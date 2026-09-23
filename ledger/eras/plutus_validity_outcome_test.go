@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -117,11 +118,61 @@ func newDijkstraGuardingValidityOutcomeTx(
 	}
 }
 
-func dijkstraValidityOutcomePParams() *gdijkstra.DijkstraProtocolParameters {
+// dijkstraValidityOutcomeV4CostModelPad covers the 7 PlutusV4 cost-model
+// parameters (multiIndexArray, assetCount) that plutigo's CostModelParamNamesV4
+// appends after PlutusV3's own 350 names, in the same order. No script in this
+// file calls either builtin, so these placeholders never affect a measured
+// cost; they only have to be present and finite. See
+// plutigo lang.CostModelParamNamesV4.
+var dijkstraValidityOutcomeV4CostModelPad = []int64{
+	100,
+	100,
+	100,
+	100,
+	100,
+	100,
+	100,
+}
+
+// dijkstraValidityOutcomePParams builds real, non-empty cost models for every
+// Plutus language version invoked by this file's tests. plutigo v0.7.2's
+// costModelFromList costs any parameter beyond the supplied list at
+// math.MaxInt64 rather than leaving it at a zero-valued default (matching
+// upstream's real "an uncosted parameter cannot run within any budget"
+// semantics, see plutigo#415's cek/cost_model.go change) -- an empty
+// CostModels map, as this fixture carried before, therefore made every CEK
+// machine step cost MaxInt64 and exhausted any real budget on the first step,
+// independent of the trivial guarding script's own true cost. PlutusV3 (index
+// 2) reuses the real Preview epoch-672 cost model; PlutusV4 (index 3) reuses
+// the same list, since PlutusV4's own names are PlutusV3's 350 plus the 7
+// multiIndexArray/assetCount entries above.
+func dijkstraValidityOutcomePParams(
+	t *testing.T,
+) *gdijkstra.DijkstraProtocolParameters {
+	t.Helper()
+	var costModels struct {
+		PlutusV1 []int64 `json:"PlutusV1"`
+		PlutusV2 []int64 `json:"PlutusV2"`
+		PlutusV3 []int64 `json:"PlutusV3"`
+	}
+	require.NoError(t, json.Unmarshal(
+		readErasFixture(t, previewConwayCostModels),
+		&costModels,
+	))
+	v4CostModel := append(
+		append([]int64{}, costModels.PlutusV3...),
+		dijkstraValidityOutcomeV4CostModelPad...,
+	)
 	return &gdijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+			CostModels: map[uint][]int64{
+				0: costModels.PlutusV1,
+				1: costModels.PlutusV2,
+				2: costModels.PlutusV3,
+				3: v4CostModel,
 			},
 		},
 	}
@@ -203,7 +254,7 @@ func TestValidateTxDijkstraRequiresDeclaredValidityToMatchGuardingExecution(
 						tx,
 						0,
 						newMockLedgerState(),
-						dijkstraValidityOutcomePParams(),
+						dijkstraValidityOutcomePParams(t),
 					)
 					outcome.assert(t, err)
 				})
@@ -241,7 +292,7 @@ func TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure(
 		tx,
 		0,
 		newMockLedgerState(),
-		dijkstraValidityOutcomePParams(),
+		dijkstraValidityOutcomePParams(t),
 	)
 	require.ErrorIs(t, err, phase1Sentinel)
 }
@@ -320,7 +371,7 @@ func TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers(
 			newTx(),
 			0,
 			ls,
-			dijkstraValidityOutcomePParams(),
+			dijkstraValidityOutcomePParams(t),
 		)
 		var missing lcommon.MissingRedeemerForScriptError
 		require.ErrorAs(t, err, &missing)
@@ -344,7 +395,7 @@ func TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers(
 			tx,
 			0,
 			ls,
-			dijkstraValidityOutcomePParams(),
+			dijkstraValidityOutcomePParams(t),
 		))
 	})
 }
