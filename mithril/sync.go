@@ -1361,11 +1361,11 @@ func Sync(
 		// construction), so this is explicit rather than the zero-value
 		// default.
 		bf.SetDelegatorInactivityEnabled(false)
-		// #3975 reports reward divergence at the second boundary after a
-		// Mithril anchor. Until that path is verified, rebuild from canonical
-		// UTxOs even for fresh imports instead of trusting the #4499 running
-		// totals finalizer.
-		bf.SetUseRunningTotalsFinalization(false)
+		// The running-total finalizer is safe only after a complete fresh
+		// ledger-state import established every live credential row. An
+		// interrupted API sync may have incomplete aggregate state, so its
+		// resume path must use the authoritative rebuild.
+		bf.SetUseRunningTotalsFinalization(mode == syncModeBootstrap)
 		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(
