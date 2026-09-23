@@ -211,8 +211,8 @@ func decideCatchUp(
 				return catchUpDecision{}, errors.New(
 					"mithril v2 catch-up supports core storage mode only; " +
 						"api-mode metadata replacement is not yet designed — " +
-						"perform a full Mithril resync (remove the database and " +
-						"run `dingo mithril sync` again)",
+						"the existing database is preserved and no automatic " +
+						"repair was attempted",
 				)
 			}
 			logger.Info(
@@ -259,6 +259,23 @@ func decideCatchUp(
 	default:
 		return catchUpDecision{}, nil
 	}
+}
+
+func repairCatchUpDecision(
+	decision catchUpDecision,
+	repairRewardState bool,
+	marker uint64,
+	hasMarker bool,
+) catchUpDecision {
+	if !repairRewardState || !decision.upToDate {
+		return decision
+	}
+	decision.upToDate = false
+	decision.engage = true
+	if hasMarker {
+		decision.start = marker
+	}
+	return decision
 }
 
 // SyncPhase identifies a stage of a Mithril bootstrap.
@@ -312,13 +329,18 @@ type SyncConfig struct {
 	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (v1 snapshot digest; v2 database hash)
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
-	StoragePlugins         StoragePlugins
-	RunMode                string
-	BackfillBatchSize      int
-	DatabaseWorkers        int
-	Tracing                bool             // OpenTelemetry tracing enabled; forwarded to the metadata pool
-	Logger                 *slog.Logger     // optional; defaults to slog.Default()
-	OnProgress             SyncProgressFunc // optional
+	// RepairLegacyRewardState forces a same-chain Mithril reconciliation for
+	// an existing database marked by the reward-pot migration. The node may
+	// serve only after an artifact covers the local tip and the reconciliation
+	// completes; a clean bootstrap is never selected for this path.
+	RepairLegacyRewardState bool
+	StoragePlugins          StoragePlugins
+	RunMode                 string
+	BackfillBatchSize       int
+	DatabaseWorkers         int
+	Tracing                 bool             // OpenTelemetry tracing enabled; forwarded to the metadata pool
+	Logger                  *slog.Logger     // optional; defaults to slog.Default()
+	OnProgress              SyncProgressFunc // optional
 }
 
 // StoragePlugins contains canonical storage provider selections used during
@@ -511,10 +533,17 @@ func Sync(
 	if decErr != nil {
 		return SyncResult{}, decErr
 	}
-	if dec.upToDate {
+	if cfg.RepairLegacyRewardState && dec.upToDate {
+		marker, hasMarker, markerErr := getImmutableImportMarker(db)
+		if markerErr != nil {
+			return SyncResult{}, markerErr
+		}
+		dec = repairCatchUpDecision(dec, true, marker, hasMarker)
+	}
+	if dec.upToDate && !cfg.RepairLegacyRewardState {
 		return SyncResult{}, nil
 	}
-	catchUp = dec.engage
+	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
 	// Artifact pin. A run that was interrupted after it began mutating the
 	// database must import the artifact those partial rows and ledger-state
@@ -823,6 +852,13 @@ func Sync(
 			return SyncResult{}, interErr
 		}
 		if upToDate {
+			if cfg.RepairLegacyRewardState {
+				return SyncResult{}, errors.New(
+					"Mithril reward-state repair is waiting for a certified snapshot " +
+						"that covers the local chain tip; the existing database was " +
+						"left intact and the node must not serve it yet",
+				)
+			}
 			if cfg.CleanupAfterLoad {
 				bootstrapResult.Cleanup(logger)
 			}

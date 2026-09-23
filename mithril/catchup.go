@@ -193,8 +193,8 @@ func verifyCatchupIntersection(
 		return fmt.Errorf(
 			"local chain diverges from the target Mithril v2 artifact at "+
 				"slot %d (local block %x; artifact has slot %d block %x); "+
-				"perform a full Mithril resync (remove the database and run "+
-				"`dingo mithril sync` again)",
+				"the existing database was left untouched because catch-up "+
+				"cannot safely reconcile divergent chains",
 			tip.Slot, tip.Hash, first.Slot, first.Hash,
 		)
 	}
@@ -237,8 +237,9 @@ func verifyLocalAheadOfArtifactTip(
 	return fmt.Errorf(
 		"local chain diverges from the target Mithril v2 artifact above "+
 			"slot %d (local tip slot %d block %x; artifact tip block %x "+
-			"is not an ancestor of the local tip); perform a full Mithril resync "+
-			"(remove the database and run `dingo mithril sync` again)",
+			"is not an ancestor of the local tip); the existing database was "+
+			"left untouched because catch-up cannot safely reconcile divergent "+
+			"chains",
 		artifactTip.Slot, localTip.Slot, localTip.Hash, artifactTip.Hash,
 	)
 }

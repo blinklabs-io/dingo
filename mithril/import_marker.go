@@ -33,6 +33,12 @@ import (
 // nothing in normal `dingo serve` operation removes it.
 const syncKeyImmutableMax = "mithril_immutable_max"
 
+// RewardStateRepairPendingKey marks a legacy imported database whose reward
+// state must be reconciled against a newer certified ledger snapshot before
+// it can serve. The metadata migration writes it only when it finds the old
+// imported reward-pot row at the recorded Mithril anchor.
+const RewardStateRepairPendingKey = "mithril_reward_repair_pending"
+
 // setImmutableImportMarker records num as the highest immutable file number
 // imported by a Mithril sync.
 func setImmutableImportMarker(db *database.Database, num uint64) error {
@@ -72,6 +78,18 @@ func WasBootstrapped(db *database.Database) (bool, error) {
 		)
 	}
 	return val != "", nil
+}
+
+// RewardStateRepairPending reports whether startup must reconcile a legacy
+// imported reward state before serving the database.
+func RewardStateRepairPending(db *database.Database) (bool, error) {
+	value, err := db.GetSyncState(RewardStateRepairPendingKey, nil)
+	if err != nil {
+		return false, fmt.Errorf(
+			"reading Mithril reward repair marker: %w", err,
+		)
+	}
+	return value == "1", nil
 }
 
 // getImmutableImportMarker returns the recorded highest imported immutable file

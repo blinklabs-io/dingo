@@ -45,13 +45,17 @@ func serveRun(
 	if err := checkSyncState(cfg, logger); err != nil {
 		return err
 	}
-
 	// CIP-0163: refuse to serve a Mithril-bootstrapped database with the
 	// delegator-inactivity gate enabled. This closes the "run 'mithril sync'
 	// with the gate off, then restart with it on" path that Guard 1 in the
 	// sync command cannot see; a bootstrapped node cannot reproduce a
 	// genesis-synced node's expiration state.
 	if err := checkMithrilInactivityCompat(cfg, logger); err != nil {
+		return err
+	}
+	if err := repairPendingMithrilRewardState(
+		cmd.Context(), cfg, logger,
+	); err != nil {
 		return err
 	}
 
@@ -130,12 +134,107 @@ func checkSyncState(
 		// secondary indexes.
 		return nil
 	}
+	pendingRepair, err := mithril.RewardStateRepairPending(db)
+	if err != nil {
+		return err
+	}
+	if pendingRepair {
+		return nil
+	}
 	return fmt.Errorf(
 		"incomplete sync detected (sync_status=%q). "+
 			"Run 'dingo sync' (or 'dingo sync --mithril' for "+
 			"Mithril bootstrap) to resume before starting the node",
 		val,
 	)
+}
+
+// repairPendingMithrilRewardState reconciles a legacy bootstrapped database
+// against a certified artifact before node startup. Mithril's catch-up path
+// verifies the existing chain intersection before writing and reconciles the
+// ledger rows in place. If no artifact covers the local tip yet, Sync returns
+// without consuming the durable repair marker and this function keeps the node
+// offline instead of serving inconsistent rewards.
+func repairPendingMithrilRewardState(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+) error {
+	pending, err := mithrilRewardRepairPending(cfg, logger)
+	if err != nil || !pending {
+		return err
+	}
+	if effectiveStorageMode(cfg) != dingo.StorageModeCore {
+		return errors.New(
+			"this legacy Mithril reward-state repair requires core storage; " +
+				"the existing database is preserved and must not be removed or " +
+				"bootstrapped from scratch",
+		)
+	}
+	backend, err := resolveMithrilBackend(cfg.Mithril.Backend)
+	if err != nil {
+		return err
+	}
+	if backend != mithril.BackendV2 {
+		return fmt.Errorf(
+			"legacy Mithril reward-state repair requires backend v2, got %q; "+
+				"the existing database is preserved",
+			backend,
+		)
+	}
+	logger.Warn(
+		"reconciling legacy Mithril reward state before serving",
+		"component", "node",
+	)
+	repairCfg := *cfg
+	// Artifact pins are only valid for a fresh import. Repair always selects
+	// the latest certified state, then verifies its chain intersection.
+	repairCfg.Mithril.PinnedDigest = ""
+	network := repairCfg.Network
+	if network == "" {
+		network = "preview"
+	}
+	if err := runMithrilSyncForRewardRepair(
+		ctx, &repairCfg, logger, network,
+	); err != nil {
+		return fmt.Errorf("repairing legacy Mithril reward state: %w", err)
+	}
+	pending, err = mithrilRewardRepairPending(cfg, logger)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return errors.New(
+			"Mithril reward-state repair did not reconcile the existing database; " +
+				"the database is preserved and node startup is blocked until a " +
+				"certified snapshot covers its tip",
+		)
+	}
+	return nil
+}
+
+func mithrilRewardRepairPending(
+	cfg *config.Config,
+	logger *slog.Logger,
+) (bool, error) {
+	runtime, err := openConfiguredDatabase(
+		context.Background(), cfg, logger, 1,
+	)
+	if err != nil {
+		return false, fmt.Errorf("opening database for reward repair check: %w", err)
+	}
+	db, err := runtimeDatabase(runtime)
+	if err != nil {
+		return false, err
+	}
+	defer runtime.Close(context.Background()) //nolint:contextcheck
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
+		var cte database.CommitTimestampError
+		if !errors.As(recoveryErr, &cte) {
+			return false, fmt.Errorf("opening database: %w", recoveryErr)
+		}
+	}
+	return mithril.RewardStateRepairPending(db)
 }
 
 // checkMithrilInactivityCompat refuses to start a node that has the CIP-0163

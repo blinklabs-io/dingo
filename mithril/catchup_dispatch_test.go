@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,6 +102,66 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		})
 		require.Error(t, err)
 		require.ErrorContains(t, err, "core storage mode only")
+	})
+
+	t.Run("legacy reward repair reconciles an existing database in place", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		_, anchorHash := validImmutableFiles(t, 1000)
+		dataDir := t.TempDir()
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1000,
+			Hash:     anchorHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, setImmutableImportMarker(db, 0))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		result, err := Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			AggregatorURL:           fixture.server.URL,
+			AllowInsecureHTTP:       true,
+			StoragePlugins:          testStoragePlugins(),
+			DatabaseWorkers:         1,
+			Logger:                  discard,
+			RepairLegacyRewardState: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.Snapshot)
+
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		pending, err := RewardStateRepairPending(db)
+		require.NoError(t, err)
+		require.False(t, pending)
+		block, err := database.BlockByHash(db, anchorHash)
+		require.NoError(t, err)
+		require.EqualValues(t, 1000, block.Slot,
+			"repair must retain the existing chain anchor")
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 }
 

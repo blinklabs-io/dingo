@@ -11655,10 +11655,15 @@ imported counts are (see below): a bootstrap applies no block, and files no
 transaction, at or below its anchor. Summing from the epoch start regardless
 of the anchor would then double-count once the historical backfill (issue
 #4061) has stored pre-anchor transactions locally. `ImportedEpochFees` is
-additive schema (migration `v22`): a row written by an older release reads
-back `NULL` and keeps today's whole-epoch sum, so an already-imported database
-is not repaired by upgrading in place -- only a bootstrap performed by a
-version carrying this field seeds it.
+additive schema (migration `v22`). The migration marks a pre-v22 Mithril
+database whose imported anchor row lacks this basis for repair. Before
+`dingo serve` starts, core-mode databases with that marker automatically run a
+Mithril v2 catch-up against the latest certified state. Catch-up verifies the
+existing chain intersection before reconciling ledger rows, retains the local
+block history, and clears the marker only on completion. If the selected
+artifact does not cover the local tip, startup remains blocked and the database
+is left intact until a covering artifact is available; it is never treated as
+a clean bootstrap.
 
 The per-credential reward basis is seeded from the same import: mark, set and
 go each carry one epoch's per-credential stake and its credential-to-pool
