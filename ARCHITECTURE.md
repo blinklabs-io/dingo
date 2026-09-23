@@ -9597,7 +9597,7 @@ cmd/node-parity/           # thin Cobra CLI wrapper: 'check', 'watch' and 'from-
   check.go                  # one-shot subcommand (full mode only)
   watch.go                  # --mode=full (block-triggered, --fallback-interval backstop) or
                              # --mode=incremental (sequential per-block, --full-check-interval/--cursor-file)
-  from_genesis.go           # from-genesis subcommand: Koios instead of a reference cardano-node,
+  from_genesis.go           # from-genesis subcommand: Koios, not a reference cardano-node,
                              # --koios-base-url/--koios-api-key/--koios-cache-path, --at-slot/--at-hash resume
   metrics.go                # not a subcommand -- Prometheus counters plus the /metrics HTTP
                              # server 'watch' starts when --metrics-addr is set; 'check' never
