@@ -80,6 +80,14 @@ func (f *fakeLeiosAnnouncementLedger) ValidateLeiosAnnouncementHeader(
 	return f.staleness, f.err
 }
 
+func (f *fakeLeiosAnnouncementLedger) ValidateLeiosEndorserBlockTransactions(
+	context.Context,
+	gledger.BlockHeader,
+	[][]byte,
+) error {
+	return f.err
+}
+
 func mustCbor(t *testing.T, value any) cbor.RawMessage {
 	t.Helper()
 	data, err := cbor.Encode(value)

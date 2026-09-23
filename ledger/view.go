@@ -2131,9 +2131,16 @@ func (lv *LedgerView) GetLeiosKeys(
 	if err != nil {
 		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
 	}
+	maxKeyAgeEpochs, err := lv.ls.maxLeiosKeyAgeEpochs()
+	if err != nil {
+		return nil, fmt.Errorf("resolve maximum Leios key age: %w", err)
+	}
 	for _, snapshot := range snapshots {
 		if len(snapshot.LeiosKeyPublic) == 0 ||
-			len(snapshot.LeiosKeyPossessionProof) == 0 {
+			len(snapshot.LeiosKeyPossessionProof) == 0 ||
+			snapshot.LeiosKeyRegistrationEpoch == nil ||
+			*snapshot.LeiosKeyRegistrationEpoch > epoch ||
+			epoch-*snapshot.LeiosKeyRegistrationEpoch >= maxKeyAgeEpochs {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{
@@ -2146,6 +2153,36 @@ func (lv *LedgerView) GetLeiosKeys(
 		}
 	}
 	return out, nil
+}
+
+func (ls *LedgerState) maxLeiosKeyAgeEpochs() (uint64, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("cardano configuration unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxKESEvolutions <= 0 {
+		return 0, errors.New("invalid MaxKESEvolutions")
+	}
+	slotsPerKESPeriod := ls.SlotsPerKESPeriod()
+	slotsPerEpoch := ls.SlotsPerEpoch()
+	if slotsPerKESPeriod == 0 || slotsPerEpoch == 0 {
+		return 0, errors.New("invalid KES-period or epoch length")
+	}
+	maxSlots := new(big.Int).Mul(
+		big.NewInt(int64(genesis.MaxKESEvolutions)),
+		new(big.Int).SetUint64(slotsPerKESPeriod),
+	)
+	divisor := new(big.Int).SetUint64(slotsPerEpoch)
+	epochs, remainder := new(big.Int), new(big.Int)
+	epochs.QuoRem(maxSlots, divisor, remainder)
+	if remainder.Sign() > 0 {
+		epochs.Add(epochs, big.NewInt(1))
+	}
+	epochs.Add(epochs, big.NewInt(2))
+	if !epochs.IsUint64() {
+		return 0, errors.New("maximum Leios key age overflows uint64")
+	}
+	return epochs.Uint64(), nil
 }
 
 // GetPoolStake returns the stake for a specific pool from the snapshot.

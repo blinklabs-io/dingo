@@ -58,12 +58,12 @@ func (startupLeiosEpochProvider) EpochForSlot(uint64) (uint64, error) {
 
 type startupLeiosParamsProvider struct{}
 
-func (startupLeiosParamsProvider) LeiosCommitteeParameters() (
-	*big.Rat,
+func (startupLeiosParamsProvider) LeiosCommitteeParameters(uint64) (
+	uint16,
 	*big.Rat,
 	error,
 ) {
-	return big.NewRat(99, 100), big.NewRat(3, 4), nil
+	return 900, big.NewRat(3, 4), nil
 }
 
 type startupLeiosKeyProvider struct{}
@@ -124,12 +124,12 @@ func (p *startupLeiosReplayProvider) GetStakeDistribution(
 	return map[string]uint64{p.poolHash: 100}, 100, nil
 }
 
-func (p *startupLeiosReplayProvider) LeiosCommitteeParameters() (
-	*big.Rat,
+func (p *startupLeiosReplayProvider) LeiosCommitteeParameters(uint64) (
+	uint16,
 	*big.Rat,
 	error,
 ) {
-	return big.NewRat(1, 1), big.NewRat(3, 4), nil
+	return 1, big.NewRat(3, 4), nil
 }
 
 func (p *startupLeiosReplayProvider) GetLeiosKeys(
@@ -151,107 +151,45 @@ func (p *startupLeiosReplayProvider) recover() {
 	p.recovered = true
 }
 
-// TestLeiosCommitteeParamsFromPParamsDefaultsWhenBothUnset covers the issue
-// #2836 root cause: musashi ships a refScript-only dijkstra genesis, so
-// neither committee stake coverage (sigma_c) nor quorum stake threshold
-// (tau) is configured. The genesis is immutable, so the adapter must fall
-// back to the CIP-0164 defaults (0.99 / 0.75) rather than erroring or
-// returning nil, which is what lets committee formation and certification
-// proceed.
-func TestLeiosCommitteeParamsFromPParamsDefaultsWhenBothUnset(t *testing.T) {
+func TestLeiosCommitteeParamsFromPParamsUsesDijkstraFields(t *testing.T) {
 	t.Parallel()
 
-	pp := &gdijkstra.DijkstraProtocolParameters{}
-	sigmaC, tau, err := leiosCommitteeParamsFromPParams(pp)
+	pp := &gdijkstra.DijkstraProtocolParameters{
+		LeiosCommitteeSize:        900,
+		LeiosQuorumStakeThreshold: &cbor.Rat{Rat: big.NewRat(3, 4)},
+	}
+	size, tau, err := leiosCommitteeParamsFromPParams(pp)
 	require.NoError(t, err)
-	require.NotNil(t, sigmaC)
-	require.NotNil(t, tau)
-	assert.Equal(t, 0, sigmaC.Cmp(big.NewRat(99, 100)))
+	assert.Equal(t, uint16(900), size)
 	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 4)))
 }
 
-// TestLeiosCommitteeParamsFromPParamsDefaultsMissingCoverage confirms a
-// configured tau is preserved while an unset sigma_c falls back to its
-// default (tau=1/2 < default sigma_c=0.99 holds).
-func TestLeiosCommitteeParamsFromPParamsDefaultsMissingCoverage(t *testing.T) {
+func TestLeiosCommitteeParamsFromPParamsRejectsMissingValues(t *testing.T) {
 	t.Parallel()
 
-	pp := &gdijkstra.DijkstraProtocolParameters{
-		QuorumStakeThreshold: &cbor.Rat{Rat: big.NewRat(1, 2)},
-	}
-	sigmaC, tau, err := leiosCommitteeParamsFromPParams(pp)
-	require.NoError(t, err)
-	require.NotNil(t, sigmaC)
-	require.NotNil(t, tau)
-	assert.Equal(t, 0, sigmaC.Cmp(big.NewRat(99, 100)))
-	assert.Equal(t, 0, tau.Cmp(big.NewRat(1, 2)))
+	_, _, err := leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{})
+	require.ErrorContains(t, err, "committee size")
+	_, _, err = leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{
+		LeiosCommitteeSize: 900,
+	})
+	require.ErrorContains(t, err, "quorum stake threshold is missing")
 }
 
-// TestLeiosCommitteeParamsFromPParamsDefaultsMissingQuorum confirms a
-// configured sigma_c is preserved while an unset tau falls back to its
-// default (default tau=0.75 < sigma_c=0.99 holds).
-func TestLeiosCommitteeParamsFromPParamsDefaultsMissingQuorum(t *testing.T) {
+func TestLeiosCommitteeParamsFromPParamsRejectsInvalidQuorum(t *testing.T) {
 	t.Parallel()
 
-	pp := &gdijkstra.DijkstraProtocolParameters{
-		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(99, 100)},
+	for _, threshold := range []*big.Rat{
+		big.NewRat(-1, 10),
+		big.NewRat(11, 10),
+	} {
+		_, _, err := leiosCommitteeParamsFromPParams(
+			&gdijkstra.DijkstraProtocolParameters{
+				LeiosCommitteeSize:        900,
+				LeiosQuorumStakeThreshold: &cbor.Rat{Rat: threshold},
+			},
+		)
+		require.ErrorIs(t, err, leios.ErrInvalidQuorumStakeThreshold)
 	}
-	sigmaC, tau, err := leiosCommitteeParamsFromPParams(pp)
-	require.NoError(t, err)
-	require.NotNil(t, sigmaC)
-	require.NotNil(t, tau)
-	assert.Equal(t, 0, sigmaC.Cmp(big.NewRat(99, 100)))
-	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 4)))
-}
-
-// TestLeiosCommitteeParamsFromPParamsReturnsBothWhenConfigured confirms a
-// fully configured genesis flows both values through unchanged (no default
-// applied).
-func TestLeiosCommitteeParamsFromPParamsReturnsBothWhenConfigured(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	pp := &gdijkstra.DijkstraProtocolParameters{
-		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(95, 100)},
-		QuorumStakeThreshold:   &cbor.Rat{Rat: big.NewRat(3, 5)},
-	}
-	sigmaC, tau, err := leiosCommitteeParamsFromPParams(pp)
-	require.NoError(t, err)
-	require.NotNil(t, sigmaC)
-	require.NotNil(t, tau)
-	assert.Equal(t, 0, sigmaC.Cmp(big.NewRat(95, 100)))
-	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 5)))
-}
-
-// TestLeiosCommitteeParamsFromPParamsRejectsInvariantViolation confirms the
-// tau < sigma_c invariant is enforced when both are configured.
-func TestLeiosCommitteeParamsFromPParamsRejectsInvariantViolation(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	pp := &gdijkstra.DijkstraProtocolParameters{
-		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(3, 4)},
-		QuorumStakeThreshold:   &cbor.Rat{Rat: big.NewRat(3, 4)},
-	}
-	_, _, err := leiosCommitteeParamsFromPParams(pp)
-	require.Error(t, err)
-}
-
-// TestLeiosCommitteeParamsFromPParamsRejectsDefaultInvariantViolation
-// confirms the post-default re-check: a configured sigma_c below the default
-// tau (0.75) with tau unset would otherwise yield tau >= sigma_c.
-func TestLeiosCommitteeParamsFromPParamsRejectsDefaultInvariantViolation(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	pp := &gdijkstra.DijkstraProtocolParameters{
-		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(1, 2)},
-	}
-	_, _, err := leiosCommitteeParamsFromPParams(pp)
-	require.Error(t, err)
 }
 
 func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
@@ -425,7 +363,7 @@ func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
 	)
 	key, err := leios.LoadVoteSigningKeyFile(voteKeyPath)
 	require.NoError(t, err)
-	proof, err := leios.SignVote(key, key.PublicKeyBytes())
+	proof, err := leios.SignLeiosKeyProofOfPossession(key)
 	require.NoError(t, err)
 
 	poolID := creds.GetPoolID()

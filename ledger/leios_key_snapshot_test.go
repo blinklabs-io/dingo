@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +59,9 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	}
 
 	importPool(50, oldPublic, oldProof)
+	require.NoError(t, db.SetEpoch(0, 6, nil, nil, nil, nil, 3, 1, 100, nil))
+	require.NoError(t, db.SetEpoch(100, 7, nil, nil, nil, nil, 3, 1, 100, nil))
+	keyRegistrationEpoch := uint64(7)
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
 			Epoch:                         8,
@@ -67,6 +71,7 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 			CapturedSlot:                  199,
 			LeiosKeyPublic:                append([]byte(nil), oldPublic...),
 			LeiosKeyPossessionProof:       append([]byte(nil), oldProof...),
+			LeiosKeyRegistrationEpoch:     &keyRegistrationEpoch,
 			CalculationVersion:            1,
 			RewardAccountAutoVote:         models.PoolRewardAccountAutoVoteNone,
 			RewardAccountAutoVoteResolved: true,
@@ -83,9 +88,31 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	require.Len(t, current, 1)
 	require.Equal(t, newPublic, current[0].LeiosKeyPublic)
 
+	for _, snapshotEpoch := range []uint64{27, 28} {
+		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+			&models.PoolStakeSnapshot{
+				Epoch:                     snapshotEpoch,
+				SnapshotType:              models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:               append([]byte(nil), poolKeyHash...),
+				TotalStake:                dbtypes.Uint64(100),
+				LeiosKeyPublic:            append([]byte(nil), oldPublic...),
+				LeiosKeyPossessionProof:   append([]byte(nil), oldProof...),
+				LeiosKeyRegistrationEpoch: &keyRegistrationEpoch,
+			},
+			nil,
+		))
+	}
 	txn := db.Transaction(false)
 	defer txn.Release()
-	view := (&LedgerState{db: db}).NewView(txn)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		},
+	}
+	ls.consensus.Store(&consensusSnapshot{currentEra: eras.ShelleyEraDesc})
+	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
+	view := ls.NewView(txn)
 	keys, err := view.GetLeiosKeys(8, []lcommon.PoolKeyHash{poolHash})
 	require.NoError(t, err)
 	key := keys[hex.EncodeToString(poolKeyHash)]
@@ -93,4 +120,13 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	require.Equal(t, oldPublic, key.PublicKey,
 		"committee key must come from requested Mark[8], not live pool state")
 	require.Equal(t, oldProof, key.PossessionProof)
+	maxAgeEpochs, err := ls.maxLeiosKeyAgeEpochs()
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), maxAgeEpochs)
+	beforeExpiry, err := view.GetLeiosKeys(27, []lcommon.PoolKeyHash{poolHash})
+	require.NoError(t, err)
+	require.Contains(t, beforeExpiry, hex.EncodeToString(poolKeyHash))
+	atExpiry, err := view.GetLeiosKeys(28, []lcommon.PoolKeyHash{poolHash})
+	require.NoError(t, err)
+	require.NotContains(t, atExpiry, hex.EncodeToString(poolKeyHash))
 }

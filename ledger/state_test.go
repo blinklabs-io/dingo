@@ -4846,6 +4846,12 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	certified, err := cbor.Encode(true)
 	require.NoError(t, err)
 	block := &dijkstra.DijkstraBlock{
+		BlockBody: dijkstra.DijkstraBlockBody{
+			LeiosCertificate: &dijkstra.DijkstraLeiosCertificate{
+				Signers:             []byte{1},
+				AggregatedSignature: make([]byte, 48),
+			},
+		},
 		BlockHeader: &dijkstra.DijkstraBlockHeader{
 			BabbageBlockHeader: babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{
@@ -4868,6 +4874,14 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 				uint64,
 			) ([]cbor.RawMessage, bool) {
 				return nil, false
+			},
+			ValidateLeiosCertificate: func(
+				uint64,
+				[]byte,
+				[]byte,
+				[]byte,
+			) error {
+				return nil
 			},
 		},
 	}

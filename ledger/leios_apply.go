@@ -459,6 +459,16 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
 ) error {
+	// Certificate validation precedes both asynchronous historical backfill
+	// and the apply-time certified fetch. Invalid certificates therefore never
+	// trigger certified endorser-block work, including during replay.
+	if ls.config.ValidateLeiosCertificate != nil {
+		for _, block := range blocks {
+			if err := ls.validateDijkstraLeiosCertificate(block); err != nil {
+				return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
+			}
+		}
+	}
 	// Index each block's announced endorser block by the block's own hash so a
 	// certifying ranking block can resolve the endorser block its parent
 	// announced without a store round-trip (the parent is normally in the same
@@ -1110,6 +1120,62 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 		}
 	}
 	return info
+}
+
+func (ls *LedgerState) validateDijkstraLeiosCertificate(
+	block ledger.Block,
+) error {
+	dijkstraBlock, ok := block.(*dijkstra.DijkstraBlock)
+	if !ok {
+		return nil
+	}
+	certifier, ok := dijkstraBlock.Header().(leiosEndorserBlockCertifier)
+	if !ok {
+		return errors.New("dijkstra header has no Leios certification accessor")
+	}
+	certified, flagPresent := certifier.LeiosCertified()
+	certificate := dijkstraBlock.BlockBody.LeiosCertificate
+	if !flagPresent {
+		if certificate != nil {
+			return errors.New("certificate body is present without a certified header flag")
+		}
+		return nil
+	}
+	if certified != (certificate != nil) {
+		return fmt.Errorf(
+			"certified header flag is %t but certificate body presence is %t",
+			certified,
+			certificate != nil,
+		)
+	}
+	if !certified {
+		return nil
+	}
+	if ls.config.ValidateLeiosCertificate == nil {
+		return errors.New("no Dijkstra Leios certificate validator configured")
+	}
+	_, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
+		block.PrevHash().Bytes(),
+	)
+	if err != nil {
+		return fmt.Errorf("%w: resolve certified parent announcement: %w", errCertifiedEndorserBlockUnavailable, err)
+	}
+	if !announced {
+		return fmt.Errorf(
+			"%w: certifying block parent has no endorser-block announcement",
+			errCertifiedEndorserBlockUnavailable,
+		)
+	}
+	epochInfo, err := ls.epochForSlot(ebSlot)
+	if err != nil {
+		return fmt.Errorf("resolve certified endorser-block epoch: %w", err)
+	}
+	return ls.config.ValidateLeiosCertificate(
+		epochInfo.EpochId,
+		block.PrevHash().Bytes(),
+		certificate.Signers,
+		certificate.AggregatedSignature,
+	)
 }
 
 // classifyEndorserBlockFetches decides which endorser blocks to fetch for a

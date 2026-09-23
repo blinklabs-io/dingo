@@ -356,6 +356,10 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{{
+		EpochId:       6,
+		StartSlot:     0,
+		LengthInSlots: 100,
+	}, {
 		EpochId:       7,
 		StartSlot:     100,
 		LengthInSlots: 100,
@@ -435,6 +439,8 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 	require.Equal(t, oldPublic, stored.LeiosKeyPublic,
 		"mark[8] must retain the key captured before the live rotation")
 	require.Equal(t, oldProof, stored.LeiosKeyPossessionProof)
+	require.NotNil(t, stored.LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *stored.LeiosKeyRegistrationEpoch)
 }
 
 // TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs is the

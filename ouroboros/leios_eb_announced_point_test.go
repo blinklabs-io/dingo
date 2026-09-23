@@ -156,7 +156,9 @@ func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
 	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	// This test covers announcement lock ordering; the injected validation
+	// gate is tested separately.
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	announceTestEndorserBlock(
 		t,
 		o,
@@ -341,9 +343,23 @@ func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOf
 func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 41)
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(41, lcommon.Blake2b256Hash(blockRaw).Bytes())
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	ledger := &fakeLeiosAnnouncementLedger{}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ledger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	votes := &fakeLeiosVoteHandler{}
 	o.leiosVotes = votes
 
@@ -374,7 +390,24 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.slotVerified)
-	require.Len(t, votes.ebs, 1)
+	require.Empty(t, votes.ebs)
+
+	// The manifest references one transaction, while the first offer carried
+	// only the manifest. Supplying the transaction completes the cache and
+	// starts the semantic validation gate.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	require.Eventually(t, func() bool {
+		votes.mu.Lock()
+		defer votes.mu.Unlock()
+		return len(votes.ebs) == 1
+	}, time.Second, time.Millisecond)
+	votes.mu.Lock()
+	defer votes.mu.Unlock()
 	require.Equal(t, point.Slot, votes.ebs[0].slot)
 }
 
@@ -396,7 +429,7 @@ func TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified(
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 41)
 	fabricated := ocommon.Point{Slot: 42, Hash: point.Hash}
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	votes := &fakeLeiosVoteHandler{}
 	o.leiosVotes = votes
 
@@ -983,7 +1016,7 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 250)
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	votes := &lockProbingVoteHandler{
 		fakeLeiosVoteHandler: &fakeLeiosVoteHandler{},
 		o:                    o,

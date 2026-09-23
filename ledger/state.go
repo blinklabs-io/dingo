@@ -688,6 +688,14 @@ type LedgerStateConfig struct {
 	// validation or consumed-input recovery. Set from the network in node.go
 	// (false on musashi, true otherwise).
 	LeiosApplyEndorserBlockTxs bool
+	// ValidateLeiosCertificate verifies a Dijkstra certificate before any
+	// certified endorser-block transactions are fetched or applied.
+	ValidateLeiosCertificate func(
+		epoch uint64,
+		announcingBlockHash []byte,
+		signers []byte,
+		aggregatedSignature []byte,
+	) error
 	// SkipLeaderStakeThresholdCheck, when true, downgrades a failed Praos
 	// stake-derived leader-eligibility check from a hard header rejection to a
 	// logged warning (the block is trusted). It defaults to false so the check
@@ -8023,6 +8031,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Storage-phase failures always abort the DB transaction so a partial
 	// endorser-block application cannot be committed.
 	if dijkstraEraGate(currentEra) {
+		if err := ls.validateDijkstraLeiosCertificate(block); err != nil {
+			return nil, fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
+		}
 		if ls.config.EndorserBlockProvider == nil {
 			if certifier, ok := block.Header().(leiosEndorserBlockCertifier); ok {
 				if certified, present := certifier.LeiosCertified(); present &&
@@ -12173,6 +12184,7 @@ func validationReferenceSlot(
 
 type txValidationSnapshot struct {
 	generation                   uint64
+	tipPoint                     ocommon.Point
 	currentEra                   eras.EraDesc
 	currentPParams               lcommon.ProtocolParameters
 	prevEraPParams               lcommon.ProtocolParameters
@@ -12182,6 +12194,10 @@ type txValidationSnapshot struct {
 	currentEpochStartSlot        uint64
 	syntheticV2CostModelInEffect bool
 }
+
+var ErrLeiosValidationParentUnavailable = errors.New(
+	"leios announcement parent is not the current ledger tip",
+)
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
@@ -12198,7 +12214,11 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 		ls.metrics.slotClockFallbacks.Inc()
 	}
 	return txValidationSnapshot{
-		generation:     consensusState.generation,
+		generation: consensusState.generation,
+		tipPoint: ocommon.Point{
+			Slot: tipState.currentTip.Point.Slot,
+			Hash: slices.Clone(tipState.currentTip.Point.Hash),
+		},
 		currentEra:     consensusState.currentEra,
 		currentPParams: consensusState.currentPParams,
 		prevEraPParams: consensusState.prevEraPParams,
@@ -12237,7 +12257,29 @@ func (ls *LedgerState) WithTxValidationSession(
 		stillCurrent func() bool,
 	) error,
 ) error {
+	return ls.withTxValidationSession(nil, nil, fn)
+}
+
+func (ls *LedgerState) withTxValidationSession(
+	expectedParentHash []byte,
+	referenceSlot *uint64,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+		) error,
+		stillCurrent func() bool,
+	) error,
+) error {
 	snapshot := ls.txValidationSnapshot()
+	if expectedParentHash != nil &&
+		!bytes.Equal(snapshot.tipPoint.Hash, expectedParentHash) {
+		return ErrLeiosValidationParentUnavailable
+	}
+	if referenceSlot != nil {
+		snapshot.referenceSlot = *referenceSlot
+	}
 
 	txn := ls.db.Transaction(false)
 	return txn.Do(func(txn *database.Txn) error {
@@ -12300,6 +12342,89 @@ func (ls *LedgerState) WithTxValidationSession(
 		}
 		return fn(validate, stillCurrent)
 	})
+}
+
+// ValidateLeiosEndorserBlockTransactions validates an announced endorser
+// block against the exact ledger snapshot named by the ranking block's
+// parent. It uses one repeatable-read transaction and applies transaction
+// effects in manifest order so later transactions can spend earlier outputs.
+func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
+	ctx context.Context,
+	header ledger.BlockHeader,
+	txs [][]byte,
+) error {
+	if header == nil {
+		return errors.New("nil Leios announcing header")
+	}
+	if len(txs) == 0 {
+		return errors.New("leios endorser block has no transactions")
+	}
+	var totalBytes uint64
+	for i, txCbor := range txs {
+		if len(txCbor) == 0 {
+			return fmt.Errorf("leios endorser transaction %d is empty", i)
+		}
+		if uint64(len(txCbor)) > (16<<20)-totalBytes {
+			return errors.New("leios endorser block exceeds validation byte limit")
+		}
+		totalBytes += uint64(len(txCbor))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	slot := header.SlotNumber()
+	parentHash := header.PrevHash().Bytes()
+	return ls.withTxValidationSession(
+		parentHash,
+		&slot,
+		func(
+			validate func(
+				tx ledger.Transaction,
+				consumedUtxos map[utxoref.Key]struct{},
+				createdUtxos map[utxoref.Key]lcommon.Utxo,
+			) error,
+			stillCurrent func() bool,
+		) error {
+			consumed := make(map[utxoref.Key]struct{}, len(txs)*2)
+			created := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
+			for i, txCbor := range txs {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if !stillCurrent() {
+					return ErrLeiosValidationParentUnavailable
+				}
+				tx, err := ledger.NewTransactionFromCbor(
+					ledger.TxTypeDijkstra,
+					txCbor,
+				)
+				if err != nil {
+					return fmt.Errorf("decode leios endorser transaction %d: %w", i, err)
+				}
+				if err := validate(tx, consumed, created); err != nil {
+					return fmt.Errorf(
+						"leios endorser transaction %d at slot %d: %w",
+						i,
+						slot,
+						err,
+					)
+				}
+				for _, utxo := range tx.Produced() {
+					created[utxoref.ForUtxo(utxo)] = utxo
+				}
+				for _, input := range tx.Consumed() {
+					consumed[utxoref.ForInput(input)] = struct{}{}
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !stillCurrent() {
+				return ErrLeiosValidationParentUnavailable
+			}
+			return nil
+		},
+	)
 }
 
 // validateTxCore is the shared validation flow for ValidateTx and
