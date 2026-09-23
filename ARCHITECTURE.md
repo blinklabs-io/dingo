@@ -3842,6 +3842,24 @@ separately as blinklabs-io/dingo#4082. `ledger/queries.go`'s
 classified as intentionally live-only, or a real gap left for a caller that
 needs it.
 
+`HardForkCurrentEraQuery` (`queryHardFork`, dispatched from `queryBlock`
+alongside `ShelleyQuery` rather than through `queryShelleyLeaf`, so it sat
+outside that audit) now honors a pinned point too, resolving the era that
+governed the pinned epoch the same way `queryShelleyCurrentProtocolParams`
+does (`resolveAsOfEpoch` plus the epoch's persisted `EraId`), rather than
+always answering with dingo's live era. This mattered beyond its own query
+type: gouroboros's client-side `GetCurrentProtocolParams` (and other
+era-dispatching client calls) queries `HardForkCurrentEraQuery` first
+specifically to pick which era-shaped struct to decode the *next* query's
+reply into, so the previous always-live answer broke decoding an already
+correct, point-aware `queryShelleyCurrentProtocolParams` reply for any
+pinned point whose real era differed from dingo's live one -- confirmed
+live pinning at genesis (slot 0) against a dingo instance already many eras
+past it, during a node-parity `--from-genesis` validation run
+(blinklabs-io/dingo#1900). `HardForkEraHistoryQuery` is unaffected: it
+answers the whole era-boundary table as known up to the live tip, not a
+single point-relative era value.
+
 Credential filters are bounded by `ledger.MaxLocalStateQueryItems` (currently
 1000) for `GetDRepState`, `GetStakeDelegDeposits`,
 `GetFilteredDelegationsAndRewardAccounts`, and `GetFilteredVoteDelegatees`.
