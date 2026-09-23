@@ -464,8 +464,8 @@ sequenceDiagram
     LS->>ChM: enqueue header in chain.headers[]
 
     Note over Peer,DB: Stage 2 — Full Block Retrieval (BlockFetch)
-    LS->>OB: blockfetchClientBlockRange(start, end)
-    OB->>Peer: RequestRange(start, end)
+    LS->>OB: BlockfetchClientRequestRange(start, end)
+    OB->>Peer: RequestRange(start, end) — pipelined, returns once sent
     Peer->>OB: Block(type, cbor) × N
     OB->>EB: publish BlockfetchEvent(block)
     EB->>LS: handleEventBlockfetchBlock()
@@ -473,7 +473,8 @@ sequenceDiagram
     LS->>LS: defer future-slot stateful overlay checks until ledger apply
 
     Note over Peer,DB: Stage 3 — Block Processing
-    OB->>EB: publish BlockfetchEvent(batchDone)
+    Peer->>OB: BatchDone (or NoBlocks) resolves the range
+    OB->>EB: publish BlockfetchEvent(batchDone, RangeErr)
     EB->>LS: handleEventBlockfetchBatchDone()
     LS->>LS: validate transactions (Phase 1 + Phase 2)
     LS->>LS: update UTXO set, process certs & governance
@@ -813,8 +814,11 @@ promised a batch with `StartBatch`, found nothing to stream, and closed it with
 `BatchDone` — a response the requesting peer cannot distinguish from a served
 range, so it re-requested the same range indefinitely instead of failing over.
 Rejecting the point instead makes the request take the existing
-start-point-not-found branch: the server answers `NoBlocks` (which surfaces on
-the client as a `GetBlockRange` error, driving peer failover) and repeated
+start-point-not-found branch: the server answers `NoBlocks` (which the client
+receives asynchronously through `RequestRange`'s `RangeDoneFunc`, published as
+a `BlockfetchEvent` with `RangeErr` wrapping `blockfetch.ErrNoBlocks`, and fed
+into the same `noteBlockfetchRangeUnavailable` streak a batch that never
+extends the chain feeds, driving peer failover once it repeats) and repeated
 NoBlocks for the same point closes the stuck peer. This condition is normal
 during a tip slot battle, where two nodes each roll back their own block in
 favor of the other's and are then asked for a body neither still has.
@@ -1777,10 +1781,14 @@ paths, where the point is to report before the goroutine unwinds.
   deadlock as a direct `EventBus.Publish`. Register the flush with `defer`
   *before* taking the lock so LIFO order runs it last.
 - `ledger` also must not invoke an external `BlockfetchRequestRangeFunc` while
-  holding `chainsyncBlockfetchMutex`. The blockfetch client can wait in
-  `acquireBusy` for the previous request's receive callback to return, while
-  that callback is publishing `ledger.blockfetch` and its subscriber is
-  waiting for the ledger mutex. `startQueuedBlockfetchLocked` reserves the
+  holding `chainsyncBlockfetchMutex`. `BlockfetchClientRequestRange` calls
+  gouroboros' `RequestRange`, which (with request pipelining enabled) returns
+  as soon as the request is sent rather than waiting for the range to
+  complete, but it can still block first: `sendRequestRange` waits for the
+  client's in-flight-byte budget to admit the request, and that budget is only
+  released as an earlier request's blocks are delivered — by the same receive
+  callback that publishes `ledger.blockfetch` and needs the ledger mutex to do
+  it. `startQueuedBlockfetchLocked` reserves the
   batch and arms its timer under the mutex, releases the mutex for the primary
   and shadow requests, then reacquires it before inspecting state. If a
   callback completed or replaced the batch while the request was outside the
@@ -1788,6 +1796,62 @@ paths, where the point is to report before the goroutine unwinds.
   observes `LedgerState`'s shutdown context, so a chainsync subscriber already
   waiting for a reused connection can return before the terminal EventBus close
   waits for in-flight handlers.
+- `RequestRange`'s terminal outcome (success, `NoBlocks`, or any
+  transport/protocol failure) always arrives asynchronously through its
+  `RangeDoneFunc`, published as a `BlockfetchEvent` with `BatchDone` set and
+  `RangeErr` carrying the outcome (`nil` on success). This replaced
+  `GetBlockRange`'s `BatchDoneFunc`, which carried no error at all and, for a
+  request that failed after `MsgStartBatch`, gave no signal of that failure
+  either. A `NoBlocks` reply (`errors.Is(e.RangeErr, blockfetch.ErrNoBlocks)`)
+  needs no separate handling in `handleEventBlockfetchBatchDone`: gouroboros
+  resolves `NoBlocks` before `MsgStartBatch` is ever sent, so it always leaves
+  `batchBlocksApplied` at 0 with the queued headers untouched, which is
+  exactly the shape the existing "batch completed without extending the
+  chain" branch already routes through `noteBlockfetchRangeUnavailable`. Any
+  other non-nil `RangeErr` wears that same shape without establishing
+  anything about the range, so it is logged and explicitly excluded from both
+  recovery branches that shape reaches: the `noteBlockfetchRangeUnavailable`
+  streak, and the large-upstream-gap branch whose no-alternate-connection leg
+  clears the header queue and requests a chainsync re-intersect. A transport
+  failure instead falls through to the ordinary continuation, which
+  re-dispatches the still-queued range on the next blockfetch connection.
+- During deep catch-up (queued headers past `shadowBlockfetchMaxHeaders`, the
+  same threshold that gates the near-tip shadow-peer dispatch below and is
+  mutually exclusive with it), `startQueuedBlockfetchLockedWithWaitSignal`
+  also pre-queues a second `RequestRange` call on the same connection for the
+  header window immediately after the active batch's own claimed range
+  (`startQueuedBlockfetchPrefetchLocked`), tracked in
+  `LedgerState.nextBlockfetchRequest`. gouroboros resolves one connection's
+  requests strictly FIFO, so the batch that has not yet produced its
+  `RangeDoneFunc` terminal event is the one currently streaming. When the active
+  batch's `BatchDone` arrives having applied at least one block,
+  `tryPromoteQueuedBlockfetchLocked` promotes the pre-queued request to
+  active (scoring its peer latency from its original dispatch time, not the
+  promotion time) and immediately tops the pipeline back up to depth 1,
+  instead of waiting for a fresh round-trip. This is what closed issue #4651:
+  before it, a batch boundary always paid a full peer round-trip with the
+  connection idle. Promotion's precondition is that the live header queue
+  still *starts* at the pre-queued request's own range: a completed batch
+  having applied a block does not mean it applied every header it claimed
+  (a body that does not fit the chain tip is swallowed as "ignored", and a
+  transport-shaped `RangeErr` can end a range after a partial delivery), and
+  promoting past a still-queued prefix would strand it — chain insertion
+  requires blocks in queued order. A rollback/fork/timeout/connection-switch
+  path, and a refused promotion, discard a pre-queued request unconditionally
+  rather than trying to preserve or migrate it, arming the late-event latch so
+  its still-outstanding terminal event is never attributed to the replacement
+  batch. `LedgerState.blockfetchRequestsInFlight` (per connection key) and
+  the `blockfetchDiscardConnId` late-event latch are therefore both
+  generalized to handle up to two outstanding/abandoned requests on the same
+  connection at once instead of one. Each in-flight entry is bound to the
+  request ID `RequestRange` returned, and a terminal event releases the entry
+  carrying its own `BlockfetchEvent.RequestId`, not the connection's front
+  entry: a teardown releases entries whose requests are still outstanding with
+  the peer, so position no longer identifies the request. A refused promotion
+  leaves the pre-queued request reserved, so a same-connection redispatch waits
+  for its terminal event. A request a teardown released is remembered by ID;
+  its late terminal event releases nothing, and consumes the latch only when
+  the latch was armed for it.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into
@@ -4091,13 +4155,26 @@ A queued header range that no peer will serve is bounded by a failure count,
 `blockfetchRangeFailure`, capped at `blockfetchMaxSameRangeFailures`. Failing
 to obtain the range has two shapes and both count against the same range,
 because one peer can produce either: a `NoBlocks` reply, which gouroboros
-resolves into a synchronous `GetBlockRange` error and so never reaches
-`BatchDone`; and a `StartBatch`/`BatchDone` pair carrying no blocks, seen in
-`handleEventBlockfetchBatchDone`. Counting them separately would let the two
-alternate while each stayed under its own bound. Other synchronous
-`GetBlockRange` errors — including transport resets, protocol shutdown,
-send-queue failures, and missing callback wiring — do not count, because they
-do not establish that the peer cannot serve the range.
+resolves through `RequestRange`'s `RangeDoneFunc` before `MsgStartBatch` is
+ever sent (delivered as a `BlockfetchEvent` with `RangeErr` wrapping
+`blockfetch.ErrNoBlocks`); and a `StartBatch`/`BatchDone` pair carrying no
+blocks. Both arrive as a `BatchDone` `BlockfetchEvent` and are counted
+together in `handleEventBlockfetchBatchDone`'s "no blocks applied, headers
+still queued" branch — a `NoBlocks` reply always has that shape, since
+gouroboros never calls a block or `StartBatch` callback for it. Counting them
+separately would let the two alternate while each stayed under its own bound.
+A failure that does not establish that the peer cannot serve the range never
+counts, by either route it can now take. A synchronous `RequestRange`
+dispatch error — connection lookup failure, context cancellation, or a
+protocol-shutdown race, arising before the request is ever queued — is
+returned to the caller and not recorded. A transport, protocol, or decode
+failure that resolves the request later arrives as a `BatchDone` event whose
+`RangeErr` is non-nil and is not `blockfetch.ErrNoBlocks`; because it leaves
+the same "no blocks applied, headers still queued" shape a genuine
+`NoBlocks` does, `handleEventBlockfetchBatchDone` suppresses the
+range-failure branch for it explicitly. Without that suppression a range
+that is still obtainable would be dropped, and a chainsync re-intersect
+forced, after three peer disconnections against the same queued range.
 
 The count is keyed to the range's start point, not kept as a global
 consecutive streak, and this is what makes it able to fire at all. Failures
@@ -4120,19 +4197,27 @@ different range starts its own count. After the bound fires the record
 restarts from zero, so a re-offered header must earn a fresh set of failures
 rather than being dropped on every later miss.
 
-The accounting lives in `startQueuedBlockfetchLocked`, the single point every
-queued-range request passes through, not in the callers. That placement is
-load-bearing: every caller treats the error differently and several treat it
-as advisory — the two fork-resolution restarts in `tryResolveFork` log
-"failed to start blockfetch after fork rollback" (or "...after fork
-extension") and then report the fork resolved, the local-rollback recovery
-logs "failed to start blockfetch after local rollback recovery", and the
-await-reply path logs "failed to start blockfetch after await reply" at ERROR
-and publishes a `LedgerErrorEvent`. With the request already cleaned up and
-the header still queued, none of them retried and the pipeline sat idle. The
-shadow-blockfetch dispatch calls `BlockfetchRequestRangeFunc` directly and is
-intentionally excluded: it is a duplicate request whose failure says nothing
-about the primary still in flight. On reaching the bound the ledger drops the queued headers, clears the
+The accounting lives in `handleEventBlockfetchBatchDone`, the single point
+every dispatch's `BatchDone` resolution passes through, not in the callers
+that triggered the dispatch. That placement is load-bearing for the
+synchronous dispatch error a caller can still see (connection lookup
+failure, context cancellation, a protocol-shutdown race): every such caller
+treats it differently and several treat it as advisory — the two
+fork-resolution restarts in `tryResolveFork` log "failed to start blockfetch
+after fork rollback" (or "...after fork extension") and then report the fork
+resolved, the local-rollback recovery logs "failed to start blockfetch after
+local rollback recovery", and the await-reply path logs "failed to start
+blockfetch after await reply" at ERROR and publishes a `LedgerErrorEvent`.
+None of them retried and the pipeline would have sat idle if that were the
+only way a genuine `NoBlocks` or empty-batch failure could be observed — it
+is not, because that failure resolves asynchronously through the `BatchDone`
+event instead, reaching `handleEventBlockfetchBatchDone` regardless of which
+caller's dispatch produced it. The shadow-blockfetch dispatch calls
+`BlockfetchRequestRangeFunc` directly and is intentionally excluded from this
+accounting in the same way: a `BatchDone` from the shadow connection is
+accepted (see the shadow-completion discussion above), but the range-failure
+streak is keyed to the connection actually driving the batch to completion,
+not doubled by the shadow's own request. On reaching the bound the ledger drops the queued headers, clears the
 active blockfetch connection, and emits `chainsync.resync` with reason
 `blockfetch could not obtain the queued header range`. Dropping the headers keeps the
 pipeline moving rather than being a side effect: a header whose body no peer can
@@ -10635,12 +10720,20 @@ that is already executing, but does not replay bulk-sync blockfetch backlog
 into ledger or storage components that are being closed.
 
 The ledger blockfetch subscriber must not synchronously start the next
-`GetBlockRange` from its `ledger.blockfetch` handler: the request completes
-only after the peer's `BatchDone` is delivered through that same EventBus
-subscription. Batch continuation requests therefore run on tracked workers;
-the blockfetch state mutex protects the handoff and shutdown drains those
-workers before unsubscribing the ledger. A connection must not be reused for a
-new batch while an older request on that connection is still draining, because
+`RequestRange` from its `ledger.blockfetch` handler. `RequestRange` itself
+returns once the request is sent rather than waiting for the peer's
+`BatchDone` — unlike `GetBlockRange`, which this replaced, and which blocked
+the caller until that same `BatchDone` was delivered through this same
+EventBus subscription — but the dispatch can still block first: waiting for
+the client's in-flight-byte budget to admit the request, or for its own
+queue-append send token, either of which can be held up by another request's
+receive callback running on this same subscriber. Running the next dispatch
+synchronously here would therefore still risk stalling the one goroutine that
+must remain free to drain the next batch's block and `BatchDone` events. Batch
+continuation requests therefore run on tracked workers; the blockfetch state
+mutex protects the handoff and shutdown drains those workers before
+unsubscribing the ledger. A connection must not be reused for a new batch
+while an older request on that connection is still draining, because
 blockfetch callbacks carry only the connection ID; reuse waits for the older
 request to return and fails boundedly if it remains wedged. Close also bounds
 the continuation drain without holding the scheduling mutex while waiting.
