@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -103,6 +104,20 @@ func registerAPIProbe(
 				_ context.Context,
 				_ apiProbeConfig,
 				deps mesh.ProviderDependencies,
+			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
+				return name, probe.instance(), nil
+			},
+		)
+	case plugin.CapabilityAPIMcp:
+		err = plugin.Register(
+			host,
+			descriptor,
+			func() apiProbeConfig { return apiProbeConfig{} },
+			func(
+				_ context.Context,
+				_ apiProbeConfig,
+				deps mcp.ProviderDependencies,
 			) (string, plugin.Instance, error) {
 				probe.host = deps.Host
 				return name, probe.instance(), nil
@@ -274,6 +289,7 @@ func TestAPIPluginSelectionDefaultPortPerCapability(t *testing.T) {
 		plugin.CapabilityAPIBlockfrost: 3000,
 		plugin.CapabilityAPIMesh:       8080,
 		plugin.CapabilityAPIUtxorpc:    9090,
+		plugin.CapabilityAPIMcp:        8088,
 	}
 	for capability, wantPort := range want {
 		n := &Node{
@@ -300,6 +316,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 		plugin.CapabilityAPIUtxorpc:    {},
 		plugin.CapabilityAPIBlockfrost: {},
 		plugin.CapabilityAPIMesh:       {},
+		plugin.CapabilityAPIMcp:        {},
 	}
 	for capability, probe := range probes {
 		registerAPIProbe(t, n.pluginHost, capability, "probe", probe)

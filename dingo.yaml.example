@@ -86,6 +86,12 @@ plugins:
       provider: "builtin"
       config:
         port: 9090
+    mcp:
+      # Built-in Model Context Protocol (MCP) server for AI agent integration.
+      # Requires storage.metadata.provider: "sqlite" (standard in api mode).
+      provider: "builtin"
+      config:
+        port: 8088
 
 # Shared optional TLS default for every selected plugins.api.* provider
 # (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:

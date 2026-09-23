@@ -84,6 +84,7 @@ var logURIConfigFields = []string{
 // recursively and classified per key rather than as a whole.
 var logProviderConfigFields = []string{
 	"Plugins.API.Blockfrost.Config",
+	"Plugins.API.Mcp.Config",
 	"Plugins.API.Mesh.Config",
 	"Plugins.API.Utxorpc.Config",
 	"Plugins.Mempool.Config",
@@ -222,6 +223,7 @@ var logPlainConfigFields = []string{
 	"PledgeLeverage",
 	"PledgeLeverageEnabled",
 	"Plugins.API.Blockfrost.Provider",
+	"Plugins.API.Mcp.Provider",
 	"Plugins.API.Mesh.Provider",
 	"Plugins.API.Utxorpc.Provider",
 	"Plugins.Mempool.Provider",

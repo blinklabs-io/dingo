@@ -918,6 +918,7 @@ type APIPluginsConfig struct {
 	Blockfrost hostplugin.Selection `yaml:"blockfrost"`
 	Mesh       hostplugin.Selection `yaml:"mesh"`
 	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
+	Mcp        hostplugin.Selection `yaml:"mcp"`
 }
 
 // APIConfig holds the shared TLS policy defaults
@@ -971,6 +972,10 @@ func defaultPluginsConfig() PluginsConfig {
 			Utxorpc: hostplugin.Selection{
 				Provider: "builtin",
 				Config:   map[string]any{"port": 9090},
+			},
+			Mcp: hostplugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": 8088},
 			},
 		},
 	}
@@ -1515,6 +1520,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		{hostplugin.CapabilityAPIBlockfrost, &cfg.Plugins.API.Blockfrost},
 		{hostplugin.CapabilityAPIMesh, &cfg.Plugins.API.Mesh},
 		{hostplugin.CapabilityAPIUtxorpc, &cfg.Plugins.API.Utxorpc},
+		{hostplugin.CapabilityAPIMcp, &cfg.Plugins.API.Mcp},
 	}
 	for _, item := range pluginSelections {
 		if err := hostplugin.ApplyEnvironment(item.capability, item.selection, pluginEnviron); err != nil {
@@ -1573,6 +1579,11 @@ func applyAPIPortCompatibilityEnvironment(cfg *Config, environ []string) error {
 			legacyName:    "DINGO_UTXORPC_PORT",
 			canonicalName: "DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT",
 			selection:     &cfg.Plugins.API.Utxorpc,
+		},
+		{
+			legacyName:    "DINGO_MCP_PORT",
+			canonicalName: "DINGO_PLUGINS_API_MCP_CONFIG_PORT",
+			selection:     &cfg.Plugins.API.Mcp,
 		},
 	}
 	values := make(map[string]string, len(environ))

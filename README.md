@@ -22,7 +22,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Chain rollback support for handling forks with automatic state restoration
 - Fast bootstrapping via built-in Mithril client
 - Optional Midnight event indexing and MidnightState gRPC service
-- Multiple external interfaces: general-purpose APIs (UTxO RPC, Blockfrost-compatible REST, Mesh/Rosetta) plus Bark for Dingo-to-Dingo C2 and archive services
+- Multiple external interfaces: general-purpose APIs (UTxO RPC, Blockfrost-compatible REST, Mesh/Rosetta, Model Context Protocol [MCP]) plus Bark for Dingo-to-Dingo C2 and archive services
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
 
@@ -93,6 +93,11 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_PLUGINS_API_MESH_CONFIG_PORT`
   - TCP port for the Mesh (Coinbase Rosetta) API (default: `8080`)
   - Compatibility alias: `DINGO_MESH_PORT`
+- `DINGO_PLUGINS_API_MCP_CONFIG_PORT`
+  - TCP port for the Model Context Protocol (MCP) server (default: `8088`)
+  - Compatibility alias: `DINGO_MCP_PORT`
+- `DINGO_MCP_AUTH_TOKEN`
+  - Optional Bearer authentication token for MCP clients (default: empty, disabled)
 - `DINGO_BARK_PORT`
   - TCP port for the Bark block archive API (default: `0`, disabled)
 - `DINGO_BARK_BASE_URL`

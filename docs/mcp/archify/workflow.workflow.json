@@ -1,0 +1,216 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Dingo MCP Request & Question Resolution Workflow",
+    "subtitle": "End-to-End Execution Sequence: AI Agent Reasoning, Intent Taxonomy Routing, Safety Guardrails & Cardano Ledger Queries",
+    "output": "workflow.html",
+    "quality_profile": "showcase",
+    "visual_preset": "classic",
+    "views": [
+      {
+        "id": "full-pipeline",
+        "label": "Complete Question-to-Answer Pipeline",
+        "focus": [
+          "node-user-question",
+          "node-agent-reasoning",
+          "node-intent-mapping",
+          "node-jsonrpc-call",
+          "node-security-gate",
+          "node-ast-check",
+          "node-tool-dispatch",
+          "node-cardano-exec",
+          "node-sqlite-exec",
+          "node-result-format",
+          "node-agent-synthesis",
+          "node-user-answer"
+        ],
+        "note": "End-to-end journey from user prompt to intent recognition, security verification, tool execution, and final synthesized answer."
+      },
+      {
+        "id": "question-taxonomy",
+        "label": "Question Taxonomy & Intent Routing",
+        "focus": [
+          "node-user-question",
+          "node-agent-reasoning",
+          "node-intent-mapping",
+          "node-tool-dispatch",
+          "node-cardano-exec",
+          "node-sqlite-exec"
+        ],
+        "note": "How questions from Cardano Developers, SPOs, DEXs, DeFi protocols, and Voltaire Governance map directly to specific tools."
+      },
+      {
+        "id": "security-perimeter",
+        "label": "Zero-Risk Security Perimeter",
+        "focus": [
+          "node-jsonrpc-call",
+          "node-security-gate",
+          "node-ast-check",
+          "node-mutation-blocked",
+          "node-tool-dispatch"
+        ],
+        "note": "Multi-tier defense: constant-time bearer token check, leaky bucket rate limiter, and AST mutation rejection."
+      }
+    ]
+  },
+  "lanes": [
+    { "id": "lane-user", "label": "Developer / User", "color": "blue" },
+    { "id": "lane-client", "label": "AI Client (Claude / Cursor)", "color": "indigo" },
+    { "id": "lane-security", "label": "Security & Guardrails", "color": "amber" },
+    { "id": "lane-mcp", "label": "Dingo MCP Core Router", "color": "purple" },
+    { "id": "lane-execution", "label": "Tool Execution Handlers", "color": "emerald" },
+    { "id": "lane-storage", "label": "Ledger & SQLite Storage", "color": "slate" }
+  ],
+  "phases": [
+    { "id": "phase-intent", "label": "1. Prompt & Intent Classification" },
+    { "id": "phase-transport", "label": "2. Protocol Transport & Ingress" },
+    { "id": "phase-validation", "label": "3. Security & AST Validation" },
+    { "id": "phase-execution", "label": "4. Ledger Query & Execution" },
+    { "id": "phase-response", "label": "5. Formatting & Synthesis" }
+  ],
+  "nodes": [
+    {
+      "id": "node-user-question",
+      "lane": "lane-user",
+      "phase": "phase-intent",
+      "label": "Natural Language Question",
+      "sublabel": "Developer asks domain query",
+      "type": "start",
+      "description": "User enters a prompt (e.g. 'What is the current sync tip?', 'Find UTxOs holding asset policy X', 'Is my pool minting blocks?')."
+    },
+    {
+      "id": "node-agent-reasoning",
+      "lane": "lane-client",
+      "phase": "phase-intent",
+      "label": "AI Agent Reasoning",
+      "sublabel": "Evaluates MCP tool schemas",
+      "type": "process",
+      "description": "LLM inspects the 21 registered tool schemas and 81 resources provided during MCP initialization to match query intent."
+    },
+    {
+      "id": "node-intent-mapping",
+      "lane": "lane-client",
+      "phase": "phase-intent",
+      "label": "Intent Taxonomy Routing",
+      "sublabel": "Selects tool & binds parameters",
+      "type": "decision",
+      "description": "Agent maps query intent to a specific tool (e.g. get_cardano_tip, get_utxos_by_asset, get_governance_state, or sqlite_query)."
+    },
+    {
+      "id": "node-jsonrpc-call",
+      "lane": "lane-client",
+      "phase": "phase-transport",
+      "label": "JSON-RPC 2.0 Request",
+      "sublabel": "HTTP POST /mcp or SSE /sse",
+      "type": "transport",
+      "description": "Client sends an MCP 'tools/call' payload over HTTP SSE with session ID and optional Bearer token."
+    },
+    {
+      "id": "node-security-gate",
+      "lane": "lane-security",
+      "phase": "phase-validation",
+      "label": "Ingress Security Gate",
+      "sublabel": "Auth & Rate Limit Checks",
+      "type": "security",
+      "description": "Validates Bearer token using subtle.ConstantTimeCompare and enforces token-bucket rate limiting (default 60 req/s, burst 15)."
+    },
+    {
+      "id": "node-ast-check",
+      "lane": "lane-security",
+      "phase": "phase-validation",
+      "label": "AST Mutation Validator",
+      "sublabel": "Zero-Write SQL Inspection",
+      "type": "security",
+      "description": "For SQLite tools, parses SQL with an AST visitor. Strictly forbids DROP, DELETE, INSERT, UPDATE, ALTER, and ATTACH."
+    },
+    {
+      "id": "node-mutation-blocked",
+      "lane": "lane-security",
+      "phase": "phase-validation",
+      "label": "Blocked Mutation (Error)",
+      "sublabel": "Immediate 400 Bad Request",
+      "type": "terminal",
+      "description": "Queries containing prohibited write statements are aborted immediately with a clear rejection message."
+    },
+    {
+      "id": "node-tool-dispatch",
+      "lane": "lane-mcp",
+      "phase": "phase-validation",
+      "label": "MCP Server Dispatcher",
+      "sublabel": "Routes to registered handler",
+      "type": "router",
+      "description": "Dispatches verified request to either the Cardano Domain Handler (18 tools) or the SQLite Query Handler (3 tools)."
+    },
+    {
+      "id": "node-cardano-exec",
+      "lane": "lane-execution",
+      "phase": "phase-execution",
+      "label": "Cardano Domain Handler",
+      "sublabel": "Tip, UTxO, Mempool, Gov, Plutus",
+      "type": "process",
+      "description": "Invokes pure-Go Cardano logic: reads live Ouroboros consensus tip, evaluates Plutus budgets, or extracts Conway governance."
+    },
+    {
+      "id": "node-sqlite-exec",
+      "lane": "lane-execution",
+      "phase": "phase-execution",
+      "label": "SQLite Query Handler",
+      "sublabel": "Read-Only Connection Pool",
+      "type": "process",
+      "description": "Executes SELECT queries against metadata.sqlite with PRAGMA query_only = ON and automatic row/column caps."
+    },
+    {
+      "id": "node-storage-fetch",
+      "lane": "lane-storage",
+      "phase": "phase-execution",
+      "label": "Ledger & Database Fetch",
+      "sublabel": "In-Memory State & SQLite DB",
+      "type": "database",
+      "description": "Reads unspent UTxO indices, pool parameters, account states, and governance proposals from storage."
+    },
+    {
+      "id": "node-result-format",
+      "lane": "lane-mcp",
+      "phase": "phase-response",
+      "label": "Output Formatting & Sanitizer",
+      "sublabel": "Clean Markdown & Byte Hexing",
+      "type": "process",
+      "description": "Converts binary hashes to uppercase hex, formats rows into markdown tables, and neutralizes prompt-injection payloads."
+    },
+    {
+      "id": "node-agent-synthesis",
+      "lane": "lane-client",
+      "phase": "phase-response",
+      "label": "AI Context Synthesis",
+      "sublabel": "LLM generates domain answer",
+      "type": "process",
+      "description": "AI agent synthesizes the structured tool output into a fluent, contextual response with citations and actionable advice."
+    },
+    {
+      "id": "node-user-answer",
+      "lane": "lane-user",
+      "phase": "phase-response",
+      "label": "Delivered Answer",
+      "sublabel": "Accurate, verifiable response",
+      "type": "end",
+      "description": "User receives a complete, verified answer to their question with verified slot numbers, hashes, and balances."
+    }
+  ],
+  "edges": [
+    { "from": "node-user-question", "to": "node-agent-reasoning", "label": "Prompt" },
+    { "from": "node-agent-reasoning", "to": "node-intent-mapping", "label": "Inspect Tools" },
+    { "from": "node-intent-mapping", "to": "node-jsonrpc-call", "label": "CallTool" },
+    { "from": "node-jsonrpc-call", "to": "node-security-gate", "label": "HTTP/SSE" },
+    { "from": "node-security-gate", "to": "node-ast-check", "label": "Auth OK" },
+    { "from": "node-ast-check", "to": "node-mutation-blocked", "label": "Mutation Detected", "variant": "danger" },
+    { "from": "node-ast-check", "to": "node-tool-dispatch", "label": "Read-Only Verified", "variant": "success" },
+    { "from": "node-tool-dispatch", "to": "node-cardano-exec", "label": "Cardano Tool" },
+    { "from": "node-tool-dispatch", "to": "node-sqlite-exec", "label": "SQLite Tool" },
+    { "from": "node-cardano-exec", "to": "node-storage-fetch", "label": "Query State" },
+    { "from": "node-sqlite-exec", "to": "node-storage-fetch", "label": "SELECT" },
+    { "from": "node-storage-fetch", "to": "node-result-format", "label": "Raw Data" },
+    { "from": "node-result-format", "to": "node-agent-synthesis", "label": "Markdown Payload" },
+    { "from": "node-agent-synthesis", "to": "node-user-answer", "label": "Synthesized Response" }
+  ]
+}

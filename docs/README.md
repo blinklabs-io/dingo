@@ -22,6 +22,9 @@ current branch.
 | How do I run conformance or end-to-end tests? | [Conformance tests](../internal/test/conformance/README.md) and [DevNet](../internal/test/devnet/README.md) |
 | How do I exercise archive and history-expiry behavior? | [Archive node demo](../internal/test/archive-demo/README.md) |
 | Where are runnable API examples? | [Examples](../examples/README.md) |
+| How do I connect AI assistants (Claude, Cursor, Codex) to Dingo via MCP? | [MCP Guide](mcp/README.md) |
+| How do natural-language questions map to MCP tools & requests? | [MCP Tool Intent Mapping](mcp/README.md#4-question-style--intent-mapping-taxonomy) |
+| How is the MCP server structured? | [MCP Architecture Manual](mcp/architecture.md) |
 | How do I install the Grafana dashboards? | [Dashboards](dashboards/README.md) |
 
 Contributor rules live in [`AGENTS.md`](../AGENTS.md) and

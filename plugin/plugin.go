@@ -42,13 +42,15 @@ const (
 	CapabilityAPIBlockfrost   Capability = "api.blockfrost"
 	CapabilityAPIMesh         Capability = "api.mesh"
 	CapabilityAPIUtxorpc      Capability = "api.utxorpc"
+	CapabilityAPIMcp          Capability = "api.mcp"
 )
 
 // Valid reports whether c is a capability supported by this platform.
 func (c Capability) Valid() bool {
 	switch c {
 	case CapabilityStorageBlob, CapabilityStorageMetadata, CapabilityMempool,
-		CapabilityAPIBlockfrost, CapabilityAPIMesh, CapabilityAPIUtxorpc:
+		CapabilityAPIBlockfrost, CapabilityAPIMesh, CapabilityAPIUtxorpc,
+		CapabilityAPIMcp:
 		return true
 	default:
 		return false

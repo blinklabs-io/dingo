@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Dingo MCP Subsystem Architecture",
+    "subtitle": "Model Context Protocol (HTTP/SSE) with Security, Cardano & SQLite Providers",
+    "output": "architecture.html",
+    "quality_profile": "showcase",
+    "visual_preset": "classic",
+    "views": [
+      {
+        "id": "full-pipeline",
+        "label": "Complete MCP Pipeline",
+        "focus": ["clients", "security", "transport", "server", "cardano_tools", "sqlite_tools", "resources", "dingo_node", "sqlite_db"],
+        "note": "End-to-end flow from external LLM clients through security, transport, server dispatch, to tools and data storage."
+      },
+      {
+        "id": "ingress-security",
+        "label": "Ingress & Authentication",
+        "focus": ["clients", "security", "transport", "server"],
+        "note": "Ingress perimeter enforcing constant-time token verification, leaky-bucket rate limiting, and prompt injection sanitization."
+      },
+      {
+        "id": "cardano-execution",
+        "label": "Cardano Tools & State",
+        "focus": ["server", "cardano_tools", "dingo_node"],
+        "note": "Cardano domain tools inspecting tip, ledger state, UTxO sets, Plutus scripts, and node identity/architecture via in-memory node APIs."
+      },
+      {
+        "id": "sqlite-inspection",
+        "label": "SQLite Tools & Resources",
+        "focus": ["server", "sqlite_tools", "resources", "sqlite_db"],
+        "note": "Zero-write read-only SQLite tools and 81 discoverable database and documentation resources."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "AI Clients & Agents",
+      "sublabel": "Claude Code, Desktop, Codex",
+      "tag": "MCP Client",
+      "pos": [40, 260],
+      "size": [130, 60]
+    },
+    {
+      "id": "security",
+      "type": "security",
+      "label": "Security Layer",
+      "sublabel": "Bearer Auth & Limit",
+      "tag": "Guardrails",
+      "pos": [235, 260],
+      "size": [140, 60]
+    },
+    {
+      "id": "transport",
+      "type": "cloud",
+      "label": "Stream Transport",
+      "sublabel": "HTTP + SSE",
+      "tag": "MCP 2024-11-05",
+      "pos": [440, 260],
+      "size": [140, 60]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "MCP Server Core",
+      "sublabel": "Router & Steering",
+      "tag": "JSON-RPC 2.0",
+      "pos": [645, 260],
+      "size": [140, 60]
+    },
+    {
+      "id": "cardano_tools",
+      "type": "backend",
+      "label": "Cardano Tools",
+      "sublabel": "18 Domain Tools",
+      "tag": "Tip/UTxO/Mempool/Gov/Plutus",
+      "pos": [855, 130],
+      "size": [150, 60]
+    },
+    {
+      "id": "sqlite_tools",
+      "type": "backend",
+      "label": "SQLite Tools",
+      "sublabel": "3 Query Tools",
+      "tag": "Query/Explain/Schema",
+      "pos": [855, 260],
+      "size": [150, 60]
+    },
+    {
+      "id": "resources",
+      "type": "backend",
+      "label": "MCP Resources",
+      "sublabel": "81 Resources",
+      "tag": "dingo://docs, tables",
+      "pos": [855, 390],
+      "size": [150, 60]
+    },
+    {
+      "id": "dingo_node",
+      "type": "database",
+      "label": "Dingo Node Core",
+      "sublabel": "In-Memory State",
+      "tag": "Go API State",
+      "pos": [1075, 130],
+      "size": [140, 60]
+    },
+    {
+      "id": "sqlite_db",
+      "type": "database",
+      "label": "SQLite Indexer",
+      "sublabel": "Read-Only Replica",
+      "tag": "query_only=1",
+      "pos": [1075, 330],
+      "size": [140, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Dingo Node Process Boundary",
+      "wraps": ["security", "transport", "server", "cardano_tools", "sqlite_tools", "resources", "dingo_node", "sqlite_db"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Ingress Perimeter",
+      "wraps": ["security", "transport"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "conn-client-security",
+      "from": "clients",
+      "to": "security",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "conn-security-transport",
+      "from": "security",
+      "to": "transport",
+      "label": "Auth OK",
+      "variant": "security"
+    },
+    {
+      "id": "conn-transport-server",
+      "from": "transport",
+      "to": "server",
+      "label": "JSON-RPC"
+    },
+    {
+      "id": "conn-server-cardano",
+      "from": "server",
+      "to": "cardano_tools",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "conn-server-sqlite",
+      "from": "server",
+      "to": "sqlite_tools",
+      "label": "Dispatch"
+    },
+    {
+      "id": "conn-server-resources",
+      "from": "server",
+      "to": "resources",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "conn-cardano-node",
+      "from": "cardano_tools",
+      "to": "dingo_node",
+      "label": "State Read"
+    },
+    {
+      "id": "conn-sqlite-db",
+      "from": "sqlite_tools",
+      "to": "sqlite_db",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "conn-resources-db",
+      "from": "resources",
+      "to": "sqlite_db",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Edge & Transport",
+      "items": [
+        "MCP 2024-11-05 compliant HTTP + Server-Sent Events (SSE) streamable transport",
+        "Bidirectional JSON-RPC 2.0 message dispatch and session state router"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Security Guardrails",
+      "items": [
+        "Constant-time bearer token auth with subtle.ConstantTimeCompare",
+        "Per-client token-bucket rate limiter & prompt injection sanitization"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Tools & State Safety",
+      "items": [
+        "18 Cardano domain tools & 3 SQLite query tools (21 total) with 81 schema/doc resources",
+        "Zero-write SQLite with PRAGMA query_only=1 and immutable node state reads"
+      ]
+    }
+  ]
+}
