@@ -225,19 +225,10 @@ func (ls *LedgerState) publishBlockEvent(
 // the chain mutation would leave recovery unable to reconstruct the events if
 // metadata truncation then fails.
 //
-// It does not close the window completely: the chain can still grow between
-// this validation and the rollback and push the rollback past the security
-// parameter, and an I/O failure mid-truncation is not predictable at all.
-// Both leave the chain needing recovery regardless -- see
-// validateAndEmitRollbackUndoEmitted for the one caller that can retry the
-// first of those instead. rollbackChainAndState (this function's caller)
-// still separately calls LedgerState.rollback after the emit, which can
-// itself fail -- reconcilePrimaryChainTipWithLedgerTip had the identical
-// shape (issue #3516) until it was closed by decoupling
-// LedgerState.rollback's durable commit from its resync-event publish
-// (wolf31o2 review, PR #3611: see rollbackWithBlocks/rollbackWithoutResync
-// and the reconciler's two branches). Whether the same decoupling is safe
-// to adopt here too remains tracked as issue #3817.
+// The durable record lets startup recovery repeat an undo if the chain or
+// metadata rollback fails after publication. Reconciliation uses the same
+// outbox with blocks captured from applied ledger state before it publishes
+// its undo events.
 func (ls *LedgerState) validateAndEmitRollbackUndo(
 	point ocommon.Point,
 ) error {

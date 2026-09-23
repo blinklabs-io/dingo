@@ -207,7 +207,6 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 			rewindPoint,
 			nil,
 			!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after header validation failure: %w",

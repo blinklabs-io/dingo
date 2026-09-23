@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -55,6 +56,107 @@ func TestRollbackIntentRoundTripsUndoBlocks(t *testing.T) {
 	_, _, pending, err = loadRollbackIntent(db)
 	require.NoError(t, err)
 	require.False(t, pending)
+}
+
+func TestValidateAndEmitRollbackUndoRefusesBeforePersistingIntent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		prepare func(*chainsyncRollbackFixture) error
+		want    error
+	}{
+		{
+			name: "Mithril trust boundary",
+			prepare: func(f *chainsyncRollbackFixture) error {
+				f.ls.mithrilLedgerSlot = f.ancestorTip.Point.Slot + 1
+				return nil
+			},
+			want: ErrRollbackExceedsMithrilBoundary,
+		},
+		{
+			name: "consumed UTxO prune floor",
+			prepare: func(f *chainsyncRollbackFixture) error {
+				return f.ls.db.SetSyncState(
+					database.ConsumedUtxoPruneFloorSyncKey,
+					strconv.FormatUint(
+						f.ancestorTip.Point.Slot+1,
+						10,
+					),
+					nil,
+				)
+			},
+			want: ErrRollbackBelowUtxoPruneFloor,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			require.NoError(t, tc.prepare(fixture))
+			err := fixture.ls.validateAndEmitRollbackUndo(
+				fixture.ancestorTip.Point,
+			)
+			require.ErrorIs(t, err, tc.want)
+			_, _, pending, err := loadRollbackIntent(fixture.ls.db)
+			require.NoError(t, err)
+			require.False(
+				t,
+				pending,
+				"a refused rollback must not persist an intent that startup cannot complete",
+			)
+		})
+	}
+}
+
+func TestRollbackNoopDoesNotFinishForeignIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	block, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	foreignPoint := fixture.ancestorTip.Point
+	require.NoError(t, persistRollbackIntent(
+		fixture.ls.db,
+		foreignPoint,
+		[]models.Block{block},
+	))
+
+	err = fixture.ls.rollbackWithBlocksAndIntent(
+		fixture.currentTip.Point,
+		nil,
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	gotPoint, gotBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, foreignPoint, gotPoint)
+	require.Equal(t, []models.Block{block}, gotBlocks)
+
+	aheadPoint := ocommon.NewPoint(
+		fixture.currentTip.Point.Slot+1,
+		testHashBytes("rollback-intent-ahead-point"),
+	)
+	err = fixture.ls.rollbackWithBlocksAndIntent(
+		aheadPoint,
+		nil,
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	gotPoint, gotBlocks, pending, err = loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, foreignPoint, gotPoint)
+	require.Equal(t, []models.Block{block}, gotBlocks)
 }
 
 func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {

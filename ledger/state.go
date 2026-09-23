@@ -3583,7 +3583,7 @@ func (ls *LedgerState) resolveRollbackTarget(
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.rollbackWithBlocks(point, nil, false, true)
+		return ls.rollbackWithBlocks(point, nil, false)
 	})
 }
 
@@ -3626,7 +3626,36 @@ func (ls *LedgerState) rollbackWithBlocks(
 	point ocommon.Point,
 	rollbackBlocks []models.Block,
 	repairSameTip bool,
+) error {
+	return ls.rollbackWithBlocksAndIntent(
+		point,
+		rollbackBlocks,
+		repairSameTip,
+		true,
+		false,
+	)
+}
+
+func (ls *LedgerState) rollbackWithBlocksRetainingIntent(
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+	repairSameTip bool,
+) error {
+	return ls.rollbackWithBlocksAndIntent(
+		point,
+		rollbackBlocks,
+		repairSameTip,
+		false,
+		true,
+	)
+}
+
+func (ls *LedgerState) rollbackWithBlocksAndIntent(
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+	repairSameTip bool,
 	publishResync bool,
+	retainIntent bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
@@ -3640,11 +3669,14 @@ func (ls *LedgerState) rollbackWithBlocks(
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
-		sameTip := currentTip.Point.Slot == point.Slot &&
+	sameTip := currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash)
 	if sameTip && !repairSameTip {
 		if err := ls.enforceDurableTipFloor(); err != nil {
 			return err
+		}
+		if retainIntent {
+			return nil
 		}
 		return ls.finishRollbackIntentForPoint(point)
 	}
@@ -3661,6 +3693,9 @@ func (ls *LedgerState) rollbackWithBlocks(
 			"rollback_hash", hex.EncodeToString(point.Hash),
 			"ledger_tip_hash", hex.EncodeToString(durableTip.Point.Hash),
 		)
+		if retainIntent {
+			return nil
+		}
 		return ls.finishRollbackIntentForPoint(point)
 	}
 	// A target sharing the applied tip's slot with a different hash cannot be
@@ -3732,25 +3767,15 @@ func (ls *LedgerState) rollbackWithBlocks(
 			pruneFloor,
 		)
 	}
-	if err := ls.ensureRollbackIntent(point, rollbackBlocks); err != nil {
-		switch {
-		case errors.Is(err, errRollbackIntentTooLarge):
-			ls.config.Logger.Warn(
-				"rollback undo payload exceeds durable outbox limit; continuing with live delivery",
-				"component", "ledger",
-				"error", err,
-			)
-		case errors.Is(err, errRollbackIntentConflict):
-			if recoverErr := ls.recoverRollbackIntentLocked(); recoverErr != nil {
-				return fmt.Errorf("complete previous rollback intent: %w", recoverErr)
-			}
-			if retryErr := ls.ensureRollbackIntent(point, rollbackBlocks); retryErr != nil &&
-				!errors.Is(retryErr, errRollbackIntentTooLarge) {
-				return fmt.Errorf("prepare rollback intent: %w", retryErr)
-			}
-		default:
+	if err := ls.prepareRollbackIntent(point, rollbackBlocks); err != nil {
+		if !errors.Is(err, errRollbackIntentTooLarge) {
 			return fmt.Errorf("prepare rollback intent: %w", err)
 		}
+		ls.config.Logger.Warn(
+			"rollback undo payload exceeds durable outbox limit; continuing with live delivery",
+			"component", "ledger",
+			"error", err,
+		)
 	}
 	// Bracket every rollback mutation so split reward precomputation cannot
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
@@ -4164,6 +4189,9 @@ func (ls *LedgerState) rollbackWithBlocks(
 	if floorErr != nil {
 		return &rollbackCommittedError{err: floorErr}
 	}
+	if retainIntent {
+		return nil
+	}
 	return ls.finishRollbackIntent()
 }
 
@@ -4410,7 +4438,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// dropped and no chain.update is produced at all). drainChain is
 	// idempotent per chain.
 	pubs.drainChain(ls.chain)
-	if err := ls.rollbackWithBlocks(point, nil, false, true); err != nil {
+	if err := ls.rollbackWithBlocks(point, nil, false); err != nil {
 		// ls.rollback can fail with the ledger already sitting on the
 		// rollback point: the no-op branch it takes when the tip
 		// already matches returns enforceDurableTipFloor's error
@@ -4617,7 +4645,6 @@ func (ls *LedgerState) processChainIteratorRollback(
 					point,
 					rollbackBlocks,
 					false,
-					true,
 				)
 			}); err != nil {
 				return err
@@ -4630,11 +4657,13 @@ func (ls *LedgerState) processChainIteratorRollback(
 		}
 	}
 
-	if currentTip.Point.Slot == point.Slot &&
-		bytes.Equal(currentTip.Point.Hash, point.Hash) {
-		return nil
-	}
-	return ls.rollback(point)
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.rollbackWithBlocks(
+			point,
+			rollbackBlocks,
+			false,
+		)
+	})
 }
 
 // transitionToEra performs an era transition and returns the result without
@@ -9922,29 +9951,13 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			"ledger_tip_hash",
 			hex.EncodeToString(ledgerTip.Point.Hash),
 		)
-		// This branch is not only the ordinary "primary chain got
-		// shortened out from under an ahead ledger tip" case -- it is
-		// also exactly what a *second* run of this reconciler lands in
-		// after a crash between the common-ancestor branch's
-		// RewindPrimaryChainToPoint succeeding (primary chain already
-		// truncated, durable) and its emitRollbackTransactionEvents
-		// running (in-memory only, lost on crash): ls.currentTip is
-		// still the stale pre-crash value, chain.Tip() already reports
-		// the truncated point, so chainTip.Point.Slot < ledgerTip.Point.Slot
-		// here and undo events for that already-truncated range would
-		// otherwise never be attempted at all (wolf31o2 review, PR
-		// #3611). Reusing reconciliationUndoBlocks/
-		// emitRollbackTransactionEvents here, under the same
-		// gather-exclude/drain/transactionEventMutex sequencing the
-		// common-ancestor branch below uses, makes that recovery
-		// attempt happen instead of being silently skipped -- subject
-		// to the same, already-documented restart/cache-eviction
-		// resolution gap reconciliationUndoBlocks accepts and counts
-		// via reconciliationUndoUnresolved. This branch is also
-		// reachable live (not just at startup), from the same three
-		// callers as the common-ancestor branch, so the same
-		// protection against a concurrent apply or in-flight gathered
-		// block applies here too.
+		// This branch handles a chain tip that is already behind the
+		// applied ledger tip. Capture its undo payload and keep the durable
+		// intent through metadata rollback and ordered delivery, using the
+		// same gather/drain/transaction-event serialization as the
+		// common-ancestor branch. It is reachable during startup and live
+		// reconciliation, so it also excludes concurrent applies and
+		// in-flight gathered blocks.
 		ls.blockPipelineGatherMutex.Lock()
 		defer ls.blockPipelineGatherMutex.Unlock()
 		//nolint:contextcheck // no ctx threaded through this call chain, same as rollbackChainAndState
@@ -9959,17 +9972,10 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			currentLedgerTip := ls.currentTip
 			mithrilLedgerSlot := ls.mithrilLedgerSlot
 			ls.RUnlock()
-			// Pre-check the one deterministic rejection ls.rollback
-			// below can still hit, the same way rollbackChainAndState
-			// checks it before ever calling validateAndEmitRollbackUndo
-			// (wolf31o2 review, PR #3611): skip the notification
-			// entirely rather than publish an undo for a rollback that
-			// is rejected outright, not merely delayed. This narrows
-			// ls.rollback's remaining failure mode below to a genuine,
-			// unpredictable DB I/O error -- the same residual risk
-			// validateAndEmitRollbackUndo's own doc comment already
-			// accepts for the canonical path (issue #3817 tracks
-			// closing that fully).
+			// Reject the deterministic Mithril-boundary failure before
+			// recording or publishing undo events. The captured blocks are
+			// persisted with the metadata rollback and retained until their
+			// ordered undo delivery completes.
 			if mithrilLedgerSlot > 0 &&
 				chainTip.Point.Slot < mithrilLedgerSlot {
 				return ErrRollbackExceedsMithrilBoundary
@@ -9979,23 +9985,25 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				currentLedgerTip.Point.Slot,
 				currentLedgerTip.BlockNumber,
 			)
-			// See the matching comment on the common-ancestor branch's
-			// own emit below for the full reasoning (Cubic and
-			// wolf31o2 review, PR #3611; issue #3817 tracks the real
-			// fix): the inconsistency window a failing ls.rollback
-			// would leave here is bounded the same way, matches the
-			// pre-existing rollbackChainAndState/
-			// validateAndEmitRollbackUndo contract, and the next
-			// reconciliation attempt lands right back in this same
-			// branch and retries both.
-			if err := ls.rollbackWithBlocks(chainTip.Point, undoBlocks, false, false); err != nil {
+			// The outbox remains pending through the undo event publish and
+			// ordered-delivery barrier below, so a crash after metadata
+			// truncation but before delivery can replay the captured payload.
+			if err := ls.rollbackWithBlocksRetainingIntent(
+				chainTip.Point,
+				undoBlocks,
+				false,
+			); err != nil {
 				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 					ls.emitRollbackTransactionEvents(undoBlocks)
+					return errors.Join(
+						err,
+						ls.finishRollbackIntentForPoint(chainTip.Point),
+					)
 				}
 				return err
 			}
 			ls.emitRollbackTransactionEvents(undoBlocks)
-			return nil
+			return ls.finishRollbackIntentForPoint(chainTip.Point)
 		}(); err != nil {
 			ls.config.Logger.Error(
 				"failed to roll back ledger metadata to primary chain tip",
@@ -10127,25 +10135,45 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		currentLedgerTip := ls.currentTip
 		mithrilLedgerSlot := ls.mithrilLedgerSlot
 		ls.RUnlock()
-		// Pre-check the one deterministic rejection ls.rollback below
-		// can still hit, the same way rollbackChainAndState checks it
-		// before ever calling validateAndEmitRollbackUndo (wolf31o2
-		// review, PR #3611): skip straight to the rewind without
-		// resolving or emitting an undo for a rollback that is
-		// rejected outright, not merely delayed. This narrows
-		// ls.rollback's remaining failure mode below to a genuine,
-		// unpredictable DB I/O error -- the same residual risk
-		// validateAndEmitRollbackUndo's own doc comment already
-		// accepts for the canonical path (issue #3817 tracks closing
-		// that fully).
+		resolvedAncestor, resolveErr := ls.resolveRollbackTarget(
+			ancestor,
+			currentLedgerTip,
+		)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve reconciliation rollback target: %w", resolveErr)
+		}
+		ancestor = resolvedAncestor
+		// Check both deterministic refusal boundaries before persisting an
+		// intent or truncating the primary chain.
 		if mithrilLedgerSlot > 0 && ancestor.Slot < mithrilLedgerSlot {
 			return ErrRollbackExceedsMithrilBoundary
+		}
+		belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(ancestor)
+		if floorErr != nil {
+			return fmt.Errorf(
+				"determine consumed UTxO prune floor: %w",
+				floorErr,
+			)
+		}
+		if belowPruneFloor {
+			return fmt.Errorf(
+				"%w: target slot %d, prune floor %d",
+				ErrRollbackBelowUtxoPruneFloor,
+				ancestor.Slot,
+				pruneFloor,
+			)
 		}
 		undoBlocks := ls.reconciliationUndoBlocks(
 			ancestor,
 			currentLedgerTip.Point.Slot,
 			currentLedgerTip.BlockNumber,
 		)
+		if err := ls.prepareRollbackIntent(ancestor, undoBlocks); err != nil {
+			return fmt.Errorf(
+				"prepare reconciliation rollback intent before chain rewind: %w",
+				err,
+			)
+		}
 		// RewindPrimaryChainToPoint's own K-check and truncation run
 		// under one continuous hold of the chain's own locks (see
 		// Chain.rollbackLocked), so calling it directly here -- with no
@@ -10204,65 +10232,42 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// must be a transition of its own. A rewind refused before its
 		// first deletion leaves the window describing an unchanged chain.
 		// See settleAuditAfterRewind.
-		if rewindErr == nil ||
-			primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point) {
+		chainRewound := primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point)
+		if rewindErr == nil || chainRewound {
 			ls.disarmContinuationAudit()
 		}
 		if rewindErr != nil {
+			if !chainRewound {
+				return errors.Join(
+					rewindErr,
+					ls.finishRollbackIntentForPoint(ancestor),
+				)
+			}
 			return rewindErr
 		}
-		// Publishing here, before ls.rollback below runs, leaves a
-		// narrow inconsistency window if that separate call then fails:
-		// subscribers have already been told these blocks are undone,
-		// while ls.currentTip -- updated only by ls.rollback -- still
-		// durably shows them applied (Cubic and wolf31o2 review, PR
-		// #3611). This is not a shape unique to this function:
-		// rollbackChainAndState -- the pre-existing, far-more-frequently
-		// exercised peer-driven rollback path -- has the identical
-		// structure (validateAndEmitRollbackUndo's emit inside
-		// transactionEventMutex, ls.rollback as a separate call
-		// afterward that can fail), and validateAndEmitRollbackUndo's
-		// own doc comment already accepts this exact class of window:
-		// "an I/O failure mid-truncation is not predictable at all ...
-		// leaves the chain needing recovery regardless." Closing it here
-		// alone, differently from that canonical path, would leave the
-		// two rollback contracts inconsistent for no benefit. Closing it
-		// outright would also mean either running ls.rollback here,
-		// still holding transactionEventMutex -- risking a real
-		// reentrancy hazard emitRollbackTransactionEvents's own
-		// placement above already avoids: ls.rollback can itself publish
-		// ChainsyncResyncEventType/ChainsyncResyncReasonLocalLedgerRollback
-		// synchronously via EventBus.Publish, and
-		// Ouroboros.SubscribeChainsyncResync subscribes to exactly that
-		// reason and calls the substantial RecoverAfterLocalRollback,
-		// whose own locking has not been audited for this -- or
-		// deferring this emit until after ls.rollback returns, which
-		// would let a concurrent forward apply's ledger.tx event land
-		// first on the same ordered lane, reopening exactly what holding
-		// transactionEventMutex across this emit prevents. The window is
-		// bounded rather than permanent here: the one deterministic
-		// rejection ls.rollback could otherwise hit (the Mithril
-		// boundary) is pre-checked above, before this emit, exactly
-		// as rollbackChainAndState pre-checks it before
-		// validateAndEmitRollbackUndo (proven by
-		// TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting),
-		// so ls.rollback's only remaining failure mode here is a
-		// genuine, unpredictable DB error. If it still fails, the
-		// next reconciliation attempt lands in the "ledger tip ahead
-		// of primary chain tip" branch below, which retries both the
-		// (idempotent) undo notification and this same rollback
-		// (proven by
-		// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit).
-		// A true durable, atomic handoff across every rollback path --
-		// not just this one -- is tracked as issue #3817.
-		if err := ls.rollbackWithBlocks(ancestor, undoBlocks, false, false); err != nil {
+		// The intent was durably written before this chain rewind. Commit
+		// metadata before publishing while still holding
+		// transactionEventMutex: emitting here keeps forward transaction
+		// events ordered, and retaining the intent bridges a crash between
+		// the chain rewind, metadata commit, and ordered undo delivery.
+		// Avoid ls.rollback's synchronous resync publish while holding this
+		// mutex; its subscribers may re-enter ledger recovery.
+		if err := ls.rollbackWithBlocksRetainingIntent(
+			ancestor,
+			undoBlocks,
+			false,
+		); err != nil {
 			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 				ls.emitRollbackTransactionEvents(undoBlocks)
+				return errors.Join(
+					err,
+					ls.finishRollbackIntentForPoint(ancestor),
+				)
 			}
 			return err
 		}
 		ls.emitRollbackTransactionEvents(undoBlocks)
-		return nil
+		return ls.finishRollbackIntentForPoint(ancestor)
 	}(); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to common primary-chain ancestor: %w",
@@ -10514,7 +10519,7 @@ func (ls *LedgerState) enforceDurableTipFloor() error {
 		"applied_floor_hash",
 		hex.EncodeToString(floor.Hash),
 	)
-	return ls.rollbackWithBlocks(floor, nil, false, true)
+	return ls.rollbackWithBlocks(floor, nil, false)
 }
 
 func (ls *LedgerState) latestLedgerPrimaryChainAncestor(

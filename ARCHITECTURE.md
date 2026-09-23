@@ -13314,50 +13314,28 @@ commit, which is what keeps the undo ahead of any forward `ledger.tx` event
 on the same ordered lane, regardless of this internal before/after
 ordering relative to the truncation itself.
 
-The emit still runs before `ls.rollback` — the separate call, made outside
-this closure, that durably updates `ls.currentTip` and the ledger's own
-metadata — so a failure in that later call leaves a narrow inconsistency:
-subscribers already believe these blocks are undone while durable ledger
-metadata still shows them applied (Cubic and wolf31o2 review, PR #3611).
-This is not a shape unique to this reconciler: `rollbackChainAndState` —
-the pre-existing, far-more-frequently exercised peer-driven rollback path
-— has the identical structure (`validateAndEmitRollbackUndo`'s emit inside
-`transactionEventMutex`, `ls.rollback` as a separate call afterward that
-can fail), and `validateAndEmitRollbackUndo`'s own doc comment already
-accepts this exact class of window: "an I/O failure mid-truncation is not
-predictable at all ... leaves the chain needing recovery regardless."
-Closing it here alone, differently from that canonical path, would leave
-the two rollback contracts inconsistent for no benefit.
+The captured undo payload is persisted before the primary-chain rewind and
+before metadata truncation. The reconciler retains that intent after the
+metadata commit, publishes the undo while still holding
+`transactionEventMutex`, and clears the record only after the ordered-delivery
+barrier succeeds. A crash after the chain or metadata mutation but before the
+undo is acknowledged therefore leaves the payload available for startup
+recovery. If the process stops after delivery but before clearing the record,
+recovery may deliver the undo again; consumers must tolerate this documented
+at-least-once behavior.
 
-Neither alternative ordering is free of its own hazard, either: running
-`ls.rollback` inside this closure, before the emit, would risk a real
-reentrancy hazard the placement above already avoids — `ls.rollback` can
-publish `ChainsyncResyncEventType`/`ChainsyncResyncReasonLocalLedgerRollback`
-synchronously via `EventBus.Publish`, and `Ouroboros.SubscribeChainsyncResync`
-(`ouroboros/chainsync.go`) subscribes to exactly that reason and calls the
-substantial `LedgerState.RecoverAfterLocalRollback`, whose own locking has
-not been audited for safety under `transactionEventMutex` — while
-deferring the emit until after `ls.rollback` returns (outside
-`transactionEventMutex`) would let a concurrent forward apply's
-`ledger.tx` event land first on the same ordered lane, reopening exactly
-what holding `transactionEventMutex` across the emit prevents.
-
-The window is narrowed, not merely bounded: both branches now pre-check
-the one deterministic rejection `ls.rollback` could otherwise hit — the
-Mithril boundary — before ever resolving or emitting an undo, the same way
-`rollbackChainAndState` checks it before calling
-`validateAndEmitRollbackUndo` at all. Proven by
-`TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`:
-a target below the boundary is declined immediately, with no undo
-published and no primary-chain truncation attempted either. That leaves
-`ls.rollback`'s only remaining failure mode a genuine, unpredictable DB
-error, logged at ERROR with the inconsistency called out if it happens; the
-next reconciliation attempt then lands in the "ledger tip ahead of primary
-chain tip" branch below (see its own doc comment), which retries both the
-(idempotent) undo notification and this same rollback — proven by
-`TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit`.
-A true durable, atomic handoff across every rollback path in this file,
-not a fix scoped to this one reconciler, is tracked as issue #3817.
+The emit remains outside the chain's own locks. `emitRollbackTransactionEvents`
+can publish `LedgerErrorEventType` via `EventBus.Publish`, which invokes
+subscribers synchronously on the caller's goroutine; running it from inside
+the chain rewind would risk reentrancy into `c.mutex` or `c.manager.mutex`.
+The durable intent allows the reconciler to commit metadata before publishing
+without opening a loss window, while holding `transactionEventMutex` keeps the
+undo ahead of any forward `ledger.tx` event on the same ordered lane. The
+Mithril and consumed-UTxO prune boundaries are checked before the intent is
+written or the primary chain is truncated. The boundary-refusal regression is
+covered by `TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`;
+delivery retention is covered by
+`TestRollbackRetainsIntentUntilOrderedDelivery`.
 
 That resolution is also where the reconciler's undo events diverge from
 `blocksAboveSlot`'s: by the time this rewind runs, chain selection has
@@ -13391,29 +13369,12 @@ this section releases it, so the fresh read stays valid through the
 snapshot, that lets a test force this interleaving deterministically rather
 than relying on goroutine scheduling.
 
-A crash between `RewindPrimaryChainToPoint` returning success (primary
-chain truncated, durable) and `emitRollbackTransactionEvents` completing
-(an in-memory `EventBus` publish, not durable on its own) loses that undo
-notification for good if nothing else attempts it again (wolf31o2 review,
-PR #3611). Recovery does not happen by re-entering this same branch: after
-such a crash, `ls.currentTip` is still the stale pre-crash value (this
-closure's caller only calls `ls.rollback(ancestor)`, which updates it,
-after the closure returns), while `ls.chain.Tip()` already reports the
-truncated point, so the next reconciliation attempt instead takes the
-earlier `chainTip.Point.Slot < ledgerTip.Point.Slot` branch ("ledger tip
-ahead of primary chain tip"). That branch now runs the same
-`reconciliationUndoBlocks`/`emitRollbackTransactionEvents` sequence, under
-the same `blockPipelineGatherMutex`/drain/`transactionEventMutex`
-protections, before calling `ls.rollback`, so a crash-interrupted attempt's
-undo notification is retried on the very next reconciliation attempt
-(startup or live — this branch is reachable from all three callers, the
-same as the common-ancestor branch), subject to the same block-cache-
-eviction resolution limits `reconciliationUndoBlocks` already documents and
-counts via `reconciliationUndoUnresolved`, rather than being silently and
-permanently lost. This also fixes that branch's ordinary, non-crash case:
-it previously called `ls.rollback` directly with no undo emission at all,
-live or at startup, whenever the primary chain was simply behind the
-ledger tip for any reason.
+Both reconciliation branches persist their captured undo payload before
+metadata truncation and retain it through ordered delivery. Startup recovery
+replays a surviving intent before reconciliation begins, including after the
+primary chain or metadata was already rewound. This also ensures the ordinary
+case where the primary chain is behind the ledger tip emits the missing undo
+notifications before forward processing resumes.
 
 `reconciliationUndoBlocks` also detects, and counts separately via
 `reconciliationUndoMissingRecord`, an applied block with no `block_nonce`

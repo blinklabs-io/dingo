@@ -143,12 +143,9 @@ func clearRollbackIntent(db *database.Database) error {
 // A nil rollbackBlocks means "resolve the payload from the chain", which is
 // only correct before the bodies above point are deleted. Callers that rewind
 // the primary chain first -- reconcilePrimaryChainTipWithLedgerTip's two
-// branches, rewindPrimaryChainForRecovery, and the replay-recovery rewinds --
-// reach this with nil after the bodies are gone, so the read finds nothing and
-// no record is written. Those paths deliver their undo events directly from
-// their own captured blocks and are deliberately outside the outbox; a caller
-// that both captures the blocks and rewinds afterwards must pass them here.
-// Issue #3817 tracks extending the outbox to cover them.
+// branches instead pass their captured applied blocks here and retain the
+// record through undo delivery. Recovery rewinds that reject a block before
+// its apply event was published have no transaction undo to deliver.
 //
 // A pending record for a different point is completed or merged, never
 // discarded: at or above the pending slot the caller recovers the record and
@@ -197,6 +194,24 @@ func (ls *LedgerState) ensureRollbackIntent(
 		return nil
 	}
 	return persistRollbackIntent(ls.db, point, rollbackBlocks)
+}
+
+func (ls *LedgerState) prepareRollbackIntent(
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+) error {
+	if err := ls.ensureRollbackIntent(point, rollbackBlocks); err != nil {
+		if !errors.Is(err, errRollbackIntentConflict) {
+			return err
+		}
+		if recoverErr := ls.recoverRollbackIntentLocked(); recoverErr != nil {
+			return fmt.Errorf("complete previous rollback intent: %w", recoverErr)
+		}
+		if retryErr := ls.ensureRollbackIntent(point, rollbackBlocks); retryErr != nil {
+			return retryErr
+		}
+	}
+	return nil
 }
 
 func mergeRollbackBlocks(
@@ -351,7 +366,7 @@ func (ls *LedgerState) recoverRollbackIntentLocked() error {
 	}
 
 	ls.emitRollbackTransactionEvents(blocks)
-	if err := ls.rollbackWithBlocks(point, blocks, false, true); err != nil {
+	if err := ls.rollbackWithBlocks(point, blocks, false); err != nil {
 		return fmt.Errorf("recover rollback intent: %w", err)
 	}
 	return nil

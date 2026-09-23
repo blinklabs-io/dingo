@@ -2605,25 +2605,35 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
-	err := fixture.ls.processChainIteratorRollback(
+	injected := errors.New("injected metadata truncation failure")
+	fixture.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err = fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
-		nil,
+		[]models.Block{removedBlock},
 	)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, injected)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
-	assert.True(
-		t,
-		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
-	)
-
-	dbTip, err := fixture.ls.db.GetTip(nil)
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
 	require.NoError(t, err)
-	assert.Equal(t, fixture.ancestorTip, dbTip)
+	require.True(t, pending)
+	assert.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	assert.Equal(t, []models.Block{removedBlock}, intentBlocks)
 }
 
 func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(

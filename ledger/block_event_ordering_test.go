@@ -1017,6 +1017,107 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	require.Equal(t, fixture.ancestorTip, ls.currentTip)
 }
 
+func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandler)
+	subID := bus.SubscribeFuncWithBufferPolicy(
+		TransactionEventType,
+		1,
+		event.SubscriberBackpressureBlock,
+		func(event.Event) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		},
+	)
+	require.NotZero(t, subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+	require.True(t, bus.PublishOrdered(
+		TransactionEventType,
+		event.NewEvent(TransactionEventType, TransactionEvent{}),
+	))
+	testutil.RequireReceive(
+		t,
+		entered,
+		testutil.AsyncWait,
+		"ordered subscriber must be holding the preceding event",
+	)
+	require.True(t, bus.PublishOrdered(
+		TransactionEventType,
+		event.NewEvent(TransactionEventType, TransactionEvent{}),
+	))
+	require.True(t, bus.FlushOrderedContext(t.Context(), TransactionEventType))
+
+	done := make(chan error, 1)
+	go func() {
+		blocks := []models.Block{{
+			Hash:     fixture.currentTip.Point.Hash,
+			PrevHash: fixture.ancestorTip.Point.Hash,
+			Cbor:     []byte{0x80},
+			Slot:     fixture.currentTip.Point.Slot,
+			Number:   fixture.currentTip.BlockNumber,
+			Type:     1,
+		}}
+		if err := ls.rollbackWithBlocksRetainingIntent(
+			fixture.ancestorTip.Point,
+			blocks,
+			false,
+		); err != nil {
+			done <- err
+			return
+		}
+		ls.emitRollbackTransactionEvents(blocks)
+		if !bus.PublishOrdered(
+			TransactionEventType,
+			event.NewEvent(TransactionEventType, TransactionEvent{}),
+		) {
+			done <- errors.New("publish ordered test event")
+			return
+		}
+		done <- ls.finishRollbackIntentForPoint(fixture.ancestorTip.Point)
+	}()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			ls.RLock()
+			defer ls.RUnlock()
+			return pointMatches(ls.currentTip.Point, fixture.ancestorTip.Point)
+		},
+		testutil.AsyncWait,
+		"rollback must commit metadata before waiting for undo delivery",
+	)
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	require.Len(t, intentBlocks, 1)
+
+	releaseHandler()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"rollback must finish after the ordered subscriber drains",
+	))
+	_, _, pending, err = loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+}
+
 // TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting
 // covers wolf31o2's fourth-round review on PR #3611: rollbackChainAndState
 // pre-checks the Mithril boundary before it ever calls

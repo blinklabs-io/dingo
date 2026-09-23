@@ -362,7 +362,6 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			nil,
 			replayHolding && !wasReplayHolding &&
 				pointMatches(rewindPoint, ledgerTip.Point),
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state for replay recovery: %w",
@@ -751,7 +750,6 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			rewindPoint,
 			nil,
 			!resyncSpent && pointMatches(rewindPoint, ledgerTip.Point),
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after deterministic transaction validation failure: %w",
@@ -1629,7 +1627,6 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			rewindPoint,
 			nil,
 			repairSameTip,
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after validation failure: %w",
