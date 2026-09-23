@@ -241,12 +241,14 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.config.ChainManager != nil
 	rewindPoint := candidate.RollbackPoint
 	replayHolding := false
+	wasReplayHolding := false
 	primaryChainAlreadyHeld := false
 	var ledgerTip ochainsync.Tip
 	if rewindPrimaryChain {
 		ls.RLock()
 		ledgerTip = ls.currentTip
 		ls.RUnlock()
+		wasReplayHolding = ls.replayRecoveryHolding
 		replayHolding = ls.observeReplayRecoveryTip(ledgerTip.Point.Slot)
 		if replayHolding {
 			rewindPoint = ledgerTip.Point
@@ -352,7 +354,15 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		// The chain moves first while the rollback anchor is guaranteed to
 		// remain available. If metadata synchronization fails, the primary
 		// chain is still at a retained point and reconciliation can finish.
-		if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
+		// The cycle that first starts holding at an unchanged tip repairs the
+		// metadata the failed block left above it; the cycles that keep
+		// holding at that same tip reuse what it restored.
+		if err := ls.rollbackWithOptions(
+			rewindPoint,
+			replayHolding && !wasReplayHolding &&
+				pointMatches(rewindPoint, ledgerTip.Point),
+			true,
+		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state for replay recovery: %w",
 				err,
@@ -733,7 +743,14 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 				err,
 			)
 		}
-		if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
+		// The first rejection of this block at this tip repairs the metadata
+		// the failed apply left above it; the redelivery that the resync
+		// latch already records reuses what that repair restored.
+		if err := ls.rollbackWithOptions(
+			rewindPoint,
+			!resyncSpent && pointMatches(rewindPoint, ledgerTip.Point),
+			true,
+		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after deterministic transaction validation failure: %w",
 				err,
@@ -1565,6 +1582,11 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		"attempt", attempts,
 		"holding", ls.atTipRecoveryHolding,
 	)
+	// The first recovery at a tip may need to repair metadata left behind by
+	// the failed block. Repeating the same failure at the same tip does not:
+	// the first repair already restored every UTxO above that tip, while
+	// re-running it would turn the retry loop into a full database rollback.
+	repairSameTip := !isSameFailure && pointMatches(rewindPoint, ledgerTip.Point)
 	err := ls.withConsumedUtxoPruneBoundary(func() error {
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
@@ -1601,7 +1623,11 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		// re-measure after any gouroboros bump instead of trusting this line.
 		// Stale numbers here have twice pointed diagnosis at the wrong root
 		// cause (#3165, #3678).
-		if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
+		if err := ls.rollbackWithOptions(
+			rewindPoint,
+			repairSameTip,
+			true,
+		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after validation failure: %w",
 				err,

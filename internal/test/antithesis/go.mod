@@ -1,13 +1,13 @@
 module github.com/blinklabs-io/dingo/internal/test/antithesis
 
-go 1.26.0
+go 1.26.5
 
 toolchain go1.26.7
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.0
-	github.com/blinklabs-io/gouroboros v0.204.7
-	github.com/blinklabs-io/plutigo v0.7.0
+	github.com/blinklabs-io/gouroboros v0.206.2
+	github.com/blinklabs-io/plutigo v0.7.1
 	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -22,7 +22,7 @@ require (
 	github.com/consensys/gnark-crypto v0.21.0 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.3 // indirect
 	github.com/minio/sha256-simd v1.0.1 // indirect

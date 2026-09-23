@@ -507,13 +507,13 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 }
 
 // TestCheckDetectsMissingKoiosTotalsOnUpgradedCache is a regression test for
-// the "upgraded cache" scenario the reviewer flagged: a cache.db that has a
-// koios_epoch_info row (from before /totals fetching was added to this tool,
-// or from a --skip-fetch run against such a cache) but no koios_totals row
-// for the same epoch. Before this fix, CompareEpochTotals silently skipped
-// comparison whenever koiosTotals was nil, so an epoch like this could report
-// a clean PASS despite treasury/reserves/fees never actually being validated.
-// This confirms Check now surfaces it as ERROR instead.
+// the "upgraded cache" scenario: a cache.db that has a koios_epoch_info row
+// (from before /totals fetching was added to this tool, or from a
+// --skip-fetch run against such a cache) but no koios_totals row for the
+// same epoch. CompareEpochTotals must not silently skip comparison whenever
+// koiosTotals is nil -- doing so would let an epoch like this report a
+// clean PASS despite treasury/reserves/fees never actually being validated.
+// This confirms Check surfaces it as ERROR instead.
 func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 	t.Parallel()
 
@@ -1476,7 +1476,7 @@ func seedDepartureFixtureWithCount(
 	return dingoDir, cachePath, poolBech32
 }
 
-// TestCheckDegradedActivePoolStillErrors is the reviewer's degraded-active-pool
+// TestCheckDegradedActivePoolStillErrors covers the degraded-active-pool
 // case. buildRewardStateInputs (ledger/snapshot/rotation.go) drops a pool with
 // stale registration data from reward_pool_input so one bad pool cannot wedge
 // the whole boundary capture, and says so explicitly: degraded pools are
@@ -1519,7 +1519,7 @@ func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
 	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
 }
 
-// TestCheckMissingRewardBundleStillErrors is the reviewer's no-bundle case.
+// TestCheckMissingRewardBundleStillErrors covers the no-bundle case.
 // saveSnapshotInTxn persists the mark pool_stake_snapshot and epoch summary on
 // every transition "regardless of reward-input availability", so a ready
 // epoch_summary at K+1 is compatible with the entire reward-input bundle
