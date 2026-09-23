@@ -8522,13 +8522,54 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   side of the split, not with `blocks_produced`, because they are read at K-1
   (dingo #3484).
 
+  **Zero-stake pools (dingo #4691).** A pool that stays registered but whose
+  delegated stake reaches zero at the K+1 boundary — its only delegator
+  redelegates away or deregisters — is neither of the above: it did not
+  depart the pool set (no retirement, still listed with delegators), and it
+  is not missing input either. `rewardStakeDistribution`
+  (`ledger/snapshot/rotation.go`) correctly drops zero-stake pools before
+  building `reward_pool_input`, so such a pool simply never gets a K+1 row,
+  and neither departure route above can classify it: `pool_stake_snapshot`
+  membership proves nothing here (the pool genuinely has no reward-input row,
+  but it also never "left"), and the `epoch_summary.TotalPoolCount` fallback
+  can structurally never close, because that count includes every delegated
+  pool regardless of stake while `reward_pool_input` only ever held the
+  positive-stake ones — a network with any zero-stake-but-delegated pool has
+  the two permanently mismatched by that pool's own count (observed on
+  Preview: epoch 160 declared 113 pools via `epoch_summary` against 111 real
+  reward-input rows, with `reward_snapshot` for the same epoch reporting
+  `total_pool_count=111`, `excluded_active_stake=0`).
+
+  `checkEpoch` resolves this with a third, independent completeness proof:
+  `RewardParitySource.GetRewardSnapshot` reads the mark `reward_snapshot` row
+  for the K+1 epoch, whose `TotalPoolCount` — unlike `epoch_summary`'s — is
+  written by `buildRewardStateInputs` from exactly the set `reward_pool_input`
+  holds rows for. When that count equals the size of the K+1 reward-input set
+  *and* `ExcludedActiveStake` is known and zero (so no degraded pool's
+  exclusion, dingo #4025, is hiding inside the gap), the reward-input set is
+  proven to be the network's complete positive-stake pool set, and any pool
+  absent from it genuinely has zero stake for a proven reason. `ComparePoolEpoch`
+  reports that case as `pool_zero_stake` rather than `pool_departed` — the pool
+  never left the network, so folding it into the departure category would
+  misstate that — and rather than `dingo_db_missing`, since it is not a gap in
+  Dingo's own computation. `reward_snapshot` rows are retained for the life of
+  the database (never pruned by `cleanupOldSnapshots`), so this proof survives
+  the same snapshot-retention window that closes off `pool_stake_snapshot`
+  membership for a trailing observer. A nonzero or unknown
+  `ExcludedActiveStake` leaves the route closed and the stricter
+  `dingo_db_missing` classification stands, the same fail-closed shape as the
+  other two routes.
+
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (absence may be transient — either the epoch
 closed within --grace-hours, or the chain tip has not yet reached the boundary
 that applies this stake epoch's rewards; see "Reward timing" below),
 `pool_departed` (informational: the pool left the pool set
-at K+1, so its epoch-K block count has no row to live on), plus #3097's
+at K+1, so its epoch-K block count has no row to live on), `pool_zero_stake`
+(informational: the pool is still registered but its delegated stake reached
+zero at K+1, proven via `reward_snapshot`'s own pool count rather than
+`epoch_summary`'s — see "Zero-stake pools" above), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
 reward_type, pool) row within one side — a data-integrity problem, not a
@@ -8628,10 +8669,11 @@ second sync:
 - **`DatabaseSource`** (same file) is the narrow, in-process adapter: it
   wraps an already-open, live `*database.Database` and reads
   `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
-  `reward_account_output` through the existing typed `MetadataStore`
-  accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
-  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`, and
-  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above) inside a
+  `reward_account_output`/`reward_snapshot` through the existing typed
+  `MetadataStore` accessors (`GetEpochSummary`, `GetRewardAdaPots`,
+  `GetRewardPoolInputs`, `GetRewardPoolOutputs`, `GetRewardAccountOutputs`,
+  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above, and
+  `GetRewardSnapshot` for the zero-stake completeness proof above) inside a
   fresh read-only transaction per call — the same tables `ledger/snapshot/rotation.go`
   already populates at every epoch boundary, with no new table and no
   metadata export. `GetRewardAccountOutputs` is what #3097's per-account
