@@ -31,6 +31,8 @@ The Grafana instance is pre-provisioned with a Prometheus datasource and a
 - Slots behind wall clock (`dingo_tip_gap_slots`), which trends toward 0 as
   sync completes
 - Current epoch, chainsync header-cache size, and on-disk database size
+- Block apply batch latency (p50/p99 and maximum observed) and average
+  blocks per batch, from `dingo_ledger_block_apply_batch_*`
 
 Tear down (including synced chain data):
 

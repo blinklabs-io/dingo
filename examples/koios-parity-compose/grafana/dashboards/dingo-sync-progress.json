@@ -179,13 +179,13 @@
       "id": 9,
       "type": "timeseries",
       "title": "Block apply batch latency: max observed",
-      "description": "dingo_ledger_block_apply_batch_latency_max_seconds -- the exact maximum wall-clock duration ever observed for dingo_ledger_block_apply_batch_latency_seconds, since process start. Monotonically non-decreasing and never resets. Unlike the p50/p99 panel above, this is not a bucket-bounded estimate: it is the precise worst-ever value, read directly from the same atomic the histogram observation updates, so it cannot drift behind the true maximum the way a separately-pushed gauge could.",
+      "description": "dingo_ledger_block_apply_batch_max_latency_seconds -- the exact maximum wall-clock duration ever observed for dingo_ledger_block_apply_batch_latency_seconds, since process start. Monotonically non-decreasing and never resets. Unlike the p50/p99 panel above, this is not a bucket-bounded estimate: it is the precise worst-ever value, read directly from the same atomic the histogram observation updates, so it cannot drift behind the true maximum the way a separately-pushed gauge could.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "dingo_ledger_block_apply_batch_latency_max_seconds",
+          "expr": "dingo_ledger_block_apply_batch_max_latency_seconds",
           "legendFormat": "max observed",
           "refId": "A"
         }

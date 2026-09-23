@@ -53,12 +53,12 @@ func blockApplyBatchSizeSample(
 		GetSampleSum()
 }
 
-// blockApplyBatchLatencyMaxValue returns the value reg exports for
-// dingo_ledger_block_apply_batch_latency_max_seconds. It reads the registry
+// blockApplyBatchMaxLatencyValue returns the value reg exports for
+// dingo_ledger_block_apply_batch_max_latency_seconds. It reads the registry
 // rather than a collector handle held on stateMetrics, because the metric
 // deliberately keeps no exported-value state of its own to hold: the
 // GaugeFunc collector reads the running-maximum atomic at scrape time.
-func blockApplyBatchLatencyMaxValue(
+func blockApplyBatchMaxLatencyValue(
 	t *testing.T,
 	reg *prometheus.Registry,
 ) float64 {
@@ -66,52 +66,51 @@ func blockApplyBatchLatencyMaxValue(
 	families, err := reg.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
-		if family.GetName() != "dingo_ledger_block_apply_batch_latency_max_seconds" {
+		if family.GetName() != "dingo_ledger_block_apply_batch_max_latency_seconds" {
 			continue
 		}
 		require.Len(t, family.GetMetric(), 1)
 		return family.GetMetric()[0].GetGauge().GetValue()
 	}
 	t.Fatalf(
-		"no dingo_ledger_block_apply_batch_latency_max_seconds series found",
+		"no dingo_ledger_block_apply_batch_max_latency_seconds series found",
 	)
 	return 0
 }
 
-// TestBlockApplyBatchLatencyBucketsCoverTailStalls requires the histogram's
-// widest finite bucket boundary to reach at least 30s -- an order of
-// magnitude past dingo_ledger_block_stage_duration_seconds's own ~3.3s
-// ceiling, which this metric has to exceed rather than match: its window
-// contains every stage that histogram measures individually, for every block
-// in the chunk, plus the DB commit and the tip lock (see
-// blockApplyBatchLatency's doc comment). At the per-stage range a batch whose
-// stages each sit near that ceiling would collapse into +Inf,
-// indistinguishable from any other stall past it.
-func TestBlockApplyBatchLatencyBucketsCoverTailStalls(t *testing.T) {
+// largestFiniteBucket returns the widest finite upper bound of a histogram.
+func largestFiniteBucket(t *testing.T, h prometheus.Metric) float64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	require.NoError(t, h.Write(metric))
+	buckets := metric.GetHistogram().GetBucket()
+	require.NotEmpty(t, buckets, "histogram has no finite bucket boundary")
+	return buckets[len(buckets)-1].GetUpperBound()
+}
+
+// TestBlockApplyBatchLatencyBucketsCoverBlockStageRange requires the batch
+// histogram to reach at least as far as
+// dingo_ledger_block_stage_duration_seconds. A batch window contains the
+// validate and apply stages of every block in the chunk, so a range narrower
+// than the per-stage one would put in +Inf a batch whose single stage the
+// stage histogram still resolves.
+func TestBlockApplyBatchLatencyBucketsCoverBlockStageRange(t *testing.T) {
 	t.Parallel()
 
 	var m stateMetrics
 	m.init(prometheus.NewRegistry())
 
-	metric := &dto.Metric{}
-	require.NoError(t, m.blockApplyBatchLatency.Write(metric))
-
-	buckets := metric.GetHistogram().GetBucket()
-	require.NotEmpty(
-		t,
-		buckets,
-		"histogram must have at least one finite bucket boundary",
-	)
-	largest := buckets[len(buckets)-1].GetUpperBound()
+	stageObserver, ok := m.blockStageApply.(prometheus.Metric)
+	require.True(t, ok, "stage observer must be a collectable histogram")
+	stageLargest := largestFiniteBucket(t, stageObserver)
+	batchLargest := largestFiniteBucket(t, m.blockApplyBatchLatency)
 	assert.GreaterOrEqual(
 		t,
-		largest,
-		30.0,
-		"largest finite bucket boundary (%vs) must stay well past "+
-			"dingo_ledger_block_stage_duration_seconds's ~3.3s ceiling, or "+
-			"a stall the rest of the system already treats as stuck still "+
-			"lands in +Inf here",
-		largest,
+		batchLargest,
+		stageLargest,
+		"batch latency range (%vs) is narrower than the block stage range (%vs)",
+		batchLargest,
+		stageLargest,
 	)
 }
 
@@ -161,18 +160,18 @@ func TestBlockApplyBatchLatencyMaxDurationExportsRunningMaximum(t *testing.T) {
 	assert.Equal(
 		t,
 		0.0,
-		blockApplyBatchLatencyMaxValue(t, reg),
+		blockApplyBatchMaxLatencyValue(t, reg),
 		"must export zero before any observation",
 	)
 
 	m.observeBlockApplyBatch(1, 5*time.Second)
-	assert.Equal(t, 5.0, blockApplyBatchLatencyMaxValue(t, reg))
+	assert.Equal(t, 5.0, blockApplyBatchMaxLatencyValue(t, reg))
 
 	m.observeBlockApplyBatch(1, 2*time.Second)
 	assert.Equal(
 		t,
 		5.0,
-		blockApplyBatchLatencyMaxValue(t, reg),
+		blockApplyBatchMaxLatencyValue(t, reg),
 		"a smaller observation after a larger one must not lower the record",
 	)
 
@@ -180,7 +179,7 @@ func TestBlockApplyBatchLatencyMaxDurationExportsRunningMaximum(t *testing.T) {
 	assert.Equal(
 		t,
 		9.0,
-		blockApplyBatchLatencyMaxValue(t, reg),
+		blockApplyBatchMaxLatencyValue(t, reg),
 		"a larger observation must raise the record",
 	)
 }
@@ -224,7 +223,7 @@ func TestBlockApplyBatchLatencyMaxDurationExportedValueEqualsRecord(
 	assert.Equal(
 		t,
 		want,
-		blockApplyBatchLatencyMaxValue(t, reg),
+		blockApplyBatchMaxLatencyValue(t, reg),
 		"the exported value must equal the largest observed duration, "+
 			"regardless of goroutine interleaving",
 	)
