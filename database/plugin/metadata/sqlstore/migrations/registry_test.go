@@ -388,3 +388,18 @@ func TestSplitSQLPreservesCommentTokenBoundaries(t *testing.T) {
 		"SELECT 1",
 	}, statements)
 }
+
+func TestMySQLRegistryPrefixesDRepExpiryHistoryCredentialPrimaryKey(t *testing.T) {
+	t.Parallel()
+
+	registry, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.NoError(t, validateRegistry(registry, "mysql"))
+	expand := registry[21].SQL["mysql"].Expand
+	require.Len(t, expand, 3)
+	require.Contains(
+		t,
+		expand[0],
+		"PRIMARY KEY (`credential_tag`,`credential`(255), `added_slot`)",
+	)
+}
