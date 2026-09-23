@@ -328,6 +328,29 @@ func newGatedListener(l net.Listener) *gatedListener {
 	return &gatedListener{Listener: l, opened: make(chan struct{})}
 }
 
+// newTestGatedListener binds a closed gatedListener on an OS-assigned
+// loopback port and closes it when the test ends. Leave it unopened to
+// stand in for a node that refuses every session.
+func newTestGatedListener(t *testing.T) *gatedListener {
+	t.Helper()
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	gate := newGatedListener(base)
+	t.Cleanup(func() { _ = gate.Close() })
+	return gate
+}
+
+// refusingAddr returns the address of a gatedListener that is never opened.
+// Something must call Accept for the gate to drop a connection; without it
+// the kernel completes the TCP handshake and the dial stalls in the
+// Ouroboros handshake until dialTimeout.
+func refusingAddr(t *testing.T) string {
+	t.Helper()
+	gate := newTestGatedListener(t)
+	go func() { _, _ = gate.Accept() }()
+	return gate.Addr().String()
+}
+
 func (g *gatedListener) open() {
 	g.openOnce.Do(func() { close(g.opened) })
 }
@@ -353,10 +376,7 @@ func (g *gatedListener) Accept() (net.Conn, error) {
 func TestGatedListener_DropsConnectionsUntilOpened(t *testing.T) {
 	t.Parallel()
 
-	base, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	gate := newGatedListener(base)
-	t.Cleanup(func() { _ = gate.Close() })
+	gate := newTestGatedListener(t)
 
 	accepted := make(chan net.Conn, 1)
 	go func() {
@@ -415,10 +435,7 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 
 	// The gated listener drops every connection until it is opened, so each
 	// early attempt fails fast without the port ever being released.
-	base, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	listener := newGatedListener(base)
-	t.Cleanup(func() { _ = listener.Close() })
+	listener := newTestGatedListener(t)
 	addr := listener.Addr().String()
 	server := newTestChainSyncServer(t, 5)
 	server.accepted = make(chan *ouroboros.Connection, 1)
