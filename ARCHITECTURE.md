@@ -4124,11 +4124,34 @@ against the first bootstrap peer; after a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
-catch-up allowance). It also prevents a peer's unbounded advertisement from
-suppressing other peers or forcing a chain-switch resync. A tip update that
-carries no delivered frontier at all is recorded as having delivered nothing:
-the advertised tip is never substituted for a missing observed frontier, and
-the peer is bounded and compared as block 0 until it delivers a header.
+catch-up allowance, `localTip + 2*securityParam`). It also prevents a peer's
+unbounded advertisement from suppressing other peers or forcing a
+chain-switch resync. A tip update that carries no delivered frontier at all
+is recorded as having delivered nothing: the advertised tip is never
+substituted for a missing observed frontier, and the peer is bounded and
+compared as block 0 until it delivers a header.
+
+A delivered frontier beyond the catch-up allowance is not rejected outright.
+A rejected frontier is never recorded, so without a second path a node whose
+honest peers deliver more than `2*securityParam` blocks ahead of a
+slow-to-apply local tip could never accept them. Such a frontier is too far
+ahead of local ledger state for its VRF/KES check to run
+(`ledger.ValidateChainSelectionHeaderCrypto` defers), so no single claim is
+trusted: `checkPeerTipPlausibleLocked` records it per connection
+(`ChainSelector.farTipClaims`, bounded to `maxTrackedPeers` and pruned with the
+peer in `deletePeerLocked`; a frontier that does not fit is still compared
+against the recorded ones) and accepts it once another connection has
+recorded a frontier within `securityParam` of it
+(`corroborateFarTipClaimLocked`). The earlier claim is then marked
+corroborated and becomes that connection's own reference, like a known peer's
+previous frontier: its next update is accepted within `securityParam` of its
+claim even when the corroborating frontier sits up to `securityParam` below
+it, and the entry is cleared once the connection is accepted.
+A lone far peer therefore stays rejected, and two connections delivering
+frontiers more than `securityParam` apart do not corroborate each other. The
+check counts connections, not operators, so it is not a Sybil defence;
+acceptance only admits the frontier to chain selection, and the ledger still
+verifies every applied header, completing deferred verification at apply time.
 Genesis exit may consult the advertised slot only through the separately
 documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
