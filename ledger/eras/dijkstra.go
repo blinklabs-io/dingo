@@ -262,6 +262,14 @@ func ValidateTxDijkstra(
 			)
 		}
 	}
+	if err := validateCommitteeVotingRules(
+		tx,
+		slot,
+		ls,
+		&tmpPparams.ConwayProtocolParameters,
+	); err != nil {
+		errs = append(errs, fmt.Errorf("dijkstra committee voting: %w", err))
+	}
 	// CIP-23: reject pool registration certificates whose margin is below the
 	// operator-configured minimum pool margin. No-op when disabled (nil floor).
 	// Wired only here, so Conway and earlier eras are unaffected.

@@ -281,6 +281,7 @@ var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
 // satisfies the upstream capability. Point it at the upstream type once the
 // gouroboros pin exports it.
 var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
+var _ eras.CommitteeVotingState = (*LedgerView)(nil)
 
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
@@ -1375,6 +1376,55 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		return member, nil
 	}
 	return nil, nil
+}
+
+func (lv *LedgerView) CommitteeHotCredentialColdCredentials(
+	hotCredential lcommon.Credential,
+) ([]lcommon.Credential, error) {
+	member, err := lv.CommitteeHotCredentialMember(hotCredential)
+	if err != nil {
+		return nil, err
+	}
+	if member == nil || member.Resigned || member.HotKey == nil ||
+		*member.HotKey != hotCredential.Credential {
+		return nil, nil
+	}
+	var coldCredentials []lcommon.Credential
+	for _, coldType := range []uint{
+		lcommon.CredentialTypeAddrKeyHash,
+		lcommon.CredentialTypeScriptHash,
+	} {
+		cold := lcommon.Credential{CredType: coldType, Credential: member.ColdKey}
+		candidate, err := lv.CommitteeCredentialMember(cold)
+		if err != nil {
+			return nil, err
+		}
+		if candidate != nil && !candidate.Resigned && candidate.HotKey != nil &&
+			*candidate.HotKey == hotCredential.Credential {
+			coldCredentials = append(coldCredentials, cold)
+		}
+	}
+	return coldCredentials, nil
+}
+
+func (lv *LedgerView) CommitteeCredentialIsElected(
+	coldCredential lcommon.Credential,
+) (bool, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return false, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	members, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	if err != nil {
+		return false, fmt.Errorf("get elected committee members: %w", err)
+	}
+	for _, member := range members {
+		if member != nil && member.ColdCredentialTag == coldTag &&
+			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CommitteeMembers returns all seated committee members.

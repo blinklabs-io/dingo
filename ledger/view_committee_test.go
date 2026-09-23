@@ -1115,6 +1115,36 @@ func TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal(t *testing.T) {
 	)
 }
 
+func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
+	pparams := &conway.ConwayProtocolParameters{}
+	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+	lv, db := committeeTestView(t, pparams)
+	lv.skipPhase2Validation = true
+	cold := committeeTestCredential(0xd1)
+	hot := committeeTestCredential(0xd2)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	storeCommitteeUpdateProposal(t, db, 0xd4, cold, 10)
+	elected := committeeTestCredential(0xd3)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(elected.CredType),
+		ColdCredHash:      elected.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+
+	err := eras.ValidateTxConway(tx, 0, lv, pparams)
+	require.ErrorContains(t, err, "committee voter is not elected")
+}
+
 // TestLedgerViewCommitteeResignationSurvivesTermRenewal covers the opposite
 // direction of the same TermStartSlot-stamping defect. cardano-ledger keeps
 // the CommitteeState entry of every cold credential still present in the

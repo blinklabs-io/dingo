@@ -869,6 +869,57 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	return nil, nil
 }
 
+func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
+	hotCredential common.Credential,
+) ([]common.Credential, error) {
+	member, err := p.CommitteeHotCredentialMember(hotCredential)
+	if err != nil {
+		return nil, err
+	}
+	if member == nil || member.Resigned || member.HotKey == nil ||
+		*member.HotKey != hotCredential.Credential {
+		return nil, nil
+	}
+	var coldCredentials []common.Credential
+	for _, coldType := range []uint{
+		common.CredentialTypeAddrKeyHash,
+		common.CredentialTypeScriptHash,
+	} {
+		cold := common.Credential{CredType: coldType, Credential: member.ColdKey}
+		candidate, err := p.CommitteeCredentialMember(cold)
+		if err != nil {
+			return nil, err
+		}
+		if candidate != nil && !candidate.Resigned && candidate.HotKey != nil &&
+			*candidate.HotKey == hotCredential.Credential {
+			coldCredentials = append(coldCredentials, cold)
+		}
+	}
+	return coldCredentials, nil
+}
+
+func (p *DingoStateProvider) CommitteeCredentialIsElected(
+	coldCredential common.Credential,
+) (bool, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return false, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
+		return p.manager.db.GetCommitteeMembers(nil)
+	})
+	if err != nil {
+		return false, fmt.Errorf("lookup elected committee members: %w", err)
+	}
+	for _, member := range members {
+		if member != nil && member.ColdCredentialTag == coldTag &&
+			common.NewBlake2b224(member.ColdCredHash) == coldCredential.Credential {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // DRepRegistration looks up a DRep registration by its full credential.
 func (p *DingoStateProvider) DRepRegistration(
 	credential common.Credential,
@@ -1131,6 +1182,7 @@ var _ conformance.StateProvider = (*DingoStateProvider)(nil)
 // Keep the conformance provider on the same credential-aware committee
 // capability as the production LedgerView.
 var _ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
+var _ eras.CommitteeVotingState = (*DingoStateProvider)(nil)
 
 // conformance.StateProvider does not include DRepDelegationState: the Conway
 // reward-withdrawal rule discovers it with a runtime type assertion instead.

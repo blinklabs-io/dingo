@@ -213,6 +213,9 @@ func ValidateTxConway(
 			)
 		}
 	}
+	if err := validateCommitteeVotingRules(tx, slot, ls, tmpPparams); err != nil {
+		errs = append(errs, fmt.Errorf("conway committee voting: %w", err))
+	}
 	if err := ValidateTxFeeConway(tx, ls, tmpPparams); err != nil &&
 		(!isInputResolutionError(err) || len(errs) == 0) {
 		errs = append(

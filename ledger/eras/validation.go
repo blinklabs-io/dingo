@@ -15,10 +15,12 @@
 package eras
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -68,6 +70,139 @@ type CommitteeCredentialState interface {
 	CommitteeHotCredentialMember(
 		lcommon.Credential,
 	) (*lcommon.CommitteeMember, error)
+}
+
+type CommitteeVotingState interface {
+	CommitteeHotCredentialColdCredentials(
+		lcommon.Credential,
+	) ([]lcommon.Credential, error)
+	CommitteeCredentialIsElected(lcommon.Credential) (bool, error)
+}
+
+type committeeCredentialKey struct {
+	typeTag uint
+	hash    lcommon.Blake2b224
+}
+
+func credentialKey(credential lcommon.Credential) committeeCredentialKey {
+	return committeeCredentialKey{
+		typeTag: credential.CredType,
+		hash:    credential.Credential,
+	}
+}
+
+func validateCommitteeVotingRules(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp *conway.ConwayProtocolParameters,
+) error {
+	if !tx.IsValid() {
+		return nil
+	}
+	if pp == nil {
+		return ErrIncompatibleProtocolParams
+	}
+	if pp.ProtocolVersion.Major < lcommon.ProtocolVersionVanRossem {
+		// The action-type restriction is Conway-wide; the upstream rule in
+		// the currently released dependency still gates it at PV11.
+		ccParams := *pp
+		ccParams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+		return conway.UtxoValidateCCVotingRestrictions(
+			tx, slot, ls, &ccParams,
+		)
+	}
+	return validateUnelectedCommitteeVoters(tx, ls)
+}
+
+func validateUnelectedCommitteeVoters(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+) error {
+	votes := tx.VotingProcedures()
+	voters := make([]*lcommon.Voter, 0, len(votes))
+	for voter := range votes {
+		if voter != nil && (voter.Type == lcommon.VoterTypeConstitutionalCommitteeHotKeyHash ||
+			voter.Type == lcommon.VoterTypeConstitutionalCommitteeHotScriptHash) {
+			voters = append(voters, voter)
+		}
+	}
+	if len(voters) == 0 {
+		return nil
+	}
+	slices.SortFunc(voters, func(a, b *lcommon.Voter) int {
+		if a.Type != b.Type {
+			return int(a.Type) - int(b.Type)
+		}
+		return bytes.Compare(a.Hash[:], b.Hash[:])
+	})
+	state, ok := ls.(CommitteeVotingState)
+	if !ok {
+		return errors.New("committee election state unavailable")
+	}
+	electedState, ok := ls.(CommitteeCredentialState)
+	if !ok {
+		return errors.New("committee election state unavailable")
+	}
+	available, err := electedState.CommitteeStateAvailable()
+	if err != nil {
+		return err
+	}
+	if !available {
+		return errors.New("committee election state unavailable")
+	}
+	for _, voter := range voters {
+		hotType := uint(lcommon.CredentialTypeAddrKeyHash)
+		if voter.Type == lcommon.VoterTypeConstitutionalCommitteeHotScriptHash {
+			hotType = lcommon.CredentialTypeScriptHash
+		}
+		hot := lcommon.Credential{
+			CredType:   hotType,
+			Credential: lcommon.Blake2b224(voter.Hash),
+		}
+		coldCredentials, err := state.CommitteeHotCredentialColdCredentials(hot)
+		if err != nil {
+			return fmt.Errorf("lookup committee voter credentials: %w", err)
+		}
+		elected := make(map[committeeCredentialKey]struct{}, len(coldCredentials))
+		for _, cold := range coldCredentials {
+			isElected, err := state.CommitteeCredentialIsElected(cold)
+			if err != nil {
+				return fmt.Errorf("lookup elected committee member: %w", err)
+			}
+			if isElected {
+				elected[credentialKey(cold)] = struct{}{}
+			}
+		}
+		for _, cert := range tx.Certificates() {
+			switch c := cert.(type) {
+			case *lcommon.AuthCommitteeHotCertificate:
+				if credentialKey(c.HotCredential) == credentialKey(hot) {
+					isElected, err := state.CommitteeCredentialIsElected(c.ColdCredential)
+					if err != nil {
+						return fmt.Errorf("lookup elected committee member: %w", err)
+					}
+					if isElected {
+						elected[credentialKey(c.ColdCredential)] = struct{}{}
+					} else {
+						delete(elected, credentialKey(c.ColdCredential))
+					}
+				} else {
+					delete(elected, credentialKey(c.ColdCredential))
+				}
+			case *lcommon.ResignCommitteeColdCertificate:
+				delete(elected, credentialKey(c.ColdCredential))
+			}
+		}
+		if len(elected) == 0 {
+			return fmt.Errorf(
+				"committee voter is not elected: type=%d hash=%x",
+				voter.Type,
+				voter.Hash[:],
+			)
+		}
+	}
+	return nil
 }
 
 // minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
