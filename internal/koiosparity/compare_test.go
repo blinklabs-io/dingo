@@ -1337,6 +1337,41 @@ func TestComparePoolEpochDepartedRequiresStakeEpochRow(t *testing.T) {
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
 
+// TestComparePoolEpochZeroStakeRequiresStakeEpochRow anchors the zero-stake
+// classification to the pool having been in epoch K's stake basis, the same
+// way TestComparePoolEpochDepartedRequiresStakeEpochRow anchors departure: an
+// epoch-level completeness proof must not downgrade a pool absent from both
+// reward-input reads (dingo #4691).
+func TestComparePoolEpochZeroStakeRequiresStakeEpochRow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "1000",
+		BlockCnt:    15,
+		Delegators:  3,
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:  false,
+		ParamsPresent: false,
+	}
+
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+		true,
+	)
+	for _, m := range ms {
+		require.NotEqual(
+			t,
+			CategoryPoolZeroStake,
+			m.Category,
+			"a pool with no stake-epoch row cannot be classified zero-stake",
+		)
+	}
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
 // TestComparePoolEpochMemberRewardsExcludesUnspendable pins the quantity
 // member_rewards is compared on. Koios reports the rewards members actually
 // received; reward_pool_output.member_reward_total sums every member reward the

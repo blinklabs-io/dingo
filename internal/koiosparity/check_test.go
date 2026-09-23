@@ -1910,6 +1910,47 @@ func TestCheckZeroStakeProofDoesNotMaskUnknownExclusion(t *testing.T) {
 	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
 }
 
+// TestCheckZeroStakeProofRequiresMatchingSnapshotCount covers the count half
+// of the dingo #4691 proof: a known-zero ExcludedActiveStake is not enough on
+// its own. When reward_snapshot.TotalPoolCount (2) exceeds the K+1
+// reward-input rows actually present (1), a row is missing from Dingo's own
+// computation and the absent pool must stay dingo_db_missing.
+func TestCheckZeroStakeProofRequiresMatchingSnapshotCount(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	seedRewardSnapshotForZeroStakeProof(
+		t, dingoDir, koiosEpoch+1, 2, true, 0,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a reward_snapshot count above the row count must not prove completeness",
+	)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
 // TestCheckAccountRewardsPendingWiring is the other half of
 // TestAccountRewardsPendingFold: that fold pins what checkEpoch decides, this
 // pins that checkEpoch's decision is the one the account comparison actually
