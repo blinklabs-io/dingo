@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"math"
 	"net"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,7 +85,29 @@ func markSelectorPeerStale(
 	if threshold == 0 {
 		threshold = defaultStaleTipThreshold
 	}
-	peerTip.LastUpdated = time.Now().Add(-(threshold + time.Millisecond))
+	peerTip.LastUpdated = peerTip.now().Add(-(threshold + time.Millisecond))
+}
+
+// advancePastStale moves clk just past threshold and requires connId to be
+// stale by it. The peer's staleness reads clk, so the result does not depend
+// on how much wall-clock time the test has taken.
+func advancePastStale(
+	t *testing.T,
+	cs *ChainSelector,
+	clk *fakeClock,
+	connId ouroboros.ConnectionId,
+	threshold time.Duration,
+) {
+	t.Helper()
+	clk.Advance(threshold + time.Millisecond)
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	require.True(
+		t,
+		peerTip.IsStale(threshold),
+		"peer %s should be stale",
+		connId,
+	)
 }
 
 func updatePeerTipWithPraosView(
@@ -606,6 +627,8 @@ func TestChainSelectorDoesNotRestoreStaleIncumbent(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 20 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	equalTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 120, Hash: []byte("equal-tip")},
@@ -615,12 +638,7 @@ func TestChainSelectorDoesNotRestoreStaleIncumbent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 
-	require.Eventually(t, func() bool {
-		cs.mutex.RLock()
-		defer cs.mutex.RUnlock()
-		peerTip := cs.peerTips[incumbentConn]
-		return peerTip != nil && peerTip.IsStale(20*time.Millisecond)
-	}, time.Second, 5*time.Millisecond)
+	advancePastStale(t, cs, clk, incumbentConn, 20*time.Millisecond)
 
 	cs.UpdatePeerTip(challengerConn, equalTip, nil)
 	switched := cs.EvaluateAndSwitch()
@@ -874,6 +892,8 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 100 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
@@ -889,11 +909,7 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 
 	cs.UpdatePeerTip(connId1, tip1, nil)
 
-	// Wait for peer1 to become stale (exceed threshold)
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(connId1)
-		return peerTip != nil && peerTip.IsStale(100*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "peer1 should become stale")
+	advancePastStale(t, cs, clk, connId1, 100*time.Millisecond)
 
 	cs.UpdatePeerTip(connId2, tip2, nil)
 
@@ -908,6 +924,8 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 		EventBus:          eventBus,
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
@@ -934,12 +952,8 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 	// Drain the events from the initial selection
 	drainChainSwitchesUntilBest(t, evtCh, connId1)
 
-	// Wait for peer1 to become "very stale" (2x threshold = 100ms)
-	// cleanupStalePeers uses 2x StaleTipThreshold for removal
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(connId1)
-		return peerTip != nil && peerTip.IsStale(100*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "peer1 should become very stale")
+	// cleanupStalePeers removes peers stale by 2x StaleTipThreshold.
+	advancePastStale(t, cs, clk, connId1, 100*time.Millisecond)
 
 	// Keep peer2 fresh
 	cs.UpdatePeerTip(connId2, tip2, nil)
@@ -1085,6 +1099,8 @@ func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	bestConn := newTestConnectionId(1)
 	freshConn := newTestConnectionId(2)
@@ -1103,10 +1119,7 @@ func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, bestConn, *cs.GetBestPeer())
 
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(bestConn)
-		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "best peer should become stale")
+	advancePastStale(t, cs, clk, bestConn, 50*time.Millisecond)
 
 	cs.UpdatePeerTip(freshConn, freshTip, nil)
 	cs.EvaluateAndSwitch()
@@ -1123,6 +1136,8 @@ func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	revivedConn := newTestConnectionId(1)
 	incumbentConn := newTestConnectionId(2)
@@ -1141,10 +1156,7 @@ func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, revivedConn, *cs.GetBestPeer())
 
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(revivedConn)
-		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "revived peer should become stale")
+	advancePastStale(t, cs, clk, revivedConn, 50*time.Millisecond)
 
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
 	cs.EvaluateAndSwitch()
@@ -1162,19 +1174,6 @@ func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
 	)
 }
 
-// TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent drives peer
-// staleness from an injected virtual clock instead of StaleTipThreshold
-// racing real wall-clock scheduling jitter between a tip update and the
-// evaluation that follows it (dingo#4675). The clock is fixed unless the test
-// explicitly advances it, so "just-updated peer is not yet stale" no longer
-// depends on how long the intervening code actually took to run on the host.
-//
-// The real time.Sleep below reproduces the exact CI runner jitter the issue
-// describes: with the fix, that elapsed wall-clock time no longer matters
-// because staleness is computed against the frozen virtual clock, not
-// time.Now(). Reverting the injectable-clock change in peer_tip.go/selector.go
-// (falling back to time.Now()) fails this test deterministically at that same
-// sleep, matching the originally reported flake.
 func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 	t.Parallel()
 	eventBus := event.NewEventBus(nil, nil)
@@ -1185,21 +1184,8 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
 
-	// Virtual clock: fixed until advanceClock is called. Set before any peer
-	// tip is created so every PeerChainTip the selector creates below
-	// inherits it (see PeerChainTip.nowFn).
-	var clockMu sync.Mutex
-	virtualNow := time.Now()
-	cs.nowFn = func() time.Time {
-		clockMu.Lock()
-		defer clockMu.Unlock()
-		return virtualNow
-	}
-	advanceClock := func(d time.Duration) {
-		clockMu.Lock()
-		defer clockMu.Unlock()
-		virtualNow = virtualNow.Add(d)
-	}
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
 
 	revivedConn := newTestConnectionId(1)
 	incumbentConn := newTestConnectionId(2)
@@ -1216,10 +1202,8 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 
 	cs.UpdatePeerTip(revivedConn, revivedTip, nil)
 
-	// Real scheduling jitter between the first tip update and the evaluation
-	// below. Before the injectable-clock fix, this alone made revivedConn
-	// register as stale (StaleTipThreshold=50ms) and flipped the "best peer"
-	// result to incumbentConn -- reproducing dingo#4675 deterministically.
+	// Real time past StaleTipThreshold, as runner scheduling jitter can
+	// produce. Staleness reads clk, so revivedConn must still win below.
 	time.Sleep(75 * time.Millisecond)
 
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
@@ -1229,16 +1213,7 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 
 	drainChainSwitchesUntilBest(t, evtCh, revivedConn)
 
-	// Drive the revived peer stale deterministically via the virtual clock
-	// rather than waiting for StaleTipThreshold of real time to elapse.
-	advanceClock(2 * cs.config.StaleTipThreshold)
-	peerTip := cs.GetPeerTip(revivedConn)
-	require.NotNil(t, peerTip)
-	require.True(
-		t,
-		peerTip.IsStale(cs.config.StaleTipThreshold),
-		"revived peer should become stale",
-	)
+	advancePastStale(t, cs, clk, revivedConn, 50*time.Millisecond)
 
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
 	cs.EvaluateAndSwitch()
