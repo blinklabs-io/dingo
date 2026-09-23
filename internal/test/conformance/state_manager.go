@@ -884,9 +884,16 @@ func (m *DingoStateManager) ApplyTransaction(
 
 	if governance.HasDRepActivityCertificates(tx) {
 		if err := governance.ProcessDRepActivityCertificates(
-			tx, m.currentEpoch, drepInactivityPeriod, m.db, txn,
+			tx, point, m.currentEpoch, drepInactivityPeriod, m.db, txn,
 		); err != nil {
 			return fmt.Errorf("process drep activity certs: %w", err)
+		}
+	}
+	if governance.HasDRepDeregistrationCertificates(tx) {
+		if err := governance.ProcessDRepDeregistrationEffects(
+			tx, point, m.db, txn,
+		); err != nil {
+			return fmt.Errorf("process drep deregistration effects: %w", err)
 		}
 	}
 

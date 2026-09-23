@@ -60,6 +60,7 @@ var governanceStoreMethods = []string{
 	"GetChildGovernanceProposals",
 	"GetGovernanceVotes",
 	"SetGovernanceVote",
+	"DeleteGovernanceVotesForDrep",
 	"DeleteGovernanceProposalsAfterSlot",
 	"DeleteGovernanceVotesAfterSlot",
 
@@ -95,6 +96,7 @@ var governanceStoreMethods = []string{
 	"GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
 	"UpdateDRepActivity",
+	"BumpDormantDRepExpiries",
 	"GetExpiredDReps",
 	"RestoreDrepStateAtSlot",
 

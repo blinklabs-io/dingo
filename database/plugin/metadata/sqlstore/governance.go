@@ -496,6 +496,44 @@ RETURNING id`,
 	)
 }
 
+func (s *Store) DeleteGovernanceVotesForDrep(
+	credentialTag uint8,
+	credential []byte,
+	deletedSlot uint64,
+	txn types.Txn,
+) (int, error) {
+	var affected int
+	err := s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			slot, err := checkedInt64(deletedSlot)
+			if err != nil {
+				return err
+			}
+			result, err := db.ExecContext(ctx, `
+UPDATE governance_vote
+SET deleted_slot = ?
+WHERE voter_type = ? AND voter_credential_tag = ?
+  AND voter_credential = ? AND deleted_slot IS NULL`,
+				slot,
+				models.VoterTypeDRep,
+				credentialTag,
+				credential,
+			)
+			if err != nil {
+				return err
+			}
+			rows, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			affected = int(rows)
+			return nil
+		},
+	)
+	return affected, err
+}
+
 func (s *Store) DeleteGovernanceProposalsAfterSlot(
 	slot uint64,
 	txn types.Txn,

@@ -266,6 +266,7 @@ func (d *Database) GetDRepVotingPowerByType(
 func (d *Database) UpdateDRepActivity(
 	credentialTag uint8,
 	drepCredential []byte,
+	slot uint64,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
 	txn *Txn,
@@ -274,6 +275,7 @@ func (d *Database) UpdateDRepActivity(
 		if err := d.governanceStore().UpdateDRepActivity(
 			credentialTag,
 			drepCredential,
+			slot,
 			activityEpoch,
 			inactivityPeriod,
 			txn.Metadata(),
@@ -285,6 +287,27 @@ func (d *Database) UpdateDRepActivity(
 		}
 		return nil
 	})
+}
+
+// BumpDormantDRepExpiries extends active DRep expiries at an empty Conway
+// governance boundary. Replaying the same boundary slot is idempotent.
+func (d *Database) BumpDormantDRepExpiries(
+	slot uint64,
+	txn *Txn,
+) (int, error) {
+	var affected int
+	err := d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		var err error
+		affected, err = d.governanceStore().BumpDormantDRepExpiries(
+			slot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to bump dormant DRep expiries: %w", err)
+		}
+		return nil
+	})
+	return affected, err
 }
 
 // GetExpiredDReps returns all active DReps whose expiry epoch is at

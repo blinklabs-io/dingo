@@ -227,6 +227,7 @@ type ParsedCertState struct {
 	Pools                  []ParsedPool
 	PendingPoolRetirements map[uint64][][]byte
 	DReps                  []ParsedDRep
+	DormantEpochs          uint64
 	CommitteeHotKeys       []ParsedCommitteeHotKey
 	CommitteeResignations  []Credential
 }

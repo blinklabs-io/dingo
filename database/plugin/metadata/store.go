@@ -309,6 +309,15 @@ type GovernanceStore interface {
 		types.Txn,
 	) error
 
+	// DeleteGovernanceVotesForDrep removes current votes for one tagged DRep
+	// as part of that DRep's deregistration transition.
+	DeleteGovernanceVotesForDrep(
+		uint8,
+		[]byte,
+		uint64,
+		types.Txn,
+	) (int, error)
+
 	// Committee methods
 
 	// GetCommitteeMember retrieves a committee member by cold key.
@@ -475,10 +484,16 @@ type GovernanceStore interface {
 	UpdateDRepActivity(
 		uint8, // credentialTag
 		[]byte, // drepCredential
+		uint64, // slot at which activity is recorded
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod
 		types.Txn,
 	) error
+
+	// BumpDormantDRepExpiries extends registered DRep expiries by one epoch
+	// after a Conway epoch with no live governance proposals. The write is
+	// recorded for rollback by RestoreDrepStateAtSlot.
+	BumpDormantDRepExpiries(uint64, types.Txn) (int, error)
 
 	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
 	// or before the given epoch.
@@ -2624,6 +2639,15 @@ type MetadataStore interface {
 	// `added_slot <= targetSlot` and falls back to prior certificate
 	// history). Returns the number of accounts updated.
 	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
+
+	// ClearDRepDelegationForCredential clears stake-account delegations to
+	// exactly one tagged DRep and stamps the rows for rollback restoration.
+	ClearDRepDelegationForCredential(
+		uint8,
+		[]byte,
+		uint64,
+		types.Txn,
+	) (int, error)
 
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.

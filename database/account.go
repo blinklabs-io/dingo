@@ -201,6 +201,34 @@ func (d *Database) ClearDanglingDRepDelegations(
 	return n, nil
 }
 
+// ClearDRepDelegationForCredential clears stake accounts assigned to one
+// deregistered DRep and marks the account rows for rollback restoration.
+func (d *Database) ClearDRepDelegationForCredential(
+	credentialTag uint8,
+	credential []byte,
+	atSlot uint64,
+	txn *Txn,
+) (int, error) {
+	var n int
+	err := d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		updated, err := d.metadata.ClearDRepDelegationForCredential(
+			credentialTag,
+			credential,
+			atSlot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf("clear DRep delegations: %w", err)
+		}
+		n = updated
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // RestoreAccountStateAtSlot reverts account delegation state to the given
 // slot. For accounts modified after the slot, this restores their Pool and
 // Drep delegations to the state they had at the given slot, or deletes them

@@ -271,6 +271,114 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	require.Equal(t, uint64(120), drep.ExpiryEpoch)
 }
 
+func TestProcessGovernanceClearsDRepVotesAndDelegationsAfterVotes(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	credentialBytes := bytes.Repeat([]byte{0x71}, 28)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credentialBytes,
+		AddedSlot:     1,
+		Active:        true,
+	}))
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 1,
+		Credential:    credentialBytes,
+		AddedSlot:     1,
+		Active:        true,
+	}))
+	stakeCredential := bytes.Repeat([]byte{0x72}, 28)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		CredentialTag: 0,
+		StakingKey:    stakeCredential,
+		Drep:          credentialBytes,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     2,
+		CreatedSlot:   2,
+		Active:        true,
+	}, nil))
+
+	proposalHash := bytes.Repeat([]byte{0x73}, 32)
+	proposal := &models.GovernanceProposal{
+		TxHash:       proposalHash,
+		ExpiresEpoch: 200,
+		AddedSlot:    3,
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	var actionHash [32]byte
+	copy(actionHash[:], proposalHash)
+	keyVoter := &lcommon.Voter{
+		Type: lcommon.VoterTypeDRepKeyHash,
+		Hash: credentialHash,
+	}
+	actionID := &lcommon.GovActionId{TransactionId: actionHash, GovActionIdx: 0}
+	updatedSlot := uint64(10)
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          models.VoterTypeDRep,
+		VoterCredentialTag: 0,
+		VoterCredential:    credentialBytes,
+		Vote:               models.VoteYes,
+		AddedSlot:          updatedSlot,
+		VoteUpdatedSlot:    &updatedSlot,
+	}, nil))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          models.VoterTypeDRep,
+		VoterCredentialTag: 1,
+		VoterCredential:    credentialBytes,
+		Vote:               models.VoteYes,
+		AddedSlot:          updatedSlot,
+		VoteUpdatedSlot:    &updatedSlot,
+	}, nil))
+
+	tx := mockledger.NewTransactionBuilder().
+		WithVotingProcedures(lcommon.VotingProcedures{
+			keyVoter: {
+				actionID: {Vote: models.VoteYes},
+			},
+		}).
+		WithCertificates(&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: credentialHash,
+			},
+		})
+	pparams := mockledger.NewMockConwayProtocolParams()
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   models.Epoch{EpochId: 10},
+		currentPParams: &pparams,
+	}
+	point := ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0x74}, 32)}
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := db.Metadata().DeactivateDreps(txn.Metadata(), []models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, credentialBytes),
+		}); err != nil {
+			return err
+		}
+		return (&LedgerDelta{Point: point}).processGovernance(ls, tx, txn)
+	}))
+
+	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, votes, 1)
+	require.Equal(t, uint8(1), votes[0].VoterCredentialTag,
+		"the same hash under a script credential remains distinct")
+	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.Nil(t, account.Drep)
+	require.Equal(t, models.DrepTypeAddrKeyHash, account.DrepType)
+}
+
 func TestConwayProtocolParametersDijkstra(t *testing.T) {
 	t.Parallel()
 

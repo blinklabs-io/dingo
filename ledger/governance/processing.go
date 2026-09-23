@@ -49,12 +49,72 @@ func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
 	return false
 }
 
+// HasDRepDeregistrationCertificates reports whether a transaction contains a
+// DRep deregistration whose votes and stake-account delegations need cleanup.
+func HasDRepDeregistrationCertificates(tx lcommon.Transaction) bool {
+	for _, cert := range tx.Certificates() {
+		if _, ok := cert.(*lcommon.DeregistrationDrepCertificate); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessDRepDeregistrationEffects clears delegated stake and voting state
+// after a transaction's voting procedures have been recorded.
+func ProcessDRepDeregistrationEffects(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	for index, cert := range tx.Certificates() {
+		deregistration, ok := cert.(*lcommon.DeregistrationDrepCertificate)
+		if !ok || deregistration == nil {
+			continue
+		}
+		tag, err := models.CredentialTagFromUint(
+			deregistration.DrepCredential.CredType,
+		)
+		if err != nil {
+			return fmt.Errorf("DRep deregistration certificate %d: %w", index, err)
+		}
+		credential := deregistration.DrepCredential.Credential[:]
+		if _, err := db.ClearDRepDelegationForCredential(
+			tag,
+			credential,
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"clear delegations for DRep deregistration certificate %d: %w",
+				index,
+				err,
+			)
+		}
+		if _, err := db.DeleteGovernanceVotesForDrep(
+			tag,
+			credential,
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete votes for DRep deregistration certificate %d: %w",
+				index,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
 // ProcessDRepActivityCertificates renews DRep activity for registration and
 // update certificates. Certificate persistence creates or updates the DRep row
 // before this function runs, and both writes participate in the same database
 // transaction.
 func ProcessDRepActivityCertificates(
 	tx lcommon.Transaction,
+	point ocommon.Point,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
 	db *database.Database,
@@ -95,6 +155,7 @@ func ProcessDRepActivityCertificates(
 		if err := db.UpdateDRepActivity(
 			credentialTag,
 			credential.Credential[:],
+			point.Slot,
 			currentEpoch,
 			drepInactivityPeriod,
 			txn,
@@ -291,6 +352,7 @@ func ProcessVotes(
 				err := db.UpdateDRepActivity(
 					drepCredTag,
 					voter.Hash[:],
+					point.Slot,
 					currentEpoch,
 					drepInactivityPeriod,
 					txn,
@@ -330,6 +392,7 @@ func ProcessVotes(
 					err = db.UpdateDRepActivity(
 						drepCredTag,
 						voter.Hash[:],
+						point.Slot,
 						currentEpoch,
 						drepInactivityPeriod,
 						txn,

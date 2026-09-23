@@ -632,7 +632,10 @@ func (b *Backfill) processBlockGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	hasDRepDeregistrations :=
+		governance.HasDRepDeregistrationCertificates(tx)
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts &&
+		!hasDRepDeregistrations {
 		return nil
 	}
 	var conwayPP *conway.ConwayProtocolParameters
@@ -672,6 +675,7 @@ func (b *Backfill) processBlockGovernance(
 	if hasDRepActivityCerts {
 		if err := governance.ProcessDRepActivityCertificates(
 			tx,
+			point,
 			epochId,
 			conwayPP.DRepInactivityPeriod,
 			b.db,
@@ -680,6 +684,16 @@ func (b *Backfill) processBlockGovernance(
 			return fmt.Errorf(
 				"DRep activity certificates: %w", err,
 			)
+		}
+	}
+	if hasDRepDeregistrations {
+		if err := governance.ProcessDRepDeregistrationEffects(
+			tx,
+			point,
+			b.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("DRep deregistration effects: %w", err)
 		}
 	}
 	return nil

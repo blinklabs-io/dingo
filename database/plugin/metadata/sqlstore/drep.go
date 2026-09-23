@@ -245,7 +245,7 @@ WHERE credential_tag = ? AND credential = ?`,
 					return err
 				}
 			}
-			return nil
+			return s.restoreDrepExpiryHistory(db, ctx, slot)
 		},
 	)
 }
@@ -613,6 +613,7 @@ func (s *Store) GetDRepVotingPowerByType(
 func (s *Store) UpdateDRepActivity(
 	credentialTag uint8,
 	credential []byte,
+	slot uint64,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
 	txn types.Txn,
@@ -642,11 +643,6 @@ func (s *Store) UpdateDRepActivity(
 		return models.ErrDrepActivityNotUpdated
 	}
 
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	q := s.operationalQueries(db)
 	activity, err := checkedInt64(activityEpoch)
 	if err != nil {
 		return err
@@ -662,18 +658,37 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
-	if _, err := q.UpdateDRepActivity(
-		ctx,
-		sqlitequery.UpdateDRepActivityParams{
-			LastActivityEpoch: validInt64(activity),
-			ExpiryEpoch:       validInt64(expiry),
-			CredentialTag:     int64(credentialTag),
-			Credential:        credential,
-		},
-	); err != nil {
-		return fmt.Errorf("update drep activity: %w", err)
+	if _, err := checkedInt64(slot); err != nil {
+		return err
 	}
-	return nil
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			if err := recordDrepExpiryHistory(
+				ctx,
+				db,
+				credentialTag,
+				credential,
+				slot,
+				s.dialect.Name(),
+			); err != nil {
+				return fmt.Errorf("record DRep activity rollback state: %w", err)
+			}
+			q := s.operationalQueries(db)
+			if _, err := q.UpdateDRepActivity(
+				ctx,
+				sqlitequery.UpdateDRepActivityParams{
+					LastActivityEpoch: validInt64(activity),
+					ExpiryEpoch:       validInt64(expiry),
+					CredentialTag:     int64(credentialTag),
+					Credential:        credential,
+				},
+			); err != nil {
+				return fmt.Errorf("update drep activity: %w", err)
+			}
+			return nil
+		},
+	)
 }
 
 func (s *Store) GetExpiredDReps(
@@ -953,6 +968,35 @@ WHERE drep IS NOT NULL
 	}
 	affected, err := result.RowsAffected()
 	return int(affected), err
+}
+
+func (s *Store) ClearDRepDelegationForCredential(
+	credentialTag uint8,
+	credential []byte,
+	atSlot uint64,
+	txn types.Txn,
+) (int, error) {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	slot, err := checkedInt64(atSlot)
+	if err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, `
+UPDATE account
+SET drep = NULL, drep_type = 0, added_slot = ?
+WHERE drep = ? AND drep_type = ?`,
+		slot,
+		credential,
+		credentialTag,
+	)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := result.RowsAffected()
+	return int(rows), err
 }
 
 func expandDrepCollectionQuery(query string, count int) string {

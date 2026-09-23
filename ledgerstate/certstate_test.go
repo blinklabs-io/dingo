@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/stretchr/testify/require"
 )
 
 type testCredentialKey struct {
@@ -530,6 +531,28 @@ func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
 			resignations[0],
 		)
 	}
+}
+
+func TestParseVStateAddsDormantEpochsToDRepExpiry(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x44}, 28),
+	})
+	require.NoError(t, err)
+	state, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, state...)
+	encodedVState, err := cbor.Encode([]any{cbor.RawMessage(drepMap), map[any]any{}, uint64(3)})
+	require.NoError(t, err)
+
+	dreps, _, _, dormant, err := parseVState(encodedVState)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormant)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(13), dreps[0].ExpiryEpoch)
 }
 
 func toFixed28(src []byte) [28]byte {

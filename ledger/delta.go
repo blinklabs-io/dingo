@@ -415,9 +415,12 @@ func (d *LedgerDelta) processGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
+	hasDRepDeregistrations :=
+		governance.HasDRepDeregistrationCertificates(tx)
 
 	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts &&
+		!hasDRepDeregistrations {
 		return nil
 	}
 
@@ -468,12 +471,24 @@ func (d *LedgerDelta) processGovernance(
 	if hasDRepActivityCerts {
 		if err := governance.ProcessDRepActivityCertificates(
 			tx,
+			d.Point,
 			currentEpoch,
 			conwayPParams.DRepInactivityPeriod,
 			ls.db,
 			txn,
 		); err != nil {
 			return fmt.Errorf("process DRep activity certificates: %w", err)
+		}
+	}
+
+	if hasDRepDeregistrations {
+		if err := governance.ProcessDRepDeregistrationEffects(
+			tx,
+			d.Point,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process DRep deregistration effects: %w", err)
 		}
 	}
 

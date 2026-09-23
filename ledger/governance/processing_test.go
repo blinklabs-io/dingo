@@ -166,7 +166,14 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	txn := db.Transaction(true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ProcessDRepActivityCertificates(tx, 100, 20, db, txn)
+		return ProcessDRepActivityCertificates(
+			tx,
+			ocommon.Point{Slot: 1},
+			100,
+			20,
+			db,
+			txn,
+		)
 	}))
 
 	keyDRep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)

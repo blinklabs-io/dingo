@@ -1051,14 +1051,19 @@ func setDrepCertificateState(
 	active bool,
 	requireExisting bool,
 ) error {
-	var exists bool
-	if err := db.QueryRowContext(ctx, `
+	query := `
 SELECT EXISTS (
     SELECT 1 FROM drep WHERE credential_tag = ? AND credential = ?
-)`,
-		tag,
-		credential,
-	).Scan(&exists); err != nil {
+)`
+	if requireExisting {
+		query = `
+SELECT EXISTS (
+    SELECT 1 FROM drep
+    WHERE credential_tag = ? AND credential = ? AND active = TRUE
+)`
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, tag, credential).Scan(&exists); err != nil {
 		return err
 	}
 	if requireExisting && !exists {
