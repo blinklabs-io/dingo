@@ -1641,6 +1641,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainsync.client_removed` | ChainsyncState | Client tracking removed |
 | `chainsync.client_synced` | ChainsyncState | Client caught up |
 | `chainsync.client_stalled` | ChainsyncState | Client stall detected |
+| `chainsync.client_patience_exhausted` | ChainsyncState | Client exhausted the Genesis Limit on Patience; the stall recycler disconnects it |
 | `chainsync.fork_detected` | ChainsyncState | Chainsync fork detected |
 | `chainsync.client_remove_requested` | Node | Stalled client removal |
 | `chainsync.resync` | LedgerState | Chainsync resync request |
@@ -4554,6 +4555,53 @@ deferred. These remain future work; the corroboration gate confirms only the
 overlap that independent witnesses have observed. Density-at-intersection can
 compare an unseen suffix with the local candidate, but does not independently
 corroborate that suffix.
+
+#### Genesis Limit on Patience
+
+The stall watchdog (`chainsync.CheckStalledClients`) only detects a silent
+peer: any header refreshes `LastActivity`, so a peer that advertises a far
+better tip and drips one valid header per 110 seconds never stalls, keeps a
+ChainSync client slot, and keeps its misleading candidate in consideration.
+The Limit on Patience (LoP) bounds the delivery *rate* instead. Each tracked,
+non-observability client carries a leaky token bucket
+(`chainsync.PatienceState`, exposed on `TrackedClient.Patience`) that starts
+full at `limitOnPatienceCapacity` tokens and leaks `limitOnPatienceRate`
+tokens per second. It follows the reference ChainSync client:
+
+- A header earns one token when it clears verification and raises the highest
+  block number the peer has delivered, so a rollback and re-delivery of the
+  same chain earns nothing. The level is capped at capacity.
+- The leak runs while the peer owes a message. It pauses once the peer has
+  delivered its own advertised tip (the MsgAwaitReply state) and resumes on
+  its next roll-forward or rollback. It also pauses for this node's own work:
+  `ouroboros.chainsyncClientRollForwardAt` charges the peer only up to the
+  header's network arrival (`PatienceMessageArrived`) and resumes after the
+  callback (`PatienceHeaderAccepted`), so decoding, future-header admission
+  waits, verification and ledger backpressure are not charged, and a
+  ChainSync restart pauses it (`PatiencePause`). A new bucket starts paused
+  until the peer's first accepted header or rollback, because tracked clients
+  are registered inside their first callback. Headers from a peer that is
+  not ingress-eligible are not verified, so they pause the bucket rather than
+  leak it.
+- It applies only while Genesis selection is active
+  (`ChainSelector.GenesisSelectionState`, wired as
+  `chainsync.Config.PatienceActiveFunc` by `Node.chainsyncConfig`); outside it
+  the bucket is held full, like the reference node outside GSM `Syncing`.
+- At zero the bucket latches exhausted. The stall recycler's tick calls
+  `CheckPatienceExhausted`, which publishes
+  `chainsync.client_patience_exhausted` and increments
+  `dingo_chainsync_patience_exhausted_total`, and then requests
+  `connmanager.connection_recycle_requested` with reason
+  `genesis_patience_exhausted`. That disconnect skips the stall path's grace,
+  cooldown, and only-eligible-peer guard, and is reported once per
+  connection.
+
+The defaults are 1000 tokens and 5 tokens per second: a 200-second allowance,
+the same budget as the reference node's 100,000 tokens at 500 per second. The
+rate is lower than the reference because Dingo pipelines 10 ChainSync
+requests, so one honest peer delivers about `10/RTT` headers per second; at 5
+per second a peer with up to two seconds of round-trip time keeps a full
+bucket. The Limit on Eagerness (#3270) is separate and not implemented.
 
 #### Anti-flap incumbent pin
 
