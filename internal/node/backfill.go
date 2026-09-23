@@ -689,6 +689,7 @@ func (b *Backfill) processBlockGovernance(
 		if err := governance.ProcessDRepDeregistrationEffects(
 			tx,
 			point,
+			epochId,
 			b.db,
 			txn,
 		); err != nil {

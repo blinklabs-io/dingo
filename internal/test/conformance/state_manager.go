@@ -891,7 +891,7 @@ func (m *DingoStateManager) ApplyTransaction(
 	}
 	if governance.HasDRepDeregistrationCertificates(tx) {
 		if err := governance.ProcessDRepDeregistrationEffects(
-			tx, point, m.db, txn,
+			tx, point, m.currentEpoch, m.db, txn,
 		); err != nil {
 			return fmt.Errorf("process drep deregistration effects: %w", err)
 		}

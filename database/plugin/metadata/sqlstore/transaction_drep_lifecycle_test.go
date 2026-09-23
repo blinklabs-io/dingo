@@ -217,9 +217,22 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	for _, account := range accounts {
 		require.NoError(t, store.ImportAccount(account, nil))
 	}
+	enactedEpoch := uint64(5)
+	enactedSlot := uint64(50)
+	ratifiedSlot := uint64(60)
+	decisionEpoch := uint64(6)
+	decisionSlot := uint64(70)
+	droppedEpoch := uint64(7)
+	deletedSlot := uint64(8)
 	proposals := []*models.GovernanceProposal{
 		{TxHash: bytes.Repeat([]byte{0x66}, 32), ExpiresEpoch: 10, AddedSlot: 5},
 		{TxHash: bytes.Repeat([]byte{0x67}, 32), ExpiresEpoch: 10, AddedSlot: 6},
+		{TxHash: bytes.Repeat([]byte{0x68}, 32), ExpiresEpoch: 10, RatifiedEpoch: &enactedEpoch, RatifiedSlot: &ratifiedSlot, AddedSlot: 7},
+		{TxHash: bytes.Repeat([]byte{0x69}, 32), ExpiresEpoch: 10, EnactedEpoch: &enactedEpoch, EnactedSlot: &enactedSlot, AddedSlot: 8},
+		{TxHash: bytes.Repeat([]byte{0x6a}, 32), ExpiresEpoch: 10, ExpiredEpoch: &decisionEpoch, ExpiredSlot: &decisionSlot, AddedSlot: 9},
+		{TxHash: bytes.Repeat([]byte{0x6b}, 32), ExpiresEpoch: 5, AddedSlot: 10},
+		{TxHash: bytes.Repeat([]byte{0x6c}, 32), ExpiresEpoch: 10, DeletedSlot: &deletedSlot, AddedSlot: 11},
+		{TxHash: bytes.Repeat([]byte{0x6d}, 32), ExpiresEpoch: 10, ExpiredEpoch: &decisionEpoch, ExpiredSlot: &decisionSlot, DroppedEpoch: &droppedEpoch, AddedSlot: 12},
 	}
 	for _, proposal := range proposals {
 		require.NoError(t, store.SetGovernanceProposal(proposal, nil))
@@ -250,9 +263,9 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	cleared, err := store.ClearDRepDelegationForCredential(0, credential, 30, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, cleared)
-	deleted, err := store.DeleteGovernanceVotesForDrep(0, credential, 30, nil)
+	deleted, err := store.DeleteGovernanceVotesForDrep(0, credential, 10, 30, nil)
 	require.NoError(t, err)
-	require.Equal(t, 2, deleted)
+	require.Equal(t, 3, deleted)
 
 	for index, account := range accounts {
 		got, err := store.GetAccountByCredential(
@@ -277,6 +290,14 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	otherVotes, err := store.GetGovernanceVotes(proposals[1].ID, nil)
 	require.NoError(t, err)
 	require.Empty(t, otherVotes)
+	ratifiedVotes, err := store.GetGovernanceVotes(proposals[2].ID, nil)
+	require.NoError(t, err)
+	require.Empty(t, ratifiedVotes, "ratified proposals remain active until enactment")
+	for index, proposal := range proposals[3:] {
+		votes, err := store.GetGovernanceVotes(proposal.ID, nil)
+		require.NoError(t, err)
+		require.Len(t, votes, 1, "finished proposal %d keeps its vote history", index+3)
+	}
 
 	require.NoError(t, store.RestoreAccountStateAtSlot(29, nil))
 	require.NoError(t, store.DeleteGovernanceVotesAfterSlot(29, nil))
@@ -288,4 +309,7 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	keyVotes, err = store.GetGovernanceVotes(proposals[0].ID, nil)
 	require.NoError(t, err)
 	require.Len(t, keyVotes, 2)
+	ratifiedVotes, err = store.GetGovernanceVotes(proposals[2].ID, nil)
+	require.NoError(t, err)
+	require.Len(t, ratifiedVotes, 1)
 }

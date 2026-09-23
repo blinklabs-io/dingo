@@ -484,6 +484,7 @@ func (d *LedgerDelta) processGovernance(
 		if err := governance.ProcessDRepDeregistrationEffects(
 			tx,
 			d.Point,
+			currentEpoch,
 			ls.db,
 			txn,
 		); err != nil {

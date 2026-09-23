@@ -65,11 +65,12 @@ func (d *Database) DeleteGovernanceVotesAfterSlot(
 	})
 }
 
-// DeleteGovernanceVotesForDrep soft-deletes a DRep's votes at its
-// deregistration slot so rollback can restore them.
+// DeleteGovernanceVotesForDrep soft-deletes a DRep's votes on proposals active
+// in the current epoch at its deregistration slot so rollback can restore them.
 func (d *Database) DeleteGovernanceVotesForDrep(
 	credentialTag uint8,
 	credential []byte,
+	epoch uint64,
 	deletedSlot uint64,
 	txn *Txn,
 ) (int, error) {
@@ -78,6 +79,7 @@ func (d *Database) DeleteGovernanceVotesForDrep(
 		deleted, err := d.governanceStore().DeleteGovernanceVotesForDrep(
 			credentialTag,
 			credential,
+			epoch,
 			deletedSlot,
 			txn.Metadata(),
 		)

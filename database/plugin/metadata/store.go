@@ -310,10 +310,11 @@ type GovernanceStore interface {
 	) error
 
 	// DeleteGovernanceVotesForDrep removes current votes for one tagged DRep
-	// as part of that DRep's deregistration transition.
+	// from proposals active in the supplied epoch during deregistration.
 	DeleteGovernanceVotesForDrep(
 		uint8,
 		[]byte,
+		uint64,
 		uint64,
 		types.Txn,
 	) (int, error)
