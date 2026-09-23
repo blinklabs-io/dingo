@@ -12440,26 +12440,36 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    succeeds; the certificates are scoped to the ended epoch's slot range, so a
    discarded MIR is not retried at the next boundary.
 
-   The reference DELEG transition rejects a distribution certificate at
-   transaction-validation time before any of this runs, via
-   `MIRProducesNegativeUpdate`, whenever folding its delta into a credential's
-   InstantaneousRewards accumulated so far in the epoch would drive it
-   negative — this is what makes the boundary's own capacity check above
-   normally unreachable for a fully validated chain. gouroboros's shelley
-   validation rules implement the sibling pre-Alonzo check
-   (`MIRNegativesNotCurrentlyAllowedError`, which rejects any negative delta
-   before protocol version 5) but not this one, because it needs epoch-scoped
-   ledger state their `common.LedgerState` interface does not expose.
-   `ledger/eras.validateMIRAccumulatedRewards`, called from `ValidateTxAlonzo`
-   and `ValidateTxBabbage`, is dingo's implementation: it walks a
-   transaction's move-instantaneous-rewards certificates in order, seeding a
-   running per-credential total from `*LedgerView.PendingMIRRewardDeltas`
-   (certificates already committed earlier in the epoch, same block or
-   earlier — every transaction's certificates are written immediately after
-   that transaction validates, so this is always caught up as of the
-   currently validating slot) and folding in each certificate's own delta as
-   it goes, so a later certificate in the same transaction sees the effect of
-   an earlier one.
+   The reference DELEG transition rejects most of what this check guards
+   against at transaction-validation time, before any of it runs, which is
+   what makes the boundary's own capacity check normally unreachable for a
+   fully validated chain. gouroboros's shelley validation rules implement only
+   the parts expressible against `common.LedgerState`, such as
+   `MIRNegativesNotCurrentlyAllowedError`. The rest need epoch-scoped state.
+   `ledger/eras.validateShelleyDelegCerts`, called from every
+   Shelley-through-Babbage `ValidateTx*` function, is dingo's implementation.
+   It walks a transaction's certificates in order, as DELEGS does, and it is
+   skipped for a phase-2-invalid transaction, for which DELEGS never runs.
+   For move instantaneous rewards it enforces
+   `MIRCertificateTooLateinEpochDELEG` (slot below `firstSlot(nextEpoch) -
+   3k/f`), `MIRTransferNotCurrentlyAllowed` (no pot transfer before protocol
+   version 5), `MIRProducesNegativeUpdate`,
+   `InsufficientForInstantaneousRewardsDELEG` and
+   `InsufficientForTransferDELEG`. Each certificate is checked against the
+   pots and pending rewards its predecessors left, so a later transfer
+   cannot fund an earlier distribution. The starting state comes from
+   `*LedgerView.MIRDelegState`: the `NetworkState` pots, the epoch's committed
+   distributions (summed from protocol version 5, replaced before it) and
+   net pot transfers, and the cutoff. Every transaction's certificates are
+   written immediately after that transaction validates, so this is always
+   caught up as of the currently validating slot. For legacy stake
+   certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
+   `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
+   with withdrawals drained first. It also rejects delegation from a
+   credential deregistered earlier in the transaction. Upstream value
+   conservation counts a deposit for every registration and a refund for
+   every deregistration, and those amounts match real accounts only because
+   this walk has already rejected the certificates that name no account.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two
