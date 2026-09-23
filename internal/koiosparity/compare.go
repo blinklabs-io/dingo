@@ -1862,6 +1862,27 @@ func CountSignificant(mismatches []CheckMismatch) int {
 	return n
 }
 
+// referenceLagOnly reports whether mismatches has at least one significant
+// entry and every significant entry is reference_lag. That is the one
+// non-pass result a strict-mode observer does not treat as fatal: Koios's
+// data for the epoch is not yet complete, which is not evidence that Dingo
+// is wrong. dingo_db_missing, dingo_db_error and acct_coverage_incomplete
+// share reference_lag's ERROR severity but are not covered here, so a row
+// Dingo never wrote past the grace window still stops a strict node.
+func referenceLagOnly(mismatches []CheckMismatch) bool {
+	lag := false
+	for _, m := range mismatches {
+		if severityOf(m.Category) == severityInformational {
+			continue
+		}
+		if m.Category != CategoryReferenceLag {
+			return false
+		}
+		lag = true
+	}
+	return lag
+}
+
 // isZeroRewardAmount reports whether a lovelace decimal string is zero.
 //
 // Parsed rather than compared to "0": the two sides format independently, and

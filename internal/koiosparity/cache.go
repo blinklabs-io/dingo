@@ -763,6 +763,161 @@ func (c *Cache) GetAllPoolsForEpoch(
 	return pools, rows.Err()
 }
 
+// koiosTxInfoPayloadVersion stamps every koios_tx_info row with the shape of
+// KoiosTxInfoItem its payload was serialised from, and GetTxInfos only reads
+// rows carrying the current value.
+//
+// The payload is the JSON encoding of KoiosTxInfoItem itself, not Koios's raw
+// /tx_info response. That struct is already exactly the subset of /tx_info
+// this codebase consumes (tx_hash, inputs, outputs with address/value/assets/
+// datum/reference-script, plus the collateral inputs/return and the phase-2
+// validity verdict Consumed/Produced need) -- Koios's real response
+// additionally carries metadata, certificates, withdrawals, redeemers and
+// script bodies that nothing here ever reads, and GetTxInfos does not retain
+// the raw bytes anyway. Storing the decoded struct therefore stores precisely
+// what is read back, and round-trips exactly, since the same json tags encode
+// it as decoded it.
+//
+// The cost of that choice is that a KoiosTxInfoItem which later grows a field
+// would silently read back as that field's zero value from rows written
+// before it existed. This version column is the answer: bump it in the same
+// change that adds the field, and every older row simply stops being a hit
+// and is re-fetched. That is why a plain "cache the struct" table is safe
+// without a TTL -- settled transactions never change Koios-side, so the only
+// thing that can invalidate a row is this code wanting more of the
+// transaction than it asked for last time.
+//
+// Version 2 added CollateralInputs, CollateralOutput and PlutusContracts.
+// Version 1 rows recorded only the transaction body's inputs and outputs, so
+// reading one back would report a phase-2-invalid transaction as having
+// applied its body -- the bug the new fields exist to fix. They are
+// re-fetched instead.
+const koiosTxInfoPayloadVersion = 2
+
+// txInfoLookupChunk bounds how many hashes go into one
+// "SELECT ... WHERE tx_hash IN (?, ?, ...)" so a caller that hands GetTxInfos
+// an arbitrarily long hash list never trips SQLite's bound-parameter limit
+// (999 by default). Callers in practice ask in KoiosTxInfoBatchSize-sized
+// chunks, well under this.
+const txInfoLookupChunk = 500
+
+// GetTxInfos returns every cached /tx_info item among txHashes, keyed by
+// transaction hash. Hashes with no cached row are simply absent from the
+// returned map: unlike KoiosClient.GetTxInfos (where a missing hash is an
+// error, since the caller already knows the transaction exists), a miss here
+// is the ordinary case and means "ask Koios for this one", so the caller can
+// fetch exactly the misses and merge. A partial hit is therefore a first-class
+// result, not an all-or-nothing fallback.
+//
+// Rows stamped with an older koiosTxInfoPayloadVersion are treated as misses;
+// see that constant for why.
+func (c *Cache) GetTxInfos(
+	network string,
+	txHashes []string,
+) (map[string]KoiosTxInfoItem, error) {
+	found := make(map[string]KoiosTxInfoItem, len(txHashes))
+	for start := 0; start < len(txHashes); start += txInfoLookupChunk {
+		end := min(start+txInfoLookupChunk, len(txHashes))
+		chunk := txHashes[start:end]
+		placeholders := make([]byte, 0, 2*len(chunk))
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, network, koiosTxInfoPayloadVersion)
+		for i, hash := range chunk {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args = append(args, hash)
+		}
+		// #nosec G202 -- placeholders is a generated run of "?" separated by
+		// commas, one per hash; every hash itself stays a bound parameter.
+		rows, err := c.db.Query(
+			`SELECT tx_hash, payload FROM koios_tx_info
+			WHERE network = ? AND payload_version = ? AND tx_hash IN (`+
+				string(placeholders)+`)`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("read cached tx_info: %w", err)
+		}
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var hash, payload string
+				if err := rows.Scan(&hash, &payload); err != nil {
+					return fmt.Errorf("scan cached tx_info: %w", err)
+				}
+				var item KoiosTxInfoItem
+				if err := json.Unmarshal([]byte(payload), &item); err != nil {
+					// A row that no longer decodes is treated as a miss
+					// rather than a hard failure: the live fetch below it
+					// produces the same answer, and erroring would turn a
+					// corrupt cache row into a failed parity check.
+					continue
+				}
+				found[hash] = item
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return found, nil
+}
+
+// UpsertTxInfos writes every item to koios_tx_info for network in a single
+// transaction, keyed by (network, tx_hash).
+//
+// Historical /tx_info is immutable -- a settled transaction's inputs and
+// outputs never change -- which is the same reasoning that already justifies
+// caching epoch params and pool history indefinitely, so nothing here expires
+// or re-validates rows. The upsert still overwrites on conflict so a re-fetch
+// after a payload-version bump replaces the old row in place.
+func (c *Cache) UpsertTxInfos(
+	network string,
+	items []KoiosTxInfoItem,
+	fetchedAt time.Time,
+) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return c.withClaimedSource(network, func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(
+			`INSERT INTO koios_tx_info
+			(network, tx_hash, payload_version, payload, fetched_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(network, tx_hash) DO UPDATE SET
+				payload_version=excluded.payload_version,
+				payload=excluded.payload,
+				fetched_at=excluded.fetched_at`,
+		)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close() //nolint:errcheck
+		for _, item := range items {
+			if item.TxHash == "" {
+				continue
+			}
+			payload, err := json.Marshal(item)
+			if err != nil {
+				return fmt.Errorf("encode tx_info %s: %w", item.TxHash, err)
+			}
+			if _, err := stmt.Exec(
+				network,
+				item.TxHash,
+				koiosTxInfoPayloadVersion,
+				string(payload),
+				fetchedAt,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // CommitAccountRewardsForEpoch atomically replaces every koios_account_rewards
 // row for (network, epoch) and records coverage in a single transaction — the
 // same "delete then bulk insert, commit together" pattern CommitEpochData
@@ -2010,6 +2165,7 @@ var koiosSourcedTables = []string{
 	"koios_pool_epoch",
 	"koios_totals",
 	"koios_epoch_params",
+	"koios_tx_info",
 	"koios_account_rewards",
 	"koios_account_coverage",
 	"koios_account_fetch_staged_rows",
@@ -2319,6 +2475,16 @@ func createCacheSchema(db *sql.DB) error {
 			min_utxo_value TEXT NOT NULL DEFAULT '', coins_per_utxo_size TEXT NOT NULL DEFAULT '',
 			fetched_at DATETIME NOT NULL)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kep_net_epoch ON koios_epoch_params(network, epoch)`,
+		// koios_tx_info caches /tx_info per transaction rather than per
+		// epoch: node-parity's from-genesis UTxO reconstruction walks
+		// transactions, not epochs, so the transaction hash is the only
+		// natural key. network-scoped like every other Koios-sourced table,
+		// and versioned by payload shape -- see koiosTxInfoPayloadVersion.
+		`CREATE TABLE IF NOT EXISTS koios_tx_info (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, tx_hash TEXT NOT NULL,
+			payload_version INTEGER NOT NULL DEFAULT 1, payload TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kti_net_hash ON koios_tx_info(network, tx_hash)`,
 		`CREATE TABLE IF NOT EXISTS koios_account_rewards (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			stake_address TEXT NOT NULL, reward_type TEXT NOT NULL DEFAULT '', earned TEXT NOT NULL,

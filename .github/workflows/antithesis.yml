@@ -293,7 +293,7 @@ jobs:
           sudo install -m 0755 moog /usr/local/bin/moog
           moog --version | grep -F "moog $MOOG_VERSION"
         env:
-          GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MOOG_TAG: ${{ steps.moog-release.outputs.tag }}
           MOOG_VERSION: ${{ steps.moog-release.outputs.version }}
 

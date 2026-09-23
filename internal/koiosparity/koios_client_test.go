@@ -787,6 +787,82 @@ func TestGetAccountRewardHistoryEmptyAddressesNoRequest(t *testing.T) {
 	require.False(t, called)
 }
 
+// TestGetTxInfosReturnsResultsInRequestOrder proves GetTxInfos reorders
+// Koios's response to match the caller's requested order, not whatever
+// order Koios happened to return -- required so a caller applying
+// dependent transactions (a UTxO created by one hash, spent by a later
+// one in the same request) does so in chain order.
+func TestGetTxInfosReturnsResultsInRequestOrder(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// Deliberately reversed vs. the request order below.
+			_, _ = w.Write([]byte(`[
+				{"tx_hash":"bbb","inputs":[],"outputs":[]},
+				{"tx_hash":"aaa","inputs":[],"outputs":[]}
+			]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	items, err := k.GetTxInfos(context.Background(), []string{"aaa", "bbb"})
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	require.Equal(t, "aaa", items[0].TxHash)
+	require.Equal(t, "bbb", items[1].TxHash)
+}
+
+// TestGetTxInfosErrorsOnIncompleteResponse proves that a transaction hash
+// the caller asked for but Koios omitted from the response must fail
+// loudly, not be silently treated as
+// "no changes for that hash" -- the from-genesis UTxO reconstruction can't
+// tell the difference between "this hash has no inputs/outputs" and "this
+// hash's real inputs/outputs were silently dropped," so it must never
+// proceed on an incomplete response.
+func TestGetTxInfosErrorsOnIncompleteResponse(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// Only "aaa" of the two requested hashes comes back.
+			_, _ = w.Write([]byte(`[{"tx_hash":"aaa","inputs":[],"outputs":[]}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.GetTxInfos(context.Background(), []string{"aaa", "bbb"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "bbb")
+}
+
+// TestGetTxInfosErrorsOnDuplicateResult proves a defensively-unexpected
+// duplicate tx_hash in Koios's response (which would otherwise silently
+// pick one and lose data from the other) fails loudly instead.
+func TestGetTxInfosErrorsOnDuplicateResult(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"tx_hash":"aaa","inputs":[],"outputs":[]},
+				{"tx_hash":"aaa","inputs":[],"outputs":[]}
+			]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.GetTxInfos(context.Background(), []string{"aaa"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duplicate")
+}
+
 // TestNewKoiosTransportResponseHeaderTimeout proves newKoiosTransport's
 // ResponseHeaderTimeout is actually enforced by the transport itself, not
 // merely present as a struct field: a server that accepts the connection but
