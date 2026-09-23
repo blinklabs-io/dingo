@@ -8583,10 +8583,22 @@ second sync:
     prior `PASS`.
   - **Strict mode** (`ObserverConfig.Strict`, the default via
     `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to
-    `n.cancelForFatal` — exactly once, on the first Koios/tool error or exact
-    parity mismatch, and stops processing the rest of the current batch. The
-    node records that error before cancellation and returns it from `Run`, so
-    the CLI exits non-zero instead of mistaking the stop for a clean signal.
+    `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
+    and stops processing the rest of the current batch. Every Koios/tool
+    error (`reportError`) and every non-pass parity result is fatal-eligible,
+    from either queue (`processEpoch` and `processAccountEpoch`), with one
+    exception: a result whose significant mismatches are all
+    `reference_lag` (`referenceLagOnly`). That means Koios's own data for the
+    epoch has not caught up, not that Dingo is wrong, so it is logged and
+    persisted like any other non-pass result but never calls `FatalFunc` and
+    never stops either queue (dingo #4645). The other ERROR-severity
+    categories stay fatal: `dingo_db_missing` past the grace window,
+    `dingo_db_error`, and `acct_coverage_incomplete` all mean Dingo's side or
+    the reference set is unusable, which strict mode exists to surface.
+    `fail` checks eligibility before the `fatalFired` compare-and-swap, so a
+    non-fatal call cannot consume the exactly-once slot. The node records the
+    fatal error before cancellation and returns it from `Run`, so the CLI exits
+    non-zero instead of mistaking the stop for a clean signal.
     `Run` resolves that recorded fatal error on every return path, not only its
     steady-state shutdown wait: if the observer fails while the rest of node
     startup is still in progress, a later startup step can observe only
