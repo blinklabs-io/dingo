@@ -56,17 +56,13 @@ type PeerChainTip struct {
 	observedSlots      []uint64
 	observedPoints     []ocommon.Point
 	observedTipHistory []ochainsync.Tip
-	// nowFn is the owning ChainSelector's injectable clock, propagated at
-	// creation so LastUpdated/IsStale can be driven deterministically in
-	// tests instead of racing real wall-clock scheduling jitter between a
-	// tip update and the staleness check that follows it (dingo#4675). Nil
-	// in production and in any PeerChainTip built directly (e.g. via
-	// NewPeerChainTip in tests), which falls back to time.Now via now().
+	// nowFn is the owning ChainSelector's clock, so LastUpdated and IsStale
+	// share one time source with the selector. Nil for a PeerChainTip built
+	// by NewPeerChainTip, which then uses time.Now.
 	nowFn func() time.Time
 }
 
-// now returns the current time via the injectable clock, defaulting to
-// time.Now when nowFn is unset.
+// now returns nowFn(), or time.Now when nowFn is unset.
 func (p *PeerChainTip) now() time.Time {
 	if p.nowFn != nil {
 		return p.nowFn()

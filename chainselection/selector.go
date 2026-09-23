@@ -595,11 +595,8 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				observedTipSet: true,
 				VRFOutput:      vrfOutput,
 				PraosView:      praosView,
-				// Propagate the selector's own injectable clock so this
-				// peer's staleness clock can be driven deterministically in
-				// tests (see PeerChainTip.nowFn).
-				nowFn:       cs.nowFn,
-				LastUpdated: cs.now(),
+				nowFn:          cs.nowFn,
+				LastUpdated:    cs.now(),
 			}
 			peerTip.recordObservedPoint(
 				observedTip.Point,
@@ -2364,8 +2361,6 @@ func (cs *ChainSelector) registerPeerFromRollbackLocked(
 		e.Point,
 		e.Tip,
 	)
-	// Propagate the selector's injectable clock, matching the roll-forward
-	// peer-creation path (see PeerChainTip.nowFn).
 	newPeer.nowFn = cs.nowFn
 	newPeer.LastUpdated = cs.now()
 	cs.peerTips[e.ConnectionId] = newPeer
