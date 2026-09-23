@@ -2003,26 +2003,33 @@ func TestUpdatePeerTipFarDeliveredFrontierCorroboration(t *testing.T) {
 		), "the first claimant must be accepted on its next header")
 	})
 
-	t.Run("corroborated exactly K below keeps the claimant's next header", func(t *testing.T) {
-		t.Parallel()
-		cs := newSelector()
-		first := newTestConnectionId(2)
-		second := newTestConnectionId(3)
-		claim := pastCeiling + securityParam
-		assert.False(t, cs.updatePeerTipObserved(
-			first, advertised, blockTip(claim), nil,
-		))
-		assert.True(t, cs.updatePeerTipObserved(
-			second, advertised, blockTip(claim-securityParam), nil,
-		), "a delivered frontier exactly K below another connection's must corroborate it")
-		assert.True(t, cs.updatePeerTipObserved(
-			first, advertised, blockTip(claim+1), nil,
-		), "the corroborated claimant must be accepted on its next header even though it is more than K above the accepted frontier")
-		require.NotNil(t, cs.GetPeerTip(first))
-		assert.False(t, cs.updatePeerTipObserved(
-			newTestConnectionId(4), advertised, blockTip(claim+securityParam+2), nil,
-		), "the claimant's allowance must not widen the bound for another connection")
-	})
+	t.Run(
+		"corroborated exactly K below keeps the claimant's next header",
+		func(t *testing.T) {
+			t.Parallel()
+			cs := newSelector()
+			first := newTestConnectionId(2)
+			second := newTestConnectionId(3)
+			claim := pastCeiling + securityParam
+			assert.False(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim), nil,
+			))
+			assert.True(t, cs.updatePeerTipObserved(
+				second, advertised, blockTip(claim-securityParam), nil,
+			), "a delivered frontier exactly K below another connection's must corroborate it")
+			assert.True(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim+1), nil,
+			), "the corroborated claimant must be accepted on its next header even though it is more than K above the accepted frontier")
+			require.NotNil(t, cs.GetPeerTip(first))
+			third := newTestConnectionId(4)
+			assert.False(t, cs.updatePeerTipObserved(
+				third,
+				advertised,
+				blockTip(claim+securityParam+2),
+				nil,
+			), "the claimant's allowance must not widen the bound for another connection")
+		},
+	)
 
 	t.Run("more than K apart does not corroborate", func(t *testing.T) {
 		t.Parallel()
@@ -2049,6 +2056,82 @@ func TestUpdatePeerTipFarDeliveredFrontierCorroboration(t *testing.T) {
 		assert.False(t, cs.updatePeerTipObserved(
 			newTestConnectionId(3), advertised, blockTip(pastCeiling+1), nil,
 		), "a removed connection's far claim must not corroborate a new one")
+	})
+
+	t.Run(
+		"a corroborated claimant is bounded by its claim plus K",
+		func(t *testing.T) {
+			t.Parallel()
+			cs := newSelector()
+			first := newTestConnectionId(2)
+			second := newTestConnectionId(3)
+			claim := pastCeiling + securityParam
+			assert.False(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim), nil,
+			))
+			assert.True(t, cs.updatePeerTipObserved(
+				second, advertised, blockTip(claim-securityParam), nil,
+			))
+			assert.False(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim+securityParam+1), nil,
+			), "a corroborated claimant must be rejected more than K past its own claim")
+			assert.True(t, cs.updatePeerTipObserved(
+				first, advertised, blockTip(claim+securityParam), nil,
+			), "a corroborated claimant must be accepted exactly K past its own claim")
+		},
+	)
+
+	t.Run("claims are bounded by the tracked-peer limit", func(t *testing.T) {
+		t.Parallel()
+		const maxPeers = 3
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:   securityParam,
+			MaxTrackedPeers: maxPeers,
+		})
+		cs.SetLocalTip(blockTip(localBlock))
+		require.True(t, cs.UpdatePeerTip(
+			newTestConnectionId(1),
+			blockTip(localBlock-500),
+			nil,
+		))
+		// Claims spaced 2*K apart never corroborate each other.
+		var lastClaim uint64
+		for i := range maxPeers {
+			lastClaim = pastCeiling + uint64(i)*2*securityParam
+			assert.False(t, cs.updatePeerTipObserved(
+				newTestConnectionId(2+i), advertised, blockTip(lastClaim), nil,
+			))
+		}
+		overflowClaim := pastCeiling + 20*securityParam
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(10), advertised, blockTip(overflowClaim), nil,
+		))
+		assert.Len(t, cs.farTipClaims, maxPeers)
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(11), advertised, blockTip(overflowClaim+1), nil,
+		), "a claim dropped at capacity must not corroborate a later one")
+		assert.True(t, cs.updatePeerTipObserved(
+			newTestConnectionId(12), advertised, blockTip(lastClaim+1), nil,
+		), "a frontier within K of a recorded claim must corroborate it while the claim table is full")
+		assert.Len(t, cs.farTipClaims, maxPeers)
+	})
+
+	t.Run("an accepted connection no longer holds a claim", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := newTestConnectionId(2)
+		second := newTestConnectionId(3)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling), nil,
+		))
+		assert.True(t, cs.updatePeerTipObserved(
+			second, advertised, blockTip(pastCeiling+1), nil,
+		))
+		assert.NotContains(t, cs.farTipClaims, second)
+		assert.True(t, cs.updatePeerTipObserved(
+			first, advertised, blockTip(pastCeiling+2), nil,
+		))
+		assert.Empty(t, cs.farTipClaims)
 	})
 }
 

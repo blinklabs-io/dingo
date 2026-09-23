@@ -4075,7 +4075,8 @@ ahead of local ledger state for its VRF/KES check to run
 (`ledger.ValidateChainSelectionHeaderCrypto` defers), so no single claim is
 trusted: `checkPeerTipPlausibleLocked` records it per connection
 (`ChainSelector.farTipClaims`, bounded to `maxTrackedPeers` and pruned with the
-peer in `deletePeerLocked`) and accepts it once another connection has
+peer in `deletePeerLocked`; a frontier that does not fit is still compared
+against the recorded ones) and accepts it once another connection has
 recorded a frontier within `securityParam` of it
 (`corroborateFarTipClaimLocked`). The earlier claim is then marked
 corroborated and becomes that connection's own reference, like a known peer's

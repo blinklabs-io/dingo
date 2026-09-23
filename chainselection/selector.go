@@ -863,14 +863,14 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 	if cs.farTipClaims == nil {
 		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
 	}
-	if _, exists := cs.farTipClaims[connId]; !exists &&
-		len(cs.farTipClaims) >= cs.maxTrackedPeers {
-		// Bounded like peerTips: connection churn must not grow this map
-		// without limit. The claim can still corroborate on a later
-		// update once room frees up.
-		return false
+	// Bounded like peerTips: connection churn must not grow this map without
+	// limit. A claim that does not fit is still compared against the recorded
+	// ones, so a full table cannot keep its own claims from being
+	// corroborated.
+	if _, exists := cs.farTipClaims[connId]; exists ||
+		len(cs.farTipClaims) < cs.maxTrackedPeers {
+		cs.farTipClaims[connId] = farTipClaim{block: claimed}
 	}
-	cs.farTipClaims[connId] = farTipClaim{block: claimed}
 	corroborated := false
 	for otherConn, other := range cs.farTipClaims {
 		if otherConn == connId {
