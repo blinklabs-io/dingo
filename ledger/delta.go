@@ -415,8 +415,7 @@ func (d *LedgerDelta) processGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	hasDRepDeregistrations :=
-		governance.HasDRepDeregistrationCertificates(tx)
+	hasDRepDeregistrations := governance.HasDRepDeregistrationCertificates(tx)
 
 	// Early return if no governance data to process
 	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts &&

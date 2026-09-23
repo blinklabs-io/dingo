@@ -146,6 +146,7 @@ ORDER BY added_slot DESC`, slot)
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	type historyRow struct {
 		tag          uint8
 		credential   []byte
@@ -161,7 +162,6 @@ ORDER BY added_slot DESC`, slot)
 			&item.expiry,
 			&item.lastActivity,
 		); err != nil {
-			rows.Close()
 			return err
 		}
 		items = append(items, item)
