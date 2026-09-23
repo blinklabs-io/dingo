@@ -12359,11 +12359,13 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    claim that this preflight implements every formal ENACT predicate. In
    particular it does not add committee-term validation; committee membership
    and term state remain part of the actual enactment path. A parameter update
-   is tested against a clone during preflight and that result is discarded;
-   only a successful actual enactment advances `UpdatedPParams`. RATIFY does
-   not thread a prospective parameter-update result into the parameter view of
-   later candidates in the same pass. This is another reason the behavior
-   described here is specifically the running-treasury subset, not the full
+   is tested against a clone during preflight and that result is discarded.
+   During RATIFY, accepted parameter changes are applied to a local staged
+   parameter value and advance the parameter-purpose root, allowing later
+   candidates in the same pass to validate against their accepted parent's
+   state. Only a successful actual ENACT advances `UpdatedPParams`; RATIFY's
+   staged value is not published as active ledger parameters. This behavior is
+   specifically the running-treasury and staged-parameter subset, not the full
    formal ENACT-state transition.
 
    The proposal-independent voting denominators — DRep voting power

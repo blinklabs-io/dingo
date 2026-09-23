@@ -579,6 +579,7 @@ func ProcessEpoch(
 		return govActionPriority(stillActive[i]) <
 			govActionPriority(stillActive[j])
 	})
+	stillActive = orderParameterChangeChains(stillActive)
 
 	// Log the tally scale before the loop so an unexpectedly slow or
 	// stalled tally is visible in operator logs (a hang shows a
@@ -815,6 +816,49 @@ func ProcessEpoch(
 	}
 
 	return out, nil
+}
+
+// orderParameterChangeChains preserves the existing candidate order while
+// ensuring an active parameter-change parent is considered before its child.
+// SQL's deterministic tie-breaker is not a ledger ancestry rule, and imported
+// proposals may share an AddedSlot.
+func orderParameterChangeChains(
+	proposals []*models.GovernanceProposal,
+) []*models.GovernanceProposal {
+	parameterChanges := make(map[string]bool)
+	for _, proposal := range proposals {
+		if lcommon.GovActionType(proposal.ActionType) ==
+			lcommon.GovActionTypeParameterChange {
+			parameterChanges[proposalIdentityKey(proposal)] = true
+		}
+	}
+	if len(parameterChanges) < 2 {
+		return proposals
+	}
+
+	ordered := make([]*models.GovernanceProposal, 0, len(proposals))
+	remaining := append([]*models.GovernanceProposal(nil), proposals...)
+	for len(remaining) > 0 {
+		progress := false
+		next := make([]*models.GovernanceProposal, 0, len(remaining))
+		for _, proposal := range remaining {
+			parentKey := proposalParentKey(proposal)
+			if parameterChanges[proposalIdentityKey(proposal)] &&
+				parameterChanges[parentKey] {
+				next = append(next, proposal)
+				continue
+			}
+			ordered = append(ordered, proposal)
+			delete(parameterChanges, proposalIdentityKey(proposal))
+			progress = true
+		}
+		if !progress {
+			ordered = append(ordered, next...)
+			break
+		}
+		remaining = next
+	}
+	return ordered
 }
 
 func cloneGovernanceProtocolParameters(

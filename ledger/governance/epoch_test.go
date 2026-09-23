@@ -717,8 +717,10 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	updatedThresholds := pparams.DRepVotingThresholds
 	updatedThresholds.PpEconomicGroup = newRat(0, 1)
 
-	parentHash := testBytes(32, 0x71)
-	childHash := testBytes(32, 0x72)
+	// Give the child a lexically earlier hash and the same anchor slot so
+	// ancestry, rather than the SQL tie-breaker, determines candidate order.
+	parentHash := testBytes(32, 0x72)
+	childHash := testBytes(32, 0x71)
 	parentActionIndex := uint32(0)
 	parentAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
 		Type: uint(lcommon.GovActionTypeParameterChange),
@@ -757,7 +759,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 		AnchorHash:      testBytes(32, 0x75),
 		ReturnAddress:   testBytes(29, 0x76),
 		GovActionCbor:   childAction,
-		AddedSlot:       401,
+		AddedSlot:       400,
 	}
 	require.NoError(t, db.SetGovernanceProposal(parent, nil))
 	require.NoError(t, db.SetGovernanceProposal(child, nil))
