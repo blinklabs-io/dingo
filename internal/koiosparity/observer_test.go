@@ -52,6 +52,13 @@ type fakeEpochRef struct {
 	// after that — exercising the observer's fetch retry loop.
 	notYetClosedFor int32
 	attempts        atomic.Int32
+	// endTimeUnix, if nonzero, overrides the fake /epoch_info response's
+	// end_time (default: the fixed historical timestamp 2000, decades
+	// outside any graceHours window every other fixture in this file
+	// relies on). Set this to place an epoch's Koios close time inside a
+	// grace window deliberately, e.g. to drive CompareEpochAggregates'
+	// reference_lag (StatusError) path instead of dingo_db_missing.
+	endTimeUnix int64
 }
 
 // fakeKoiosAccountFixtures optionally extends newFakeKoiosServer with
@@ -148,6 +155,9 @@ func newFakeKoiosServer(
 					return
 				}
 				endTime := int64(2000)
+				if ref.endTimeUnix != 0 {
+					endTime = ref.endTimeUnix
+				}
 				if attempt := ref.attempts.Add(1); attempt <= ref.notYetClosedFor {
 					endTime = 0
 				}
@@ -897,6 +907,165 @@ func TestObserverNonStrictModeContinuesAfterFailure(t *testing.T) {
 		fatalCount.Load(),
 		"non-strict mode must never call FatalFunc",
 	)
+}
+
+// TestObserverStrictModeDoesNotFatalOnReferenceLagOnly guards dingo #4645: an
+// epoch whose only significant mismatches are reference_lag (Koios's data had
+// not caught up, so the comparison could not be trusted yet) must never fire
+// FatalFunc in strict mode. Epoch 5 is left unseeded on the Dingo side while
+// its fake Koios epoch_info reports a recent end_time inside the configured
+// grace window, so the comparison emits only reference_lag mismatches. Epoch 7
+// is seeded normally and passes; both are published in the same batch (as in
+// TestObserverStrictModeCancelsOnFirstMismatch) so epoch 7 being checked at
+// all proves strict mode did not stop on epoch 5.
+//
+// It runs once per queue: processEpoch and processAccountEpoch each call fail
+// on their own result, so each call site needs its own proof.
+//
+// 7 rather than 6 because seedDingoEpochAggregate writes the epoch_summary
+// row at koiosEpoch-1: seeding epoch 6 would also create epoch 5's summary,
+// leaving epoch 5 half-present and yielding a dingo_db_missing
+// reward_ada_pots row instead of the reference_lag the incident reported.
+func TestObserverStrictModeDoesNotFatalOnReferenceLagOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, accounts := range []bool{false, true} {
+		t.Run(fmt.Sprintf("accounts=%t", accounts), func(t *testing.T) {
+			t.Parallel()
+			fatalCount, o := runStrictUnseededEpoch5(
+				t,
+				time.Now().Add(-time.Hour).Unix(),
+				accounts,
+			)
+			testutil.WaitForCondition(t, func() bool {
+				statuses, err := o.cache.GetStatusSummary("preview")
+				return err == nil && len(statuses) == 2
+			}, 5*time.Second,
+				"strict mode must still validate epoch 7 after epoch 5's "+
+					"reference_lag result")
+			if accounts {
+				// The account queue sorts 5 before 7, so an account phase
+				// for epoch 7 proves that queue did not stop on epoch 5.
+				testutil.WaitForCondition(t, func() bool {
+					statuses, err := o.cache.GetStatusSummary("preview")
+					if err != nil {
+						return false
+					}
+					for _, s := range statuses {
+						if s.Epoch == 7 && s.AccountStatus != "" {
+							return true
+						}
+					}
+					return false
+				}, 5*time.Second, "account queue must still validate epoch 7")
+			}
+
+			statuses, err := o.cache.GetStatusSummary("preview")
+			require.NoError(t, err)
+			byEpoch := map[uint64]string{}
+			for _, s := range statuses {
+				byEpoch[s.Epoch] = s.Status
+			}
+			require.Equal(t, StatusError, byEpoch[5])
+			require.Equal(t, StatusPass, byEpoch[7])
+			// Pin the ERROR to #4645's exact category: dingo_db_missing is
+			// also ERROR-severity but stays fatal (see
+			// TestObserverStrictModeFatalsOnDBMissingPastGrace).
+			mismatches, err := o.cache.GetMismatches("preview", 5, "")
+			require.NoError(t, err)
+			require.NotEmpty(t, mismatches)
+			for _, m := range mismatches {
+				require.Equal(
+					t,
+					CategoryReferenceLag,
+					m.Category,
+					"field %s",
+					m.Field,
+				)
+			}
+			require.Equal(
+				t,
+				int32(0),
+				fatalCount.Load(),
+				"strict mode must never call FatalFunc on a reference_lag-only result",
+			)
+		})
+	}
+}
+
+// TestObserverStrictModeFatalsOnDBMissingPastGrace is the negative control for
+// TestObserverStrictModeDoesNotFatalOnReferenceLagOnly: the same unseeded
+// epoch 5, but with Koios's end_time far outside the grace window, reads as
+// dingo_db_missing. That shares reference_lag's ERROR severity but means Dingo
+// never wrote a row it should have, so strict mode must still stop.
+func TestObserverStrictModeFatalsOnDBMissingPastGrace(t *testing.T) {
+	t.Parallel()
+
+	fatalCount, o := runStrictUnseededEpoch5(t, 0, false)
+	testutil.WaitForCondition(t, func() bool {
+		return fatalCount.Load() == 1
+	}, 5*time.Second,
+		"strict mode must call FatalFunc on dingo_db_missing past the "+
+			"grace window")
+
+	mismatches, err := o.cache.GetMismatches("preview", 5, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, mismatches)
+	for _, m := range mismatches {
+		require.Equal(t, CategoryDBMissing, m.Category, "field %s", m.Field)
+	}
+}
+
+// runStrictUnseededEpoch5 starts a strict observer (GraceHours 24) against a
+// fake Koios serving epochs 5 and 7, seeds only epoch 7 on the Dingo side, and
+// publishes both transitions in one batch. endTimeUnix overrides epoch 5's
+// Koios end_time; 0 keeps the fixture default, far outside the grace window.
+func runStrictUnseededEpoch5(
+	t *testing.T,
+	endTimeUnix int64,
+	accountsEnabled bool,
+) (*atomic.Int32, *Observer) {
+	t.Helper()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		5: {
+			activeStake: "1000000",
+			treasury:    "10",
+			reserves:    "20",
+			fees:        "30",
+			endTimeUnix: endTimeUnix,
+		},
+		7: {activeStake: "2000000", treasury: "11", reserves: "21", fees: "31"},
+	})
+
+	fatalCount := &atomic.Int32{}
+	o, err := NewObserver(ObserverConfig{
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source: source, Strict: true, GraceHours: 24,
+		AccountsEnabled: accountsEnabled,
+		Logger:          slog.New(slog.DiscardHandler),
+		FatalFunc:       func(error) { fatalCount.Add(1) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.Start(context.Background()))
+	eb := event.NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+	seedDingoEpochAggregate(t, source, 7, 2_000_000, 11, 21, 31)
+	publishEpochTransition(eb, 5)
+	publishEpochTransition(eb, 7)
+	return fatalCount, o
 }
 
 // TestObserverCancellationStopsPromptly confirms cancelling the context
