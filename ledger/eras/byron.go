@@ -716,7 +716,8 @@ func byronDecodeWitnesses(
 				Signature: witnessFields[1],
 			})
 		case lcommon.ByronAddressTypeRedeem:
-			if len(witnessFields) != 2 {
+			if len(witnessFields) != 2 || len(witnessFields[0]) != 32 ||
+				len(witnessFields[1]) != 64 {
 				return nil, nil, fmt.Errorf(
 					"witness %d: malformed RedeemWitness fields", idx,
 				)

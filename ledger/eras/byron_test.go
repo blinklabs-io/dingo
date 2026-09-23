@@ -1101,6 +1101,7 @@ func TestByronDecodeWitnesses(t *testing.T) {
 	sig := []byte{5, 6, 7, 8}
 	pk64 := bytes.Repeat([]byte{0xAB}, 64)
 	sig64 := bytes.Repeat([]byte{0xCD}, 64)
+	redeemPk32 := bytes.Repeat([]byte{0xEF}, 32)
 
 	t.Run("valid constructor 0 and constructor 2 decode", func(t *testing.T) {
 		t.Parallel()
@@ -1113,7 +1114,7 @@ func TestByronDecodeWitnesses(t *testing.T) {
 			byronTestWitness(
 				t,
 				lcommon.ByronAddressTypeRedeem,
-				[]any{pk, sig},
+				[]any{redeemPk32, sig64},
 			),
 		}
 		bootstrap, redeem, err := byronDecodeWitnesses(witnesses)
@@ -1123,8 +1124,8 @@ func TestByronDecodeWitnesses(t *testing.T) {
 		assert.Equal(t, pk64[:32], bootstrap[0].PublicKey)
 		assert.Equal(t, pk64[32:], bootstrap[0].ChainCode)
 		assert.Equal(t, sig64, bootstrap[0].Signature)
-		assert.Equal(t, pk, []byte(redeem[0].Vkey))
-		assert.Equal(t, sig, []byte(redeem[0].Signature))
+		assert.Equal(t, redeemPk32, []byte(redeem[0].Vkey))
+		assert.Equal(t, sig64, []byte(redeem[0].Signature))
 	})
 
 	t.Run("unknown constructor 1 is rejected", func(t *testing.T) {
@@ -1177,7 +1178,24 @@ func TestByronDecodeWitnesses(t *testing.T) {
 			byronTestWitness(
 				t,
 				lcommon.ByronAddressTypeRedeem,
-				[]any{pk, sig, sig},
+				[]any{redeemPk32, sig64, sig64},
+			),
+		}
+		_, _, err := byronDecodeWitnesses(witnesses)
+		require.Error(t, err)
+	})
+
+	t.Run("malformed constructor-2 field length is rejected", func(t *testing.T) {
+		t.Parallel()
+		// A redeem key and signature that are the wrong length for Byron's
+		// Ed25519-based redeem crypto (32-byte key, 64-byte signature) must
+		// be rejected as a malformed witness during decoding, not accepted
+		// here and left to fail later as a signature-verification error.
+		witnesses := []cbor.Value{
+			byronTestWitness(
+				t,
+				lcommon.ByronAddressTypeRedeem,
+				[]any{pk, sig},
 			),
 		}
 		_, _, err := byronDecodeWitnesses(witnesses)
@@ -1222,7 +1240,7 @@ func TestByronDecodeWitnesses(t *testing.T) {
 				byronTestWitness(
 					t,
 					lcommon.ByronAddressTypeRedeem,
-					[]any{pk, sig},
+					[]any{redeemPk32, sig64},
 				),
 				byronTestWitness(t, 1, []any{pk, sig}),
 			}
