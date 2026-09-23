@@ -15,7 +15,8 @@
 package nodeparity
 
 // Proves node-parity's Koios-backed checks (CheckProtocolParams,
-// CheckStakeDistribution) actually read and write the shared
+// CheckStakeDistribution, and the UTxO half's fetchTxInfosCached) actually
+// read and write the shared
 // internal/koiosparity.Cache -- blinklabs-io/dingo#1900's explicit
 // requirement that node-parity stop calling live Koios fresh for every
 // single epoch with nothing ever saved for reuse.
@@ -29,11 +30,13 @@ package nodeparity
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -303,4 +306,206 @@ func TestCheckStakeDistribution_CacheMissFetchesOnceAndPersists(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), reqCount.Load(),
 		"the second call for the same epoch must be served from cache, not a second live request")
+}
+
+// txInfoRequestHashes decodes the "_tx_hashes" array out of a /tx_info POST
+// body, so a test can assert on exactly which hashes reached live Koios --
+// the whole point of batch-aware caching is that a partially-cached chunk
+// asks for the misses ONLY, which a plain request count cannot distinguish
+// from re-fetching the whole chunk.
+func txInfoRequestHashes(t *testing.T, r *http.Request) []string {
+	t.Helper()
+	var payload struct {
+		TxHashes []string `json:"_tx_hashes"`
+	}
+	require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+	return payload.TxHashes
+}
+
+// txInfoHandler answers a /tx_info POST with one synthetic item per
+// requested hash (an output paying "addr_<hash>" for 1000000 lovelace), and
+// records every request's hash list into requested.
+func txInfoHandler(
+	t *testing.T, requested *[][]string, mu *sync.Mutex,
+) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tx_info" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		hashes := txInfoRequestHashes(t, r)
+		mu.Lock()
+		*requested = append(*requested, hashes)
+		mu.Unlock()
+		items := make([]koiosparity.KoiosTxInfoItem, 0, len(hashes))
+		for _, h := range hashes {
+			items = append(items, syntheticTxInfo(h))
+		}
+		body, err := json.Marshal(items)
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}
+}
+
+// syntheticTxInfo builds the one canonical fake /tx_info item every test
+// below uses for a hash, so a cached row and a live answer for the same hash
+// are byte-identical and a test asserting on content cannot accidentally
+// pass just because the two sources happened to differ visibly.
+func syntheticTxInfo(hash string) koiosparity.KoiosTxInfoItem {
+	out := koiosparity.KoiosTxInfoOutput{
+		TxHash:  hash,
+		TxIndex: 0,
+		Value:   "1000000",
+		AssetList: []koiosparity.KoiosTxInfoAsset{
+			{PolicyID: "aa", AssetName: "bb", Quantity: "7"},
+		},
+	}
+	out.PaymentAddr.Bech32 = "addr_" + hash
+	return koiosparity.KoiosTxInfoItem{
+		TxHash: hash,
+		Inputs: []koiosparity.KoiosTxInfoUtxoRef{
+			{TxHash: "spent_" + hash, TxIndex: 1},
+		},
+		Outputs: []koiosparity.KoiosTxInfoOutput{out},
+	}
+}
+
+// TestFetchTxInfosCached_FullCacheHitSkipsLiveKoiosCall proves a chunk whose
+// every transaction is already in koios_tx_info costs no live Koios request
+// at all -- the UTxO half of the from-genesis walk reaching the same
+// cache-first behavior CheckProtocolParams/CheckStakeDistribution already
+// have (blinklabs-io/dingo#1900).
+//
+// Reverting fetchTxInfosCached's cache lookup in place (calling
+// koios.GetTxInfos on the full chunk) makes the fake below receive a request
+// and fails the reqCount assertion.
+func TestFetchTxInfosCached_FullCacheHitSkipsLiveKoiosCall(t *testing.T) {
+	ctx := context.Background()
+	hashes := []string{"aaa", "bbb"}
+
+	koiosURL, reqCount := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	want := []koiosparity.KoiosTxInfoItem{
+		syntheticTxInfo("aaa"), syntheticTxInfo("bbb"),
+	}
+	require.NoError(t, cache.UpsertTxInfos("preview", want, time.Now().UTC()))
+
+	got, err := fetchTxInfosCached(ctx, koios, cache, "preview", hashes)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), reqCount.Load(),
+		"a fully cached tx_info chunk must never call live Koios")
+	require.Equal(t, want, got,
+		"cached items must round-trip identically to what was stored")
+}
+
+// TestFetchTxInfosCached_PartialHitFetchesOnlyMissingHashes is the assertion
+// that matters most for a BATCH endpoint: a chunk with one cached and one
+// uncached transaction must ask Koios for the uncached hash ONLY, not
+// re-fetch the whole chunk, and must merge the two sources back into
+// request order (which the from-genesis walk depends on, since a UTxO
+// created by one transaction can be spent by a later one in the same chunk).
+//
+// Reverting fetchTxInfosCached to an all-or-nothing check (any miss =>
+// fetch the full chunk) leaves the cached hash in the request body and fails
+// the requested-hashes assertion below, even though the request COUNT would
+// be unchanged.
+func TestFetchTxInfosCached_PartialHitFetchesOnlyMissingHashes(t *testing.T) {
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var requested [][]string
+	koiosURL, reqCount := countingKoiosServer(t, txInfoHandler(t, &requested, &mu))
+	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	require.NoError(t, cache.UpsertTxInfos(
+		"preview",
+		[]koiosparity.KoiosTxInfoItem{syntheticTxInfo("cached1")},
+		time.Now().UTC(),
+	))
+
+	chunk := []string{"cached1", "fresh1", "fresh2"}
+	got, err := fetchTxInfosCached(ctx, koios, cache, "preview", chunk)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), reqCount.Load(),
+		"a partially cached chunk must make exactly one live request")
+
+	mu.Lock()
+	sent := requested
+	mu.Unlock()
+	require.Len(t, sent, 1)
+	require.Equal(t, []string{"fresh1", "fresh2"}, sent[0],
+		"only the uncached hashes may reach live Koios")
+
+	require.Equal(t, []koiosparity.KoiosTxInfoItem{
+		syntheticTxInfo("cached1"),
+		syntheticTxInfo("fresh1"),
+		syntheticTxInfo("fresh2"),
+	}, got, "cached and freshly-fetched items must merge in request order")
+
+	// The freshly-fetched pair must have been written back, so replaying the
+	// same chunk -- exactly what a node-parity restart from genesis does --
+	// costs nothing.
+	got2, err := fetchTxInfosCached(ctx, koios, cache, "preview", chunk)
+	require.NoError(t, err)
+	require.Equal(t, got, got2)
+	require.Equal(t, int32(1), reqCount.Load(),
+		"a replay of an already-fetched chunk must make no further live request")
+}
+
+// TestFetchTxInfosCached_NilCacheStillFetchesLive proves the cache is purely
+// additive: a run without a cache (--koios-cache-path unset) behaves exactly
+// as it did before, fetching the whole chunk live.
+func TestFetchTxInfosCached_NilCacheStillFetchesLive(t *testing.T) {
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var requested [][]string
+	koiosURL, reqCount := countingKoiosServer(t, txInfoHandler(t, &requested, &mu))
+	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	require.NoError(t, err)
+
+	got, err := fetchTxInfosCached(ctx, koios, nil, "preview", []string{"x", "y"})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), reqCount.Load())
+	require.Equal(t, []koiosparity.KoiosTxInfoItem{
+		syntheticTxInfo("x"), syntheticTxInfo("y"),
+	}, got)
+}
+
+// TestFetchTxInfosCached_LiveFetchErrorIsNotSwallowed proves a Koios failure
+// on the uncached remainder still fails the whole call, so
+// applyTxInfoResults keeps re-baselining and marking the epoch tainted
+// instead of silently applying only the cached half of a chunk -- the
+// partially-applied reconstruction would be exactly the silent data loss
+// KoiosClient.GetTxInfos' all-or-nothing contract exists to prevent.
+func TestFetchTxInfosCached_LiveFetchErrorIsNotSwallowed(t *testing.T) {
+	ctx := context.Background()
+
+	koiosURL, _ := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	require.NoError(t, cache.UpsertTxInfos(
+		"preview",
+		[]koiosparity.KoiosTxInfoItem{syntheticTxInfo("cached1")},
+		time.Now().UTC(),
+	))
+
+	_, err = fetchTxInfosCached(
+		ctx, koios, cache, "preview", []string{"cached1", "missing1"},
+	)
+	require.Error(t, err,
+		"a live failure for the uncached part of a chunk must fail the whole call")
 }

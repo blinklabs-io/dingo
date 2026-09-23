@@ -598,6 +598,99 @@ func CheckStakeDistribution(
 	return mismatches, nil
 }
 
+// fetchTxInfosCached is the cache-first counterpart to
+// koiosparity.KoiosClient.GetTxInfos, completing the set: protocol params
+// (CheckProtocolParams) and stake distribution (CheckStakeDistribution)
+// already consult the shared cache before Koios, and this makes the UTxO
+// half do the same (blinklabs-io/dingo#1900).
+//
+// Unlike those two, /tx_info is a BATCH endpoint, so an all-or-nothing cache
+// check would throw away almost all of the benefit: one uncached transaction
+// in a chunk of KoiosTxInfoBatchSize would re-fetch the other 39 that are
+// already known. This looks up the whole chunk, asks Koios for exactly the
+// misses, and merges -- so a chunk that is half cached costs half a request's
+// worth of hashes, and a fully cached chunk costs no request at all. The
+// merged result is returned in txHashes order, preserving GetTxInfos' own
+// ordering contract (a UTxO created by one transaction and spent by a later
+// one in the same chunk must be applied in chain order), and a hash neither
+// cached nor returned live is still an error, exactly as GetTxInfos requires.
+//
+// Caching historical tx_info indefinitely is safe for the same reason
+// caching epoch params is: a settled transaction's inputs and outputs are
+// immutable Koios-side, so there is nothing to invalidate. Writes target the
+// same cache.db dingo's own embedded koios-parity observer writes to
+// concurrently -- see cache.go's OpenCache doc comment for why that is safe
+// -- and are best-effort: a cache read error degrades to a live fetch and a
+// cache write error is ignored, because the caller already has a trustworthy
+// live answer and the cache is strictly an optimisation over the call it
+// already tolerates failing.
+func fetchTxInfosCached(
+	ctx context.Context,
+	koios *koiosparity.KoiosClient,
+	cache *koiosparity.Cache,
+	network string,
+	txHashes []string,
+) ([]koiosparity.KoiosTxInfoItem, error) {
+	if cache == nil || len(txHashes) == 0 {
+		return koios.GetTxInfos(ctx, txHashes)
+	}
+
+	cached, err := cache.GetTxInfos(network, txHashes)
+	if err != nil {
+		// Best-effort read: fall back to the live path this function is
+		// wrapping rather than failing a check the cache is only an
+		// optimisation for.
+		cached = nil
+	}
+
+	missing := make([]string, 0, len(txHashes))
+	seen := make(map[string]struct{}, len(txHashes))
+	for _, hash := range txHashes {
+		if _, ok := cached[hash]; ok {
+			continue
+		}
+		if _, dup := seen[hash]; dup {
+			continue
+		}
+		seen[hash] = struct{}{}
+		missing = append(missing, hash)
+	}
+
+	fetched := make(map[string]koiosparity.KoiosTxInfoItem, len(missing))
+	if len(missing) > 0 {
+		items, err := koios.GetTxInfos(ctx, missing)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			fetched[item.TxHash] = item
+		}
+		// Best-effort, same rationale as CheckProtocolParams's cache write:
+		// a hiccup here must not fail a fetch that already succeeded.
+		_ = cache.UpsertTxInfos(network, items, time.Now().UTC())
+	}
+
+	all := make([]koiosparity.KoiosTxInfoItem, len(txHashes))
+	for i, hash := range txHashes {
+		if item, ok := cached[hash]; ok {
+			all[i] = item
+			continue
+		}
+		item, ok := fetched[hash]
+		if !ok {
+			// Unreachable through KoiosClient.GetTxInfos, which already
+			// errors on a hash it got no result for; kept so a future
+			// change to either side cannot silently drop a transaction
+			// from the reconstruction.
+			return nil, fmt.Errorf(
+				"koios /tx_info: no result for requested tx hash %s", hash,
+			)
+		}
+		all[i] = item
+	}
+	return all, nil
+}
+
 // UTxOSet is a live UTxO set mapping ref ("<txHash>#<outputIndex>") to its
 // canonical content encoding: koiosparity.CanonicalKoiosUTxOEntry for a ref
 // tracked from Koios's own /tx_info data, or canonicalUTxOEntry (this

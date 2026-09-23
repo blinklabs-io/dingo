@@ -514,14 +514,17 @@ func resolveStartPoint(resumeFrom *Tip) (pcommon.Point, error) {
 }
 
 // RunFromGenesis is documented at the top of this file. cache, when non-nil,
-// is threaded into every CheckProtocolParams/CheckStakeDistribution call --
-// see koios_check.go's doc comments on those two functions for what gets
-// cached, why it is safe for dingo's own embedded koios-parity observer to
-// be writing the same cache.db concurrently, and why UTxO reconstruction
-// (CheckUTxO/the roll-forward callback's own UTxO half below) deliberately
-// does not go through it: that reconstruction is a stateful, order-dependent
-// walk fed incrementally from GetTxInfos, not a per-epoch keyed lookup like
-// the other two, and does not fit this cache's schema.
+// is threaded into every Koios-backed check: CheckProtocolParams and
+// CheckStakeDistribution per epoch, and the UTxO reconstruction's own
+// /tx_info fetches per chunk (fetchTxInfosCached, called from
+// flushPendingTxInfos below) -- see koios_check.go's doc comments on those
+// three for what gets cached and why it is safe for dingo's own embedded
+// koios-parity observer to be writing the same cache.db concurrently.
+//
+// The reconstruction itself stays a stateful, order-dependent walk: what is
+// cached is only each transaction's own immutable /tx_info answer, keyed by
+// transaction hash rather than by epoch, so a re-run from genesis replays the
+// same walk without re-asking Koios about transactions it has already seen.
 func RunFromGenesis(
 	ctx context.Context,
 	dingoAddr string,
@@ -644,7 +647,9 @@ func RunFromGenesis(
 		g.SetLimit(txInfoConcurrency)
 		for i, chunk := range chunks {
 			g.Go(func() error {
-				txInfos, err := koios.GetTxInfos(gctx, chunk)
+				txInfos, err := fetchTxInfosCached(
+					gctx, koios, cache, network, chunk,
+				)
 				results[i] = txInfos
 				errs[i] = err
 				return nil
