@@ -165,29 +165,12 @@ func repairPendingMithrilRewardState(
 	if err != nil || !pending {
 		return err
 	}
-	if effectiveStorageMode(cfg) != dingo.StorageModeCore {
-		return errors.New(
-			"this legacy Mithril reward-state repair requires core storage; " +
-				"the existing database is preserved and must not be removed or " +
-				"bootstrapped from scratch",
-		)
-	}
-	backend, err := resolveMithrilBackend(cfg.Mithril.Backend)
-	if err != nil {
-		return err
-	}
-	if backend != mithril.BackendV2 {
-		return fmt.Errorf(
-			"legacy Mithril reward-state repair requires backend v2, got %q; "+
-				"the existing database is preserved",
-			backend,
-		)
-	}
 	logger.Warn(
 		"reconciling legacy Mithril reward state before serving",
 		"component", "node",
 	)
 	repairCfg := *cfg
+	repairCfg.Mithril.Backend = mithril.BackendV2
 	// Artifact pins are only valid for a fresh import. Repair always selects
 	// the latest certified state, then verifies its chain intersection.
 	repairCfg.Mithril.PinnedDigest = ""

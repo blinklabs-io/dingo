@@ -207,20 +207,24 @@ func decideCatchUp(
 		return catchUpDecision{}, nil
 	case syncModeCatchUp:
 		if isAPIMode(storageMode) {
-			if hasMarker {
-				return catchUpDecision{}, errors.New(
-					"mithril v2 catch-up supports core storage mode only; " +
-						"api-mode metadata replacement is not yet designed — " +
-						"the existing database is preserved and no automatic " +
-						"repair was attempted",
-				)
+			repairPending, pendingErr := RewardStateRepairPending(db)
+			if pendingErr != nil {
+				return catchUpDecision{}, pendingErr
+			}
+			if !repairPending {
+				if hasMarker {
+					return catchUpDecision{}, errors.New(
+						"mithril v2 catch-up supports core storage mode only; " +
+							"API-mode metadata replacement requires a pending " +
+							"in-place reward-state repair",
+					)
+				}
+				return catchUpDecision{}, nil
 			}
 			logger.Info(
-				"complete api-mode database has no Mithril immutable-import "+
-					"marker; using the full sync path",
+				"reconciling API-mode metadata through the certified ledger anchor",
 				"component", "mithril",
 			)
-			return catchUpDecision{}, nil
 		}
 		if !hasMarker {
 			logger.Info(
@@ -507,13 +511,14 @@ func Sync(
 		}
 	}
 
-	// Catch-up dispatch. A complete core database (chain data present,
-	// sync_status clear) running against the v2 backend is advanced with
+	// Catch-up dispatch. A complete database (chain data present, sync_status
+	// clear) running against the v2 backend is advanced with
 	// catch-up semantics instead of a blind re-bootstrap: the import first
 	// checks for chain divergence and the ledger import reconciles stale live
-	// rows. If an immutable-import marker exists, only the missing archives are
-	// downloaded; markerless complete core databases use the same reconciliation
-	// path over the full artifact range.
+	// rows. A pending API-mode reward repair also rebuilds metadata through the
+	// certified anchor. If an immutable-import marker exists, only the missing
+	// archives are downloaded; markerless complete databases use the same
+	// reconciliation path over the full artifact range.
 	catchUp := false
 	var catchUpStart uint64
 	mode, modeErr := determineSyncMode(db)
@@ -869,6 +874,11 @@ func Sync(
 				return SyncResult{}, err
 			}
 			return SyncResult{}, nil
+		}
+		if cfg.RepairLegacyRewardState && isAPIMode(cfg.StorageMode) {
+			if err := resetMithrilBackfillCheckpoint(db); err != nil {
+				return SyncResult{}, err
+			}
 		}
 		// The import is about to mutate the database. Record the catch-up so
 		// an interrupted run resumes with catch-up semantics (reconcile)
