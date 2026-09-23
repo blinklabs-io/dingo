@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1161,7 +1162,21 @@ func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
 	)
 }
 
+// TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent drives peer
+// staleness from an injected virtual clock instead of StaleTipThreshold
+// racing real wall-clock scheduling jitter between a tip update and the
+// evaluation that follows it (dingo#4675). The clock is fixed unless the test
+// explicitly advances it, so "just-updated peer is not yet stale" no longer
+// depends on how long the intervening code actually took to run on the host.
+//
+// The real time.Sleep below reproduces the exact CI runner jitter the issue
+// describes: with the fix, that elapsed wall-clock time no longer matters
+// because staleness is computed against the frozen virtual clock, not
+// time.Now(). Reverting the injectable-clock change in peer_tip.go/selector.go
+// (falling back to time.Now()) fails this test deterministically at that same
+// sleep, matching the originally reported flake.
 func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
+	t.Parallel()
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -1169,6 +1184,22 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 		EventBus:          eventBus,
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
+
+	// Virtual clock: fixed until advanceClock is called. Set before any peer
+	// tip is created so every PeerChainTip the selector creates below
+	// inherits it (see PeerChainTip.nowFn).
+	var clockMu sync.Mutex
+	virtualNow := time.Now()
+	cs.nowFn = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return virtualNow
+	}
+	advanceClock := func(d time.Duration) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		virtualNow = virtualNow.Add(d)
+	}
 
 	revivedConn := newTestConnectionId(1)
 	incumbentConn := newTestConnectionId(2)
@@ -1184,6 +1215,13 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
 
 	cs.UpdatePeerTip(revivedConn, revivedTip, nil)
+
+	// Real scheduling jitter between the first tip update and the evaluation
+	// below. Before the injectable-clock fix, this alone made revivedConn
+	// register as stale (StaleTipThreshold=50ms) and flipped the "best peer"
+	// result to incumbentConn -- reproducing dingo#4675 deterministically.
+	time.Sleep(75 * time.Millisecond)
+
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
@@ -1191,10 +1229,16 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 
 	drainChainSwitchesUntilBest(t, evtCh, revivedConn)
 
-	require.Eventually(t, func() bool {
-		peerTip := cs.GetPeerTip(revivedConn)
-		return peerTip != nil && peerTip.IsStale(50*time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "revived peer should become stale")
+	// Drive the revived peer stale deterministically via the virtual clock
+	// rather than waiting for StaleTipThreshold of real time to elapse.
+	advanceClock(2 * cs.config.StaleTipThreshold)
+	peerTip := cs.GetPeerTip(revivedConn)
+	require.NotNil(t, peerTip)
+	require.True(
+		t,
+		peerTip.IsStale(cs.config.StaleTipThreshold),
+		"revived peer should become stale",
+	)
 
 	cs.UpdatePeerTip(incumbentConn, incumbentTip, nil)
 	cs.EvaluateAndSwitch()

@@ -56,6 +56,22 @@ type PeerChainTip struct {
 	observedSlots      []uint64
 	observedPoints     []ocommon.Point
 	observedTipHistory []ochainsync.Tip
+	// nowFn is the owning ChainSelector's injectable clock, propagated at
+	// creation so LastUpdated/IsStale can be driven deterministically in
+	// tests instead of racing real wall-clock scheduling jitter between a
+	// tip update and the staleness check that follows it (dingo#4675). Nil
+	// in production and in any PeerChainTip built directly (e.g. via
+	// NewPeerChainTip in tests), which falls back to time.Now via now().
+	nowFn func() time.Time
+}
+
+// now returns the current time via the injectable clock, defaulting to
+// time.Now when nowFn is unset.
+func (p *PeerChainTip) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
 }
 
 // NewPeerChainTip creates a new PeerChainTip with the given connection ID,
@@ -156,7 +172,7 @@ func (p *PeerChainTip) UpdateTipWithObservedPraosView(
 	p.awaitingFirstHeader = false
 	p.VRFOutput = vrfOutput
 	p.PraosView = praosView
-	p.LastUpdated = time.Now()
+	p.LastUpdated = p.now()
 }
 
 // ApplyRollback trims observed history at the rollback point and refreshes the
@@ -201,7 +217,7 @@ func (p *PeerChainTip) ApplyRollback(
 	}
 	p.VRFOutput = nil
 	p.PraosView = PraosTiebreakerView{}
-	p.LastUpdated = time.Now()
+	p.LastUpdated = p.now()
 	if point.Slot == 0 || len(p.observedSlots) == 0 {
 		p.observedSlots = nil
 		p.observedPoints = nil
@@ -516,11 +532,11 @@ func (p *PeerChainTip) AwaitingFirstHeader() bool {
 
 // Touch marks the peer as recently active without changing its advertised tip.
 func (p *PeerChainTip) Touch() {
-	p.LastUpdated = time.Now()
+	p.LastUpdated = p.now()
 }
 
 // IsStale returns true if the peer's tip hasn't been updated within the given
 // duration.
 func (p *PeerChainTip) IsStale(threshold time.Duration) bool {
-	return time.Since(p.LastUpdated) > threshold
+	return p.now().Sub(p.LastUpdated) > threshold
 }
