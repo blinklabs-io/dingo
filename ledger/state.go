@@ -1016,10 +1016,11 @@ type LedgerState struct {
 	slotsPerKESPeriod           atomic.Uint64
 	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
-	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
-	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
-	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
-	epochSnapshotStakeHook      atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
+	cachedShape                 atomic.Pointer[hardfork.Shape]                    // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
+	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]         // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
+	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder]   // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
+	epochSnapshotStakeHook      atomic.Pointer[epochBoundarySnapshotHookHolder]   // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
+	currentBoundarySPOStakeHook atomic.Pointer[currentBoundarySPOStakeHookHolder] // optional same-boundary SPO stake rows for governance's RATIFY phase (nil = governance falls back to reading the not-yet-written persisted row)
 	reachedTip                  atomic.Bool
 	currentTip                  ochainsync.Tip
 	byronPBFT                   byronPBFTCache
@@ -3133,6 +3134,58 @@ func (ls *LedgerState) SetEpochBoundarySnapshotStakeHook(
 // nil when none is set.
 func (ls *LedgerState) epochBoundarySnapshotStakeHook() func(*database.Txn, event.EpochTransitionEvent) error {
 	if h := ls.epochSnapshotStakeHook.Load(); h != nil {
+		return h.fn
+	}
+	return nil
+}
+
+// currentBoundarySPOStakeHookHolder wraps the optional same-boundary SPO
+// stake-rows callback so it can live in an atomic.Pointer.
+type currentBoundarySPOStakeHookHolder struct {
+	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error)
+}
+
+// SetCurrentBoundarySPOStakeHook installs (or clears, with a nil fn) the
+// same-boundary SPO stake-rows callback governance.ProcessEpoch's RATIFY
+// phase uses for every SPO-gated action (HardForkInitiation, NoConfidence,
+// UpdateCommittee, and a ParameterChange touching the security-parameter
+// group). It is wired at node startup to the snapshot manager's
+// CurrentBoundarySPOStakeRows, alongside SetEpochBoundarySnapshotStakeHook.
+//
+// Why this hook exists: governance.stakeEpochFor resolves to NewEpoch, i.e.
+// this same boundary's own mark snapshot, but that row is written only at the
+// end of the rollover (epochSnapshotHook), after RATIFY has already run --
+// see stakeEpochFor's doc comment for the upstream derivation. Without this
+// hook installed, governance falls back to reading the not-yet-written
+// pool_stake_snapshot row, which holds no stake at all -- so every SPO-gated
+// action would tally a zero denominator and never ratify, which is strictly
+// worse than the epoch-lag bug this fixed (dingo#4441): permanent
+// non-ratification instead of a wrong but eventually-correct epoch.
+// governance.ProcessEpoch rejects that empty read with
+// governance.ErrMissingCurrentBoundarySPOState, so the boundary fails rather
+// than tally a zero denominator -- but only once mark[NewEpoch-1] holds
+// stake, which is the signal that distinguishes a missing hook from a chain
+// with no earlier mark. A boundary with no earlier mark keeps the silent
+// outcome: it ratifies nothing and reports no error, which
+// TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook pins. A
+// production node must always wire this alongside the other two
+// epoch-boundary hooks.
+func (ls *LedgerState) SetCurrentBoundarySPOStakeHook(
+	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error),
+) {
+	if fn == nil {
+		ls.currentBoundarySPOStakeHook.Store(nil)
+		return
+	}
+	ls.currentBoundarySPOStakeHook.Store(
+		&currentBoundarySPOStakeHookHolder{fn: fn},
+	)
+}
+
+// currentBoundarySPOStakeHookFn returns the installed same-boundary SPO
+// stake-rows hook, or nil when none is set.
+func (ls *LedgerState) currentBoundarySPOStakeHookFn() func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error) {
+	if h := ls.currentBoundarySPOStakeHook.Load(); h != nil {
 		return h.fn
 	}
 	return nil
@@ -8771,13 +8824,22 @@ func (ls *LedgerState) evaluateTransitionImpossible() {
 // checking whether any in-flight HardForkInitiation governance action
 // would be ratified if the boundary tick fired now.
 //
-// Why this is correct mid-epoch: governance votes stop being accepted
-// at slot epochEnd - 2*stabilityWindow (the voting deadline). After
-// that point the inputs to the ratification computation are frozen —
-// no new vote, registration, or pool change can flip the outcome — so
-// "would ratify now" equals "will ratify at the next boundary tick".
-// Before the deadline the answer is volatile and surfacing it would
-// give clients a stale view, so the function returns early.
+// Why this is worth publishing mid-epoch: governance votes stop being
+// accepted at slot epochEnd - 2*stabilityWindow (the voting deadline),
+// so after that point no new vote can flip the outcome. Before the
+// deadline the answer is volatile and surfacing it would give clients
+// a stale view, so the function returns early.
+//
+// The vote freeze is not a freeze of every input, and the SPO stake
+// denominator in particular keeps moving after it: the boundary tallies
+// the mark snapshot SNAP captures at the boundary itself, while this
+// check can only read the last committed one — see
+// governance.predictedBoundaryStakeEpochFor. So "would ratify now" is a
+// prediction of the boundary tick, not a preview of it, and the boundary
+// can still decide differently. A prediction the boundary does not honor
+// is bounded to the epoch that made it: the rollover resets
+// transitionInfo to Unknown when no era transition happened, and
+// applyEraTransition clears it when one did.
 //
 // Priority order on a successful detection: TransitionKnown supersedes
 // both TransitionUnknown and TransitionImpossible because it carries

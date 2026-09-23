@@ -12038,6 +12038,49 @@ Both run in the one rollover transaction, so the capture still commits atomicall
 with the boundary state changes and a rollback or replay of the boundary
 re-executes the same deterministic read and reproduces the same snapshot.
 
+A third, read-only consumer sits between those two: `governance.ProcessEpoch`'s
+RATIFY phase tallies every SPO-gated action (`HardForkInitiation`,
+`NoConfidence`, `UpdateCommittee`, and a `ParameterChange` touching the
+security-parameter group) against `mark[NewEpoch]` -- this same boundary's own
+mark snapshot, not an earlier one (dingo#4441; see `governance.stakeEpochFor`'s
+doc comment for the upstream `cardano-ledger` derivation). That row is not
+readable from `pool_stake_snapshot` yet at this point in the transaction: it is
+written only by the persist half above, after RATIFY has already run.
+`Manager.CurrentBoundarySPOStakeRows`, installed via
+`LedgerState.SetCurrentBoundarySPOStakeHook`, supplies it instead: it peeks
+(never consumes) the same SNAP-point distribution `ComputeEpochBoundarySnapshot`
+stashed, or falls back to the same historical boundary reconstruction the
+persist half falls back to, resolves the CIP-1694 reward-account auto-vote
+against live state, and returns rows without writing anything. `processEpochRollover`
+calls it right after the SNAP-point stake read and passes the result to
+`governance.ProcessEpoch` as `EpochInput.CurrentBoundarySPOState`, which RATIFY
+prefers over its own `LoadSPOVotingState` DB read. A production node must wire
+this hook alongside the other two: without it, RATIFY falls back to reading the
+not-yet-written row and finds zero SPO stake for every gated action at every
+boundary -- worse than the epoch-lag bug this fixed, not better. When the
+fallback read comes back empty while `mark[NewEpoch-1]` still holds pool stake,
+`ProcessEpoch` returns `ErrMissingCurrentBoundarySPOState` and the boundary
+fails rather than tally a zero denominator; the previous boundary's mark is
+what makes the empty read a contradiction rather than a fact. That gate leaves
+one case silent, and it is not covered by any error: a boundary with no earlier
+mark at all, where an un-wired caller ratifies nothing and reports nothing even
+though live delegation would have cleared the threshold.
+`TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook` pins that
+residual behavior, so wiring the hook -- not the guard -- is what a node relies
+on.
+
+The mid-epoch predictor is a separate consumer and does not take this route.
+`governance.EvaluateRatifiableHardForkInitiation`, which
+`LedgerState.evaluateHardForkInitiationStability` runs once per epoch after the
+voting deadline to surface an upcoming era boundary through `TransitionInfo`,
+tallies `mark[CurrentEpoch]` -- the last durably committed mark -- because the
+`mark[CurrentEpoch+1]` the boundary will read does not exist until that boundary
+runs. Its answer is therefore a prediction rather than a preview: votes freeze at
+the deadline but the SPO denominator does not, and stake moving across the
+boundary can carry an action over or under its threshold. See
+`governance.predictedBoundaryStakeEpochFor` for why estimating the boundary
+snapshot from live state instead would be the worse trade.
+
 The split is what makes the capture reference-ordered. cardano-ledger runs SNAP
 before POOLREAP and before governance enactment, and the live `reward_live_stake`
 aggregate has no slot predicate, so capturing at the end of the rollover made the
@@ -12247,7 +12290,15 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    that credits reward accounts at the boundary slot. Read-only and
    savepoint-wrapped; see "Boundary Capture And Events" for the deferral
    behavior. Locked in by
-   `TestProcessEpochRollover_SnapStakeReadOrdering`.
+   `TestProcessEpochRollover_SnapStakeReadOrdering`. Immediately after, a
+   second read-only call (`currentBoundarySPOStakeState` →
+   `snapshot.Manager.CurrentBoundarySPOStakeRows`) resolves the same
+   distribution, with reward-account auto-vote resolved, for step 7's RATIFY
+   phase -- see "Boundary Capture And Events" for why RATIFY cannot simply
+   read the persisted row. That call's position is locked in by the same test:
+   its no-stash fallback reconstructs the boundary itself and counts reward
+   deltas through the boundary slot, so running it below step 5 or step 7
+   would tally SPO votes against a mark carrying those steps' credits.
 4. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
 5. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. The refunded amount is the deposit
@@ -12368,7 +12419,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
 
    The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
-   stake snapshot (`LoadSPOVotingState`), and committee state
+   stake snapshot (`in.CurrentBoundarySPOState`, falling back to
+   `LoadSPOVotingState` for standalone/test callers that seed
+   `mark[NewEpoch]` directly), and committee state
    (`LoadCommitteeVotingState`) — are computed once per epoch tick and reused
    across every proposal's `TallyProposal`, since they do not change while the
    RATIFY loop runs. (Recomputing DRep voting power per proposal ran the heavy
