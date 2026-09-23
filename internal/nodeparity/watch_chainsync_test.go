@@ -312,6 +312,88 @@ func TestWatchBlocks_ReceivesMultipleRealEvents(t *testing.T) {
 	}
 }
 
+// gatedListener holds its port for the whole test, so no parallel test can
+// bind it. Until open is called, Accept closes each connection instead of
+// returning it, which makes a dial fail fast at the handshake. Releasing a
+// port to simulate an absent server is not safe: another parallel test's
+// listener can take it, and a real session to that server ends when that
+// test does.
+type gatedListener struct {
+	net.Listener
+	opened   chan struct{}
+	openOnce sync.Once
+}
+
+func newGatedListener(l net.Listener) *gatedListener {
+	return &gatedListener{Listener: l, opened: make(chan struct{})}
+}
+
+func (g *gatedListener) open() {
+	g.openOnce.Do(func() { close(g.opened) })
+}
+
+func (g *gatedListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := g.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case <-g.opened:
+			return conn, nil
+		default:
+			_ = conn.Close()
+		}
+	}
+}
+
+// TestGatedListener_DropsConnectionsUntilOpened pins the gate the reconnect
+// test relies on: connections made before open are closed without being
+// handed to the caller, and connections made after it are.
+func TestGatedListener_DropsConnectionsUntilOpened(t *testing.T) {
+	t.Parallel()
+
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	gate := newGatedListener(base)
+	t.Cleanup(func() { _ = gate.Close() })
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if conn, acceptErr := gate.Accept(); acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	dropped, err := net.Dial("tcp", gate.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dropped.Close() })
+	require.NoError(t, dropped.SetReadDeadline(time.Now().Add(2*time.Second)))
+	_, err = dropped.Read(make([]byte, 1))
+	require.Error(t, err)
+	var netErr net.Error
+	require.False(
+		t, errors.As(err, &netErr) && netErr.Timeout(),
+		"a connection made before open must be closed by the listener",
+	)
+	select {
+	case <-accepted:
+		t.Fatal("Accept handed out a connection made before open")
+	default:
+	}
+
+	gate.open()
+	served, err := net.Dial("tcp", gate.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = served.Close() })
+	select {
+	case conn := <-accepted:
+		require.NoError(t, conn.Close())
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept did not hand out a connection made after open")
+	}
+}
+
 // TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops is an
 // end-to-end regression test for a backoff-ordering bug: followBlocks used
 // to reset the backoff to watcherMinBackoff only *after* waiting out
@@ -331,14 +413,16 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 
 	const magic = 42
 
-	// Reserve an address nothing is listening on yet (see unreachableAddr):
-	// a listener that exists but never calls Accept would still complete
-	// the TCP handshake via the kernel's backlog and then hang waiting for
-	// the Ouroboros handshake response that never comes, which fails slow
-	// rather than fast. Closing the listener first guarantees a real,
-	// fast ECONNREFUSED for every attempt until the address is rebound
-	// below.
-	addr := unreachableAddr(t)
+	// The gated listener drops every connection until it is opened, so each
+	// early attempt fails fast without the port ever being released.
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	listener := newGatedListener(base)
+	t.Cleanup(func() { _ = listener.Close() })
+	addr := listener.Addr().String()
+	server := newTestChainSyncServer(t, 5)
+	server.accepted = make(chan *ouroboros.Connection, 1)
+	server.serve(listener, magic)
 
 	var mu sync.Mutex
 	var logs []string
@@ -363,8 +447,8 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 	w := WatchBlocks(ctx, addr, magic, logf)
 	t.Cleanup(w.Close)
 
-	// Let several dial attempts fail first (nobody is accepting yet), so
-	// the watcher's backoff grows well past watcherMinBackoff before the
+	// Let several dial attempts fail first (the gate is closed), so the
+	// watcher's backoff grows well past watcherMinBackoff before the
 	// server ever answers.
 	testutil.WaitForCondition(t, func() bool {
 		return logCount() >= 4
@@ -374,13 +458,8 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 		"precondition: backoff must have grown past the minimum by now",
 	)
 
-	// Now bind the same address for real and let the watcher establish.
-	listener, err := net.Listen("tcp", addr)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	server := newTestChainSyncServer(t, 5)
-	server.accepted = make(chan *ouroboros.Connection, 1)
-	server.serve(listener, magic)
+	// Now let the server answer, and let the watcher establish.
+	listener.open()
 
 	requireNextEvent(
 		t, w, server, 10*time.Second,
