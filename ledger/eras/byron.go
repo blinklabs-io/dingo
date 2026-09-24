@@ -51,6 +51,25 @@ func EpochLengthByron(
 	if byronGenesis == nil {
 		return 0, 0, errors.New("unable to get byron genesis")
 	}
+	if byronGenesis.BlockVersionData.SlotDuration < 0 {
+		return 0, 0, fmt.Errorf(
+			"byron genesis: slotDuration must not be negative, got %d",
+			byronGenesis.BlockVersionData.SlotDuration,
+		)
+	}
+	// K is also validated at genesis load (config/cardano's
+	// validateSecurityParameters), by internal/node/load.go's
+	// loadSecurityParamForConfig, and by this package's own
+	// StabilityWindowForEra -- so a non-positive k should never reach a
+	// production call here. This guard is the same defense-in-depth as the
+	// SlotDuration check above: this specific uint conversion had no local
+	// guard of its own before either fix.
+	if byronGenesis.ProtocolConsts.K <= 0 {
+		return 0, 0, fmt.Errorf(
+			"byron genesis: security parameter (protocolConsts.k) must be positive, got %d",
+			byronGenesis.ProtocolConsts.K,
+		)
+	}
 	// These are known to be within uint range
 	// #nosec G115
 	return uint(byronGenesis.BlockVersionData.SlotDuration),
