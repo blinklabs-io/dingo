@@ -212,12 +212,13 @@ const (
 // decodedMempackTxOut holds the decoded fields from a MemPack-encoded
 // Babbage/Conway TxOut.
 type decodedMempackTxOut struct {
-	Address   []byte // raw address bytes
-	Lovelace  uint64 // ADA amount in lovelace
-	Assets    []ParsedAsset
-	DatumHash []byte // 32 bytes, optional
-	Datum     []byte // inline datum bytes, optional
-	ScriptRef []byte // reference script bytes, optional
+	Address       []byte // raw address bytes
+	Lovelace      uint64 // ADA amount in lovelace
+	Assets        []ParsedAsset
+	DatumHash     []byte // 32 bytes, optional
+	Datum         []byte // inline datum bytes, optional
+	ScriptRef     []byte // reference script bytes, optional
+	ScriptRefType uint8  // 0=native, 1=Plutus V1, 2=Plutus V2, 3=Plutus V3
 }
 
 // decodeMempackTxOut decodes a MemPack-encoded BabbageTxOut (also
@@ -294,7 +295,9 @@ func encodeMempackTxOut(out *decodedMempackTxOut) ([]byte, error) {
 		fields[2] = cbor.RawMessage(dat)
 	}
 	if len(out.ScriptRef) > 0 {
-		ref, err := encodeMempackScriptRef(out.ScriptRef)
+		ref, err := encodeMempackScriptRef(
+			out.ScriptRefType, out.ScriptRef,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -376,23 +379,20 @@ func encodeCBORByteMap(entries []cborByteMapEntry) ([]byte, error) {
 	return result, nil
 }
 
-func encodeMempackScriptRef(script []byte) ([]byte, error) {
+func encodeMempackScriptRef(scriptType uint8, script []byte) ([]byte, error) {
 	if len(script) == 0 {
 		return nil, errors.New("empty MemPack reference script")
 	}
-	var scriptType uint64
 	var scriptValue any
-	if script[0] == alonzoScriptNative {
-		scriptType = 0
-		scriptValue = cbor.RawMessage(script[1:])
+	if scriptType == alonzoScriptNative {
+		scriptValue = cbor.RawMessage(script)
 	} else {
-		scriptType = uint64(script[0]) + 1
-		if scriptType > 4 {
-			return nil, fmt.Errorf("unsupported MemPack script type %d", script[0])
+		if scriptType > 3 {
+			return nil, fmt.Errorf("unsupported MemPack script type %d", scriptType)
 		}
-		scriptValue = script[1:]
+		scriptValue = script
 	}
-	inner, err := cbor.Encode([]any{scriptType, scriptValue})
+	inner, err := cbor.Encode([]any{uint64(scriptType), scriptValue})
 	if err != nil {
 		return nil, fmt.Errorf("encoding reference script: %w", err)
 	}
@@ -626,17 +626,18 @@ func decodeTxOutCompactRefScript(
 		return nil, fmt.Errorf("reading Datum: %w", err)
 	}
 	// Script (era) = AlonzoScript: tag + payload
-	script, err := decodeMempackScript(r)
+	scriptType, script, err := decodeMempackScript(r)
 	if err != nil {
 		return nil, fmt.Errorf("reading Script: %w", err)
 	}
 	return &decodedMempackTxOut{
-		Address:   addr,
-		Lovelace:  lovelace,
-		Assets:    assets,
-		DatumHash: datumHash,
-		Datum:     datum,
-		ScriptRef: script,
+		Address:       addr,
+		Lovelace:      lovelace,
+		Assets:        assets,
+		DatumHash:     datumHash,
+		Datum:         datum,
+		ScriptRef:     script,
+		ScriptRefType: scriptType,
 	}, nil
 }
 
@@ -988,10 +989,10 @@ const (
 // over PlutusBinary over ShortByteString), also length-prefixed.
 func decodeMempackScript(
 	r *mempackReader,
-) ([]byte, error) {
+) (uint8, []byte, error) {
 	scriptTag, err := r.readTag()
 	if err != nil {
-		return nil, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"reading AlonzoScript tag: %w", err,
 		)
 	}
@@ -1001,38 +1002,36 @@ func decodeMempackScript(
 		// (length-prefixed CBOR bytes)
 		script, err := r.readLengthPrefixedBytes()
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"reading NativeScript: %w", err,
 			)
 		}
-		return script, nil
+		return alonzoScriptNative, script, nil
 	case alonzoScriptPlutus:
 		// PlutusScript: version tag + length-prefixed bytes
 		versionTag, err := r.readTag()
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"reading PlutusScript version tag: %w",
 				err,
 			)
 		}
 		if versionTag > 2 {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"unknown PlutusScript version tag: %d",
 				versionTag,
 			)
 		}
 		script, err := r.readLengthPrefixedBytes()
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"reading PlutusScript V%d: %w",
 				versionTag+1, err,
 			)
 		}
-		return append(
-			[]byte{byte(versionTag)}, script...,
-		), nil
+		return versionTag + 1, script, nil
 	default:
-		return nil, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"unknown AlonzoScript tag: %d", scriptTag,
 		)
 	}

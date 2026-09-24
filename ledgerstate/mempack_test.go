@@ -15,10 +15,12 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"encoding/hex"
 	"os"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -174,6 +176,48 @@ func TestDecodeMempackTxOutTag2(t *testing.T) {
 	t.Logf("Lovelace: %d (~%.2f ADA)",
 		decoded.Lovelace,
 		float64(decoded.Lovelace)/1_000_000)
+}
+
+func TestEncodeMempackTxOutReferenceScript(t *testing.T) {
+	t.Parallel()
+
+	address := buildShelleyAddr(
+		7, 1, bytes.Repeat([]byte{0x11}, 28), nil,
+	)
+	nativeScript, err := cbor.Encode([]any{
+		uint64(0), bytes.Repeat([]byte{0x22}, 28),
+	})
+	require.NoError(t, err)
+
+	// Tag 5 stores CompactAddr, ADA-only CompactValue, no datum, then
+	// AlonzoScript's native-script tag and length-prefixed CBOR.
+	mempack := []byte{babbageTxOutCompactRefScript, byte(len(address))}
+	mempack = append(mempack, address...)
+	mempack = append(mempack, 0, 1, 0, alonzoScriptNative, byte(len(nativeScript)))
+	mempack = append(mempack, nativeScript...)
+
+	decoded, err := decodeMempackTxOut(mempack)
+	require.NoError(t, err)
+	require.Equal(t, uint8(alonzoScriptNative), decoded.ScriptRefType)
+	require.Equal(t, nativeScript, decoded.ScriptRef)
+	outputCbor, err := encodeMempackTxOut(decoded)
+	require.NoError(t, err)
+	output, err := ledger.NewTransactionOutputFromCbor(outputCbor)
+	require.NoError(t, err)
+	require.NotNil(t, output.ScriptRef())
+
+	plutusMempack := []byte{babbageTxOutCompactRefScript, byte(len(address))}
+	plutusMempack = append(plutusMempack, address...)
+	plutusMempack = append(plutusMempack, 0, 1, 0, alonzoScriptPlutus, 0, 2, 0x41, 0x00)
+	plutusOutput, err := decodeMempackTxOut(plutusMempack)
+	require.NoError(t, err)
+	require.Equal(t, uint8(1), plutusOutput.ScriptRefType,
+		"Plutus V1's zero version tag must not be mistaken for a native script")
+	encodedPlutus, err := encodeMempackTxOut(plutusOutput)
+	require.NoError(t, err)
+	parsedPlutus, err := ledger.NewTransactionOutputFromCbor(encodedPlutus)
+	require.NoError(t, err)
+	require.NotNil(t, parsedPlutus.ScriptRef())
 }
 
 func TestVarLenDecoding(t *testing.T) {
