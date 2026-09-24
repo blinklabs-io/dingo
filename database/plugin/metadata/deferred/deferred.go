@@ -223,18 +223,6 @@ var Manifest = []Index{
 		Notes:   "Policy lookup", Critical: true,
 	},
 	{
-		Name:    "idx_asset_fingerprint",
-		Table:   "asset",
-		Columns: []string{"fingerprint"},
-		Notes:   "Fingerprint lookup",
-	},
-	{
-		Name:    "idx_asset_amount",
-		Table:   "asset",
-		Columns: []string{"amount"},
-		Notes:   "Amount range scan",
-	},
-	{
 		Name:    "idx_datum_added_slot",
 		Table:   "datum",
 		Columns: []string{"added_slot"},

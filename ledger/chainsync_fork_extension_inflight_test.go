@@ -68,9 +68,9 @@ func TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnecti
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 
 	require.NoError(
@@ -149,9 +149,9 @@ func TestRestartQueuedBlockfetchAfterForkStillRestartsSameConnection(
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 
 	require.NoError(

@@ -407,6 +407,40 @@ func koiosParamEpoch(koiosEpoch uint64) uint64 {
 // fees, compared in CompareEpochTotals) is unaffected and still read at
 // epoch itself: it is a point-in-time ledger pot balance captured at the
 // boundary into that same epoch, not a delayed reward-calculation input.
+// checkedScopes names the mismatch scopes a check run owns, so its commit
+// replaces exactly the evidence it recomputed. An aggregate-only run must not
+// name ScopeAccount: deleting the account phase's rows would leave that
+// phase's recorded failure with nothing behind it.
+func checkedScopes(accountsChecked bool) []string {
+	if accountsChecked {
+		return AllMismatchScopes
+	}
+	return []string{ScopeAggregate}
+}
+
+// passedCheckEpochStatus builds the status row for an epoch that has no
+// comparison surface at all — pre-staking, or below this node's earliest
+// available ledger epoch. Both phases pass vacuously when both were asked
+// for, so a stored failure from either clears rather than outliving the
+// reason it was recorded.
+func passedCheckEpochStatus(
+	network string,
+	epoch uint64,
+	now time.Time,
+	accountsEnabled bool,
+) CheckEpochStatus {
+	status := CheckEpochStatus{
+		Network:         network,
+		Epoch:           epoch,
+		LastCheckedAt:   now,
+		AggregateStatus: StatusPass,
+	}
+	if accountsEnabled {
+		status.AccountStatus = StatusPass
+	}
+	return status
+}
+
 func checkEpoch(
 	ctx context.Context,
 	cache *Cache,
@@ -435,15 +469,17 @@ func checkEpoch(
 	// Dingo-side pool as pool_only_dingo. Nothing fallible needs to complete
 	// first, so it's safe to replace any prior evidence immediately.
 	if koiosEpoch.PreStaking {
-		if err := cache.CommitEpochMismatches(network, epoch, nil); err != nil {
+		if err := cache.CommitEpochMismatches(
+			network,
+			epoch,
+			nil,
+			checkedScopes(accountsEnabled)...,
+		); err != nil {
 			return nil, fmt.Errorf("commit mismatches: %w", err)
 		}
-		if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
-			Network:       network,
-			Epoch:         epoch,
-			LastCheckedAt: now,
-			Status:        StatusPass,
-		}); err != nil {
+		if err := cache.UpsertCheckEpochStatus(passedCheckEpochStatus(
+			network, epoch, now, accountsEnabled,
+		)); err != nil {
 			return nil, fmt.Errorf("upsert check status: %w", err)
 		}
 		logger.Debug("koiosparity: epoch predates staking, skipping comparison",
@@ -451,9 +487,10 @@ func checkEpoch(
 			"epoch", epoch,
 		)
 		return &EpochCompareResult{
-			Network: network,
-			Epoch:   epoch,
-			Status:  StatusPass,
+			Network:       network,
+			Epoch:         epoch,
+			Status:        StatusPass,
+			CheckedScopes: checkedScopes(accountsEnabled),
 		}, nil
 	}
 
@@ -476,15 +513,17 @@ func checkEpoch(
 		)
 	}
 	if haveEarliestAvailable && epoch < earliestAvailable {
-		if err := cache.CommitEpochMismatches(network, epoch, nil); err != nil {
+		if err := cache.CommitEpochMismatches(
+			network,
+			epoch,
+			nil,
+			checkedScopes(accountsEnabled)...,
+		); err != nil {
 			return nil, fmt.Errorf("commit mismatches: %w", err)
 		}
-		if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
-			Network:       network,
-			Epoch:         epoch,
-			LastCheckedAt: now,
-			Status:        StatusPass,
-		}); err != nil {
+		if err := cache.UpsertCheckEpochStatus(passedCheckEpochStatus(
+			network, epoch, now, accountsEnabled,
+		)); err != nil {
 			return nil, fmt.Errorf("upsert check status: %w", err)
 		}
 		logger.Debug(
@@ -497,9 +536,10 @@ func checkEpoch(
 			earliestAvailable,
 		)
 		return &EpochCompareResult{
-			Network: network,
-			Epoch:   epoch,
-			Status:  StatusPass,
+			Network:       network,
+			Epoch:         epoch,
+			Status:        StatusPass,
+			CheckedScopes: checkedScopes(accountsEnabled),
 		}, nil
 	}
 
@@ -880,47 +920,72 @@ func checkEpoch(
 	// comment). Gated behind the account-coverage completeness check so an
 	// interrupted or not-yet-run account fetch can never be silently treated
 	// as "nothing to compare" — see KoiosAccountCoverage's doc comment.
+	// Read before the account phase appends to allMismatches, so the two
+	// phases' verdicts stay separable without re-partitioning the combined
+	// slice afterwards.
+	aggregateStatus := DetermineStatus(allMismatches)
+	aggregateCount := len(allMismatches)
+
+	var accountMismatches []CheckMismatch
 	if accountsEnabled && hasStakeEpoch {
 		rewardsPending := accountRewardsPending(dingoPoolMap)
-		allMismatches = append(
-			allMismatches,
-			compareEpochAccounts(
-				ctx,
-				cache,
-				dingo,
-				network,
-				epoch,
-				stakeEpoch,
-				now,
-				graceHours,
-				epochEndTime,
-				rewardsPending,
-				logger,
-			)...,
+		accountMismatches = compareEpochAccounts(
+			ctx,
+			cache,
+			dingo,
+			network,
+			epoch,
+			stakeEpoch,
+			now,
+			graceHours,
+			epochEndTime,
+			rewardsPending,
+			logger,
 		)
+		// Tagged by provenance rather than derived from Category, which
+		// cannot tell the phases apart: both emit CategoryDBError.
+		for i := range accountMismatches {
+			accountMismatches[i].Scope = ScopeAccount
+		}
+		allMismatches = append(allMismatches, accountMismatches...)
 	}
 
-	status := DetermineStatus(allMismatches)
+	accountStatus := ""
+	if accountsEnabled && hasStakeEpoch {
+		// Recorded even when the account comparison produced nothing, so a
+		// clean account pass clears a previously stored account failure. Left
+		// empty when the comparison did not run at all, which must leave the
+		// stored account verdict alone rather than assert a pass for it.
+		accountStatus = DetermineStatus(accountMismatches)
+	}
+	status := MergeCheckStatus(aggregateStatus, accountStatus)
 
 	// Every fallible read above has already succeeded by this point, so it's
 	// safe to replace prior evidence now. CommitEpochMismatches deletes and
 	// (re)inserts in one transaction: if the insert fails partway through,
 	// the delete rolls back with it and the previous record is left intact
 	// instead of being erased with nothing to replace it.
-	if err := cache.CommitEpochMismatches(network, epoch, allMismatches); err != nil {
+	if err := cache.CommitEpochMismatches(
+		network,
+		epoch,
+		allMismatches,
+		checkedScopes(accountStatus != "")...,
+	); err != nil {
 		return nil, fmt.Errorf("commit mismatches: %w", err)
 	}
 
 	if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
-		Network:        network,
-		Epoch:          epoch,
-		LastCheckedAt:  now,
-		Status:         status,
-		MismatchCount:  len(allMismatches),
-		DingoPoolCount: dingoFound,
-		KoiosPoolCount: len(koiosPools),
-		OnlyDingoPools: MarshalPoolList(onlyDingo),
-		OnlyKoiosPools: MarshalPoolList(onlyKoios),
+		Network:                network,
+		Epoch:                  epoch,
+		LastCheckedAt:          now,
+		DingoPoolCount:         dingoFound,
+		KoiosPoolCount:         len(koiosPools),
+		OnlyDingoPools:         MarshalPoolList(onlyDingo),
+		OnlyKoiosPools:         MarshalPoolList(onlyKoios),
+		AggregateStatus:        aggregateStatus,
+		AggregateMismatchCount: aggregateCount,
+		AccountStatus:          accountStatus,
+		AccountMismatchCount:   len(accountMismatches),
 	}); err != nil {
 		return nil, fmt.Errorf("upsert check status: %w", err)
 	}
@@ -944,6 +1009,9 @@ func checkEpoch(
 		KoiosPoolCount: len(koiosPools),
 		OnlyDingo:      onlyDingo,
 		OnlyKoios:      onlyKoios,
+		// The same set the mismatch commit above replaces, so the verdict and
+		// the evidence behind it always name the same phases.
+		CheckedScopes: checkedScopes(accountStatus != ""),
 	}, nil
 }
 
