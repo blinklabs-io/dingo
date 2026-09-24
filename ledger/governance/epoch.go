@@ -981,9 +981,9 @@ func ratificationEnactmentPrecondition(
 		}
 		return treasuryRemaining - total, nil
 	case *lcommon.UpdateCommitteeGovAction:
-		if a.Quorum.Rat == nil || a.Quorum.Sign() <= 0 {
+		if a.Quorum.Rat == nil || a.Quorum.Sign() < 0 {
 			return treasuryRemaining, errors.New(
-				"committee quorum must be positive",
+				"committee quorum must be non-negative",
 			)
 		}
 	case *lcommon.InfoGovAction:

@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"iter"
@@ -2890,8 +2891,20 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 				TxId:        lcommon.Blake2b256{0x51},
 				OutputIndex: 0,
 			}
+			seed := make([]byte, ed25519.SeedSize)
+			seed[0] = 0x51
+			privateKey := ed25519.NewKeyFromSeed(seed)
+			publicKey := privateKey.Public().(ed25519.PublicKey)
+			paymentHash := lcommon.Blake2b224Hash(publicKey)
+			paymentAddress, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyNone,
+				lcommon.AddressNetworkTestnet,
+				paymentHash[:],
+				nil,
+			)
+			require.NoError(t, err)
 			output := babbage.BabbageTransactionOutput{
-				OutputAddress: newTestKeyAddress(t),
+				OutputAddress: paymentAddress,
 				OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
 			}
 			tx := &conway.ConwayTransaction{
@@ -2911,6 +2924,17 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 				mockLedgerState: baseState,
 				epoch:           500,
 			}
+			bodyCbor, err := cbor.Encode(tx.Body)
+			require.NoError(t, err)
+			tx.Body.SetCbor(bodyCbor)
+			txHash := tx.Hash()
+			tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+				[]lcommon.VkeyWitness{{
+					Vkey:      publicKey,
+					Signature: ed25519.Sign(privateKey, txHash[:]),
+				}},
+				false,
+			)
 
 			err = ValidateTxConway(tx, 1, state, pp)
 			var expired conway.CommitteeMemberAlreadyExpiredError
@@ -2920,11 +2944,97 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 				require.Equal(t, uint64(500), expired.CurrentEpoch)
 				return
 			}
+			require.NoError(t, err)
 			require.NotErrorAs(t, err, &expired)
 			require.NoError(
 				t,
 				conway.UtxoValidateProposalProcedures(tx, 1, state, pp),
 			)
+		})
+	}
+}
+
+func TestConwayGovActionWellFormednessRejectsDuplicateCommitteeRemovals(
+	t *testing.T,
+) {
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionPlomin,
+		},
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+	baseCredential := lcommon.NewBlake2b224([]byte("committee removal"))
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: baseCredential,
+	}
+	scriptCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: baseCredential,
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	anchor := lcommon.GovAnchor{
+		Url:      "https://example.test/committee",
+		DataHash: [32]byte{0x52},
+	}
+	for _, test := range []struct {
+		name        string
+		credentials []lcommon.Credential
+		wantError   bool
+	}{
+		{
+			name:        "duplicate logical credential",
+			credentials: []lcommon.Credential{keyCredential, keyCredential},
+			wantError:   true,
+		},
+		{
+			name:        "same hash with distinct credential types",
+			credentials: []lcommon.Credential{keyCredential, scriptCredential},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action := &lcommon.UpdateCommitteeGovAction{
+				Credentials: test.credentials,
+				Quorum:      cbor.Rat{Rat: big.NewRat(1, 2)},
+			}
+			encoded, err := cbor.Encode(action)
+			require.NoError(t, err)
+			var decoded lcommon.UpdateCommitteeGovAction
+			_, decodeErr := cbor.Decode(encoded, &decoded)
+			proposal, err := conway.NewConwayProposalProcedure(
+				0,
+				rewardAccount,
+				action,
+				anchor,
+			)
+			require.NoError(t, err)
+			tx := &conway.ConwayTransaction{
+				Body: conway.ConwayTransactionBody{
+					TxProposalProcedures: []conway.ConwayProposalProcedure{
+						*proposal,
+					},
+				},
+				TxIsValid: true,
+			}
+			ruleErr := conway.UtxoValidateGovActionWellFormedness(
+				tx, 1, newMockLedgerState(), pp,
+			)
+			if test.wantError {
+				require.Error(t, decodeErr)
+				require.Error(t, ruleErr)
+				return
+			}
+			require.NoError(t, decodeErr)
+			require.NoError(t, ruleErr)
 		})
 	}
 }

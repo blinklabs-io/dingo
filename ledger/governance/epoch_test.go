@@ -43,6 +43,30 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	assert.Same(t, pparams, out.UpdatedPParams)
 }
 
+func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
+	t.Parallel()
+
+	action := &lcommon.UpdateCommitteeGovAction{
+		Type:   uint(lcommon.GovActionTypeUpdateCommittee),
+		Quorum: cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	actionCbor, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+		GovActionCbor: actionCbor,
+	}
+
+	remaining, err := ratificationEnactmentPrecondition(
+		conwayPParamsFixture(10),
+		nil,
+		proposal,
+		0,
+	)
+	require.NoError(t, err)
+	assert.Zero(t, remaining)
+}
+
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	t.Parallel()
 
