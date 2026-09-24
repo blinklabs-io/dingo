@@ -4604,7 +4604,11 @@ pin to a dead/minority peer:
   repeated same-or-lower tip updates (including rollbacks) do NOT reset the
   stall clock, so a stalled incumbent cannot keep the pin alive by re-reporting
   an unchanged tip. The clock is fed by an injectable `nowFn` (defaulting to
-  `time.Now`) for deterministic tests.
+  `time.Now`) for deterministic tests. `ChainSelector` propagates the same
+  `nowFn` into each `PeerChainTip` it creates, so `PeerChainTip.IsStale`
+  (`StaleTipThreshold`) is driven by the identical clock instead of a separate
+  `time.Now()` call — a test can hold both the stall clock and per-peer
+  staleness fixed and advance them together.
 
 The existing equal-tip incumbent preservation (when `ComparePraosTips` returns
 `ChainEqual`, and the same-block transport tiebreaker) is preserved and runs
