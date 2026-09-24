@@ -223,11 +223,12 @@ type Credential struct {
 
 // ParsedCertState holds the parsed delegation, pool, and DRep state.
 type ParsedCertState struct {
-	Accounts              []ParsedAccount
-	Pools                 []ParsedPool
-	DReps                 []ParsedDRep
-	CommitteeHotKeys      []ParsedCommitteeHotKey
-	CommitteeResignations []Credential
+	Accounts               []ParsedAccount
+	Pools                  []ParsedPool
+	PendingPoolRetirements map[uint64][][]byte
+	DReps                  []ParsedDRep
+	CommitteeHotKeys       []ParsedCommitteeHotKey
+	CommitteeResignations  []Credential
 }
 
 type ParsedCommitteeHotKey struct {
@@ -298,6 +299,11 @@ type ParsedPool struct {
 	MetadataUrl                string
 	MetadataHash               []byte // 32 bytes
 	Deposit                    uint64
+	// RetiringEpoch is the epoch this pool is scheduled to retire at, from
+	// the PState `retiring` map, or nil when no retirement is pending. The
+	// pool is still live: it keeps its deposit, earns rewards and leads
+	// slots until the boundary, so this only schedules the retirement.
+	RetiringEpoch *uint64
 	// LeiosKeyPublic and LeiosKeyPossessionProof are the pool's registered
 	// Dijkstra/Leios BLS voting key and its proof of possession, or nil when
 	// the snapshot's pool params carry no leiosKey field. Proof-of-possession
@@ -413,6 +419,10 @@ type ImportConfig struct {
 	// when Reconcile is set. It is populated by the import phases and consumed
 	// by reconcileStaleLedgerState. Not caller-settable.
 	reconcileKeys *reconcileKeys
+}
+
+type deferredRewardLiveStakeImporter interface {
+	ImportUtxosDeferredRewardLiveStakeRefresh([]models.Utxo, types.Txn) error
 }
 
 // ImportLedgerState orchestrates the full import of parsed ledger
@@ -799,6 +809,11 @@ func importUTxOs(
 	)
 
 	store := cfg.Database.Metadata()
+	// The concrete store cannot change mid-import, so resolve the deferred
+	// importer once rather than per batch. Skipping the per-batch aggregate
+	// refresh is only sound because ImportLedgerState rebuilds
+	// reward_live_stake in full once every phase has been imported.
+	importer, supportsDeferredRefresh := store.(deferredRewardLiveStakeImporter)
 	totalImported := 0
 	lastProgressLog := time.Time{}
 	lastLoggedPercent := -5.0
@@ -835,9 +850,16 @@ func importUTxOs(
 		txn := cfg.Database.MetadataTxn(true)
 		defer txn.Release()
 
-		if err := store.ImportUtxos(
-			utxos, txn.Metadata(),
-		); err != nil {
+		var err error
+		if supportsDeferredRefresh {
+			err = importer.ImportUtxosDeferredRewardLiveStakeRefresh(
+				utxos,
+				txn.Metadata(),
+			)
+		} else {
+			err = store.ImportUtxos(utxos, txn.Metadata())
+		}
+		if err != nil {
 			return fmt.Errorf(
 				"inserting UTxO batch: %w",
 				err,
@@ -1034,6 +1056,7 @@ func importCertState(
 	if len(certState.Pools) > 0 {
 		if err := importPools(
 			ctx, cfg, certState.Pools, slot,
+			certState.PendingPoolRetirements,
 		); err != nil {
 			return 0, fmt.Errorf("importing pools: %w", err)
 		}
@@ -1191,6 +1214,7 @@ func importPools(
 	cfg ImportConfig,
 	pools []ParsedPool,
 	slot uint64,
+	retirements map[uint64][][]byte,
 ) error {
 	cfg.Logger.Info(
 		"importing pools",
@@ -1209,6 +1233,12 @@ func importPools(
 	}()
 
 	inBatch := 0
+	pendingRetirements := make(map[uint64][][]byte)
+	for epoch, keyHashes := range retirements {
+		pendingRetirements[epoch] = append(
+			pendingRetirements[epoch], slices.Clone(keyHashes)...,
+		)
+	}
 	for _, pool := range pools {
 		select {
 		case <-ctx.Done():
@@ -1216,6 +1246,14 @@ func importPools(
 				"pool import cancelled: %w", ctx.Err(),
 			)
 		default:
+		}
+
+		if retirements == nil && pool.RetiringEpoch != nil {
+			epoch := *pool.RetiringEpoch
+			pendingRetirements[epoch] = append(
+				pendingRetirements[epoch],
+				slices.Clone(pool.PoolKeyHash),
+			)
 		}
 
 		var margin *types.Rat
@@ -1316,6 +1354,139 @@ func importPools(
 		txn.Release()
 		txn = nil
 	}
+
+	return importPendingPoolRetirements(
+		ctx, cfg, pendingRetirements, slot,
+	)
+}
+
+// importPendingPoolRetirements records the retirements the snapshot has
+// already scheduled but not yet applied, from the PState `retiring` map.
+// It runs after every pool batch has committed because RetirePools resolves
+// each key hash against the pool table and so needs the registrations
+// written first.
+//
+// These pools are still live -- they keep their deposit, earn rewards and
+// lead slots until the retirement epoch -- so only the retirement row is
+// written here. Without it the node holds the deposit past the boundary
+// where the network refunds it to the pool's reward account, the two
+// ledgers then disagree about that account's balance, and the node rejects
+// the first block withdrawing from it.
+func importPendingPoolRetirements(
+	ctx context.Context,
+	cfg ImportConfig,
+	byEpoch map[uint64][][]byte,
+	slot uint64,
+) error {
+	if len(byEpoch) == 0 {
+		return nil
+	}
+
+	epochs := make([]uint64, 0, len(byEpoch))
+	for epoch := range byEpoch {
+		epochs = append(epochs, epoch)
+	}
+	slices.Sort(epochs)
+
+	store := cfg.Database.Metadata()
+	txn := cfg.Database.MetadataTxn(true)
+	defer txn.Release()
+	metaTxn := txn.Metadata()
+
+	total := 0
+	for _, epoch := range epochs {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"pool retirement import cancelled: %w", ctx.Err(),
+			)
+		default:
+		}
+		keyHashes := byEpoch[epoch]
+		if cfg.State != nil && epoch <= cfg.State.Epoch {
+			return fmt.Errorf(
+				"pool retirement epoch %d is not after snapshot epoch %d",
+				epoch,
+				cfg.State.Epoch,
+			)
+		}
+		if err := assertPoolsImported(store, metaTxn, keyHashes); err != nil {
+			return fmt.Errorf(
+				"checking pools scheduled to retire at epoch %d: %w",
+				epoch,
+				err,
+			)
+		}
+		// The snapshot carries no certificate slot for a pending
+		// retirement, so the registrations' own added slot is reused.
+		// Cert ordering ties break on added_slot, which keeps these rows
+		// sorting with the rest of the import and behind any retirement
+		// certificate seen in a later live block.
+		if err := store.RetirePools(
+			metaTxn, keyHashes, epoch, slot,
+		); err != nil {
+			return fmt.Errorf(
+				"retiring pools scheduled for epoch %d: %w",
+				epoch,
+				err,
+			)
+		}
+		total += len(keyHashes)
+	}
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf(
+			"committing pool retirements: %w", err,
+		)
+	}
+	cfg.Logger.Info(
+		"imported pending pool retirements",
+		"component", "ledgerstate",
+		"pools", total,
+		"epochs", len(epochs),
+	)
+	return nil
+}
+
+// assertPoolsImported fails the import when a pool carrying a scheduled
+// retirement has no row in the pool table. RetirePools silently skips a key
+// hash it cannot resolve, which would reproduce the very gap these rows
+// exist to close, so the mismatch is surfaced instead of logged.
+func assertPoolsImported(
+	store metadata.MetadataStore,
+	metaTxn types.Txn,
+	keyHashes [][]byte,
+) error {
+	poolKeyHashSize := len(lcommon.PoolKeyHash{})
+	lookup := make([]lcommon.PoolKeyHash, 0, len(keyHashes))
+	for _, keyHash := range keyHashes {
+		if len(keyHash) != poolKeyHashSize {
+			return fmt.Errorf(
+				"malformed pool key hash %x (%d bytes, want %d)",
+				keyHash,
+				len(keyHash),
+				poolKeyHashSize,
+			)
+		}
+		var pkh lcommon.PoolKeyHash
+		copy(pkh[:], keyHash)
+		lookup = append(lookup, pkh)
+	}
+	existing, err := store.GetPools(lookup, metaTxn)
+	if err != nil {
+		return fmt.Errorf("loading pools: %w", err)
+	}
+	present := make(map[string]struct{}, len(existing))
+	for i := range existing {
+		present[string(existing[i].PoolKeyHash)] = struct{}{}
+	}
+	for _, keyHash := range keyHashes {
+		if _, ok := present[string(keyHash)]; !ok {
+			return fmt.Errorf(
+				"pool %x not found in the pool table", keyHash,
+			)
+		}
+	}
 	return nil
 }
 
@@ -1369,6 +1540,7 @@ func importDReps(
 			AnchorURL:     drep.AnchorURL,
 			AnchorHash:    drep.AnchorHash,
 			AddedSlot:     slot,
+			ExpiryEpoch:   drep.ExpiryEpoch,
 			Active:        drep.Active,
 		}
 
@@ -1467,7 +1639,7 @@ func importSnapShots(
 					cfg.reconcileKeys.addPool(snapshotPools[i].PoolKeyHash)
 				}
 			}
-			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
+			if err := importPools(ctx, cfg, snapshotPools, slot, nil); err != nil {
 				return fmt.Errorf(
 					"importing pools from snapshots: %w",
 					err,

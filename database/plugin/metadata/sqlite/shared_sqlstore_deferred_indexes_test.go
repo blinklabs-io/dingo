@@ -36,24 +36,24 @@ func TestSharedStoreDeferredIndexLifecycle(t *testing.T) {
 	})
 
 	require.True(t, sqliteIndexExists(t, writeDB, "idx_utxo_payment_key"))
-	require.True(t, sqliteIndexExists(t, writeDB, "idx_asset_name_hex"))
+	require.True(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
 
 	require.NoError(t, store.DropDeferredIndexes())
 	pending, err := store.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.True(t, pending)
 	require.False(t, sqliteIndexExists(t, writeDB, "idx_utxo_payment_key"))
-	require.False(t, sqliteIndexExists(t, writeDB, "idx_asset_name_hex"))
+	require.False(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
 
 	require.NoError(t, store.BuildCriticalDeferredIndexes())
 	require.True(t, sqliteIndexExists(t, writeDB, "idx_utxo_payment_key"))
-	require.False(t, sqliteIndexExists(t, writeDB, "idx_asset_name_hex"))
+	require.False(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
 	pending, err = store.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.True(t, pending)
 
 	require.NoError(t, store.BuildDeferredIndexes())
-	require.True(t, sqliteIndexExists(t, writeDB, "idx_asset_name_hex"))
+	require.True(t, sqliteIndexExists(t, writeDB, "idx_datum_added_slot"))
 	pending, err = store.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.False(t, pending)

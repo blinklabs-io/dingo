@@ -90,6 +90,9 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
+	sameFailureAtTip := ls.lastHeaderValidationFailure != nil &&
+		pointMatches(ls.lastHeaderValidationFailure.BlockPoint, validationErr.BlockPoint) &&
+		pointMatches(ls.lastHeaderValidationTip, ledgerTip.Point)
 
 	// The ledger tip is normally the last block that applied cleanly, so it
 	// already precedes the failing block and rewinding to it drops the
@@ -174,29 +177,54 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		)
 	}
 
-	if err := ls.rewindPrimaryChainForRecovery(
-		rewindPoint,
-	); err != nil {
-		if ls.yieldedToChainSelection(
-			err, validationErr, rewindPoint, "rewind",
-		) {
-			return true, nil
+	yielded := false
+	err = ls.withConsumedUtxoPruneBoundary(func() error {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return err
 		}
-		return false, fmt.Errorf(
-			"rewind primary chain after header validation failure: %w",
-			err,
-		)
+		if err := ls.rewindPrimaryChainForRecovery(
+			rewindPoint,
+		); err != nil {
+			if ls.yieldedToChainSelection(
+				err, validationErr, rewindPoint, "rewind",
+			) {
+				yielded = true
+				return nil
+			}
+			return fmt.Errorf(
+				"rewind primary chain after header validation failure: %w",
+				err,
+			)
+		}
+		// The chain prune alone leaves the ledger reflecting the rejected
+		// block's post-apply state; the matching ledger rollback has to be
+		// explicit, for the same reason it is on the transaction-validation
+		// path.
+		// The first recovery at this tip may still need to repair metadata
+		// the rejected block left above it; a repeat of the same failure at
+		// the same tip reuses what that repair restored.
+		if err := ls.rollbackWithOptions(
+			rewindPoint,
+			!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
+			true,
+		); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state after header validation failure: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	// The chain prune alone leaves the ledger reflecting the rejected
-	// block's post-apply state; the matching ledger rollback has to be
-	// explicit, for the same reason it is on the transaction-validation
-	// path.
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state after header validation failure: %w",
-			err,
-		)
+	if yielded {
+		return true, nil
 	}
+	// Record only an attempt that completed the rewind and metadata rollback.
+	// A declined or failed attempt must not consume the first same-tip repair.
+	ls.lastHeaderValidationFailure = validationErr
+	ls.lastHeaderValidationTip = ledgerTip.Point
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,

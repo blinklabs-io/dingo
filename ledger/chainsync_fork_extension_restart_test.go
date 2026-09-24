@@ -86,10 +86,10 @@ func TestRecoverBlockfetchRestartFailureRetriesLiveActiveConnection(t *testing.T
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
 		requestedConn = connId
-		return nil
+		return 0, nil
 	}
 
 	bus := event.NewEventBus(nil, nil)
@@ -152,9 +152,9 @@ func TestRecoverBlockfetchRestartFailureFallsBackToResyncWithoutLiveConnection(
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 
 	bus := event.NewEventBus(nil, nil)

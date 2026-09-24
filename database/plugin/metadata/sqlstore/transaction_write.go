@@ -977,8 +977,8 @@ RETURNING id`
 // like the surrounding UTxO importer statements.
 const importAssetQuery = `
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 `
 
@@ -1091,7 +1091,6 @@ WHERE id = ?`,
 		asset.UtxoID = utxo.ID
 		_, err := s.execCached(ctx, db, importAssetQuery,
 			asset.Name,
-			asset.NameHex,
 			asset.PolicyId,
 			asset.Fingerprint,
 			sql.NullInt64{Int64: id, Valid: true},

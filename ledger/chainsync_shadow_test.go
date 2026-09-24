@@ -61,21 +61,23 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 		activeBlockfetchConnId:       primary,
 		shadowBlockfetchConnId:       shadow,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
-		// Skip the empty-batch retry path: pretend the shadow already
-		// delivered a block before sending BatchDone.
+		// Skip the unobtained-range retry path: pretend the shadow already
+		// delivered a block, and that it extended the chain, before sending
+		// BatchDone.
 		batchBlocksReceived: 1,
+		batchBlocksApplied:  1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestCount++
 				requestedConnId = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -137,18 +139,19 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 		shadowBlockfetchConnId:       shadow,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		batchBlocksReceived:          1,
+		batchBlocksApplied:           1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -229,11 +232,11 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}

@@ -127,12 +127,12 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 			ConnectionSwitchFunc: func() {
 				switchCalls++
@@ -473,11 +473,11 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -574,11 +574,11 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -618,11 +618,11 @@ func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -665,6 +665,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId1,
 		batchBlocksReceived:          1,
+		batchBlocksApplied:           1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -672,10 +673,10 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				requestedConnId = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -725,6 +726,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId,
 		batchBlocksReceived:          1,
+		batchBlocksApplied:           1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -732,10 +734,10 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				requestedConnId = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -980,14 +982,14 @@ func newChainSwitchFallbackFixture(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				if sameConnectionId(connId, connId2) {
 					testChain.ClearHeaders()
-					return errors.New("connection closed")
+					return 0, errors.New("connection closed")
 				}
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1350,11 +1352,11 @@ func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1620,11 +1622,11 @@ func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConn = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1669,12 +1671,12 @@ func TestHandleEventChainsyncBlockHeaderBuffersMinimumBatchWhenBehind(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -1716,12 +1718,12 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2141,12 +2143,12 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 				requestConnId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(1064), start.Slot)
 				assert.Equal(t, uint64(1064), end.Slot)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2200,12 +2202,12 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 				requestConnId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(107374026), start.Slot)
 				assert.Equal(t, uint64(107374047), end.Slot)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2282,12 +2284,12 @@ func TestHandleEventChainsyncAwaitReplyStartsBlockfetchForActiveConnection(
 				requestConnId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
 				assert.Equal(t, connId, requestConnId)
 				assert.Equal(t, uint64(1001), start.Slot)
 				assert.Equal(t, uint64(1004), end.Slot)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2342,11 +2344,11 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConnIds = append(requestedConnIds, connId)
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2394,9 +2396,9 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 				_ ouroboros.ConnectionId,
 				_ ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2428,6 +2430,10 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
 	}
+	shadowConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3003},
+	}
 	hash1 := lcommon.NewBlake2b256([]byte("hdr-1"))
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
@@ -2442,6 +2448,11 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 	ls := &LedgerState{
 		chain:                  testChain,
 		activeBlockfetchConnId: connId1,
+		shadowBlockfetchConnId: shadowConnId,
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId1):      {make(chan struct{})},
+			connIdKey(shadowConnId): {make(chan struct{})},
+		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
@@ -2451,11 +2462,11 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConn = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2465,6 +2476,37 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 	assert.Equal(t, connId2, requestedConn)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
 	assert.Equal(t, 1, testChain.HeaderCount())
+	assert.NotContains(t, ls.blockfetchRequestsInFlight, connIdKey(connId1))
+	assert.NotContains(t, ls.blockfetchRequestsInFlight, connIdKey(shadowConnId))
+	assert.Contains(t, ls.blockfetchRequestsInFlight, connIdKey(connId2))
+}
+
+func TestHandleConnectionClosedReleasesRequestWithoutBatchDone(t *testing.T) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6120, 3001)
+	done := make(chan struct{})
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		blockfetchRequestsInFlight: map[string][]chan struct{}{
+			connIdKey(connId): {done},
+		},
+	}
+
+	ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: connId},
+	))
+
+	assert.NotContains(t, ls.blockfetchRequestsInFlight, connIdKey(connId))
+	select {
+	case <-done:
+	default:
+		t.Fatal("connection close did not release blockfetch request waiter")
+	}
 }
 
 // TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection asserts a timeout
@@ -2510,9 +2552,9 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 				connId ouroboros.ConnectionId,
 				_ ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requestedConn = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -2595,14 +2637,14 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestedConnIds = append(requestedConnIds, connId)
 				if connId == connId2 {
-					return errors.New("retry failed")
+					return 0, errors.New("retry failed")
 				}
-				return nil
+				return 0, nil
 			},
 		},
 	}
