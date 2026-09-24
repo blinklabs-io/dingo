@@ -309,7 +309,7 @@ func run() int {
 			"Starting CPU profiling to %q\n",
 			cpuprofile,
 		) //nolint:gosec // stderr output, no XSS risk
-		//nolint:gosec // User explicitly chose the CPU profile output path.
+		//nolint:gosec // the operator supplies this local profiling output path
 		f, err := os.OpenFile(
 			cpuprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
@@ -498,7 +498,7 @@ Database Workers:
 	// Finalize memory profiling before exit
 	if memprofile != "" {
 		memprofile = filepath.Clean(memprofile)
-		//nolint:gosec // User explicitly chose the memory profile output path.
+		//nolint:gosec // the operator supplies this local profiling output path
 		f, err := os.OpenFile(
 			memprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
