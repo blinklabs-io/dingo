@@ -133,9 +133,50 @@ func shouldSkipPhase2Validation(
 	return ok && skipper.SkipPhase2Validation()
 }
 
+// CommitteeMemberAlreadyResignedError indicates a committee cold-key
+// resignation certificate for a member already resigned, in ledger state or
+// by an earlier certificate of the same transaction.
+//
+// Reference: ConwayCommitteeHasPreviouslyResigned in GOVCERT,
+// eras/conway/impl/src/Cardano/Ledger/Conway/Rules/GovCert.hs.
+type CommitteeMemberAlreadyResignedError struct {
+	ColdCredential lcommon.Credential
+}
+
+func (e CommitteeMemberAlreadyResignedError) Error() string {
+	return fmt.Sprintf(
+		"committee member already resigned: %x",
+		e.ColdCredential.Credential[:],
+	)
+}
+
+// committeeCredentialKey is a comparable identity for a committee cold
+// credential. Credential embeds cbor.DecodeStoreCbor, which is not itself
+// comparable, so a full tagged identity must be projected out to use as a map
+// key; a hash-only key would conflate a key-hash and script-hash credential
+// that happen to share hash bytes.
+type committeeCredentialKey struct {
+	credType   uint
+	credential lcommon.CredentialHash
+}
+
+func committeeCredentialKeyFor(
+	credential lcommon.Credential,
+) committeeCredentialKey {
+	return committeeCredentialKey{
+		credType:   credential.CredType,
+		credential: credential.Credential,
+	}
+}
+
 // validateCommitteeCertificates preserves the full cold credential identity
 // when the ledger state exposes Dingo's tag-aware capability. Other state
 // implementations retain the upstream hash-only behavior.
+//
+// Committee certificates are processed sequentially within the transaction:
+// a resignation certificate is tracked in resignedInTx so a later certificate
+// for the same credential sees it, rather than every certificate querying
+// only the pre-transaction snapshot.
 func validateCommitteeCertificates(
 	tx lcommon.Transaction,
 	slot uint64,
@@ -173,6 +214,7 @@ func validateCommitteeCertificates(
 		member, err := state.CommitteeCredentialMember(coldCredential)
 		return member, true, err
 	}
+	resignedInTx := make(map[committeeCredentialKey]bool)
 	for _, cert := range tx.Certificates() {
 		var (
 			credential lcommon.Credential
@@ -213,10 +255,20 @@ func validateCommitteeCertificates(
 				Operation:  operation,
 			}
 		}
-		if authorize && member.Resigned {
-			return conway.ResignedCommitteeMemberHotKeyError{
-				ColdKey: credential.Credential,
+		key := committeeCredentialKeyFor(credential)
+		resigned := member.Resigned || resignedInTx[key]
+		if resigned {
+			if authorize {
+				return conway.ResignedCommitteeMemberHotKeyError{
+					ColdKey: credential.Credential,
+				}
 			}
+			return CommitteeMemberAlreadyResignedError{
+				ColdCredential: credential,
+			}
+		}
+		if !authorize {
+			resignedInTx[key] = true
 		}
 	}
 	return nil
