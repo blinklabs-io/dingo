@@ -60,6 +60,18 @@ func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 			err,
 		)
 	}
+	numerator, denominator, configured, err :=
+		lsConfig.CardanoNodeConfig.PBFTSignatureThresholdRatio()
+	if err != nil {
+		return byronPBFTCache{}, fmt.Errorf(
+			"read Byron PBFT signature threshold: %w",
+			err,
+		)
+	}
+	if configured {
+		config.PBFTSignatureThresholdNumerator = numerator
+		config.PBFTSignatureThresholdDenominator = denominator
+	}
 	return byronPBFTCache{config: &config}, nil
 }
 
@@ -437,10 +449,7 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 func newByronPBFTState(
 	config byronconsensus.ByronConfig,
 ) (byronPBFTState, error) {
-	issuerState, err := byronconsensus.NewPBFTState(
-		nil,
-		config.SecurityParam,
-	)
+	issuerState, err := byronconsensus.NewPBFTStateFromConfig(nil, config)
 	if err != nil {
 		return byronPBFTState{}, err
 	}

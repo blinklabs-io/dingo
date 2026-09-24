@@ -204,7 +204,7 @@ func TestCreateGenesisBlockRejectsAvvmNonAvvmCollisionBeforeWriting(t *testing.T
 		},
 	}
 	err = ls.createGenesisBlock()
-	require.ErrorContains(t, err, "duplicate genesis UTxO reference")
+	require.ErrorContains(t, err, "duplicate Byron genesis UTxO reference")
 
 	state, stateErr := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, stateErr)
@@ -413,12 +413,11 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	)
 }
 
-// TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision pins dingo#4428's
-// cited upstream case (gouroboros#2378): an AVVM redeem address and a
-// non-AVVM address that resolve to the same underlying address bytes
-// produce the same transaction ID through Byron's real
-// ByronGenesis.GenesisUtxos() path, not a hand-built duplicate.
-func TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision(t *testing.T) {
+// TestByronGenesisUtxosRejectAvvmNonAvvmCollision pins dingo#4428's cited
+// upstream case (gouroboros#2378): an AVVM redeem address and a non-AVVM
+// address that resolve to the same underlying address bytes produce the same
+// transaction ID, which the Byron genesis decoder rejects.
+func TestByronGenesisUtxosRejectAvvmNonAvvmCollision(t *testing.T) {
 	t.Parallel()
 
 	pubkeyBytes := make([]byte, 32)
@@ -442,15 +441,8 @@ func TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision(t *testing.T) {
 			redeemAddr.String(): "2000000",
 		},
 	}
-	utxos, err := byronGenesis.GenesisUtxos()
-	require.NoError(t, err)
-	require.Len(t, utxos, 2)
-
-	require.ErrorContains(
-		t,
-		rejectDuplicateGenesisUtxos(utxos),
-		"duplicate genesis UTxO reference",
-	)
+	_, err = byronGenesis.GenesisUtxos()
+	require.ErrorContains(t, err, "duplicate Byron genesis UTxO reference")
 }
 
 // TestRejectDuplicateGenesisUtxosAllowsDistinctRefs guards against an

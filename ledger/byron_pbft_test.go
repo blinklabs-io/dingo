@@ -59,7 +59,7 @@ func newByronPBFTTestKey(seedByte byte) byronPBFTTestKey {
 }
 
 func newSignedByronPBFTDelegationCertificate(
-	t *testing.T,
+	t testing.TB,
 	protocolMagic uint32,
 	epoch uint64,
 	issuer byronPBFTTestKey,
@@ -122,7 +122,9 @@ func newSignedByronPBFTBlock(
 	if delegationPayload == nil {
 		delegationPayload = []any{}
 	}
-	delegationPayloadCbor, err := cbor.Encode(delegationPayload)
+	delegationPayloadCbor, err := cbor.Encode(
+		cbor.IndefLengthList(delegationPayload),
+	)
 	require.NoError(t, err)
 	bodyProof, ok := header.BodyProof.([]any)
 	require.True(t, ok)
@@ -250,14 +252,14 @@ func newGeneratedByronPBFTTestNodeConfig(
 		"mainnet/config.json",
 	)
 	require.NoError(t, err)
-	require.NoError(t, nodeConfig.LoadByronGenesisFromReader(strings.NewReader(
+	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
 			"blockVersionData": {"slotDuration": "20000"},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {},
+			"bootStakeholders": {%q: 1000},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": 0}
 			},
@@ -266,6 +268,7 @@ func newGeneratedByronPBFTTestNodeConfig(
 		}`,
 			securityParam,
 			protocolMagic,
+			issuerHash.String(),
 			issuerHash.String(),
 			hex.EncodeToString(genesisCertificate[3].([]byte)),
 			base64.StdEncoding.EncodeToString(initialDelegate.verificationKey),
@@ -303,14 +306,14 @@ func newByronPBFTTestNodeConfig(
 		"mainnet/config.json",
 	)
 	require.NoError(t, err)
-	require.NoError(t, nodeConfig.LoadByronGenesisFromReader(strings.NewReader(
+	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
 			"blockVersionData": {"slotDuration": "20000"},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {},
+			"bootStakeholders": {%q: 1000},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": %d}
 			},
@@ -319,6 +322,7 @@ func newByronPBFTTestNodeConfig(
 		}`,
 			securityParam,
 			header.ProtocolMagic,
+			issuerHash.String(),
 			issuerHash.String(),
 			hex.EncodeToString(certificateSignature),
 			base64.StdEncoding.EncodeToString(delegateKey),
@@ -361,6 +365,56 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	_, err = ls.advanceByronPBFTState(state, block, true)
 	require.ErrorContains(t, err, "signature threshold")
 	require.Len(t, state.issuerState.SignatureHistory(), 2)
+}
+
+func TestByronPBFTStateUsesCardanoNodeThreshold(t *testing.T) {
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name        string
+		threshold   string
+		numerator   uint64
+		denominator uint64
+		maxAllowed  uint64
+		shouldBlock bool
+	}{
+		{name: "default", maxAllowed: 2, shouldBlock: true},
+		{name: "0.10", threshold: "0.10", numerator: 1, denominator: 10, maxAllowed: 1, shouldBlock: true},
+		{name: "0.22", threshold: "0.22", numerator: 11, denominator: 50, maxAllowed: 2, shouldBlock: true},
+		{name: "0.50", threshold: "0.50", numerator: 1, denominator: 2, maxAllowed: 5, shouldBlock: true},
+		{name: "1.1", threshold: "1.1", numerator: 11, denominator: 10, maxAllowed: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeConfig := newByronPBFTTestNodeConfig(t, block, 10)
+			if tc.threshold != "" {
+				threshold := cardano.CardanoNodeDecimal(tc.threshold)
+				nodeConfig.PBftSignatureThreshold = &threshold
+			}
+			ls := &LedgerState{config: LedgerStateConfig{
+				CardanoNodeConfig: nodeConfig,
+			}}
+
+			config, err := ls.byronPBFTConfig()
+			require.NoError(t, err)
+			require.Equal(t, tc.numerator, config.PBFTSignatureThresholdNumerator)
+			require.Equal(t, tc.denominator, config.PBFTSignatureThresholdDenominator)
+
+			state, err := ls.byronPBFTStateAtTip(context.Background(), ocommon.Tip{})
+			require.NoError(t, err)
+			issuer := lcommon.Blake2b224Hash([]byte("configured issuer"))
+			for range tc.maxAllowed {
+				state.issuerState, err = state.issuerState.Transition(issuer)
+				require.NoError(t, err)
+			}
+			_, err = state.issuerState.Transition(issuer)
+			if tc.shouldBlock {
+				require.ErrorContains(t, err, "signature threshold")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
@@ -474,7 +528,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleAtActivation, true)
-	require.ErrorContains(t, err, "active delegate mismatch")
+	require.ErrorContains(t, err, "active delegation does not authorize delegate")
 
 	activated := newSignedByronPBFTBlock(
 		t,
@@ -542,7 +596,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleAfterRevocation, true)
-	require.ErrorContains(t, err, "active delegate mismatch")
+	require.ErrorContains(t, err, "active delegation does not authorize delegate")
 
 	revoked := newSignedByronPBFTBlock(
 		t,
@@ -666,7 +720,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleDelegate, true)
-	require.ErrorContains(t, err, "active delegate mismatch")
+	require.ErrorContains(t, err, "active delegation does not authorize delegate")
 	revoked := newSignedByronPBFTBlock(
 		t,
 		template,

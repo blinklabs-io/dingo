@@ -93,8 +93,8 @@ func newMusashiOuroboros(t *testing.T, eventBus *event.EventBus) *Ouroboros {
 }
 
 // TestDecodeBlockfetchBlockMusashiWireTypes drives the production block-fetch
-// decode dispatch with the real bytes for both Musashi block wire types, and
-// asserts each decodes to the hash chain-sync computed for the same block.
+// decode dispatch with a valid Musashi Conway block and asserts it matches the
+// chain-sync header identity.
 func TestDecodeBlockfetchBlockMusashiWireTypes(t *testing.T) {
 	t.Parallel()
 
@@ -110,12 +110,6 @@ func TestDecodeBlockfetchBlockMusashiWireTypes(t *testing.T) {
 			blockType:  gledger.BlockTypeConway,
 			blockPath:  musashiType7BlockFixture,
 			headerPath: musashiType7HeaderFixture,
-		},
-		{
-			name:       "type8_dijkstra_layout",
-			blockType:  gledger.BlockTypeDijkstra,
-			blockPath:  musashiType8BlockFixture,
-			headerPath: musashiType8HeaderFixture,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -439,6 +433,7 @@ func runMusashiBlockfetchClientDelivery(
 	blockType uint,
 	blockPath string,
 	headerPath string,
+	expectReject bool,
 ) (gledger.Block, gledger.BlockHeader, []byte) {
 	t.Helper()
 	blockRaw := readHexFixture(t, blockPath)
@@ -503,6 +498,17 @@ func runMusashiBlockfetchClientDelivery(
 	}()
 
 	require.NoError(t, peer.client.GetBlockRange(point, point))
+	if expectReject {
+		select {
+		case evt := <-blockCh:
+			t.Fatalf("rejected legacy body emitted block event: %#v", evt)
+		case err := <-peer.errChan:
+			require.ErrorContains(t, err, "expected 3 components, got 4")
+		case <-time.After(10 * time.Second):
+			t.Fatal("timeout waiting for legacy Dijkstra block rejection")
+		}
+		return nil, header, blockRaw
+	}
 
 	select {
 	case evt := <-blockCh:
@@ -546,34 +552,26 @@ func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
 		gledger.BlockTypeConway,
 		musashiType7BlockFixture,
 		musashiType7HeaderFixture,
+		false,
 	)
 	require.Equal(t, header.Hash().String(), block.Hash().String())
 	require.Equal(t, header.SlotNumber(), block.SlotNumber())
 	require.Equal(t, blockRaw, block.Cbor())
 }
 
-// TestBlockfetchClientDeliversMusashiType8Block covers the type-8 input #3798
-// names, through the same production dispatch.
-//
-// It needs no raw-delivery support and is not skipped, which is the point:
-// gouroboros dispatches block type 8 to its Dijkstra decoder, that decoder
-// accepts the Musashi twelve-field Leios header body, so the typed decode
-// succeeds and BlockRawFunc is reached even on a gouroboros without #2186.
-// Type 8 was never gated out of the Musashi fallback in a way that mattered --
-// the strict decoder for type 8 is the Dijkstra decoder. The error #3798
-// quotes names conway.tmpConwayBlock, which only the type-7 route can produce.
-func TestBlockfetchClientDeliversMusashiType8Block(t *testing.T) {
+// TestBlockfetchClientRejectsLegacyMusashiType8Block verifies rejection by
+// the real block-fetch path before an obsolete Dijkstra body is emitted.
+func TestBlockfetchClientRejectsLegacyMusashiType8Block(t *testing.T) {
 	t.Parallel()
 
-	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
+	block, _, _ := runMusashiBlockfetchClientDelivery(
 		t,
 		gledger.BlockTypeDijkstra,
 		musashiType8BlockFixture,
 		musashiType8HeaderFixture,
+		true,
 	)
-	require.Equal(t, header.Hash().String(), block.Hash().String())
-	require.Equal(t, header.SlotNumber(), block.SlotNumber())
-	require.Equal(t, blockRaw, block.Cbor())
+	require.Nil(t, block)
 }
 
 // TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks is the negative case for
@@ -610,17 +608,12 @@ func TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks(t *testing.T) {
 	}
 }
 
-// TestDecodeBlockfetchBlockType8NeedsNoMusashiScope pins the fact #3798 got
-// wrong: block type 8 decodes through gouroboros' own dispatch, so it needs no
-// network-scoped fallback and behaves identically on Musashi and on a network
-// that has never seen a Musashi block. Widening the Musashi gate to type 8, or
-// widening models.hasDijkstraLeiosShape, would change nothing here except to
-// loosen a decoder for no observed input.
-func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
+// TestDecodeBlockfetchBlockRejectsLegacyDijkstraBody ensures four-component
+// prototype bodies are rejected on every network.
+func TestDecodeBlockfetchBlockRejectsLegacyDijkstraBody(t *testing.T) {
 	t.Parallel()
 
 	blockRaw := readHexFixture(t, musashiType8BlockFixture)
-	var hashes []string
 	for _, magic := range []uint32{musashiNetworkMagic, 764824073} {
 		o := newOuroboros(OuroborosConfig{
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -630,21 +623,14 @@ func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
 			gledger.BlockTypeDijkstra,
 			blockRaw,
 		)
-		require.NoError(t, err)
-		require.NotNil(t, block)
-		require.EqualValues(t, dijkstra.EraIdDijkstra, block.Era().Id)
-		hashes = append(hashes, block.Hash().String())
+		require.ErrorContains(t, err, "expected 3 components, got 4")
+		require.Nil(t, block)
 	}
-	// The loop above ranges a two-element literal and appends once per
-	// iteration, so both indexes exist; nilaway does not track that.
-	//nolint:nilaway // the loop above appends exactly two entries
-	require.Equal(t, hashes[0], hashes[1])
 }
 
 // TestMusashiDispatchEraAgreement records the era each production dispatch
-// path assigns to the same Musashi block, for both wire types. #3761 was the
-// header and block paths disagreeing, so the mapping is asserted rather than
-// assumed.
+// path assigns to the accepted Musashi Conway block. #3761 was the header and
+// block paths disagreeing, so the mapping is asserted rather than assumed.
 //
 // The hashes agree for both types. The eras do not for type 7: its
 // five-component Conway envelope is only representable as a Conway block, so
@@ -678,13 +664,6 @@ func TestMusashiDispatchEraAgreement(t *testing.T) {
 			blockPath:    musashiType7BlockFixture,
 			headerPath:   musashiType7HeaderFixture,
 			wantBlockEra: conway.EraIdConway,
-		},
-		{
-			name:         "type8_dijkstra_layout",
-			blockType:    gledger.BlockTypeDijkstra,
-			blockPath:    musashiType8BlockFixture,
-			headerPath:   musashiType8HeaderFixture,
-			wantBlockEra: dijkstra.EraIdDijkstra,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

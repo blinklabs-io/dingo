@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,12 +62,24 @@ func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			byronGenesisJSON := `{
-				"startTime": 1666656000,
-				"protocolConsts": {"protocolMagic": ` + strconv.Itoa(
-				tt.byronProtocolMagic,
-			) + `}
-			}`
+			byronGenesisJSON, err := cardano.EmbeddedConfigFS.ReadFile(
+				"mainnet/byron-genesis.json",
+			)
+			require.NoError(t, err)
+			var byronGenesis map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(byronGenesisJSON, &byronGenesis))
+			var protocolConsts map[string]json.RawMessage
+			require.NoError(
+				t,
+				json.Unmarshal(byronGenesis["protocolConsts"], &protocolConsts),
+			)
+			protocolMagic, err := json.Marshal(tt.byronProtocolMagic)
+			require.NoError(t, err)
+			protocolConsts["protocolMagic"] = protocolMagic
+			byronGenesis["protocolConsts"], err = json.Marshal(protocolConsts)
+			require.NoError(t, err)
+			byronGenesisJSON, err = json.Marshal(byronGenesis)
+			require.NoError(t, err)
 
 			nodeCfg := &cardano.CardanoNodeConfig{}
 			require.NoError(
@@ -78,7 +91,7 @@ func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 			require.NoError(
 				t,
 				nodeCfg.LoadByronGenesisFromReader(
-					strings.NewReader(byronGenesisJSON),
+					strings.NewReader(string(byronGenesisJSON)),
 				),
 			)
 
@@ -91,13 +104,13 @@ func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 				WithNetworkMagic(shelleyMagic),
 				WithCardanoNodeConfig(nodeCfg),
 			)
-			n, err := New(cfg)
+			n := &Node{config: cfg}
+			err = n.configValidate()
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			t.Cleanup(func() { _ = n.Stop() })
 		})
 	}
 }

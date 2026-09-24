@@ -1123,6 +1123,7 @@ func makeMinimalTxCbor(t *testing.T, txID byte, padding int) []byte {
 			Content: []any{[]any{txHash, uint64(0)}},
 		},
 		2: uint64(200000),
+		1: []any{},
 	}
 
 	// Add padding via an output with a large address if needed
@@ -1390,6 +1391,7 @@ func makeMinimalTxCborWithInput(
 			Content: []any{[]any{inputHash, inputIndex}},
 		},
 		2: uint64(200000),
+		1: []any{},
 	}
 
 	txArr := []any{bodyMap, map[uint]any{}, true, nil}
@@ -1869,6 +1871,7 @@ func makeMinimalTxCborWithExUnits(
 			Content: []any{[]any{txHash, uint64(0)}},
 		},
 		2: uint64(200000),
+		1: []any{},
 	}
 
 	// Build the witness set with redeemers using raw CBOR.

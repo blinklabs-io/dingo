@@ -107,6 +107,75 @@ func TestCardanoNodeConfig(t *testing.T) {
 	})
 }
 
+func TestPBFTSignatureThresholdRatio(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      string
+		numerator   uint64
+		denominator uint64
+		configured  bool
+		wantError   bool
+	}{
+		{name: "absent", config: "{}\n", configured: false},
+		{
+			name:        "decimal fraction",
+			config:      "PBftSignatureThreshold: 0.6\n",
+			numerator:   3,
+			denominator: 5,
+			configured:  true,
+		},
+		{
+			name:        "decimal exponent",
+			config:      "PBftSignatureThreshold: 1e-1\n",
+			numerator:   1,
+			denominator: 10,
+			configured:  true,
+		},
+		{
+			name:        "above one",
+			config:      "PBftSignatureThreshold: 1.1\n",
+			numerator:   11,
+			denominator: 10,
+			configured:  true,
+		},
+		{
+			name:        "explicit zero",
+			config:      "PBftSignatureThreshold: 0\n",
+			numerator:   0,
+			denominator: 1,
+			configured:  true,
+		},
+		{
+			name:      "negative",
+			config:    "PBftSignatureThreshold: -0.1\n",
+			wantError: true,
+		},
+		{
+			name:      "string",
+			config:    "PBftSignatureThreshold: invalid\n",
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := NewCardanoNodeConfigFromReader(
+				bytes.NewBufferString(test.config),
+			)
+			if test.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			numerator, denominator, configured, err :=
+				config.PBFTSignatureThresholdRatio()
+			require.NoError(t, err)
+			require.Equal(t, test.numerator, numerator)
+			require.Equal(t, test.denominator, denominator)
+			require.Equal(t, test.configured, configured)
+		})
+	}
+}
+
 func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
 	t.Parallel()
 

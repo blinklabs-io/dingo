@@ -68,7 +68,9 @@ func bodyBudgetTransaction(
 	}
 	body := map[uint]any{
 		0: []any{[]any{make([]byte, 32), uint(index)}},
+		1: []any{},
 		2: uint(200000),
+		3: uint64(1000),
 	}
 	if auxiliary != nil {
 		encoded, err := cbor.Encode(auxiliary)

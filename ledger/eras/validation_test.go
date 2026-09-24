@@ -2826,6 +2826,7 @@ func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(
 				[]any{inputHash, uint64(0)},
 			},
 		},
+		1: []any{},
 		2: uint64(200_000),
 	}
 	txCbor, err := cbor.Encode([]any{bodyMap, map[uint]any{}, true, nil})

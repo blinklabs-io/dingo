@@ -834,7 +834,7 @@ func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 
 // buildDijkstraLeiosBlockRaw assembles a Dijkstra block [header, block_body]
 // whose header carries the 12-field Leios extension. The extension elements
-// (ext) and the four-element block_body (bodyElems) are supplied as raw CBOR.
+// (ext) and the current three-element block_body (bodyElems) are supplied as raw CBOR.
 // The header is assembled directly because DijkstraBlockHeader.MarshalCBOR
 // drops the extension for in-process-constructed headers.
 func buildDijkstraLeiosBlockRaw(
@@ -845,7 +845,7 @@ func buildDijkstraLeiosBlockRaw(
 	bodyElems []cbor.RawMessage,
 ) cbor.RawMessage {
 	t.Helper()
-	require.Len(t, bodyElems, 4)
+	require.Len(t, bodyElems, 3)
 	headerBody := babbage.BabbageBlockHeaderBody{
 		Slot:     slot,
 		PrevHash: lcommon.NewBlake2b256(prevHash),
@@ -891,7 +891,6 @@ func buildDijkstraLeiosBlockRaw(
 func testDijkstraCertRBBodyElems(t *testing.T) []cbor.RawMessage {
 	t.Helper()
 	return []cbor.RawMessage{
-		mustCbor(t, []uint{}),            // invalid_transactions
 		mustCbor(t, []cbor.RawMessage{}), // transactions (empty on a CertRB)
 		mustCbor(
 			t,
@@ -919,8 +918,14 @@ func testDijkstraCertRBRaw(
 func testDijkstraTx(t *testing.T, seed byte) cbor.RawMessage {
 	t.Helper()
 	// A complete Dijkstra transaction: [transaction_body, witness_set, aux/nil].
+	hash := make([]byte, lcommon.Blake2b256Size)
+	hash[0] = seed
 	return mustCbor(t, []cbor.RawMessage{
-		mustCbor(t, map[uint]any{2: 100_000 + uint64(seed)}),
+		mustCbor(t, map[uint]any{
+			0: cbor.Tag{Number: 258, Content: []any{[]any{hash, uint64(0)}}},
+			1: []any{},
+			2: 100_000 + uint64(seed),
+		}),
 		mustCbor(t, map[uint]any{}),
 		mustCbor(t, nil),
 	})
@@ -1281,31 +1286,39 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Equal(t, []byte(origTop[0]), []byte(mergedTop[0]))
 
 	// The transaction segment now holds the endorser block's transactions; the
-	// invalid, certificate, and peras segments are preserved.
+	// certificate and peras segments retain their three-component positions.
 	origBody := make([]cbor.RawMessage, 0)
 	mergedBody := make([]cbor.RawMessage, 0)
 	_, err = cbor.Decode(origTop[1], &origBody)
 	require.NoError(t, err)
 	_, err = cbor.Decode(mergedTop[1], &mergedBody)
 	require.NoError(t, err)
-	require.Len(t, origBody, 4)
-	require.Len(t, mergedBody, 4)
-	require.Equal(t, []byte(origBody[0]), []byte(mergedBody[0]))
-	require.Equal(t, []byte(origBody[3]), []byte(mergedBody[3]))
+	require.Len(t, origBody, 3)
+	require.Len(t, mergedBody, 3)
+	require.Equal(t, []byte(origBody[2]), []byte(mergedBody[2]))
 	// The certificate segment is cleared, not preserved: CIP-0164 forbids a
 	// body carrying both a certificate and transactions.
-	require.NotEqual(t, []byte(origBody[2]), []byte(mergedBody[2]))
+	require.NotEqual(t, []byte(origBody[1]), []byte(mergedBody[1]))
 	var mergedCert any
-	_, err = cbor.Decode(mergedBody[2], &mergedCert)
+	_, err = cbor.Decode(mergedBody[1], &mergedCert)
 	require.NoError(t, err)
 	require.Nil(t, mergedCert)
 
 	var mergedTxs []cbor.RawMessage
-	_, err = cbor.Decode(mergedBody[1], &mergedTxs)
+	_, err = cbor.Decode(mergedBody[0], &mergedTxs)
 	require.NoError(t, err)
 	require.Len(t, mergedTxs, 2)
-	require.Equal(t, []byte(ebTxs[0]), []byte(mergedTxs[0]))
-	require.Equal(t, []byte(ebTxs[1]), []byte(mergedTxs[1]))
+	for idx := range ebTxs {
+		var inputFields, blockFields []cbor.RawMessage
+		_, err = cbor.Decode(ebTxs[idx], &inputFields)
+		require.NoError(t, err)
+		_, err = cbor.Decode(mergedTxs[idx], &blockFields)
+		require.NoError(t, err)
+		require.Len(t, inputFields, 3)
+		require.Len(t, blockFields, 4)
+		require.Equal(t, inputFields, blockFields[:3])
+		require.Equal(t, cbor.RawMessage{0xf5}, blockFields[3])
+	}
 
 	// The merged block deliberately has a stale body hash: the preserved header
 	// still commits to the original empty body, so a full parse (which verifies
@@ -1333,7 +1346,7 @@ func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
 
 	ext := []cbor.RawMessage{mustCbor(t, true), mustCbor(t, nil)}
 	body := testDijkstraCertRBBodyElems(t)
-	body[1] = mustCbor(t, []cbor.RawMessage{testDijkstraTx(t, 9)}) // non-empty
+	body[0] = mustCbor(t, []cbor.RawMessage{testDijkstraTx(t, 9)}) // non-empty
 	block := buildDijkstraLeiosBlockRaw(
 		t, 101, make([]byte, lcommon.Blake2b256Size), ext, body,
 	)

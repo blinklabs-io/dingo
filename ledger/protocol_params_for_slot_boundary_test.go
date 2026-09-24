@@ -263,11 +263,7 @@ func newMultiEraForecastCfg(
 	forkEpoch uint64,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
-		"blockVersionData": { "slotDuration": "20000" },
-		"protocolConsts": { "k": 1 }
-	}`)))
+	cfg := newTestCardanoNodeConfig(t, 1)
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.4,
 		"securityParam": 1,
@@ -403,7 +399,7 @@ func newShelleyUpdateQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
@@ -430,7 +426,7 @@ func newAllegraAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
@@ -513,7 +509,7 @@ func newAlonzoBabbageAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42

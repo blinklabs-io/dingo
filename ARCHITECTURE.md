@@ -3280,7 +3280,11 @@ The `4k/f` check passes rather than rejects when `epochLength` is zero or negati
 - Slot leader eligibility checking
 
 Byron main-block validation derives its configured genesis issuers and initial
-heavy delegations from the Byron genesis file. Stateless validation verifies
+heavy delegations from the Byron genesis file. The optional
+`PBftSignatureThreshold` in the Cardano node configuration is preserved as an
+exact rational and applied to the rolling issuer window; absence selects the
+reference default of 0.22. Both live state construction and canonical-chain
+rebuild use that same configured threshold. Stateless validation verifies
 the protocol magic, genesis issuer, proxy certificate, exact header signature,
 and current-slot bound. Ordered ledger application then ticks the active
 delegation view, validates the signing delegate, and charges the resolved

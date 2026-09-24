@@ -1184,8 +1184,10 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	addrs := make([]lcommon.Address, patternCount)
 	for i := range addrs {
-		payload := make([]byte, 4)
-		binary.BigEndian.PutUint32(payload, uint32(i)+1)
+		path := make([]byte, 4)
+		binary.BigEndian.PutUint32(path, uint32(i)+1)
+		payload, err := cbor.Encode(path)
+		require.NoError(t, err)
 		addr, err := lcommon.NewByronAddressFromParts(
 			0,
 			zeroPayment,

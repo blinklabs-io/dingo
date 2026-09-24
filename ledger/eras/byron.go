@@ -51,6 +51,12 @@ func EpochLengthByron(
 	if byronGenesis == nil {
 		return 0, 0, errors.New("unable to get byron genesis")
 	}
+	return epochLengthByronGenesis(byronGenesis)
+}
+
+func epochLengthByronGenesis(
+	byronGenesis *byron.ByronGenesis,
+) (uint, uint, error) {
 	if byronGenesis.BlockVersionData.SlotDuration < 0 {
 		return 0, 0, fmt.Errorf(
 			"byron genesis: slotDuration must not be negative, got %d",
@@ -550,16 +556,16 @@ func byronValidateWitnesses(
 	ls lcommon.LedgerState,
 	_ lcommon.ProtocolParameters,
 ) error {
-	// Verify vkey witness signatures
-	if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
-		return err
+	// ByronTransaction's upstream verifier requires protocol magic to be
+	// injected from a decoded block header. Here, Dingo validates its raw Byron
+	// witnesses below using the active ledger state's protocol magic instead.
+	if _, ok := tx.(*byron.ByronTransaction); !ok {
+		if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
+			return err
+		}
 	}
-	// Byron redeem witnesses are constructor 2 values whose fields are
-	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
-	// values but do not expose them through TransactionWitnessSet, and even
-	// a current release's VkeyWitness has no room for the chain-code half
-	// of a constructor-0 witness that byronAddressRootForParts needs, so
-	// this file must still decode Twit itself.
+	// Decode raw Byron witness values because bootstrap verification needs the
+	// chain-code half of a constructor-0 witness, which VkeyWitness omits.
 	var redeemWitnesses []lcommon.VkeyWitness
 	var bootstrapWitnesses []byronBootstrapWitness
 	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
@@ -576,7 +582,6 @@ func byronValidateWitnesses(
 			)
 		}
 		if len(redeemWitnesses) > 0 || len(bootstrapWitnesses) > 0 {
-			txHash := tx.Hash()
 			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
 			if !ok {
 				return errors.New(
@@ -587,55 +592,17 @@ func byronValidateWitnesses(
 			if err != nil {
 				return fmt.Errorf("get Byron protocol magic: %w", err)
 			}
-			var redeemMessage []byte
-			if len(redeemWitnesses) > 0 {
-				redeemMessage, err = byronSignatureMessage(
-					0x02,
-					protocolMagic,
-					txHash,
+			byronTx, ok := tx.(*byron.ByronTransaction)
+			if !ok {
+				return errors.New("unexpected Byron transaction implementation")
+			}
+			if err := byronTx.ValidateVKeyWitnesses(protocolMagic); err != nil {
+				return lcommon.NewValidationError(
+					lcommon.ValidationErrorTypeTransaction,
+					"invalid Byron vkey witness",
+					map[string]any{"err": err.Error()},
+					err,
 				)
-				if err != nil {
-					return err
-				}
-			}
-			var bootstrapMessage []byte
-			if len(bootstrapWitnesses) > 0 {
-				bootstrapMessage, err = byronSignatureMessage(
-					0x01,
-					protocolMagic,
-					txHash,
-				)
-				if err != nil {
-					return err
-				}
-			}
-			for _, witness := range redeemWitnesses {
-				if err := lcommon.VerifyVKeySignature(
-					witness.Vkey,
-					witness.Signature,
-					redeemMessage,
-				); err != nil {
-					return lcommon.NewValidationError(
-						lcommon.ValidationErrorTypeTransaction,
-						"invalid vkey signature",
-						map[string]any{"err": err.Error()},
-						err,
-					)
-				}
-			}
-			for _, witness := range bootstrapWitnesses {
-				if err := lcommon.VerifyVKeySignature(
-					witness.PublicKey,
-					witness.Signature,
-					bootstrapMessage,
-				); err != nil {
-					return lcommon.NewValidationError(
-						lcommon.ValidationErrorTypeTransaction,
-						"invalid bootstrap signature",
-						map[string]any{"err": err.Error()},
-						err,
-					)
-				}
 			}
 		}
 	}
@@ -666,11 +633,12 @@ func byronSignatureMessage(
 	if err != nil {
 		return nil, fmt.Errorf("encode Byron protocol magic: %w", err)
 	}
-	// Byron signatures use a domain tag, the CBOR-encoded protocol magic, and
-	// the CBOR bytestring encoding of TxSigData (the transaction body hash).
+	txPayload, err := cbor.Encode(txHash[:])
+	if err != nil {
+		return nil, fmt.Errorf("encode Byron transaction signing payload: %w", err)
+	}
 	message := append([]byte{tag}, magicCbor...)
-	message = append(message, 0x58, 0x20)
-	return append(message, txHash[:]...), nil
+	return append(message, txPayload...), nil
 }
 
 type byronBootstrapWitness struct {

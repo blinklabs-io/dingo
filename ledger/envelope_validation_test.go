@@ -369,7 +369,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
 }
 
-func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
+func TestValidateInboundBlockEnvelopeAcceptsSubstitutedByronEbbBody(t *testing.T) {
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -391,7 +391,6 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 	tampered, err := gledger.NewBlockFromCbor(
 		uint(gledger.BlockTypeByronEbb),
 		tamperedCbor,
-		lcommon.VerifyConfig{SkipBodyHashValidation: true},
 	)
 	require.NoError(t, err)
 	require.Equal(t, genuine.Hash(), tampered.Hash())
@@ -403,8 +402,83 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 		config,
 		envelopeParent{origin: true},
 	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+	require.NoError(t, err)
+
+	shortProof := substituteByronEbbProof(t, genuine.Cbor(), make([]byte, 31))
+	shortProofBlock, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		shortProof,
+	)
+	require.NoError(t, err)
+	parsedShortProof, ok := shortProofBlock.(*byron.ByronEpochBoundaryBlock)
+	require.True(t, ok)
+	decodedProof, ok := parsedShortProof.BlockHeader.BodyProof.([]byte)
+	require.True(t, ok)
+	require.Len(t, decodedProof, 31)
+	require.NoError(t, validateInboundBlockEnvelope(
+		shortProofBlock,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	))
+}
+
+func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
+	fixture := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	for _, tc := range []struct {
+		name         string
+		blockSize    int
+		maxBlockSize int
+		maxHeader    int
+		wantErr      string
+	}{
+		{
+			name:         "accept at limit below configured max block size",
+			blockSize:    2_000_000,
+			maxBlockSize: 1_500_000,
+			maxHeader:    1,
+		},
+		{
+			name:         "accept at limit above configured max block size",
+			blockSize:    2_000_000,
+			maxBlockSize: 2_500_000,
+			maxHeader:    1,
+		},
+		{
+			name:         "reject one byte over fixed limit despite configured max",
+			blockSize:    2_000_001,
+			maxBlockSize: 2_500_000,
+			maxHeader:    100_000,
+			wantErr:      "exceeds fixed limit 2000000",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blockCbor := byronEbbBlockWithSize(t, fixture.Cbor(), tc.blockSize)
+			block, err := gledger.NewBlockFromCbor(
+				uint(gledger.BlockTypeByronEbb),
+				blockCbor,
+			)
+			require.NoError(t, err)
+			require.Len(t, block.Cbor(), tc.blockSize)
+
+			config := newByronEnvelopeNodeConfig(t, tc.maxBlockSize, tc.maxHeader)
+			err = validateInboundBlockEnvelope(
+				block,
+				nil,
+				config,
+				envelopeParent{origin: true},
+			)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
 }
 
 func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
@@ -724,14 +798,36 @@ func newByronEnvelopeNodeConfig(
 	t.Helper()
 	config := &cardano.CardanoNodeConfig{}
 	genesis := fmt.Sprintf(`{
+		"avvmDistr": {},
 		"blockVersionData": {
+			"heavyDelThd": "0",
 			"maxBlockSize": "%d",
-			"maxHeaderSize": "%d"
-		}
+			"maxHeaderSize": "%d",
+			"maxProposalSize": "0",
+			"maxTxSize": "0",
+			"mpcThd": "0",
+			"scriptVersion": 0,
+			"slotDuration": "20000",
+			"softforkRule": {
+				"initThd": "0",
+				"minThd": "0",
+				"thdDecrement": "0"
+			},
+			"txFeePolicy": {"multiplier": "0", "summand": "0"},
+			"unlockStakeEpoch": "0",
+			"updateImplicit": "0",
+			"updateProposalThd": "0",
+			"updateVoteThd": "0"
+		},
+		"protocolConsts": {"k": 2160, "protocolMagic": 42},
+		"startTime": 0,
+		"bootStakeholders": {},
+		"heavyDelegation": {},
+		"nonAvvmBalances": {}
 	}`, maxBlockSize, maxHeaderSize)
 	require.NoError(
 		t,
-		config.LoadByronGenesisFromReader(strings.NewReader(genesis)),
+		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),
 	)
 	return config
 }
@@ -771,7 +867,7 @@ func substituteByronMainTxPayload(t *testing.T, blockCbor []byte) []byte {
 	_, err = cbor.Decode(block[1], &body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(body), 4)
-	emptyTxPayload, err := cbor.Encode([]any{})
+	emptyTxPayload, err := cbor.Encode(cbor.IndefLengthList{})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(body[0]), emptyTxPayload)
 	body[0] = emptyTxPayload
@@ -788,13 +884,69 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 	_, err := cbor.Decode(blockCbor, &block)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(block), 2)
-	emptyBody, err := cbor.Encode([]any{})
+	emptyBody, err := cbor.Encode(cbor.IndefLengthList{[]byte{0}})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(block[1]), emptyBody)
 	block[1] = emptyBody
 	tampered, err := cbor.Encode(block)
 	require.NoError(t, err)
 	return tampered
+}
+
+func substituteByronEbbProof(t *testing.T, blockCbor, proof []byte) []byte {
+	t.Helper()
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(blockCbor, &block)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(block), 2)
+	var header []cbor.RawMessage
+	_, err = cbor.Decode(block[0], &header)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(header), 3)
+	header[2], err = cbor.Encode(proof)
+	require.NoError(t, err)
+	block[0], err = cbor.Encode(header)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(block)
+	require.NoError(t, err)
+	return encoded
+}
+
+func byronEbbBlockWithSize(
+	t *testing.T,
+	blockCbor []byte,
+	targetSize int,
+) []byte {
+	t.Helper()
+	var fields []cbor.RawMessage
+	_, err := cbor.Decode(blockCbor, &fields)
+	require.NoError(t, err)
+	require.Len(t, fields, 3)
+
+	low, high := 0, targetSize
+	for low <= high {
+		bodySize := low + (high-low)/2
+		body, err := cbor.Encode(cbor.IndefLengthList{
+			make([]byte, bodySize),
+		})
+		require.NoError(t, err)
+		encoded, err := cbor.Encode([]cbor.RawMessage{
+			fields[0],
+			body,
+			fields[2],
+		})
+		require.NoError(t, err)
+		switch {
+		case len(encoded) == targetSize:
+			return encoded
+		case len(encoded) < targetSize:
+			low = bodySize + 1
+		default:
+			high = bodySize - 1
+		}
+	}
+	t.Fatalf("could not encode Byron EBB at %d bytes", targetSize)
+	return nil
 }
 
 // TestValidateBlockOrderPinsTheEqualSlotAlternativeShape pins, from the

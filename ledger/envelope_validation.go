@@ -91,10 +91,8 @@ func validateInboundBlockEnvelope(
 		return err
 	}
 	if block.Era().Id == byron.EraIdByron {
-		// Byron does not carry the Shelley-style body-size field, but its
-		// header carries a separate proof over every body payload. Verify it
-		// before admitting the block so a genuine header cannot be paired with
-		// a substituted body.
+		// Main-block proofs bind the body. EBB proofs are decoded but discarded
+		// by the reference transition, so they do not bind the body.
 		// Decoded inbound blocks preserve their complete CBOR. Synthetic
 		// blocks used by callers that do not carry wire bytes cannot provide a
 		// body proof to verify and are handled by the normal structural path.
@@ -107,9 +105,6 @@ func validateInboundBlockEnvelope(
 				return fmt.Errorf("validate Byron main block body proof: %w", err)
 			}
 		case *byron.ByronEpochBoundaryBlock:
-			if err := byronBlock.ValidateBodyProof(); err != nil {
-				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
-			}
 		default:
 			return nil
 		}
@@ -306,6 +301,17 @@ func validateByronBlockSizes(
 	block gledger.Block,
 	config *cardano.CardanoNodeConfig,
 ) error {
+	if _, isEbb := block.(*byron.ByronEpochBoundaryBlock); isEbb {
+		const maxEbbSize = 2_000_000
+		if size := len(block.Cbor()); size > maxEbbSize {
+			return fmt.Errorf(
+				"byron epoch boundary block size %d exceeds fixed limit %d",
+				size,
+				maxEbbSize,
+			)
+		}
+		return nil
+	}
 	if config == nil || config.ByronGenesis() == nil {
 		return errors.New("byron genesis is required for block size validation")
 	}

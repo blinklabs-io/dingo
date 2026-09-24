@@ -221,7 +221,7 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
-		return models.DecodeConwayBlock(raw)
+		return models.DecodeConwayPeerBlock(raw)
 	}
 	return gledger.NewBlockFromCbor(blockType, raw)
 }

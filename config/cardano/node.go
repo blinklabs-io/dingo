@@ -19,6 +19,7 @@ import (
 	"embed"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path"
 	"path/filepath"
@@ -59,6 +60,9 @@ type CardanoNodeConfig struct {
 	ShelleyGenesisHash                         string `yaml:"ShelleyGenesisHash"`
 	CheckpointsFile                            string `yaml:"CheckpointsFile"`
 	CheckpointsFileHash                        string `yaml:"CheckpointsFileHash"`
+	// PBftSignatureThreshold is preserved as a decimal scalar so Byron's
+	// configured PBFT limit can be converted to an exact rational.
+	PBftSignatureThreshold *CardanoNodeDecimal `yaml:"PBftSignatureThreshold"`
 
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
@@ -90,6 +94,20 @@ type CardanoNodeConfig struct {
 	PeerSharing *bool `yaml:"PeerSharing"`
 }
 
+// CardanoNodeDecimal preserves the source spelling of a numeric node-config
+// value so rational protocol parameters do not pass through float64.
+type CardanoNodeDecimal string
+
+// UnmarshalYAML accepts numeric scalars only and retains their exact text.
+func (d *CardanoNodeDecimal) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode ||
+		(node.Tag != "!!float" && node.Tag != "!!int") {
+		return fmt.Errorf("expected a numeric scalar, got %s", node.Tag)
+	}
+	*d = CardanoNodeDecimal(node.Value)
+	return nil
+}
+
 const (
 	defaultMithrilGenesisVerificationKeyFile          = "genesis.vkey"
 	defaultMithrilGenesisAncillaryVerificationKeyFile = "ancillary.vkey"
@@ -101,7 +119,38 @@ func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
 	if err := dec.Decode(&ret); err != nil {
 		return nil, err
 	}
+	if _, _, _, err := ret.PBFTSignatureThresholdRatio(); err != nil {
+		return nil, fmt.Errorf("invalid PBftSignatureThreshold: %w", err)
+	}
 	return &ret, nil
+}
+
+// PBFTSignatureThresholdRatio returns the optional Byron PBFT threshold as
+// an exact numerator/denominator pair. A false configured value means that
+// cardano-node's default applies.
+func (c *CardanoNodeConfig) PBFTSignatureThresholdRatio() (
+	numerator uint64,
+	denominator uint64,
+	configured bool,
+	err error,
+) {
+	if c == nil || c.PBftSignatureThreshold == nil {
+		return 0, 0, false, nil
+	}
+	ratio, ok := new(big.Rat).SetString(string(*c.PBftSignatureThreshold))
+	if !ok || ratio.Sign() < 0 {
+		return 0, 0, true, fmt.Errorf(
+			"threshold %q is not a non-negative rational number",
+			*c.PBftSignatureThreshold,
+		)
+	}
+	if !ratio.Num().IsUint64() || !ratio.Denom().IsUint64() {
+		return 0, 0, true, fmt.Errorf(
+			"threshold %q exceeds the supported rational range",
+			*c.PBftSignatureThreshold,
+		)
+	}
+	return ratio.Num().Uint64(), ratio.Denom().Uint64(), true, nil
 }
 
 func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {

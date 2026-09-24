@@ -43,29 +43,15 @@ func musashiDijkstraBlock(t *testing.T) []byte {
 	return raw
 }
 
-// TestDecodeConwayBlockAcceptsDijkstraLayout is the regression for #3761: a
-// from-genesis Musashi sync could not advance past origin because every
-// BlockFetch block failed to decode.
-//
-// The respun chain carries the Dijkstra two-component block layout while still
-// tagging blocks as Conway (NtN block type 7) on the wire, so neither the
-// strict Conway decoder nor the five-component Leios-extended reconstruct
-// recognized them, and the strict Conway error surfaced:
-//
-//	cbor: cannot unmarshal array into Go value of type conway.tmpConwayBlock
-//	(cannot decode CBOR array to struct with different number of elements)
-func TestDecodeConwayBlockAcceptsDijkstraLayout(t *testing.T) {
+// TestDecodeConwayBlockRejectsLegacyDijkstraLayout ensures the obsolete
+// four-component Dijkstra body cannot be accepted through Conway storage or
+// replay decoding.
+func TestDecodeConwayBlockRejectsLegacyDijkstraLayout(t *testing.T) {
 	raw := musashiDijkstraBlock(t)
 
 	block, err := models.DecodeConwayBlock(raw)
-	require.NoError(
-		t,
-		err,
-		"a Musashi block in the Dijkstra layout must decode; without this a "+
-			"from-genesis sync never advances past origin",
-	)
-	require.NotNil(t, block)
-	require.Equal(t, uint64(566037), block.SlotNumber())
+	require.Error(t, err)
+	require.Nil(t, block)
 }
 
 // TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
@@ -102,10 +88,8 @@ func TestMusashiFixtureHasDijkstraLayout(t *testing.T) {
 	)
 }
 
-// TestDecodeConwayBlockRejectsUnrecognizedBlock proves the added fallback did
-// not turn the decoder into one that accepts anything: input matching none of
-// the three shapes still fails, and still reports the strict Conway error,
-// which is the meaningful one for real Conway networks.
+// TestDecodeConwayBlockRejectsUnrecognizedBlock ensures unrecognized input
+// still reports the strict Conway decode error.
 func TestDecodeConwayBlockRejectsUnrecognizedBlock(t *testing.T) {
 	notABlock, err := cbor.Encode([]any{1, 2, 3})
 	require.NoError(t, err)
@@ -116,15 +100,8 @@ func TestDecodeConwayBlockRejectsUnrecognizedBlock(t *testing.T) {
 	require.Contains(t, err.Error(), "decode Conway block error")
 }
 
-// TestDecodeConwayBlockRejectsTwoComponentNonDijkstra proves the Dijkstra
-// fallback is gated on the Leios-extended signature rather than on "any CBOR
-// array of two things".
-//
-// DecodeConwayBlock is reached from the network-independent storage path
-// (models.Block.Decode) as well as from the Musashi block-fetch path, so an
-// ungated fallback would let a corrupt or foreign stored Conway-tagged block
-// be silently reinterpreted as Dijkstra instead of returning the strict-decode
-// error.
+// TestDecodeConwayBlockRejectsTwoComponentNonDijkstra ensures a two-component
+// array is not accepted as a Conway block.
 func TestDecodeConwayBlockRejectsTwoComponentNonDijkstra(t *testing.T) {
 	twoThings, err := cbor.Encode([]any{1, 2})
 	require.NoError(t, err)
@@ -141,9 +118,8 @@ func TestDecodeConwayBlockRejectsTwoComponentNonDijkstra(t *testing.T) {
 	)
 }
 
-// TestDecodeConwayBlockRejectsUnextendedDijkstraShape proves the
-// gate checks the header body width too: a two-component block whose header
-// body carries only the ten standard Babbage fields is not the Musashi shape.
+// TestDecodeConwayBlockRejectsUnextendedDijkstraShape ensures a legacy
+// two-component block is rejected even with a standard-width header.
 func TestDecodeConwayBlockRejectsUnextendedDijkstraShape(t *testing.T) {
 	raw := musashiDijkstraBlock(t)
 

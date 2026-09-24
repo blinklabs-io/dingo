@@ -86,6 +86,12 @@ func (p *DingoStateProvider) NetworkId() uint {
 	return 0
 }
 
+// EpochForSlot maps conformance slots to their epoch using the harness's
+// fixed slots-per-epoch value.
+func (p *DingoStateProvider) EpochForSlot(slot uint64) (uint64, error) {
+	return slot / conformanceSlotsPerEpoch, nil
+}
+
 // CostModels returns which Plutus language versions have cost models
 // defined. CostModel values are empty markers (struct{} upstream).
 func (p *DingoStateProvider) CostModels() map[common.PlutusLanguage]common.CostModel {

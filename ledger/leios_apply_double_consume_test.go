@@ -39,6 +39,7 @@ func leiosApplyTestProducerTx(
 	t.Helper()
 	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
 	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: []any{},
 		1: []any{
 			map[uint]any{0: addr, 1: uint64(1_000_000)},
 			map[uint]any{0: addr, 1: uint64(2_000_000)},

@@ -1588,19 +1588,18 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 // block's transactions inlined into the ranking block's (empty) transaction
 // segment, matching the node-to-client "merged" block the prototype serves for
 // a certifying ranking block. The Dijkstra block is [header, block_body] with
-// block_body = [invalid_transactions, transactions, leios_certificate,
-// peras_certificate]. The transactions element (index 1) is replaced and the
-// leios_certificate element (index 2) is cleared, because CIP-0164 permits a
-// certificate or transactions and not both. The header, peras, and
-// invalid-transactions elements are preserved verbatim so the served block's
+// block_body = [transactions, leios_certificate, peras_certificate]. The
+// transactions element (index 0) is replaced and the leios_certificate element
+// (index 1) is cleared, because CIP-0164 permits a certificate or transactions
+// and not both. The header and peras element are preserved verbatim so the served block's
 // hash (a hash of the header) is unchanged; the header's block_body_hash
 // intentionally no longer matches, which is acceptable over node-to-client
 // because local clients do not re-verify the body hash.
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
-// four, and the existing transactions segment must be empty. ebTxsRaw must be
-// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
+// three, and the existing transactions segment must be empty. ebTxsRaw contains
+// Dijkstra mempool transactions ([transaction_body, transaction_witness_set,
 // auxiliary_data/nil]) in endorser-block order.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
@@ -1620,14 +1619,14 @@ func spliceEndorserTxsIntoDijkstraBlock(
 	if _, err := cbor.Decode(top[1], &body); err != nil {
 		return nil, fmt.Errorf("decode dijkstra block body: %w", err)
 	}
-	if len(body) != 4 {
+	if len(body) != 3 {
 		return nil, fmt.Errorf(
-			"dijkstra block body has %d elements, expected 4",
+			"dijkstra block body has %d elements, expected 3",
 			len(body),
 		)
 	}
 	var existingTxs []cbor.RawMessage
-	if _, err := cbor.Decode(body[1], &existingTxs); err != nil {
+	if _, err := cbor.Decode(body[0], &existingTxs); err != nil {
 		return nil, fmt.Errorf("decode dijkstra transactions: %w", err)
 	}
 	if len(existingTxs) != 0 {
@@ -1636,7 +1635,28 @@ func spliceEndorserTxsIntoDijkstraBlock(
 			len(existingTxs),
 		)
 	}
-	newTxs, err := cbor.Encode(ebTxsRaw)
+	blockTxs := make([]cbor.RawMessage, len(ebTxsRaw))
+	for idx, rawTx := range ebTxsRaw {
+		var fields []cbor.RawMessage
+		if _, err := cbor.Decode(rawTx, &fields); err != nil {
+			return nil, fmt.Errorf("decode endorser transaction %d: %w", idx, err)
+		}
+		if len(fields) != 3 {
+			return nil, fmt.Errorf(
+				"endorser transaction %d has %d elements, expected 3",
+				idx,
+				len(fields),
+			)
+		}
+		encoded, err := cbor.Encode([]cbor.RawMessage{
+			fields[0], fields[1], fields[2], cbor.RawMessage{0xf5},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("encode endorser transaction %d: %w", idx, err)
+		}
+		blockTxs[idx] = encoded
+	}
+	newTxs, err := cbor.Encode(blockTxs)
 	if err != nil {
 		return nil, fmt.Errorf("encode endorser transactions: %w", err)
 	}
@@ -1651,7 +1671,7 @@ func spliceEndorserTxsIntoDijkstraBlock(
 		return nil, fmt.Errorf("encode cleared leios certificate: %w", err)
 	}
 	newBody, err := cbor.Encode([]cbor.RawMessage{
-		body[0], cbor.RawMessage(newTxs), cbor.RawMessage(nilCert), body[3],
+		cbor.RawMessage(newTxs), cbor.RawMessage(nilCert), body[2],
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode merged block body: %w", err)
