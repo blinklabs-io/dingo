@@ -1568,16 +1568,17 @@ func TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch(t *testing.T) {
 	var fatalErr error
 	var mu sync.Mutex
 	o, err := NewObserver(ObserverConfig{
-		BaseURL:            srv.URL,
-		AllowInsecureHTTP:  true,
-		Network:            "preview",
-		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
-		Source:             source,
-		Strict:             true,
-		AccountsEnabled:    true,
-		Logger:             slog.New(slog.DiscardHandler),
-		FetchRetryAttempts: 3,
-		FetchRetryDelay:    5 * time.Millisecond,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Source:                source,
+		Strict:                true,
+		AccountsEnabled:       true,
+		Logger:                slog.New(slog.DiscardHandler),
+		FetchRetryAttempts:    3,
+		FetchRetryDelay:       5 * time.Millisecond,
 		FatalFunc: func(err error) {
 			fatalCount.Add(1)
 			mu.Lock()
@@ -1752,16 +1753,17 @@ func TestObserverFetchesAggregateReferenceOncePerEpochAcrossQueues(
 
 	var results atomic.Int32
 	o, err := NewObserver(ObserverConfig{
-		BaseURL:            srv.URL,
-		AllowInsecureHTTP:  true,
-		Network:            "preview",
-		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
-		Source:             source,
-		AccountsEnabled:    true,
-		Logger:             slog.New(slog.DiscardHandler),
-		FetchRetryAttempts: 3,
-		FetchRetryDelay:    5 * time.Millisecond,
-		OnResult:           func(*EpochCompareResult) { results.Add(1) },
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Source:                source,
+		AccountsEnabled:       true,
+		Logger:                slog.New(slog.DiscardHandler),
+		FetchRetryAttempts:    3,
+		FetchRetryDelay:       5 * time.Millisecond,
+		OnResult:              func(*EpochCompareResult) { results.Add(1) },
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = o.Stop(context.Background()) })

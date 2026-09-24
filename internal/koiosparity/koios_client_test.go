@@ -79,10 +79,13 @@ func TestPostRejectsOversizedResponseAsPermanentNeverRetried(t *testing.T) {
 // limiter is disabled (limit 0) so retries are not slowed by the sliding window.
 func newTestKoiosClient(baseURL string) *KoiosClient {
 	return &KoiosClient{
-		baseURL: baseURL,
-		apiKey:  "testkey",
-		http:    &http.Client{Timeout: 5 * time.Second},
-		limiter: newBurstLimiter(0, koiosBurstWindow),
+		baseURL:                baseURL,
+		apiKey:                 "testkey",
+		http:                   &http.Client{Timeout: 5 * time.Second},
+		limiter:                newBurstLimiter(0, koiosBurstWindow),
+		koios408MaxRetries:     koios408MaxRetriesDefault,
+		koios408InitialBackoff: koios408InitialBackoffDefault,
+		koios408MaxBackoff:     koios408MaxBackoffDefault,
 	}
 }
 
@@ -164,6 +167,28 @@ func TestKoiosRestrictedDialerRejectsSpecialUseIPv6DNSAnswer(t *testing.T) {
 			assert.False(t, dialed.Load())
 		})
 	}
+}
+
+func TestNewKoiosClientTransportEnforcesResolvedAddressPolicy(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	blockedClient, err := NewKoiosClient("preview", "", "", false, false)
+	require.NoError(t, err)
+	blockedClient.baseURL = srv.URL
+	_, err = blockedClient.http.Get(srv.URL)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "private or special-use address")
+
+	allowedClient, err := NewKoiosClient("preview", "", "", false, true)
+	require.NoError(t, err)
+	allowedClient.baseURL = srv.URL
+	resp, err := allowedClient.http.Get(srv.URL)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 }
 
 func TestKoiosRestrictedDialerDialsValidatedPublicIP(t *testing.T) {
@@ -951,4 +976,204 @@ func TestNewKoiosTransportDoesNotConsultNonHTTPDefaultTransport(
 			transport.ExpectContinueTimeout,
 		)
 	})
+}
+
+func newTestKoiosClientFast408(baseURL string, maxRetries int) *KoiosClient {
+	k := newTestKoiosClient(baseURL)
+	k.koios408MaxRetries = maxRetries
+	k.koios408InitialBackoff = time.Millisecond
+	k.koios408MaxBackoff = 5 * time.Millisecond
+	return k
+}
+
+func TestGetRetries408ThenSucceeds(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) <= 2 {
+				w.WriteHeader(http.StatusRequestTimeout)
+				_, _ = w.Write(
+					[]byte(
+						"<html><body><h1>408 Request Time-out</h1></body></html>",
+					),
+				)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 5)
+	resp, err := k.get(context.Background(), "/tip", -1, -1)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 3, attempts.Load())
+}
+
+func TestGetFailsAfterExhausting408RetriesReturnsPermanent(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusRequestTimeout)
+			_, _ = w.Write(
+				[]byte(
+					"<html><body><h1>408 Request Time-out</h1></body></html>",
+				),
+			)
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 4)
+	_, err := k.get(context.Background(), "/tip", -1, -1)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 4, attempts.Load())
+}
+
+func TestGet408RetriesDoNotConsumeThe5xxBudget(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch attempts.Add(1) {
+			case 1, 2:
+				w.WriteHeader(http.StatusRequestTimeout)
+			case 3:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 16)
+	resp, err := k.get(context.Background(), "/tip", -1, -1)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 4, attempts.Load())
+}
+
+func TestGetDoesNotRetryOn404(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.get(context.Background(), "/tip", -1, -1)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 1, attempts.Load(), "a 404 must not be retried")
+}
+
+func TestPostRetries408ThenSucceeds(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodPost, r.Method)
+			if attempts.Add(1) <= 2 {
+				w.WriteHeader(http.StatusRequestTimeout)
+				_, _ = w.Write(
+					[]byte(
+						"<html><body><h1>408 Request Time-out</h1></body></html>",
+					),
+				)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"stake_address":"stake1x"}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 5)
+	resp, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{
+			"_stake_addresses": []string{"stake1x"},
+			"_epoch_no":        100,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 3, attempts.Load())
+}
+
+func TestPostFailsAfterExhausting408RetriesReturnsPermanent(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusRequestTimeout)
+			_, _ = w.Write(
+				[]byte(
+					"<html><body><h1>408 Request Time-out</h1></body></html>",
+				),
+			)
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 4)
+	_, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{},
+	)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 4, attempts.Load())
+}
+
+func TestPost408RetriesDoNotConsumeThe5xxBudget(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch attempts.Add(1) {
+			case 1, 2:
+				w.WriteHeader(http.StatusRequestTimeout)
+			case 3:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"stake_address":"stake1x"}]`))
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 16)
+	resp, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{"_stake_addresses": []string{"stake1x"}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 4, attempts.Load())
 }
