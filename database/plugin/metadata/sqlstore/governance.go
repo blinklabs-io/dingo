@@ -463,7 +463,7 @@ func (s *Store) SetGovernanceVote(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			var previousVote sql.NullInt64
+			var previousVote sql.NullByte
 			var previousAnchorURL sql.NullString
 			var previousAnchorHash []byte
 			previousErr := db.QueryRowContext(ctx, `
@@ -518,7 +518,7 @@ RETURNING id`,
 			// at the target slot instead of losing it (dingo#4463).
 			unchanged := previousErr == nil &&
 				previousVote.Valid &&
-				uint8(previousVote.Int64) == vote.Vote &&
+				previousVote.Byte == vote.Vote &&
 				previousAnchorURL.String == vote.AnchorURL &&
 				bytes.Equal(previousAnchorHash, vote.AnchorHash)
 			if unchanged {
