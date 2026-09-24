@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -117,11 +118,35 @@ func newDijkstraGuardingValidityOutcomeTx(
 	}
 }
 
-func dijkstraValidityOutcomePParams() *gdijkstra.DijkstraProtocolParameters {
+// dijkstraValidityOutcomePParams supplies real Preview epoch-672 cost models.
+// plutigo costs every parameter missing from a supplied list at
+// math.MaxInt64, as plutus-ledger-api does, so an empty CostModels map makes
+// the first CEK machine step exhaust any budget. PlutusV4 reuses the PlutusV3
+// list: its machine-step parameters are costed, and the builtins it leaves at
+// MaxInt64 are never called by these scripts.
+func dijkstraValidityOutcomePParams(
+	t *testing.T,
+) *gdijkstra.DijkstraProtocolParameters {
+	t.Helper()
+	var costModels struct {
+		PlutusV1 []int64 `json:"PlutusV1"`
+		PlutusV2 []int64 `json:"PlutusV2"`
+		PlutusV3 []int64 `json:"PlutusV3"`
+	}
+	require.NoError(t, json.Unmarshal(
+		readErasFixture(t, previewConwayCostModels),
+		&costModels,
+	))
 	return &gdijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+			CostModels: map[uint][]int64{
+				0: costModels.PlutusV1,
+				1: costModels.PlutusV2,
+				2: costModels.PlutusV3,
+				3: costModels.PlutusV3,
 			},
 		},
 	}
@@ -203,7 +228,7 @@ func TestValidateTxDijkstraRequiresDeclaredValidityToMatchGuardingExecution(
 						tx,
 						0,
 						newMockLedgerState(),
-						dijkstraValidityOutcomePParams(),
+						dijkstraValidityOutcomePParams(t),
 					)
 					outcome.assert(t, err)
 				})
@@ -241,7 +266,7 @@ func TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure(
 		tx,
 		0,
 		newMockLedgerState(),
-		dijkstraValidityOutcomePParams(),
+		dijkstraValidityOutcomePParams(t),
 	)
 	require.ErrorIs(t, err, phase1Sentinel)
 }
@@ -320,7 +345,7 @@ func TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers(
 			newTx(),
 			0,
 			ls,
-			dijkstraValidityOutcomePParams(),
+			dijkstraValidityOutcomePParams(t),
 		)
 		var missing lcommon.MissingRedeemerForScriptError
 		require.ErrorAs(t, err, &missing)
@@ -344,7 +369,7 @@ func TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers(
 			tx,
 			0,
 			ls,
-			dijkstraValidityOutcomePParams(),
+			dijkstraValidityOutcomePParams(t),
 		))
 	})
 }

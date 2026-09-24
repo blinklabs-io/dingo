@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func blockStageSampleCount(
 }
 
 // TestObserveBlockStageRecordsUnderEachLabel is the regression test for the
-// per-block stage histogram wiring: each of the three known stages must
+// per-block stage histogram wiring: each of the four known stages must
 // record its own duration sample under its own label, so a dashboard can
 // break down where per-block ledger time goes.
 func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
@@ -55,6 +56,7 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	m.observeBlockStage(blockStageValidate, 20*time.Millisecond)
 	m.observeBlockStage(blockStageApply, 30*time.Millisecond)
 	m.observeBlockStage(blockStageValidate, 5*time.Millisecond)
+	m.observeBlockStage(blockStageEpochRollover, 40*time.Second)
 
 	count, _ := blockStageSampleCount(t, &m, blockStageHeaderVerify)
 	assert.Equal(t, uint64(1), count)
@@ -63,20 +65,22 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	assert.InDelta(t, 0.025, sum, 0.0001)
 	count, _ = blockStageSampleCount(t, &m, blockStageApply)
 	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStageEpochRollover)
+	assert.Equal(t, uint64(1), count)
 
-	// Three distinct label series, no more.
+	// Four distinct label series, no more.
 	assert.Equal(
 		t,
-		3,
+		4,
 		testutil.CollectAndCount(m.blockStageDuration),
 	)
 }
 
 // TestObserveBlockStageIgnoresUnknownStage confirms an unrecognized stage
 // label is silently dropped rather than panicking or creating a stray label
-// series. init pre-materializes the three known stage series, so this
+// series. init pre-materializes the four known stage series, so this
 // checks their sample counts stay zero rather than the series count, which
-// is already 3 regardless of any observation.
+// is already 4 regardless of any observation.
 func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 	t.Parallel()
 
@@ -87,14 +91,15 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 
 	assert.Equal(
 		t,
-		3,
+		4,
 		testutil.CollectAndCount(m.blockStageDuration),
-		"init pre-materializes exactly the three known stage series",
+		"init pre-materializes exactly the four known stage series",
 	)
 	for _, stage := range []string{
 		blockStageHeaderVerify,
 		blockStageValidate,
 		blockStageApply,
+		blockStageEpochRollover,
 	} {
 		count, _ := blockStageSampleCount(t, &m, stage)
 		assert.Zerof(
@@ -114,4 +119,176 @@ func TestObserveBlockStageNoopWhenMetricsDisabled(t *testing.T) {
 	var m stateMetrics
 	// m.init is never called: blockStageDuration and friends stay nil.
 	m.observeBlockStage(blockStageHeaderVerify, time.Millisecond)
+}
+
+// TestBlockStageDurationBucketsCoverTailStalls pins the histogram's upper
+// range to the epoch-boundary stalls it has to resolve.
+// blinklabs-io/dingo#4364 measured block application blocked for 25s to 318s
+// across preview boundaries; with the old ExponentialBuckets(0.0001, 2, 16)
+// ceiling of ~3.3s every one of those landed in +Inf, indistinguishable from
+// each other.
+func TestBlockStageDurationBucketsCoverTailStalls(t *testing.T) {
+	t.Parallel()
+
+	var m stateMetrics
+	m.init(prometheus.NewRegistry())
+
+	metric := &dto.Metric{}
+	obs, ok := m.blockStageDuration.WithLabelValues(blockStageApply).(prometheus.Histogram)
+	require.True(t, ok, "stage observer must be a prometheus.Histogram")
+	require.NoError(t, obs.Write(metric))
+
+	buckets := metric.GetHistogram().GetBucket()
+	require.NotEmpty(
+		t,
+		buckets,
+		"histogram must have at least one finite bucket boundary",
+	)
+	largest := buckets[len(buckets)-1].GetUpperBound()
+	assert.GreaterOrEqual(
+		t,
+		largest,
+		318.0,
+		"largest finite bucket boundary (%vs) must resolve the 318s "+
+			"epoch-boundary stall measured in #4364",
+		largest,
+	)
+}
+
+// blockStageMaxDurationValue returns the value reg exports for the given
+// stage label of dingo_ledger_block_stage_max_duration_seconds. It reads the
+// registry rather than a collector handle held on stateMetrics, because the
+// metric deliberately keeps no exported-value state of its own to hold: the
+// three GaugeFunc collectors read the running-maximum atomics at scrape time.
+func blockStageMaxDurationValue(
+	t *testing.T,
+	reg *prometheus.Registry,
+	stage string,
+) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "dingo_ledger_block_stage_max_duration_seconds" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "stage" &&
+					label.GetValue() == stage {
+					return metric.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	t.Fatalf(
+		"no dingo_ledger_block_stage_max_duration_seconds series for stage %q",
+		stage,
+	)
+	return 0
+}
+
+// TestBlockStageMaxDurationExportsRunningMaximum drives the exported metric
+// through observeBlockStage: it must start at zero, rise on a larger
+// observation, hold on a smaller one, and move only the stage that was
+// observed.
+func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	var m stateMetrics
+	m.init(reg)
+
+	for _, stage := range []string{
+		blockStageHeaderVerify,
+		blockStageValidate,
+		blockStageApply,
+		blockStageEpochRollover,
+	} {
+		assert.Equal(
+			t,
+			0.0,
+			blockStageMaxDurationValue(t, reg, stage),
+			"stage %q must export zero before any observation",
+			stage,
+		)
+	}
+
+	m.observeBlockStage(blockStageApply, 5*time.Second)
+	assert.Equal(t, 5.0, blockStageMaxDurationValue(t, reg, blockStageApply))
+
+	m.observeBlockStage(blockStageApply, 2*time.Second)
+	assert.Equal(
+		t,
+		5.0,
+		blockStageMaxDurationValue(t, reg, blockStageApply),
+		"a smaller observation after a larger one must not lower the record",
+	)
+
+	m.observeBlockStage(blockStageApply, 9*time.Second)
+	assert.Equal(
+		t,
+		9.0,
+		blockStageMaxDurationValue(t, reg, blockStageApply),
+		"a larger observation must raise the record",
+	)
+
+	for _, stage := range []string{
+		blockStageHeaderVerify,
+		blockStageValidate,
+		blockStageEpochRollover,
+	} {
+		assert.Equal(
+			t,
+			0.0,
+			blockStageMaxDurationValue(t, reg, stage),
+			"observing %q must not move stage %q",
+			blockStageApply,
+			stage,
+		)
+	}
+}
+
+// TestBlockStageMaxDurationExportedValueEqualsRecord hammers one stage from
+// many goroutines at once and requires the exported value to equal the
+// largest duration any writer submitted -- exactly, not merely to be bounded
+// by it.
+//
+// Exact equality is the point. It is what distinguishes reading the
+// running-maximum atomic at scrape time from pushing each new maximum into a
+// Gauge: with a pushed Gauge two writers can each win the compare-and-swap
+// and land their Set calls in the other order, leaving the exported value
+// below the record with nothing to recover it until an observation beats the
+// record itself (see updateMaxDuration). Run with -race, which also covers
+// the compare-and-swap loop under concurrent writers.
+func TestBlockStageMaxDurationExportedValueEqualsRecord(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	var m stateMetrics
+	m.init(reg)
+
+	const writers = 64
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for i := range writers {
+		// Each writer submits a larger value and then a smaller one, so
+		// both directions race against every other writer.
+		observed := time.Duration(i) * time.Millisecond
+		go func() {
+			defer wg.Done()
+			m.observeBlockStage(blockStageApply, observed)
+			m.observeBlockStage(blockStageApply, observed/2)
+		}()
+	}
+	wg.Wait()
+
+	want := (time.Duration(writers-1) * time.Millisecond).Seconds()
+	assert.Equal(
+		t,
+		want,
+		blockStageMaxDurationValue(t, reg, blockStageApply),
+		"the exported value must equal the largest observed duration, "+
+			"regardless of goroutine interleaving",
+	)
 }

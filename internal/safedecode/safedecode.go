@@ -46,8 +46,8 @@ var ErrDecodePanic = errors.New("cbor decode panicked")
 // state: recovering there converts a crash into silent corruption, which is
 // worse.
 //
-// completed records whether decode returned normally, including when the
-// panic value is nil. See blinklabs-io/gouroboros#2075.
+// completed records whether decode returned normally rather than inferring
+// completion from recover's value. See blinklabs-io/gouroboros#2075.
 func Guard[T any](decode func() (T, error)) (value T, err error) {
 	completed := false
 	defer func() {

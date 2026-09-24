@@ -81,11 +81,9 @@ func TestGuardContainsPanics(t *testing.T) {
 	}
 }
 
-// TestGuardNilPanicIsNotSilentSuccess pins the reason Guard tracks completion
-// separately from recover()'s return value: recover() yields nil for a
-// panic(nil) exactly as it does when nothing panicked, so a check on the
-// recovered value alone would return (zero value, nil error) and let the
-// caller treat an aborted decode as a decoded one.
+// TestGuardNilPanicIsNotSilentSuccess pins that a nil panic is reported as a
+// decode failure rather than inferred to be a normal return from recover's
+// value.
 func TestGuardNilPanicIsNotSilentSuccess(t *testing.T) {
 	t.Parallel()
 
