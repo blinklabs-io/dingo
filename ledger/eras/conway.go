@@ -93,6 +93,12 @@ func PParamsUpdateConway(
 			pparamsUpdate,
 		)
 	}
+	// ParameterChange must never change protocol version; only
+	// HardForkInitiation may (dingo#4439). Transaction validation already
+	// rejects a ParameterChange carrying key 14 before it can be persisted,
+	// so this only guards an already-stored malformed proposal that reaches
+	// enactment some other way (e.g. replay of pre-fix data).
+	conwayPParamsUpdate.ProtocolVersion = nil
 	conwayPParams.Update(&conwayPParamsUpdate)
 	return conwayPParams, nil
 }
@@ -212,6 +218,12 @@ func ValidateTxConway(
 				),
 			)
 		}
+	}
+	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
+		errs = append(
+			errs,
+			fmt.Errorf("conway parameter-change validation: %w", err),
+		)
 	}
 	if err := ValidateTxFeeConway(tx, ls, tmpPparams); err != nil &&
 		(!isInputResolutionError(err) || len(errs) == 0) {
