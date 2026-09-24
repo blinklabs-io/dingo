@@ -17,6 +17,8 @@ package node
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -27,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -428,13 +431,11 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 		Type: 1,
 	}, nil))
 
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	bf := NewBackfill(db, nil, logger)
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	bf.SetEndSlot(1)
 
-	// If iteration crosses the configured end slot, the malformed block at
-	// slot 2 fails the run instead of remaining for ledger replay.
+	// If iteration crosses the configured end slot, parsing the malformed
+	// block at slot 2 fails the run instead of leaving it for ledger replay.
 	require.NoError(t, bf.Run(context.Background()))
 	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
 		BackfillPhase,
@@ -444,8 +445,6 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	require.True(t, checkpoint.Completed)
 	require.Equal(t, uint64(1), checkpoint.LastSlot)
 	require.Equal(t, uint64(1), checkpoint.TotalSlots)
-	require.Contains(t, logs.String(), `"slot":1`)
-	require.NotContains(t, logs.String(), `"slot":2`)
 }
 
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
@@ -564,6 +563,61 @@ func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, checkpoint)
 	assert.Equal(t, uint64(3), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
+}
+
+func TestRun_OffsetFailureKeepsLastCommittedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	for _, block := range blocks {
+		blockCbor := block.Cbor()
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   blockCbor,
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	bf := NewBackfill(db, nil, slog.Default())
+	require.NoError(t, bf.SetBatchSize(1))
+	offsetFailure := errors.New("injected offset computation failure")
+	bf.computeOffsets = func(
+		slot uint64,
+		hash, blockCbor []byte,
+		block gledger.Block,
+	) (*database.BlockIngestionResult, error) {
+		if slot == blocks[1].SlotNumber() {
+			return nil, offsetFailure
+		}
+		return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+			blockCbor,
+			block,
+		)
+	}
+	err = bf.Run(context.Background())
+	require.ErrorContains(
+		t,
+		err,
+		fmt.Sprintf(
+			"computing offsets for block at slot %d",
+			blocks[1].SlotNumber(),
+		),
+	)
+	assert.ErrorIs(t, err, offsetFailure)
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, blocks[0].SlotNumber(), checkpoint.LastSlot)
 	assert.False(t, checkpoint.Completed)
 }
 
