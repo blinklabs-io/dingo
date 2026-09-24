@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -70,13 +71,17 @@ type ObserverConfig struct {
 	// live, in-process *database.Database.
 	Source RewardParitySource
 	// Strict stops the observer (and, via FatalFunc, the node driving it)
-	// on the first Koios/tool error or exact parity mismatch. When false,
-	// a failure is logged and recorded in the cache, and the observer keeps
-	// validating subsequent epochs — an explicit, non-default choice for
-	// advisory/observability-only use, since the issue this implements
-	// requires Strict behavior to be available and be the operator default
-	// (see dingo.KoiosParityConfig / DefaultKoiosParityConfig), not that
-	// non-strict mode is forbidden to exist.
+	// on the first Koios/tool error or non-pass parity result, except an
+	// epoch whose only significant mismatches are reference_lag: Koios's
+	// own data had not caught up, so that result is logged and recorded
+	// but never triggers FatalFunc (dingo #4645; see Observer.fail). When
+	// Strict is false, every failure is logged and recorded in the cache,
+	// and the observer keeps validating subsequent epochs — an explicit,
+	// non-default choice for advisory/observability-only use, since the
+	// issue this implements requires Strict behavior to be available and be
+	// the operator default (see dingo.KoiosParityConfig /
+	// DefaultKoiosParityConfig), not that non-strict mode is forbidden to
+	// exist.
 	Strict bool
 	// AccountsEnabled runs #3097's per-account exact-parity fetch+check
 	// phase (FetchAccountRewardsForEpoch / CompareAccountEpoch) alongside
@@ -118,7 +123,13 @@ type ObserverConfig struct {
 	// (pass, fail, or error), for tests/observability. Never called
 	// concurrently with itself.
 	OnResult func(*EpochCompareResult)
-	Logger   *slog.Logger
+	// PromRegistry registers this observer's dingo_koiosparity_* metrics
+	// (metrics.go) when non-nil, matching every other component's own
+	// PromRegistry field. nil in some paths (tests build an Observer/Node
+	// without one), in which case the observer records no metrics at all —
+	// see newMetrics.
+	PromRegistry prometheus.Registerer
+	Logger       *slog.Logger
 }
 
 // Observer drives Koios fetch+check for each closed epoch as Dingo's own
@@ -157,9 +168,10 @@ type ObserverConfig struct {
 // fall arbitrarily far behind the aggregate queue without affecting how
 // quickly a strict-mode aggregate/pool mismatch fires FatalFunc.
 type Observer struct {
-	cfg   ObserverConfig
-	cache *Cache
-	koios *KoiosClient
+	cfg     ObserverConfig
+	cache   *Cache
+	koios   *KoiosClient
+	metrics *metrics
 
 	mu       sync.Mutex
 	pending  map[uint64]struct{} // epochs requested for (re)validation
@@ -252,6 +264,7 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		cfg:             cfg,
 		cache:           cache,
 		koios:           koios,
+		metrics:         newMetrics(cfg.PromRegistry),
 		pending:         make(map[uint64]struct{}),
 		pendingAccounts: make(map[uint64]struct{}),
 		wake:            make(chan struct{}, defaultQueueBuffer),
@@ -743,7 +756,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.fail(epoch, fmt.Errorf(
 			"parity %s at epoch %d (%d significant of %d mismatch(es))",
 			result.Status, epoch, significant, len(result.Mismatches),
-		))
+		), !referenceLagOnly(result.Mismatches))
 		return
 	}
 	// scopes keeps an aggregate-only pass from reading as the whole epoch's
@@ -839,7 +852,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		o.fail(epoch, fmt.Errorf(
 			"parity %s at epoch %d (%d significant of %d mismatch(es))",
 			result.Status, epoch, significant, len(result.Mismatches),
-		))
+		), !referenceLagOnly(result.Mismatches))
 		return
 	}
 	// scopes keeps an aggregate-only pass from reading as the whole epoch's
@@ -889,7 +902,7 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
-	o.fail(epoch, err)
+	o.fail(epoch, err, true)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
 		Network:       o.cfg.Network,
@@ -907,7 +920,14 @@ func (o *Observer) reportError(
 	})
 }
 
+// emitResult is the single choke point every completed check result passes
+// through: processEpoch's success path, processAccountEpoch's success path,
+// and reportError's synthesized ERROR path (see their call sites) all call
+// this rather than o.cfg.OnResult directly. Recording metrics here, once,
+// rather than at each call site individually, is what covers all three
+// without scattering dingo_koiosparity_* updates across observer.go.
 func (o *Observer) emitResult(result *EpochCompareResult) {
+	o.metrics.recordResult(result)
 	if o.cfg.OnResult == nil {
 		return
 	}
@@ -1210,13 +1230,22 @@ func (o *Observer) fetchAccountsIfNeeded(
 }
 
 // fail logs a per-epoch failure and, in strict mode, fires FatalFunc exactly
-// once (the first failure across the observer's lifetime). run and
-// runAccounts's goroutines can both call this concurrently (dingo #4339's
-// queue split), so the exactly-once guarantee is enforced with an atomic
-// compare-and-swap on fatalFired rather than a plain read-then-write, which
-// could otherwise let both goroutines' near-simultaneous first failures each
-// observe fatalFired as false and both invoke FatalFunc.
-func (o *Observer) fail(epoch uint64, err error) {
+// once (the first fatal-eligible failure across the observer's lifetime).
+// fatal is false only for a result whose significant mismatches are all
+// reference_lag (see referenceLagOnly): Koios's own data had not caught up,
+// so the comparison could not be trusted yet (dingo #4645). Such a call is
+// still logged, and processEpoch/processAccountEpoch have already persisted
+// the result, but it never reaches FatalFunc and never sets fatalFired, so
+// run/runAccounts keep processing later epochs. Every other non-pass result,
+// including dingo_db_missing and dingo_db_error, and every reportError call
+// stays fatal in strict mode.
+//
+// run and runAccounts's goroutines can both call this concurrently (dingo
+// #4339's queue split), so the exactly-once guarantee is enforced with an
+// atomic compare-and-swap on fatalFired rather than a plain read-then-write,
+// which could otherwise let both goroutines' near-simultaneous first failures
+// each observe fatalFired as false and both invoke FatalFunc.
+func (o *Observer) fail(epoch uint64, err error, fatal bool) {
 	o.cfg.Logger.Error(
 		"koiosparity observer: epoch validation failed",
 		"network",
@@ -1227,8 +1256,10 @@ func (o *Observer) fail(epoch uint64, err error) {
 		err,
 		"strict",
 		o.cfg.Strict,
+		"fatal",
+		fatal,
 	)
-	if !o.cfg.Strict {
+	if !o.cfg.Strict || !fatal {
 		return
 	}
 	if !o.fatalFired.CompareAndSwap(false, true) {

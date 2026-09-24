@@ -15,13 +15,16 @@
 package eras
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/plutigo/data"
@@ -238,6 +241,47 @@ func TestValidateTxByron_MainnetBootstrapWitness(t *testing.T) {
 	assert.NoError(t, ValidateTxByron(bootstrapTx, 3336, ls, nil))
 }
 
+// TestValidateTxByron_RejectsExtraMalformedWitness is the regression for
+// issue #4384: a transaction with a genuine, matching witness must not
+// validate merely because that one witness resolves every input. A second,
+// unrecognized witness entry appended after it must reject the whole
+// transaction, mirroring the reference decoder's lack of a catch-all case.
+func TestValidateTxByron_RejectsExtraMalformedWitness(t *testing.T) {
+	t.Parallel()
+
+	txCbor, err := hex.DecodeString(
+		"82839f8200d8185824825820a12a839c25a01fa5d118167db5acdbd9e38172ae8f00e5ac0a4997ef792a200700ff9f8282d818584283581c6c9982e7f2b6dcc5eaa880e8014568913c8868d9f0f86eb687b2633ca101581e581c010d876783fb2b4d0d17c86df29af8d35356ed3d1827bf4744f06700001a8dc672c11a000f4240ffa0818202d81858658258208c0bdedfbbab26a1308300512ffb1b220f068ee13f7612afb076c22de3fb764158406cc41635a9794234966629ccfa2a5b089a20ae392f0e92154ff97eda30ff7a082a65fc4b362c24cf58c27f30103b1f1345e15479cf4b80cd4134c0f9dca83109",
+	)
+	require.NoError(t, err)
+	redeemTx, err := byron.NewByronTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	producerOutputCbor, err := hex.DecodeString(
+		"82582b82d818582183581c4041adf6b03851a9c85db3f028995504fb4ba48b50703ab1b9841350a0021ad658e71f1a000f4240",
+	)
+	require.NoError(t, err)
+	producerOutput, err := byron.NewByronTransactionOutputFromCbor(
+		producerOutputCbor,
+	)
+	require.NoError(t, err)
+
+	ls := newMockLedgerState()
+	ls.networkId = lcommon.AddressNetworkMainnet
+	ls.protocolMagic = byron.MainnetProtocolMagic
+	ls.addUtxo(redeemTx.Inputs()[0], producerOutput)
+
+	// Confirm the unmodified transaction is genuinely valid before tampering,
+	// so the failure below is attributable to the appended witness.
+	require.NoError(t, ValidateTxByron(redeemTx, 3313, ls, nil))
+
+	redeemTx.Twit = append(
+		redeemTx.Twit,
+		byronTestWitness(t, 1, []any{[]byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}}),
+	)
+	err = ValidateTxByron(redeemTx, 3313, ls, nil)
+	require.Error(t, err)
+}
+
 func TestValidateTxByron_ValidMultipleInputsOutputs(
 	t *testing.T,
 ) {
@@ -368,9 +412,12 @@ var errUtxoNotFound = errors.New("UTxO not found")
 // mockLedgerState implements lcommon.LedgerState for testing
 // UTxO-aware Byron validation rules.
 type mockLedgerState struct {
-	utxos                map[string]lcommon.Utxo
-	networkId            uint
-	protocolMagic        uint32
+	utxos         map[string]lcommon.Utxo
+	networkId     uint
+	protocolMagic uint32
+	// protocolMagicErr, when set, makes ByronProtocolMagic fail, so a test
+	// can prove a rule surfaces the lookup failure rather than skipping.
+	protocolMagicErr     error
 	byronFeeSummand      int64
 	byronFeeMultiplier   int64
 	skipPhase2Validation bool
@@ -389,20 +436,48 @@ type mockLedgerState struct {
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
 	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
-	// pendingMIR backs PendingMIRRewardDeltas, letting a test simulate
-	// InstantaneousRewards already accumulated earlier in the current epoch
-	// without a real *ledger.LedgerView or database.
+	// pendingMIR seeds the Pending map MIRDelegState reports, letting a test
+	// simulate InstantaneousRewards already accumulated earlier in the
+	// current epoch without a real *ledger.LedgerView or database.
 	pendingMIR map[MIRCredentialKey]*big.Int
+	// mirState, when set, replaces the default MIRDelegState: unbounded pots
+	// and no cutoff, so tests unrelated to MIR capacity or timing are not
+	// rejected by it.
+	mirState *MIRDelegState
+	// stakeRegistered backs IsStakeCredentialRegistered, and rewardBalances
+	// the balance RewardAccountBalance reports for a registered credential.
+	stakeRegistered map[lcommon.Blake2b224]bool
+	rewardBalances  map[lcommon.Blake2b224]uint64
 }
 
-// PendingMIRRewardDeltas implements eras.MIRPendingRewardsProvider for tests.
-// The real implementation (*ledger.LedgerView) derives this from the database;
-// this mock just returns whatever a test has staged in pendingMIR, ignoring
-// uptoSlot.
-func (m *mockLedgerState) PendingMIRRewardDeltas(
+// MIRDelegState implements eras.MIRDelegStateProvider for tests. The real
+// implementation (*ledger.LedgerView) derives this from the database. The
+// Pending map is copied because the caller folds certificates into it.
+func (m *mockLedgerState) MIRDelegState(
 	_ uint64,
-) (map[MIRCredentialKey]*big.Int, error) {
-	return m.pendingMIR, nil
+	_ bool,
+) (MIRDelegState, error) {
+	state := MIRDelegState{
+		Reserves: math.MaxUint64,
+		Treasury: math.MaxUint64,
+		Pending:  m.pendingMIR,
+		Cutoff:   math.MaxUint64,
+	}
+	if m.mirState != nil {
+		state = *m.mirState
+		if state.DeltaReserves != nil {
+			state.DeltaReserves = new(big.Int).Set(state.DeltaReserves)
+		}
+		if state.DeltaTreasury != nil {
+			state.DeltaTreasury = new(big.Int).Set(state.DeltaTreasury)
+		}
+	}
+	pending := make(map[MIRCredentialKey]*big.Int, len(state.Pending))
+	for key, amount := range state.Pending {
+		pending[key] = new(big.Int).Set(amount)
+	}
+	state.Pending = pending
+	return state, nil
 }
 
 // SyntheticV2CostModelInEffect implements the eras package's local
@@ -444,6 +519,9 @@ func (m *mockLedgerState) UtxoById(
 func (m *mockLedgerState) NetworkId() uint { return m.networkId }
 
 func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
+	if m.protocolMagicErr != nil {
+		return 0, m.protocolMagicErr
+	}
 	return m.protocolMagic, nil
 }
 
@@ -465,9 +543,9 @@ func (m *mockLedgerState) StakeRegistration(
 }
 
 func (m *mockLedgerState) IsStakeCredentialRegistered(
-	_ lcommon.Credential,
+	cred lcommon.Credential,
 ) bool {
-	return false
+	return m.stakeRegistered[cred.Credential]
 }
 
 func (m *mockLedgerState) SlotToTime(
@@ -535,9 +613,13 @@ func (m *mockLedgerState) IsRewardAccountRegistered(
 }
 
 func (m *mockLedgerState) RewardAccountBalance(
-	_ lcommon.Credential,
+	cred lcommon.Credential,
 ) (*uint64, error) {
-	return nil, nil
+	if !m.stakeRegistered[cred.Credential] {
+		return nil, nil
+	}
+	balance := m.rewardBalances[cred.Credential]
+	return &balance, nil
 }
 
 func (m *mockLedgerState) CommitteeMember(
@@ -776,9 +858,11 @@ func TestValidateTxByron_MinimumFee(t *testing.T) {
 			ls.byronFeeMultiplier = 1_000_000_000
 			ls.addUtxo(input, newTestOutput(1_000))
 			tx := &testByronTx{
-				inputs:  []lcommon.TransactionInput{input},
-				outputs: []lcommon.TransactionOutput{newTestOutput(test.output)},
-				cbor:    make([]byte, txSize),
+				inputs: []lcommon.TransactionInput{input},
+				outputs: []lcommon.TransactionOutput{
+					newTestOutput(test.output),
+				},
+				cbor: make([]byte, txSize),
 			}
 
 			err := ValidateTxByron(tx, 0, ls, nil)
@@ -1029,4 +1113,174 @@ func TestByronValidateMinFee_NoInputsNotRedeemOnly(t *testing.T) {
 	// riding on a negative fee.
 	assert.Zero(t, feeErr.Actual.Sign())
 	assert.Positive(t, feeErr.Required.Sign())
+}
+
+// byronTestWitness builds a single Byron TxInWitness value --
+// [ctor, #6.24(bytes .cbor fields)] -- as the cbor.Value byronDecodeWitnesses
+// expects, for exercising its constructor handling directly.
+func byronTestWitness(t *testing.T, ctor uint64, fields []any) cbor.Value {
+	t.Helper()
+	inner, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	outer, err := cbor.Encode([]any{ctor, cbor.WrappedCbor(inner)})
+	require.NoError(t, err)
+	var v cbor.Value
+	require.NoError(t, v.UnmarshalCBOR(outer))
+	return v
+}
+
+func TestByronDecodeWitnesses(t *testing.T) {
+	t.Parallel()
+
+	pk := []byte{1, 2, 3, 4}
+	sig := []byte{5, 6, 7, 8}
+	pk64 := bytes.Repeat([]byte{0xAB}, 64)
+	sig64 := bytes.Repeat([]byte{0xCD}, 64)
+	redeemPk32 := bytes.Repeat([]byte{0xEF}, 32)
+
+	t.Run("valid constructor 0 and constructor 2 decode", func(t *testing.T) {
+		t.Parallel()
+		witnesses := []cbor.Value{
+			byronTestWitness(
+				t,
+				lcommon.ByronAddressTypePubkey,
+				[]any{pk64, sig64},
+			),
+			byronTestWitness(
+				t,
+				lcommon.ByronAddressTypeRedeem,
+				[]any{redeemPk32, sig64},
+			),
+		}
+		bootstrap, redeem, err := byronDecodeWitnesses(witnesses)
+		require.NoError(t, err)
+		require.Len(t, bootstrap, 1)
+		require.Len(t, redeem, 1)
+		assert.Equal(t, pk64[:32], bootstrap[0].PublicKey)
+		assert.Equal(t, pk64[32:], bootstrap[0].ChainCode)
+		assert.Equal(t, sig64, bootstrap[0].Signature)
+		assert.Equal(t, redeemPk32, []byte(redeem[0].Vkey))
+		assert.Equal(t, sig64, []byte(redeem[0].Signature))
+	})
+
+	t.Run("unknown constructor 1 is rejected", func(t *testing.T) {
+		t.Parallel()
+		witnesses := []cbor.Value{
+			byronTestWitness(t, 1, []any{pk, sig}),
+		}
+		_, _, err := byronDecodeWitnesses(witnesses)
+		require.Error(t, err)
+	})
+
+	t.Run("unknown constructor 3 is rejected", func(t *testing.T) {
+		t.Parallel()
+		witnesses := []cbor.Value{
+			byronTestWitness(t, 3, []any{pk64, sig64, pk64, sig64}),
+		}
+		_, _, err := byronDecodeWitnesses(witnesses)
+		require.Error(t, err)
+	})
+
+	t.Run("malformed constructor-0 field count is rejected", func(t *testing.T) {
+		t.Parallel()
+		witnesses := []cbor.Value{
+			byronTestWitness(
+				t,
+				lcommon.ByronAddressTypePubkey,
+				[]any{pk64},
+			),
+		}
+		_, _, err := byronDecodeWitnesses(witnesses)
+		require.Error(t, err)
+	})
+
+	t.Run("malformed constructor-0 field length is rejected", func(t *testing.T) {
+		t.Parallel()
+		witnesses := []cbor.Value{
+			byronTestWitness(
+				t,
+				lcommon.ByronAddressTypePubkey,
+				[]any{pk, sig},
+			),
+		}
+		_, _, err := byronDecodeWitnesses(witnesses)
+		require.Error(t, err)
+	})
+
+	t.Run("malformed constructor-2 field count is rejected", func(t *testing.T) {
+		t.Parallel()
+		witnesses := []cbor.Value{
+			byronTestWitness(
+				t,
+				lcommon.ByronAddressTypeRedeem,
+				[]any{redeemPk32, sig64, sig64},
+			),
+		}
+		_, _, err := byronDecodeWitnesses(witnesses)
+		require.Error(t, err)
+	})
+
+	t.Run("malformed constructor-2 field length is rejected", func(t *testing.T) {
+		t.Parallel()
+		// A redeem key and signature that are the wrong length for Byron's
+		// Ed25519-based redeem crypto (32-byte key, 64-byte signature) must
+		// be rejected as a malformed witness during decoding, not accepted
+		// here and left to fail later as a signature-verification error.
+		witnesses := []cbor.Value{
+			byronTestWitness(
+				t,
+				lcommon.ByronAddressTypeRedeem,
+				[]any{pk, sig},
+			),
+		}
+		_, _, err := byronDecodeWitnesses(witnesses)
+		require.Error(t, err)
+	})
+
+	t.Run("untagged witness is rejected", func(t *testing.T) {
+		t.Parallel()
+		outer, err := cbor.Encode(
+			[]any{uint64(lcommon.ByronAddressTypePubkey), []any{pk64, sig64}},
+		)
+		require.NoError(t, err)
+		var v cbor.Value
+		require.NoError(t, v.UnmarshalCBOR(outer))
+		_, _, err = byronDecodeWitnesses([]cbor.Value{v})
+		require.Error(t, err)
+	})
+
+	t.Run("trailing bytes after nested cbor are rejected", func(t *testing.T) {
+		t.Parallel()
+		inner, err := cbor.Encode([]any{pk64, sig64})
+		require.NoError(t, err)
+		withTrailingGarbage := append(append([]byte{}, inner...), 0xFF, 0xFF)
+		outer, err := cbor.Encode(
+			[]any{
+				uint64(lcommon.ByronAddressTypePubkey),
+				cbor.WrappedCbor(withTrailingGarbage),
+			},
+		)
+		require.NoError(t, err)
+		var v cbor.Value
+		require.NoError(t, v.UnmarshalCBOR(outer))
+		_, _, err = byronDecodeWitnesses([]cbor.Value{v})
+		require.Error(t, err)
+	})
+
+	t.Run(
+		"valid witness plus a malformed extra witness rejects both",
+		func(t *testing.T) {
+			t.Parallel()
+			witnesses := []cbor.Value{
+				byronTestWitness(
+					t,
+					lcommon.ByronAddressTypeRedeem,
+					[]any{redeemPk32, sig64},
+				),
+				byronTestWitness(t, 1, []any{pk, sig}),
+			}
+			_, _, err := byronDecodeWitnesses(witnesses)
+			require.Error(t, err)
+		},
+	)
 }

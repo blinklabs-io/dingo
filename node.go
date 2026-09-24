@@ -932,6 +932,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
+	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
+	// that row is not durably written until the hook above runs, later in
+	// the same rollover. Without this, governance would silently see zero
+	// SPO stake for every SPO-gated action at every boundary.
+	n.ledgerState.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
+		},
+	)
 
 	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
 	// (and, critically, subscribed to event.EpochTransitionEventType) before
@@ -1068,31 +1081,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	)
 	// Set mempool adapter in ledger state for block forging.
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
-	// Initialize chainsync state with multi-client configuration
-	chainsyncCfg := chainsync.DefaultConfig()
-	if n.config.chainsyncMaxClients > 0 {
-		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
-	}
-	if n.config.chainsyncStallTimeout > 0 {
-		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
-	}
-	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
-	chainsyncCfg.PromRegistry = n.config.promRegistry
-	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
-		if n.chainSelector == nil {
-			return 0
-		}
-		active, window := n.chainSelector.GenesisSelectionState()
-		if !active {
-			return 0
-		}
-		if window > uint64(math.MaxInt) {
-			return math.MaxInt
-		}
-		// The MaxInt check above makes this conversion safe on both 32- and
-		// 64-bit platforms.
-		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
-	}
+	chainsyncCfg := n.chainsyncConfig()
 	// LedgerState.Start above starts its slot-clock goroutine before Run
 	// creates chainsync state. Use the same lock live Restore/Truncate use
 	// for this initial publication so late-bound ledger callbacks cannot
@@ -1129,7 +1118,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if genesisWindowSlots == 0 {
 		genesisWindowSlots = chainselection.GenesisWindowSlotsForParams(
 			chainSelectorSecurityParam,
-			n.ledgerState.ActiveSlotCoeff(),
+			n.ledgerState.ActiveSlotCoeffRat(),
 		)
 	}
 	genesisSelectionMode := n.config.genesisBootstrap &&
@@ -2309,4 +2298,49 @@ func (n *Node) newTokenRegistrySync() (
 			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
 		},
 	)
+}
+
+// chainsyncConfig builds the chainsync state configuration. Run and the live
+// restore/truncate rebuild share it so a rebuilt state keeps the Genesis
+// hooks and Limit on Patience settings. The Genesis callbacks read
+// n.chainSelector lazily because it is created after the chainsync state.
+func (n *Node) chainsyncConfig() chainsync.Config {
+	chainsyncCfg := chainsync.DefaultConfig()
+	if n.config.chainsyncMaxClients > 0 {
+		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	}
+	if n.config.chainsyncStallTimeout > 0 {
+		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
+	}
+	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
+	chainsyncCfg.PromRegistry = n.config.promRegistry
+	genesisBootstrap := n.config.GenesisBootstrap()
+	chainsyncCfg.Patience = chainsync.PatienceConfig{
+		Enabled:  genesisBootstrap.LimitOnPatienceEnabled,
+		Capacity: genesisBootstrap.LimitOnPatienceCapacity,
+		Rate:     genesisBootstrap.LimitOnPatienceRate,
+	}
+	chainsyncCfg.PatienceActiveFunc = func() bool {
+		if n.chainSelector == nil {
+			return false
+		}
+		active, _ := n.chainSelector.GenesisSelectionState()
+		return active
+	}
+	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
+		if n.chainSelector == nil {
+			return 0
+		}
+		active, window := n.chainSelector.GenesisSelectionState()
+		if !active {
+			return 0
+		}
+		if window > uint64(math.MaxInt) {
+			return math.MaxInt
+		}
+		// The MaxInt check above makes this conversion safe on both 32- and
+		// 64-bit platforms.
+		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+	}
+	return chainsyncCfg
 }
