@@ -189,7 +189,7 @@ func leiosDijkstraPParamsForSnapshot(
 		}
 		if len(rows) == 0 {
 			return nil, fmt.Errorf(
-				"Leios snapshot epoch %d has no Dijkstra parameter rows",
+				"leios snapshot epoch %d has no Dijkstra parameter rows",
 				snapshotEpoch,
 			)
 		}
@@ -206,7 +206,7 @@ func leiosDijkstraPParamsForSnapshot(
 	dijkstraPParams, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
 	if !ok || dijkstraPParams == nil {
 		return nil, fmt.Errorf(
-			"Leios snapshot epoch %d has no Dijkstra protocol parameters",
+			"leios snapshot epoch %d has no Dijkstra protocol parameters",
 			snapshotEpoch,
 		)
 	}
