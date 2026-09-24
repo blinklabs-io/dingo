@@ -349,7 +349,7 @@ func TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot(t *testing.T) {
 	probeDB, err := sqlstore.OpenDB(
 		"sqlite",
 		sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))+
-			"?_pragma=busy_timeout(0)",
+			"?_pragma=busy_timeout(0)&_pragma=synchronous(OFF)",
 		"sqlite",
 		false,
 	)
