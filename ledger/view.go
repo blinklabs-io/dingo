@@ -731,6 +731,42 @@ func (lv *LedgerView) TimeToSlot(t time.Time) (uint64, error) {
 	return lv.ls.TimeToSlot(t)
 }
 
+// ProtocolParameterUpdateWindow returns the epoch containing slot and the
+// first slot whose classic protocol parameter proposals target the next epoch.
+func (lv *LedgerView) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	if lv == nil || lv.ls == nil || lv.ls.slotClock == nil {
+		return 0, 0, errors.New("classic protocol parameter update window unavailable")
+	}
+	epoch, err := lv.ls.slotClock.GetEpochForSlot(slot)
+	if err != nil {
+		return 0, 0, fmt.Errorf("get epoch for classic protocol parameter update: %w", err)
+	}
+	endSlot := epoch.EndSlot()
+	if endSlot < epoch.StartSlot {
+		return 0, 0, errors.New("classic protocol parameter update epoch end overflows")
+	}
+	lv.ls.RLock()
+	eraID := lv.ls.currentEra.Id
+	lv.ls.RUnlock()
+	stabilityWindow, err := eras.StabilityWindowForEra(
+		lv.ls.config.CardanoNodeConfig,
+		eraID,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("get classic protocol parameter update stability window: %w", err)
+	}
+	if stabilityWindow >= uint64(epoch.LengthInSlots) {
+		return 0, 0, fmt.Errorf(
+			"classic protocol parameter update stability window %d is not smaller than epoch length %d",
+			stabilityWindow,
+			epoch.LengthInSlots,
+		)
+	}
+	return epoch.EpochId, endSlot - stabilityWindow, nil
+}
+
 // CalculateRewards calculates rewards for the given stake keys.
 // TODO: implement reward calculation. Requires reward formulas from the
 // Cardano Shelley formal specification and integration with stake snapshots.

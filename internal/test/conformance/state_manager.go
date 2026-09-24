@@ -52,6 +52,10 @@ import (
 // given network is irrelevant here -- so a single fixed value is fine.
 const conformanceSlotsPerEpoch uint64 = 432000
 
+// The conformance ledger uses the same k=432 and active-slot coefficient 0.05
+// as its default Shelley test genesis when deriving the classic PPUP cutoff.
+const conformanceStabilityWindowSlots uint64 = 25920
+
 // defaultGovActionLifetime and defaultDRepInactivityPeriod are the
 // fallback epoch counts used when the active protocol parameters aren't
 // Conway (governance is a Conway-only concern, but ApplyTransaction must

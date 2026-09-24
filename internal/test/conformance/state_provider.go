@@ -269,6 +269,20 @@ func (p *DingoStateProvider) TimeToSlot(t time.Time) (uint64, error) {
 	return uint64(t.Unix()), nil
 }
 
+// ProtocolParameterUpdateWindow exposes the conformance fixture's fixed epoch
+// schedule to Shelley-family protocol parameter update validation.
+func (p *DingoStateProvider) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	epoch := slot / conformanceSlotsPerEpoch
+	epochStart := epoch * conformanceSlotsPerEpoch
+	epochEnd := epochStart + conformanceSlotsPerEpoch
+	if epochEnd < epochStart {
+		return 0, 0, errors.New("conformance PPUP epoch end overflows")
+	}
+	return epoch, epochEnd - conformanceStabilityWindowSlots, nil
+}
+
 // ========== common.PoolState ==========
 
 // PoolCurrentState returns the current state of a pool. A pool's

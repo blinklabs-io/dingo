@@ -2842,6 +2842,13 @@ provide protocol-version-aware input accounting, intra-block output handling,
 and the era's aggregate limit. The explicit non-validating Musashi profile
 retains its Dijkstra validation bypass.
 
+Classic Shelley-family protocol-parameter update validation asks its ledger
+state for the slot's epoch and no-return boundary. `ledger.LedgerView` derives
+that boundary from the slot clock's epoch schedule and the active era's
+configured stability window; missing epoch or genesis data is an error rather
+than a guessed cutoff. The conformance state provider supplies the matching
+fixed schedule used by its synthetic 432,000-slot epochs.
+
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
