@@ -429,7 +429,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
-		"stop/cancel the node on the first Koios/tool error or exact parity mismatch",
+		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result never stops the node)",
 	),
 	intFlag(
 		"KoiosParity.GraceHours",
@@ -615,6 +615,21 @@ var flagSpecs = []flagSpec{
 		"genesis-bootstrap-corroboration-peers",
 		"independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)",
 	),
+	boolFlag(
+		"GenesisBootstrap.LimitOnPatienceEnabled",
+		"genesis-bootstrap-limit-on-patience-enabled",
+		"disconnect ChainSync peers that deliver advertised progress too slowly during Genesis sync",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceCapacity",
+		"genesis-bootstrap-limit-on-patience-capacity",
+		"Genesis Limit on Patience bucket capacity in tokens (0 uses the default of 1000)",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceRate",
+		"genesis-bootstrap-limit-on-patience-rate",
+		"Genesis Limit on Patience leak rate in tokens per second (0 uses the default of 5)",
+	),
 
 	// Logging
 	transformStringFlag(
@@ -676,6 +691,23 @@ var flagSpecs = []flagSpec{
 		"shelley-opcert",
 		"",
 		"path to Shelley operational certificate",
+	),
+	stringFlag(
+		"ShelleyKESAgentSocket",
+		"shelley-kes-agent-socket",
+		"",
+		"path to a bursa KES agent service socket; sources the KES signing key from the agent instead of --shelley-kes-key (VRF key and opcert flags still apply)",
+	),
+	stringFlag(
+		"ShelleyKESAgentMode",
+		"shelley-kes-agent-mode",
+		"",
+		"KES agent service mode: serve-key (default) or sign",
+	),
+	durationFlag(
+		"ShelleyKESAgentSignTimeout",
+		"shelley-kes-agent-sign-timeout",
+		"timeout for one sign-mode KES agent round trip; must stay below a slot (0 uses the 500ms default)",
 	),
 	uint64Flag(
 		"SlotsPerKESPeriod",

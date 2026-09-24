@@ -15,9 +15,17 @@
     "@utxorpc/blaze-provider": "0.3.9"
   },
   "devDependencies": {
-    "@types/node": "26.5.1",
+    "@types/node": "26.6.1",
     "typescript": "7.0.2",
     "vite": "8.3.0",
     "vite-plugin-node-polyfills": "0.28.0"
+  },
+  "overrides": {
+    "@blaze-cardano/core": "0.9.1",
+    "@blaze-cardano/data": "0.6.8",
+    "@blaze-cardano/query": "0.6.2",
+    "@blaze-cardano/tx": "0.15.1",
+    "@blaze-cardano/uplc": "0.5.1",
+    "@blaze-cardano/wallet": "0.6.1"
   }
 }

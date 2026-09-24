@@ -44,14 +44,6 @@ func newMockEventBus() *event.EventBus {
 	return event.NewEventBus(nil, nil)
 }
 
-// boolPtr returns a pointer to the given bool value.
-// Used for config fields that use *bool to distinguish nil from explicit false.
-//
-//go:fix inline
-func boolPtr(v bool) *bool {
-	return new(v)
-}
-
 func requirePendingEventData[T any](
 	t *testing.T,
 	events []pendingEvent,

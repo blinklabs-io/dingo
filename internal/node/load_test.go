@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -97,6 +99,21 @@ func TestDecodeImmutableBlockBatchPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestDecodeImmutableBlockBatchReportsRealDecodeError(t *testing.T) {
+	t.Parallel()
+
+	blocks := immutableDecodeBenchmarkBlocks(t)
+	blocks[len(blocks)/2].Cbor = []byte{0xff}
+
+	_, err := decodeImmutableBlockBatch(
+		context.Background(),
+		blocks,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		1,
+	)
+	require.Error(t, err)
+}
+
 func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
 	t.Parallel()
 	blocks := immutableDecodeBenchmarkBlocks(t)
@@ -114,14 +131,57 @@ func TestDecodeImmutableBlockBatchCancellation(t *testing.T) {
 func TestDecodeImmutableBlockBatchDecodeErrorCancelsWorkers(t *testing.T) {
 	t.Parallel()
 	blocks := immutableDecodeBenchmarkBlocks(t)
-	blocks[len(blocks)/2].Cbor = []byte{0xff}
-	_, err := decodeImmutableBlockBatch(
-		context.Background(),
-		blocks,
-		lcommon.VerifyConfig{SkipBodyHashValidation: true},
-		8,
-	)
-	require.Error(t, err)
+	decodeErr := errors.New("decode failed")
+	cancelObserved := make(chan struct{})
+	var cancelOnce sync.Once
+	const workerCount = 8
+	// The first job fails only once the other workers are parked in the
+	// decoder, so the failure always has a live observer. Counting parked
+	// workers rather than handing tokens to job 0 keeps the barrier lossless:
+	// workers released by the cancellation pick up further jobs and re-enter
+	// the decoder, and those late arrivals must neither block nor be dropped.
+	var parked atomic.Int64
+	allParked := make(chan struct{})
+	decoder := func(
+		ctx context.Context,
+		index int,
+		_ immutable.Block,
+		_ lcommon.VerifyConfig,
+	) (gledger.Block, error) {
+		if index == 0 {
+			<-allParked
+			return nil, decodeErr
+		}
+		if parked.Add(1) == workerCount-1 {
+			close(allParked)
+		}
+		<-ctx.Done()
+		cancelOnce.Do(func() { close(cancelObserved) })
+		return nil, ctx.Err()
+	}
+	resultCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_, err := decodeImmutableBlockBatchWithDecoder(
+			ctx,
+			blocks,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+			workerCount,
+			decoder,
+		)
+		resultCh <- err
+	}()
+	select {
+	case <-cancelObserved:
+	// Failsafe only: a cancellation that never reaches the workers would
+	// otherwise hang until the package test timeout with no goroutine dump.
+	case <-time.After(30 * time.Second):
+		cancel()
+		require.Fail(t, "worker cancellation was not observed")
+	}
+	err := <-resultCh
+	require.ErrorIs(t, err, decodeErr)
 }
 
 func BenchmarkDecodeImmutableBlockBatch(b *testing.B) {

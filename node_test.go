@@ -659,6 +659,41 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 	assert.Nil(t, active)
 }
 
+// TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
+// dingo#4599 regression coverage: it proves that a Config built through the
+// public NewConfig/With... option API -- not a hand-built struct literal --
+// carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
+// into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
+// NewLedgerState. internal/node/node_test.go's
+// TestBuildDingoConfigWiresBlockPipelineFlags covers the other half: the
+// internal/config.Config -> dingo.Config hop that was the actual defect.
+// Together the two tests span the full path a live serve run takes.
+func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewConfig(
+		WithBlockPipelineEnabled(true),
+		WithBlockPipelineValidateEnabled(true),
+	)
+	n := &Node{config: cfg}
+	lsCfg := n.ledgerStateConfig()
+
+	assert.True(
+		t,
+		lsCfg.BlockPipelineEnabled,
+		"expected LedgerStateConfig.BlockPipelineEnabled true; the parallel "+
+			"block decode pipeline never constructs on the serve path "+
+			"otherwise",
+	)
+	assert.True(
+		t,
+		lsCfg.BlockPipelineValidateEnabled,
+		"expected LedgerStateConfig.BlockPipelineValidateEnabled true; the "+
+			"pipeline's parallel VRF/KES validate stage never activates "+
+			"otherwise",
+	)
+}
+
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	t.Parallel()
 
