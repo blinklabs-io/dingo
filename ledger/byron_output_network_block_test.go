@@ -218,7 +218,7 @@ func newNetworkMagicNodeConfig(
 	}`, protocolMagic)
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(genesis)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, genesis))),
 	)
 	return cfg
 }

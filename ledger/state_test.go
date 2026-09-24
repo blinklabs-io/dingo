@@ -302,7 +302,7 @@ func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 			}`
 
 			cfg := &cardano.CardanoNodeConfig{}
-			if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+			if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
 			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -400,7 +400,7 @@ func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
 			}`, tc.activeSlotsCoeff, tc.k)
 
 			cfg := &cardano.CardanoNodeConfig{}
-			if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+			if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
 			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -473,7 +473,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 				"protocolMagic": 2
 			}
 		}`
-		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
 
@@ -507,7 +507,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+		_ = cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON)))
 		_ = cfg.LoadShelleyGenesisFromReader(
 			strings.NewReader(shelleyGenesisJSON),
 		)
@@ -546,7 +546,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+		_ = cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON)))
 		_ = cfg.LoadShelleyGenesisFromReader(
 			strings.NewReader(shelleyGenesisJSON),
 		)
@@ -592,7 +592,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		}`
 
 		cfg := &cardano.CardanoNodeConfig{}
-		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
 		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -635,7 +635,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		}`
 
 		cfg := &cardano.CardanoNodeConfig{}
-		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
 		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -673,7 +673,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		}`
 
 		cfg := &cardano.CardanoNodeConfig{}
-		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
 		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -705,12 +705,6 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -718,7 +712,7 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 	}`
 
 	cfg := &cardano.CardanoNodeConfig{}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(testByronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -810,7 +804,7 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 		}`
 
 		cfg := &cardano.CardanoNodeConfig{}
-		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
 		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -871,7 +865,7 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 		}`
 
 		cfg := &cardano.CardanoNodeConfig{}
-		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+		if err := cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
 		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -903,12 +897,6 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 1000000,
@@ -916,7 +904,7 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 	}`
 
 	cfg := &cardano.CardanoNodeConfig{}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(testByronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -942,12 +930,6 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 func newNonceReadyTestConfig(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.5,
 		"securityParam": 1,
@@ -959,7 +941,7 @@ func newNonceReadyTestConfig(t *testing.T) *cardano.CardanoNodeConfig {
 	}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(testByronGenesisJSON)),
 	)
 	require.NoError(
 		t,
@@ -1150,7 +1132,7 @@ func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -1198,7 +1180,7 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -1317,7 +1299,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -1442,7 +1424,7 @@ func TestNextEpochNonceReadyCutoffSlotShortEpoch(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -2065,7 +2047,7 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -2170,7 +2152,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -2379,7 +2361,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -2480,7 +2462,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -2611,7 +2593,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+		cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON))),
 	)
 	require.NoError(
 		t,
@@ -3873,7 +3855,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 			ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 		}
 		require.NoError(t, cfg.LoadByronGenesisFromReader(
-			strings.NewReader(byronGenesisJSON),
+			strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON)),
 		))
 		require.NoError(t, cfg.LoadShelleyGenesisFromReader(
 			strings.NewReader(shelleyGenesisJSON),
@@ -4921,7 +4903,7 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 
 	db := newTestDB(t)
 	txCbor, err := cbor.Encode([]any{
-		map[uint]any{2: uint64(0)},
+		map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)},
 		map[uint]any{},
 		nil,
 	})
@@ -5423,7 +5405,7 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 		cfg := &cardano.CardanoNodeConfig{}
 		if withByron {
 			require.NoError(t, cfg.LoadByronGenesisFromReader(
-				strings.NewReader(byronGenesisJSON),
+				strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON)),
 			))
 		}
 		if shelleyAtGenesis {

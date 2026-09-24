@@ -658,12 +658,9 @@ func newConwayBootstrapStabilityCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
-		"protocolConsts": {
-			"k": 6,
-			"protocolMagic": 42
-		}
-	}`)))
+	require.NoError(t, cfg.LoadByronGenesisFromReader(
+		strings.NewReader(testByronGenesisJSONForK(6)),
+	))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,

@@ -349,7 +349,22 @@ func smallSecurityParamCardanoConfig(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	byronGenesisJSON := fmt.Sprintf(
-		`{"protocolConsts": {"k": %d, "protocolMagic": 2}}`,
+		`{
+  "avvmDistr": {},
+  "blockVersionData": {
+    "heavyDelThd": "0", "maxBlockSize": "1",
+    "maxHeaderSize": "1", "maxProposalSize": "1",
+    "maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+    "slotDuration": "1",
+    "softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+    "txFeePolicy": {"multiplier": "0", "summand": "0"},
+    "unlockStakeEpoch": "0", "updateImplicit": "0",
+    "updateProposalThd": "0", "updateVoteThd": "0"
+  },
+  "protocolConsts": {"k": %d, "protocolMagic": 2},
+  "startTime": 0, "bootStakeholders": {},
+  "heavyDelegation": {}, "nonAvvmBalances": {}
+}`,
 		k,
 	)
 	shelleyGenesisJSON := fmt.Sprintf(

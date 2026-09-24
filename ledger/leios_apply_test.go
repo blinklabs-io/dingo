@@ -62,6 +62,8 @@ func leiosApplyTestTx(
 ) (cbor.RawMessage, []byte, lcommon.Transaction) {
 	t.Helper()
 	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: []any{},
+		1: []any{},
 		2: 200_000 + uint64(seed),
 	})
 	require.NoError(t, err)
@@ -322,6 +324,7 @@ func leiosApplyTestTxWithOutput(
 	// Enterprise testnet address: header byte 0x60 + 28-byte payment key hash.
 	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
 	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: []any{}, // inputs
 		1: []any{ // outputs
 			map[uint]any{
 				0: addr,

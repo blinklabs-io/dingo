@@ -723,12 +723,18 @@ func newByronEnvelopeNodeConfig(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	config := &cardano.CardanoNodeConfig{}
-	genesis := fmt.Sprintf(`{
-		"blockVersionData": {
-			"maxBlockSize": "%d",
-			"maxHeaderSize": "%d"
-		}
-	}`, maxBlockSize, maxHeaderSize)
+	genesis := strings.Replace(
+		testByronGenesisJSON,
+		`"maxBlockSize": "1"`,
+		fmt.Sprintf(`"maxBlockSize": "%d"`, maxBlockSize),
+		1,
+	)
+	genesis = strings.Replace(
+		genesis,
+		`"maxHeaderSize": "1"`,
+		fmt.Sprintf(`"maxHeaderSize": "%d"`, maxHeaderSize),
+		1,
+	)
 	require.NoError(
 		t,
 		config.LoadByronGenesisFromReader(strings.NewReader(genesis)),
@@ -771,8 +777,7 @@ func substituteByronMainTxPayload(t *testing.T, blockCbor []byte) []byte {
 	_, err = cbor.Decode(block[1], &body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(body), 4)
-	emptyTxPayload, err := cbor.Encode([]any{})
-	require.NoError(t, err)
+	emptyTxPayload := []byte{0x9f, 0xff}
 	require.NotEqual(t, []byte(body[0]), emptyTxPayload)
 	body[0] = emptyTxPayload
 	block[1], err = cbor.Encode(body)
@@ -788,10 +793,11 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 	_, err := cbor.Decode(blockCbor, &block)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(block), 2)
-	emptyBody, err := cbor.Encode([]any{})
-	require.NoError(t, err)
-	require.NotEqual(t, []byte(block[1]), emptyBody)
-	block[1] = emptyBody
+	// A single ignored stakeholder byte string changes the committed body
+	// while retaining the reference decoder's required indefinite framing.
+	tamperedBody := []byte{0x9f, 0x41, 0x01, 0xff}
+	require.NotEqual(t, []byte(block[1]), tamperedBody)
+	block[1] = tamperedBody
 	tampered, err := cbor.Encode(block)
 	require.NoError(t, err)
 	return tampered

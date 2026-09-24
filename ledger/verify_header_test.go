@@ -994,12 +994,8 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	byronGenesisJSON := `{
-		"blockVersionData": { "slotDuration": "20000" },
-		"protocolConsts": { "k": 432 }
-	}`
 	err := cfg.LoadByronGenesisFromReader(
-		strings.NewReader(byronGenesisJSON),
+		strings.NewReader(testByronGenesisJSON),
 	)
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
@@ -1644,8 +1640,7 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(testByronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
@@ -1694,8 +1689,7 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		}
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(testByronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),

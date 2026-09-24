@@ -314,7 +314,7 @@ func newByronShelleyBoundaryLedger(
 		ShelleyGenesisHash: strings.Repeat("42", 32),
 	}
 	require.NoError(t, cfg.LoadByronGenesisFromReader(
-		strings.NewReader(byronGenesisJSON),
+		strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON)),
 	))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),

@@ -133,6 +133,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			signers []byte,
 			aggregatedSignature []byte,
 		) error {
+			if n.config.prototypeTrustBypassesEnabled() {
+				return nil
+			}
 			if n.leiosVoteManager == nil {
 				return errors.New("leios vote manager is unavailable")
 			}

@@ -102,6 +102,18 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 			nil,
 		))
 	}
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:                     9,
+			SnapshotType:              models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:               append([]byte(nil), poolKeyHash...),
+			TotalStake:                dbtypes.Uint64(100),
+			LeiosKeyPublic:            append([]byte(nil), oldPublic...),
+			LeiosKeyPossessionProof:   append([]byte(nil), oldProof...),
+			LeiosKeyRegistrationEpoch: nil,
+		},
+		nil,
+	))
 	txn := db.Transaction(false)
 	defer txn.Release()
 	ls := &LedgerState{
@@ -129,4 +141,8 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	atExpiry, err := view.GetLeiosKeys(28, []lcommon.PoolKeyHash{poolHash})
 	require.NoError(t, err)
 	require.NotContains(t, atExpiry, hex.EncodeToString(poolKeyHash))
+	unknownAge, err := view.GetLeiosKeys(9, []lcommon.PoolKeyHash{poolHash})
+	require.NoError(t, err)
+	require.NotContains(t, unknownAge, hex.EncodeToString(poolKeyHash),
+		"a key with unknown age is retained as snapshot data but cannot be used to validate a certificate")
 }

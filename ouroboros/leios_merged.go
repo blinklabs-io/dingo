@@ -1785,20 +1785,20 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 // block's transactions inlined into the ranking block's (empty) transaction
 // segment, matching the node-to-client "merged" block the prototype serves for
 // a certifying ranking block. The Dijkstra block is [header, block_body] with
-// block_body = [invalid_transactions, transactions, leios_certificate,
-// peras_certificate]. The transactions element (index 1) is replaced and the
-// leios_certificate element (index 2) is cleared, because CIP-0164 permits a
-// certificate or transactions and not both. The header, peras, and
-// invalid-transactions elements are preserved verbatim so the served block's
+// block_body = [transactions, leios_certificate, peras_certificate]. The
+// transactions element (index 0) is replaced and the leios_certificate
+// element (index 1) is cleared, because CIP-0164 permits a certificate or
+// transactions and not both. The header and peras certificate are preserved
+// verbatim so the served block's
 // hash (a hash of the header) is unchanged; the header's block_body_hash
 // intentionally no longer matches, which is acceptable over node-to-client
 // because local clients do not re-verify the body hash.
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
-// four, and the existing transactions segment must be empty. ebTxsRaw must be
-// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
-// auxiliary_data/nil]) in endorser-block order.
+// three, and the existing transactions segment must be empty. ebTxsRaw must be
+// complete Dijkstra mempool transactions in endorser-block order. They are
+// converted to the block-specific transaction tuple before insertion.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
 	ebTxsRaw []cbor.RawMessage,
@@ -1817,14 +1817,14 @@ func spliceEndorserTxsIntoDijkstraBlock(
 	if _, err := cbor.Decode(top[1], &body); err != nil {
 		return nil, fmt.Errorf("decode dijkstra block body: %w", err)
 	}
-	if len(body) != 4 {
+	if len(body) != 3 {
 		return nil, fmt.Errorf(
-			"dijkstra block body has %d elements, expected 4",
+			"dijkstra block body has %d elements, expected 3",
 			len(body),
 		)
 	}
 	var existingTxs []cbor.RawMessage
-	if _, err := cbor.Decode(body[1], &existingTxs); err != nil {
+	if _, err := cbor.Decode(body[0], &existingTxs); err != nil {
 		return nil, fmt.Errorf("decode dijkstra transactions: %w", err)
 	}
 	if len(existingTxs) != 0 {
@@ -1833,7 +1833,15 @@ func spliceEndorserTxsIntoDijkstraBlock(
 			len(existingTxs),
 		)
 	}
-	newTxs, err := cbor.Encode(ebTxsRaw)
+	newTxs := make([]cbor.RawMessage, len(ebTxsRaw))
+	var err error
+	for i, tx := range ebTxsRaw {
+		newTxs[i], err = dijkstraBlockTransactionCbor(tx)
+		if err != nil {
+			return nil, fmt.Errorf("convert endorser transaction %d: %w", i, err)
+		}
+	}
+	newTxsRaw, err := cbor.Encode(newTxs)
 	if err != nil {
 		return nil, fmt.Errorf("encode endorser transactions: %w", err)
 	}
@@ -1848,7 +1856,7 @@ func spliceEndorserTxsIntoDijkstraBlock(
 		return nil, fmt.Errorf("encode cleared leios certificate: %w", err)
 	}
 	newBody, err := cbor.Encode([]cbor.RawMessage{
-		body[0], cbor.RawMessage(newTxs), cbor.RawMessage(nilCert), body[3],
+		cbor.RawMessage(newTxsRaw), cbor.RawMessage(nilCert), body[2],
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode merged block body: %w", err)
@@ -1860,6 +1868,44 @@ func spliceEndorserTxsIntoDijkstraBlock(
 		return nil, fmt.Errorf("encode merged block: %w", err)
 	}
 	return merged, nil
+}
+
+func dijkstraBlockTransactionCbor(
+	txCbor cbor.RawMessage,
+) (cbor.RawMessage, error) {
+	var components []cbor.RawMessage
+	if _, err := cbor.Decode(txCbor, &components); err != nil {
+		return nil, fmt.Errorf("decode transaction components: %w", err)
+	}
+	switch len(components) {
+	case 3:
+		validity, err := cbor.Encode(true)
+		if err != nil {
+			return nil, fmt.Errorf("encode transaction validity: %w", err)
+		}
+		components = append(components, validity)
+	case 4:
+		var valid bool
+		if _, err := cbor.Decode(components[2], &valid); err != nil {
+			return nil, fmt.Errorf("decode transaction validity: %w", err)
+		}
+		if !valid {
+			return nil, errors.New("Dijkstra transaction is marked invalid")
+		}
+		// Standalone Dijkstra transactions put is_valid before auxiliary data;
+		// block transactions put it last.
+		components[2], components[3] = components[3], components[2]
+	default:
+		return nil, fmt.Errorf(
+			"Dijkstra transaction has %d components, expected 3 or 4",
+			len(components),
+		)
+	}
+	encoded, err := cbor.Encode(components)
+	if err != nil {
+		return nil, fmt.Errorf("encode block transaction: %w", err)
+	}
+	return encoded, nil
 }
 
 // mergedLeiosRankingBlockCbor returns the node-to-client representation of a

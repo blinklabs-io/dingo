@@ -443,6 +443,81 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 	require.Equal(t, uint64(7), *stored.LeiosKeyRegistrationEpoch)
 }
 
+func TestRotateSnapshotsPreservesLeiosKeyWhenRegistrationAgeIsUnknown(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := setupTestDB(t)
+	// Retained epoch history begins after the imported registration, while the
+	// registration itself remains authoritative for the boundary snapshot.
+	seedEpochs(t, db, []models.Epoch{{
+		EpochId:       7,
+		StartSlot:     100,
+		LengthInSlots: 100,
+	}})
+
+	poolKeyHash := bytes.Repeat([]byte{0x41}, 28)
+	publicKey := bytes.Repeat([]byte{0x51}, 96)
+	proof := bytes.Repeat([]byte{0x61}, 48)
+	pool := &models.Pool{
+		PoolKeyHash:             append([]byte(nil), poolKeyHash...),
+		VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+		LeiosKeyPublic:          append([]byte(nil), publicKey...),
+		LeiosKeyPossessionProof: append([]byte(nil), proof...),
+	}
+	registration := &models.PoolRegistration{
+		PoolKeyHash:             append([]byte(nil), poolKeyHash...),
+		VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+		AddedSlot:               50,
+		LeiosKeyPublic:          append([]byte(nil), publicKey...),
+		LeiosKeyPossessionProof: append([]byte(nil), proof...),
+	}
+	require.NoError(t, db.ImportPool(nil, pool, registration))
+
+	var poolHash lcommon.PoolKeyHash
+	copy(poolHash[:], poolKeyHash)
+	distribution := &StakeDistribution{
+		Slot:           199,
+		PoolStakes:     map[lcommon.PoolKeyHash]uint64{poolHash: 100},
+		DelegatorCount: map[lcommon.PoolKeyHash]uint64{poolHash: 1},
+		TotalStake:     100,
+		TotalPools:     1,
+	}
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	saved, err := mgr.saveSnapshot(
+		context.Background(),
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		distribution,
+		event.EpochTransitionEvent{
+			PreviousEpoch: 7,
+			NewEpoch:      8,
+			BoundarySlot:  200,
+			SnapshotSlot:  199,
+		},
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	require.True(t, saved)
+
+	stored, err := db.Metadata().GetPoolStakeSnapshot(
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, publicKey, stored.LeiosKeyPublic,
+		"the effective key bytes must survive a missing epoch-to-slot mapping")
+	require.Equal(t, proof, stored.LeiosKeyPossessionProof)
+	require.Nil(t, stored.LeiosKeyRegistrationEpoch,
+		"unknown registration age must remain distinguishable from an absent key")
+}
+
 // TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs is the
 // snapshot-side regression guard for issue #3727. When a queued/deferred header
 // still needs an older epoch's mark snapshot for leader validation, the

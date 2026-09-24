@@ -318,9 +318,11 @@ func (m *Manager) saveSnapshotInTxn(
 // freeze a key one epoch too early. This is the same historical selection used
 // by buildRewardStateInputs for the rest of the snapshotted pool parameters.
 //
-// Missing legacy epoch metadata leaves the affected seats keyless. It must not
-// fall back to current pool state: doing so would make an old snapshot resolve
-// differently after a key rotation.
+// Missing legacy epoch metadata leaves the key's age unknown. Preserve the key
+// bytes from the registration selected for the snapshot, but do not invent an
+// effective epoch; key lookup will keep it ineligible until its TTL can be
+// established. Never fall back to current pool state, which would make an old
+// snapshot resolve differently after a key rotation.
 type snapshottedLeiosKey struct {
 	key               *lcommon.LeiosKey
 	registrationEpoch *uint64
@@ -369,13 +371,17 @@ func (m *Manager) snapshotLeiosKeys(
 			len(registration.LeiosKeyPossessionProof) == 0 {
 			continue
 		}
-		registrationEpoch, ok := epochForSlot(epochs, registration.AddedSlot)
-		if !ok || registrationEpoch == ^uint64(0) {
-			continue
-		}
-		registrationEpoch++ // pool parameters take effect after POOLREAP
-		if registrationEpoch > snapshotEpoch {
-			continue
+		registrationEpoch, ageKnown := epochForSlot(
+			epochs,
+			registration.AddedSlot,
+		)
+		var effectiveEpoch *uint64
+		if ageKnown && registrationEpoch != ^uint64(0) {
+			registrationEpoch++ // pool parameters take effect after POOLREAP
+			if registrationEpoch > snapshotEpoch {
+				continue
+			}
+			effectiveEpoch = &registrationEpoch
 		}
 		ret[string(registration.PoolKeyHash)] = snapshottedLeiosKey{
 			key: &lcommon.LeiosKey{
@@ -386,7 +392,7 @@ func (m *Manager) snapshotLeiosKeys(
 					[]byte(nil), registration.LeiosKeyPossessionProof...,
 				),
 			},
-			registrationEpoch: &registrationEpoch,
+			registrationEpoch: effectiveEpoch,
 		}
 	}
 	return ret, nil

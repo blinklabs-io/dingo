@@ -264,10 +264,10 @@ func newMultiEraForecastCfg(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, `{
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 1 }
-	}`)))
+	}`))))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.4,
 		"securityParam": 1,
@@ -403,12 +403,12 @@ func newShelleyUpdateQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, `{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
 		}
-	}`)))
+	}`))))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
@@ -430,12 +430,12 @@ func newAllegraAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, `{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
 		}
-	}`)))
+	}`))))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
@@ -513,12 +513,12 @@ func newAlonzoBabbageAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, `{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
 		}
-	}`)))
+	}`))))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,

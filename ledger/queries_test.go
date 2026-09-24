@@ -51,10 +51,6 @@ import (
 // and the security parameters needed by calculateStabilityWindowForEra.
 func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
-	byronGenesisJSON := `{
-		"blockVersionData": { "slotDuration": "20000" },
-		"protocolConsts": { "k": 432 }
-	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -63,7 +59,7 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(testByronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
