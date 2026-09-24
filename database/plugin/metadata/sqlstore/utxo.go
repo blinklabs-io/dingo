@@ -353,6 +353,7 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 				query, args := markUtxosDeletedQuery(
 					rowIDs[start:end],
 					slot,
+					s.dialect.Name() != "sqlite",
 				)
 				if _, err := db.ExecContext(
 					ctx,
@@ -1184,19 +1185,10 @@ func utxoRowIDsByTxIDQuery(txIDs [][]byte) (string, []any) {
 		"WHERE tx_id IN (" + placeholders + ")", args
 }
 
-// queryUtxoRowIDs resolves the primary keys of exactly the requested UTxO
-// references that are still live. It deliberately reads every output for the
-// requested tx_id values, then applies output-index and liveness matching in
-// Go: adding a deleted_slot predicate or an OR of exact pairs makes SQLite
-// abandon tx_id_output_idx. The caller keeps this lookup and its primary-key
-// update in one write transaction, so no other writer can change the selected
-// rows in between, which is what lets the update carry no liveness predicate
-// of its own.
-// markUtxosDeletedQuery builds the second half of MarkUtxosDeletedAtSlot's
-// two-step update: a primary-key update of the row IDs queryUtxoRowIDs
-// already established are live.
+// markUtxosDeletedQuery builds the primary-key update for the row IDs
+// queryUtxoRowIDs established as live.
 //
-// It carries no "deleted_slot = 0" predicate on purpose. With one, SQLite
+// SQLite updates carry no "deleted_slot = 0" predicate. With one, SQLite
 // plans the statement as SEARCH utxo USING INDEX
 // idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards
 // whenever sqlite_stat1 is absent -- every live row visited and "id IN (...)"
@@ -1204,8 +1196,14 @@ func utxoRowIDsByTxIDQuery(txIDs [][]byte) (string, []any) {
 // from the lookup to the update. Populated statistics change the plan, but a
 // long-running node's utxo statistics are stale or absent, so the plan has to
 // hold without them. Liveness is filtered in queryUtxoRowIDs instead, inside
-// the same write transaction as this update.
-func markUtxosDeletedQuery(rowIDs []int64, slot int64) (string, []any) {
+// the same write transaction as this update. Other dialects retain the
+// liveness predicate to protect against another transaction changing a
+// selected row between the lookup and update.
+func markUtxosDeletedQuery(
+	rowIDs []int64,
+	slot int64,
+	guardLiveRows bool,
+) (string, []any) {
 	args := make([]any, len(rowIDs)+1)
 	args[0] = slot
 	for i, rowID := range rowIDs {
@@ -1215,10 +1213,18 @@ func markUtxosDeletedQuery(rowIDs []int64, slot int64) (string, []any) {
 		strings.Repeat("?,", len(rowIDs)),
 		",",
 	)
-	return "UPDATE utxo SET deleted_slot = ? WHERE id IN (" +
+	where := "id IN ("
+	if guardLiveRows {
+		where = "deleted_slot = 0 AND " + where
+	}
+	return "UPDATE utxo SET deleted_slot = ? WHERE " + where +
 		placeholders + ")", args
 }
 
+// queryUtxoRowIDs resolves the primary keys of exactly the requested live
+// references. It reads every output for the requested transaction IDs, then
+// applies output-index and liveness matching in Go so SQLite can use
+// tx_id_output_idx without a deleted_slot predicate.
 func queryUtxoRowIDs(
 	ctx context.Context,
 	db queryer,

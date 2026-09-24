@@ -164,7 +164,7 @@ func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
 				rowIDs[i] = int64(i + 1)
 			}
 
-			query, args := markUtxosDeletedQuery(rowIDs, 1)
+			query, args := markUtxosDeletedQuery(rowIDs, 1, false)
 			plan := queryPlan(t, store.writeDB, query, args...)
 			require.Contains(
 				t, plan, "INTEGER PRIMARY KEY",
@@ -196,4 +196,15 @@ func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMarkUtxosDeletedQueryRetainsLivenessGuardForConcurrentWriters(t *testing.T) {
+	t.Parallel()
+	query, args := markUtxosDeletedQuery([]int64{1, 2}, 10, true)
+	require.Equal(
+		t,
+		"UPDATE utxo SET deleted_slot = ? WHERE deleted_slot = 0 AND id IN (?,?)",
+		query,
+	)
+	require.Equal(t, []any{int64(10), int64(1), int64(2)}, args)
 }
