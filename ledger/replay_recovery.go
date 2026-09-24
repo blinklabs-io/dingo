@@ -747,7 +747,7 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		)
 	}
 	rewindPoint := ledgerTip.Point
-	if !recoveryRewindTargetPrecedes(rewindPoint, validationErr.BlockPoint) {
+	if !ls.recoveryRewindTargetPrecedes(rewindPoint, validationErr.BlockPoint) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"deterministic transaction validation rejected a block at or behind the ledger tip; no rewind target precedes it",

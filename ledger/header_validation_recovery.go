@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -109,7 +110,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// stuck-pipeline signal is suppressed, because every restart looks like
 	// a successful recovery. Decline instead and let the failure surface.
 	rewindPoint := ledgerTip.Point
-	if !recoveryRewindTargetPrecedes(rewindPoint, validationErr.BlockPoint) {
+	if !ls.recoveryRewindTargetPrecedes(rewindPoint, validationErr.BlockPoint) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"header validation rejected a block at or behind the ledger tip; no rewind target precedes it, so recovery cannot drop it",
@@ -308,9 +309,28 @@ func (ls *LedgerState) yieldedToChainSelection(
 // the ledger tip. A target the primary chain no longer holds is refused
 // downstream by Chain.ValidateRollback, which resolves the point by slot and
 // hash, so this test does not repeat that membership check.
-func recoveryRewindTargetPrecedes(rewindPoint, failing ocommon.Point) bool {
+func (ls *LedgerState) recoveryRewindTargetPrecedes(
+	rewindPoint, failing ocommon.Point,
+) bool {
 	if rewindPoint.Slot != failing.Slot {
 		return rewindPoint.Slot < failing.Slot
 	}
-	return !bytes.Equal(rewindPoint.Hash, failing.Hash)
+	if bytes.Equal(rewindPoint.Hash, failing.Hash) || ls.db == nil {
+		return false
+	}
+	rewindBlock, err := database.BlockByPoint(ls.db, rewindPoint)
+	if err != nil {
+		return false
+	}
+	failingBlock, err := database.BlockByPoint(ls.db, failing)
+	if err != nil {
+		return false
+	}
+	if bytes.Equal(failingBlock.PrevHash, rewindBlock.Hash) {
+		return true
+	}
+	if bytes.Equal(rewindBlock.PrevHash, failingBlock.Hash) {
+		return false
+	}
+	return rewindBlock.Number < failingBlock.Number
 }

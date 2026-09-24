@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -112,6 +113,7 @@ func newSameSlotRecoveryFixture(t *testing.T) *sameSlotRecoveryFixture {
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = ledgerTip
 	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
 	require.Equal(t, blocks[4].Slot, cm.PrimaryChain().Tip().Point.Slot,
@@ -122,6 +124,40 @@ func newSameSlotRecoveryFixture(t *testing.T) *sameSlotRecoveryFixture {
 		cm:           cm,
 		blocks:       blocks,
 		resyncEvents: resyncEvents,
+	}
+}
+
+func TestHeaderValidationRecoveryDeclinesPastFailureAtSameSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newSameSlotRecoveryFixture(t)
+	boundary := f.blocks[2]
+	laterBlock := f.blocks[3]
+	laterTip := ochainsync.Tip{
+		Point:       makeTestPoint(laterBlock),
+		BlockNumber: laterBlock.Number,
+	}
+	require.NoError(t, f.ls.db.SetTip(laterTip, nil))
+	f.ls.currentTip = laterTip
+	chainTipBefore := f.cm.PrimaryChain().Tip().Point
+
+	recovered, recoverErr := f.ls.tryRecoverFromHeaderValidationError(
+		&headerValidationError{
+			BlockPoint: makeTestPoint(boundary),
+			Cause:      errors.New("failing EBB precedes the applied block"),
+		},
+	)
+
+	require.NoError(t, recoverErr)
+	require.False(t, recovered,
+		"a later same-slot tip must not be treated as preceding the failed EBB")
+	require.Equal(t, chainTipBefore, f.cm.PrimaryChain().Tip().Point)
+	select {
+	case <-f.resyncEvents:
+		t.Fatal("declined recovery must not publish a resync")
+	default:
 	}
 }
 
