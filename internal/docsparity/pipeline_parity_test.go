@@ -45,7 +45,6 @@ var pipelineStages = []string{
 	"go-test-linux-quick",
 	"go-test-linux",
 	"go-test-linux-race",
-	"go-test-windows",
 	"go-test-macos",
 }
 
@@ -147,8 +146,8 @@ func TestPipelineStagesMatch(t *testing.T) {
 
 // TestPipelineStagesAreOrdered checks the dependency chain that makes the
 // pipeline cheap before it is expensive: lint gates the quick Linux suite,
-// which gates the four platform suites. Without it a stage could be detached
-// from its gate and start fanning out four runners again on a change that does
+// which gates the platform suites. Without it a stage could be detached
+// from its gate and start fanning out three runners again on a change that does
 // not compile.
 func TestPipelineStagesAreOrdered(t *testing.T) {
 	root := repoRoot(t)
@@ -157,7 +156,6 @@ func TestPipelineStagesAreOrdered(t *testing.T) {
 	fanOut := []string{
 		"go-test-linux",
 		"go-test-linux-race",
-		"go-test-windows",
 		"go-test-macos",
 	}
 
@@ -229,23 +227,21 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 
 // buildGates names, for each build job, every test job for its own runner OS.
 // Gating a build on its own platform and no other is what lets the Linux
-// binaries start while the Windows suite is still running.
+// binaries start while macOS tests are still running.
 //
 // Linux has two suites and a build must wait for both. Naming only one would
 // leave the other free to be dropped from the build's dependencies with this
 // check still green, which is exactly the hole that would let build-linux run
 // without the race suite.
 var buildGates = map[string][]string{
-	"build-linux":   {"go-test-linux", "go-test-linux-race"},
-	"build-windows": {"go-test-windows"},
-	"build-macos":   {"go-test-macos"},
+	"build-linux": {"go-test-linux", "go-test-linux-race"},
+	"build-macos": {"go-test-macos"},
 }
 
 // otherPlatformTests are the test jobs a given build job must NOT depend on.
 var otherPlatformTests = map[string][]string{
-	"build-linux":   {"go-test-windows", "go-test-macos"},
-	"build-windows": {"go-test-linux", "go-test-linux-race", "go-test-macos"},
-	"build-macos":   {"go-test-linux", "go-test-linux-race", "go-test-windows"},
+	"build-linux": {"go-test-macos"},
+	"build-macos": {"go-test-linux", "go-test-linux-race"},
 }
 
 // TestBuildsGateOnTheirOwnPlatform checks that each build job waits for its own
