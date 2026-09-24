@@ -127,7 +127,7 @@ type Parameters struct {
 	PledgeLeverageEnabled bool
 	// PledgeLeverage is L, the maximum ratio of total stake to pledge before a
 	// pool's reward-eligible stake plateaus. It is used only when
-	// PledgeLeverageEnabled is true and must be in the range [1, 10000].
+	// PledgeLeverageEnabled is true and must be non-negative.
 	PledgeLeverage *big.Rat
 	// FullPotRewardsEnabled turns on CIP-0163 full-pot reward distribution: the
 	// entire available reward pot is apportioned across pools that earned a base
@@ -764,7 +764,7 @@ func validateParameters(params Parameters) error {
 }
 
 // validatePledgeLeverage enforces the CIP-50 constraint that, when the
-// pledge-leverage feature is enabled, L is supplied and lies in [1, 10000]. It
+// pledge-leverage feature is enabled, L is supplied and non-negative. It
 // is a no-op when the feature is disabled. Both Calculate (via
 // validateParameters) and CalculatePoolReward (via validatePoolRewardParameters)
 // run it, since a nil L reaching optimalPoolRewardChecked while enabled would
@@ -779,10 +779,9 @@ func validatePledgeLeverage(params Parameters) error {
 			ErrInvalidParameters,
 		)
 	}
-	if params.PledgeLeverage.Cmp(oneRat()) < 0 ||
-		params.PledgeLeverage.Cmp(big.NewRat(10_000, 1)) > 0 {
+	if params.PledgeLeverage.Sign() < 0 {
 		return fmt.Errorf(
-			"%w: pledge leverage %s outside [1, 10000]",
+			"%w: pledge leverage %s is negative",
 			ErrInvalidParameters,
 			params.PledgeLeverage.RatString(),
 		)
@@ -1368,9 +1367,8 @@ func optimalPoolRewardChecked(
 	// CIP-50: when pledgeLeverage (L) is set, a pool's reward-eligible stake is
 	// additionally capped at L*p (the pledge fraction times L), so sigma' =
 	// min(sigma, z0, L*p). A zero-pledge pool then has sigma' = 0 and earns no
-	// rewards. Because L >= 1 and poolStake always includes pledge, the capped
-	// sigma' still satisfies sigma' >= p', so the pledge-influence term below
-	// stays non-negative.
+	// rewards. Subunit L can make sigma' lower than p', so the pledge-influence
+	// term can be negative; floorRatChecked clamps a non-positive reward to zero.
 	if pledgeLeverage != nil {
 		leverageCap := new(big.Rat).Mul(pledgeLeverage, pledgeRatio)
 		s = minRat(s, leverageCap)

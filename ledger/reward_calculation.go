@@ -3309,7 +3309,7 @@ func (ls *LedgerState) rewardParameters(
 			calculationEpoch,
 		)
 	}
-	// Every protocol-parameter input to the reward calculation comes from the
+	// Most protocol-parameter inputs to the reward calculation come from the
 	// performance epoch, not the calculation epoch. cardano-ledger's startStep
 	// (LedgerState/PulsingReward.hs) binds `pr = es ^. prevPParamsEpochStateL`
 	// and reads d, rho and tau from it, then hands that same `pr` to
@@ -3340,10 +3340,41 @@ func (ls *LedgerState) rewardParameters(
 	// Dijkstra and later. Single chokepoint feeding both the boundary apply and
 	// the async precompute, so both agree.
 	applyMinPoolMarginConfig(&params, ls.config)
-	// CIP-50 is an enacted Dijkstra protocol parameter. Retain the experimental
-	// operator setting only for pre-Dijkstra devnets, where no such parameter
-	// exists; in Dijkstra the chain value (including nil) is authoritative.
-	applyPledgeLeveragePParams(&params, performancePParams, ls.config)
+	// At the first Dijkstra reward round, the performance epoch still carries
+	// Conway parameters, while the reference's prevPParams has already been
+	// upgraded by Dijkstra enactment. Use the calculation epoch's enacted value
+	// for CIP-50 at that boundary; other reward inputs remain performance-era.
+	pledgeLeveragePParams := performancePParams
+	calculationEraDesc, ok := ls.eraById(calculationEpochRow.EraId)
+	if !ok || calculationEraDesc == nil {
+		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+			"unknown era ID %d for reward calculation epoch %d",
+			calculationEpochRow.EraId, calculationEpoch,
+		)
+	}
+	if calculationEraDesc.Id == eras.DijkstraEraDesc.Id &&
+		performanceEraDesc.Id != eras.DijkstraEraDesc.Id {
+		pledgeLeveragePParams, err = ls.loadPersistedProtocolParameters(
+			calculationEpoch,
+			*calculationEraDesc,
+			txn,
+		)
+		if err != nil {
+			return nil, rewards.Parameters{}, nil, fmt.Errorf(
+				"get Dijkstra pparams for reward calculation epoch %d: %w",
+				calculationEpoch, err,
+			)
+		}
+		if pledgeLeveragePParams == nil {
+			return nil, rewards.Parameters{}, nil, fmt.Errorf(
+				"missing Dijkstra pparams for reward calculation epoch %d",
+				calculationEpoch,
+			)
+		}
+	}
+	// Before Dijkstra, retain the experimental operator setting. In Dijkstra,
+	// the enacted chain value (including nil) is authoritative.
+	applyPledgeLeveragePParams(&params, pledgeLeveragePParams, ls.config)
 	// CIP-0163: overlay the operator-configured full-pot feature gate onto the
 	// on-chain-derived parameters. This is the single chokepoint feeding both
 	// the boundary apply and the async precompute path, so both agree.

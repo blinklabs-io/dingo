@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
@@ -4935,6 +4936,42 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 		"the block-count decentralization is the same value the "+
 			"calculation uses",
 	)
+}
+
+func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.config.PledgeLeverageEnabled = true
+	ls.config.PledgeLeverage = 100
+	performancePParams := &conway.ConwayProtocolParameters{
+		NOpt:            10,
+		A0:              rewardCalcRat(1, 2),
+		Rho:             rewardCalcRat(1, 100),
+		Tau:             rewardCalcRat(0, 1),
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 9},
+	}
+	calculationPParams := &dijkstra.DijkstraProtocolParameters{
+		MaxPledgeLeverage: rewardCalcRat(1, 2),
+	}
+	performanceCBOR, err := cbor.Encode(performancePParams)
+	require.NoError(t, err)
+	calculationCBOR, err := cbor.Encode(calculationPParams)
+	require.NoError(t, err)
+	meta := db.Metadata()
+	require.NoError(t, meta.SetEpoch(100, 2, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil))
+	require.NoError(t, meta.SetEpoch(200, 3, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil))
+	require.NoError(t, db.SetPParams(performanceCBOR, 100, 2, eras.ConwayEraDesc.Id, nil))
+	require.NoError(t, db.SetPParams(calculationCBOR, 200, 3, eras.DijkstraEraDesc.Id, nil))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	_, params, _, err := ls.rewardParameters(
+		txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},
+	)
+	require.NoError(t, err)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(1, 2), params.PledgeLeverage)
 }
 
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(

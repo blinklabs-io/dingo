@@ -12461,10 +12461,13 @@ epoch's snapshot is below the floor, reuse is conservatively bypassed for that
 whole epoch's snapshot and the fresh authoritative calculation is used.
 
 CIP-50 pledge leverage uses the enacted Dijkstra `maxPledgeLeverage` protocol
-parameter. `rewardParameters` reads it from the performance epoch's protocol
-parameters, matching cardano-ledger's previous-epoch reward inputs. A nil value
-(including the Dijkstra genesis default) leaves the original formula unchanged;
-otherwise `optimalPoolRewardChecked` computes
+parameter. `rewardParameters` normally reads it from the performance epoch's
+protocol parameters, matching cardano-ledger's previous-epoch reward inputs.
+For the first Dijkstra reward round, it reads the upgraded value from the
+calculation epoch's Dijkstra parameters while all other reward inputs remain
+from the Conway performance epoch. A nil value (including the Dijkstra genesis
+default) leaves the original formula unchanged; otherwise
+`optimalPoolRewardChecked` computes
 `sigma' = min(sigma, z0, L*p)`. A zero-pledge pool then earns nothing. This
 single parameter path feeds both boundary application and asynchronous reward
 precomputation. The operator setting remains an experimental override only for
