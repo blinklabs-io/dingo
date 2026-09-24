@@ -974,12 +974,14 @@ func (s *TokenRegistrySync) stageSnapshot(
 		}
 		entryBytes := tokenRegistryEntryRetainedBytes(entry)
 		if entryBytes > s.maxBatchBytes {
-			return nil, fmt.Errorf(
-				"token registry mapping %q retains %d bytes, exceeding batch limit %d",
-				header.Name,
-				entryBytes,
-				s.maxBatchBytes,
+			stage.skipped++
+			s.logger.Debug(
+				"token registry mapping exceeds retained batch limit",
+				"name", header.Name,
+				"size", entryBytes,
+				"limit", s.maxBatchBytes,
 			)
+			continue
 		}
 		encoded, err := json.Marshal(newTokenRegistryStageEntry(entry))
 		if err != nil {

@@ -552,6 +552,15 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.TokenRegistry.MaxBatchBytes,
 		))
 	}
+	if c.TokenRegistry.MaxEntryBytes > 0 &&
+		c.TokenRegistry.MaxBatchBytes > 0 &&
+		c.TokenRegistry.MaxBatchBytes < c.TokenRegistry.MaxEntryBytes {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxBatchBytes: %d (must be at least maxEntryBytes %d)",
+			c.TokenRegistry.MaxBatchBytes,
+			c.TokenRegistry.MaxEntryBytes,
+		))
+	}
 
 	// Block production needs all three credential paths
 	if c.BlockProducer {

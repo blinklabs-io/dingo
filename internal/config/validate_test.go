@@ -101,6 +101,13 @@ func TestValidateTokenRegistryAggregateBounds(t *testing.T) {
 				cfg.TokenRegistry.MaxBatchBytes = -1
 			},
 		},
+		"batch smaller than entry": {
+			field: "tokenRegistry.maxBatchBytes",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxEntryBytes = 2048
+				cfg.TokenRegistry.MaxBatchBytes = 1024
+			},
+		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

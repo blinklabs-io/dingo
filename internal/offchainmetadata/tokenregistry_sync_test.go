@@ -21,7 +21,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -580,24 +582,43 @@ func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 }
 
 func TestTokenRegistrySyncRejectsExcessiveDecompressedContent(t *testing.T) {
-	body := tarballOf(t, map[string]string{
-		"README.md": strings.Repeat("A", 8<<10),
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(
-			syncSubjectNut, "nutcoin", "", "",
-		),
-	})
-	server := newRegistryServer(t, body)
+	var body bytes.Buffer
+	gz := gzip.NewWriter(&body)
+	tw := tar.NewWriter(gz)
+	content := make([]byte, 4<<20)
+	_, err := rand.New(rand.NewSource(1)).Read(content)
+	require.NoError(t, err)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Name: "cardano-token-registry-master/README.md", Typeflag: tar.TypeReg,
+		Mode: 0o644, Size: int64(len(content)),
+	}))
+	_, err = tw.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+
+	tracked := &countingTestReader{reader: bytes.NewReader(body.Bytes())}
 	store := newFakeTokenRegistryStore()
-	sync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+	sync := newTestSync(t, store, "https://registry.invalid", func(c *TokenRegistryConfig) {
 		c.MaxDecompressedBytes = 4 << 10
 	})
 
-	_, err := sync.SyncOnce(t.Context())
+	_, err = sync.stageSnapshot(t.Context(), tracked)
 
 	require.ErrorContains(t, err, "decompressed")
+	require.Less(t, tracked.read, int64(body.Len()), "reader must stop before consuming the full archive")
 	require.Empty(t, store.snapshot())
-	require.Empty(t, store.state(tokenRegistryStampKey))
-	require.Empty(t, store.state(TokenRegistrySyncStateKey))
+}
+
+type countingTestReader struct {
+	reader io.Reader
+	read   int64
+}
+
+func (r *countingTestReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.read += int64(n)
+	return n, err
 }
 
 func TestTokenRegistrySyncRejectsExcessiveArchiveEntries(t *testing.T) {
