@@ -313,7 +313,7 @@ func run() int {
 			cpuprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o600,
-		) //nolint:gosec // user-specified profiling output path
+		) // #nosec G703 -- profile path is an explicit CLI argument
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			return 1
@@ -501,7 +501,7 @@ Database Workers:
 			memprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o600,
-		) //nolint:gosec // user-specified profiling output path
+		) // #nosec G703 -- profile path is an explicit CLI argument
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 		} else {
