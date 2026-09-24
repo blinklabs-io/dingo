@@ -573,15 +573,6 @@ func (s *TokenRegistrySync) SyncOnce(
 			resp.StatusCode,
 		)
 	}
-	// One stamp for the whole snapshot: every row it carries gets this
-	// value, so anything older afterwards is a subject the snapshot did not
-	// carry. Taken before the first write so no row can predate it.
-	// Truncated to a whole second because MySQL's `datetime` column holds
-	// no fractional seconds. A sub-second stamp would be stored rounded
-	// while the prune below compared against the unrounded value, so every
-	// row the snapshot had just written would look older than the cutoff
-	// and be deleted. Truncating at the source makes the written value and
-	// the cutoff identical on SQLite, PostgreSQL, and MySQL alike.
 	stage, err := s.stageSnapshot(ctx, resp.Body)
 	if err != nil {
 		return 0, err
@@ -622,6 +613,10 @@ func (s *TokenRegistrySync) SyncOnce(
 	// Artifact ingestion is complete before the metadata transaction begins.
 	// This keeps network and parsing latency outside SQLite's writer lock and
 	// outside the corresponding write transaction on every SQL backend.
+	// One stamp for the whole snapshot: every row it carries gets this
+	// value, so anything older afterwards is a subject the snapshot did not
+	// carry. Truncation keeps MySQL's `datetime` value equal to the prune
+	// cutoff on every backend.
 	syncedAt := s.nextSyncStamp(persistedStamp)
 	txn := s.store.Transaction(ctx)
 	committed := false
