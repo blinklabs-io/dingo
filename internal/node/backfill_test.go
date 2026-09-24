@@ -418,13 +418,23 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 		},
 		nil,
 	))
-	addValidBackfillBlocks(t, db, 3)
+	addValidBackfillBlocks(t, db, 2)
+	malformedHash := make([]byte, 32)
+	malformedHash[0] = 3
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 2,
+		Hash: malformedHash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	bf := NewBackfill(db, nil, logger)
 	bf.SetEndSlot(1)
 
+	// If iteration crosses the configured end slot, the malformed block at
+	// slot 2 fails the run instead of remaining for ledger replay.
 	require.NoError(t, bf.Run(context.Background()))
 	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
 		BackfillPhase,
@@ -532,18 +542,20 @@ func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
+	addValidBackfillBlocks(t, db, 4)
 	hash := make([]byte, 32)
-	hash[0] = 1
+	hash[0] = 5
 	require.NoError(t, db.BlockCreate(models.Block{
-		Slot: 1,
+		Slot: 4,
 		Hash: hash,
-		Cbor: []byte{0x82, 0x01},
+		Cbor: []byte{0xff},
 		Type: 1,
 	}, nil))
 
 	bf := NewBackfill(db, nil, slog.Default())
+	require.NoError(t, bf.SetBatchSize(2))
 	err := bf.Run(context.Background())
-	require.ErrorContains(t, err, "parsing block at slot 1")
+	require.ErrorContains(t, err, "parsing block at slot 4")
 
 	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
 		BackfillPhase,
@@ -551,7 +563,7 @@ func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, checkpoint)
-	assert.Equal(t, uint64(0), checkpoint.LastSlot)
+	assert.Equal(t, uint64(3), checkpoint.LastSlot)
 	assert.False(t, checkpoint.Completed)
 }
 
