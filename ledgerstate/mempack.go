@@ -78,6 +78,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
 // mempackReader is a cursor over a byte slice for reading MemPack
@@ -258,6 +261,163 @@ func decodeMempackTxOut(data []byte) (*decodedMempackTxOut, error) {
 		)
 	}
 	return result, nil
+}
+
+func encodeMempackTxOut(out *decodedMempackTxOut) ([]byte, error) {
+	value, err := encodeMempackValue(out.Lovelace, out.Assets)
+	if err != nil {
+		return nil, fmt.Errorf("encoding MemPack value: %w", err)
+	}
+	address, err := cbor.Encode(out.Address)
+	if err != nil {
+		return nil, fmt.Errorf("encoding address: %w", err)
+	}
+	fields := map[uint64]cbor.RawMessage{
+		0: cbor.RawMessage(address),
+		1: cbor.RawMessage(value),
+	}
+	if len(out.DatumHash) > 0 {
+		dat, err := cbor.Encode([]any{uint64(0), out.DatumHash})
+		if err != nil {
+			return nil, fmt.Errorf("encoding datum hash: %w", err)
+		}
+		fields[2] = cbor.RawMessage(dat)
+	} else if len(out.Datum) > 0 {
+		dat, err := cbor.Encode([]any{
+			uint64(1),
+			cbor.Tag{Number: 24, Content: out.Datum},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("encoding inline datum: %w", err)
+		}
+		fields[2] = cbor.RawMessage(dat)
+	}
+	if len(out.ScriptRef) > 0 {
+		ref, err := encodeMempackScriptRef(out.ScriptRef)
+		if err != nil {
+			return nil, err
+		}
+		fields[3] = cbor.RawMessage(ref)
+	}
+	encoded, err := cbor.Encode(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encoding TxOut map: %w", err)
+	}
+	return encoded, nil
+}
+
+func encodeMempackValue(
+	coin uint64,
+	assets []ParsedAsset,
+) ([]byte, error) {
+	if len(assets) == 0 {
+		return cbor.Encode(coin)
+	}
+	byPolicy := make(map[string][]ParsedAsset)
+	for _, asset := range assets {
+		byPolicy[string(asset.PolicyId)] = append(
+			byPolicy[string(asset.PolicyId)], asset,
+		)
+	}
+	policies := make([]string, 0, len(byPolicy))
+	for policy := range byPolicy {
+		policies = append(policies, policy)
+	}
+	sort.Strings(policies)
+	assetEntries := make([]cborByteMapEntry, 0, len(policies))
+	for _, policy := range policies {
+		policyAssets := byPolicy[policy]
+		sort.Slice(policyAssets, func(i, j int) bool {
+			return string(policyAssets[i].Name) < string(policyAssets[j].Name)
+		})
+		entries := make([]cborByteMapEntry, 0, len(policyAssets))
+		for _, asset := range policyAssets {
+			amount, err := cbor.Encode(asset.Amount)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, cborByteMapEntry{
+				key:   asset.Name,
+				value: amount,
+			})
+		}
+		assetsMap, err := encodeCBORByteMap(entries)
+		if err != nil {
+			return nil, err
+		}
+		assetEntries = append(assetEntries, cborByteMapEntry{
+			key:   []byte(policy),
+			value: assetsMap,
+		})
+	}
+	assetsMap, err := encodeCBORByteMap(assetEntries)
+	if err != nil {
+		return nil, err
+	}
+	return cbor.Encode([]any{coin, cbor.RawMessage(assetsMap)})
+}
+
+type cborByteMapEntry struct {
+	key   []byte
+	value []byte
+}
+
+func encodeCBORByteMap(entries []cborByteMapEntry) ([]byte, error) {
+	result := appendCBORHead(nil, 5, uint64(len(entries)))
+	for _, entry := range entries {
+		key, err := cbor.Encode(entry.key)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, key...)
+		result = append(result, entry.value...)
+	}
+	return result, nil
+}
+
+func encodeMempackScriptRef(script []byte) ([]byte, error) {
+	if len(script) == 0 {
+		return nil, fmt.Errorf("empty MemPack reference script")
+	}
+	var scriptType uint64
+	var scriptValue any
+	if script[0] == alonzoScriptNative {
+		scriptType = 0
+		scriptValue = cbor.RawMessage(script[1:])
+	} else {
+		scriptType = uint64(script[0]) + 1
+		if scriptType > 4 {
+			return nil, fmt.Errorf("unsupported MemPack script type %d", script[0])
+		}
+		scriptValue = script[1:]
+	}
+	inner, err := cbor.Encode([]any{scriptType, scriptValue})
+	if err != nil {
+		return nil, fmt.Errorf("encoding reference script: %w", err)
+	}
+	encoded, err := cbor.Encode(cbor.Tag{Number: 24, Content: inner})
+	if err != nil {
+		return nil, fmt.Errorf("encoding reference script wrapper: %w", err)
+	}
+	return encoded, nil
+}
+
+func appendCBORHead(dst []byte, major byte, value uint64) []byte {
+	switch {
+	case value < 24:
+		return append(dst, major<<5|byte(value))
+	case value <= math.MaxUint8:
+		return append(dst, major<<5|24, byte(value))
+	case value <= math.MaxUint16:
+		return append(dst, major<<5|25, byte(value>>8), byte(value))
+	case value <= math.MaxUint32:
+		return append(dst, major<<5|26,
+			byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+	default:
+		return append(dst, major<<5|27,
+			byte(value>>56), byte(value>>48), byte(value>>40), byte(value>>32),
+			byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+	}
 }
 
 // decodeTxOutCompact: tag 0 = CompactAddr + CompactForm Value

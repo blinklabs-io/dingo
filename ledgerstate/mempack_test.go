@@ -19,6 +19,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,6 +54,15 @@ func TestDecodeMempackTxOutTag4(t *testing.T) {
 		"enterprise address should be 29 bytes")
 	require.Equal(t, byte(0x70), decoded.Address[0],
 		"should be enterprise script address (testnet)")
+	outputCbor, err := encodeMempackTxOut(decoded)
+	require.NoError(t, err)
+	output, err := ledger.NewTransactionOutputFromCbor(outputCbor)
+	require.NoError(t, err)
+	gotAddress, err := output.Address().Bytes()
+	require.NoError(t, err)
+	require.Equal(t, decoded.Address, gotAddress)
+	require.Equal(t, decoded.Lovelace, output.Amount().Uint64())
+	require.NotNil(t, output.Datum(), "inline datum must survive CBOR reconstruction")
 
 	// With corrected VarLen (big-endian 7-bit), the coin bytes
 	// d8 b1 60 decode as:
@@ -108,6 +118,12 @@ func TestDecodeMempackTxOutTag4MultiAsset(t *testing.T) {
 	// Should have 1 native asset
 	require.Equal(t, 1, len(decoded.Assets),
 		"should have exactly 1 asset")
+	outputCbor, err := encodeMempackTxOut(decoded)
+	require.NoError(t, err)
+	output, err := ledger.NewTransactionOutputFromCbor(outputCbor)
+	require.NoError(t, err)
+	require.Equal(t, decoded.Lovelace, output.Amount().Uint64())
+	require.Len(t, output.Assets().Policies(), 1)
 
 	t.Logf("Address: %x", decoded.Address)
 	t.Logf("Lovelace: %d", decoded.Lovelace)

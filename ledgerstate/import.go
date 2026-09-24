@@ -181,6 +181,7 @@ type EraBound struct {
 type ParsedUTxO struct {
 	TxHash        []byte // 32 bytes
 	OutputIndex   uint32
+	Cbor          []byte // serialized TxOut used by ledger replay
 	Address       []byte // raw address bytes
 	PaymentKey    []byte // 28 bytes, extracted from address
 	StakingKey    []byte // 28 bytes, extracted from address
@@ -850,7 +851,7 @@ func importUTxOs(
 			)
 		}
 
-		txn := cfg.Database.MetadataTxn(true)
+		txn := cfg.Database.Transaction(true)
 		defer txn.Release()
 
 		var err error
@@ -867,6 +868,30 @@ func importUTxOs(
 				"inserting UTxO batch: %w",
 				err,
 			)
+		}
+		blob := txn.BlobStore()
+		if blob == nil {
+			return errors.New("blob store not available during UTxO import")
+		}
+		for i := range batch {
+			if len(batch[i].Cbor) == 0 {
+				return fmt.Errorf(
+					"UTxO %x#%d has no serialized output",
+					batch[i].TxHash,
+					batch[i].OutputIndex,
+				)
+			}
+			if err := blob.SetUtxo(
+				txn.Blob(), batch[i].TxHash,
+				batch[i].OutputIndex, batch[i].Cbor,
+			); err != nil {
+				return fmt.Errorf(
+					"storing imported UTxO CBOR %x#%d: %w",
+					batch[i].TxHash,
+					batch[i].OutputIndex,
+					err,
+				)
+			}
 		}
 
 		if err := txn.Commit(); err != nil {

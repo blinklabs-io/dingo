@@ -11712,7 +11712,11 @@ database whose imported anchor row lacks this basis for repair. Before
 `dingo serve` starts, core- and API-mode databases with that marker automatically
 run a Mithril v2 catch-up against the latest certified state. Catch-up verifies
 the existing chain intersection before reconciling ledger rows, retains the local
-block history, and clears the marker only on completion. API mode also rebuilds
+block history, and clears the marker only on completion. During reconciliation,
+the certified live UTxO set and each output's CBOR are restored together, so
+outputs live at the anchor remain available when replaying post-anchor blocks
+that spent them; UTxO-HD MemPack outputs are converted back to ledger TxOut
+CBOR for this purpose. API mode also rebuilds
 its historical metadata through the certified ledger anchor. If the selected
 artifact does not cover the local tip, startup remains blocked and the database
 is left intact while Dingo retries the repair every five minutes; it is never
