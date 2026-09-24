@@ -8,9 +8,8 @@ name: publish
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
 #       -> go-test (Linux)
 #          go-test (Linux, race)
-#          go-test (Windows)
-#          go-test (macOS)               4 runners, 5-35 min
-#         -> create-draft-release        tag only, needs all four
+#          go-test (macOS)               3 runners, 5-35 min
+#         -> create-draft-release        tag only, needs all three
 #         -> build-<os>, build-images    gated on the SAME OS's tests
 #           -> build-image-manifest
 #             -> finalize-release        tag only
@@ -19,7 +18,7 @@ name: publish
 # pull-request only. Previously a merge started go-test.yml's five jobs and
 # this workflow's ten independently, sixteen runners at once, and the images
 # and binaries published without waiting for any of them. Now the same merge
-# peaks at about five concurrent jobs and nothing is pushed until the tests
+# peaks at about five concurrent jobs and nothing is published until tests
 # that cover it are green.
 #
 # The difference between a main push and a release tag is signing and
@@ -96,10 +95,6 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
         with:
           working-directory: examples/dingo-gov-lens
-      - name: golangci-lint (root, GOOS=windows)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        env:
-          GOOS: windows
       - name: config-parity
         run: make config-parity
 
@@ -199,6 +194,13 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+        # Discarded with the job, so durability buys nothing and every
+        # commit's fsync is cost: the conformance replays commit per statement.
+        command: >-
+          postgres
+          -c fsync=off
+          -c synchronous_commit=off
+          -c full_page_writes=off
         ports:
           - 5432:5432
       mysql:
@@ -213,6 +215,13 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+        # Discarded with the job, so durability buys nothing and every
+        # commit's fsync is cost: the conformance replays commit per statement.
+        command: >-
+          --innodb-file-per-table=OFF
+          --innodb-flush-log-at-trx-commit=0
+          --sync-binlog=0
+          --skip-log-bin
         ports:
           - 3306:3306
       minio:
@@ -321,40 +330,9 @@ jobs:
       - name: go-test-race
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
 
-  # Stage 3. Platform coverage on the merge and release path, not only on a
-  # pull request: a merge conflict, a stale base, or a force-push can land a
-  # tree no pull request ever tested on these platforms.
-  go-test-windows:
-    name: go-test (Windows)
-    needs: [go-test-linux-quick]
-    strategy:
-      matrix:
-        go-version: [1.26.x]
-    runs-on: windows-latest
-    timeout-minutes: 90
-    env:
-      CGO_ENABLED: 0
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: ${{ matrix.go-version }}
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~\AppData\Local\go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
-      - name: go-build
-        run: go build ./...
-      - name: go-test
-        run: go test -v -ldflags="-s -w" -timeout 30m ./...
-
+  # Stage 3. macOS coverage on the merge and release path, not only on a pull
+  # request: a merge conflict, a stale base, or a force-push can land a tree
+  # no pull request ever tested on this platform.
   go-test-macos:
     name: go-test (macOS)
     needs: [go-test-linux-quick]
@@ -386,7 +364,8 @@ jobs:
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
 
-  # A release draft is created only once every platform is green, so a tag
+  # A release draft is created only once the supported platforms are green,
+  # so a tag
   # cannot reach a half-published state the way v0.70.3 did.
   create-draft-release:
     name: create-draft-release
@@ -396,7 +375,6 @@ jobs:
       - govulncheck
       - go-test-linux
       - go-test-linux-race
-      - go-test-windows
       - go-test-macos
     if: github.ref_type == 'tag'
     permissions:
@@ -450,7 +428,7 @@ jobs:
 
             return response.data.id;
 
-  # Stage 4. One build job per runner OS, each gated on that OS's own tests,
+  # Stage 4. One build job per remaining runner OS, each gated on its own tests,
   # replacing a 7-entry matrix of one-target jobs. See
   # .github/scripts/build-targets.sh.
   #
@@ -514,58 +492,6 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
         with:
           subject-path: dist/*/${{ env.APPLICATION_NAME }}
-
-  build-windows:
-    name: build (Windows)
-    needs: [go-test-windows, create-draft-release]
-    if: >-
-      always()
-      && needs.go-test-windows.result == 'success'
-      && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
-    runs-on: windows-latest
-    timeout-minutes: 60
-    permissions:
-      attestations: write
-      contents: write
-      id-token: write
-    steps:
-      - run: git config --global --add safe.directory "$PWD"
-        shell: bash
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: 1.26.x
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~\AppData\Local\go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
-      - name: Build binaries
-        env:
-          BUILD_TARGETS: windows/amd64 windows/arm64
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-        run: .github/scripts/build-targets.sh
-        shell: bash
-      - name: Upload release assets
-        if: github.ref_type == 'tag'
-        env:
-          RELEASE_ID: ${{ needs.create-draft-release.outputs.RELEASE_ID }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
-          RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: .github/scripts/upload-release-assets.sh
-        shell: bash
-      - name: Attest binaries
-        if: github.ref_type == 'tag'
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2 https://github.com/actions/attest/releases/tag/v4.2.2
-        with:
-          subject-path: dist/*/${{ env.APPLICATION_NAME }}.exe
 
   build-macos:
     name: build (macOS)
@@ -823,7 +749,6 @@ jobs:
     needs:
       - create-draft-release
       - build-linux
-      - build-windows
       - build-macos
       - build-images
       - build-image-manifest
@@ -832,7 +757,6 @@ jobs:
       && github.ref_type == 'tag'
       && needs.create-draft-release.result == 'success'
       && needs.build-linux.result == 'success'
-      && needs.build-windows.result == 'success'
       && needs.build-macos.result == 'success'
       && needs.build-images.result == 'success'
       && needs.build-image-manifest.result == 'success'
