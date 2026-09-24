@@ -212,41 +212,62 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
-// PendingMIRRewardDeltas returns, for each stake credential, the signed sum of
-// MIR reward deltas already committed this epoch at or before uptoSlot. Every
-// transaction's certificates are written to the database immediately after
-// that transaction validates (see ledgerProcessBlock), before the next
-// transaction in the same block validates, so this query already reflects
-// every prior transaction's MIR certificates this epoch, same block or
-// earlier -- only certificates within the transaction currently being
-// validated are not yet visible here, and validateMIRAccumulatedRewards folds
-// those in memory as it walks the transaction's own certificate list.
+// MIRDelegState returns the move instantaneous rewards DELEG state that a
+// certificate at slot is checked against: the chain account pots, the
+// distributions and pot transfers committed this epoch at or before slot, and
+// the epoch's too-late cutoff. additive selects how repeated distributions to
+// one credential fold, per eras.MIRDelegState.Pending.
+//
+// Every transaction's certificates are written to the database immediately
+// after that transaction validates (see ledgerProcessBlock), before the next
+// transaction in the same block validates, so this already reflects every
+// prior transaction's MIR certificates this epoch, same block or earlier.
+// Certificates within the transaction being validated are folded in memory by
+// the eras package as it walks the certificate list.
 //
 // The epoch start slot comes from lv.epochStartSlot, pinned from the same
-// snapshot pp was captured from at every real validation call site (see
-// epochStartSlot's field doc comment and IsVrfKeyInUse, which pins it for the
-// same reason), never a fresh read of LedgerState.currentEpoch: that field is
-// writer-owned working state (see its doc comment in state.go), and
-// re-reading it independently, later in the same validation call, could
-// observe an epoch rollover that a concurrent writer committed after the
-// rest of this validation was pinned to an earlier snapshot -- silently
-// reporting zero pending deltas for a transaction that is still, in truth,
-// inside the earlier epoch.
-func (lv *LedgerView) PendingMIRRewardDeltas(
-	uptoSlot uint64,
-) (map[eras.MIRCredentialKey]*big.Int, error) {
+// snapshot pp was captured from (see its field doc comment), never a fresh
+// read of LedgerState.currentEpoch, which a concurrent writer could advance
+// mid-validation.
+func (lv *LedgerView) MIRDelegState(
+	slot uint64,
+	additive bool,
+) (eras.MIRDelegState, error) {
+	ret := eras.MIRDelegState{
+		DeltaReserves: new(big.Int),
+		DeltaTreasury: new(big.Int),
+		Pending:       make(map[eras.MIRCredentialKey]*big.Int),
+	}
+	cutoff, err := lv.ls.mirCertificateCutoff(slot)
+	if err != nil {
+		return ret, err
+	}
+	ret.Cutoff = cutoff
+	ret.Treasury, ret.Reserves, err = lv.ls.readNetworkState(lv.txn)
+	if err != nil {
+		return ret, err
+	}
 	epochStartSlot := lv.epochStartSlot
-	if uptoSlot < epochStartSlot {
-		return nil, nil
+	if slot < epochStartSlot {
+		return ret, nil
 	}
 	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
-		epochStartSlot, uptoSlot+1, lv.txn,
+		epochStartSlot, slot+1, lv.txn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get MIR certs in slot range: %w", err)
+		return ret, fmt.Errorf("get MIR certs in slot range: %w", err)
 	}
-	totals := make(map[eras.MIRCredentialKey]*big.Int)
 	for _, effect := range effects {
+		if effect.OtherPot > 0 {
+			amount := new(big.Int).SetUint64(effect.OtherPot)
+			source, target := ret.DeltaReserves, ret.DeltaTreasury
+			if effect.Pot == mirPotTreasury {
+				source, target = target, source
+			}
+			source.Sub(source, amount)
+			target.Add(target, amount)
+			continue
+		}
 		for _, reward := range effect.Rewards {
 			if reward.Amount == nil {
 				continue
@@ -256,20 +277,20 @@ func (lv *LedgerView) PendingMIRRewardDeltas(
 				Credential: lcommon.NewBlake2b224(reward.Credential),
 				Pot:        effect.Pot,
 			}
-			if existing, ok := totals[key]; ok {
-				totals[key] = new(big.Int).Add(existing, reward.Amount)
+			if existing, ok := ret.Pending[key]; ok && additive {
+				ret.Pending[key] = new(big.Int).Add(existing, reward.Amount)
 			} else {
-				totals[key] = new(big.Int).Set(reward.Amount)
+				ret.Pending[key] = new(big.Int).Set(reward.Amount)
 			}
 		}
 	}
-	return totals, nil
+	return ret, nil
 }
 
-// var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil) makes any future
-// drift in the MIRPendingRewardsProvider method signature a compile error
-// instead of a silent runtime no-op for the MIRProducesNegativeUpdate check.
-var _ eras.MIRPendingRewardsProvider = (*LedgerView)(nil)
+// var _ eras.MIRDelegStateProvider = (*LedgerView)(nil) makes any future
+// drift in the MIRDelegStateProvider method signature a compile error instead
+// of a silent runtime no-op for every MIR DELEG predicate that reads it.
+var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
@@ -1594,9 +1615,12 @@ func (lv *LedgerView) drepRegistrationDeposit(
 	if lv.ls != nil && lv.ls.config.Logger != nil {
 		lv.ls.config.Logger.Warn(
 			"registered DRep has no recorded registration deposit; substituting the current protocol parameter",
-			"component", "ledger",
-			"drep_credential", hex.EncodeToString(credential[:]),
-			"substituted_deposit", deposit,
+			"component",
+			"ledger",
+			"drep_credential",
+			hex.EncodeToString(credential[:]),
+			"substituted_deposit",
+			deposit,
 		)
 	}
 	return &deposit

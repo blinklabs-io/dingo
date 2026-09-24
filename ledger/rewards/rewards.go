@@ -274,10 +274,9 @@ func Calculate(
 			ErrInvalidParameters,
 		)
 	}
-	efficiency := rewardEfficiency(
+	efficiency := Efficiency(
 		totalBlocks,
-		expectedBlocks,
-		params.Decentralization,
+		params,
 	)
 	incentives, err := floorMulChecked(
 		minRat(oneRat(), efficiency),
@@ -1271,6 +1270,17 @@ func rewardEfficiency(
 	return new(big.Rat).Quo(
 		uintRat(totalBlocks),
 		expectedBlocks,
+	)
+}
+
+// Efficiency returns the network reward efficiency for the observed total
+// block count and reward parameters. It is also used when logging a previously
+// computed reward application from its persisted inputs.
+func Efficiency(totalBlocks uint64, params Parameters) *big.Rat {
+	return rewardEfficiency(
+		totalBlocks,
+		expectedBlocks(params),
+		params.Decentralization,
 	)
 }
 

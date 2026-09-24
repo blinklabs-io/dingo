@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -209,6 +210,35 @@ func TestBootstrap(t *testing.T) {
 
 	// Verify the immutable directory contains chunk files
 	require.True(t, hasChunkFiles(result.ImmutableDir))
+}
+
+func TestBootstrapRedactsCredentialAggregatorURLFromLogs(t *testing.T) {
+	t.Parallel()
+
+	handler := &captureSlogHandler{}
+	_, err := Bootstrap(context.Background(), BootstrapConfig{
+		Backend: "unsupported",
+		AggregatorURL: "https://operator:super-secret@aggregator.example/" +
+			"?token=query-secret",
+		Logger: slog.New(handler),
+	})
+	require.Error(t, err)
+
+	found := false
+	for _, record := range handler.records {
+		if record.Message != "starting Mithril bootstrap" {
+			continue
+		}
+		record.Attrs(func(attr slog.Attr) bool {
+			if attr.Key != "aggregator" {
+				return true
+			}
+			found = true
+			assert.Equal(t, "https://aggregator.example/", attr.Value.String())
+			return true
+		})
+	}
+	require.True(t, found, "bootstrap log is missing aggregator URL")
 }
 
 func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {

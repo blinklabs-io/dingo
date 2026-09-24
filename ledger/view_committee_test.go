@@ -1145,6 +1145,33 @@ func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
 	require.ErrorContains(t, err, "committee voter is not elected")
 }
 
+func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
+	pparams := &conway.ConwayProtocolParameters{}
+	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+	lv, db := committeeTestView(t, pparams)
+	lv.skipPhase2Validation = true
+	cold := committeeTestCredential(0xd1)
+	hot := committeeTestCredential(0xd2)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(cold.CredType),
+		ColdCredHash:      cold.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+
+	require.NoError(t, eras.ValidateTxConway(tx, 0, lv, pparams))
+}
+
 func TestValidateTxConwayRejectsCommitteeUpdateVoteAtPV10(t *testing.T) {
 	pparams := &conway.ConwayProtocolParameters{}
 	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
