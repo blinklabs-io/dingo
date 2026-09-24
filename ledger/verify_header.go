@@ -1323,17 +1323,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	return nil
 }
 
-//nolint:unused // retained as a test helper
-func (ls *LedgerState) leaderEligibilityStake(
-	block ledger.Block,
-	epochId uint64,
-	poolKeyHash lcommon.PoolKeyHash,
-) (uint64, uint64, uint64, string, bool, error) {
-	return ls.leaderEligibilityStakeWithCache(
-		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
-	)
-}
-
 func (ls *LedgerState) leaderEligibilityStakeWithCache(
 	block ledger.Block,
 	epochId uint64,
@@ -1588,16 +1577,6 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
 		return snapshot.CapturedSlot >= ep.StartSlot
 	}
 	return false
-}
-
-//nolint:unused // retained as a test helper
-func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
-	block ledger.Block,
-	epochId uint64,
-) (bool, error) {
-	return ls.shouldUseImportedActivePoolDistributionWithCache(
-		block, epochId, ls.epochCacheSnapshot(),
-	)
 }
 
 // shouldUseImportedActivePoolDistributionWithCache resolves the Mithril trust

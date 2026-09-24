@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"math"
+	"math/big"
 	"testing"
 	"time"
 
@@ -27,22 +28,53 @@ import (
 )
 
 func TestGenesisWindowSlotsForParams(t *testing.T) {
-	assert.Equal(t, uint64(129600), GenesisWindowSlotsForParams(2160, 0.05))
-	assert.Equal(
-		t,
-		defaultGenesisWindowSlots,
-		GenesisWindowSlotsForParams(0, 0.05),
-	)
-	assert.Equal(
-		t,
-		defaultGenesisWindowSlots,
-		GenesisWindowSlotsForParams(2160, 0),
-	)
-	assert.Equal(
-		t,
-		defaultGenesisWindowSlots,
-		GenesisWindowSlotsForParams(2160, math.NaN()),
-	)
+	tests := []struct {
+		name  string
+		k     uint64
+		coeff *big.Rat
+		want  uint64
+	}{
+		{"mainnet", 2160, big.NewRat(1, 20), 129600},
+		// float64(0.0003) is below 3/10000, so a float quotient lands just
+		// above 21,600,000 and ceil returns 21,600,001 (#4346).
+		{"exact quotient", 2160, big.NewRat(3, 10000), 21_600_000},
+		// 90000/7 = 12857 remainder 1: just above an integer.
+		{"just above boundary", 3, big.NewRat(7, 10000), 12858},
+		// 120000/7 = 17142 remainder 6: just below an integer.
+		{"just below boundary", 4, big.NewRat(7, 10000), 17143},
+		{"coefficient of one", 2160, big.NewRat(1, 1), 6480},
+		{
+			"saturates on overflow",
+			math.MaxUint64,
+			big.NewRat(1, 20),
+			math.MaxUint64,
+		},
+		{"zero security param", 0, big.NewRat(1, 20), defaultGenesisWindowSlots},
+		{"nil coefficient", 2160, nil, defaultGenesisWindowSlots},
+		{"zero coefficient", 2160, new(big.Rat), defaultGenesisWindowSlots},
+		{
+			"negative coefficient",
+			2160,
+			big.NewRat(-1, 20),
+			defaultGenesisWindowSlots,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var before string
+			if tc.coeff != nil {
+				before = tc.coeff.String()
+			}
+			assert.Equal(
+				t,
+				tc.want,
+				GenesisWindowSlotsForParams(tc.k, tc.coeff),
+			)
+			if tc.coeff != nil {
+				assert.Equal(t, before, tc.coeff.String(), "coeff mutated")
+			}
+		})
+	}
 }
 
 func TestDensityFromIntersection(t *testing.T) {

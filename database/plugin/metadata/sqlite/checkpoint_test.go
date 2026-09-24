@@ -137,8 +137,15 @@ func TestCheckpointWALTruncatesFile(t *testing.T) {
 // checkpointWAL now issues the pragma from a dedicated connection with a
 // short busy_timeout instead, so it fails fast on the same busy=1 outcome
 // and a concurrent writeDB write is never blocked by it.
+//
+// Not t.Parallel: every assertion below is a wall-clock duration, which is a
+// process-wide measurement in the same sense as testing.AllocsPerRun or
+// runtime.NumGoroutine -- what it reports depends on whatever else is running
+// in the process, not only on the code under test. Run in parallel with the
+// rest of this package it measured the runner's load as much as the
+// checkpoint, and failed on a loaded CI runner while the behaviour it guards
+// was intact.
 func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
-	t.Parallel()
 	dataDir := t.TempDir()
 	store, writeDB, readDB, err := openSQLStore(
 		Config{DataDir: dataDir},
@@ -170,6 +177,14 @@ func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
 	t.Cleanup(func() {
 		_ = readTx.Rollback()
 	})
+	// The design this guards blocked for the full busy_timeout(30000); a
+	// healthy dedicated-connection attempt gives up after
+	// checkpointBusyTimeout (250ms). Bound the gap well below 30s rather
+	// than just above 250ms: these are wall-clock measurements on shared
+	// runners, and a bound close to the healthy time fails on load rather
+	// than on the defect it exists to catch.
+	const maxUnblocked = 10 * time.Second
+
 	var probe int
 	require.NoError(
 		t,
@@ -207,7 +222,7 @@ func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
 	)
 	checkpointDuration := time.Since(checkpointStarted)
 	require.Less(
-		t, checkpointDuration, 2*time.Second,
+		t, checkpointDuration, maxUnblocked,
 		"a dedicated-connection checkpoint attempt should fail fast on a "+
 			"blocked truncate, not wait out busy_timeout(30000)",
 	)
@@ -218,13 +233,13 @@ func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
 	)
 
 	result := testutil.RequireReceive(
-		t, writeResultCh, 2*time.Second,
+		t, writeResultCh, maxUnblocked,
 		"concurrent writeDB insert must not be blocked behind the "+
 			"checkpoint attempt",
 	)
 	require.NoError(t, result.err)
 	require.Less(
-		t, result.duration, 2*time.Second,
+		t, result.duration, maxUnblocked,
 		"a concurrent write must not be blocked behind the checkpoint attempt",
 	)
 }

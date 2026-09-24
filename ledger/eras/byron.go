@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -49,6 +50,25 @@ func EpochLengthByron(
 	byronGenesis := nodeConfig.ByronGenesis()
 	if byronGenesis == nil {
 		return 0, 0, errors.New("unable to get byron genesis")
+	}
+	if byronGenesis.BlockVersionData.SlotDuration < 0 {
+		return 0, 0, fmt.Errorf(
+			"byron genesis: slotDuration must not be negative, got %d",
+			byronGenesis.BlockVersionData.SlotDuration,
+		)
+	}
+	// K is also validated at genesis load (config/cardano's
+	// validateSecurityParameters), by internal/node/load.go's
+	// loadSecurityParamForConfig, and by this package's own
+	// StabilityWindowForEra -- so a non-positive k should never reach a
+	// production call here. This guard is the same defense-in-depth as the
+	// SlotDuration check above: this specific uint conversion had no local
+	// guard of its own before either fix.
+	if byronGenesis.ProtocolConsts.K <= 0 {
+		return 0, 0, fmt.Errorf(
+			"byron genesis: security parameter (protocolConsts.k) must be positive, got %d",
+			byronGenesis.ProtocolConsts.K,
+		)
 	}
 	// These are known to be within uint range
 	// #nosec G115
@@ -160,6 +180,36 @@ func (e FeeTooLowByronError) Error() string {
 	)
 }
 
+// NetworkMagicMismatchByronError is returned when a Byron transaction pays to
+// an address belonging to a different network than the one this node is
+// validating for. Expected and Actual are nil for the mainnet encoding, which
+// carries no network-magic attribute at all, and non-nil for a testnet or
+// custom network, which carries its magic explicitly.
+type NetworkMagicMismatchByronError struct {
+	OutputIndex int
+	Expected    *uint32
+	Actual      *uint32
+}
+
+func (e NetworkMagicMismatchByronError) Error() string {
+	return fmt.Sprintf(
+		"output %d network magic %s does not match expected %s",
+		e.OutputIndex,
+		byronNetworkMagicString(e.Actual),
+		byronNetworkMagicString(e.Expected),
+	)
+}
+
+// byronNetworkMagicString renders a Byron address network attribute, naming
+// the absent case rather than printing a bare nil: absence is meaningful here,
+// it is how a mainnet address is encoded.
+func byronNetworkMagicString(magic *uint32) string {
+	if magic == nil {
+		return "mainnet (no network attribute)"
+	}
+	return strconv.FormatUint(uint64(*magic), 10)
+}
+
 // ByronFeePolicyProvider supplies the active Byron genesis fee policy. Both
 // values are scaled by 10^9.
 type ByronFeePolicyProvider interface {
@@ -220,6 +270,7 @@ var byronValidationRules = []byronValidationRuleFunc{
 var byronUtxoValidationRules = []lcommon.UtxoValidationRuleFunc{
 	byronValidateBadInputs,
 	byronValidateValueConserved,
+	byronValidateOutputNetwork,
 	byronValidateMinFee,
 	byronValidateWitnesses,
 }
@@ -344,6 +395,70 @@ func byronValidateValueConserved(
 	return nil
 }
 
+// byronValidateOutputNetwork enforces the Byron reference's validateTxOutNM:
+// every output address must belong to the network this node validates for,
+// derived from the active protocol magic.
+//
+// Byron encodes that membership asymmetrically. A mainnet address carries no
+// network-magic attribute at all, while a testnet or custom-network address
+// carries its magic explicitly, so the expected value is an absence on
+// mainnet and a specific number everywhere else. Comparing the magic itself,
+// rather than a mainnet/testnet flag, is what keeps two distinct custom
+// networks from being treated as interchangeable: an address minted for magic
+// 42 is invalid on the network whose magic is 43, even though both are
+// "testnet" by any boolean reading. Address.NetworkId() collapses exactly
+// that distinction, which is why this reads the attribute directly.
+func byronValidateOutputNetwork(
+	tx lcommon.Transaction,
+	_ uint64,
+	ls lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	provider, ok := ls.(ByronProtocolMagicProvider)
+	if !ok {
+		// Lightweight ledger-state implementations used by structural callers
+		// do not necessarily expose chain configuration. The production
+		// LedgerState does, and enforces the rule there.
+		return nil
+	}
+	protocolMagic, err := provider.ByronProtocolMagic()
+	if err != nil {
+		return fmt.Errorf("get Byron protocol magic: %w", err)
+	}
+	var expected *uint32
+	if protocolMagic != byron.MainnetProtocolMagic {
+		expected = &protocolMagic
+	}
+	for idx, output := range tx.Outputs() {
+		addr := output.Address()
+		if addr.Type() != lcommon.AddressTypeByron {
+			// A Byron output always decodes to a Byron address; the
+			// lightweight outputs structural tests build do not carry one at
+			// all, and there is no network to compare for those.
+			continue
+		}
+		actual := addr.ByronAttr().Network
+		if byronNetworkMagicEqual(expected, actual) {
+			continue
+		}
+		return NetworkMagicMismatchByronError{
+			OutputIndex: idx,
+			Expected:    expected,
+			Actual:      actual,
+		}
+	}
+	return nil
+}
+
+// byronNetworkMagicEqual compares two Byron address network attributes by
+// value, treating absence as its own case rather than as zero.
+func byronNetworkMagicEqual(expected, actual *uint32) bool {
+	if expected == nil || actual == nil {
+		return expected == nil && actual == nil
+	}
+	return *expected == *actual
+}
+
 // byronValidateMinFee enforces the Byron genesis fee policy. Byron fees are
 // implicit, so the consumed-minus-produced value computed by the conservation
 // rule is the transaction fee.
@@ -386,10 +501,22 @@ func byronValidateMinFee(
 	required = quotient
 
 	actual := new(big.Int)
+	// The Byron reference exempts a transaction from the minimum fee when its
+	// complete input UTxO consists of redeem addresses (isRedeemUTxO). A single
+	// non-redeem input is enough to require the normal fee, and an input that
+	// cannot be resolved is not evidence of a redeem address, so both clear the
+	// exemption. An empty input set is not vacuously redeem-only.
+	redeemOnly := len(tx.Inputs()) > 0
 	for _, input := range tx.Inputs() {
 		utxo, lookupErr := ls.UtxoById(input)
 		if lookupErr != nil || utxo.Output == nil {
+			redeemOnly = false
 			continue
+		}
+		addr := utxo.Output.Address()
+		if addr.Type() != lcommon.AddressTypeByron ||
+			addr.ByronType() != lcommon.ByronAddressTypeRedeem {
+			redeemOnly = false
 		}
 		if amount := utxo.Output.Amount(); amount != nil {
 			actual.Add(actual, amount)
@@ -399,6 +526,11 @@ func byronValidateMinFee(
 		if amount := output.Amount(); amount != nil {
 			actual.Sub(actual, amount)
 		}
+	}
+	if redeemOnly {
+		// Redemption still must conserve value, so a negative implicit fee
+		// remains a failure against a zero requirement.
+		required = big.NewInt(0)
 	}
 	if actual.Cmp(required) < 0 {
 		return FeeTooLowByronError{
@@ -424,12 +556,25 @@ func byronValidateWitnesses(
 	}
 	// Byron redeem witnesses are constructor 2 values whose fields are
 	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
-	// values but do not expose them through TransactionWitnessSet.
+	// values but do not expose them through TransactionWitnessSet, and even
+	// a current release's VkeyWitness has no room for the chain-code half
+	// of a constructor-0 witness that byronAddressRootForParts needs, so
+	// this file must still decode Twit itself.
 	var redeemWitnesses []lcommon.VkeyWitness
 	var bootstrapWitnesses []byronBootstrapWitness
 	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
-		redeemWitnesses = byronRedeemWitnesses(byronTx.Twit)
-		bootstrapWitnesses = byronBootstrapWitnesses(byronTx.Twit)
+		var err error
+		bootstrapWitnesses, redeemWitnesses, err = byronDecodeWitnesses(
+			byronTx.Twit,
+		)
+		if err != nil {
+			return lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeTransaction,
+				"invalid byron transaction witness",
+				map[string]any{"err": err.Error()},
+				err,
+			)
+		}
 		if len(redeemWitnesses) > 0 || len(bootstrapWitnesses) > 0 {
 			txHash := tx.Hash()
 			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
@@ -534,71 +679,79 @@ type byronBootstrapWitness struct {
 	ChainCode []byte
 }
 
-func byronWitnessPayloads(
+// byronDecodeWitnesses strictly decodes every entry of a Byron transaction's
+// Twit list. The reference sum type (Cardano.Chain.UTxO.TxWitness) has
+// exactly two live constructors -- VKWitness (0) and RedeemWitness (2) --
+// and no catch-all case: a witness with an unrecognized constructor, or a
+// malformed payload for a known constructor, invalidates the whole
+// transaction rather than being dropped from the returned witnesses. A
+// transaction with a genuinely valid witness followed by such an entry must
+// not have its valid witness accepted while the invalid one is discarded,
+// since the witness proof covers the raw bytes of both.
+func byronDecodeWitnesses(
 	witnesses []cbor.Value,
-	expectedConstructor uint64,
-) [][][]byte {
-	var ret [][][]byte
-	for _, witness := range witnesses {
+) ([]byronBootstrapWitness, []lcommon.VkeyWitness, error) {
+	var bootstrap []byronBootstrapWitness
+	var redeem []lcommon.VkeyWitness
+	for idx, witness := range witnesses {
 		fields, ok := witness.Value().([]any)
 		if !ok || len(fields) != 2 {
-			continue
+			return nil, nil, fmt.Errorf(
+				"witness %d: not a 2-element TxInWitness", idx,
+			)
 		}
 		ctor, ok := fields[0].(uint64)
-		if !ok || ctor != expectedConstructor {
-			continue
+		if !ok {
+			return nil, nil, fmt.Errorf(
+				"witness %d: constructor tag is not an unsigned integer",
+				idx,
+			)
 		}
 		wrapped, ok := fields[1].(cbor.WrappedCbor)
 		if !ok {
-			continue
+			return nil, nil, fmt.Errorf(
+				"witness %d: payload is not tag-24-wrapped CBOR", idx,
+			)
 		}
 		var witnessFields [][]byte
-		if _, err := cbor.Decode(wrapped.Bytes(), &witnessFields); err != nil {
-			continue
+		wrappedBytes := wrapped.Bytes()
+		consumed, err := cbor.Decode(wrappedBytes, &witnessFields)
+		if err != nil || consumed != len(wrappedBytes) {
+			return nil, nil, fmt.Errorf(
+				"witness %d: failed to decode tag-24 payload", idx,
+			)
 		}
-		ret = append(ret, witnessFields)
-	}
-	return ret
-}
-
-func byronBootstrapWitnesses(
-	witnesses []cbor.Value,
-) []byronBootstrapWitness {
-	var ret []byronBootstrapWitness
-	for _, witnessFields := range byronWitnessPayloads(
-		witnesses,
-		lcommon.ByronAddressTypePubkey,
-	) {
-		if len(witnessFields) != 2 || len(witnessFields[0]) != 64 ||
-			len(witnessFields[1]) != 64 {
-			continue
+		switch ctor {
+		case lcommon.ByronAddressTypePubkey:
+			if len(witnessFields) != 2 || len(witnessFields[0]) != 64 ||
+				len(witnessFields[1]) != 64 {
+				return nil, nil, fmt.Errorf(
+					"witness %d: malformed VKWitness fields", idx,
+				)
+			}
+			bootstrap = append(bootstrap, byronBootstrapWitness{
+				PublicKey: witnessFields[0][:32],
+				ChainCode: witnessFields[0][32:],
+				Signature: witnessFields[1],
+			})
+		case lcommon.ByronAddressTypeRedeem:
+			if len(witnessFields) != 2 || len(witnessFields[0]) != 32 ||
+				len(witnessFields[1]) != 64 {
+				return nil, nil, fmt.Errorf(
+					"witness %d: malformed RedeemWitness fields", idx,
+				)
+			}
+			redeem = append(redeem, lcommon.VkeyWitness{
+				Vkey:      witnessFields[0],
+				Signature: witnessFields[1],
+			})
+		default:
+			return nil, nil, fmt.Errorf(
+				"witness %d: unknown TxInWitness constructor %d", idx, ctor,
+			)
 		}
-		ret = append(ret, byronBootstrapWitness{
-			PublicKey: witnessFields[0][:32],
-			ChainCode: witnessFields[0][32:],
-			Signature: witnessFields[1],
-		})
 	}
-	return ret
-}
-
-func byronRedeemWitnesses(
-	witnesses []cbor.Value,
-) []lcommon.VkeyWitness {
-	var ret []lcommon.VkeyWitness
-	for _, witnessFields := range byronWitnessPayloads(
-		witnesses,
-		lcommon.ByronAddressTypeRedeem,
-	) {
-		if len(witnessFields) != 2 {
-			continue
-		}
-		ret = append(ret, lcommon.VkeyWitness{
-			Vkey:      witnessFields[0],
-			Signature: witnessFields[1],
-		})
-	}
-	return ret
+	return bootstrap, redeem, nil
 }
 
 func validateByronInputWitnesses(
