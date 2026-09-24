@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -122,7 +123,13 @@ type ObserverConfig struct {
 	// (pass, fail, or error), for tests/observability. Never called
 	// concurrently with itself.
 	OnResult func(*EpochCompareResult)
-	Logger   *slog.Logger
+	// PromRegistry registers this observer's dingo_koiosparity_* metrics
+	// (metrics.go) when non-nil, matching every other component's own
+	// PromRegistry field. nil in some paths (tests build an Observer/Node
+	// without one), in which case the observer records no metrics at all —
+	// see newMetrics.
+	PromRegistry prometheus.Registerer
+	Logger       *slog.Logger
 }
 
 // Observer drives Koios fetch+check for each closed epoch as Dingo's own
@@ -161,9 +168,10 @@ type ObserverConfig struct {
 // fall arbitrarily far behind the aggregate queue without affecting how
 // quickly a strict-mode aggregate/pool mismatch fires FatalFunc.
 type Observer struct {
-	cfg   ObserverConfig
-	cache *Cache
-	koios *KoiosClient
+	cfg     ObserverConfig
+	cache   *Cache
+	koios   *KoiosClient
+	metrics *metrics
 
 	mu       sync.Mutex
 	pending  map[uint64]struct{} // epochs requested for (re)validation
@@ -256,6 +264,7 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		cfg:             cfg,
 		cache:           cache,
 		koios:           koios,
+		metrics:         newMetrics(cfg.PromRegistry),
 		pending:         make(map[uint64]struct{}),
 		pendingAccounts: make(map[uint64]struct{}),
 		wake:            make(chan struct{}, defaultQueueBuffer),
@@ -911,7 +920,14 @@ func (o *Observer) reportError(
 	})
 }
 
+// emitResult is the single choke point every completed check result passes
+// through: processEpoch's success path, processAccountEpoch's success path,
+// and reportError's synthesized ERROR path (see their call sites) all call
+// this rather than o.cfg.OnResult directly. Recording metrics here, once,
+// rather than at each call site individually, is what covers all three
+// without scattering dingo_koiosparity_* updates across observer.go.
 func (o *Observer) emitResult(result *EpochCompareResult) {
+	o.metrics.recordResult(result)
 	if o.cfg.OnResult == nil {
 		return
 	}
