@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
@@ -319,6 +320,51 @@ func validateUnknownVoters(
 			}
 		default:
 			return conway.UnknownVoterError{Voter: *voter}
+		}
+	}
+	return nil
+}
+
+// ParameterChangeProtocolVersionError indicates that a ParameterChange
+// governance action set protocol-version key 14, which the reference
+// excludes from PParamsUpdate entirely.
+type ParameterChangeProtocolVersionError struct {
+	ProposalIndex int
+}
+
+func (e ParameterChangeProtocolVersionError) Error() string {
+	return fmt.Sprintf(
+		"proposal %d: ParameterChange must not set protocol-version (key 14); only HardForkInitiation can change protocol version",
+		e.ProposalIndex,
+	)
+}
+
+// validateParameterChangeExcludesProtocolVersion rejects a Conway or
+// Dijkstra ParameterChange governance action that carries protocol-version
+// key 14 (dingo#4439). The reference excludes protocol version from
+// PParamsUpdate: a protocol change must go through HardForkInitiation
+// instead, which carries separate SPO/DRep threshold semantics and, at PV9,
+// bootstrap restrictions that a same-purpose ParameterChange would
+// otherwise bypass. Rejecting here, before ProcessProposals, keeps a
+// malformed proposal from ever being persisted or reaching enactment.
+func validateParameterChangeExcludesProtocolVersion(
+	tx lcommon.Transaction,
+	_ uint64,
+	_ lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	for i, proposal := range tx.ProposalProcedures() {
+		var setsProtocolVersion bool
+		switch action := proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				action.ParamUpdate.ProtocolVersion != nil
+		case *gdijkstra.DijkstraParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				action.ParamUpdate.ProtocolVersion != nil
+		}
+		if setsProtocolVersion {
+			return ParameterChangeProtocolVersionError{ProposalIndex: i}
 		}
 	}
 	return nil
