@@ -10174,8 +10174,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			currentLedgerTip.Point.Slot,
 			currentLedgerTip.BlockNumber,
 		)
-		priorIntentPoint, priorIntentBlocks, priorIntentPending, intentErr :=
-			loadRollbackIntent(ls.db)
+		priorIntentPoint, priorIntentBlocks, priorIntentPending, intentErr := loadRollbackIntent(ls.db)
 		if intentErr != nil {
 			return fmt.Errorf("load prior rollback intent: %w", intentErr)
 		}
