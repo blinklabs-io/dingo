@@ -100,6 +100,7 @@ func (n *Node) startKoiosParityObserver() error {
 		GraceHours:            cfg.GraceHours,
 		AccountChunkSize:      cfg.AccountChunkSize,
 		AccountChunkMaxBytes:  cfg.AccountChunkMaxBytes,
+		PromRegistry:          n.config.promRegistry,
 		Logger:                n.config.logger,
 		FatalFunc: func(err error) {
 			n.config.logger.Error(

@@ -947,6 +947,21 @@ func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.GenesisBootstrap.CorroborationPeers = peers }
 }
 
+// WithGenesisLimitOnPatience configures the Genesis Limit on Patience for
+// ChainSync peers. capacity is the per-peer bucket size in tokens and rate
+// the leak in tokens per second; zero selects the chainsync package default.
+func WithGenesisLimitOnPatience(
+	enabled bool,
+	capacity uint64,
+	rate uint64,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.GenesisBootstrap.LimitOnPatienceEnabled = enabled
+		c.cfg.GenesisBootstrap.LimitOnPatienceCapacity = capacity
+		c.cfg.GenesisBootstrap.LimitOnPatienceRate = rate
+	}
+}
+
 func WithMinPoolMargin(v uint) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.MinPoolMargin, c.minPoolMargin = v, v }
 }

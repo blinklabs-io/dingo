@@ -300,6 +300,19 @@ type GenesisBootstrapConfig struct {
 	// is denied selection and stalls rather than steering the local chain. A
 	// zero value disables corroboration (density-only Genesis selection).
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
+	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
+	// Genesis selection is syncing, a ChainSync peer that delivers its
+	// advertised progress more slowly than LimitOnPatienceRate headers per
+	// second, beyond a LimitOnPatienceCapacity token allowance, is
+	// disconnected.
+	LimitOnPatienceEnabled bool `yaml:"limitOnPatienceEnabled"      envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_ENABLED"`
+	// LimitOnPatienceCapacity is the per-peer patience bucket size in tokens
+	// (one token per header that raises the peer's block number). 0 selects
+	// the default of 1000.
+	LimitOnPatienceCapacity uint64 `yaml:"limitOnPatienceCapacity"     envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY"`
+	// LimitOnPatienceRate is the bucket leak rate in tokens per second. 0
+	// selects the default of 5.
+	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
@@ -463,7 +476,8 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 // configuration values.
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
-		Enabled: true,
+		Enabled:                true,
+		LimitOnPatienceEnabled: true,
 	}
 }
 
