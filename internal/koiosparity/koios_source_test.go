@@ -133,7 +133,14 @@ func seedOracleRows(t *testing.T, c *Cache, network string) {
 		Epoch:   7,
 		Era:     "conway",
 	}))
-
+	// koios_tx_info holds another oracle's /tx_info answers, so it is
+	// discarded on a source change for the same reason every other fetched
+	// table is.
+	require.NoError(t, c.UpsertTxInfos(
+		network,
+		[]KoiosTxInfoItem{{TxHash: "txseeded"}},
+		now,
+	))
 }
 
 func countOracleRows(t *testing.T, c *Cache, network string) int {
@@ -848,6 +855,11 @@ func gatedCacheWrites(network string, now time.Time) []gatedCacheWrite {
 			return c.UpsertEpochParams(KoiosEpochParams{
 				Network: network, Epoch: epoch, Era: "alonzo", FetchedAt: now,
 			})
+		}},
+		{"UpsertTxInfos", func(c *Cache) error {
+			return c.UpsertTxInfos(
+				network, []KoiosTxInfoItem{{TxHash: "txfirst"}}, now,
+			)
 		}},
 		{"SaveAccountUniverse", func(c *Cache) error {
 			return c.SaveAccountUniverse(network, []string{addr}, now)

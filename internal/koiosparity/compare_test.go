@@ -551,8 +551,8 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 // reward_pool_output row can never yield PASS regardless of how recently the
 // epoch closed — only the mismatch category differs (reference_lag for a
 // recent epoch that may simply not be computed yet vs dingo_db_missing for a
-// long-settled one), per the reviewer finding that this condition must not be
-// conflated with "nothing to compare".
+// long-settled one). This condition must not be conflated with "nothing to
+// compare".
 func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 	t.Parallel()
 
