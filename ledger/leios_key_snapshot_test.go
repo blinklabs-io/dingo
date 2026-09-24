@@ -143,6 +143,9 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	require.NotContains(t, atExpiry, hex.EncodeToString(poolKeyHash))
 	unknownAge, err := view.GetLeiosKeys(9, []lcommon.PoolKeyHash{poolHash})
 	require.NoError(t, err)
-	require.NotContains(t, unknownAge, hex.EncodeToString(poolKeyHash),
-		"a key with unknown age is retained as snapshot data but cannot be used to validate a certificate")
+	unknownAgeKey := unknownAge[hex.EncodeToString(poolKeyHash)]
+	require.NotNil(t, unknownAgeKey,
+		"legacy key material with unknown age remains available for certificate validation")
+	require.Equal(t, oldPublic, unknownAgeKey.PublicKey)
+	require.Equal(t, oldProof, unknownAgeKey.PossessionProof)
 }

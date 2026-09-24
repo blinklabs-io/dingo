@@ -116,11 +116,65 @@ func (o *Ouroboros) leiosvotesServerRequestNext(
 			done = protocol.StopChan()
 		}
 	}
+	connectionDone := make(chan struct{})
+	o.registerLeiosVoteWait(ctx.ConnectionId, connectionDone)
+	defer o.unregisterLeiosVoteWait(ctx.ConnectionId, connectionDone)
+	combinedDone := make(chan struct{})
+	cancelCombine := make(chan struct{})
+	defer close(cancelCombine)
+	go func() {
+		select {
+		case <-done:
+		case <-connectionDone:
+		case <-cancelCombine:
+			return
+		}
+		close(combinedDone)
+	}()
 	return o.leiosVotes.NextVotes(
-		done,
+		combinedDone,
 		leiosConnectionIdString(ctx.ConnectionId),
 		count,
 	)
+}
+
+func (o *Ouroboros) registerLeiosVoteWait(
+	connId ouroboros.ConnectionId,
+	done chan struct{},
+) {
+	o.leiosVoteWaitMu.Lock()
+	defer o.leiosVoteWaitMu.Unlock()
+	if o.leiosVoteWaits == nil {
+		o.leiosVoteWaits = make(map[ouroboros.ConnectionId]map[chan struct{}]struct{})
+	}
+	waits := o.leiosVoteWaits[connId]
+	if waits == nil {
+		waits = make(map[chan struct{}]struct{})
+		o.leiosVoteWaits[connId] = waits
+	}
+	waits[done] = struct{}{}
+}
+
+func (o *Ouroboros) unregisterLeiosVoteWait(
+	connId ouroboros.ConnectionId,
+	done chan struct{},
+) {
+	o.leiosVoteWaitMu.Lock()
+	defer o.leiosVoteWaitMu.Unlock()
+	waits := o.leiosVoteWaits[connId]
+	delete(waits, done)
+	if len(waits) == 0 {
+		delete(o.leiosVoteWaits, connId)
+	}
+}
+
+func (o *Ouroboros) closeLeiosVoteWaits(connId ouroboros.ConnectionId) {
+	o.leiosVoteWaitMu.Lock()
+	defer o.leiosVoteWaitMu.Unlock()
+	for done := range o.leiosVoteWaits[connId] {
+		close(done)
+	}
+	delete(o.leiosVoteWaits, connId)
 }
 
 func (o *Ouroboros) leiosvotesClientVote(

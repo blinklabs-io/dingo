@@ -2161,10 +2161,15 @@ func (lv *LedgerView) GetLeiosKeys(
 	}
 	for _, snapshot := range snapshots {
 		if len(snapshot.LeiosKeyPublic) == 0 ||
-			len(snapshot.LeiosKeyPossessionProof) == 0 ||
-			snapshot.LeiosKeyRegistrationEpoch == nil ||
-			*snapshot.LeiosKeyRegistrationEpoch > epoch ||
-			epoch-*snapshot.LeiosKeyRegistrationEpoch >= maxKeyAgeEpochs {
+			len(snapshot.LeiosKeyPossessionProof) == 0 {
+			continue
+		}
+		// Legacy and imported snapshots can retain valid key material without
+		// enough history to establish its registration epoch. Preserve that key
+		// for certificate validation; enforce the age bound whenever its age is
+		// known.
+		if registrationEpoch := snapshot.LeiosKeyRegistrationEpoch; registrationEpoch != nil &&
+			(*registrationEpoch > epoch || epoch-*registrationEpoch >= maxKeyAgeEpochs) {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/event"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -212,6 +213,35 @@ func TestLeiosVotesServerRequestNextCanceledByProtocolStop(t *testing.T) {
 		require.Error(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("vote request remained blocked after protocol stop")
+	}
+}
+
+func TestLeiosVotesServerRequestNextCanceledOnConnectionClose(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	started := make(chan struct{})
+	o.leiosVotes = &fakeLeiosVoteHandler{waitStarted: started}
+	connId := newTestConnId("127.0.0.1:3000", "127.0.0.2:3001")
+	result := make(chan error, 1)
+	go func() {
+		_, err := o.leiosvotesServerRequestNext(
+			oleiosvotes.CallbackContext{ConnectionId: connId},
+			1,
+		)
+		result <- err
+	}()
+	<-started
+	o.HandleConnClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{ConnectionId: connId},
+	})
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("vote request remained blocked after connection close")
 	}
 }
 

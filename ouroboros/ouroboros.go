@@ -101,6 +101,8 @@ type Ouroboros struct {
 	// publication, and relay semantics.
 	leiosAnnouncementLedger LeiosAnnouncementLedger
 	leiosVotes              LeiosVoteHandler
+	leiosVoteWaitMu         sync.Mutex
+	leiosVoteWaits          map[ouroboros.ConnectionId]map[chan struct{}]struct{}
 	leiosPipeline           LeiosPipelineHandler
 	leiosValidationCtx      context.Context
 	leiosValidationCancel   context.CancelFunc
@@ -893,6 +895,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		return
 	}
 	connId := e.ConnectionId
+	o.closeLeiosVoteWaits(connId)
 	o.cancelFutureHeaderResync(connId)
 
 	// Record connection stability observation for peer scoring
