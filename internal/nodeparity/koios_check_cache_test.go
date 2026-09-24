@@ -56,7 +56,11 @@ import (
 // koios-parity observer also uses, including its WAL/busy_timeout setup.
 func openTestCache(t *testing.T) *koiosparity.Cache {
 	t.Helper()
-	cache, err := koiosparity.OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := koiosparity.OpenCache(
+		filepath.Join(t.TempDir(), "cache.db"),
+		nil,
+		koiosparity.WithRelaxedDurability(),
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cache.Close() })
 	return cache

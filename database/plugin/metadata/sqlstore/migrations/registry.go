@@ -58,6 +58,7 @@ const (
 	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
 	leiosKeyAgeSchemaRelease                      = "leios-key-registration-effective-epoch"
 	leiosImportedKeyAgeSchemaRelease              = "leios-imported-key-age-unknown"
+	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 )
 
 // alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
@@ -131,13 +132,18 @@ var schemaVersions = []struct {
 	},
 	{
 		Version: 22,
-		Name:    leiosKeyAgeSchemaRelease,
+		Name:    governanceVoteHistorySchemaRelease,
 		Dir:     "v22",
 	},
 	{
 		Version: 23,
-		Name:    leiosImportedKeyAgeSchemaRelease,
+		Name:    leiosKeyAgeSchemaRelease,
 		Dir:     "v23",
+	},
+	{
+		Version: 24,
+		Name:    leiosImportedKeyAgeSchemaRelease,
+		Dir:     "v24",
 	},
 }
 

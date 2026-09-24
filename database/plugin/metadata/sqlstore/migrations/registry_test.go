@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 23)
+	require.Len(t, registry, 24)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -177,13 +177,16 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, 21, registry[20].Version)
 	require.Equal(t, assetAmountFingerprintIndexDropSchemaRelease, registry[20].Name)
 	require.Equal(t, 22, registry[21].Version)
-	require.Equal(t, "leios-key-registration-effective-epoch", registry[21].Name)
+	require.Equal(t, governanceVoteHistorySchemaRelease, registry[21].Name)
+	require.Contains(t, registry[21].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `governance_vote_history`")
+	require.Equal(t, 23, registry[22].Version)
+	require.Equal(t, leiosKeyAgeSchemaRelease, registry[22].Name)
 	require.Equal(t, []string{
 		"ALTER TABLE `pool_stake_snapshot`\n" +
 			"    ADD COLUMN `leios_key_registration_epoch` INTEGER",
-	}, registry[21].SQL["sqlite"].Expand)
-	require.Equal(t, 23, registry[22].Version)
-	require.Equal(t, leiosImportedKeyAgeSchemaRelease, registry[22].Name)
+	}, registry[22].SQL["sqlite"].Expand)
+	require.Equal(t, 24, registry[23].Version)
+	require.Equal(t, leiosImportedKeyAgeSchemaRelease, registry[23].Name)
 	require.Equal(t, []string{
 		"ALTER TABLE `pool_registration`\n" +
 			"    ADD COLUMN `leios_key_registration_age_unknown` BOOLEAN NOT NULL DEFAULT FALSE",
@@ -192,7 +195,7 @@ func TestSQLiteRegistry(t *testing.T) {
 			"WHERE (`certificate_id` IS NULL OR `certificate_id` = 0)\n" +
 			"  AND `added_slot` > 0\n" +
 			"  AND (`leios_key_public` IS NOT NULL OR `leios_key_possession_proof` IS NOT NULL)",
-	}, registry[22].SQL["sqlite"].Expand)
+	}, registry[23].SQL["sqlite"].Expand)
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -318,7 +321,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 23)
+	require.Len(t, registry, 24)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

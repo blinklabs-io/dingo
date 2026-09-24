@@ -213,7 +213,7 @@ func TestImportedLeiosKeyMigrationKeepsAgeUnknown(t *testing.T) {
 	require.NoError(t, err)
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
-	for _, statement := range registry[22].SQL["sqlite"].Expand {
+	for _, statement := range registry[23].SQL["sqlite"].Expand {
 		_, err := db.Exec(statement)
 		require.NoError(t, err)
 	}
