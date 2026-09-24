@@ -259,12 +259,46 @@ type CheckEpochStatus struct {
 	Network        string
 	Epoch          uint64
 	LastCheckedAt  time.Time
-	Status         string // PASS, FAIL, ERROR
-	MismatchCount  int
+	Status         string // PASS, FAIL, ERROR; merged across both phases
+	MismatchCount  int    // merged across both phases
 	DingoPoolCount int
 	KoiosPoolCount int
 	OnlyDingoPools string // JSON array of pool IDs
 	OnlyKoiosPools string // JSON array of pool IDs
+
+	// AggregateStatus and AccountStatus record each check phase's own outcome
+	// so the merged Status above can be recomputed from them rather than
+	// overwritten by whichever phase wrote last. The aggregate phase
+	// (CheckEpoch with accountsEnabled=false) and the account phase
+	// (accountsEnabled=true) run from independent observer queues at
+	// unrelated times, so a single status column can only either lose one
+	// phase's failure to the other's pass or, if it refuses to, never clear a
+	// failure that has since recovered. Keeping the two apart is what lets
+	// each phase's failure clear on that phase's own next pass while neither
+	// phase's pass can erase the other's failure.
+	//
+	// An empty status means that phase has not run for this epoch. It
+	// contributes nothing to the merge and is left untouched by the other
+	// phase's writes.
+	AggregateStatus        string
+	AggregateMismatchCount int
+	AccountStatus          string
+	AccountMismatchCount   int
+}
+
+// MergeCheckStatus reduces the aggregate and account phase statuses to the
+// single worst outcome, which is what Status carries and what every consumer
+// of the epoch's verdict reads. An empty phase status means "not run" and is
+// ignored; if neither phase has run the result is StatusPass, matching the
+// zero value a never-checked epoch would otherwise carry.
+func MergeCheckStatus(aggregate, account string) string {
+	if aggregate == StatusFail || account == StatusFail {
+		return StatusFail
+	}
+	if aggregate == StatusError || account == StatusError {
+		return StatusError
+	}
+	return StatusPass
 }
 
 // CheckRun records a completed check-run invocation.
@@ -290,7 +324,27 @@ type CheckMismatch struct {
 	KoiosValue   string    `json:"koios_value"`
 	Category     string    `json:"category"`
 	CheckedAt    time.Time `json:"checked_at"`
+	// Scope names the check phase that produced this row, so the aggregate
+	// phase can replace its own evidence without deleting the account
+	// phase's. Category cannot stand in for it: both phases emit
+	// CategoryDBError. An empty value is normalised to ScopeAggregate on
+	// write.
+	Scope string `json:"scope"`
 }
+
+// Check phases, each owning the check_mismatches rows it produced and the
+// matching status pair on check_epoch_status.
+const (
+	// ScopeAggregate is the fast epoch/pool comparison every check runs.
+	ScopeAggregate = "aggregate"
+	// ScopeAccount is the slow per-account comparison (#3097) that only runs
+	// when accounts are enabled.
+	ScopeAccount = "account"
+)
+
+// AllMismatchScopes is every scope a check can own, for callers replacing an
+// epoch's evidence wholesale.
+var AllMismatchScopes = []string{ScopeAggregate, ScopeAccount}
 
 // Cache wraps the SQLite cache.db.
 type Cache struct {
@@ -313,18 +367,59 @@ type Cache struct {
 	claimedSources map[string]string
 }
 
+// cacheDSN returns the cache's connection string. It applies the same
+// settings as Dingo's SQLite metadata store (sqliteCommonPragmas in
+// database/plugin/metadata/sqlite/shared_sqlstore.go): synchronous=NORMAL
+// under WAL flushes at checkpoints rather than on every autocommit, which is
+// what the driver's FULL default costs the many small cache writes.
+//
+// busy_timeout is the one difference. It stays at 5s because the concurrency
+// tests in cache_concurrency_test.go are built around that bound.
+func cacheDSN(path, synchronous string) string {
+	return path + "?_pragma=journal_mode(WAL)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(" + synchronous + ")" +
+		"&_pragma=wal_autocheckpoint(10000)" +
+		"&_pragma=cache_size(-50000)" +
+		"&_pragma=foreign_keys(1)" +
+		"&_pragma=mmap_size(268435456)"
+}
+
+// CacheOption adjusts how OpenCache opens the database.
+type CacheOption func(*cacheOptions)
+
+type cacheOptions struct {
+	relaxedDurability bool
+}
+
+// WithRelaxedDurability opens the cache with synchronous=OFF, so commits are
+// never flushed to disk. A machine crash can then corrupt the file, so it is
+// only for caches that are discarded with the process, such as tests'.
+func WithRelaxedDurability() CacheOption {
+	return func(o *cacheOptions) { o.relaxedDurability = true }
+}
+
 // OpenCache opens (or creates) the SQLite cache at path, running migrations.
-func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
+func OpenCache(
+	path string,
+	logger *slog.Logger,
+	opts ...CacheOption,
+) (*Cache, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
-	db, err := sql.Open(
-		"sqlite",
-		path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
-	)
+	var options cacheOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	synchronous := "NORMAL"
+	if options.relaxedDurability {
+		synchronous = "OFF"
+	}
+	db, err := sql.Open("sqlite", cacheDSN(path, synchronous))
 	if err != nil {
 		return nil, fmt.Errorf("open cache db: %w", err)
 	}
@@ -707,6 +802,161 @@ func (c *Cache) GetAllPoolsForEpoch(
 		pools = append(pools, p)
 	}
 	return pools, rows.Err()
+}
+
+// koiosTxInfoPayloadVersion stamps every koios_tx_info row with the shape of
+// KoiosTxInfoItem its payload was serialised from, and GetTxInfos only reads
+// rows carrying the current value.
+//
+// The payload is the JSON encoding of KoiosTxInfoItem itself, not Koios's raw
+// /tx_info response. That struct is already exactly the subset of /tx_info
+// this codebase consumes (tx_hash, inputs, outputs with address/value/assets/
+// datum/reference-script, plus the collateral inputs/return and the phase-2
+// validity verdict Consumed/Produced need) -- Koios's real response
+// additionally carries metadata, certificates, withdrawals, redeemers and
+// script bodies that nothing here ever reads, and GetTxInfos does not retain
+// the raw bytes anyway. Storing the decoded struct therefore stores precisely
+// what is read back, and round-trips exactly, since the same json tags encode
+// it as decoded it.
+//
+// The cost of that choice is that a KoiosTxInfoItem which later grows a field
+// would silently read back as that field's zero value from rows written
+// before it existed. This version column is the answer: bump it in the same
+// change that adds the field, and every older row simply stops being a hit
+// and is re-fetched. That is why a plain "cache the struct" table is safe
+// without a TTL -- settled transactions never change Koios-side, so the only
+// thing that can invalidate a row is this code wanting more of the
+// transaction than it asked for last time.
+//
+// Version 2 added CollateralInputs, CollateralOutput and PlutusContracts.
+// Version 1 rows recorded only the transaction body's inputs and outputs, so
+// reading one back would report a phase-2-invalid transaction as having
+// applied its body -- the bug the new fields exist to fix. They are
+// re-fetched instead.
+const koiosTxInfoPayloadVersion = 2
+
+// txInfoLookupChunk bounds how many hashes go into one
+// "SELECT ... WHERE tx_hash IN (?, ?, ...)" so a caller that hands GetTxInfos
+// an arbitrarily long hash list never trips SQLite's bound-parameter limit
+// (999 by default). Callers in practice ask in KoiosTxInfoBatchSize-sized
+// chunks, well under this.
+const txInfoLookupChunk = 500
+
+// GetTxInfos returns every cached /tx_info item among txHashes, keyed by
+// transaction hash. Hashes with no cached row are simply absent from the
+// returned map: unlike KoiosClient.GetTxInfos (where a missing hash is an
+// error, since the caller already knows the transaction exists), a miss here
+// is the ordinary case and means "ask Koios for this one", so the caller can
+// fetch exactly the misses and merge. A partial hit is therefore a first-class
+// result, not an all-or-nothing fallback.
+//
+// Rows stamped with an older koiosTxInfoPayloadVersion are treated as misses;
+// see that constant for why.
+func (c *Cache) GetTxInfos(
+	network string,
+	txHashes []string,
+) (map[string]KoiosTxInfoItem, error) {
+	found := make(map[string]KoiosTxInfoItem, len(txHashes))
+	for start := 0; start < len(txHashes); start += txInfoLookupChunk {
+		end := min(start+txInfoLookupChunk, len(txHashes))
+		chunk := txHashes[start:end]
+		placeholders := make([]byte, 0, 2*len(chunk))
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, network, koiosTxInfoPayloadVersion)
+		for i, hash := range chunk {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args = append(args, hash)
+		}
+		// #nosec G202 -- placeholders is a generated run of "?" separated by
+		// commas, one per hash; every hash itself stays a bound parameter.
+		rows, err := c.db.Query(
+			`SELECT tx_hash, payload FROM koios_tx_info
+			WHERE network = ? AND payload_version = ? AND tx_hash IN (`+
+				string(placeholders)+`)`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("read cached tx_info: %w", err)
+		}
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var hash, payload string
+				if err := rows.Scan(&hash, &payload); err != nil {
+					return fmt.Errorf("scan cached tx_info: %w", err)
+				}
+				var item KoiosTxInfoItem
+				if err := json.Unmarshal([]byte(payload), &item); err != nil {
+					// A row that no longer decodes is treated as a miss
+					// rather than a hard failure: the live fetch below it
+					// produces the same answer, and erroring would turn a
+					// corrupt cache row into a failed parity check.
+					continue
+				}
+				found[hash] = item
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return found, nil
+}
+
+// UpsertTxInfos writes every item to koios_tx_info for network in a single
+// transaction, keyed by (network, tx_hash).
+//
+// Historical /tx_info is immutable -- a settled transaction's inputs and
+// outputs never change -- which is the same reasoning that already justifies
+// caching epoch params and pool history indefinitely, so nothing here expires
+// or re-validates rows. The upsert still overwrites on conflict so a re-fetch
+// after a payload-version bump replaces the old row in place.
+func (c *Cache) UpsertTxInfos(
+	network string,
+	items []KoiosTxInfoItem,
+	fetchedAt time.Time,
+) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return c.withClaimedSource(network, func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(
+			`INSERT INTO koios_tx_info
+			(network, tx_hash, payload_version, payload, fetched_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(network, tx_hash) DO UPDATE SET
+				payload_version=excluded.payload_version,
+				payload=excluded.payload,
+				fetched_at=excluded.fetched_at`,
+		)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close() //nolint:errcheck
+		for _, item := range items {
+			if item.TxHash == "" {
+				continue
+			}
+			payload, err := json.Marshal(item)
+			if err != nil {
+				return fmt.Errorf("encode tx_info %s: %w", item.TxHash, err)
+			}
+			if _, err := stmt.Exec(
+				network,
+				item.TxHash,
+				koiosTxInfoPayloadVersion,
+				string(payload),
+				fetchedAt,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // CommitAccountRewardsForEpoch atomically replaces every koios_account_rewards
@@ -1553,26 +1803,85 @@ func (c *Cache) GetUncachedEpochs(
 	return missing, nil
 }
 
+// keptAccountStatus and keptAccountCount are the account phase's surviving
+// values inside the upsert below: the incoming write's own when it carries an
+// account result, and the stored row's when it does not. The aggregate phase
+// leaves AccountStatus empty, which is how its write passes the account
+// columns through untouched instead of clearing them.
+const (
+	keptAccountStatus = `CASE WHEN excluded.account_status <> '' ` +
+		`THEN excluded.account_status ELSE check_epoch_status.account_status END`
+	keptAccountCount = `CASE WHEN excluded.account_status <> '' ` +
+		`THEN excluded.account_mismatch_count ELSE check_epoch_status.account_mismatch_count END`
+)
+
+// upsertCheckEpochStatusSQL recomputes the merged status and mismatch count
+// from the two phase pairs on every write, rather than taking either from the
+// incoming row. Both phases always recompute the aggregate comparison, so
+// excluded.aggregate_* is authoritative for that scope unconditionally; the
+// account pair survives per keptAccountStatus above. The merge is written in
+// SQL rather than read-modify-write in Go because withClaimedSource requires
+// fn's first statement to be the write — see its doc comment — so there is no
+// point at which this could read the current row first.
+var upsertCheckEpochStatusSQL = `INSERT INTO check_epoch_status
+		(network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count,
+		 koios_pool_count, only_dingo_pools, only_koios_pools,
+		 aggregate_status, aggregate_mismatch_count, account_status, account_mismatch_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(network, epoch) DO UPDATE SET
+			last_checked_at=excluded.last_checked_at,
+			dingo_pool_count=excluded.dingo_pool_count,
+			koios_pool_count=excluded.koios_pool_count,
+			only_dingo_pools=excluded.only_dingo_pools,
+			only_koios_pools=excluded.only_koios_pools,
+			aggregate_status=excluded.aggregate_status,
+			aggregate_mismatch_count=excluded.aggregate_mismatch_count,
+			account_status=` + keptAccountStatus + `,
+			account_mismatch_count=` + keptAccountCount + `,
+			status=CASE
+				WHEN excluded.aggregate_status = '` + StatusFail + `'
+					OR ` + keptAccountStatus + ` = '` + StatusFail + `' THEN '` + StatusFail + `'
+				WHEN excluded.aggregate_status = '` + StatusError + `'
+					OR ` + keptAccountStatus + ` = '` + StatusError + `' THEN '` + StatusError + `'
+				ELSE '` + StatusPass + `' END,
+			mismatch_count=excluded.aggregate_mismatch_count + ` + keptAccountCount
+
 // UpsertCheckEpochStatus idempotently stores a check result for an epoch.
+//
+// A write carries the result of the phase (or phases) the caller actually ran:
+// the aggregate phase leaves AccountStatus empty and the stored account result
+// survives untouched, so an aggregate pass can neither erase nor be erased by
+// an account failure. The merged Status and MismatchCount are always
+// recomputed from the two phases, so each phase's failure clears as soon as
+// that phase itself passes again.
+//
+// A caller that sets only Status (no phase fields) is writing an
+// aggregate-phase result, which is what every pre-#4339 caller meant.
 func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
+	aggregateStatus := status.AggregateStatus
+	aggregateCount := status.AggregateMismatchCount
+	if aggregateStatus == "" {
+		aggregateStatus, aggregateCount = status.Status, status.MismatchCount
+	}
+	if aggregateStatus == "" {
+		aggregateStatus = StatusPass
+	}
 	return c.withClaimedSource(status.Network, func(tx *sql.Tx) error {
 		_, err := tx.Exec(
-			`INSERT INTO check_epoch_status
-		(network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(network, epoch) DO UPDATE SET last_checked_at=excluded.last_checked_at, status=excluded.status,
-		mismatch_count=excluded.mismatch_count, dingo_pool_count=excluded.dingo_pool_count,
-		koios_pool_count=excluded.koios_pool_count, only_dingo_pools=excluded.only_dingo_pools,
-		only_koios_pools=excluded.only_koios_pools`,
+			upsertCheckEpochStatusSQL,
 			status.Network,
 			status.Epoch,
 			status.LastCheckedAt,
-			status.Status,
-			status.MismatchCount,
+			MergeCheckStatus(aggregateStatus, status.AccountStatus),
+			aggregateCount+status.AccountMismatchCount,
 			status.DingoPoolCount,
 			status.KoiosPoolCount,
 			status.OnlyDingoPools,
 			status.OnlyKoiosPools,
+			aggregateStatus,
+			aggregateCount,
+			status.AccountStatus,
+			status.AccountMismatchCount,
 		)
 		return err
 	})
@@ -1638,23 +1947,39 @@ func (c *Cache) withClaimedSource(
 	return tx.Commit()
 }
 
-// CommitEpochMismatches atomically replaces all mismatch rows for an epoch:
-// the prior rows are deleted and the new set inserted in a single
-// transaction, the same "delete then bulk insert, commit together" pattern
-// CommitEpochData uses for pool rows. Committing both together means a
-// failure partway through the insert rolls back the delete too, so a failed
-// write never leaves the cache with less evidence than before the check ran.
-// Callers must call this only once every fallible read for the epoch has
-// already succeeded, so prior evidence is never cleared ahead of a
-// still-incomplete replacement. Each row's Network and Epoch are normalised
-// from the network/epoch parameters before insertion, mirroring
+// CommitEpochMismatches atomically replaces an epoch's mismatch rows in the
+// named scopes: the prior rows in those scopes are deleted and the new set
+// inserted in a single transaction, the same "delete then bulk insert, commit
+// together" pattern CommitEpochData uses for pool rows. Committing both
+// together means a failure partway through the insert rolls back the delete
+// too, so a failed write never leaves the cache with less evidence than
+// before the check ran. Callers must call this only once every fallible read
+// for the epoch has already succeeded, so prior evidence is never cleared
+// ahead of a still-incomplete replacement. Each row's Network and Epoch are
+// normalised from the network/epoch parameters before insertion, mirroring
 // CommitEpochData, so a mismatched caller cannot corrupt a different epoch's
 // data.
+//
+// scopes names the check phases this call recomputed. Rows belonging to any
+// other scope are left in place, so the aggregate phase replacing its own
+// evidence does not delete the account phase's — which would leave the
+// account failure recorded on check_epoch_status with nothing behind it.
+// Passing no scopes replaces every scope, which is what a caller with no
+// phase distinction means. mismatches carrying a scope that was not named are
+// not inserted, since nothing would delete them on a later pass.
 func (c *Cache) CommitEpochMismatches(
 	network string,
 	epoch uint64,
 	mismatches []CheckMismatch,
+	scopes ...string,
 ) error {
+	if len(scopes) == 0 {
+		scopes = AllMismatchScopes
+	}
+	replacing := make(map[string]bool, len(scopes))
+	for _, scope := range scopes {
+		replacing[scope] = true
+	}
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
@@ -1664,17 +1989,23 @@ func (c *Cache) CommitEpochMismatches(
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err = tx.Exec(
-		"DELETE FROM check_mismatches WHERE network = ? AND epoch = ?",
-		network,
-		epoch,
-	); err != nil {
-		return err
+	// One statement per scope rather than a built IN list: there are only
+	// ever a handful of scopes, they all run in this transaction, and the
+	// statement stays a constant instead of a concatenation.
+	for scope := range replacing {
+		if _, err = tx.Exec(
+			"DELETE FROM check_mismatches WHERE network = ? AND epoch = ? AND scope = ?",
+			network,
+			epoch,
+			scope,
+		); err != nil {
+			return err
+		}
 	}
 	if len(mismatches) > 0 {
 		var stmt *sql.Stmt
 		stmt, err = tx.Prepare(
-			`INSERT INTO check_mismatches (network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO check_mismatches (network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at, scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		if err != nil {
 			return err
@@ -1682,8 +2013,14 @@ func (c *Cache) CommitEpochMismatches(
 		defer stmt.Close()
 		for i := range mismatches {
 			mismatches[i].Network, mismatches[i].Epoch = network, epoch
+			if mismatches[i].Scope == "" {
+				mismatches[i].Scope = ScopeAggregate
+			}
 			m := mismatches[i]
-			if _, err = stmt.Exec(m.Network, m.Epoch, m.PoolBech32, m.StakeAddress, m.Field, m.DingoValue, m.KoiosValue, m.Category, m.CheckedAt); err != nil {
+			if !replacing[m.Scope] {
+				continue
+			}
+			if _, err = stmt.Exec(m.Network, m.Epoch, m.PoolBech32, m.StakeAddress, m.Field, m.DingoValue, m.KoiosValue, m.Category, m.CheckedAt, m.Scope); err != nil {
 				return err
 			}
 		}
@@ -1703,7 +2040,7 @@ func (c *Cache) GetMismatches(
 	epoch uint64,
 	poolBech32 string,
 ) ([]CheckMismatch, error) {
-	query := `SELECT network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at FROM check_mismatches WHERE network = ? AND epoch = ?`
+	query := `SELECT network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at, scope FROM check_mismatches WHERE network = ? AND epoch = ?`
 	args := []any{network, epoch}
 	if poolBech32 != "" {
 		query += " AND pool_bech32 = ?"
@@ -1718,7 +2055,7 @@ func (c *Cache) GetMismatches(
 	var ret []CheckMismatch
 	for rows.Next() {
 		var m CheckMismatch
-		if err := rows.Scan(&m.Network, &m.Epoch, &m.PoolBech32, &m.StakeAddress, &m.Field, &m.DingoValue, &m.KoiosValue, &m.Category, &m.CheckedAt); err != nil {
+		if err := rows.Scan(&m.Network, &m.Epoch, &m.PoolBech32, &m.StakeAddress, &m.Field, &m.DingoValue, &m.KoiosValue, &m.Category, &m.CheckedAt, &m.Scope); err != nil {
 			return nil, err
 		}
 		ret = append(ret, m)
@@ -1729,7 +2066,7 @@ func (c *Cache) GetMismatches(
 // GetStatusSummary returns all check epoch statuses for a network in epoch order.
 func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 	rows, err := c.db.Query(
-		`SELECT network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools FROM check_epoch_status WHERE network = ? ORDER BY epoch ASC`,
+		`SELECT network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools, aggregate_status, aggregate_mismatch_count, account_status, account_mismatch_count FROM check_epoch_status WHERE network = ? ORDER BY epoch ASC`,
 		network,
 	)
 	if err != nil {
@@ -1739,7 +2076,7 @@ func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 	var ret []CheckEpochStatus
 	for rows.Next() {
 		var s CheckEpochStatus
-		if err := rows.Scan(&s.Network, &s.Epoch, &s.LastCheckedAt, &s.Status, &s.MismatchCount, &s.DingoPoolCount, &s.KoiosPoolCount, &s.OnlyDingoPools, &s.OnlyKoiosPools); err != nil {
+		if err := rows.Scan(&s.Network, &s.Epoch, &s.LastCheckedAt, &s.Status, &s.MismatchCount, &s.DingoPoolCount, &s.KoiosPoolCount, &s.OnlyDingoPools, &s.OnlyKoiosPools, &s.AggregateStatus, &s.AggregateMismatchCount, &s.AccountStatus, &s.AccountMismatchCount); err != nil {
 			return nil, err
 		}
 		ret = append(ret, s)
@@ -1869,6 +2206,7 @@ var koiosSourcedTables = []string{
 	"koios_pool_epoch",
 	"koios_totals",
 	"koios_epoch_params",
+	"koios_tx_info",
 	"koios_account_rewards",
 	"koios_account_coverage",
 	"koios_account_fetch_staged_rows",
@@ -2178,6 +2516,16 @@ func createCacheSchema(db *sql.DB) error {
 			min_utxo_value TEXT NOT NULL DEFAULT '', coins_per_utxo_size TEXT NOT NULL DEFAULT '',
 			fetched_at DATETIME NOT NULL)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kep_net_epoch ON koios_epoch_params(network, epoch)`,
+		// koios_tx_info caches /tx_info per transaction rather than per
+		// epoch: node-parity's from-genesis UTxO reconstruction walks
+		// transactions, not epochs, so the transaction hash is the only
+		// natural key. network-scoped like every other Koios-sourced table,
+		// and versioned by payload shape -- see koiosTxInfoPayloadVersion.
+		`CREATE TABLE IF NOT EXISTS koios_tx_info (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, tx_hash TEXT NOT NULL,
+			payload_version INTEGER NOT NULL DEFAULT 1, payload TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kti_net_hash ON koios_tx_info(network, tx_hash)`,
 		`CREATE TABLE IF NOT EXISTS koios_account_rewards (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			stake_address TEXT NOT NULL, reward_type TEXT NOT NULL DEFAULT '', earned TEXT NOT NULL,
@@ -2234,18 +2582,28 @@ func createCacheSchema(db *sql.DB) error {
 		// count rather than the chunk being removed.
 		`CREATE INDEX IF NOT EXISTS idx_kaced_net_epoch_chunk ON koios_account_checked(network, epoch, chunk_hash)`,
 
+		// status/mismatch_count are the merge of the aggregate_* and account_*
+		// pairs, kept as stored columns so every existing reader of the
+		// epoch's verdict is unaffected. The pairs exist because the two
+		// check phases write this row independently — see CheckEpochStatus.
 		`CREATE TABLE IF NOT EXISTS check_epoch_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			last_checked_at DATETIME NOT NULL, status TEXT NOT NULL, mismatch_count INTEGER NOT NULL,
-			dingo_pool_count INTEGER NOT NULL, koios_pool_count INTEGER NOT NULL, only_dingo_pools TEXT NOT NULL, only_koios_pools TEXT NOT NULL)`,
+			dingo_pool_count INTEGER NOT NULL, koios_pool_count INTEGER NOT NULL, only_dingo_pools TEXT NOT NULL, only_koios_pools TEXT NOT NULL,
+			aggregate_status TEXT NOT NULL DEFAULT '', aggregate_mismatch_count INTEGER NOT NULL DEFAULT 0,
+			account_status TEXT NOT NULL DEFAULT '', account_mismatch_count INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ces_net_epoch ON check_epoch_status(network, epoch)`,
 		`CREATE TABLE IF NOT EXISTS check_runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, run_at DATETIME NOT NULL,
 			epochs_checked INTEGER NOT NULL, pools_checked INTEGER NOT NULL, mismatch_count INTEGER NOT NULL, report_path TEXT NOT NULL)`,
+		// scope records which check phase produced the row so that phase can
+		// replace its own evidence without deleting the other's; see
+		// CommitEpochMismatches.
 		`CREATE TABLE IF NOT EXISTS check_mismatches (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			pool_bech32 TEXT NOT NULL, stake_address TEXT NOT NULL, field TEXT NOT NULL, dingo_value TEXT NOT NULL,
-			koios_value TEXT NOT NULL, category TEXT NOT NULL, checked_at DATETIME NOT NULL)`,
+			koios_value TEXT NOT NULL, category TEXT NOT NULL, checked_at DATETIME NOT NULL,
+			scope TEXT NOT NULL DEFAULT 'aggregate')`,
 		`CREATE INDEX IF NOT EXISTS idx_cm_net_epoch ON check_mismatches(network, epoch)`,
 		// The Koios /account_list crawl, cached across epochs. Without it the
 		// per-account fetch re-walked the whole list once per epoch — 304
@@ -2338,6 +2696,50 @@ GROUP BY network`); err != nil {
 	}
 	if err := backfillZeroRewardSummaries(db); err != nil {
 		return fmt.Errorf("migrate koios_account_coverage summaries: %w", err)
+	}
+
+	// Cache files written before the aggregate and account phases kept
+	// separate verdicts (#4339) have one status column and no row-level
+	// record of which phase produced it.
+	for _, col := range [][2]string{
+		{"aggregate_status", "TEXT NOT NULL DEFAULT ''"},
+		{"aggregate_mismatch_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"account_status", "TEXT NOT NULL DEFAULT ''"},
+		{"account_mismatch_count", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := addColumnIfMissing(db, "check_epoch_status", col[0], col[1]); err != nil {
+			return fmt.Errorf(
+				"migrate check_epoch_status: add column %s: %w",
+				col[0],
+				err,
+			)
+		}
+	}
+	if err := addColumnIfMissing(
+		db,
+		"check_mismatches",
+		"scope",
+		"TEXT NOT NULL DEFAULT '"+ScopeAggregate+"'",
+	); err != nil {
+		return fmt.Errorf("migrate check_mismatches: add column scope: %w", err)
+	}
+	// Existing verdicts are attributed to the aggregate phase, and existing
+	// mismatch rows take that scope from the column default above. The
+	// account phase's own provenance is not recoverable from the old schema,
+	// and attributing an unknown verdict to the account phase instead would
+	// be the worse guess: the aggregate phase runs for every queued epoch and
+	// re-establishes its scope on the next pass, whereas an account status no
+	// account run ever clears would be permanently sticky in the
+	// accounts-disabled mode where nothing writes that scope at all.
+	// GetEpochsNeedingCheck(network, true) requeues every epoch whose account
+	// coverage is absent, incomplete, or stale, so an accounts-enabled
+	// deployment re-establishes the account scope too.
+	if _, err := db.Exec(
+		`UPDATE check_epoch_status
+		 SET aggregate_status = status, aggregate_mismatch_count = mismatch_count
+		 WHERE aggregate_status = ''`,
+	); err != nil {
+		return fmt.Errorf("migrate check_epoch_status phase backfill: %w", err)
 	}
 	// The pre-#3097 unique index only covered (network, epoch,
 	// stake_address); drop it now that reward_type is guaranteed to exist

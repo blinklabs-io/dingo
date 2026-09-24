@@ -1216,6 +1216,18 @@ type StakeSnapshotStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
+	// boundary reconstruction attributes stake to at the snapshot slot,
+	// including pools that are no longer registered. It is the historical-path
+	// counterpart of GetDelegatedPoolKeyHashes, and exists for the same reason:
+	// the sigma_a denominator must be enumerated from delegations, not from the
+	// stake-pool set (dingo #4660).
+	GetEpochBoundaryDelegatedPoolKeyHashes(
+		uint64, // snapshotSlot
+		uint64, // boundarySlot
+		types.Txn,
+	) ([][]byte, error)
+
 	// GetPointerStakeInputsForPools returns the per-credential stake held at a
 	// pointer address for pools in poolKeyHashes, resolved and delegated as of
 	// slot. It is additive: the caller adds it to what
@@ -2025,6 +2037,14 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetDelegatedPoolKeyHashes returns every pool key hash the live reward
+	// stake aggregate attributes stake to, including pools that are no longer
+	// registered. cardano-ledger's ssTotalActiveStake sums registered
+	// credentials holding a delegation without consulting the stake-pool set,
+	// so the snapshot's sigma_a denominator must cover these pools too or every
+	// reward on the node is under-credited by their share (dingo #4660).
+	GetDelegatedPoolKeyHashes(types.Txn) ([][]byte, error)
+
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 	// canonical account and live UTxO metadata. Node startup uses it as an
 	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.
@@ -2556,14 +2576,6 @@ type MetadataStore interface {
 	// Blockfrost account reward-history endpoint can serve an account's full
 	// reward history. See rewardstate.DeleteStakeInputBeforeEpoch.
 	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
-
-	// DeleteRewardStakeInputsForEpoch deletes exactly one epoch's
-	// reward_stake_input rows, leaving reward_pool_input and every other
-	// reward-state table for that epoch untouched. Used to clean up a
-	// partial write after a mid-batch SaveRewardStakeInputs failure, so an
-	// incomplete reconstruction cannot look like a complete one to a later
-	// read of the same epoch.
-	DeleteRewardStakeInputsForEpoch(uint64, types.Txn) error
 
 	// Network state methods
 

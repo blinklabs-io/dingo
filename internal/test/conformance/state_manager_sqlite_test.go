@@ -31,7 +31,11 @@ import (
 func newSqliteResetterTestDB(t *testing.T, ddl ...string) (string, *sql.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(30000)")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=busy_timeout(30000)&"+
+			"_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)",
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	for _, stmt := range ddl {
@@ -49,6 +53,27 @@ func sqliteRowCount(t *testing.T, db *sql.DB, table string) int {
 		db.QueryRow(`SELECT COUNT(*) FROM "`+table+`"`).Scan(&n),
 	)
 	return n
+}
+
+// TestSqliteResetterRelaxesSynchronous pins the resetter's connection to
+// synchronous=OFF (0). It runs one DELETE batch per vector against a throwaway
+// database, so the driver's per-autocommit flush is pure cost. The store under
+// test opens its own connections with its production settings.
+func TestSqliteResetterRelaxesSynchronous(t *testing.T) {
+	path, _ := newSqliteResetterTestDB(
+		t,
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
+	)
+	resetter, err := newSqliteResetter(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resetter.Close() })
+
+	var synchronous int
+	require.NoError(
+		t,
+		resetter.db.QueryRow("PRAGMA synchronous").Scan(&synchronous),
+	)
+	require.Zero(t, synchronous, "PRAGMA synchronous must be OFF (0)")
 }
 
 // TestSqliteResetterTruncatesOnlyDirtyTables pins the same dirty-only

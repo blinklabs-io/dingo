@@ -87,6 +87,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 				iter,
 				server,
 				conn,
+				testMaxBlocksUnbounded,
 			)
 			if test.wantDone {
 				require.NoError(t, err)
