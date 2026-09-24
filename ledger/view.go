@@ -326,6 +326,9 @@ var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 // drift fails at build time instead of disabling the rule.
 var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
 
+// The same holds for the Byron ppMaxTxSize rule.
+var _ eras.ByronMaxTxSizeProvider = (*LedgerView)(nil)
+
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
 // when it misses: a failed assertion silently refunds a legacy stake
@@ -355,6 +358,10 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 
 func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
 	return lv.ls.ByronFeePolicy()
+}
+
+func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
+	return lv.ls.ByronMaxTxSize()
 }
 
 func (lv *LedgerView) UtxoById(
