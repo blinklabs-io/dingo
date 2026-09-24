@@ -33,12 +33,9 @@ type Block struct {
 	Type     uint
 }
 
-// Decode decodes b.Cbor as a block of b.Type. config is forwarded to
-// gouroboros for every type except Conway, which always routes through
-// DecodeConwayBlock (Musashi/Leios's extended header has nothing config
-// would toggle); at most one config is meaningful, matching
-// ledger.NewBlockFromCbor's own variadic convention. Omitting it preserves
-// every existing caller's behavior unchanged.
+// Decode decodes b.Cbor with Dingo's era-aware storage compatibility paths.
+// At most one verification config is meaningful, matching
+// ledger.NewBlockFromCbor's variadic convention.
 func (b Block) Decode(config ...common.VerifyConfig) (ledger.Block, error) {
 	return DecodeBlockCbor(b.Type, b.Cbor, config...)
 }
@@ -51,10 +48,22 @@ func DecodeBlockCbor(
 	config ...common.VerifyConfig,
 ) (ledger.Block, error) {
 	// Conway blocks may carry the Musashi/Leios extended header; route them
-	// through the Leios-aware decoder, which falls back to reconstructing the
-	// block only when gouroboros' strict Conway decode fails.
+	// through the Leios-aware decoder. Stored blocks can also retain the early
+	// Musashi Dijkstra layout while carrying Conway's wire type.
 	if blockType == ledger.BlockTypeConway {
-		return DecodeConwayBlock(blockCbor)
+		block, err := DecodeConwayBlock(blockCbor)
+		if err == nil {
+			return block, nil
+		}
+		if hasDijkstraLeiosShape(blockCbor) {
+			if dijkstraBlock, dijkstraErr := DecodeDijkstraBlock(
+				blockCbor,
+				config...,
+			); dijkstraErr == nil {
+				return dijkstraBlock, nil
+			}
+		}
+		return nil, err
 	}
 	if blockType == ledger.BlockTypeDijkstra {
 		return DecodeDijkstraBlock(blockCbor, config...)

@@ -34,6 +34,11 @@ const babbageHeaderBodyFieldCount = 10
 // transaction_metadata, invalid_transactions].
 const conwayBlockComponentCount = 5
 
+const (
+	dijkstraBlockComponentCount = 2
+	leiosHeaderExtraFields      = 2
+)
+
 // DecodeConwayBlock decodes a Conway block, transparently accepting the
 // Musashi/Leios prototype header extension. The respun Musashi network
 // (network magic 164) tags its early chain as Conway (NtN block type 7) but its
@@ -58,6 +63,27 @@ func DecodeConwayPeerBlock(raw []byte) (ledger.Block, error) {
 		return extBlock, nil
 	}
 	return nil, err
+}
+
+// hasDijkstraLeiosShape gates the storage fallback on the historical Musashi
+// block and header layout.
+func hasDijkstraLeiosShape(raw []byte) bool {
+	var components []cbor.RawMessage
+	if _, err := cbor.Decode(raw, &components); err != nil ||
+		len(components) != dijkstraBlockComponentCount {
+		return false
+	}
+	var headerParts []cbor.RawMessage
+	if _, err := cbor.Decode(components[0], &headerParts); err != nil ||
+		len(headerParts) != 2 {
+		return false
+	}
+	var bodyElems []cbor.RawMessage
+	if _, err := cbor.Decode(headerParts[0], &bodyElems); err != nil {
+		return false
+	}
+	return len(bodyElems) ==
+		babbageHeaderBodyFieldCount+leiosHeaderExtraFields
 }
 
 // decodeLeiosExtendedConwayBlock reconstructs a Conway block whose header body
@@ -100,7 +126,8 @@ func decodeLeiosExtendedConwayBlock(raw []byte) (*conway.ConwayBlock, error) {
 	if _, err := cbor.Decode(headerParts[0], &bodyElems); err != nil {
 		return nil, fmt.Errorf("decode Conway block header body: %w", err)
 	}
-	if len(bodyElems) != babbageHeaderBodyFieldCount+2 {
+	if len(bodyElems) !=
+		babbageHeaderBodyFieldCount+leiosHeaderExtraFields {
 		return nil, fmt.Errorf(
 			"unexpected Conway block header body: expected %d fields, got %d",
 			babbageHeaderBodyFieldCount+2,
