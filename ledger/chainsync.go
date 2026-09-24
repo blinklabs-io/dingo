@@ -5607,6 +5607,9 @@ func (ls *LedgerState) createGenesisBlock() error {
 
 		// Group genesis UTxOs by transaction hash
 		genesisUtxos := slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos)
+		if err := rejectDuplicateGenesisUtxos(genesisUtxos); err != nil {
+			return fmt.Errorf("validate genesis UTxOs: %w", err)
+		}
 		genesisReserves, err := genesisReserveBalance(
 			shelleyGenesis.MaxLovelaceSupply,
 			genesisUtxos,
