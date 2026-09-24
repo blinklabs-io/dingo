@@ -40,6 +40,22 @@ const (
 	// below: both sides agree the pool departed, so it is a documented gap in
 	// coverage rather than a divergence (dingo #3485).
 	CategoryPoolDeparted = "pool_departed"
+	// CategoryPoolZeroStake marks a pool that was in epoch K's stake basis
+	// and is absent from the K+1 reward-input set for a proven reason other
+	// than departure: the network's complete K+1 positive-stake pool set
+	// (established via reward_snapshot's own TotalPoolCount rather than
+	// epoch_summary's -- see checkEpoch's paramEpochPositiveStakeProven)
+	// simply does not include it, because its delegated stake reached zero
+	// at the boundary (its last delegator redelegated or deregistered)
+	// while the pool itself stayed registered. Its epoch-K block count is
+	// stamped onto the K+1 reward_pool_input row that rewardStakeDistribution
+	// (ledger/snapshot/rotation.go) correctly never writes for a zero-stake
+	// pool, so blocks_produced is not comparable for that one epoch -- the
+	// same uncomparable-input shape as CategoryPoolDeparted, but for a pool
+	// that never left the pool set, so folding it into that category would
+	// misreport it as having departed (dingo #4691). Purely informational,
+	// like CategoryPoolDeparted.
+	CategoryPoolZeroStake = "pool_zero_stake"
 
 	// CategoryAcctOnlyDingo/CategoryAcctOnlyKoios mirror
 	// CategoryPoolOnlyDingo/CategoryPoolOnlyKoios but at per-account
@@ -126,6 +142,7 @@ var AllCategories = []string{
 	CategoryDBError,
 	CategoryDBMissing,
 	CategoryPoolDeparted,
+	CategoryPoolZeroStake,
 	CategoryAcctOnlyDingo,
 	CategoryAcctOnlyKoios,
 	CategoryAcctDuplicate,
@@ -761,6 +778,15 @@ func costModelFieldName(language string) string {
 // downgrade both. False whenever neither route could establish departure,
 // which keeps the stricter classification (dingo #3485, #3925). See
 // poolDepartedAtParamEpoch in check.go.
+//
+// paramEpochPositiveStakeProven reports whether checkEpoch proved the K+1
+// reward-input set is the network's complete positive-stake pool set, using
+// reward_snapshot's own TotalPoolCount (dingo #4691). It is epoch-level, not
+// per-pool: every pool absent from K+1's reward-input set once this is true
+// genuinely has no positive stake at K+1 for a proven reason, distinct from
+// departedAtParamEpoch, which is specific evidence that this pool provably
+// left the pool set. See checkEpoch's paramEpochPositiveStakeProven doc
+// comment for why epoch_summary.TotalPoolCount cannot supply this proof.
 func ComparePoolEpoch(
 	network string,
 	epoch uint64,
@@ -770,6 +796,7 @@ func ComparePoolEpoch(
 	graceHours int,
 	epochEndTime time.Time,
 	departedAtParamEpoch bool,
+	paramEpochPositiveStakeProven bool,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
@@ -909,6 +936,15 @@ func ComparePoolEpoch(
 			// in the K+1 pool set whose reward-input row is absent is missing
 			// input, not a departure, and falls through to the cases below.
 			cat = CategoryPoolDeparted
+		case dingoPool.StakePresent && paramEpochPositiveStakeProven:
+			// The pool was in this epoch's stake basis, but the network's K+1
+			// positive-stake pool set is proven complete (see this function's
+			// doc comment) and does not include it: its delegated stake
+			// reached zero at the boundary. Still registered, still
+			// delegated to -- unlike departedAtParamEpoch above, this pool
+			// never left the pool set, so it gets its own category rather
+			// than being reported as departed (dingo #4691).
+			cat = CategoryPoolZeroStake
 		case graceHours > 0 && !epochEndTime.IsZero() &&
 			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 			cat = CategoryReferenceLag
@@ -1836,11 +1872,31 @@ func severityOf(category string) mismatchSeverity {
 		CategoryAcctNewlyRegistered,
 		CategoryAcctDeregistered,
 		CategoryPoolDeparted,
+		CategoryPoolZeroStake,
 		CategoryCostModelSynthetic:
 		// Purely informational — see these categories' doc comments.
 		return severityInformational
 	default:
 		return severityFail
+	}
+}
+
+// severityLabel maps a mismatchSeverity to the string label value
+// dingo_koiosparity_mismatch_total's severity label uses (metrics.go). Kept
+// as a thin wrapper over severityOf's existing classification, rather than a
+// second switch over category strings, so the metric's severity label and
+// DetermineStatus/CountSignificant's classification of the same category can
+// never drift apart.
+func severityLabel(s mismatchSeverity) string {
+	switch s {
+	case severityFail:
+		return "fail"
+	case severityError:
+		return "error"
+	case severityInformational:
+		return "informational"
+	default:
+		return "informational"
 	}
 }
 
