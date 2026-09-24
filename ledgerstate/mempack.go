@@ -76,6 +76,7 @@ package ledgerstate
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -377,7 +378,7 @@ func encodeCBORByteMap(entries []cborByteMapEntry) ([]byte, error) {
 
 func encodeMempackScriptRef(script []byte) ([]byte, error) {
 	if len(script) == 0 {
-		return nil, fmt.Errorf("empty MemPack reference script")
+		return nil, errors.New("empty MemPack reference script")
 	}
 	var scriptType uint64
 	var scriptValue any
@@ -409,14 +410,18 @@ func appendCBORHead(dst []byte, major byte, value uint64) []byte {
 	case value <= math.MaxUint8:
 		return append(dst, major<<5|24, byte(value))
 	case value <= math.MaxUint16:
-		return append(dst, major<<5|25, byte(value>>8), byte(value))
+		return append(dst, major<<5|25,
+			byte(value>>8&math.MaxUint8), byte(value&math.MaxUint8))
 	case value <= math.MaxUint32:
 		return append(dst, major<<5|26,
-			byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+			byte(value>>24&math.MaxUint8), byte(value>>16&math.MaxUint8),
+			byte(value>>8&math.MaxUint8), byte(value&math.MaxUint8))
 	default:
 		return append(dst, major<<5|27,
-			byte(value>>56), byte(value>>48), byte(value>>40), byte(value>>32),
-			byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+			byte(value>>56&math.MaxUint8), byte(value>>48&math.MaxUint8),
+			byte(value>>40&math.MaxUint8), byte(value>>32&math.MaxUint8),
+			byte(value>>24&math.MaxUint8), byte(value>>16&math.MaxUint8),
+			byte(value>>8&math.MaxUint8), byte(value&math.MaxUint8))
 	}
 }
 
