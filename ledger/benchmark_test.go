@@ -1095,16 +1095,14 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 	)
 
 	// Confirm the query hits before timing it
-	seededTx, err := db.Metadata().
-		GetTransactionByHash(records.txHashes[0], nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if seededTx == nil {
-		b.Fatalf(
-			"seeded transaction %x is not readable",
-			records.txHashes[0],
-		)
+	for _, hash := range records.txHashes {
+		seededTx, err := db.Metadata().GetTransactionByHash(hash, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if seededTx == nil {
+			b.Fatalf("seeded transaction %x is not readable", hash)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1177,13 +1175,14 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	stakeKeys := distinctStakeKeys(b, records.stakeKeys, 10)
 
 	// Confirm the query hits before timing it
-	account, err := db.Metadata().
-		GetAccountByCredential(0, stakeKeys[0], false, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if account == nil {
-		b.Fatalf("seeded account %x is not readable", stakeKeys[0])
+	for _, key := range stakeKeys {
+		account, err := db.Metadata().GetAccountByCredential(0, key, false, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if account == nil {
+			b.Fatalf("seeded account %x is not readable", key)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1193,7 +1192,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		key := stakeKeys[i%len(stakeKeys)]
 		_, err := db.Metadata().GetAccountByCredential(0, key, false, nil)
-		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
+		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -1256,12 +1255,14 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	poolKeyHashes := distinctPoolKeyHashes(b, records.poolKeyHashes, 10)
 
 	// Confirm the query hits before timing it
-	pool, err := db.Metadata().GetPool(poolKeyHashes[0], false, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if pool == nil {
-		b.Fatalf("seeded pool %x is not readable", poolKeyHashes[0].Bytes())
+	for _, keyHash := range poolKeyHashes {
+		pool, err := db.Metadata().GetPool(keyHash, false, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if pool == nil {
+			b.Fatalf("seeded pool %x is not readable", keyHash.Bytes())
+		}
 	}
 
 	// Reset timer after seeding
@@ -1271,7 +1272,7 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		poolKeyHash := poolKeyHashes[i%len(poolKeyHashes)]
 		_, err := db.Metadata().GetPool(poolKeyHash, false, nil)
-		if err != nil && !errors.Is(err, models.ErrPoolNotFound) {
+		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -1340,12 +1341,14 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	)
 
 	// Confirm the query hits before timing it
-	drep, err := db.Metadata().GetDrep(credentials[0], false, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if drep == nil {
-		b.Fatalf("seeded DRep %x is not readable", credentials[0])
+	for _, credential := range credentials {
+		drep, err := db.Metadata().GetDrep(credential, false, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if drep == nil {
+			b.Fatalf("seeded DRep %x is not readable", credential)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1355,7 +1358,7 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		credential := credentials[i%len(credentials)]
 		_, err := db.Metadata().GetDrep(credential, false, nil)
-		if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
+		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -1417,12 +1420,14 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 	)
 
 	// Confirm the query hits before timing it
-	datum, err := db.Metadata().GetDatum(hashes[0], nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if datum == nil {
-		b.Fatalf("seeded datum %x is not readable", hashes[0].Bytes())
+	for _, hash := range hashes {
+		datum, err := db.Metadata().GetDatum(hash, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if datum == nil {
+			b.Fatalf("seeded datum %x is not readable", hash.Bytes())
+		}
 	}
 
 	// Reset timer after seeding
@@ -1483,16 +1488,14 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 	seedPreviewPParams(b, db, testEpochs)
 
 	// Confirm the query hits before timing it
-	rows, err := db.Metadata().
-		GetPParams(testEpochs[0], ledger.EraIdShelley, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if len(rows) == 0 {
-		b.Fatalf(
-			"seeded protocol parameters for epoch %d are not readable",
-			testEpochs[0],
-		)
+	for _, epoch := range testEpochs {
+		rows, err := db.Metadata().GetPParams(epoch, ledger.EraIdShelley, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(rows) == 0 {
+			b.Fatalf("seeded protocol parameters for epoch %d are not readable", epoch)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1570,15 +1573,14 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 	)
 
 	// Confirm the query hits before timing it
-	nonce, err := db.Metadata().GetBlockNonce(points[0], nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if len(nonce) == 0 {
-		b.Fatalf(
-			"seeded block nonce at slot %d is not readable",
-			points[0].Slot,
-		)
+	for _, point := range points {
+		nonce, err := db.Metadata().GetBlockNonce(point, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(nonce) == 0 {
+			b.Fatalf("seeded block nonce at slot %d is not readable", point.Slot)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1656,16 +1658,15 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 	stakeKeys := distinctStakeKeys(b, records.stakeKeys, 10)
 
 	// Confirm the query hits before timing it
-	registrations, err := db.Metadata().
-		GetStakeRegistrationsByCredential(0, stakeKeys[0], nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if len(registrations) == 0 {
-		b.Fatalf(
-			"seeded stake registration %x is not readable",
-			stakeKeys[0],
-		)
+	for _, key := range stakeKeys {
+		registrations, err := db.Metadata().
+			GetStakeRegistrationsByCredential(0, key, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(registrations) == 0 {
+			b.Fatalf("seeded stake registration %x is not readable", key)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1744,16 +1745,14 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 	poolKeyHashes := distinctPoolKeyHashes(b, records.poolKeyHashes, 10)
 
 	// Confirm the query hits before timing it
-	registrations, err := db.Metadata().
-		GetPoolRegistrations(poolKeyHashes[0], nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if len(registrations) == 0 {
-		b.Fatalf(
-			"seeded pool registration %x is not readable",
-			poolKeyHashes[0].Bytes(),
-		)
+	for _, keyHash := range poolKeyHashes {
+		registrations, err := db.Metadata().GetPoolRegistrations(keyHash, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(registrations) == 0 {
+			b.Fatalf("seeded pool registration %x is not readable", keyHash.Bytes())
+		}
 	}
 
 	// Reset timer after seeding
