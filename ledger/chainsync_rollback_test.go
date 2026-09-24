@@ -2610,6 +2610,55 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 		fixture.currentTip.Point,
 	)
 	require.NoError(t, err)
+	removedBlock.Cbor = []byte{0xff}
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	fixture.ls.config.EventBus = bus
+	errSubID, errCh := bus.Subscribe(LedgerErrorEventType)
+	require.NotZero(t, errSubID)
+	require.NotNil(t, errCh)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.NoError(t, err)
+	evt := testutil.RequireReceive(
+		t,
+		errCh,
+		testutil.AsyncWait,
+		"undo decode event for the captured rollback block",
+	)
+	undoDecodeEvent, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "undo decode event type")
+	require.Equal(t, "rollback_tx_undo_decode", undoDecodeEvent.Operation)
+	require.Equal(t, fixture.currentTip.Point, undoDecodeEvent.Point)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.Equal(t, fixture.ancestorNonce, fixture.ls.currentTipBlockNonce)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+	_, _, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	assert.False(t, pending)
+}
+
+func TestProcessChainIteratorRollbackRetainsIntentAfterMetadataTruncationFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
 	injected := errors.New("injected metadata truncation failure")

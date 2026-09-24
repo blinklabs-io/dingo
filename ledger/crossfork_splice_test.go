@@ -26,6 +26,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1344,7 +1346,39 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 			ls.continuationAudit.Load(),
 			"a refused rewind deletes nothing the window describes",
 		)
+		_, _, pending, err := loadRollbackIntent(ls.db)
+		require.NoError(t, err)
+		assert.False(t, pending, "a refused rewind must not leave a new intent")
 	})
+}
+
+func TestReconcileRefusedRewindRestoresPreviousRollbackIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	oldBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	priorBlocks := []models.Block{oldBlock}
+	require.NoError(t, persistRollbackIntent(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+		priorBlocks,
+	))
+	putPrimaryChainOnForkBeyondK(t, fixture, "reconcile-prior-intent")
+	chainTip := fixture.ls.chain.Tip()
+
+	err = fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+	require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
+	require.Equal(t, chainTip, fixture.ls.chain.Tip())
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.currentTip.Point, intentPoint)
+	require.Equal(t, priorBlocks, intentBlocks)
 }
 
 // TestPrimaryChainTipRegressed pins which tip movements a recovery rewind may

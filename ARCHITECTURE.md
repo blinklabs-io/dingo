@@ -736,6 +736,11 @@ captured `RollbackBlocks` payload (newest first) into
 `ledger.rollback.pending` before metadata truncation; it does not attempt to
 re-read block bodies that chain selection has already deleted. Multiple queued
 iterator rollbacks retain the combined removed-block payload in rollback order.
+The iterator rollback holds the transaction-event mutex while it updates ledger
+metadata, emits undo events from the captured blocks, and waits for their
+ordered delivery before retiring the matching intent. If a reconciliation
+rewind is refused before changing the chain, it restores the intent that was
+pending before preparation, or clears only the new intent when there was none.
 
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply

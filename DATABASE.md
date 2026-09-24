@@ -513,11 +513,17 @@ Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshot
 JSON record in `sync_state` containing `format_version`, the target `slot` and
 hex `hash`, and a newest-first `blocks` array. Each block uses explicit JSON
 fields (`hash`, `prev_hash`, `cbor`, `id`, `slot`, `number`, `type`) rather than
-the Go storage model's field names. The record is written before chain
-truncation removes those block bodies, extended when a multi-window rollback
-descends farther, and cleared only after metadata rollback and ordered undo
-delivery complete. Recovery is at-least-once and consumers must tolerate a
-duplicate undo after a crash. The durable payload is limited to 4096 blocks
+the Go storage model's field names. Peer-driven rollback records are written
+before chain truncation removes those block bodies. When the lagging ledger
+iterator reports a rollback after the chain has already removed them, it
+persists the iterator's captured `RollbackBlocks` payload before metadata
+truncation. A deeper multi-window rollback merges its blocks into the pending
+record rather than replacing an earlier payload. If a reconciliation rewind is
+refused before changing the chain, the prior point and payload are restored; a
+newly created intent is cleared. A matching record is cleared only after
+metadata rollback and ordered undo delivery complete. Recovery is at-least-once
+and consumers must tolerate a duplicate undo after a crash. The durable payload
+is limited to 4096 blocks
 and 64 MiB of raw block fields; a larger rollback logs a degraded-recovery
 warning and continues with live delivery rather than writing an unbounded
 value. A record recovery cannot replay as a truncation -- its point leads the

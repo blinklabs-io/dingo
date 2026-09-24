@@ -4596,6 +4596,24 @@ func (ls *LedgerState) processChainIteratorRollback(
 	rollbackBlocks []models.Block,
 ) error {
 	ls.drainBlockPipelineBeforeRollback(ctx, "chain iterator rollback")
+	rollback := func() error {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		err := ls.rollbackWithBlocksRetainingIntent(
+			point,
+			rollbackBlocks,
+			false,
+		)
+		if err != nil {
+			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
+				return err
+			}
+			ls.emitRollbackTransactionEvents(rollbackBlocks)
+			return errors.Join(err, ls.finishRollbackIntentForPoint(point))
+		}
+		ls.emitRollbackTransactionEvents(rollbackBlocks)
+		return ls.finishRollbackIntentForPoint(point)
+	}
 	chainTip := ls.chain.Tip()
 	stale := chainTip.Point.Slot != point.Slot ||
 		!bytes.Equal(chainTip.Point.Hash, point.Hash)
@@ -4640,13 +4658,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 				"ledger_tip_hash",
 				hex.EncodeToString(currentTip.Point.Hash),
 			)
-			if err := ls.withConsumedUtxoPruneBoundary(func() error {
-				return ls.rollbackWithBlocks(
-					point,
-					rollbackBlocks,
-					false,
-				)
-			}); err != nil {
+			if err := ls.withConsumedUtxoPruneBoundary(rollback); err != nil {
 				return err
 			}
 			return errRestartLedgerPipeline
@@ -4657,13 +4669,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 		}
 	}
 
-	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.rollbackWithBlocks(
-			point,
-			rollbackBlocks,
-			false,
-		)
-	})
+	return ls.withConsumedUtxoPruneBoundary(rollback)
 }
 
 // transitionToEra performs an era transition and returns the result without
@@ -10168,6 +10174,11 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			currentLedgerTip.Point.Slot,
 			currentLedgerTip.BlockNumber,
 		)
+		priorIntentPoint, priorIntentBlocks, priorIntentPending, intentErr :=
+			loadRollbackIntent(ls.db)
+		if intentErr != nil {
+			return fmt.Errorf("load prior rollback intent: %w", intentErr)
+		}
 		if err := ls.prepareRollbackIntent(ancestor, undoBlocks); err != nil {
 			return fmt.Errorf(
 				"prepare reconciliation rollback intent before chain rewind: %w",
@@ -10240,7 +10251,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			if !chainRewound {
 				return errors.Join(
 					rewindErr,
-					ls.finishRollbackIntentForPoint(ancestor),
+					restoreRollbackIntent(
+						ls.db,
+						priorIntentPoint,
+						priorIntentBlocks,
+						priorIntentPending,
+					),
 				)
 			}
 			return rewindErr

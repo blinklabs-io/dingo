@@ -1017,6 +1017,51 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	require.Equal(t, fixture.ancestorTip, ls.currentTip)
 }
 
+func TestReconcileKeepsIntentWhenMetadataRollbackFailsAfterChainRewind(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 8)
+	require.NotZero(t, txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+	forkHash := testHashBytes("reconcile-metadata-failure-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+		Slot:        fixture.currentTip.Point.Slot + 5,
+		Hash:        forkHash,
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.ancestorTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+
+	injected := errors.New("injected metadata truncation failure")
+	ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err := ls.reconcilePrimaryChainTipWithLedgerTip()
+	require.ErrorIs(t, err, injected)
+	require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
+	require.Equal(t, fixture.currentTip, ls.currentTip)
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	require.Len(t, intentBlocks, 1)
+	require.Equal(t, fixture.currentTip.Point.Hash, intentBlocks[0].Hash)
+}
+
 func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 	t.Parallel()
 
@@ -1190,6 +1235,50 @@ func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmit
 		t, forkHash, ls.chain.Tip().Point.Hash,
 		"a declined rollback must not have touched the primary chain "+
 			"either -- the pre-check runs before RewindPrimaryChainToPoint",
+	)
+}
+
+func TestReconcileDeclinesPruneFloorWithoutRewindingOrPersistingIntent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	forkHash := testHashBytes("reconcile-prune-floor-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+		Slot:        fixture.currentTip.Point.Slot + 5,
+		Hash:        forkHash,
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.ancestorTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+	chainTip := ls.chain.Tip()
+	require.NoError(t, ls.db.SetSyncState(
+		database.ConsumedUtxoPruneFloorSyncKey,
+		fmt.Sprint(fixture.ancestorTip.Point.Slot+1),
+		nil,
+	))
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 8)
+	require.NotZero(t, txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	err := ls.reconcilePrimaryChainTipWithLedgerTip()
+	require.ErrorIs(t, err, ErrRollbackBelowUtxoPruneFloor)
+	require.Equal(t, chainTip, ls.chain.Tip())
+	require.Equal(t, fixture.currentTip, ls.currentTip)
+	_, _, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"a rollback refused by the prune floor must not publish undo events",
 	)
 }
 

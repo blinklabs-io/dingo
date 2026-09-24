@@ -62,6 +62,18 @@ type durableRollbackBlock struct {
 	Type     uint   `json:"type"`
 }
 
+func restoreRollbackIntent(
+	db *database.Database,
+	point ocommon.Point,
+	blocks []models.Block,
+	pending bool,
+) error {
+	if !pending {
+		return clearRollbackIntent(db)
+	}
+	return persistRollbackIntent(db, point, blocks)
+}
+
 func durableBlocks(blocks []models.Block) ([]durableRollbackBlock, error) {
 	if len(blocks) > maxRollbackIntentBlocks {
 		return nil, fmt.Errorf(
