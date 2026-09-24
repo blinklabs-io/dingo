@@ -148,11 +148,10 @@ func TestValidateParameterChangeExcludesProtocolVersionAllowsOrdinaryUpdate(
 	}
 }
 
-// decodeConwayParamUpdateFromRawFields CBOR-encodes fields as a map and
-// decodes it into a ConwayProtocolParameterUpdate through the type's own
-// UnmarshalCBOR, so the returned value's Cbor() carries the real raw bytes
-// -- unlike a struct literal, which leaves Cbor() empty. This is what lets a
-// test exercise parameterChangeSetsProtocolVersionKey's raw-CBOR path.
+// decodeConwayParamUpdateFromRawFields CBOR-encodes fields as a map and stores
+// those bytes on a ConwayProtocolParameterUpdate without decoding the struct.
+// That lets this test exercise the raw-CBOR path even when an upstream decoder
+// rejects a present-but-null protocolVersion before transaction validation.
 func decodeConwayParamUpdateFromRawFields(
 	t *testing.T,
 	fields map[uint]any,
@@ -161,8 +160,7 @@ func decodeConwayParamUpdateFromRawFields(
 	raw, err := cbor.Encode(fields)
 	require.NoError(t, err)
 	var update conway.ConwayProtocolParameterUpdate
-	_, err = cbor.Decode(raw, &update)
-	require.NoError(t, err)
+	update.SetCbor(raw)
 	return update
 }
 
@@ -176,8 +174,7 @@ func decodeDijkstraParamUpdateFromRawFields(
 	raw, err := cbor.Encode(fields)
 	require.NoError(t, err)
 	var update gdijkstra.DijkstraProtocolParameterUpdate
-	_, err = cbor.Decode(raw, &update)
-	require.NoError(t, err)
+	update.SetCbor(raw)
 	return update
 }
 
