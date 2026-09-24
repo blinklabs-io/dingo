@@ -1686,7 +1686,7 @@ func pruneParamEpochSnapshots(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 	_, err = db.Exec(
@@ -2167,7 +2167,7 @@ func seedPoolCertificateHistory(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
