@@ -428,15 +428,26 @@ type rewardStateBundle struct {
 // sums the stake of every registered credential that has a delegation
 // (Cardano.Ledger.State.SnapShots.mkSnapShot over
 // Cardano.Ledger.State.Stake.resolveInstantStake) independently of which pools
-// appear in ssStakePoolsSnapShot. Deriving it from the reduced distribution
+// appear in ssStakePoolsSnapShot. Deriving it from a reduced distribution
 // instead shrinks that denominator, which raises sigma_a for every surviving
 // pool, lowers its apparent performance, and under-credits every member and
-// leader reward on the node — a divergence proportional to the excluded pool's
-// share of active stake. It is therefore computed from the full reward-stake
-// distribution. Reward calculation checks the reward_pool_input rows sum to
-// exactly that minus the snapshot's tracked ExcludedActiveStake when it is
-// set (dingo #4025); a snapshot captured before that tracking existed (nil)
-// falls back to checking the rows sum to no more than it.
+// leader reward on the node — a divergence proportional to the missing stake's
+// share of active stake.
+//
+// There are two ways stake goes missing, and they need different repairs. A
+// pool excluded here for degraded registration data is still in the
+// distribution, so the difference is measurable and is recorded as
+// ExcludedActiveStake (dingo #4025). A credential whose pool has left the
+// active pool set is not: enumerating the distribution from that set never
+// fetched it, so both the pool rows and a total summed from them are short by
+// the same amount and no check comparing the two can see it (dingo #4660).
+// The denominator is therefore taken from the calculator's credential-first
+// count (rewardTotalActiveStake over StakeDistribution.TotalActiveStake), not
+// from the pool buckets, and both kinds of exclusion land in
+// ExcludedActiveStake. Reward calculation checks the reward_pool_input rows sum
+// to exactly TotalActiveStake minus that when it is set; a snapshot captured
+// before that tracking existed (nil) falls back to checking the rows sum to no
+// more than it.
 func (m *Manager) buildRewardStateInputs(
 	epoch uint64,
 	snapshotType string,
@@ -468,7 +479,7 @@ func (m *Manager) buildRewardStateInputs(
 		return nil, err
 	}
 
-	totalActiveStake := sumPoolStakes(rewardDistribution.PoolStakes)
+	totalActiveStake := rewardTotalActiveStake(rewardDistribution)
 	// The full reward-stake distribution's sum minus the post-exclusion
 	// distribution's sum is exactly the stake degraded-pool exclusion removed
 	// from reward_pool_input. Persisting it lets reward calculation verify
@@ -534,6 +545,10 @@ func rewardStakeDistribution(
 		StakeInputs:    deduped,
 		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
 		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+		// Carried, not recomputed: StakeInputs holds only the credentials of
+		// pools that are still active, so it cannot express the denominator
+		// (dingo #4660). The calculator summed every delegated credential.
+		TotalActiveStake: dist.TotalActiveStake,
 	}
 	for _, input := range reward.StakeInputs {
 		if input.Stake == 0 {
@@ -604,9 +619,11 @@ func (m *Manager) saveRewardStateInputRows(
 // The returned distribution is the one actually consumed to build
 // poolInputs/stakeInputs, so its TotalPoolCount and TotalDelegators are safe
 // to use for RewardSnapshot. TotalActiveStake is not derived from this
-// returned, post-exclusion distribution: buildRewardStateInputs computes it
-// from the pre-exclusion rewardDistribution so a degraded pool's delegators
-// keep contributing to the sigma_a denominator.
+// returned, post-exclusion distribution, nor from any pool-bucket sum:
+// buildRewardStateInputs takes it from the pre-exclusion rewardDistribution's
+// credential-first count, so both a degraded pool's delegators and those of a
+// pool no longer in the active set keep contributing to the sigma_a
+// denominator.
 func (m *Manager) rewardInputsSkippingDegradedPools(
 	epoch uint64,
 	distribution *StakeDistribution,
@@ -719,6 +736,24 @@ func excludeRewardInputPool(dist *StakeDistribution, poolKeyHash []byte) bool {
 	dist.StakeInputs = filtered
 	dist.TotalStake = sumPoolStakes(dist.PoolStakes)
 	return true
+}
+
+// rewardTotalActiveStake returns the sigma_a denominator for a reward-stake
+// distribution: the stake of every delegated credential the calculator saw,
+// which includes credentials whose pool has left the active set and is
+// therefore never a key in PoolStakes.
+//
+// The pool-bucket sum is the floor, not the answer. It is used only when the
+// distribution carries no credential-first total -- a value built outside the
+// calculator, or one restored from a capture predating this field -- where it
+// is the best available lower bound and matches the pre-#4660 behaviour rather
+// than under-reporting the denominator to zero.
+func rewardTotalActiveStake(dist *StakeDistribution) uint64 {
+	bucketed := sumPoolStakes(dist.PoolStakes)
+	if dist.TotalActiveStake > bucketed {
+		return dist.TotalActiveStake
+	}
+	return bucketed
 }
 
 // sumPoolStakes totals all pool stakes, mirroring sumDelegators. Recomputed

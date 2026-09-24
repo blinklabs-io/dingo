@@ -8072,7 +8072,16 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koios_account_coverage` (one row per `(network, epoch)` recording
   `requested_count`/`fetched_count`/`complete` — see "Per-account exact
   parity (#3097)" below for why `complete` gates every per-account
-  comparison).
+  comparison). #1900 adds `koios_tx_info` (one row per `(network, tx_hash)`
+  holding the decoded `/tx_info` subset `node-parity from-genesis` rebuilds
+  the UTxO set from: body inputs and outputs, plus the collateral inputs,
+  collateral return and phase-2 validity verdict its `Consumed`/`Produced`
+  need). That table is written by `cmd/node-parity from-genesis`, not by the
+  `fetch` subcommand, and unlike the per-epoch tables it needs no TTL —
+  a settled transaction never changes Koios-side. A `payload_version` column
+  stands in for one: it stamps the struct shape each row was written from,
+  and rows carrying an older version are treated as misses and re-fetched,
+  which is how a row gains a field the code did not previously ask for.
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
@@ -9554,6 +9563,23 @@ both sides from a database, after the fact), this tool talks Ouroboros NtC
 directly to two live, independently-running node processes it does not
 start, stop, or otherwise manage.
 
+The `from-genesis` subcommand is the exception to "two nodes": it replaces the
+reference cardano-node with Koios. A real cardano-node cannot fill the
+reference role for a from-genesis replay, because its own replay races ahead
+of a freshly-started Dingo fast enough that no matching historical block is
+left to compare against by the time Dingo reaches it; Koios retains full
+per-epoch history instead. It follows `--dingo-addr`'s chain from genesis over
+one reconnecting ChainSync session and, at every epoch boundary, compares
+protocol parameters, stake distribution, and the whole UTxO set against
+Koios. The UTxO side is a running reconstruction seeded from Dingo at the
+start point and advanced by Koios's own `/tx_info` answers for every
+transaction on the chain, so it stays independent of Dingo after its seed; a
+rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
+than reporting a comparison that would trivially match. `--koios-cache-path`
+makes those lookups cache-first against a `koios-parity` `cache.db`, which
+may be the one a dingo instance's own embedded observer is writing, provided
+its recorded Koios API root matches `--koios-base-url`.
+
 **Architecture:**
 
 ```text
@@ -9565,12 +9591,16 @@ internal/nodeparity/       # shared library, untagged and importable
   check.go                  # CheckResult, Check, tipsAgree: the point-pinning orchestration (full mode)
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
   incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
+  from_genesis.go           # RunFromGenesis: reconnecting from-genesis ChainSync walk, per-epoch checks (Koios mode)
+  koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
 
-cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' are subcommands
+cmd/node-parity/           # thin Cobra CLI wrapper: 'check', 'watch' and 'from-genesis' are the subcommands
   main.go                  # root command (default action: one check, same as 'check')
   check.go                  # one-shot subcommand (full mode only)
   watch.go                  # --mode=full (block-triggered, --fallback-interval backstop) or
                              # --mode=incremental (sequential per-block, --full-check-interval/--cursor-file)
+  from_genesis.go           # from-genesis subcommand: Koios, not a reference cardano-node,
+                             # --koios-base-url/--koios-api-key/--koios-cache-path, --at-slot/--at-hash resume
   metrics.go                # not a subcommand -- Prometheus counters plus the /metrics HTTP
                              # server 'watch' starts when --metrics-addr is set; 'check' never
                              # serves metrics, since a one-shot invocation has nothing ongoing
@@ -12411,26 +12441,36 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    succeeds; the certificates are scoped to the ended epoch's slot range, so a
    discarded MIR is not retried at the next boundary.
 
-   The reference DELEG transition rejects a distribution certificate at
-   transaction-validation time before any of this runs, via
-   `MIRProducesNegativeUpdate`, whenever folding its delta into a credential's
-   InstantaneousRewards accumulated so far in the epoch would drive it
-   negative — this is what makes the boundary's own capacity check above
-   normally unreachable for a fully validated chain. gouroboros's shelley
-   validation rules implement the sibling pre-Alonzo check
-   (`MIRNegativesNotCurrentlyAllowedError`, which rejects any negative delta
-   before protocol version 5) but not this one, because it needs epoch-scoped
-   ledger state their `common.LedgerState` interface does not expose.
-   `ledger/eras.validateMIRAccumulatedRewards`, called from `ValidateTxAlonzo`
-   and `ValidateTxBabbage`, is dingo's implementation: it walks a
-   transaction's move-instantaneous-rewards certificates in order, seeding a
-   running per-credential total from `*LedgerView.PendingMIRRewardDeltas`
-   (certificates already committed earlier in the epoch, same block or
-   earlier — every transaction's certificates are written immediately after
-   that transaction validates, so this is always caught up as of the
-   currently validating slot) and folding in each certificate's own delta as
-   it goes, so a later certificate in the same transaction sees the effect of
-   an earlier one.
+   The reference DELEG transition rejects most of what this check guards
+   against at transaction-validation time, before any of it runs, which is
+   what makes the boundary's own capacity check normally unreachable for a
+   fully validated chain. gouroboros's shelley validation rules implement only
+   the parts expressible against `common.LedgerState`, such as
+   `MIRNegativesNotCurrentlyAllowedError`. The rest need epoch-scoped state.
+   `ledger/eras.validateShelleyDelegCerts`, called from every
+   Shelley-through-Babbage `ValidateTx*` function, is dingo's implementation.
+   It walks a transaction's certificates in order, as DELEGS does, and it is
+   skipped for a phase-2-invalid transaction, for which DELEGS never runs.
+   For move instantaneous rewards it enforces
+   `MIRCertificateTooLateinEpochDELEG` (slot below `firstSlot(nextEpoch) -
+   3k/f`), `MIRTransferNotCurrentlyAllowed` (no pot transfer before protocol
+   version 5), `MIRProducesNegativeUpdate`,
+   `InsufficientForInstantaneousRewardsDELEG` and
+   `InsufficientForTransferDELEG`. Each certificate is checked against the
+   pots and pending rewards its predecessors left, so a later transfer
+   cannot fund an earlier distribution. The starting state comes from
+   `*LedgerView.MIRDelegState`: the `NetworkState` pots, the epoch's committed
+   distributions (summed from protocol version 5, replaced before it) and
+   net pot transfers, and the cutoff. Every transaction's certificates are
+   written immediately after that transaction validates, so this is always
+   caught up as of the currently validating slot. For legacy stake
+   certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
+   `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
+   with withdrawals drained first. It also rejects delegation from a
+   credential deregistered earlier in the transaction. Upstream value
+   conservation counts a deposit for every registration and a refund for
+   every deregistration, and those amounts match real accounts only because
+   this walk has already rejected the certificates that name no account.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two

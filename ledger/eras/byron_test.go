@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -392,20 +393,48 @@ type mockLedgerState struct {
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
 	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
-	// pendingMIR backs PendingMIRRewardDeltas, letting a test simulate
-	// InstantaneousRewards already accumulated earlier in the current epoch
-	// without a real *ledger.LedgerView or database.
+	// pendingMIR seeds the Pending map MIRDelegState reports, letting a test
+	// simulate InstantaneousRewards already accumulated earlier in the
+	// current epoch without a real *ledger.LedgerView or database.
 	pendingMIR map[MIRCredentialKey]*big.Int
+	// mirState, when set, replaces the default MIRDelegState: unbounded pots
+	// and no cutoff, so tests unrelated to MIR capacity or timing are not
+	// rejected by it.
+	mirState *MIRDelegState
+	// stakeRegistered backs IsStakeCredentialRegistered, and rewardBalances
+	// the balance RewardAccountBalance reports for a registered credential.
+	stakeRegistered map[lcommon.Blake2b224]bool
+	rewardBalances  map[lcommon.Blake2b224]uint64
 }
 
-// PendingMIRRewardDeltas implements eras.MIRPendingRewardsProvider for tests.
-// The real implementation (*ledger.LedgerView) derives this from the database;
-// this mock just returns whatever a test has staged in pendingMIR, ignoring
-// uptoSlot.
-func (m *mockLedgerState) PendingMIRRewardDeltas(
+// MIRDelegState implements eras.MIRDelegStateProvider for tests. The real
+// implementation (*ledger.LedgerView) derives this from the database. The
+// Pending map is copied because the caller folds certificates into it.
+func (m *mockLedgerState) MIRDelegState(
 	_ uint64,
-) (map[MIRCredentialKey]*big.Int, error) {
-	return m.pendingMIR, nil
+	_ bool,
+) (MIRDelegState, error) {
+	state := MIRDelegState{
+		Reserves: math.MaxUint64,
+		Treasury: math.MaxUint64,
+		Pending:  m.pendingMIR,
+		Cutoff:   math.MaxUint64,
+	}
+	if m.mirState != nil {
+		state = *m.mirState
+		if state.DeltaReserves != nil {
+			state.DeltaReserves = new(big.Int).Set(state.DeltaReserves)
+		}
+		if state.DeltaTreasury != nil {
+			state.DeltaTreasury = new(big.Int).Set(state.DeltaTreasury)
+		}
+	}
+	pending := make(map[MIRCredentialKey]*big.Int, len(state.Pending))
+	for key, amount := range state.Pending {
+		pending[key] = new(big.Int).Set(amount)
+	}
+	state.Pending = pending
+	return state, nil
 }
 
 // SyntheticV2CostModelInEffect implements the eras package's local
@@ -471,9 +500,9 @@ func (m *mockLedgerState) StakeRegistration(
 }
 
 func (m *mockLedgerState) IsStakeCredentialRegistered(
-	_ lcommon.Credential,
+	cred lcommon.Credential,
 ) bool {
-	return false
+	return m.stakeRegistered[cred.Credential]
 }
 
 func (m *mockLedgerState) SlotToTime(
@@ -541,9 +570,13 @@ func (m *mockLedgerState) IsRewardAccountRegistered(
 }
 
 func (m *mockLedgerState) RewardAccountBalance(
-	_ lcommon.Credential,
+	cred lcommon.Credential,
 ) (*uint64, error) {
-	return nil, nil
+	if !m.stakeRegistered[cred.Credential] {
+		return nil, nil
+	}
+	balance := m.rewardBalances[cred.Credential]
+	return &balance, nil
 }
 
 func (m *mockLedgerState) CommitteeMember(
@@ -782,9 +815,11 @@ func TestValidateTxByron_MinimumFee(t *testing.T) {
 			ls.byronFeeMultiplier = 1_000_000_000
 			ls.addUtxo(input, newTestOutput(1_000))
 			tx := &testByronTx{
-				inputs:  []lcommon.TransactionInput{input},
-				outputs: []lcommon.TransactionOutput{newTestOutput(test.output)},
-				cbor:    make([]byte, txSize),
+				inputs: []lcommon.TransactionInput{input},
+				outputs: []lcommon.TransactionOutput{
+					newTestOutput(test.output),
+				},
+				cbor: make([]byte, txSize),
 			}
 
 			err := ValidateTxByron(tx, 0, ls, nil)

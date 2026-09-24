@@ -562,7 +562,13 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 	dist, err = calc.CalculateStakeDistribution(context.Background(), 650)
 	require.NoError(t, err)
 	require.Zero(t, dist.TotalStake)
-	require.Empty(t, dist.PoolStakes)
+	// Both registrations are still active at this slot. The pools remain in
+	// the leader-election distribution with zero stake, while the re-registered
+	// credential contributes neither stake nor a delegator count.
+	require.Equal(t, uint64(2), dist.TotalPools)
+	require.Equal(t, uint64(0), dist.PoolStakes[poolAKey])
+	require.Equal(t, uint64(0), dist.PoolStakes[poolBKey])
+	require.Empty(t, dist.DelegatorCount)
 }
 
 // TestCalculateStakeDistribution_HistoricalUtxoLiveness verifies that stake
