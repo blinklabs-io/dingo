@@ -1221,12 +1221,20 @@ func classifyEndorserBlockFetches(
 func leiosAnnouncementFromBlockCbor(
 	blockCbor []byte,
 ) (lcommon.Blake2b256, uint64, bool) {
-	var top []cbor.RawMessage
-	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
+	top, err := safedecode.Guard(func() ([]cbor.RawMessage, error) {
+		var top []cbor.RawMessage
+		_, err := cbor.Decode(blockCbor, &top)
+		return top, err
+	})
+	if err != nil || len(top) == 0 {
 		return lcommon.Blake2b256{}, 0, false
 	}
-	var header dijkstra.DijkstraBlockHeader
-	if _, err := cbor.Decode(top[0], &header); err != nil {
+	header, err := safedecode.Guard(func() (dijkstra.DijkstraBlockHeader, error) {
+		var header dijkstra.DijkstraBlockHeader
+		_, err := cbor.Decode(top[0], &header)
+		return header, err
+	})
+	if err != nil {
 		return lcommon.Blake2b256{}, 0, false
 	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()
