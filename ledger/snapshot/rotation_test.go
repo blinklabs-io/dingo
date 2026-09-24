@@ -443,15 +443,20 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 	require.Equal(t, uint64(7), *stored.LeiosKeyRegistrationEpoch)
 }
 
-func TestRotateSnapshotsPreservesLeiosKeyWhenRegistrationAgeIsUnknown(
+func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	db := setupTestDB(t)
-	// Retained epoch history begins after the imported registration, while the
-	// registration itself remains authoritative for the boundary snapshot.
+	// A Mithril registration has an import slot but no source registration
+	// slot. Even when retained epoch history maps that synthetic slot, it must
+	// not restart the voting-key TTL.
 	seedEpochs(t, db, []models.Epoch{{
+		EpochId:       6,
+		StartSlot:     0,
+		LengthInSlots: 100,
+	}, {
 		EpochId:       7,
 		StartSlot:     100,
 		LengthInSlots: 100,
@@ -467,11 +472,12 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenRegistrationAgeIsUnknown(
 		LeiosKeyPossessionProof: append([]byte(nil), proof...),
 	}
 	registration := &models.PoolRegistration{
-		PoolKeyHash:             append([]byte(nil), poolKeyHash...),
-		VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
-		AddedSlot:               50,
-		LeiosKeyPublic:          append([]byte(nil), publicKey...),
-		LeiosKeyPossessionProof: append([]byte(nil), proof...),
+		PoolKeyHash:                    append([]byte(nil), poolKeyHash...),
+		VrfKeyHash:                     bytes.Repeat([]byte{0x71}, 32),
+		AddedSlot:                      50,
+		LeiosKeyPublic:                 append([]byte(nil), publicKey...),
+		LeiosKeyPossessionProof:        append([]byte(nil), proof...),
+		LeiosKeyRegistrationAgeUnknown: true,
 	}
 	require.NoError(t, db.ImportPool(nil, pool, registration))
 

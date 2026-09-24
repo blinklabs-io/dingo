@@ -98,15 +98,19 @@ type PoolRegistration struct {
 	MetadataHash               []byte
 	LeiosKeyPublic             []byte
 	LeiosKeyPossessionProof    []byte
-	Owners                     []PoolRegistrationOwner
-	Relays                     []PoolRegistrationRelay
-	Pledge                     types.Uint64
-	Cost                       types.Uint64
-	CertificateID              uint
-	ID                         uint
-	PoolID                     uint
-	AddedSlot                  uint64
-	DepositAmount              types.Uint64
+	// LeiosKeyRegistrationAgeUnknown marks imported pool parameters whose
+	// original registration slot is unavailable. AddedSlot is the import slot
+	// for those rows and must not restart the voting-key TTL.
+	LeiosKeyRegistrationAgeUnknown bool
+	Owners                         []PoolRegistrationOwner
+	Relays                         []PoolRegistrationRelay
+	Pledge                         types.Uint64
+	Cost                           types.Uint64
+	CertificateID                  uint
+	ID                             uint
+	PoolID                         uint
+	AddedSlot                      uint64
+	DepositAmount                  types.Uint64
 }
 
 type PoolRegistrationOwner struct {

@@ -318,8 +318,9 @@ func (m *Manager) saveSnapshotInTxn(
 // freeze a key one epoch too early. This is the same historical selection used
 // by buildRewardStateInputs for the rest of the snapshotted pool parameters.
 //
-// Missing legacy epoch metadata leaves the key's age unknown. Preserve the key
-// bytes from the registration selected for the snapshot, but do not invent an
+// Missing legacy epoch metadata or an imported registration with only a
+// synthetic import slot leaves the key's age unknown. Preserve the key bytes
+// from the registration selected for the snapshot, but do not invent an
 // effective epoch; key lookup will keep it ineligible until its TTL can be
 // established. Never fall back to current pool state, which would make an old
 // snapshot resolve differently after a key rotation.
@@ -371,10 +372,13 @@ func (m *Manager) snapshotLeiosKeys(
 			len(registration.LeiosKeyPossessionProof) == 0 {
 			continue
 		}
-		registrationEpoch, ageKnown := epochForSlot(
-			epochs,
-			registration.AddedSlot,
-		)
+		registrationEpoch, ageKnown := uint64(0), false
+		if !registration.LeiosKeyRegistrationAgeUnknown {
+			registrationEpoch, ageKnown = epochForSlot(
+				epochs,
+				registration.AddedSlot,
+			)
+		}
 		var effectiveEpoch *uint64
 		if ageKnown && registrationEpoch != ^uint64(0) {
 			registrationEpoch++ // pool parameters take effect after POOLREAP

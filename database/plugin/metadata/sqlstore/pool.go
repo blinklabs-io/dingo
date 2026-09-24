@@ -54,8 +54,9 @@ INSERT INTO pool_registration (
     margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
     reward_account_credential_tag, metadata_hash, pledge, cost,
     certificate_id, pool_id, added_slot, deposit_amount, deposit_held,
-    leios_key_public, leios_key_possession_proof
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    leios_key_public, leios_key_possession_proof,
+    leios_key_registration_age_unknown
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (pool_id, added_slot) DO NOTHING
 RETURNING id`
 
@@ -428,6 +429,7 @@ RETURNING id`,
 				decimalUint64(registration.DepositAmount),
 				nullBytes(registration.LeiosKeyPublic),
 				nullBytes(registration.LeiosKeyPossessionProof),
+				registration.LeiosKeyRegistrationAgeUnknown,
 			}, int64(registration.PoolID), registration.AddedSlot)
 			if err != nil {
 				return fmt.Errorf("import pool registration: %w", err)
@@ -2020,7 +2022,8 @@ SELECT pr.margin, pr.metadata_url, pr.vrf_key_hash, pr.pool_key_hash,
        pr.reward_account, pr.reward_account_credential_tag, pr.metadata_hash,
        pr.pledge, pr.cost, pr.certificate_id, pr.id, pr.pool_id,
        pr.added_slot, pr.deposit_amount, pr.leios_key_public,
-       pr.leios_key_possession_proof
+       pr.leios_key_possession_proof,
+       pr.leios_key_registration_age_unknown
 FROM ranked r
 JOIN pool_registration pr ON pr.id = r.id
 WHERE r.rn = 1`,
@@ -2228,7 +2231,8 @@ SELECT id FROM ranked WHERE rn = 1`,
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-       p.leios_key_public, p.leios_key_possession_proof
+       p.leios_key_public, p.leios_key_possession_proof,
+       p.leios_key_registration_age_unknown
 FROM pool_registration p
 WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 			args...,
@@ -2274,7 +2278,8 @@ func (s *Store) GetPoolRegistrations(
 	SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
 	       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
 	       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-	       p.leios_key_public, p.leios_key_possession_proof
+	       p.leios_key_public, p.leios_key_possession_proof,
+	       p.leios_key_registration_age_unknown
 FROM pool_registration p
 WHERE p.pool_key_hash = ?
 ORDER BY p.id DESC`,
@@ -2846,7 +2851,8 @@ func (s *Store) loadPoolAssociations(
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-       p.leios_key_public, p.leios_key_possession_proof
+       p.leios_key_public, p.leios_key_possession_proof,
+       p.leios_key_registration_age_unknown
 FROM pool_registration p
 LEFT JOIN certs c ON c.id = p.certificate_id
 LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
@@ -2964,7 +2970,8 @@ func (s *Store) loadPoolsAssociations(
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-       p.leios_key_public, p.leios_key_possession_proof
+       p.leios_key_public, p.leios_key_possession_proof,
+       p.leios_key_registration_age_unknown
 FROM pool_registration p
 LEFT JOIN certs c ON c.id = p.certificate_id
 LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
@@ -3119,6 +3126,7 @@ func scanPoolRegistration(
 		&deposit,
 		&registration.LeiosKeyPublic,
 		&registration.LeiosKeyPossessionProof,
+		&registration.LeiosKeyRegistrationAgeUnknown,
 	)
 	if err != nil {
 		return nil, err

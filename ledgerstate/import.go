@@ -1312,12 +1312,14 @@ func importPools(
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			LeiosKeyPublic:             pool.LeiosKeyPublic,
 			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
-			AddedSlot:                  slot,
-			DepositAmount:              types.Uint64(pool.Deposit),
-			Owners:                     owners,
-			Relays:                     relays,
-			MetadataUrl:                pool.MetadataUrl,
-			MetadataHash:               pool.MetadataHash,
+			LeiosKeyRegistrationAgeUnknown: len(pool.LeiosKeyPublic) > 0 ||
+				len(pool.LeiosKeyPossessionProof) > 0,
+			AddedSlot:     slot,
+			DepositAmount: types.Uint64(pool.Deposit),
+			Owners:        owners,
+			Relays:        relays,
+			MetadataUrl:   pool.MetadataUrl,
+			MetadataHash:  pool.MetadataHash,
 		}
 
 		if err := store.ImportPool(

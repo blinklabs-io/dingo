@@ -1134,8 +1134,10 @@ func extractCostModels(
 }
 
 // Compile-time interface check
-var _ conformance.StateProvider = (*DingoStateProvider)(nil)
-var _ common.EpochState = (*DingoStateProvider)(nil)
+var (
+	_ conformance.StateProvider = (*DingoStateProvider)(nil)
+	_ common.EpochState         = (*DingoStateProvider)(nil)
+)
 
 // Keep the conformance provider on the same credential-aware committee
 // capability as the production LedgerView.

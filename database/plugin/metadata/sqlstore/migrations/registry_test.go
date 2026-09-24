@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 22)
+	require.Len(t, registry, 23)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -182,6 +182,17 @@ func TestSQLiteRegistry(t *testing.T) {
 		"ALTER TABLE `pool_stake_snapshot`\n" +
 			"    ADD COLUMN `leios_key_registration_epoch` INTEGER",
 	}, registry[21].SQL["sqlite"].Expand)
+	require.Equal(t, 23, registry[22].Version)
+	require.Equal(t, leiosImportedKeyAgeSchemaRelease, registry[22].Name)
+	require.Equal(t, []string{
+		"ALTER TABLE `pool_registration`\n" +
+			"    ADD COLUMN `leios_key_registration_age_unknown` BOOLEAN NOT NULL DEFAULT FALSE",
+		"UPDATE `pool_registration`\n" +
+			"SET `leios_key_registration_age_unknown` = TRUE\n" +
+			"WHERE (`certificate_id` IS NULL OR `certificate_id` = 0)\n" +
+			"  AND `added_slot` > 0\n" +
+			"  AND (`leios_key_public` IS NOT NULL OR `leios_key_possession_proof` IS NOT NULL)",
+	}, registry[22].SQL["sqlite"].Expand)
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -307,7 +318,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 22)
+	require.Len(t, registry, 23)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

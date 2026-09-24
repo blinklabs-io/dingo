@@ -1890,14 +1890,14 @@ func dijkstraBlockTransactionCbor(
 			return nil, fmt.Errorf("decode transaction validity: %w", err)
 		}
 		if !valid {
-			return nil, errors.New("Dijkstra transaction is marked invalid")
+			return nil, errors.New("dijkstra transaction is marked invalid")
 		}
 		// Standalone Dijkstra transactions put is_valid before auxiliary data;
 		// block transactions put it last.
 		components[2], components[3] = components[3], components[2]
 	default:
 		return nil, fmt.Errorf(
-			"Dijkstra transaction has %d components, expected 3 or 4",
+			"dijkstra transaction has %d components, expected 3 or 4",
 			len(components),
 		)
 	}
