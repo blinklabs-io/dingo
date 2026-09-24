@@ -34,7 +34,8 @@ func rawSQLiteMetadataFixture(
 	raw, err := sql.Open(
 		"sqlite",
 		"file:"+filepath.Join(db.DataDir(), "metadata.sqlite")+
-			"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+			"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)"+
+			"&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

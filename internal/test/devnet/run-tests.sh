@@ -220,6 +220,15 @@ log "Building DevNet Docker images..."
 # COMPOSE_PROFILES, so this is scoped correctly for either mode.
 docker compose -f "${COMPOSE_FILE}" build
 
+# Bootstrap conformance must observe epochs 1 and 2. A cold host-side Go
+# build after genesis can consume that entire window, especially with the
+# accelerated spec, so populate the test build cache before starting nodes.
+log "Compiling DevNet integration tests before genesis..."
+(
+  cd "${PROJECT_ROOT}"
+  go test -tags "${GO_TAGS}" -run '^$' ./internal/test/devnet/...
+)
+
 log "Starting DevNet containers..."
 devnet_compose_up "${COMPOSE_FILE}"
 log "Compose network (final): ${DEVNET_NET_BASE}.0/24"

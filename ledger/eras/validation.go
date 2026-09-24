@@ -693,10 +693,11 @@ func validatePreAlonzoTx(
 	minFeeA uint,
 	minFeeB uint,
 ) error {
-	errs := make([]error, 0, len(rules)+2)
+	errs := make([]error, 0, len(rules)+3)
 	for _, rule := range rules {
 		errs = append(errs, rule.validationFunc(tx, slot, ls, pp))
 	}
+	errs = append(errs, validateShelleyDelegCerts(tx, slot, ls, pp))
 	errs = append(errs, ValidateTxSize(tx, maxTxSize))
 	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
 	return errors.Join(errs...)

@@ -343,6 +343,21 @@ func (b *BlobStoreBark) GetBlock(
 	return archiveCbor, merged, nil
 }
 
+// RemainingTxnEntries forwards the upstream store's transaction budget.
+// Transactions come from upstream unchanged, so its bound is the one a
+// caller staging a bulk delete has to respect; a wrapper that swallowed the
+// question would leave that caller staging without one.
+func (b *BlobStoreBark) RemainingTxnEntries(
+	txn types.Txn,
+	entryBytes int,
+) (int, bool) {
+	budget, ok := b.upstream.(blob.TxnBudget)
+	if !ok {
+		return 0, false
+	}
+	return budget.RemainingTxnEntries(txn, entryBytes)
+}
+
 // GetBlockLocal bypasses Bark's archive fallback. Nested wrappers are
 // unwrapped through the same optional interface.
 func (b *BlobStoreBark) GetBlockLocal(
