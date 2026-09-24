@@ -979,6 +979,20 @@ func applyDrepDeregistrationCertificate(
 	); err != nil {
 		return 0, err
 	}
+	delegationSlot, err := checkedInt64(slot)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := db.ExecContext(ctx, `
+UPDATE account
+SET drep = NULL, drep_type = 0, added_slot = ?
+WHERE drep = ? AND drep_type = ?`,
+		delegationSlot,
+		cert.DrepCredential.Credential[:],
+		tag,
+	); err != nil {
+		return 0, fmt.Errorf("clear delegations for DRep deregistration: %w", err)
+	}
 	return insertCertificateRow(ctx, db, `
 INSERT INTO deregistration_drep (
     drep_credential, certificate_id, credential_tag, added_slot,

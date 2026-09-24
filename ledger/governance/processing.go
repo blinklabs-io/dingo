@@ -60,7 +60,7 @@ func HasDRepDeregistrationCertificates(tx lcommon.Transaction) bool {
 	return false
 }
 
-// ProcessDRepDeregistrationEffects clears delegated stake and votes on active
+// ProcessDRepDeregistrationEffects clears votes on active
 // proposals after a transaction's voting procedures have been recorded.
 func ProcessDRepDeregistrationEffects(
 	tx lcommon.Transaction,
@@ -81,18 +81,6 @@ func ProcessDRepDeregistrationEffects(
 			return fmt.Errorf("DRep deregistration certificate %d: %w", index, err)
 		}
 		credential := deregistration.DrepCredential.Credential[:]
-		if _, err := db.ClearDRepDelegationForCredential(
-			tag,
-			credential,
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"clear delegations for DRep deregistration certificate %d: %w",
-				index,
-				err,
-			)
-		}
 		if _, err := db.DeleteGovernanceVotesForDrep(
 			tag,
 			credential,
