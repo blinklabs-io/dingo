@@ -668,6 +668,14 @@ genesisBootstrap:
   # with a trustable localRoots peer plus a ledger peer snapshot in the topology
   # file. 0 disables corroboration (density-only Genesis selection).
   corroborationPeers: 0
+  # Genesis Limit on Patience: while Genesis selection is active, disconnect a
+  # ChainSync peer that delivers its advertised progress more slowly than
+  # limitOnPatienceRate headers per second, beyond a limitOnPatienceCapacity
+  # token allowance. Each header that raises the peer's block number earns one
+  # token. 0 selects the defaults (1000 tokens, 5 per second).
+  limitOnPatienceEnabled: true
+  limitOnPatienceCapacity: 0
+  limitOnPatienceRate: 0
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
