@@ -559,19 +559,22 @@ func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
 	require.Equal(t, blockRaw, block.Cbor())
 }
 
-// TestBlockfetchClientRejectsLegacyMusashiType8Block verifies rejection by
-// the real block-fetch path before an obsolete Dijkstra body is emitted.
-func TestBlockfetchClientRejectsLegacyMusashiType8Block(t *testing.T) {
+// TestBlockfetchClientDeliversLegacyMusashiType8Block verifies historical
+// Dijkstra blocks remain decodable after the current body format changed.
+func TestBlockfetchClientDeliversLegacyMusashiType8Block(t *testing.T) {
 	t.Parallel()
 
-	block, _, _ := runMusashiBlockfetchClientDelivery(
+	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
 		t,
 		gledger.BlockTypeDijkstra,
 		musashiType8BlockFixture,
 		musashiType8HeaderFixture,
-		true,
+		false,
 	)
-	require.Nil(t, block)
+	require.Equal(t, header.Hash().String(), block.Hash().String())
+	require.Equal(t, header.SlotNumber(), block.SlotNumber())
+	require.Equal(t, blockRaw, block.Cbor())
+	require.EqualValues(t, dijkstra.EraIdDijkstra, block.Era().Id)
 }
 
 // TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks is the negative case for
@@ -608,12 +611,13 @@ func TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks(t *testing.T) {
 	}
 }
 
-// TestDecodeBlockfetchBlockRejectsLegacyDijkstraBody ensures four-component
-// prototype bodies are rejected on every network.
-func TestDecodeBlockfetchBlockRejectsLegacyDijkstraBody(t *testing.T) {
+// TestDecodeBlockfetchBlockAcceptsLegacyDijkstraBody ensures the database and
+// peer decoder preserve historical four-component bodies on every network.
+func TestDecodeBlockfetchBlockAcceptsLegacyDijkstraBody(t *testing.T) {
 	t.Parallel()
 
 	blockRaw := readHexFixture(t, musashiType8BlockFixture)
+	headerRaw := readHexFixture(t, musashiType8HeaderFixture)
 	for _, magic := range []uint32{musashiNetworkMagic, 764824073} {
 		o := newOuroboros(OuroborosConfig{
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -623,8 +627,16 @@ func TestDecodeBlockfetchBlockRejectsLegacyDijkstraBody(t *testing.T) {
 			gledger.BlockTypeDijkstra,
 			blockRaw,
 		)
-		require.ErrorContains(t, err, "expected 3 components, got 4")
-		require.Nil(t, block)
+		require.NoError(t, err)
+		require.EqualValues(t, dijkstra.EraIdDijkstra, block.Era().Id)
+		require.Equal(t, blockRaw, block.Cbor())
+		header, err := o.decodeChainsyncHeader(
+			gledger.BlockTypeDijkstra,
+			headerRaw,
+		)
+		require.NoError(t, err)
+		require.Equal(t, header.Hash().String(), block.Hash().String())
+		require.Equal(t, block.BlockBodyHash(), block.(*dijkstra.DijkstraBlock).CalculatedBlockBodyHash())
 	}
 }
 

@@ -155,7 +155,7 @@ func byronRedeemWitness(
 	sign bool,
 ) cbor.Value {
 	t.Helper()
-	message, err := byronSignatureMessage(0x02, protocolMagic, bodyHash)
+	message, err := byronRedeemSignatureMessage(protocolMagic, bodyHash)
 	require.NoError(t, err)
 	signature := ed25519.Sign(key.private, message)
 	if !sign {
@@ -172,6 +172,22 @@ func byronRedeemWitness(
 	_, err = cbor.Decode(witness, &value)
 	require.NoError(t, err)
 	return value
+}
+
+func byronRedeemSignatureMessage(
+	protocolMagic uint32,
+	bodyHash lcommon.Blake2b256,
+) ([]byte, error) {
+	magicCbor, err := cbor.Encode(protocolMagic)
+	if err != nil {
+		return nil, err
+	}
+	txPayload, err := cbor.Encode(bodyHash[:])
+	if err != nil {
+		return nil, err
+	}
+	message := append([]byte{0x02}, magicCbor...)
+	return append(message, txPayload...), nil
 }
 
 // byronRedeemTxCase describes one redeem transaction to assemble.

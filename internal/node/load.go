@@ -1084,7 +1084,7 @@ func decodeImmutableBlock(
 	block immutable.Block,
 	verifyCfg lcommon.VerifyConfig,
 ) (gledger.Block, error) {
-	return gledger.NewBlockFromCbor(block.Type, block.Cbor, verifyCfg)
+	return models.DecodeBlockCbor(block.Type, block.Cbor, verifyCfg)
 }
 
 // decodeImmutableBlockBatch decodes a bounded batch with ordered results.

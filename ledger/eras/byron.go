@@ -624,23 +624,6 @@ func byronValidateWitnesses(
 	)
 }
 
-func byronSignatureMessage(
-	tag byte,
-	protocolMagic uint32,
-	txHash lcommon.Blake2b256,
-) ([]byte, error) {
-	magicCbor, err := cbor.Encode(protocolMagic)
-	if err != nil {
-		return nil, fmt.Errorf("encode Byron protocol magic: %w", err)
-	}
-	txPayload, err := cbor.Encode(txHash[:])
-	if err != nil {
-		return nil, fmt.Errorf("encode Byron transaction signing payload: %w", err)
-	}
-	message := append([]byte{tag}, magicCbor...)
-	return append(message, txPayload...), nil
-}
-
 type byronBootstrapWitness struct {
 	PublicKey []byte
 	Signature []byte

@@ -1649,7 +1649,7 @@ func spliceEndorserTxsIntoDijkstraBlock(
 			)
 		}
 		encoded, err := cbor.Encode([]cbor.RawMessage{
-			fields[0], fields[1], fields[2], cbor.RawMessage{0xf5},
+			fields[0], fields[1], fields[2], {0xf5},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("encode endorser transaction %d: %w", idx, err)

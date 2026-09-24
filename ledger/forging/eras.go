@@ -214,7 +214,7 @@ func dijkstraBlockTransactionCbor(
 	switch len(parts) {
 	case 3:
 		blockTxCbor, err := cbor.Encode([]cbor.RawMessage{
-			parts[0], parts[1], parts[2], cbor.RawMessage{0xf5},
+			parts[0], parts[1], parts[2], {0xf5},
 		})
 		if err != nil {
 			return nil, fmt.Errorf(

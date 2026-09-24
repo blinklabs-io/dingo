@@ -60,8 +60,7 @@ func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 			err,
 		)
 	}
-	numerator, denominator, configured, err :=
-		lsConfig.CardanoNodeConfig.PBFTSignatureThresholdRatio()
+	numerator, denominator, configured, err := lsConfig.CardanoNodeConfig.PBFTSignatureThresholdRatio()
 	if err != nil {
 		return byronPBFTCache{}, fmt.Errorf(
 			"read Byron PBFT signature threshold: %w",

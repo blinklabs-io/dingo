@@ -977,7 +977,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// every path reaches the common tail below.
 		var blockTxCount int
 
-		parsedBlock, parseErr := gledger.NewBlockFromCbor(
+		parsedBlock, parseErr := models.DecodeBlockCbor(
 			blk.BlockType,
 			blk.Cbor,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},

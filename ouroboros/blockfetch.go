@@ -223,6 +223,9 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 		blockType == gledger.BlockTypeConway {
 		return models.DecodeConwayPeerBlock(raw)
 	}
+	if blockType == gledger.BlockTypeDijkstra {
+		return models.DecodeDijkstraBlock(raw)
+	}
 	return gledger.NewBlockFromCbor(blockType, raw)
 }
 

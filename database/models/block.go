@@ -40,11 +40,24 @@ type Block struct {
 // ledger.NewBlockFromCbor's own variadic convention. Omitting it preserves
 // every existing caller's behavior unchanged.
 func (b Block) Decode(config ...common.VerifyConfig) (ledger.Block, error) {
+	return DecodeBlockCbor(b.Type, b.Cbor, config...)
+}
+
+// DecodeBlockCbor applies Dingo's era-specific compatibility decoders before
+// falling back to the strict Gouroboros block decoder.
+func DecodeBlockCbor(
+	blockType uint,
+	blockCbor []byte,
+	config ...common.VerifyConfig,
+) (ledger.Block, error) {
 	// Conway blocks may carry the Musashi/Leios extended header; route them
 	// through the Leios-aware decoder, which falls back to reconstructing the
 	// block only when gouroboros' strict Conway decode fails.
-	if b.Type == ledger.BlockTypeConway {
-		return DecodeConwayBlock(b.Cbor)
+	if blockType == ledger.BlockTypeConway {
+		return DecodeConwayBlock(blockCbor)
 	}
-	return ledger.NewBlockFromCbor(b.Type, b.Cbor, config...)
+	if blockType == ledger.BlockTypeDijkstra {
+		return DecodeDijkstraBlock(blockCbor, config...)
+	}
+	return ledger.NewBlockFromCbor(blockType, blockCbor, config...)
 }
