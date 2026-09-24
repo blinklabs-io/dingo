@@ -314,8 +314,8 @@ func truncateMysqlTables(
 }
 
 // listMysqlConformanceTables returns database's base tables, excluding
-// schema_migrations -- see listPostgresConformanceTables for why that table is
-// never truncated.
+// schema_migrations and node_settings_gate -- see
+// listPostgresConformanceTables for why neither is ever truncated.
 func listMysqlConformanceTables(
 	ctx context.Context,
 	db *sql.DB,
@@ -325,7 +325,8 @@ func listMysqlConformanceTables(
 		ctx,
 		"SELECT table_name FROM information_schema.tables "+
 			"WHERE table_schema = ? AND table_type = 'BASE TABLE' "+
-			"AND table_name <> 'schema_migrations'",
+			"AND table_name NOT IN ('schema_migrations', "+
+			"'node_settings_gate')",
 		database,
 	)
 	if err != nil {

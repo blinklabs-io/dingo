@@ -416,7 +416,7 @@ func Bootstrap(
 		"starting Mithril bootstrap",
 		"component", "mithril",
 		"network", cfg.Network,
-		"aggregator", aggregatorURL,
+		"aggregator", redactLocationURI(aggregatorURL),
 		"backend", cfg.Backend,
 	)
 

@@ -53,7 +53,17 @@ const stakeSnapshotRetentionEpochs = 3
 // off by the same one-epoch shift: at liveEpoch 6, targetEpoch 3 resolves
 // to snapshot epoch 2, which the floor (6-3=3) has already pruned, but
 // 6-3=3 is not > 3 so the un-shifted comparison wrongly accepted it.
-func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
+//
+// apiStorageMode skips the retention-window check entirely (matching
+// cleanupOldSnapshots' own API-mode carve-out, added alongside this
+// parameter): pool-stake snapshots are never pruned in that mode, so
+// there is no floor to reject against. The ahead-of-live-epoch check
+// above still applies regardless of storage mode -- that is a real
+// ordering violation, not a pruning question.
+func checkAsOfEpochRecency(
+	targetEpoch, liveEpoch uint64,
+	apiStorageMode bool,
+) error {
 	if targetEpoch > liveEpoch {
 		return fmt.Errorf(
 			"%w: as-of epoch %d is ahead of the live epoch (%d)",
@@ -61,6 +71,9 @@ func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 			targetEpoch,
 			liveEpoch,
 		)
+	}
+	if apiStorageMode {
+		return nil
 	}
 	if liveEpoch < stakeSnapshotRetentionEpochs {
 		// cleanupOldSnapshots itself does nothing below this floor (its own
@@ -80,6 +93,79 @@ func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 			deleteBeforeEpoch,
 			liveEpoch,
 		)
+	}
+	return nil
+}
+
+// verifyStakeDistributionRetentionOnly checks the same retention floors
+// PoolStakeDistribution enforces, without materializing anything
+// PoolStakeDistribution actually reads: VerifyPointQueryable previously
+// called PoolStakeDistribution(nil, at, txn) -- the unfiltered form --
+// purely to see whether it returned an error, discarding the result. That
+// reads the whole mark-snapshot via markStakeByPool and runs
+// totalCirculatingSupply's as-of-slot reconstruction, real work on every
+// pinned Acquire that a client issuing GetPoolDistr2 afterward then pays
+// for a second time, and one that never asks for stake distribution at all
+// (e.g. GetEpochNo) pays for once with nothing to show for it.
+//
+// Two independent floors, not one: checkAsOfEpochRecency covers the
+// mark-snapshot pruning window, but PoolStakeDistribution (both directly,
+// and via queryShelleyStakeDistribution) also calls totalCirculatingSupply
+// with asOfSlot=at.Slot for a pinned at, which separately requires a
+// network_state row at or before that slot -- rejecting with
+// ErrHistoricalStateUnavailable when none exists (see that function's doc
+// comment). Checking only the epoch floor accepts a point both
+// GetPoolDistr2 and GetStakeDistribution still reject, because no
+// network_state row happened to cover that slot even though the epoch
+// itself was recent enough -- reopening the bare "handleQuery returns that
+// error, connection drops" failure this whole change exists to close.
+// Checking only that a covering row exists (not reading genesis config or
+// computing a value) keeps this as cheap as the epoch check.
+//
+// The network_state floor is gated on the exact same condition
+// totalCirculatingSupply itself gates its GetNetworkStateAsOfSlot read on:
+// an unconditional gate would reject a point every real query would have
+// happily answered whenever ls.config.CardanoNodeConfig is nil or its
+// ShelleyGenesis carries no MaxLovelaceSupply -- totalCirculatingSupply
+// itself never reaches GetNetworkStateAsOfSlot in that case, falling back
+// to totalActiveStake instead, so requiring a network_state row here
+// unconditionally would be stricter than what PoolStakeDistribution
+// actually needs.
+func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errEpochNotResolved(at)
+	}
+	liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+	if err != nil {
+		return err
+	}
+	if err := checkAsOfEpochRecency(
+		targetEpoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+	); err != nil {
+		return err
+	}
+	if at.pinned() && ls.circulatingSupplyGenesis() != nil {
+		metaTxn := txn.Metadata()
+		state, err := ls.db.Metadata().GetNetworkStateAsOfSlot(at.Slot, metaTxn)
+		if err != nil {
+			return err
+		}
+		if state == nil {
+			return fmt.Errorf(
+				"%w: circulating supply as of slot %d cannot be "+
+					"reconstructed -- no network_state row exists at or "+
+					"before that slot",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+			)
+		}
 	}
 	return nil
 }
@@ -200,16 +286,23 @@ func (ls *LedgerState) PoolStakeDistribution(
 			tip.Point.Slot,
 		)
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		return nil, errEpochNotResolved(at)
+	}
 	if at.pinned() {
-		liveEpoch, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+		// Unpinned, so always found=true (see resolveAsOfEpoch's doc
+		// comment) -- not checked here.
+		liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
 		if err != nil {
 			return nil, err
 		}
-		if err := checkAsOfEpochRecency(epoch, liveEpoch); err != nil {
+		if err := checkAsOfEpochRecency(
+			epoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+		); err != nil {
 			return nil, err
 		}
 	}

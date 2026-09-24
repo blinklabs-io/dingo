@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/stretchr/testify/require"
 )
 
@@ -167,4 +168,88 @@ func TestResetRunsEachWipeHookIndependently(t *testing.T) {
 			require.Equal(t, tc.blob, blobCalled, "wipeBlob")
 		})
 	}
+}
+
+// TestSqliteResetPreservesAlonzoPParamsUnitMarker pins the one row a freshly
+// migrated schema is not empty of. Migration v20 seeds the Alonzo
+// protocol-parameter unit marker and database.checkAlonzoPParamsUnit fails
+// closed when it is absent, so while node_settings_gate was in the managed
+// set a Reset left the database in a state no construction accepts.
+func TestSqliteResetPreservesAlonzoPParamsUnitMarker(t *testing.T) {
+	dataDir := t.TempDir()
+	sm, err := newDingoStateManagerAt(dataDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	resetter, err := newSqliteResetter(sqliteMetadataPath(dataDir))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resetter.Close() })
+
+	require.NoError(t, sm.Reset())
+
+	var value string
+	require.NoError(
+		t,
+		resetter.db.QueryRow(
+			`SELECT value FROM node_settings_gate WHERE name = ?`,
+			nodesettings.AlonzoPParamsUnitGateName,
+		).Scan(&value),
+		"Reset must leave the migration-seeded Alonzo unit marker in place",
+	)
+	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1, value)
+}
+
+// TestSqliteReopenAfterResetSucceeds pins the consequence the marker exists
+// for: a manager constructed against a database another manager already reset
+// must still open. The remote backends share one database across every manager
+// in the process (see mysqlProcessDatabase), so the corpus replay's first Reset
+// used to make every later construction in the same test binary fail. It also
+// covers the opposite error, since preserving the whole table instead fails
+// here on the blob_store_id gate.
+func TestSqliteReopenAfterResetSucceeds(t *testing.T) {
+	dataDir := t.TempDir()
+	m1, err := newDingoStateManagerAt(dataDir)
+	require.NoError(t, err)
+
+	require.NoError(t, m1.Reset())
+	require.NoError(t, m1.Close())
+
+	m2, err := newDingoStateManagerAt(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, m2.Close())
+}
+
+// TestSqliteResetClearsBlobStoreIDGate pins the one node_settings_gate row a
+// Reset must not preserve. The blob wipe discards the reserved key the
+// identity is minted into, so a surviving gate would reject the next
+// construction as a metadata store paired with a foreign blob store -- the
+// failure TestSqliteReopenAfterResetSucceeds would then hit from the other
+// direction.
+func TestSqliteResetClearsBlobStoreIDGate(t *testing.T) {
+	dataDir := t.TempDir()
+	sm, err := newDingoStateManagerAt(dataDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+
+	resetter, err := newSqliteResetter(sqliteMetadataPath(dataDir))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resetter.Close() })
+
+	blobStoreIDRows := func() int {
+		t.Helper()
+		var rows int
+		require.NoError(t, resetter.db.QueryRow(
+			`SELECT COUNT(*) FROM node_settings_gate WHERE name = 'blob_store_id'`,
+		).Scan(&rows))
+		return rows
+	}
+	require.Equal(t, 1, blobStoreIDRows(), "precondition: the gate is latched")
+
+	require.NoError(t, sm.Reset())
+
+	require.Zero(
+		t,
+		blobStoreIDRows(),
+		"Reset discards the blob store's identity, so its gate must go too",
+	)
 }

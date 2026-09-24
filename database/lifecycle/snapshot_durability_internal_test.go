@@ -168,7 +168,8 @@ func writeMetadataTemplateWithSentinel(t *testing.T, path string) {
 	require.NoError(t, os.WriteFile(path, raw, 0o600))
 
 	conn, err := sql.Open(
-		"sqlite", "file:"+path+"?_pragma=busy_timeout(30000)",
+		"sqlite",
+		"file:"+path+"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
 	_, err = conn.Exec(fmt.Sprintf(

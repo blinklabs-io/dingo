@@ -161,6 +161,22 @@ WHERE epoch <= ? AND era_id = ?
 ORDER BY epoch DESC, id DESC
 LIMIT 1;
 
+-- name: CountPParamsByEra :one
+SELECT COUNT(*)
+FROM pparams
+WHERE era_id = ?;
+
+-- name: ListPParamsByEra :many
+SELECT cbor, id, added_slot, epoch, era_id
+FROM pparams
+WHERE era_id = ?
+ORDER BY id;
+
+-- name: UpdatePParamsCbor :exec
+UPDATE pparams
+SET cbor = ?
+WHERE id = ?;
+
 -- name: GetPParamUpdates :many
 SELECT genesis_hash, cbor, id, added_slot, epoch
 FROM pparam_update
