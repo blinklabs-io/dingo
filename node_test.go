@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -1179,6 +1180,187 @@ func newChainSelectorSubscriptionTestNode(
 		eventBus:      bus,
 		chainSelector: cs,
 	}
+}
+
+type blockingNodeTestLogHandler struct {
+	entered     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (h *blockingNodeTestLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *blockingNodeTestLogHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Level < slog.LevelWarn {
+		return nil
+	}
+	h.once.Do(func() {
+		close(h.entered)
+		<-h.release
+	})
+	return nil
+}
+
+func (h *blockingNodeTestLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) unblock() {
+	h.releaseOnce.Do(func() { close(h.release) })
+}
+
+func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		Logger:        slog.New(loggerHandler),
+		SecurityParam: 1,
+	})
+	referenceConn := newNodeTestConnId(5101)
+	cs.UpdatePeerTip(referenceConn, ochainsync.Tip{
+		Point:       ocommon.NewPoint(10, []byte("reference")),
+		BlockNumber: 1,
+	}, nil)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := newChainSelectorSubscriptionTestNode(t, bus, cs)
+	n.subscribeChainSelectorEvents()
+
+	// The first impossible advertised tip blocks in the real selector callback's
+	// warning logger. Further publications fill the production subscriber queue.
+	stalled := chainselection.PeerTipUpdateEvent{
+		ConnectionId: newNodeTestConnId(5102),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(1000, []byte("untrusted")),
+			BlockNumber: 1000,
+		},
+	}
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+	)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := 0; i < event.DefaultSubscriberBuffer+2; i++ {
+			bus.Publish(
+				chainselection.PeerTipUpdateEventType,
+				event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+			)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback queue did not fill")
+	}
+	select {
+	case <-published:
+		t.Fatal("required Node subscription stopped applying back-pressure")
+	case <-time.After(event.RemoteDeliverTimeout + time.Second):
+	}
+	loggerHandler.unblock()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("required Node subscription did not resume publishing after callback recovery")
+	}
+
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType,
+			chainselection.PeerTipUpdateEvent{
+				ConnectionId: referenceConn,
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(20, []byte("recovered")),
+					BlockNumber: 2,
+				},
+			}),
+	)
+	require.Eventually(t, func() bool {
+		got := cs.GetPeerTip(referenceConn)
+		return got != nil && got.Tip.BlockNumber == 2
+	}, time.Second, 5*time.Millisecond,
+		"required Node subscription must process events after the callback drains")
+}
+
+func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := &Node{
+		config:   Config{logger: slog.New(loggerHandler)},
+		eventBus: bus,
+	}
+	n.subscribeChainSelectorEvents()
+
+	const forkEvent = chain.ChainForkEventType
+	fork := event.NewEvent(forkEvent, chain.ChainForkEvent{})
+	bus.Publish(forkEvent, fork)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := 0; i < event.DefaultSubscriberBuffer+2; i++ {
+			bus.Publish(forkEvent, fork)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback queue did not fill")
+	}
+	select {
+	case <-published:
+	case <-time.After(event.RemoteDeliverTimeout + 2*time.Second):
+		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
+	}
+	loggerHandler.unblock()
+
+	// The observer has been removed even though its already-running callback is
+	// still blocked; a later event must not queue another diagnostic callback.
+	bus.Publish(forkEvent, fork)
 }
 
 // TestNodePeerEligibilityEventUpdatesChainSelector verifies the node wiring:
