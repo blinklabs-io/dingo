@@ -294,6 +294,19 @@ func TestCheckpointWALDoesNotWaitForReaderAtWALTip(t *testing.T) {
 // lock continuously for the whole checkpoint call.
 func TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot(t *testing.T) {
 	t.Parallel()
+	assertCheckpointWALDoesNotHoldWriterLock(t, true)
+}
+
+func TestCheckpointWALDoesNotHoldWriterLockBehindReaderAtTip(t *testing.T) {
+	t.Parallel()
+	assertCheckpointWALDoesNotHoldWriterLock(t, false)
+}
+
+func assertCheckpointWALDoesNotHoldWriterLock(
+	t *testing.T,
+	pinFrames bool,
+) {
+	t.Helper()
 	dataDir := t.TempDir()
 	store, writeDB, readDB, err := openSQLStore(
 		Config{DataDir: dataDir},
@@ -326,8 +339,9 @@ func TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot(t *testing.T) {
 	// writer lock; below wal_autocheckpoint's own 10000-page threshold.
 	writeRows(0, 4000)
 
-	// A reader snapshot opened here pins the frames written after it, so no
-	// checkpoint mode can drain the WAL completely and TRUNCATE must wait.
+	// A reader opened after the initial writes is either at the WAL tip or,
+	// below, made stale by additional frames. Both shapes must avoid holding
+	// SQLite's writer lock while TRUNCATE waits for the reader.
 	readTx, err := readDB.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -341,7 +355,9 @@ func TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot(t *testing.T) {
 			"SELECT n FROM checkpoint_probe LIMIT 1",
 		).Scan(&pinned),
 	)
-	writeRows(100_000, 2000)
+	if pinFrames {
+		writeRows(100_000, 2000)
+	}
 
 	// Probe the writer lock from a dedicated connection that never waits, so
 	// a single observation of SQLITE_BUSY means the checkpoint was holding
