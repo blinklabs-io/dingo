@@ -38,11 +38,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-//go:fix inline
-func intPtr(v int) *int {
-	return new(v)
-}
-
 func TestRedeemerExecutionFee(t *testing.T) {
 	t.Parallel()
 

@@ -139,6 +139,24 @@ func (o *Ouroboros) instrumentLocalstatequeryRelease(
 // live/immutable right now", the same thing querying with no pin at all
 // (a zero-value ledger.QueryPoint) already means.
 //
+// A specific point is rejected here, before it is ever recorded, unless
+// LedgerState.VerifyPointQueryable confirms every point-aware query type
+// can actually answer for it -- see that method's doc comment for why this
+// upfront check exists at all: the wire protocol has no way to fail a
+// query after a successful Acquire, so this is the only protocol-legal
+// place to refuse a point this node cannot honor. The two ways
+// VerifyPointQueryable can fail map to the two AcquireFailure reasons the
+// protocol already defines: a point that has left this node's chain
+// (ErrPointNotOnChain) fails the same way an unknown point always has;
+// a point still on-chain but older than some query type's own retention
+// floor (ErrHistoricalStateUnavailable) fails as "too old", the same
+// reason a point outside the volatile window already fails today. Done
+// outside localstatequeryAcquireMutex, not under it: this check opens a
+// database transaction and can run one or more real ledger queries
+// (PoolStakeDistribution, queryShelleyCurrentProtocolParams), so holding
+// the mutex for it would serialize every other connection's Acquire and
+// Release calls behind whichever one is currently being verified.
+//
 // Not every query type honors the recorded point yet -- see
 // ledger.LedgerState.Query's doc comment for which ones do.
 func (o *Ouroboros) localstatequeryServerAcquire(
@@ -154,14 +172,27 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// Validate synchronously, at Acquire time, rather than deferring to
 		// the first Query: a rejection here has a graceful wire-level
 		// AcquireFailure reply (gouroboros' handleAcquire/handleReAcquire
-		// both translate ErrAcquireFailurePointNotOnChain into one), but a
-		// rejection surfacing later, from the Query callback, has no such
-		// path and tears down the whole connection instead
+		// both translate ErrAcquireFailurePointNotOnChain/PointTooOld into
+		// one), but a rejection surfacing later, from the Query callback,
+		// has no such path and tears down the whole connection instead
 		// (blinklabs-io/dingo#4156). This point is deliberately not yet
 		// recorded in localstatequeryAcquiredPoints when validation
 		// fails, so a client that ignores the failure and queries anyway
 		// keeps whatever point (or lack of one) it had before this call.
-		if err := o.ledgerState.VerifyPointOnChain(point); err != nil {
+		//
+		// VerifyPointQueryable, not the narrower VerifyPointOnChain: a
+		// point can be genuinely still on this node's chain and yet
+		// already unanswerable by a specific query type with its own,
+		// stricter retention floor (UTxO whole/by-ref, stake/pool
+		// distribution, current protocol parameters at a historical
+		// epoch) -- this hits the exact same connection-killing gap #4156
+		// fixed for the on-chain check alone, just for a different,
+		// retention-based rejection reason
+		// (blinklabs-io/dingo#382 protocol-compliance finding).
+		// VerifyPointQueryable's own doc comment covers verifyPointOnChain
+		// too, so this subsumes VerifyPointOnChain rather than needing
+		// both checks run separately.
+		if err := o.ledgerState.VerifyPointQueryable(nil, point); err != nil {
 			if errors.Is(err, ledger.ErrPointNotOnChain) {
 				return fmt.Errorf(
 					"%w: %w",
@@ -169,16 +200,6 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 					err,
 				)
 			}
-			// Not currently reachable: VerifyPointOnChain only calls the
-			// private verifyPointOnChain helper, which can only return
-			// ErrPointNotOnChain above. ErrHistoricalStateUnavailable is
-			// raised deep inside specific Query handlers instead (e.g.
-			// circulating-supply reconstruction and GetUTxOByTxIn's
-			// retention-floor check), which this Acquire-time check does
-			// not run. Kept here (rather than removed) so this mapping is
-			// already in place if VerifyPointOnChain's scope ever grows
-			// to cover pruned-but-on-chain points too
-			// (blinklabs-io/dingo#4232 review).
 			if errors.Is(err, ledger.ErrHistoricalStateUnavailable) {
 				return fmt.Errorf(
 					"%w: %w",
@@ -186,7 +207,29 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 					err,
 				)
 			}
-			return err
+			// An error matching neither sentinel means something
+			// unexpected (a real database error, say) happened inside
+			// VerifyPointQueryable's own reads rather than the point
+			// genuinely being unqueryable: returning it bare here has
+			// gouroboros' handleAcquire treat it as a fatal protocol error
+			// and tear down the connection, reintroducing the exact
+			// connection-killing failure mode this whole mechanism exists
+			// to avoid, just triggered by a different kind of error. Map
+			// it to the same AcquireFailurePointTooOld a well-behaved
+			// client already knows how to handle (retry against a
+			// different point) instead, logging the real error here since
+			// the client only ever sees the generic wire-level rejection.
+			o.config.Logger.Error(
+				"local-state-query Acquire validation failed unexpectedly",
+				"component", "network",
+				"connection_id", ctx.ConnectionId.String(),
+				"error", err,
+			)
+			return fmt.Errorf(
+				"%w: %w",
+				olocalstatequery.ErrAcquireFailurePointTooOld,
+				err,
+			)
 		}
 		o.localstatequeryAcquireMutex.Lock()
 		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = point

@@ -18,6 +18,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -205,8 +206,10 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 
 	handler := &captureSlogHandler{}
 	logger := slog.New(handler)
+	credentialURL := server.URL +
+		"/snapshot.tar.zst?X-Amz-Credential=credential&X-Amz-Signature=signature"
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:               server.URL + "/snapshot.tar.zst",
+		URL:               credentialURL,
 		AllowInsecureHTTP: true,
 		DestDir:           t.TempDir(),
 		Filename:          "snapshot.tar.zst",
@@ -226,11 +229,179 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 				continue
 			}
 			assert.Equal(t, slog.LevelDebug, record.Level, message)
+			if message == "downloading snapshot" {
+				foundURL := false
+				record.Attrs(func(attr slog.Attr) bool {
+					if attr.Key != "url" {
+						return true
+					}
+					foundURL = true
+					assert.Equal(
+						t,
+						server.URL+"/snapshot.tar.zst",
+						attr.Value.String(),
+					)
+					return true
+				})
+				require.True(t, foundURL, "download log is missing url")
+			}
 			found = true
 			break
 		}
 		require.True(t, found, "missing log record %q", message)
 	}
+}
+
+func TestDownloadSnapshotRedactsCredentialURLFromErrors(t *testing.T) {
+	t.Parallel()
+
+	const credentialURL = "https://download.example/" +
+		"snapshot.tar.zst?X-Amz-Credential=credential&X-Amz-Signature=signature"
+	transportErr := errors.New("transport failure")
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf(
+				"request failed for %s: %w",
+				req.URL,
+				transportErr,
+			)
+		}),
+	}
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 credentialURL,
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          client,
+		AllowInsecureHTTP:   true,
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, transportErr)
+	assert.Contains(
+		t,
+		err.Error(),
+		"https://download.example/snapshot.tar.zst",
+	)
+	for _, secret := range []string{
+		"X-Amz-Credential",
+		"credential",
+		"X-Amz-Signature",
+		"signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestDownloadSnapshotRedactsCredentialURLFromErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	const credentialURL = "https://download.example/snapshot.tar.zst?" +
+		"X-Amz-Credential=credential&X-Amz-Signature=signature"
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body: io.NopCloser(strings.NewReader(
+					"request rejected: " + req.URL.String(),
+				)),
+			}, nil
+		}),
+	}
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 credentialURL,
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          client,
+		AllowInsecureHTTP:   true,
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "https://download.example/snapshot.tar.zst")
+	for _, secret := range []string{
+		"X-Amz-Credential",
+		"credential",
+		"X-Amz-Signature",
+		"signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestDownloadSnapshotRedactsMalformedRedirectLocation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		w.Header().Set(
+			"Location",
+			"https://cdn.example/%zz?X-Amz-Signature=redirect-signature",
+		)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          server.Client(),
+		AllowInsecureHTTP:   true,
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unparsable location")
+	for _, secret := range []string{
+		"X-Amz-Signature",
+		"redirect-signature",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestDownloadSnapshotRejectsRedirectWithUserinfo(t *testing.T) {
+	t.Parallel()
+
+	var redirectTarget string
+	targetReached := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		if r.URL.Path == "/target" {
+			targetReached = true
+			assert.Empty(t, r.Header.Get("Authorization"))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Location", redirectTarget)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	redirectTarget = strings.Replace(
+		server.URL,
+		"https://",
+		"https://operator:redirect-secret@",
+		1,
+	) + "/target"
+	httpClient := server.Client()
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             t.TempDir(),
+		Filename:            "snapshot.tar.zst",
+		HTTPClient:          httpClient,
+		AllowInsecureHTTP:   true,
+		MaxTransientRetries: -1,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not include userinfo")
+	assert.NotContains(t, err.Error(), "operator")
+	assert.NotContains(t, err.Error(), "redirect-secret")
+	assert.False(t, targetReached, "redirect target must not receive Basic Auth")
 }
 
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {

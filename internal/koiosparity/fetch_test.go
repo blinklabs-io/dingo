@@ -107,7 +107,7 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 	)
 	defer srv.Close()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -184,7 +184,7 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 	)
 	defer srv.Close()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -279,7 +279,7 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 	)
 	defer srv.Close()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -401,7 +401,7 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 	defer srv.Close()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	seedKoiosSource(t, cache, network, srv.URL)
 
@@ -459,7 +459,7 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 		"pool-level data was already fresh; /totals must not be re-fetched just to backfill accounts",
 	)
 
-	cache2, err := OpenCache(cachePath, nil)
+	cache2, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache2.Close() //nolint:errcheck
 
@@ -552,7 +552,7 @@ func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
 	defer srv.Close()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	cache, err := openTestCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	seedKoiosSource(t, cache, network, srv.URL)
 	fetchedAt := time.Now().UTC()
@@ -591,7 +591,7 @@ func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
 	require.Equal(t, int32(0), totalsCalls.Load(),
 		"pool-level data was fresh; /totals must not be re-fetched")
 
-	reopened, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	reopened, err := openTestCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	defer reopened.Close()
 	got, err := reopened.GetEpochParams(network, epoch)
