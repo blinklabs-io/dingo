@@ -199,15 +199,26 @@ func (s *Store) GetLastEnactedGovernanceProposal(
 	if err != nil {
 		return nil, err
 	}
-	args := make([]any, len(actionTypes))
+	args := make([]any, len(actionTypes)*2)
 	for i, actionType := range actionTypes {
 		args[i] = actionType
+		args[len(actionTypes)+i] = actionType
 	}
+	placeholders := bindPlaceholders(len(actionTypes))
 	proposal, err := scanGovernanceProposal(db.QueryRowContext(
 		ctx,
 		"SELECT "+governanceProposalColumns+governanceProposalFromSQL+`
- WHERE action_type IN (`+bindPlaceholders(len(args))+`)
+ WHERE action_type IN (`+placeholders+`)
    AND enacted_epoch IS NOT NULL AND deleted_slot IS NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM governance_proposal AS child
+        WHERE child.parent_tx_hash = governance_proposal.tx_hash
+          AND child.parent_action_idx = governance_proposal.action_index
+          AND child.action_type IN (`+placeholders+`)
+          AND child.enacted_epoch = governance_proposal.enacted_epoch
+          AND child.enacted_slot = governance_proposal.enacted_slot
+          AND child.deleted_slot IS NULL
+   )
  ORDER BY enacted_epoch DESC, enacted_slot DESC, id DESC
  LIMIT 1`,
 		args...,

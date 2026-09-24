@@ -792,8 +792,10 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 		GovActionCbor: treasuryAction,
 		AddedSlot:     400,
 	}
-	require.NoError(t, db.SetGovernanceProposal(parent, nil))
+	// Persist the child first to make row-ID order disagree with the
+	// governance ancestry order when both actions enact at the same boundary.
 	require.NoError(t, db.SetGovernanceProposal(child, nil))
+	require.NoError(t, db.SetGovernanceProposal(parent, nil))
 	require.NoError(t, db.SetGovernanceProposal(treasury, nil))
 	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
 	require.NoError(t, err)
@@ -853,8 +855,13 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	require.True(t, ok)
 	assert.Equal(
 		t,
-		newRat(0, 1),
+		newRat(1, 1),
 		updatedPParams.DRepVotingThresholds.PpEconomicGroup,
+	)
+	assert.Equal(
+		t,
+		newRat(0, 1),
+		updatedPParams.DRepVotingThresholds.TreasuryWithdrawal,
 	)
 	assert.Equal(t, poolDeposit, updatedPParams.PoolDeposit)
 
@@ -866,6 +873,44 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	require.NotNil(t, child.EnactedEpoch)
 	assert.Equal(t, stabilityTestEpoch+1, *parent.EnactedEpoch)
 	assert.Equal(t, stabilityTestEpoch+1, *child.EnactedEpoch)
+	root, err := db.GetLastEnactedGovernanceProposal(
+		[]uint8{uint8(lcommon.GovActionTypeParameterChange)}, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, root)
+	assert.Equal(t, childHash, root.TxHash)
+
+	// Replaying the committed boundary must reconstruct the same ordered
+	// parameter result from the persisted enacted proposals.
+	replayTxn := db.MetadataTxn(true)
+	defer replayTxn.Release()
+	replayOut, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          replayTxn,
+		PrevEpoch:    stabilityTestEpoch,
+		NewEpoch:     stabilityTestEpoch + 1,
+		BoundarySlot: (stabilityTestEpoch + 1) * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, replayTxn.Commit())
+	assert.Zero(t, replayOut.EnactedCount)
+	require.True(t, replayOut.PParamsChanged)
+	replayPParams := replayOut.UpdatedPParams
+	replayedPParams, ok := replayPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		newRat(1, 1),
+		replayedPParams.DRepVotingThresholds.PpEconomicGroup,
+	)
+	assert.Equal(
+		t,
+		newRat(0, 1),
+		replayedPParams.DRepVotingThresholds.TreasuryWithdrawal,
+	)
+	assert.Equal(t, poolDeposit, replayedPParams.PoolDeposit)
 }
 
 func TestProcessEpochOrdersParameterChangesBeforeTreasuryWithdrawals(

@@ -211,6 +211,12 @@ func ProcessEpoch(
 	if err != nil {
 		return nil, fmt.Errorf("get ratified proposals: %w", err)
 	}
+	// The SQL tie-breaker orders proposals by transaction hash when they
+	// share a ratification slot. Parameter-change descendants must enact
+	// after their ancestors so later updates are applied over earlier ones,
+	// matching the order used to ratify the chain.
+	replayedEnacted = orderParameterChangeChains(replayedEnacted)
+	ratified = orderParameterChangeChains(ratified)
 	applyEnactmentResult := func(
 		proposal *models.GovernanceProposal,
 		res *EnactmentResult,
