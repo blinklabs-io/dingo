@@ -175,6 +175,8 @@ func TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail(
 	t *testing.T,
 ) {
 	n := newStartupCleanupProducerNode(t)
+	kesStopped := false
+	n.kesAgentCancel = func() { kesStopped = true }
 	// Non-nil so enableLeiosVoting does not take its no-vote-manager early
 	// return; it fails on the key file below without ever calling into it.
 	n.leiosVoteManager = &leios.VoteManager{}
@@ -205,6 +207,7 @@ func TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail(
 
 	runStopsLIFO(started)
 
+	require.True(t, kesStopped, "startup rollback must stop the KES agent loop")
 	requireGoroutineGone(t, forgeCreatedBy)
 	requireGoroutineGone(t, electionCreatedBy)
 	require.False(t, n.blockForger.IsRunning())

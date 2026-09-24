@@ -2678,16 +2678,12 @@ The same rollback also constrains *where* a stop is registered, not just
 what it does: `cleanupFailedStartup` cancels `n.ctx` but joins only the
 stops already on `started`, so a component's stop belongs immediately
 after its start returns, ahead of anything else that can fail.
-`Run()`'s block-producer step (`startBlockProducer`, `node_forging.go`)
-registered `blockForger.Stop`/`leaderElection.Stop` after
-`enableLeiosVoting`, so a vote signing key that failed to load, a
-rejected `ConfigureVoting`, or an unexpected voting status unwound the
-stack with the forge loop and the election's epoch workers still
-running, and the rollback went on to close ledger state, the database
-and the plugin host under them; the registration now sits directly after
-`initBlockForger`, which assigns `n.blockForger`/`n.leaderElection` only
-once both have started and cleans up after itself on its own failure
-paths. The Midnight indexer had the same gap between `Indexer.Start` and
+`Run()`'s block-producer step uses `startBlockProducer` from
+`node_forging.go`. Its stop is registered immediately after credential
+validation, which may start the KES agent loop, and before ledger checks,
+forger startup, or Leios voting can fail. The nil-guarded stop closes the KES
+agent and joins any started forger and election workers. The Midnight indexer
+had the same gap between `Indexer.Start` and
 its stop registered after `ledgerState.Start`, where a failure in
 between left its block-event subscription live across `n.db.Close()`; it
 is now registered at both points through one `sync.OnceFunc`, which
