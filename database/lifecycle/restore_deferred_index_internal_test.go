@@ -19,6 +19,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +64,22 @@ func (m *ctxIndexManager) BuildDeferredIndexesContext(
 		m.loggedAt = m.logBuffer.String()
 	}
 	m.sawErr = ctx.Err()
+	return ctx.Err()
+}
+
+type progressIndexManager struct {
+	*ctxIndexManager
+	progressBuilds int
+}
+
+func (m *progressIndexManager) BuildDeferredIndexesContextWithProgress(
+	ctx context.Context,
+	before func(string),
+	after func(string, time.Duration),
+) error {
+	m.progressBuilds++
+	before("idx_asset_fingerprint")
+	after("idx_asset_fingerprint", time.Millisecond)
 	return ctx.Err()
 }
 
@@ -127,6 +144,26 @@ func TestRebuildRestoredDeferredIndexesNamesMissingBeforeBuilding(
 		t, buf.String(),
 		"deferred metadata index repair complete in the restored database",
 	)
+}
+
+func TestRebuildRestoredDeferredIndexesLogsProgressCallbacks(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	manager := &progressIndexManager{
+		ctxIndexManager: &ctxIndexManager{
+			missing:   []string{"idx_asset_fingerprint"},
+			logBuffer: &buf,
+		},
+	}
+	err := rebuildRestoredDeferredIndexes(
+		context.Background(),
+		manager,
+		slog.New(slog.NewTextHandler(&buf, nil)),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, manager.progressBuilds)
+	require.Contains(t, buf.String(), "building deferred metadata index")
+	require.Contains(t, buf.String(), "deferred metadata index ready")
 }
 
 // TestRebuildRestoredDeferredIndexesTolerateNilLogger keeps the logger

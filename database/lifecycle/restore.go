@@ -1116,11 +1116,6 @@ func restoreBlobStore(
 	return nil
 }
 
-// validateRestoredDatabase opens the restored store the same way a normal
-// dingo startup would, letting database.New's own CheckNodeSettings and
-// checkCommitTimestamp checks validate internal consistency, then
-// additionally confirms the restored tip matches what the manifest
-// recorded before closing it again.
 // rebuildRestoredDeferredIndexes repairs the staged metadata copy's deferred
 // indexes before the restore activates it.
 //
@@ -1194,6 +1189,10 @@ func rebuildRestoredDeferredIndexes(
 	return nil
 }
 
+// validateRestoredDatabase opens the restored store the same way a normal
+// dingo startup would, letting database.New's own CheckNodeSettings and
+// checkCommitTimestamp checks validate internal consistency, then confirms
+// the restored tip matches what the manifest recorded before closing it.
 func validateRestoredDatabase(
 	ctx context.Context,
 	host *plugin.Host,

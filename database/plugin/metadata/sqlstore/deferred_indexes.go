@@ -199,10 +199,6 @@ func (s *Store) buildDeferredIndexesWithProgress(
 		buildCtx,
 		func(db queryer, ctx context.Context) error {
 			for _, index := range indexes {
-				if before != nil {
-					before(index.Name)
-				}
-				started := time.Now()
 				exists, err := s.deferredIndexExists(ctx, db, index)
 				if err != nil {
 					return fmt.Errorf(
@@ -211,12 +207,13 @@ func (s *Store) buildDeferredIndexesWithProgress(
 						err,
 					)
 				}
-				if after != nil {
-					after(index.Name, time.Since(started))
-				}
 				if exists {
 					continue
 				}
+				if before != nil {
+					before(index.Name)
+				}
+				started := time.Now()
 				statement := s.dialect.CreateIndexSQL(
 					index.Name,
 					index.Table,

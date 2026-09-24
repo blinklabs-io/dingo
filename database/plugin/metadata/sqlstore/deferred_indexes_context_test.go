@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/stretchr/testify/require"
@@ -74,4 +75,45 @@ func TestMissingDeferredIndexesNamesDroppedEntries(t *testing.T) {
 	critical, err := store.MissingCriticalDeferredIndexes()
 	require.NoError(t, err)
 	require.Subset(t, missing, critical)
+}
+
+func TestBuildDeferredIndexesContextWithProgressReportsOnlyMissingIndexes(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	var before, after []string
+	require.NoError(t, store.BuildDeferredIndexesContextWithProgress(
+		t.Context(),
+		func(name string) { before = append(before, name) },
+		func(name string, _ time.Duration) { after = append(after, name) },
+	))
+	require.Empty(t, before, "present indexes need no build progress events")
+	require.Empty(t, after, "present indexes need no build progress events")
+
+	missing := deferred.Manifest[0]
+	_, err := store.writeDB.ExecContext(
+		t.Context(),
+		store.dialect.DropIndexSQL(missing.Name, missing.Table),
+	)
+	require.NoError(t, err)
+
+	before = nil
+	after = nil
+	require.NoError(t, store.BuildDeferredIndexesContextWithProgress(
+		t.Context(),
+		func(name string) { before = append(before, name) },
+		func(name string, _ time.Duration) {
+			after = append(after, name)
+		},
+	))
+	require.Equal(t, []string{missing.Name}, before)
+	require.Equal(t, []string{missing.Name}, after)
+	exists, err := store.deferredIndexExists(
+		t.Context(),
+		store.readDB,
+		missing,
+	)
+	require.NoError(t, err)
+	require.True(t, exists, "the after callback follows the CREATE INDEX")
 }

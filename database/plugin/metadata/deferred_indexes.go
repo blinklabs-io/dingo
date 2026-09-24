@@ -62,12 +62,16 @@ type DeferredIndexManager interface {
 // on a multi-million-row table takes long enough that an operator watching
 // startup sees nothing at all until it finishes. A caller that can name the
 // missing entries first can attribute that wait while it is happening.
-//
 // Stores that do not implement this report nothing and fall back to logging
 // after the fact.
-// MissingDeferredIndexLister is MissingCriticalDeferredIndexLister for the
-// complete manifest. The full-manifest repair a restored database needs is as
-// silent as the critical one, and has more entries to build.
+type MissingCriticalDeferredIndexLister interface {
+	// MissingCriticalDeferredIndexes returns the names of missing
+	// Critical=true manifest entries, in manifest order. It performs no DDL.
+	MissingCriticalDeferredIndexes() ([]string, error)
+}
+
+// MissingDeferredIndexLister lists missing entries in the complete deferred
+// index manifest, for restore paths that rebuild the full manifest.
 type MissingDeferredIndexLister interface {
 	// MissingDeferredIndexes returns the names of the manifest entries
 	// missing from the schema, in manifest order. It performs no DDL.
@@ -95,11 +99,4 @@ type DeferredIndexProgressBuilder interface {
 		before func(string),
 		after func(string, time.Duration),
 	) error
-}
-
-type MissingCriticalDeferredIndexLister interface {
-	// MissingCriticalDeferredIndexes returns the names of the
-	// Critical=true manifest entries missing from the schema, in
-	// manifest order. It performs no DDL.
-	MissingCriticalDeferredIndexes() ([]string, error)
 }
