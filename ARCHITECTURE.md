@@ -967,7 +967,9 @@ empty invalid-transaction list. Each candidate adds constant-time accounting;
 previously selected transactions are not re-encoded or hashed during selection.
 Selection stops before the first candidate that exceeds `MaxBlockBodySize`,
 preserving the accepted prefix. The final encoding and body hash still provide
-an independent size check. Dijkstra retains its separate inline-body sizing.
+an independent size check. Dijkstra retains its separate inline-body sizing;
+its block body contains inline transactions followed by Leios and Peras
+certificate fields, and each block transaction carries its validity flag.
 
 Two invariants keep the forger from advertising or repeating a block it has
 not durably adopted:

@@ -564,20 +564,47 @@ func TestBuildBlockDijkstraNormalizesAdmittedTxForBlock(t *testing.T) {
 	var rawBody []cbor.RawMessage
 	_, err = cbor.Decode(rawBlock[1], &rawBody)
 	require.NoError(t, err)
-	require.Len(t, rawBody, 4)
+	require.Len(t, rawBody, 3)
 
 	var rawTxs []cbor.RawMessage
-	_, err = cbor.Decode(rawBody[1], &rawTxs)
+	_, err = cbor.Decode(rawBody[0], &rawTxs)
 	require.NoError(t, err)
 	require.Len(t, rawTxs, 1)
 
 	var blockTxFields []cbor.RawMessage
 	_, err = cbor.Decode(rawTxs[0], &blockTxFields)
 	require.NoError(t, err)
-	require.Len(t, blockTxFields, 3)
+	require.Len(t, blockTxFields, 4)
 	assert.Equal(t, originalFields[0], blockTxFields[0])
 	assert.Equal(t, originalFields[1], blockTxFields[1])
 	assert.Equal(t, originalFields[3], blockTxFields[2])
+	assert.Equal(t, []byte{0xf5}, []byte(blockTxFields[3]))
+}
+
+func TestDijkstraBlockBodyEncodesInvalidityOnTransaction(t *testing.T) {
+	t.Parallel()
+
+	blockTx, err := dijkstraBlockTransactionCbor(
+		makeMinimalTxCbor(t, 0x02, 0),
+	)
+	require.NoError(t, err)
+	bodyCbor, err := encodeDijkstraBlockBodyCbor(
+		[]cbor.RawMessage{blockTx},
+		[]uint{0},
+		nil,
+	)
+	require.NoError(t, err)
+
+	var bodyFields []cbor.RawMessage
+	_, err = cbor.Decode(bodyCbor, &bodyFields)
+	require.NoError(t, err)
+	require.Len(t, bodyFields, 3)
+
+	var body dijkstra.DijkstraBlockBody
+	_, err = cbor.Decode(bodyCbor, &body)
+	require.NoError(t, err)
+	require.Len(t, body.Transactions, 1)
+	assert.False(t, body.Transactions[0].TxIsValid)
 }
 
 func TestBuildBlockDijkstraRespectsActualBlockBodySize(t *testing.T) {

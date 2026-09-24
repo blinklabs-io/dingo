@@ -1115,7 +1115,7 @@ func makeMinimalTxCbor(t *testing.T, txID byte, padding int) []byte {
 	txHash := make([]byte, 32)
 	txHash[0] = txID
 
-	// Conway transaction body: {0: inputs, 2: fee}
+	// Conway transaction body: {0: inputs, 1: outputs, 2: fee}
 	// Inputs are encoded as a tagged set (tag 258)
 	bodyMap := map[uint]any{
 		0: cbor.Tag{
@@ -1125,13 +1125,12 @@ func makeMinimalTxCbor(t *testing.T, txID byte, padding int) []byte {
 		2: uint64(200000),
 	}
 
-	// Add padding via an output with a large address if needed
-	if padding > 0 {
-		addr := make([]byte, padding)
-		addr[0] = 0x61 // Shelley enterprise address header byte
-		bodyMap[1] = []any{
-			[]any{addr, uint64(1000000)},
-		}
+	// Use a valid output even when no padding is requested.
+	addressSize := max(padding, 29)
+	addr := make([]byte, addressSize)
+	addr[0] = 0x61 // Shelley enterprise address header byte
+	bodyMap[1] = []any{
+		[]any{addr, uint64(1000000)},
 	}
 
 	// Full Conway tx: [body, witnesses, isValid, auxData]
@@ -1390,6 +1389,7 @@ func makeMinimalTxCborWithInput(
 			Content: []any{[]any{inputHash, inputIndex}},
 		},
 		2: uint64(200000),
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 	}
 
 	txArr := []any{bodyMap, map[uint]any{}, true, nil}
@@ -1868,6 +1868,7 @@ func makeMinimalTxCborWithExUnits(
 			Number:  258,
 			Content: []any{[]any{txHash, uint64(0)}},
 		},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 		2: uint64(200000),
 	}
 
