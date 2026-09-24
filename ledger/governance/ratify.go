@@ -367,9 +367,10 @@ const (
 )
 
 // parameterChangeDRepGroups classifies the fields touched by a concrete
-// Conway or Dijkstra parameter-change action. Dijkstra keys 34 through 37 are
-// network-group parameters for DRep voting and security-group parameters for
-// SPO voting (the latter is supplied by SecurityGroupFields above).
+// Conway or Dijkstra parameter-change action. Dijkstra keys 34-37 and 40-48
+// are NetworkGroup parameters, while keys 38-39 are TechnicalGroup and
+// EconomicGroup parameters respectively. SecurityGroupFields supplies the
+// independent SPO threshold classification.
 func parameterChangeDRepGroups(
 	action lcommon.ParameterChangeGovAction,
 ) drepParameterGroups {
@@ -393,9 +394,23 @@ func parameterChangeDRepGroups(
 			a.ParamUpdate.MaxRefScriptSizePerTx != nil ||
 			a.ParamUpdate.RefScriptCostStride != nil ||
 			a.ParamUpdate.RefScriptCostMultiplier != nil ||
-			a.ParamUpdate.CommitteeStakeCoverage != nil ||
-			a.ParamUpdate.QuorumStakeThreshold != nil {
+			a.ParamUpdate.LeiosAnnouncementPeriodLength != nil ||
+			a.ParamUpdate.LeiosVotePeriodLength != nil ||
+			a.ParamUpdate.LeiosDiffusionPeriodLength != nil ||
+			a.ParamUpdate.LeiosCommitteeSize != nil ||
+			a.ParamUpdate.LeiosQuorumStakeThreshold != nil ||
+			a.ParamUpdate.MaxEndorserBlockReferencesSize != nil ||
+			a.ParamUpdate.MaxEndorserBlockTxsSize != nil ||
+			a.ParamUpdate.MaxEndorserBlockExUnits != nil ||
+			a.ParamUpdate.MaxRefScriptSizePerEndorserBlock != nil {
 			groups |= drepParameterGroupNetwork
+		}
+		if a.ParamUpdate.MaxPledgeLeverageSet ||
+			a.ParamUpdate.MaxPledgeLeverage != nil {
+			groups |= drepParameterGroupTechnical
+		}
+		if a.ParamUpdate.MinPoolMargin != nil {
+			groups |= drepParameterGroupEconomic
 		}
 	default:
 		return allDRepParameterGroups

@@ -579,7 +579,9 @@ func byronValidateWitnesses(
 			)
 		}
 		if len(redeemWitnesses) > 0 || len(bootstrapWitnesses) > 0 {
-			txHash := tx.Hash()
+			// Byron witnesses sign the wire-encoded body ID. ByronTransaction.Hash
+			// is the canonical ledger ID, which may differ from those bytes.
+			txHash := byronTx.WireId()
 			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
 			if !ok {
 				return errors.New(
