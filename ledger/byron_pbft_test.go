@@ -367,6 +367,30 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	require.Len(t, state.issuerState.SignatureHistory(), 2)
 }
 
+func TestAdvanceByronPBFTStateRejectsMalformedUpdateProposal(t *testing.T) {
+	t.Parallel()
+
+	block, err := loadRealByronMainBlock(t).Decode()
+	require.NoError(t, err)
+	mainBlock, ok := block.(*byron.ByronMainBlock)
+	require.True(t, ok)
+	mainBlock.Body.UpdPayload.Proposals = append(
+		mainBlock.Body.UpdPayload.Proposals,
+		byron.ByronUpdateProposal{},
+	)
+
+	config := newByronPBFTTestNodeConfig(t, block, 10)
+	ls := &LedgerState{config: LedgerStateConfig{CardanoNodeConfig: config}}
+	byronConfig, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(byronConfig)
+	require.NoError(t, err)
+
+	_, err = ls.advanceByronPBFTState(state, block, false)
+	require.ErrorContains(t, err, "validate Byron update payload")
+	require.ErrorContains(t, err, "update proposal 0")
+}
+
 func TestByronPBFTStateUsesCardanoNodeThreshold(t *testing.T) {
 	stored := loadRealByronMainBlock(t)
 	block, err := stored.Decode()

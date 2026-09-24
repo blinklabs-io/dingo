@@ -527,6 +527,13 @@ func (ls *LedgerState) advanceByronPBFTState(
 			block,
 		)
 	}
+	if err := mainBlock.ValidateUpdatePayload(); err != nil {
+		return byronPBFTState{}, fmt.Errorf(
+			"validate Byron update payload at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
 	dlgPayload, err := byronDelegationPayload(mainBlock)
 	if err != nil {
 		return byronPBFTState{}, fmt.Errorf(
