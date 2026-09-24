@@ -1169,7 +1169,12 @@ func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
 		TxIsValid: true,
 	}
 
-	require.NoError(t, eras.ValidateTxConway(tx, 0, lv, pparams))
+	err := eras.ValidateTxConway(tx, 0, lv, pparams)
+	var unknownVoter conway.UnknownVoterError
+	require.False(t, errors.As(err, &unknownVoter), "elected committee voter must not be unknown: %v", err)
+	if err != nil {
+		require.NotContains(t, err.Error(), "committee voter is not elected")
+	}
 }
 
 func TestValidateTxConwayRejectsCommitteeUpdateVoteAtPV10(t *testing.T) {
