@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -997,5 +998,192 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 		t,
 		available,
 		"an authoritatively empty committee after NoConfidence must stay authoritative",
+	)
+}
+
+// enactTestUpdateCommittee drives a real UpdateCommittee enactment through
+// governance.EnactProposal -- the same production entry point epoch-boundary
+// processing calls -- rather than seeding committee_member/auth rows
+// directly, so this test exercises applyUpdateCommittee's actual
+// TermStartSlot-stamping decision (blinklabs-io/dingo#4584).
+func enactTestUpdateCommittee(
+	t *testing.T,
+	db *database.Database,
+	pparams lcommon.ProtocolParameters,
+	slot uint64,
+	credEpochs map[*lcommon.Credential]uint64,
+) {
+	t.Helper()
+	action, err := lcommon.NewUpdateCommitteeGovAction(
+		nil,
+		nil,
+		credEpochs,
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        governanceTestHash(byte(slot)),
+		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+		AnchorHash:    make([]byte, 32),
+		ReturnAddress: make([]byte, 29),
+		GovActionCbor: encoded,
+		AddedSlot:     slot,
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	_, err = governance.EnactProposal(&governance.EnactmentContext{
+		DB:      db,
+		Epoch:   0,
+		Slot:    slot,
+		PParams: pparams,
+	}, proposal)
+	require.NoError(t, err)
+}
+
+// TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal reproduces the
+// blinklabs-io/dingo#4584 live Preview halt end-to-end, driving the real
+// enactment path (governance.EnactProposal -> applyUpdateCommittee) rather
+// than seeding raw rows: a continuing committee member's one-time hot-key
+// authorization must survive a later UpdateCommittee action that renews the
+// committee's term, and the vote it authorizes must not be rejected as cast
+// by an unknown voter (conway UTXO validation rule 52 in the observed
+// incident).
+func TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal(t *testing.T) {
+	t.Parallel()
+
+	pparams := &conway.ConwayProtocolParameters{}
+	lv, db := committeeTestView(t, pparams)
+	lv.pinCommitteeState(5, pparams)
+	lv.skipPhase2Validation = true
+
+	cold := committeeTestCredential(0xd1)
+	hot := committeeTestCredential(0xd2)
+
+	// First election at slot 10; the member authorizes its hot key once, at
+	// slot 20.
+	enactTestUpdateCommittee(
+		t, db, pparams, 10,
+		map[*lcommon.Credential]uint64{&cold: 50},
+	)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 20)
+
+	// A renewal: a later UpdateCommittee action re-elects the same
+	// credential (continuing membership, not removal-then-rejoin), with no
+	// new AuthCommitteeHot certificate.
+	enactTestUpdateCommittee(
+		t, db, pparams, 30,
+		map[*lcommon.Credential]uint64{&cold: 100},
+	)
+
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.NotNil(t, member)
+	require.False(t, member.Resigned)
+	require.NotNil(
+		t,
+		member.HotKey,
+		"a continuing member's authorization must survive a term renewal",
+	)
+	require.Equal(t, hot.Credential, *member.HotKey)
+
+	voterMember, err := lv.CommitteeHotCredentialMember(hot)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		voterMember,
+		"the renewed committee's authorization map must still resolve the voter",
+	)
+
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+	err = eras.ValidateTxConway(tx, 0, lv, pparams)
+	var unknown conway.UnknownVoterError
+	require.False(
+		t,
+		errors.As(err, &unknown),
+		"a term renewal must not reject a still-valid hot key as unknown: %v",
+		err,
+	)
+}
+
+// TestLedgerViewCommitteeResignationSurvivesTermRenewal covers the opposite
+// direction of the same TermStartSlot-stamping defect. cardano-ledger keeps
+// the CommitteeState entry of every cold credential still present in the
+// enacted committee (Map.intersection in the Conway EPOCH rule), so a
+// CommitteeMemberResigned marker survives a term renewal and a later
+// AuthCommitteeHot certificate from that credential is rejected
+// (ConwayCommitteeHasPreviouslyResigned). Stamping a fresh TermStartSlot on a
+// continuing member moved the term past the resignation certificate, silently
+// un-resigning the member and accepting a certificate cardano-node rejects.
+func TestLedgerViewCommitteeResignationSurvivesTermRenewal(t *testing.T) {
+	t.Parallel()
+
+	pparams := &conway.ConwayProtocolParameters{}
+	lv, db := committeeTestView(t, pparams)
+	lv.pinCommitteeState(5, pparams)
+	lv.skipPhase2Validation = true
+
+	cold := committeeTestCredential(0xd7)
+	hot := committeeTestCredential(0xd8)
+
+	enactTestUpdateCommittee(
+		t, db, pparams, 10,
+		map[*lcommon.Credential]uint64{&cold: 50},
+	)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 20)
+	seedCommitteeCredentialResignation(t, db, cold, 2, 25)
+
+	enactTestUpdateCommittee(
+		t, db, pparams, 30,
+		map[*lcommon.Credential]uint64{&cold: 100},
+	)
+
+	member, err := lv.CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.NotNil(t, member)
+	require.True(
+		t,
+		member.Resigned,
+		"a term renewal must not un-resign a continuing member",
+	)
+	require.Nil(t, member.HotKey)
+
+	voterMember, err := lv.CommitteeHotCredentialMember(hot)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		voterMember,
+		"a resigned member's hot key must not resolve after a term renewal",
+	)
+
+	certificate := &lcommon.AuthCommitteeHotCertificate{
+		CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+		ColdCredential: cold,
+		HotCredential:  hot,
+	}
+	authTx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{{
+				Type:        certificate.Type(),
+				Certificate: certificate,
+			}},
+		},
+	}
+	var resigned conway.ResignedCommitteeMemberHotKeyError
+	require.ErrorAs(
+		t,
+		eras.ValidateTxConway(authTx, 0, lv, pparams),
+		&resigned,
+		"a resigned member must not be able to re-authorize after a renewal",
 	)
 }

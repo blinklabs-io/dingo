@@ -54,14 +54,15 @@ func startHealthListener(
 	t.Helper()
 
 	cfg.BindAddr = "127.0.0.1"
-	cfg.HealthPort = freeTCPPort(t)
+	listener, port := reservedTCPListener(t, "127.0.0.1")
+	cfg.HealthPort = port
 
 	srv := NewHealthServer(cfg, tipGap)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-	go serveAuxiliaryListener("health", srv, logger)
+	go serveAuxiliaryListenerOn("health", srv, listener, logger)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(
 			context.Background(),
@@ -76,22 +77,31 @@ func startHealthListener(
 	return base
 }
 
-func freeTCPPort(t *testing.T) uint {
+// reservedTCPListener binds a loopback port on host and returns the live
+// listener with the port it bound. The listener stays bound for the whole
+// test and is handed to the server under test.
+//
+// Binding, closing and returning the number instead would be a race rather
+// than a reservation: any other bind in the process -- most often a request
+// for a kernel-assigned port -- can take it in the gap, and the server then
+// fails to come up. The health port has no kernel-assigned form to fall back
+// on, because 0 is the operator's opt-out.
+func reservedTCPListener(t *testing.T, host string) (net.Listener, uint) {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
-		t.Fatalf("reserve port: %s", err)
+		t.Fatalf("reserve port on %s: %s", host, err)
 	}
-	defer l.Close()
+	t.Cleanup(func() { _ = l.Close() })
 	_, portStr, err := net.SplitHostPort(l.Addr().String())
 	if err != nil {
 		t.Fatalf("split port: %s", err)
 	}
-	port, err := strconv.ParseUint(portStr, 10, 32)
+	port, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
 		t.Fatalf("parse port: %s", err)
 	}
-	return uint(port)
+	return l, uint(port)
 }
 
 func waitForListener(t *testing.T, url string) {
@@ -152,10 +162,9 @@ func TestHealthListenerServesInCoreModeWithAPIsDisabled(t *testing.T) {
 	listeners := []dingo.ListenerConfig{
 		{
 			ListenNetwork: "tcp",
-			ListenAddress: net.JoinHostPort(
-				"127.0.0.1",
-				strconv.FormatUint(uint64(freeTCPPort(t)), 10),
-			),
+			// Kernel-assigned: the node binds it once and nothing
+			// here reads the port back.
+			ListenAddress: "127.0.0.1:0",
 		},
 	}
 	node, err := dingo.New(
@@ -370,19 +379,30 @@ func TestHealthServerBracketsIPv6BindAddr(t *testing.T) {
 func TestHealthListenerBindsIPv6Loopback(t *testing.T) {
 	t.Parallel()
 
-	if l, err := net.Listen("tcp", "[::1]:0"); err != nil {
+	// One bind does both jobs: it establishes that the host has an IPv6
+	// loopback at all, and it holds the port the server is about to serve
+	// on.
+	listener, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
 		t.Skipf("no IPv6 loopback on this host: %s", err)
-	} else {
-		l.Close()
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	_, portStr, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split port: %s", err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatalf("parse port: %s", err)
 	}
 
-	cfg := &config.Config{HealthPort: freeTCPPort(t), BindAddr: "::1"}
+	cfg := &config.Config{HealthPort: uint(port), BindAddr: "::1"}
 	srv := NewHealthServer(cfg, func() (uint64, bool) { return 4, true })
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-	go serveAuxiliaryListener("health", srv, logger)
+	go serveAuxiliaryListenerOn("health", srv, listener, logger)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(
 			context.Background(),

@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -49,7 +50,10 @@ func setupTestDBWithStorageMode(
 // TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput pins that CORE
 // storage mode's retention behavior is unchanged by dingo #1875: both
 // reward_stake_input and reward_account_output are pruned to the same
-// rotation/reward-replay window.
+// rotation/reward-replay window. Also pins pool_stake_snapshot's own
+// CORE-mode window (dingo#1900/#382: no test previously exercised the
+// apiStorageMode branch cleanupOldSnapshots gained for this table) -- CORE
+// mode's pool-snapshot pruning is unchanged from before that commit.
 func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 	t.Parallel()
 
@@ -85,6 +89,16 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 			"core mode must prune reward_stake_input for epoch %d",
 			epoch,
 		)
+		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Empty(
+			t,
+			poolSnapshots,
+			"core mode must prune pool_stake_snapshot for epoch %d",
+			epoch,
+		)
 	}
 	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
 		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
@@ -96,6 +110,17 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 			"core mode retains reward_account_output inside the window for epoch %d",
 			epoch,
 		)
+		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Len(
+			t,
+			poolSnapshots,
+			1,
+			"core mode retains pool_stake_snapshot inside the window for epoch %d",
+			epoch,
+		)
 	}
 }
 
@@ -104,7 +129,13 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 // retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
 // can serve an account's full history), while reward_stake_input still
 // cannot be kept and continues to be pruned to the rotation/reward-replay
-// window exactly as in core mode.
+// window exactly as in core mode. Also the dingo#1900/#382 regression test:
+// pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
+// so a from-genesis historical Acquire pinned well outside the ordinary
+// 3-epoch window can still be validated
+// (VerifyPointQueryable's stake-retention check) and answered
+// (GetStakeDistribution/GetPoolDistr2) -- confirmed live before this test
+// existed, but never previously pinned by an automated test.
 func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 	t.Parallel()
 
@@ -123,8 +154,8 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
 	)
 
-	// reward_account_output survives for every epoch, including those
-	// outside the rotation/reward-replay window.
+	// reward_account_output and pool_stake_snapshot both survive for every
+	// epoch, including those outside the rotation/reward-replay window.
 	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
 		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
 		require.NoError(t, err, "get reward account outputs %d", epoch)
@@ -133,6 +164,17 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 			accountOutputs,
 			1,
 			"API mode must retain reward_account_output for epoch %d",
+			epoch,
+		)
+		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Len(
+			t,
+			poolSnapshots,
+			1,
+			"API mode must retain pool_stake_snapshot for epoch %d",
 			epoch,
 		)
 	}

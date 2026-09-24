@@ -421,6 +421,10 @@ type ImportConfig struct {
 	reconcileKeys *reconcileKeys
 }
 
+type deferredRewardLiveStakeImporter interface {
+	ImportUtxosDeferredRewardLiveStakeRefresh([]models.Utxo, types.Txn) error
+}
+
 // ImportLedgerState orchestrates the full import of parsed ledger
 // state data into Dingo's metadata store. If ImportKey is set,
 // completed phases are checkpointed so a failed import can resume
@@ -805,6 +809,11 @@ func importUTxOs(
 	)
 
 	store := cfg.Database.Metadata()
+	// The concrete store cannot change mid-import, so resolve the deferred
+	// importer once rather than per batch. Skipping the per-batch aggregate
+	// refresh is only sound because ImportLedgerState rebuilds
+	// reward_live_stake in full once every phase has been imported.
+	importer, supportsDeferredRefresh := store.(deferredRewardLiveStakeImporter)
 	totalImported := 0
 	lastProgressLog := time.Time{}
 	lastLoggedPercent := -5.0
@@ -841,9 +850,16 @@ func importUTxOs(
 		txn := cfg.Database.MetadataTxn(true)
 		defer txn.Release()
 
-		if err := store.ImportUtxos(
-			utxos, txn.Metadata(),
-		); err != nil {
+		var err error
+		if supportsDeferredRefresh {
+			err = importer.ImportUtxosDeferredRewardLiveStakeRefresh(
+				utxos,
+				txn.Metadata(),
+			)
+		} else {
+			err = store.ImportUtxos(utxos, txn.Metadata())
+		}
+		if err != nil {
 			return fmt.Errorf(
 				"inserting UTxO batch: %w",
 				err,

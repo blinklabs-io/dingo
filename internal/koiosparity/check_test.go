@@ -82,7 +82,7 @@ func TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -118,7 +118,7 @@ func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -163,7 +163,7 @@ func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -279,7 +279,7 @@ func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -326,7 +326,7 @@ func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -451,7 +451,7 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 	require.NoError(t, sqlDB.Close())
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -507,13 +507,13 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 }
 
 // TestCheckDetectsMissingKoiosTotalsOnUpgradedCache is a regression test for
-// the "upgraded cache" scenario the reviewer flagged: a cache.db that has a
-// koios_epoch_info row (from before /totals fetching was added to this tool,
-// or from a --skip-fetch run against such a cache) but no koios_totals row
-// for the same epoch. Before this fix, CompareEpochTotals silently skipped
-// comparison whenever koiosTotals was nil, so an epoch like this could report
-// a clean PASS despite treasury/reserves/fees never actually being validated.
-// This confirms Check now surfaces it as ERROR instead.
+// the "upgraded cache" scenario: a cache.db that has a koios_epoch_info row
+// (from before /totals fetching was added to this tool, or from a
+// --skip-fetch run against such a cache) but no koios_totals row for the
+// same epoch. CompareEpochTotals must not silently skip comparison whenever
+// koiosTotals is nil -- doing so would let an epoch like this report a
+// clean PASS despite treasury/reserves/fees never actually being validated.
+// This confirms Check surfaces it as ERROR instead.
 func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 	t.Parallel()
 
@@ -560,7 +560,7 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 	require.NoError(t, sqlDB.Close())
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -645,7 +645,7 @@ func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(
 	require.NoError(t, sqlDB.Close())
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -734,7 +734,7 @@ func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
 	require.NoError(t, sqlDB.Close())
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -804,7 +804,7 @@ func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
 	require.NoError(t, sqlDB.Close())
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -908,7 +908,7 @@ func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
 	require.NoError(t, err)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -1013,7 +1013,7 @@ func TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts(t *testing
 		require.NoError(t, gdb.Create(row).Error)
 	}
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -1160,7 +1160,7 @@ func seedPoolPresenceFixture(
 	require.NoError(t, sqlDB.Close())
 
 	cachePath = filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -1229,7 +1229,7 @@ func TestCheckIgnoresParamEpochOnlyPoolForPresence(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, result.FailEpochs)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -1265,7 +1265,7 @@ func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -1321,7 +1321,7 @@ func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
 	)
 	require.Empty(t, result.FailEpochs)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -1439,7 +1439,7 @@ func seedDepartureFixtureWithCount(
 	require.NoError(t, sqlDB.Close())
 
 	cachePath = filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	fetchedAt := time.Now().Add(-time.Hour).UTC()
 	require.NoError(t, cache.CommitEpochData(
@@ -1476,7 +1476,7 @@ func seedDepartureFixtureWithCount(
 	return dingoDir, cachePath, poolBech32
 }
 
-// TestCheckDegradedActivePoolStillErrors is the reviewer's degraded-active-pool
+// TestCheckDegradedActivePoolStillErrors covers the degraded-active-pool
 // case. buildRewardStateInputs (ledger/snapshot/rotation.go) drops a pool with
 // stale registration data from reward_pool_input so one bad pool cannot wedge
 // the whole boundary capture, and says so explicitly: degraded pools are
@@ -1510,7 +1510,7 @@ func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
 			"missing input, not a departure",
 	)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -1519,7 +1519,7 @@ func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
 	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
 }
 
-// TestCheckMissingRewardBundleStillErrors is the reviewer's no-bundle case.
+// TestCheckMissingRewardBundleStillErrors covers the no-bundle case.
 // saveSnapshotInTxn persists the mark pool_stake_snapshot and epoch summary on
 // every transition "regardless of reward-input availability", so a ready
 // epoch_summary at K+1 is compatible with the entire reward-input bundle
@@ -1586,7 +1586,7 @@ func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
 		"an incomplete K+1 pool set must not let absence read as departure",
 	)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -1632,7 +1632,7 @@ func TestCheckDepartedPoolSurvivesSnapshotRetentionPrune(t *testing.T) {
 	)
 	require.Empty(t, result.FailEpochs)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -1666,7 +1666,7 @@ func TestCheckIncompleteRewardInputSetStillErrorsAfterPrune(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, result.ErrorEpochs, koiosEpoch)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -1686,7 +1686,10 @@ func pruneParamEpochSnapshots(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
+	)
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 	_, err = db.Exec(
@@ -1791,7 +1794,7 @@ func TestCheckAccountRewardsPendingWiring(t *testing.T) {
 		require.NoError(t, err)
 
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
-		cache, err := OpenCache(cachePath, nil)
+		cache, err := openTestCache(cachePath, nil)
 		require.NoError(t, err)
 		defer cache.Close() //nolint:errcheck
 
@@ -1910,7 +1913,7 @@ func TestCheckUncreditedDingoRowStillFailsAgainstKoios(t *testing.T) {
 	require.NoError(t, err)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -2013,7 +2016,7 @@ func TestCheckAccountDecodeErrorReachesOutput(t *testing.T) {
 			require.NoError(t, sqlDB.Close())
 
 			cachePath := filepath.Join(t.TempDir(), "cache.db")
-			cache, err := OpenCache(cachePath, nil)
+			cache, err := openTestCache(cachePath, nil)
 			require.NoError(t, err)
 			defer cache.Close() //nolint:errcheck
 
@@ -2097,7 +2100,7 @@ func TestCheckAccountPoolDecodeErrorIsNotAnAddressError(t *testing.T) {
 	require.NoError(t, sqlDB.Close())
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -2167,7 +2170,10 @@ func seedPoolCertificateHistory(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
+	)
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2241,7 +2247,7 @@ func TestCheckRetiredPoolIsDepartedWithoutAnyPoolSetEvidence(t *testing.T) {
 	)
 	require.Empty(t, result.FailEpochs)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -2288,7 +2294,7 @@ func TestCheckRetiredPoolStaysDepartedInLaterEpochs(t *testing.T) {
 		"a pool that left several epochs ago is still departed",
 	)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -2337,7 +2343,7 @@ func TestCheckReregisteredPoolStillErrors(t *testing.T) {
 		"a re-registration cancels the retirement, so the pool is back",
 	)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
@@ -2390,7 +2396,7 @@ func TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch(t *testing.T) {
 	}
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -2435,4 +2441,121 @@ func TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch(t *testing.T) {
 		}
 	}
 	require.True(t, found, "epoch should have a persisted check status")
+}
+
+// TestCheckEpochResultNamesOnlyThePhasesItRan pins the verdict boundary the
+// two observer queues (dingo #4339) created: the aggregate queue and the
+// account queue both return an EpochCompareResult for the same epoch, and the
+// aggregate queue's check never looks at account data. Without CheckedScopes
+// its PASS is indistinguishable from the epoch's real verdict, so a consumer
+// reading Status alone would report an epoch clean while a recorded account
+// failure stands — the callback-side form of the stored-status defect
+// UpsertCheckEpochStatus fixes.
+func TestCheckEpochResultNamesOnlyThePhasesItRan(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// One account whose Dingo reward differs from the Koios reference below,
+	// so the account phase fails while the aggregate phase has nothing to
+	// disagree about.
+	badKey := testPoolKeyHash(t, 0x42)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  badKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x22),
+		RewardType:  "member",
+		Amount:      types.Uint64(2_000_000),
+		Spendable:   true,
+	}).Error)
+	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	require.NoError(t, err)
+	seedDingoBabbageProtocolParams(t, sqlDB, koiosEpoch)
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Network:   network,
+		Epoch:     koiosEpoch,
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{{
+			StakeAddress: badAddr,
+			RewardType:   "member",
+			Earned:       "2000001",
+			FetchedAt:    fetchedAt,
+		}},
+		1,
+		true,
+		fetchedAt,
+	))
+
+	withAccounts, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		true,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusFail, withAccounts.Status)
+	require.True(t, withAccounts.CoversScope(ScopeAggregate))
+	require.True(t, withAccounts.CoversScope(ScopeAccount),
+		"a check that ran the account comparison must say so")
+
+	aggregateOnly, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusPass, aggregateOnly.Status,
+		"the scenario must hold a passing aggregate phase, or the "+
+			"assertion below proves nothing")
+	require.True(t, aggregateOnly.CoversScope(ScopeAggregate))
+	require.False(t, aggregateOnly.CoversScope(ScopeAccount),
+		"an aggregate-only check must not present its verdict as the "+
+			"account phase's")
+
+	// The stored verdict is the merge of both phases, so the account failure
+	// the aggregate-only re-check never looked at still stands.
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusFail, statuses[0].Status)
+	require.Equal(t, StatusFail, statuses[0].AccountStatus)
 }

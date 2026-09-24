@@ -88,7 +88,10 @@ const (
 	defaultTokenRegistryMaxBytes int64 = 768 << 20
 	// defaultTokenRegistryMaxEntryBytes caps a single mapping document. Real
 	// mappings run to tens of kilobytes, dominated by base64 logos.
-	defaultTokenRegistryMaxEntryBytes int64 = 4 << 20
+	defaultTokenRegistryMaxEntryBytes    int64 = 4 << 20
+	defaultTokenRegistryMaxExpandedBytes int64 = 1 << 30
+	defaultTokenRegistryMaxMappings            = 100_000
+	defaultTokenRegistryMaxRetainedBytes int64 = 512 << 20
 	// tokenRegistryBatchSize bounds how many parsed entries are held before
 	// being flushed to the store, keeping peak memory independent of the
 	// roughly 8,000 mappings in the mainnet registry.
@@ -118,6 +121,10 @@ type TokenRegistryStore interface {
 	SetSyncState(key, value string, txn types.Txn) error
 }
 
+type tokenRegistryTransactionalStore interface {
+	Transaction(context.Context) types.Txn
+}
+
 // TokenRegistryConfig configures the CIP-26 token registry sync. Zero values
 // fall back to the defaults above.
 type TokenRegistryConfig struct {
@@ -137,8 +144,11 @@ type TokenRegistryConfig struct {
 	Interval       time.Duration
 	RequestTimeout time.Duration
 	// MaxBytes caps the compressed download; MaxEntryBytes caps one mapping.
-	MaxBytes      int64
-	MaxEntryBytes int64
+	MaxBytes         int64
+	MaxEntryBytes    int64
+	MaxExpandedBytes int64
+	MaxMappings      int
+	MaxRetainedBytes int64
 	// StoreLogos opts into persisting base64 logo payloads, which are
 	// roughly 90% of registry bytes. Off by default.
 	StoreLogos bool
@@ -155,19 +165,22 @@ type TokenRegistryConfig struct {
 // complete registry, so unlike per-asset lookups against a remote metadata
 // server it reveals nothing about which assets a user holds.
 type TokenRegistrySync struct {
-	logger        *slog.Logger
-	store         TokenRegistryStore
-	client        *http.Client
-	sourceURL     string
-	userAgent     string
-	interval      time.Duration
-	maxBytes      int64
-	maxEntryBytes int64
-	storeLogos    bool
-	allowPrivate  bool
-	now           func() time.Time
-	lastSyncedAt  time.Time
-	mu            sync.Mutex
+	logger           *slog.Logger
+	store            TokenRegistryStore
+	client           *http.Client
+	sourceURL        string
+	userAgent        string
+	interval         time.Duration
+	maxBytes         int64
+	maxEntryBytes    int64
+	maxExpandedBytes int64
+	maxMappings      int
+	maxRetainedBytes int64
+	storeLogos       bool
+	allowPrivate     bool
+	now              func() time.Time
+	lastSyncedAt     time.Time
+	mu               sync.Mutex
 	// syncSlot serializes whole snapshot applications. It is a buffered
 	// channel rather than a mutex so the wait can be abandoned on context
 	// cancellation: an external SyncOnce call holds its own uncancelled
@@ -234,19 +247,34 @@ func NewTokenRegistrySync(
 	if maxEntryBytes <= 0 {
 		maxEntryBytes = defaultTokenRegistryMaxEntryBytes
 	}
+	maxExpandedBytes := cfg.MaxExpandedBytes
+	if maxExpandedBytes <= 0 {
+		maxExpandedBytes = defaultTokenRegistryMaxExpandedBytes
+	}
+	maxMappings := cfg.MaxMappings
+	if maxMappings <= 0 {
+		maxMappings = defaultTokenRegistryMaxMappings
+	}
+	maxRetainedBytes := cfg.MaxRetainedBytes
+	if maxRetainedBytes <= 0 {
+		maxRetainedBytes = defaultTokenRegistryMaxRetainedBytes
+	}
 	return &TokenRegistrySync{
-		logger:        logger,
-		store:         cfg.Store,
-		client:        client,
-		sourceURL:     sourceURL,
-		userAgent:     userAgent,
-		interval:      interval,
-		maxBytes:      maxBytes,
-		maxEntryBytes: maxEntryBytes,
-		storeLogos:    cfg.StoreLogos,
-		allowPrivate:  cfg.AllowPrivateAddresses,
-		now:           time.Now,
-		syncSlot:      make(chan struct{}, 1),
+		logger:           logger,
+		store:            cfg.Store,
+		client:           client,
+		sourceURL:        sourceURL,
+		userAgent:        userAgent,
+		interval:         interval,
+		maxBytes:         maxBytes,
+		maxEntryBytes:    maxEntryBytes,
+		maxExpandedBytes: maxExpandedBytes,
+		maxMappings:      maxMappings,
+		maxRetainedBytes: maxRetainedBytes,
+		storeLogos:       cfg.StoreLogos,
+		allowPrivate:     cfg.AllowPrivateAddresses,
+		now:              time.Now,
+		syncSlot:         make(chan struct{}, 1),
 	}, nil
 }
 
@@ -755,6 +783,15 @@ func (s *TokenRegistrySync) applySnapshot(
 	body io.Reader,
 	syncedAt time.Time,
 ) (written int, mappings int, skipped int, err error) {
+	var txn types.Txn
+	if transactional, ok := s.store.(tokenRegistryTransactionalStore); ok {
+		txn = transactional.Transaction(ctx)
+		defer func() {
+			if err != nil {
+				_ = txn.Rollback()
+			}
+		}()
+	}
 	limited := io.LimitReader(body, s.maxBytes+1)
 	counter := &countingReader{reader: limited}
 	gzipReader, err := gzip.NewReader(counter)
@@ -772,8 +809,10 @@ func (s *TokenRegistrySync) applySnapshot(
 	}
 	defer func() { _ = gzipReader.Close() }()
 
-	tarReader := tar.NewReader(gzipReader)
+	expanded := &countingReader{reader: gzipReader}
+	tarReader := tar.NewReader(expanded)
 	batch := make([]models.TokenRegistryEntry, 0, tokenRegistryBatchSize)
+	retainedBytes := int64(0)
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -782,7 +821,7 @@ func (s *TokenRegistrySync) applySnapshot(
 			ctx,
 			batch,
 			syncedAt,
-			nil,
+			txn,
 		)
 		if err != nil {
 			return fmt.Errorf("store token registry entries: %w", err)
@@ -794,6 +833,9 @@ func (s *TokenRegistrySync) applySnapshot(
 	for {
 		if ctx.Err() != nil {
 			return written, mappings, skipped, ctx.Err()
+		}
+		if expanded.read > s.maxExpandedBytes {
+			return written, mappings, skipped, fmt.Errorf("token registry snapshot exceeds %d expanded bytes", s.maxExpandedBytes)
 		}
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -817,6 +859,9 @@ func (s *TokenRegistrySync) applySnapshot(
 		// Counted before any per-entry filtering, so this reflects the
 		// archive's shape rather than the data's usefulness.
 		mappings++
+		if mappings > s.maxMappings {
+			return written, mappings, skipped, fmt.Errorf("token registry snapshot exceeds %d mappings", s.maxMappings)
+		}
 		if header.Size > s.maxEntryBytes {
 			skipped++
 			s.logger.Debug(
@@ -849,6 +894,10 @@ func (s *TokenRegistrySync) applySnapshot(
 		if !s.storeLogos {
 			entry.Logo = ""
 		}
+		retainedBytes += int64(len(raw))
+		if retainedBytes > s.maxRetainedBytes {
+			return written, mappings, skipped, fmt.Errorf("token registry snapshot exceeds %d retained bytes", s.maxRetainedBytes)
+		}
 		if entry.IsEmpty() {
 			continue
 		}
@@ -867,6 +916,12 @@ func (s *TokenRegistrySync) applySnapshot(
 			"token registry snapshot exceeds %d bytes",
 			s.maxBytes,
 		)
+	}
+	if txn != nil {
+		if err := txn.Commit(); err != nil {
+			return written, mappings, skipped, fmt.Errorf("commit token registry snapshot: %w", err)
+		}
+		txn = nil
 	}
 	if skipped > 0 {
 		s.logger.Info(

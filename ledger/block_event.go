@@ -229,7 +229,7 @@ func (ls *LedgerState) publishBlockEvent(
 // itself fail -- reconcilePrimaryChainTipWithLedgerTip had the identical
 // shape (issue #3516) until it was closed by decoupling
 // LedgerState.rollback's durable commit from its resync-event publish
-// (wolf31o2 review, PR #3611: see rollbackWithResync/rollbackWithoutResync
+// (wolf31o2 review, PR #3611: see rollback/rollbackWithOptions
 // and the reconciler's two branches). Whether the same decoupling is safe
 // to adopt here too remains tracked as issue #3817.
 func (ls *LedgerState) validateAndEmitRollbackUndo(

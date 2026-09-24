@@ -28,7 +28,7 @@ import (
 func TestCollateralInputMigrationBackfillsLegacyMarker(t *testing.T) {
 	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+dbPath)
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
@@ -43,12 +43,12 @@ func TestCollateralInputMigrationBackfillsLegacyMarker(t *testing.T) {
 collateral_by_tx_id) VALUES (X'01', 0, 0, '1', X'02')`)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
-	db, err = sql.Open("sqlite", "file:"+dbPath)
+	db, err = sql.Open("sqlite", "file:"+dbPath+"?"+testDBPragmas)
 	// Reopen the same file and run the real pending migration.
 	require.NoError(t, err)
 	run(registry[:14])
 	require.NoError(t, db.Close())
-	db, err = sql.Open("sqlite", "file:"+dbPath)
+	db, err = sql.Open("sqlite", "file:"+dbPath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	// Force v14 back to pending while retaining its schema/data so the runner
 	// re-executes the backfill on restart.

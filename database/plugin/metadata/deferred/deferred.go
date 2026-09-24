@@ -218,27 +218,9 @@ var Manifest = []Index{
 		Notes:   "Rollback and transaction history ordering", Critical: true,
 	},
 	{
-		Name:    "idx_asset_name_hex",
-		Table:   "asset",
-		Columns: []string{"name_hex"},
-		Notes:   "Asset name lookup",
-	},
-	{
 		Name: "idx_asset_policy_id", Table: "asset",
 		Columns: []string{"policy_id"},
 		Notes:   "Policy lookup", Critical: true,
-	},
-	{
-		Name:    "idx_asset_fingerprint",
-		Table:   "asset",
-		Columns: []string{"fingerprint"},
-		Notes:   "Fingerprint lookup",
-	},
-	{
-		Name:    "idx_asset_amount",
-		Table:   "asset",
-		Columns: []string{"amount"},
-		Notes:   "Amount range scan",
 	},
 	{
 		Name:    "idx_datum_added_slot",

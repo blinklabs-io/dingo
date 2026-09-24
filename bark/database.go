@@ -944,6 +944,7 @@ func verifySnapshotIntegrity(
 	ctx context.Context,
 	registry *lifecycle.DestinationRegistry,
 	snapshotDir string,
+	storageConfig lifecycle.RestoreStorageConfig,
 ) error {
 	tempDir, err := os.MkdirTemp("", "dingo-verify-snapshot-*")
 	if err != nil {
@@ -959,7 +960,7 @@ func verifySnapshotIntegrity(
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	if _, err := lifecycle.Restore(
-		ctx, host, registry, snapshotDir, tempDir, lifecycle.RestoreStorageConfig{},
+		ctx, host, registry, snapshotDir, tempDir, storageConfig,
 	); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
@@ -1000,6 +1001,7 @@ func (h *databaseServiceHandler) VerifySnapshot(
 				opCtx,
 				h.bark.config.DestinationRegistry,
 				source,
+				h.bark.config.Lifecycle.RestoreStorageConfig(),
 			)
 		}), 0)
 	}()
