@@ -859,7 +859,7 @@ func fetchEpoch(
 	// the epoch looking unfetched and it is simply re-fetched. Committing
 	// them after would advance fetched_at with no parameter row behind it.
 	if err := cache.UpsertEpochParams(
-		epochParamsFromKoios(network, epoch, paramsResp, now),
+		EpochParamsFromKoios(network, epoch, paramsResp, now),
 	); err != nil {
 		return 0, fmt.Errorf("commit epoch params: %w", err)
 	}
@@ -970,35 +970,11 @@ outer:
 				return // Pool wasn't active this epoch.
 			}
 
-			var margin, activeStakePct string
-			if item.Margin != nil {
-				// Format without trailing zeros so "0.100" and "0.1" compare
-				// equally after Rat normalisation in ComparePoolEpoch.
-				margin = strconv.FormatFloat(*item.Margin, 'g', -1, 64)
-			}
-			if item.ActiveStakePct != nil {
-				activeStakePct = strconv.FormatFloat(*item.ActiveStakePct, 'g', -1, 64)
-			}
-			memberRewards := strOrEmpty(item.MemberRewards)
-
 			poolMu.Lock()
-			poolRows = append(poolRows, KoiosPoolEpoch{
-				Network:        network,
-				Epoch:          epoch,
-				PoolBech32:     id,
-				ActiveStake:    item.ActiveStake,
-				BlockCnt:       item.BlockCnt,
-				Delegators:     item.DelegatorCnt,
-				Margin:         margin,
-				FixedCost:      item.FixedCost,
-				PoolFees:       item.PoolFees,
-				DelegRewards:   item.DelegRewards,
-				MemberRewards:  memberRewards,
-				ActiveStakePct: activeStakePct,
-				SaturationPct:  strconv.FormatFloat(item.SaturationPct, 'g', -1, 64),
-				EpochRos:       strconv.FormatFloat(item.EpochRos, 'g', -1, 64),
-				FetchedAt:      now,
-			})
+			poolRows = append(
+				poolRows,
+				PoolEpochFromKoiosHistoryItem(network, epoch, id, item, now),
+			)
 			poolMu.Unlock()
 		}(poolID)
 	}
@@ -1110,21 +1086,84 @@ func fetchEpochParamsOnly(
 		return classifyFetchErr(fmt.Errorf("get epoch params: %w", err))
 	}
 	if err := cache.UpsertEpochParams(
-		epochParamsFromKoios(network, epoch, paramsResp, time.Now().UTC()),
+		EpochParamsFromKoios(network, epoch, paramsResp, time.Now().UTC()),
 	); err != nil {
 		return fmt.Errorf("commit epoch params: %w", err)
 	}
 	return nil
 }
 
-// epochParamsFromKoios flattens a /epoch_params response into the cache row.
+// PoolEpochFromKoiosHistoryItem flattens one /pool_history entry for
+// poolBech32 at epoch into the cache row -- the same fetchEpoch used to build
+// every koios_pool_epoch row, pulled out so a second caller can build an
+// identical row from its own GetPoolEpochHistory call.
+//
+// item.EpochNo is deliberately not trusted for the row's own Epoch field:
+// epoch (the value fetchEpoch/the caller actually requested) is used
+// instead, matching this function's own prior inline form.
+//
+// Exported so cmd/node-parity's Koios-backed comparison
+// (blinklabs-io/dingo#1900) can build the same row shape a
+// koios_pool_epoch-backed cache lookup would return, directly from a live
+// GetPoolEpochHistory call, without going through this package's own fetch
+// path -- the same convention EpochParamsFromKoios already follows for
+// koios_epoch_params.
+func PoolEpochFromKoiosHistoryItem(
+	network string,
+	epoch uint64,
+	poolBech32 string,
+	item *KoiosPoolHistoryItem,
+	now time.Time,
+) KoiosPoolEpoch {
+	if item == nil {
+		return KoiosPoolEpoch{
+			Network:    network,
+			Epoch:      epoch,
+			PoolBech32: poolBech32,
+			FetchedAt:  now,
+		}
+	}
+	var margin, activeStakePct string
+	if item.Margin != nil {
+		// Format without trailing zeros so "0.100" and "0.1" compare equally
+		// after Rat normalisation in ComparePoolEpoch.
+		margin = strconv.FormatFloat(*item.Margin, 'g', -1, 64)
+	}
+	if item.ActiveStakePct != nil {
+		activeStakePct = strconv.FormatFloat(*item.ActiveStakePct, 'g', -1, 64)
+	}
+	return KoiosPoolEpoch{
+		Network:        network,
+		Epoch:          epoch,
+		PoolBech32:     poolBech32,
+		ActiveStake:    item.ActiveStake,
+		BlockCnt:       item.BlockCnt,
+		Delegators:     item.DelegatorCnt,
+		Margin:         margin,
+		FixedCost:      item.FixedCost,
+		PoolFees:       item.PoolFees,
+		DelegRewards:   item.DelegRewards,
+		MemberRewards:  strOrEmpty(item.MemberRewards),
+		ActiveStakePct: activeStakePct,
+		SaturationPct:  strconv.FormatFloat(item.SaturationPct, 'g', -1, 64),
+		EpochRos:       strconv.FormatFloat(item.EpochRos, 'g', -1, 64),
+		FetchedAt:      now,
+	}
+}
+
+// EpochParamsFromKoios flattens a /epoch_params response into the cache row.
 //
 // Every value is carried across as the literal text Koios published — a
 // json.Number keeps its own digits, so "7.21e-05" is stored exactly as sent
 // with no float round-trip — and a null becomes "", which
 // CompareEpochProtocolParams reads as "this era does not define this
 // parameter" rather than as zero.
-func epochParamsFromKoios(
+//
+// Exported so cmd/node-parity's Koios-backed comparison
+// (blinklabs-io/dingo#1900) can build the same row shape
+// CompareEpochProtocolParams expects directly from a live GetEpochParams
+// call, without going through this package's own cache.
+func EpochParamsFromKoios(
 	network string,
 	epoch uint64,
 	resp *KoiosEpochParamsResp,

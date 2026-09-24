@@ -913,13 +913,18 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	ls.reachedTip.Store(true)
 	ls.publishSnapshotsLocked()
 
-	seedReplayRecoveryTransaction(
-		t,
-		db,
-		testHashBytes("producer-tx-live"),
-		producerBlock.Hash,
-		producerBlock.Slot,
-	)
+	producerTxHash := testHashBytes("producer-tx-live")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId:      producerTxHash,
+		OutputIdx: 0,
+		AddedSlot: producerBlock.Slot,
+		Amount:    types.Uint64(100),
+	}))
+	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		nil,
+		[]types.UtxoKey{{TxId: producerTxHash, OutputIdx: 0}},
+		failingBlock.Slot,
+	))
 
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
@@ -941,7 +946,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// and request chainsync resync. This is the simple case — peers
 	// may switch to a different fork that is compatible with our
 	// ledger.
-	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err := ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 
@@ -956,6 +961,10 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+	utxo, err := db.Metadata().GetUtxoIncludingSpent(producerTxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	assert.Zero(t, utxo.DeletedSlot, "at-tip recovery must restore spent UTxOs")
 
 	// Second and third attempts: same failing (slot, block, tx).
 	// The pipeline should keep recovering with progressively deeper
@@ -963,7 +972,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// keep replaying the same losing fork and we need to expose a
 	// wider candidate set for chainselection.
 	for i := 2; i <= maxAtTipRecoveryAttempts; i++ {
-		recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+		recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 		require.NoError(t, err, "attempt %d should still recover", i)
 		require.True(t, recovered, "attempt %d should still recover", i)
 	}
@@ -978,7 +987,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// scheduled rewind. A persistent bad candidate chain is a peer/fork
 	// selection problem; the node should keep trying fresh ChainSync
 	// connections instead of halting the ledger pipeline.
-	recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 	require.NotNil(t, ls.lastAtTipRecovery)
@@ -1129,6 +1138,71 @@ func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 		0.0,
 		promtestutil.ToFloat64(ls.metrics.atTipRecoveryNonConverging),
 	)
+}
+
+func TestAtTipRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newAtTipDescentLedger(t)
+	failure := atTipDescentFailure(500, "same-tip-repair")
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first failure at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"an identical failure at the same tip must reuse the completed repair")
+}
+
+// tryRecoverFromTxValidationError tests isDeterministicTxValidationError
+// before IsAtTip, so an at-tip deterministic rejection is recovered by
+// recoverFromDeterministicTxValidationError rather than by
+// recoverAtTipFromTxValidationError. That site rewinds to the ledger tip it
+// already sits at, so it needs the same-tip repair, and the same
+// first-occurrence bound on it: the deterministic resync latch that already
+// stops peer rotation also gates the repair, so a redelivered identical
+// rejection reuses the restored state instead of re-running the sweep.
+func TestDeterministicRecoveryRepairsSameTipOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	ls.reachedTip.Store(true)
+	require.True(t, ls.IsAtTip())
+	failing := &txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("duplicate-input-tx"),
+		Cause: shelley.DuplicateInputError{
+			Input: &replayRecoveryInput{
+				txId:  testHashBytes("duplicate-reference"),
+				index: 0,
+			},
+			InputType: "reference",
+		},
+	}
+
+	generationBeforeFirst := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Nil(t, ls.lastAtTipRecovery,
+		"the deterministic branch must be the site under test")
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirst,
+		"the first deterministic rejection at a tip must repair metadata")
+
+	generationBeforeRepeat := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(failing)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeRepeat, ls.rewardInputGeneration.Load(),
+		"a redelivered identical deterministic rejection at the same tip "+
+			"must reuse the completed repair")
 }
 
 // TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress
@@ -2027,8 +2101,8 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 
-	recovered, err := ls.tryRecoverFromTxValidationError(
-		&txValidationError{
+	txErr := func() *txValidationError {
+		return &txValidationError{
 			BlockPoint: ocommon.NewPoint(
 				failingBlock.Slot,
 				failingBlock.Hash,
@@ -2041,10 +2115,15 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 				},
 			},
 			Cause: errors.New("bad input"),
-		},
-	)
+		}
+	}
+
+	generationBeforeFirstHold := ls.rewardInputGeneration.Load()
+	recovered, err := ls.tryRecoverFromTxValidationError(txErr())
 	require.NoError(t, err)
 	require.True(t, recovered)
+	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirstHold,
+		"the first held cycle must repair same-tip metadata")
 
 	require.True(t, ls.replayRecoveryHolding)
 	assert.Equal(
@@ -2074,6 +2153,13 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	)
 	assert.Equal(t, activeConnId.String(), freshResync.ConnectionId.String())
 	assert.Equal(t, ledgerTip.Point, freshResync.Point)
+
+	generationBeforeSecondHold := ls.rewardInputGeneration.Load()
+	recovered, err = ls.tryRecoverFromTxValidationError(txErr())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, generationBeforeSecondHold, ls.rewardInputGeneration.Load(),
+		"a repeated held cycle at an unchanged tip must not repair again")
 }
 
 // newReplayRecoveryAuditLedger builds the fallback topology with an
@@ -3221,4 +3307,233 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, present, "a missing UTxO is not present")
 	assert.Nil(t, resolved)
+}
+
+// A missing redeemer is deterministic for every script purpose. Each tag gets
+// its own subtest so that dropping one from the classification switch fails
+// here instead of passing quietly.
+func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		tag  lcommon.RedeemerTag
+	}{
+		{name: "spend purpose", tag: lcommon.RedeemerTagSpend},
+		{name: "mint purpose", tag: lcommon.RedeemerTagMint},
+		{name: "cert purpose", tag: lcommon.RedeemerTagCert},
+		{name: "reward purpose", tag: lcommon.RedeemerTagReward},
+		{name: "voting purpose", tag: lcommon.RedeemerTagVoting},
+		{name: "proposing purpose", tag: lcommon.RedeemerTagProposing},
+		{name: "guarding purpose", tag: lcommon.RedeemerTagGuarding},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			requireMissingRedeemerRecovery(t, tc.tag, true)
+		})
+	}
+}
+
+// The spend purpose is one of the seven tags the upstream
+// UtxoValidateRequiredRedeemers rule reports at the gouroboros v0.205.7 pin,
+// and it reaches its redeemer check only on inputs that already resolved, so
+// its verdict is as replay-invariant as the other six. A joined error chain
+// must still reach isRewardWithdrawalMismatch: ValidateTxConway runs every
+// rule and joins the failures rather than stopping at the first, so a
+// spend-tagged missing redeemer can arrive alongside a withdrawal mismatch.
+func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
+	t.Parallel()
+
+	missingSpend := lcommon.MissingRedeemerForScriptError{
+		ScriptHash: lcommon.Blake2b224Hash([]byte("joined-script")),
+		Tag:        lcommon.RedeemerTagSpend,
+		Index:      0,
+		RedeemerKey: lcommon.RedeemerKey{
+			Tag:   lcommon.RedeemerTagSpend,
+			Index: 0,
+		},
+	}
+	require.True(
+		t,
+		isDeterministicTxValidationError(missingSpend),
+		"a spend-tagged missing redeemer is decided by the transaction",
+	)
+	require.True(
+		t,
+		isDeterministicTxValidationError(errors.Join(
+			fmt.Errorf("conway utxow rule: %w", missingSpend),
+			fmt.Errorf(
+				"conway utxo rule: %w",
+				shelley.IncorrectWithdrawalAmountError{},
+			),
+		)),
+		"a joined chain carrying a withdrawal mismatch stays deterministic",
+	)
+	// The control, on the bare error: an unresolved input carries no
+	// deterministic classification of its own. It is only a control in
+	// isolation -- errors.AsType walks a join, so an InputResolutionError
+	// joined with any classified verdict classifies deterministic, which the
+	// monotone argument above makes correct.
+	require.False(
+		t,
+		isDeterministicTxValidationError(lcommon.InputResolutionError{}),
+		"an unresolved input is decided by local UTxO state",
+	)
+	// The shared ExtraRedeemerError type has both a transaction-only Conway
+	// emitter and a state-dependent Dijkstra emitter. The latter is the reason
+	// this type remains unclassified: an unresolved consumed input is skipped,
+	// so its spend purpose never reaches the required set and a legitimate spend
+	// redeemer reads as extra; resolving the input removes the verdict. The
+	// type alone cannot distinguish those emitters.
+	require.False(
+		t,
+		isDeterministicTxValidationError(conway.ExtraRedeemerError{}),
+		"the shared extra-redeemer type includes a state-dependent Dijkstra emitter",
+	)
+	require.True(
+		t,
+		isDeterministicTxValidationError(errors.Join(
+			lcommon.InputResolutionError{},
+			lcommon.MissingRedeemerForScriptError{
+				ScriptHash: lcommon.Blake2b224Hash([]byte("joined-mint")),
+				Tag:        lcommon.RedeemerTagMint,
+				Index:      0,
+				RedeemerKey: lcommon.RedeemerKey{
+					Tag:   lcommon.RedeemerTagMint,
+					Index: 0,
+				},
+			},
+		)),
+		"a join carrying a missing redeemer stays deterministic even "+
+			"alongside an unresolved input",
+	)
+}
+
+func requireMissingRedeemerRecovery(
+	t *testing.T,
+	tag lcommon.RedeemerTag,
+	deterministic bool,
+) {
+	t.Helper()
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		// The same failing block the producer-resolution path recovers from
+		// in TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind, so the
+		// rewind path is genuinely available here and the classification is
+		// what routes the rejection away from it.
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("missing-redeemer-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId: testHashBytes("missing-redeemer-producer"),
+			},
+		},
+		Cause: fmt.Errorf(
+			"conway plutus redeemer validation: %w",
+			lcommon.MissingRedeemerForScriptError{
+				ScriptHash: lcommon.Blake2b224Hash(
+					[]byte("missing-redeemer-script"),
+				),
+				Tag:   tag,
+				Index: 0,
+				RedeemerKey: lcommon.RedeemerKey{
+					Tag:   tag,
+					Index: 0,
+				},
+			},
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	if deterministic {
+		// The deterministic branch holds the applied tip and rewinds the
+		// primary chain to meet it, rather than descending to a producer's
+		// parent.
+		assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+		assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+		assert.Nil(t, ls.lastAtTipRecovery)
+		assert.Nil(t, ls.continuationAudit.Load())
+
+		resync := testutil.RequireReceive(
+			t,
+			resyncCh,
+			2*time.Second,
+			"deterministic missing-redeemer rejection must request a fresh "+
+				"ChainSync intersection",
+		)
+		assert.Equal(t, ls.Tip().Point, resync.Point)
+		return
+	}
+
+	// Retained for callers that assert the state-dependent rewind path.
+	assert.NotNil(
+		t,
+		ls.continuationAudit.Load(),
+		"a state-dependent missing-redeemer rejection must take the rewind path",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"a state-dependent missing-redeemer rejection must not request a "+
+			"fresh ChainSync intersection",
+	)
+}
+
+// The control for the classification above. A bad-input verdict is exactly the
+// state-dependent case replay recovery exists for: the input is absent from
+// this node's UTxO window, and rebuilding that window from the producer's
+// branch can make the same block valid. It must keep taking the
+// producer-resolution rewind, so classifying rejections wholesale -- or
+// widening isDeterministicTxValidationError past what a transaction alone
+// decides -- fails here rather than passing quietly.
+func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("bad-inputs-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId: testHashBytes("bad-inputs-producer"),
+			},
+		},
+		Cause: fmt.Errorf(
+			"shelley utxo validation rule 8: %w",
+			shelley.BadInputsUtxoError{},
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	// armContinuationAudit runs only on the producer-resolution rewind, so an
+	// armed window is proof this rejection did not take the deterministic
+	// branch.
+	require.NotNil(
+		t,
+		ls.continuationAudit.Load(),
+		"a state-dependent rejection must take the rewind path",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"a state-dependent rejection must not use the deterministic "+
+			"fresh-intersection path",
+	)
+	require.False(
+		t,
+		isDeterministicTxValidationError(shelley.BadInputsUtxoError{}),
+		"a missing input is decided by local UTxO state, not by the tx",
+	)
 }

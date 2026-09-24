@@ -136,7 +136,7 @@ func TestFetchSendsRequestsToTheConfiguredBaseURL(t *testing.T) {
 		slog.New(slog.DiscardHandler),
 	)
 
-	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	cache, err := openTestCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cache.Close() })
 

@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,25 +136,65 @@ const (
 
 	// The following bound the connection-establishment and response-wait
 	// phases of a single Koios HTTP attempt independently of the overall
-	// koiosClientTimeout, as defense-in-depth rather than a replacement for
-	// it. Without them, only two of the four phases below are actually
-	// bounded by anything narrower than koiosClientTimeout:
+	// koiosRequestTimeout (below), as defense-in-depth rather than a
+	// replacement for it. Without them, only two of the four phases below
+	// are actually bounded by anything narrower than koiosRequestTimeout:
 	// http.DefaultTransport's own defaults already give a dial a 30s budget
 	// and a TLS handshake a 10s budget (see net/http.DefaultTransport in the
 	// Go standard library), but it sets no ResponseHeaderTimeout at all, so
 	// "connection accepted, server writes nothing" is caught today only by
-	// the coarse, whole-round-trip koiosClientTimeout -- which also has to
+	// the coarse, whole-round-trip koiosRequestTimeout -- which also has to
 	// cover dial, TLS, and body reads, so a slow dial/handshake eats into
 	// the time actually available to notice a stuck server. Every value
-	// here is chosen to be clearly shorter than koiosClientTimeout so a
+	// here is chosen to be clearly shorter than koiosRequestTimeout so a
 	// phase-specific failure attributes cleanly instead of surfacing as an
-	// undifferentiated overall timeout.
-	koiosClientTimeout         = 60 * time.Second
+	// undifferentiated overall timeout. koiosResponseHeaderTimeout in
+	// particular must stay below koiosRequestTimeout, or it could never
+	// fire before koiosRequestTimeout already had, making it dead weight.
 	koiosDialTimeout           = 10 * time.Second
 	koiosDialKeepAlive         = 30 * time.Second
 	koiosTLSHandshakeTimeout   = 10 * time.Second
-	koiosResponseHeaderTimeout = 30 * time.Second
+	koiosResponseHeaderTimeout = 15 * time.Second
 	koiosExpectContinueTimeout = 1 * time.Second
+
+	// koiosIdleConnTimeout bounds how long an idle keep-alive connection
+	// stays in the client's pool before Go proactively closes it. Shorter
+	// than http.DefaultTransport's 90s default, so that a stale
+	// server/CDN-closed keep-alive connection is dropped rather than reused
+	// into the write-succeeds-then-read-hangs stall koiosRequestTimeout's
+	// own doc comment describes. It narrows the window for that stall
+	// rather than closing it, which is why koiosRequestTimeout bounds it
+	// too.
+	koiosIdleConnTimeout = 30 * time.Second
+
+	// koiosRequestTimeout bounds a single HTTP request/response round
+	// trip. Confirmed live against a Koios mirror that individual requests
+	// occasionally stalled for almost exactly 60s (this client's prior
+	// overall timeout) before an immediate retry succeeded in well under a
+	// second -- observed on /tx_info and /pool_history calls, including
+	// under CheckStakeDistribution's own bounded concurrency, so this is
+	// not purely a sequential-reuse artifact and may also be transient
+	// overload on a community-hosted mirror under concurrent load. Every
+	// real (non-stalled) call measured during this investigation completed
+	// in under 2s, so 20s leaves a wide margin above normal latency while
+	// cutting the wall-clock cost of a stall from 60s to 20s per
+	// occurrence, and (with koiosMaxRetries=3) the pathological worst case
+	// from minutes to well under a minute.
+	//
+	// Applies to every KoiosClient, not only node-parity's live
+	// per-epoch checking that this investigation was run against:
+	// observer.go's in-process Observer and fetch.go's koios-parity fetch
+	// both construct their client through this same NewKoiosClient, and
+	// each one makes is still a single bounded, page-sized Koios API call
+	// (koiosPageSize) -- a long-running bulk fetch is many such calls over
+	// time, not one call carrying a larger payload, so it has no distinct
+	// need for a longer per-request bound.
+	// A request that genuinely stalls past 20s is retried as a transport
+	// error (get's own doc comment) up to koiosMaxRetries times regardless
+	// of caller, so this tightening only shortens how long a stall is
+	// tolerated before that retry fires -- it does not lower the ceiling
+	// on how long a legitimately slow bulk operation may run in total.
+	koiosRequestTimeout = 20 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -413,7 +454,7 @@ func NewKoiosClient(
 		baseURL: base,
 		apiKey:  apiKey,
 		http: &http.Client{
-			Timeout: koiosClientTimeout,
+			Timeout: koiosRequestTimeout,
 			Transport: newKoiosTransport(
 				koiosDialTimeout,
 				koiosDialKeepAlive,
@@ -461,19 +502,31 @@ func NewKoiosClient(
 // sending a request body when the client sets the Expect header; this
 // client never sets Expect, so it is inert today and included purely for
 // completeness against a future caller of this transport that does.
+//
+// Also sets IdleConnTimeout to koiosIdleConnTimeout, shorter than
+// DefaultTransport's 90s default -- see that constant's doc comment for
+// why (a stale, server/CDN-closed keep-alive connection reused anyway is
+// suspected to contribute to the stalls koiosRequestTimeout's doc comment
+// describes).
 func newKoiosTransport(
 	dialTimeout, dialKeepAlive time.Duration,
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
 	allowPrivateAddresses bool,
 ) *http.Transport {
-	transport := &http.Transport{
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   tlsHandshakeTimeout,
-		ResponseHeaderTimeout: responseHeaderTimeout,
-		ExpectContinueTimeout: expectContinueTimeout,
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 	}
+	transport.ForceAttemptHTTP2 = true
+	transport.MaxIdleConns = 100
+	transport.TLSClientConfig = nil
+	transport.TLSNextProto = nil
+	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	transport.ExpectContinueTimeout = expectContinueTimeout
+	transport.IdleConnTimeout = koiosIdleConnTimeout
 	dialer := &net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: dialKeepAlive,
@@ -1744,6 +1797,628 @@ func (k *KoiosClient) GetAccountRewardHistory(
 		)
 	}
 	return items, nil
+}
+
+// KoiosTxInfoBatchSize bounds how many transaction hashes go into a single
+// /tx_info request: each 64-char hex hash plus JSON quoting/comma overhead is
+// ~70 bytes, so this many hashes stays comfortably under Koios's request-body
+// size cap (confirmed live: an unbatched request for a full block's worth of
+// hashes was rejected outright with a plain-text "Payload too large" body
+// that fails JSON decoding, rather than any structured error).
+//
+// Exported so a caller accumulating hashes across multiple blocks before
+// calling GetTxInfos (e.g. nodeparity's from-genesis UTxO reconstruction,
+// blinklabs-io/dingo#1900) can flush at the same size GetTxInfos itself
+// batches at, rather than duplicating this number.
+const KoiosTxInfoBatchSize = 40
+
+// KoiosTxInfoUtxoRef is one entry in a KoiosTxInfoItem's Inputs: just enough
+// to identify a UTxO ref ("<tx_hash>#<tx_index>"), not its content -- an
+// input is being consumed, so only its identity is ever needed to remove it
+// from a running reconstruction, never what it contained.
+type KoiosTxInfoUtxoRef struct {
+	TxHash  string `json:"tx_hash"`
+	TxIndex int    `json:"tx_index"`
+}
+
+// KoiosTxInfoAsset is one multi-asset entry on a KoiosTxInfoOutput.
+// PolicyID and AssetName are both hex, matching gouroboros'
+// Blake2b224.String()/hex.EncodeToString conventions exactly (Koios's own
+// documented examples are lowercase hex the same way), which is what lets
+// CanonicalKoiosUTxOEntry produce a string directly comparable to
+// nodeparity's canonicalUTxOEntry without any re-encoding.
+type KoiosTxInfoAsset struct {
+	PolicyID  string `json:"policy_id"`
+	AssetName string `json:"asset_name"`
+	Quantity  string `json:"quantity"`
+}
+
+// KoiosTxInfoAssetList is /tx_info's asset_list, which Koios serialises two
+// different ways for the same content: a JSON array on inputs, outputs and
+// collateral_inputs, but a JSON *string* on collateral_output.
+//
+// The string form is NOT JSON-inside-a-string. It is cardano-ledger's Haskell
+// `Show` rendering of the output's MultiAsset value, passed through verbatim
+// (confirmed against the live preview API -- see
+// TestAssetListDecodesLedgerShowMultiAsset for captured real responses):
+//
+//	[]                                      -- no assets
+//	[(PolicyID {policyID = ScriptHash "65a9..."},[("494e4459",32200000000000)])]
+//	[(PolicyID {policyID = ScriptHash "09e5..."},[("474f565f4e4654",1)]),(PolicyID {policyID = ScriptHash "65a9..."},[("494e4459",32200000000000)])]
+//
+// The empty case, "[]", happens to also be valid JSON, which is why the
+// original string-form support (dingo #1900, the phase-2-invalid collateral
+// fix) looked correct: every transaction whose collateral return carried no
+// tokens decoded fine. A collateral return that actually carries tokens --
+// the normal case for a phase-2-invalid Plutus transaction, whose whole
+// purpose is returning the collateral inputs' assets -- renders as the form
+// above, and feeding that to json.Unmarshal fails on its first "(" with
+// "invalid character '(' looking for beginning of value".
+//
+// That failure was not contained to the one field: it failed the enclosing
+// transaction, which failed its whole 40-hash /tx_info chunk, which tainted
+// the epoch and skipped its UTxO comparison entirely -- measured at 5 of 10
+// consecutive chunks on real preview data, matching the ~50% of epochs that
+// were losing UTxO validation.
+//
+// Policy IDs, asset names and quantities in the Show form use exactly the
+// same encodings as the JSON array form (lowercase hex, hex, decimal), which
+// is what lets both branches produce the same KoiosTxInfoAsset and cross-check
+// against each other: a transaction's collateral_inputs (array form) and its
+// collateral_output (Show form) report the same tokens identically.
+//
+// Marshalling is the plain array form, so a cached row written from this
+// struct always reads back through the array branch.
+type KoiosTxInfoAssetList []KoiosTxInfoAsset
+
+func (a *KoiosTxInfoAssetList) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*a = nil
+		return nil
+	}
+
+	// Array form: inputs, outputs, collateral_inputs, and anything this
+	// struct marshalled itself (including every cached row).
+	if trimmed[0] != '"' {
+		var items []KoiosTxInfoAsset
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return fmt.Errorf("asset_list array form: %w", err)
+		}
+		*a = items
+		return nil
+	}
+
+	var inner string
+	if err := json.Unmarshal(trimmed, &inner); err != nil {
+		return fmt.Errorf("asset_list string form: %w", err)
+	}
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		*a = nil
+		return nil
+	}
+
+	// Try JSON first: it covers the "[]" empty case, and keeps working if
+	// Koios ever switches the string form to real embedded JSON.
+	var items []KoiosTxInfoAsset
+	if err := json.Unmarshal([]byte(inner), &items); err == nil {
+		*a = items
+		return nil
+	}
+
+	parsed, err := parseLedgerShowMultiAsset(inner)
+	if err != nil {
+		return fmt.Errorf(
+			"asset_list string form is neither JSON nor a cardano-ledger "+
+				"MultiAsset rendering: %w: %s",
+			err,
+			koiosBodyExcerpt([]byte(inner)),
+		)
+	}
+	*a = parsed
+	return nil
+}
+
+// parseLedgerShowMultiAsset parses cardano-ledger's Haskell `Show` rendering
+// of a MultiAsset -- the form Koios emits for collateral_output.asset_list.
+// See KoiosTxInfoAssetList's doc comment for real examples.
+//
+// The grammar accepted is exactly:
+//
+//	list   := "[" [ entry { "," entry } ] "]"
+//	entry  := "(" policy "," assets ")"
+//	policy := "PolicyID" "{" "policyID" "=" "ScriptHash" quoted "}"
+//	assets := "[" [ asset { "," asset } ] "]"
+//	asset  := "(" quoted "," integer ")"
+//
+// It is deliberately strict rather than a lenient regex scrape. A lenient
+// parser that silently skipped an entry it did not recognise would drop
+// tokens from a reconstructed UTxO, and the UTxO comparison this feeds
+// (nodeparity's from-genesis check) would then report a content mismatch
+// that is this parser's fault rather than Dingo's -- the exact class of false
+// result the check exists to detect. Failing loudly, with the offending text
+// in the error, keeps a future ledger Show change a one-line diagnosis
+// instead of a phantom ledger bug.
+func parseLedgerShowMultiAsset(s string) ([]KoiosTxInfoAsset, error) {
+	sc := &showScanner{s: s}
+	if err := sc.expect("["); err != nil {
+		return nil, err
+	}
+	var out []KoiosTxInfoAsset
+	if !sc.accept("]") {
+		for {
+			policy, assets, err := sc.entry()
+			if err != nil {
+				return nil, err
+			}
+			for _, as := range assets {
+				as.PolicyID = policy
+				out = append(out, as)
+			}
+			if sc.accept(",") {
+				continue
+			}
+			if err := sc.expect("]"); err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	sc.skipSpace()
+	if sc.pos != len(sc.s) {
+		return nil, fmt.Errorf("trailing input at offset %d", sc.pos)
+	}
+	return out, nil
+}
+
+// showScanner is a tiny cursor over a Haskell `Show` rendering. It is not a
+// general Haskell parser -- only the MultiAsset shape above is accepted.
+type showScanner struct {
+	s   string
+	pos int
+}
+
+func (sc *showScanner) skipSpace() {
+	for sc.pos < len(sc.s) {
+		switch sc.s[sc.pos] {
+		case ' ', '\t', '\n', '\r':
+			sc.pos++
+		default:
+			return
+		}
+	}
+}
+
+func (sc *showScanner) accept(lit string) bool {
+	sc.skipSpace()
+	if strings.HasPrefix(sc.s[sc.pos:], lit) {
+		sc.pos += len(lit)
+		return true
+	}
+	return false
+}
+
+func (sc *showScanner) expect(lit string) error {
+	if sc.accept(lit) {
+		return nil
+	}
+	return fmt.Errorf("expected %q at offset %d", lit, sc.pos)
+}
+
+// quoted reads a Haskell string literal. Policy IDs and asset names are hex,
+// so no escape beyond the pass-through handled here has ever been observed,
+// but \" and \\ are honoured so a name that did need them cannot truncate
+// the scan and silently drop the rest of the list.
+func (sc *showScanner) quoted() (string, error) {
+	sc.skipSpace()
+	if sc.pos >= len(sc.s) || sc.s[sc.pos] != '"' {
+		return "", fmt.Errorf("expected a quoted string at offset %d", sc.pos)
+	}
+	sc.pos++
+	var b strings.Builder
+	for sc.pos < len(sc.s) {
+		switch c := sc.s[sc.pos]; c {
+		case '\\':
+			if sc.pos+1 >= len(sc.s) {
+				return "", fmt.Errorf(
+					"dangling escape at offset %d", sc.pos,
+				)
+			}
+			b.WriteByte(sc.s[sc.pos+1])
+			sc.pos += 2
+		case '"':
+			sc.pos++
+			return b.String(), nil
+		default:
+			b.WriteByte(c)
+			sc.pos++
+		}
+	}
+	return "", fmt.Errorf("unterminated quoted string at offset %d", sc.pos)
+}
+
+func (sc *showScanner) integer() (string, error) {
+	sc.skipSpace()
+	start := sc.pos
+	if sc.pos < len(sc.s) && sc.s[sc.pos] == '-' {
+		sc.pos++
+	}
+	for sc.pos < len(sc.s) && sc.s[sc.pos] >= '0' && sc.s[sc.pos] <= '9' {
+		sc.pos++
+	}
+	if sc.pos == start || (sc.pos == start+1 && sc.s[start] == '-') {
+		return "", fmt.Errorf("expected an integer at offset %d", start)
+	}
+	return sc.s[start:sc.pos], nil
+}
+
+// entry parses one "(PolicyID {...},[(name,qty),...])" pair, returning the
+// policy ID and its assets with PolicyID left for the caller to fill in.
+func (sc *showScanner) entry() (string, []KoiosTxInfoAsset, error) {
+	for _, lit := range []string{
+		"(", "PolicyID", "{", "policyID", "=", "ScriptHash",
+	} {
+		if err := sc.expect(lit); err != nil {
+			return "", nil, err
+		}
+	}
+	policy, err := sc.quoted()
+	if err != nil {
+		return "", nil, err
+	}
+	for _, lit := range []string{"}", ",", "["} {
+		if err := sc.expect(lit); err != nil {
+			return "", nil, err
+		}
+	}
+	var assets []KoiosTxInfoAsset
+	if !sc.accept("]") {
+		for {
+			if err := sc.expect("("); err != nil {
+				return "", nil, err
+			}
+			name, err := sc.quoted()
+			if err != nil {
+				return "", nil, err
+			}
+			if err := sc.expect(","); err != nil {
+				return "", nil, err
+			}
+			qty, err := sc.integer()
+			if err != nil {
+				return "", nil, err
+			}
+			if err := sc.expect(")"); err != nil {
+				return "", nil, err
+			}
+			assets = append(assets, KoiosTxInfoAsset{
+				AssetName: name,
+				Quantity:  qty,
+			})
+			if sc.accept(",") {
+				continue
+			}
+			if err := sc.expect("]"); err != nil {
+				return "", nil, err
+			}
+			break
+		}
+	}
+	if err := sc.expect(")"); err != nil {
+		return "", nil, err
+	}
+	return policy, assets, nil
+}
+
+// koiosBodyExcerpt renders a short, single-line, printable prefix of some
+// response text for an error message. A malformed field can be long, so the
+// whole value is useless in a log line -- but its first few characters are
+// exactly what identifies the form it arrived in, which is the one thing the
+// bare "invalid character '(' looking for beginning of value" this replaced
+// never told us.
+func koiosBodyExcerpt(body []byte) string {
+	const maxExcerpt = 200
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return "<empty>"
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxExcerpt {
+		return s[:maxExcerpt] + "..."
+	}
+	return s
+}
+
+// KoiosTxInfoInlineDatum is the non-null shape of a KoiosTxInfoOutput's
+// InlineDatum -- only its presence matters here (to distinguish the
+// "inline" and "hash-only" datum forms), not its content.
+type KoiosTxInfoInlineDatum struct {
+	Bytes string `json:"bytes"`
+}
+
+// KoiosTxInfoReferenceScript is the non-null shape of a KoiosTxInfoOutput's
+// ReferenceScript.
+type KoiosTxInfoReferenceScript struct {
+	Hash string `json:"hash"`
+}
+
+// KoiosTxInfoOutput is one output from a KoiosTxInfoItem's Outputs, with
+// enough content to build the same canonical encoding
+// nodeparity.canonicalUTxOEntry builds from a live LocalStateQuery
+// GetUTxOWhole result: address, ADA value, multi-asset tokens, datum
+// presence/form, and reference script hash.
+type KoiosTxInfoOutput struct {
+	TxHash      string `json:"tx_hash"`
+	TxIndex     int    `json:"tx_index"`
+	PaymentAddr struct {
+		Bech32 string `json:"bech32"`
+	} `json:"payment_addr"`
+	// Value is the ADA-only amount (lovelace, as a plain decimal string,
+	// e.g. "157832856") -- multi-asset tokens are reported separately in
+	// AssetList, mirroring gouroboros' own TransactionOutput.Amount()
+	// (ADA only) versus .Assets() (everything else) split.
+	Value string `json:"value"`
+	// DatumHash is non-nil whenever the output carries ANY datum, hash-only
+	// or inline -- mirroring gouroboros' TransactionOutput.DatumHash(),
+	// which is likewise set for both forms (only .Datum() itself
+	// distinguishes them, matching InlineDatum here).
+	DatumHash       *string                     `json:"datum_hash"`
+	InlineDatum     *KoiosTxInfoInlineDatum     `json:"inline_datum"`
+	ReferenceScript *KoiosTxInfoReferenceScript `json:"reference_script"`
+	AssetList       KoiosTxInfoAssetList        `json:"asset_list"`
+}
+
+// KoiosTxInfoPlutusContract is one entry in a KoiosTxInfoItem's
+// PlutusContracts, decoded only far enough to read the phase-2 validation
+// verdict.
+//
+// /tx_info reports no top-level validity flag (confirmed against the live
+// API: tx_info objects carry no valid_contract key at all). The ledger's
+// single per-transaction is_valid flag is denormalised onto every one of
+// that transaction's Plutus contract rows instead, so any entry answers for
+// the whole transaction.
+type KoiosTxInfoPlutusContract struct {
+	// ValidContract is a pointer so that a null or absent flag is "no
+	// verdict reported" rather than a silent "invalid": only an explicit
+	// false marks a transaction phase-2-invalid.
+	ValidContract *bool `json:"valid_contract"`
+}
+
+// KoiosTxInfoItem is one transaction from /tx_info: which refs it consumes
+// (Inputs) and which outputs it creates, with enough content on each output
+// for full content-based UTxO comparison (see CanonicalKoiosUTxOEntry), not
+// merely existence. Requesting with _inputs/_assets/_scripts:true (done by
+// GetTxInfos) is required for Inputs, AssetList, and the datum/reference-
+// script fields to be populated at all -- Koios omits all of them by
+// default.
+type KoiosTxInfoItem struct {
+	TxHash  string               `json:"tx_hash"`
+	Inputs  []KoiosTxInfoUtxoRef `json:"inputs"`
+	Outputs []KoiosTxInfoOutput  `json:"outputs"`
+
+	// CollateralInputs, CollateralOutput and PlutusContracts exist for the
+	// phase-2-invalid case only: Inputs/Outputs describe what the
+	// transaction body asked for, which the ledger does not apply when
+	// phase-2 validation fails. See Consumed and Produced.
+	CollateralInputs []KoiosTxInfoUtxoRef        `json:"collateral_inputs"`
+	CollateralOutput *KoiosTxInfoOutput          `json:"collateral_output"`
+	PlutusContracts  []KoiosTxInfoPlutusContract `json:"plutus_contracts"`
+}
+
+// IsValid reports whether the ledger applied this transaction's body, i.e.
+// whether phase-2 script validation passed. A transaction with no Plutus
+// contracts is always valid -- phase-2 validation only applies to script
+// transactions -- and so is one whose contracts report no verdict (see
+// KoiosTxInfoPlutusContract.ValidContract).
+func (i KoiosTxInfoItem) IsValid() bool {
+	for _, pc := range i.PlutusContracts {
+		if pc.ValidContract != nil && !*pc.ValidContract {
+			return false
+		}
+	}
+	return true
+}
+
+// Consumed reports the refs this transaction actually removed from the UTxO
+// set, mirroring gouroboros' Transaction.Consumed() exactly: the body inputs
+// for a valid transaction, the collateral inputs for a phase-2-invalid one.
+func (i KoiosTxInfoItem) Consumed() []KoiosTxInfoUtxoRef {
+	if i.IsValid() {
+		return i.Inputs
+	}
+	return i.CollateralInputs
+}
+
+// Produced reports the outputs this transaction actually added to the UTxO
+// set, mirroring gouroboros' Transaction.Produced() exactly: the body
+// outputs for a valid transaction, and for a phase-2-invalid one the single
+// collateral return if it declared one, nothing otherwise. Koios indexes the
+// collateral return at len(outputs), the same index gouroboros assigns it.
+func (i KoiosTxInfoItem) Produced() []KoiosTxInfoOutput {
+	if i.IsValid() {
+		return i.Outputs
+	}
+	if i.CollateralOutput == nil {
+		return nil
+	}
+	return []KoiosTxInfoOutput{*i.CollateralOutput}
+}
+
+// CanonicalKoiosUTxOEntry builds a deterministic string encoding of out,
+// directly comparable (byte-for-byte, when the two sides genuinely agree)
+// to nodeparity's own canonicalUTxOEntry -- same field order, same "|"
+// separators, same asset sort order (policy then asset name, both already
+// hex so a plain string sort matches gouroboros' own raw-byte
+// bytes.Compare sort), same datum "form:hash" encoding. Kept in this
+// package (not nodeparity) since it depends only on Koios's own response
+// shape, not on gouroboros.
+func CanonicalKoiosUTxOEntry(out KoiosTxInfoOutput) string {
+	var sb strings.Builder
+	sb.WriteString(out.PaymentAddr.Bech32)
+	sb.WriteString("|")
+	sb.WriteString(out.Value)
+
+	if len(out.AssetList) > 0 {
+		assets := make([]KoiosTxInfoAsset, len(out.AssetList))
+		copy(assets, out.AssetList)
+		sort.Slice(assets, func(i, j int) bool {
+			if assets[i].PolicyID != assets[j].PolicyID {
+				return assets[i].PolicyID < assets[j].PolicyID
+			}
+			return assets[i].AssetName < assets[j].AssetName
+		})
+		for _, a := range assets {
+			fmt.Fprintf(&sb, "|%s.%s=%s", a.PolicyID, a.AssetName, a.Quantity)
+		}
+	}
+
+	if out.DatumHash != nil {
+		form := "hash"
+		if out.InlineDatum != nil {
+			form = "inline"
+		}
+		fmt.Fprintf(&sb, "|datum=%s:%s", form, *out.DatumHash)
+	}
+	if out.ReferenceScript != nil {
+		fmt.Fprintf(&sb, "|scriptref=%s", out.ReferenceScript.Hash)
+	}
+	return sb.String()
+}
+
+// GetTxInfos fetches input refs and full output content for every one of
+// txHashes, batched to stay under Koios's request-size cap.
+//
+// Unlike GetPoolEpochHistory's "missing means missing" contract (a
+// legitimate outcome there -- a pool with no snapshot row yet), a
+// transaction hash given to GetTxInfos is never optional: the caller
+// (nodeparity's from-genesis UTxO reconstruction, blinklabs-io/dingo#1900)
+// asked for it because a block it already trusts contains that exact
+// transaction, so Koios omitting it from the response means either
+// transient incompleteness or that this specific hash isn't indexed yet --
+// applying only the hashes that did come back would silently and
+// permanently lose that transaction's spends/creates from the running
+// reconstruction. Requires exactly one result per requested hash --
+// erroring, not silently dropping, on any that are missing or duplicated --
+// and returns them in request order (not Koios's response order) so a
+// caller applying dependent transactions (a UTxO created by one hash and
+// spent by a later one in the same request) does so in the same order the
+// chain itself does.
+func (k *KoiosClient) GetTxInfos(
+	ctx context.Context,
+	txHashes []string,
+) ([]KoiosTxInfoItem, error) {
+	byHash := make(map[string]KoiosTxInfoItem, len(txHashes))
+	for start := 0; start < len(txHashes); start += KoiosTxInfoBatchSize {
+		end := min(start+KoiosTxInfoBatchSize, len(txHashes))
+		payload := struct {
+			TxHashes []string `json:"_tx_hashes"`
+			Inputs   bool     `json:"_inputs"`
+			Assets   bool     `json:"_assets"`
+			Scripts  bool     `json:"_scripts"`
+		}{
+			TxHashes: txHashes[start:end],
+			Inputs:   true,
+			Assets:   true,
+			Scripts:  true,
+		}
+		resp, err := k.post(ctx, "/tx_info", payload)
+		if err != nil {
+			return nil, fmt.Errorf("tx_info batch [%d:%d]: %w", start, end, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf(
+				"koios /tx_info: status %d body: %s",
+				resp.StatusCode,
+				resp.Body,
+			)
+		}
+		var items []KoiosTxInfoItem
+		if err := json.Unmarshal(resp.Body, &items); err != nil {
+			return nil, describeTxInfoDecodeFailure(resp.Body, err)
+		}
+		for _, item := range items {
+			if _, dup := byHash[item.TxHash]; dup {
+				return nil, fmt.Errorf(
+					"koios /tx_info: duplicate result for tx hash %s",
+					item.TxHash,
+				)
+			}
+			byHash[item.TxHash] = item
+		}
+	}
+
+	all := make([]KoiosTxInfoItem, len(txHashes))
+	for i, hash := range txHashes {
+		item, ok := byHash[hash]
+		if !ok {
+			return nil, fmt.Errorf(
+				"koios /tx_info: no result for requested tx hash %s",
+				hash,
+			)
+		}
+		all[i] = item
+	}
+	return all, nil
+}
+
+// describeTxInfoDecodeFailure turns a whole-response /tx_info decode failure
+// into an error that names the offending transaction and preserves the
+// underlying cause, by re-decoding the response one transaction at a time.
+//
+// This is diagnosis, not recovery: the returned error still fails the entire
+// chunk, exactly as before. That is deliberate. GetTxInfos' contract is that
+// every requested hash comes back, because nodeparity's caller applies these
+// to a running UTxO reconstruction -- dropping the one transaction that
+// failed to decode would silently lose its spends and creates, and the
+// reconstruction would then differ from Dingo for a reason that has nothing
+// to do with Dingo. Failing the chunk keeps the caller's existing
+// taint-and-re-baseline path in charge, so the epoch is honestly reported as
+// "utxo check did not run" instead of being compared against a corrupted set.
+//
+// What was wrong before was only the blast radius of the *message*: one
+// unparseable field in one transaction surfaced as a bare
+// "koios /tx_info decode: invalid character '(' ..." with no field, no
+// transaction and no chunk identity, which is what made the underlying
+// collateral_output.asset_list bug (see KoiosTxInfoAssetList) expensive to
+// find.
+//
+// Runs only on the failure path, so the extra decode costs nothing in the
+// normal case.
+func describeTxInfoDecodeFailure(body []byte, decodeErr error) error {
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(body, &rawItems); err != nil {
+		// The response isn't even an array -- report the original error
+		// plus what actually arrived.
+		return fmt.Errorf(
+			"koios /tx_info decode: %w: response was not a JSON array: %s",
+			decodeErr,
+			koiosBodyExcerpt(body),
+		)
+	}
+	for i, raw := range rawItems {
+		var one KoiosTxInfoItem
+		if err := json.Unmarshal(raw, &one); err == nil {
+			continue
+		} else {
+			var probe struct {
+				TxHash string `json:"tx_hash"`
+			}
+			hash := "<unidentified>"
+			if perr := json.Unmarshal(raw, &probe); perr == nil &&
+				probe.TxHash != "" {
+				hash = probe.TxHash
+			}
+			return fmt.Errorf(
+				"koios /tx_info decode: transaction %s (response index %d): %w",
+				hash,
+				i,
+				err,
+			)
+		}
+	}
+	// Every item decodes alone but the array did not: report the original.
+	return fmt.Errorf("koios /tx_info decode: %w", decodeErr)
 }
 
 // parseTotalFromContentRange extracts the total count from a Content-Range header

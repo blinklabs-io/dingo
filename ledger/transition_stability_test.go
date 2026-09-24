@@ -206,9 +206,15 @@ INSERT INTO auth_committee_hot (
 		AddedSlot:       2,
 	}, nil))
 	poolCred := repeatByte(28, 0xDD)
+	// governance.predictedBoundaryStakeEpochFor(currentEpoch) resolves to
+	// currentEpoch itself (dingo#4441): the mid-epoch check tallies the SPO
+	// vote against mark[currentEpoch], the last mark durably written at the
+	// boundary that opened the currently active epoch. The boundary it
+	// predicts will instead tally mark[currentEpoch+1], which SNAP does not
+	// capture until that boundary runs.
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
-			Epoch:        currentEpoch - 2,
+			Epoch:        currentEpoch,
 			SnapshotType: models.PoolStakeSnapshotTypeMark,
 			PoolKeyHash:  poolCred,
 			TotalStake:   types.Uint64(1_000),
