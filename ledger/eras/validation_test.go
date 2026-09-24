@@ -4408,3 +4408,81 @@ func TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity(
 		rule(tx, 0, state, &conway.ConwayProtocolParameters{}),
 	)
 }
+
+// TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable
+// covers a CodeRabbit finding on this PR: when CommitteeStateAvailable
+// reports false (e.g. a genesis committee member Dingo does not persist,
+// blinklabs-io/dingo#3785), every certificate for that credential takes the
+// non-authoritative continue branch. That branch must still consult and
+// update resignedInTx, or a resign-then-resign or resign-then-authorize
+// sequence in one transaction passes uninspected because neither
+// certificate ever reaches the ledger-state Resigned check.
+func TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd8
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	newState := func() *taggedCommitteeLedgerState {
+		return &taggedCommitteeLedgerState{
+			mockLedgerState: newMockLedgerState(),
+			available:       false,
+		}
+	}
+	newTx := func(
+		certs ...lcommon.CertificateWrapper,
+	) *conway.ConwayTransaction {
+		return &conway.ConwayTransaction{
+			TxIsValid: true,
+			Body: conway.ConwayTransactionBody{
+				TxCertificates: certs,
+			},
+		}
+	}
+
+	t.Run("resign then resign rejects", func(t *testing.T) {
+		err := rule(
+			newTx(
+				committeeCert(credential, false),
+				committeeCert(credential, false),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		)
+		var resignedErr CommitteeMemberAlreadyResignedError
+		require.ErrorAs(t, err, &resignedErr)
+	})
+	t.Run("resign then authorize rejects", func(t *testing.T) {
+		err := rule(
+			newTx(
+				committeeCert(credential, false),
+				committeeCert(credential, true),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		)
+		var hotKeyErr conway.ResignedCommitteeMemberHotKeyError
+		require.ErrorAs(t, err, &hotKeyErr)
+	})
+	t.Run("authorize then resign passes", func(t *testing.T) {
+		require.NoError(t, rule(
+			newTx(
+				committeeCert(credential, true),
+				committeeCert(credential, false),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		))
+	})
+}

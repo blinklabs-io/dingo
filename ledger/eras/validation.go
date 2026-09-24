@@ -232,6 +232,7 @@ func validateCommitteeCertificates(
 		default:
 			continue
 		}
+		key := committeeCredentialKeyFor(credential)
 		member, authoritative, err := committeeMember(credential)
 		if err != nil {
 			// A failed lookup is never authorization: fail closed.
@@ -243,11 +244,26 @@ func validateCommitteeCertificates(
 		if member == nil {
 			if !authoritative {
 				// Dingo holds no committee state for this snapshot, so
-				// non-membership cannot be established. Rejecting here would
-				// reject a real genesis committee member, because Dingo does
-				// not seed the Conway genesis committee
-				// (blinklabs-io/dingo#3785). See
+				// non-membership cannot be established beyond what this
+				// transaction's own certificates have already done. An
+				// earlier certificate's resignation must still be honored,
+				// or a genesis committee member Dingo does not persist
+				// (blinklabs-io/dingo#3785) could be resigned twice, or
+				// resigned then reauthorized, within one transaction. See
 				// LedgerView.CommitteeStateAvailable.
+				if resignedInTx[key] {
+					if authorize {
+						return conway.ResignedCommitteeMemberHotKeyError{
+							ColdKey: credential.Credential,
+						}
+					}
+					return CommitteeMemberAlreadyResignedError{
+						ColdCredential: credential,
+					}
+				}
+				if !authorize {
+					resignedInTx[key] = true
+				}
 				continue
 			}
 			return conway.NotCommitteeMemberError{
@@ -255,7 +271,6 @@ func validateCommitteeCertificates(
 				Operation:  operation,
 			}
 		}
-		key := committeeCredentialKeyFor(credential)
 		resigned := member.Resigned || resignedInTx[key]
 		if resigned {
 			if authorize {
