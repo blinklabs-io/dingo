@@ -425,6 +425,105 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 	))
 }
 
+func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+
+	// Hold the prune lock so reconciliation pauses before taking the
+	// destructive barrier. Another destructive transition must still be able
+	// to enter while reconciliation is waiting for the prune lock.
+	fixture.ls.consumedUtxoPruneMutex.Lock()
+	var releasePruneOnce sync.Once
+	releasePrune := func() {
+		releasePruneOnce.Do(fixture.ls.consumedUtxoPruneMutex.Unlock)
+	}
+	defer releasePrune()
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+	}()
+	const wait = 10 * time.Second
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return testutil.GoroutineParkedIn(
+				"sync.(*Mutex).Lock",
+				"(*LedgerState).withConsumedUtxoPruneBoundary",
+			)
+		},
+		wait,
+		"reconciliation waiting for the prune lock",
+	)
+
+	barrierEntered := make(chan struct{})
+	go func() {
+		finish := fixture.ls.db.BeginDestructiveTransition()
+		finish()
+		close(barrierEntered)
+	}()
+	testutil.RequireReceive(
+		t,
+		barrierEntered,
+		wait,
+		"reconciliation must not hold the destructive barrier while waiting for the prune lock",
+	)
+
+	releasePrune()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		reconcileDone,
+		wait,
+		"reconciliation after the prune lock is released",
+	))
+}
+
+func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	finish := fixture.ls.db.BeginDestructiveTransition()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(finish) }
+	defer release()
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+	}()
+	const wait = 10 * time.Second
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return testutil.GoroutineParkedIn(
+				"database.(*cancellableBarrier).lockContext",
+				"(*LedgerState).withDestructiveDatabaseTransition",
+			)
+		},
+		wait,
+		"reconciliation waiting for the destructive transition barrier",
+	)
+	testutil.RequireNoReceive(
+		t,
+		reconcileDone,
+		100*time.Millisecond,
+		"reconciliation finishing before the destructive transition",
+	)
+	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+
+	release()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		reconcileDone,
+		wait,
+		"reconciliation after the destructive transition finishes",
+	))
+	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+}
+
 func TestBlockApplyCandidatePointUsesLastExaminedBlock(t *testing.T) {
 	t.Parallel()
 
