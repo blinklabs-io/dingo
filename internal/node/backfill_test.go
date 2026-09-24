@@ -164,6 +164,63 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
 }
 
+func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0xA7}, 28)
+	proposalHash := bytes.Repeat([]byte{0xB8}, 32)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        proposalHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 100,
+		ExpiresEpoch:  120,
+		AddedSlot:     900,
+	}, nil))
+	proposal, err := db.GetGovernanceProposal(proposalHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, proposal)
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          uint8(models.VoterTypeDRep),
+		VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		VoterCredential:    drepCredential,
+		Vote:               uint8(models.VoteYes),
+		AddedSlot:          900,
+	}, nil))
+
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	pparams := mockledger.NewMockConwayProtocolParams()
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return backfill.processBlockGovernance(
+			tx,
+			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			100,
+			&pparams,
+			txn,
+		)
+	}))
+
+	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	require.NoError(t, err)
+	require.Empty(t, votes, "backfill must apply DRep deregistration cleanup")
+}
+
 func closeTestDB(db *database.Database) error {
 	return dbtest.CloseDatabase(db)
 }
