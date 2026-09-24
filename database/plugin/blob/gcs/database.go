@@ -514,6 +514,7 @@ type gcsStreamIterator struct {
 // reset arms the iterator at start without contacting GCS. The listing itself
 // is issued by begin, on the first read.
 func (it *gcsStreamIterator) reset(start []byte) {
+	it.closed = false
 	if it.cancel != nil {
 		it.cancel()
 		it.cancel = nil

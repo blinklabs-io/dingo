@@ -326,3 +326,25 @@ func TestS3IteratorCloseStopsListing(t *testing.T) {
 	}
 	_ = txn.Rollback()
 }
+
+func TestS3IteratorSeekAfterCloseReopensListing(t *testing.T) {
+	fake := fakeBlockBucket(10)
+	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+	defer srv.Close()
+	store := storeOnFake(t, srv)
+	txn := store.NewTransaction(false)
+	defer txn.Rollback()
+	it := store.NewIterator(
+		txn,
+		types.BlobIteratorOptions{Prefix: []byte(types.BlockBlobKeyPrefix)},
+	)
+	it.Close()
+	seek := []byte(blockBlobKey(60))
+	it.Seek(seek)
+	if !it.Valid() {
+		t.Fatalf("Seek after Close did not reopen listing: %v", it.Err())
+	}
+	if got := it.Item().Key(); string(got) != string(seek) {
+		t.Fatalf("first key after Seek = %x, want %x", got, seek)
+	}
+}

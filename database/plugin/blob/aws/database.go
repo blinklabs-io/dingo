@@ -415,6 +415,7 @@ type s3StreamIterator struct {
 // reset arms the iterator at seek without contacting S3. The listing itself is
 // issued by start, on the first read.
 func (it *s3StreamIterator) reset(seek []byte) {
+	it.closed = false
 	if it.cancel != nil {
 		it.cancel()
 		it.cancel = nil

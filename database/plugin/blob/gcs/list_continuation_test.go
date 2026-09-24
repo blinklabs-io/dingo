@@ -98,3 +98,12 @@ func TestStreamIteratorCloseStopsListing(t *testing.T) {
 	}
 	it.Next()
 }
+
+func TestStreamIteratorSeekAfterCloseRearmsListing(t *testing.T) {
+	it := &gcsStreamIterator{}
+	it.Close()
+	it.Seek([]byte("bp-resume"))
+	if it.closed || it.started || string(it.pendingStart) != "bp-resume" {
+		t.Fatalf("Seek after Close did not rearm listing: %+v", it)
+	}
+}
