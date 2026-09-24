@@ -309,11 +309,12 @@ func run() int {
 			"Starting CPU profiling to %q\n",
 			cpuprofile,
 		) //nolint:gosec // stderr output, no XSS risk
+		//nolint:gosec // User explicitly chose the CPU profile output path.
 		f, err := os.OpenFile(
 			cpuprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o600,
-		) //nolint:gosec // user-specified profiling output path
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			return 1
@@ -497,11 +498,12 @@ Database Workers:
 	// Finalize memory profiling before exit
 	if memprofile != "" {
 		memprofile = filepath.Clean(memprofile)
+		//nolint:gosec // User explicitly chose the memory profile output path.
 		f, err := os.OpenFile(
 			memprofile,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o600,
-		) //nolint:gosec // user-specified profiling output path
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 		} else {
