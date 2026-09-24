@@ -49,6 +49,17 @@ func (d *Database) GetCommitteeMember(
 	return ret, nil
 }
 
+// GetCommitteeHotAuthorizations returns the latest recorded hot-key authorization per cold credential.
+func (d *Database) GetCommitteeHotAuthorizations(
+	txn *Txn,
+) ([]*models.AuthCommitteeHot, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetCommitteeHotAuthorizations(txn.Metadata())
+}
+
 // GetActiveCommitteeMembers returns all active committee members
 func (d *Database) GetActiveCommitteeMembers(
 	txn *Txn,

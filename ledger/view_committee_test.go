@@ -253,6 +253,29 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 					committeeTestCredential(0x72).Credential,
 					*member.HotKey,
 				)
+				hot := committeeTestCredential(0x72)
+				voterMember, err := lv.CommitteeHotCredentialMember(hot)
+				require.NoError(t, err)
+				require.NotNil(t, voterMember,
+					"pending committee proposals still contribute authorization state")
+				elected, err := lv.CommitteeCredentialIsElected(cold)
+				require.NoError(t, err)
+				require.False(t, elected,
+					"a pending member must remain distinct from an elected member")
+				voter := &lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: [28]byte(hot.Credential),
+				}
+				tx := &conway.ConwayTransaction{
+					Body: conway.ConwayTransactionBody{
+						TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+					},
+					TxIsValid: true,
+				}
+				err = eras.ValidateTxConway(tx, 0, lv, &conway.ConwayProtocolParameters{})
+				var unknownVoter conway.UnknownVoterError
+				require.False(t, errors.As(err, &unknownVoter),
+					"authorized pending voter must pass the unknown-voter rule: %v", err)
 			} else {
 				require.Nil(t, member.HotKey)
 			}
@@ -1143,6 +1166,38 @@ func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
 
 	err := eras.ValidateTxConway(tx, 0, lv, pparams)
 	require.ErrorContains(t, err, "committee voter is not elected")
+}
+
+func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
+	pparams := dijkstraTestProtocolParameters()
+	lv, db := committeeTestView(t, pparams)
+	lv.skipPhase2Validation = true
+	cold := committeeTestCredential(0xe1)
+	hot := committeeTestCredential(0xe2)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(cold.CredType),
+		ColdCredHash:      cold.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+
+	err := eras.ValidateTxDijkstra(tx, 0, lv, pparams)
+	var unknownVoter conway.UnknownVoterError
+	require.False(t, errors.As(err, &unknownVoter),
+		"elected Dijkstra committee voter must not be unknown: %v", err)
+	if err != nil {
+		require.NotContains(t, err.Error(), "committee voter is not elected")
+	}
 }
 
 func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {

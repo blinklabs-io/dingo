@@ -1374,9 +1374,9 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
 	}
-	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
+	authorizations, err := lv.ls.db.GetCommitteeHotAuthorizations(lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
+		return nil, fmt.Errorf("get committee hot credentials: %w", err)
 	}
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||
@@ -1393,7 +1393,8 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		if err != nil {
 			return nil, err
 		}
-		if member == nil || member.Resigned {
+		if member == nil || member.Resigned || member.HotKey == nil ||
+			*member.HotKey != hotCredential.Credential {
 			continue
 		}
 		return member, nil

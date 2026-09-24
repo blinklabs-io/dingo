@@ -321,6 +321,8 @@ type GovernanceStore interface {
 
 	// GetActiveCommitteeMembers retrieves all active committee members.
 	GetActiveCommitteeMembers(types.Txn) ([]*models.AuthCommitteeHot, error)
+	// GetCommitteeHotAuthorizations retrieves the latest authorization per cold credential.
+	GetCommitteeHotAuthorizations(types.Txn) ([]*models.AuthCommitteeHot, error)
 
 	// IsCommitteeMemberResigned checks if a committee member has resigned.
 	IsCommitteeMemberResigned(

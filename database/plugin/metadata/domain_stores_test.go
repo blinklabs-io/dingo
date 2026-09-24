@@ -66,6 +66,7 @@ var governanceStoreMethods = []string{
 	// Committee
 	"GetCommitteeMember",
 	"GetActiveCommitteeMembers",
+	"GetCommitteeHotAuthorizations",
 	"IsCommitteeMemberResigned",
 	"GetResignedCommitteeMembers",
 	"GetCommitteeActiveCount",
