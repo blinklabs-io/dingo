@@ -32,7 +32,7 @@ import (
 
 func newSourceTestCache(t *testing.T) *Cache {
 	t.Helper()
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cache.Close() })
 	return cache
@@ -519,7 +519,7 @@ func TestRecordKoiosSourceUnchangedMakesNoRequest(t *testing.T) {
 func TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
 
-	first, err := OpenCache(path, nil)
+	first, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer first.Close() //nolint:errcheck
 	_, err = first.RecordKoiosSource(
@@ -533,7 +533,7 @@ func TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints(t *testing.T) {
 	))
 
 	// A second process re-points the same cache at another host.
-	second, err := OpenCache(path, nil)
+	second, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer second.Close() //nolint:errcheck
 	_, err = second.RecordKoiosSource(
@@ -574,7 +574,7 @@ func TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints(t *testing.T) {
 // start refusing writes to a cache someone else stamped.
 func TestUnclaimedCacheStillWrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
-	owner, err := OpenCache(path, nil)
+	owner, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer owner.Close() //nolint:errcheck
 	_, err = owner.RecordKoiosSource(
@@ -582,7 +582,7 @@ func TestUnclaimedCacheStillWrites(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	bystander, err := OpenCache(path, nil)
+	bystander, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer bystander.Close() //nolint:errcheck
 	assert.NoError(t, bystander.CommitAccountRewardsForEpoch(
@@ -626,7 +626,7 @@ func TestPreviousInferredDistinguishesAttributionFromRecord(t *testing.T) {
 // computed against — the same mixing, one layer up.
 func TestPinnedSourceRefusesCheckWrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
-	owner, err := OpenCache(path, nil)
+	owner, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer owner.Close() //nolint:errcheck
 	_, err = owner.RecordKoiosSource(
@@ -635,7 +635,7 @@ func TestPinnedSourceRefusesCheckWrites(t *testing.T) {
 	require.NoError(t, err)
 
 	// A checker pins whatever is recorded; it has no client to name a source.
-	checker, err := OpenCache(path, nil)
+	checker, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer checker.Close() //nolint:errcheck
 	require.NoError(t, checker.PinRecordedSource("preview"))
@@ -680,7 +680,7 @@ func TestPinnedSourceRefusesCheckWrites(t *testing.T) {
 // through if an unstamped cache pins nothing at all.
 func TestPinnedUnstampedCacheWritesUntilItIsStamped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
-	checker, err := OpenCache(path, nil)
+	checker, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer checker.Close() //nolint:errcheck
 	require.NoError(t, checker.PinRecordedSource("preview"))
@@ -694,7 +694,7 @@ func TestPinnedUnstampedCacheWritesUntilItIsStamped(t *testing.T) {
 
 	// Another process records the public root explicitly: same oracle, so the
 	// attribution still matches and the check carries on.
-	stamper, err := OpenCache(path, nil)
+	stamper, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer stamper.Close() //nolint:errcheck
 	_, err = stamper.RecordKoiosSource(
@@ -736,7 +736,7 @@ func TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints(
 	const network = "preview"
 	path := filepath.Join(t.TempDir(), "cache.db")
 
-	first, err := OpenCache(path, nil)
+	first, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer first.Close() //nolint:errcheck
 	_, err = first.RecordKoiosSource(
@@ -756,7 +756,7 @@ func TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints(
 
 	// A second process re-points the same cache, discarding the first host's
 	// rows including this parameter row.
-	second, err := OpenCache(path, nil)
+	second, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer second.Close() //nolint:errcheck
 	_, err = second.RecordKoiosSource(
@@ -793,7 +793,7 @@ func TestUnclaimedCacheStillWritesEpochParams(t *testing.T) {
 	const network = "preview"
 	path := filepath.Join(t.TempDir(), "cache.db")
 
-	owner, err := OpenCache(path, nil)
+	owner, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer owner.Close() //nolint:errcheck
 	_, err = owner.RecordKoiosSource(
@@ -801,7 +801,7 @@ func TestUnclaimedCacheStillWritesEpochParams(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	bystander, err := OpenCache(path, nil)
+	bystander, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer bystander.Close() //nolint:errcheck
 	assert.NoError(t, bystander.UpsertEpochParams(KoiosEpochParams{
@@ -934,7 +934,7 @@ func TestRefusedWriteLeavesNoRows(t *testing.T) {
 	now := time.Now().UTC()
 	writes := gatedCacheWrites(network, now)
 
-	first, err := OpenCache(path, nil)
+	first, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer first.Close() //nolint:errcheck
 	_, err = first.RecordKoiosSource(
@@ -953,7 +953,7 @@ func TestRefusedWriteLeavesNoRows(t *testing.T) {
 	}
 
 	// A second process re-points the cache, discarding those rows.
-	second, err := OpenCache(path, nil)
+	second, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer second.Close() //nolint:errcheck
 	_, err = second.RecordKoiosSource(

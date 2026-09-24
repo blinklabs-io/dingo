@@ -367,18 +367,59 @@ type Cache struct {
 	claimedSources map[string]string
 }
 
+// cacheDSN returns the cache's connection string. It applies the same
+// settings as Dingo's SQLite metadata store (sqliteCommonPragmas in
+// database/plugin/metadata/sqlite/shared_sqlstore.go): synchronous=NORMAL
+// under WAL flushes at checkpoints rather than on every autocommit, which is
+// what the driver's FULL default costs the many small cache writes.
+//
+// busy_timeout is the one difference. It stays at 5s because the concurrency
+// tests in cache_concurrency_test.go are built around that bound.
+func cacheDSN(path, synchronous string) string {
+	return path + "?_pragma=journal_mode(WAL)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(" + synchronous + ")" +
+		"&_pragma=wal_autocheckpoint(10000)" +
+		"&_pragma=cache_size(-50000)" +
+		"&_pragma=foreign_keys(1)" +
+		"&_pragma=mmap_size(268435456)"
+}
+
+// CacheOption adjusts how OpenCache opens the database.
+type CacheOption func(*cacheOptions)
+
+type cacheOptions struct {
+	relaxedDurability bool
+}
+
+// WithRelaxedDurability opens the cache with synchronous=OFF, so commits are
+// never flushed to disk. A machine crash can then corrupt the file, so it is
+// only for caches that are discarded with the process, such as tests'.
+func WithRelaxedDurability() CacheOption {
+	return func(o *cacheOptions) { o.relaxedDurability = true }
+}
+
 // OpenCache opens (or creates) the SQLite cache at path, running migrations.
-func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
+func OpenCache(
+	path string,
+	logger *slog.Logger,
+	opts ...CacheOption,
+) (*Cache, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
-	db, err := sql.Open(
-		"sqlite",
-		path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
-	)
+	var options cacheOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	synchronous := "NORMAL"
+	if options.relaxedDurability {
+		synchronous = "OFF"
+	}
+	db, err := sql.Open("sqlite", cacheDSN(path, synchronous))
 	if err != nil {
 		return nil, fmt.Errorf("open cache db: %w", err)
 	}

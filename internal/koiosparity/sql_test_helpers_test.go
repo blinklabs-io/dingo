@@ -56,7 +56,10 @@ func (d *testDB) Exec(query string, args ...any) testResult {
 func openTestSQLDB(t testingT, dir string, includePools bool) *testDB {
 	t.Helper()
 	path := filepath.Join(dir, "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
+	)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
