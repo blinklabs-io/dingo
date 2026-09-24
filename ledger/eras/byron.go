@@ -418,13 +418,9 @@ func byronValidateWitnesses(
 	ls lcommon.LedgerState,
 	_ lcommon.ProtocolParameters,
 ) error {
-	// Verify vkey witness signatures
-	if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
-		return err
-	}
-	// Byron redeem witnesses are constructor 2 values whose fields are
-	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
-	// values but do not expose them through TransactionWitnessSet.
+	// Byron constructors have different signature domains and witness key
+	// layouts from Shelley vkey witnesses. Validate them below using their
+	// original constructors instead of the generic witness-set verifier.
 	var redeemWitnesses []lcommon.VkeyWitness
 	var bootstrapWitnesses []byronBootstrapWitness
 	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
@@ -493,6 +489,8 @@ func byronValidateWitnesses(
 				}
 			}
 		}
+	} else if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
+		return err
 	}
 	// Verify bootstrap witness signatures
 	if len(bootstrapWitnesses) == 0 {

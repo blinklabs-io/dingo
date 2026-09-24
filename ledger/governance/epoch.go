@@ -698,13 +698,17 @@ func ProcessEpoch(
 			parameterChange = a
 		}
 		decision := ShouldRatify(RatifyInputs{
-			Tally:                 tally,
-			PParams:               conwayPParams,
-			ParameterChange:       parameterChange,
-			GovAction:             action,
-			CurrentEpoch:          in.NewEpoch,
-			ActiveDRepCount:       activeDRepCount,
-			ActiveCCCount:         activeCCCount,
+			Tally:           tally,
+			PParams:         conwayPParams,
+			ParameterChange: parameterChange,
+			GovAction:       action,
+			CurrentEpoch:    in.NewEpoch,
+			ActiveDRepCount: activeDRepCount,
+			ActiveCCCount:   activeCCCount,
+			CommitteeAbsent: committeeAbsent(
+				rootsByPurpose[purposeCommittee], in.ConwayGenesis,
+				committeeState.CommitteePresent,
+			),
 			CCQuorum:              ccQuorum,
 			MajorVersion:          majorVersion,
 			CommitteeNoConfidence: ccInNoConfidence,
@@ -951,6 +955,21 @@ func committeeNoConfidenceState(
 	return committeeRoot != nil &&
 		lcommon.GovActionType(committeeRoot.ActionType) ==
 			lcommon.GovActionTypeNoConfidence
+}
+
+func committeeAbsent(
+	committeeRoot *models.GovernanceProposal,
+	genesis *conway.ConwayGenesis,
+	hasStoredMembers bool,
+) bool {
+	if committeeRoot != nil {
+		return lcommon.GovActionType(committeeRoot.ActionType) !=
+			lcommon.GovActionTypeUpdateCommittee
+	}
+	if hasStoredMembers {
+		return false
+	}
+	return genesis == nil || len(genesis.Committee.Members) == 0
 }
 
 func govActionPriority(proposal *models.GovernanceProposal) int {

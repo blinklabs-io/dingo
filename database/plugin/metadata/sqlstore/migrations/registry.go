@@ -52,6 +52,7 @@ const (
 	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
 	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
 	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
+	committeeZeroQuorumSchemaRelease              = "committee-zero-quorum"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -102,6 +103,7 @@ var schemaVersions = []struct {
 		Name:    rewardSnapshotExcludedStakeSchemaRelease,
 		Dir:     "v18",
 	},
+	{Version: 19, Name: committeeZeroQuorumSchemaRelease, Dir: "v19"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

@@ -98,6 +98,7 @@ func ratifyInputs(
 		GovAction:             govAction,
 		ActiveDRepCount:       activeDReps,
 		ActiveCCCount:         activeCC,
+		CommitteeAbsent:       false,
 		CCQuorum:              ccQuorum,
 		MajorVersion:          majorVersion,
 		CommitteeNoConfidence: committeeNoConfidence,
@@ -993,14 +994,51 @@ func TestShouldRatify_CCQuorumMissingFailsSafe(t *testing.T) {
 	))
 	assert.False(t, d.CCApproved)
 	assert.False(t, d.Ratified)
-	assert.Equal(t, "cc quorum missing or zero", d.FailureReason)
+	assert.Equal(t, "cc quorum missing", d.FailureReason)
 
-	// Same, but with an explicit zero quorum.
+	// Zero is a valid UnitInterval threshold and short-circuits approval.
 	d = ShouldRatify(ratifyInputs(
 		tally, pparams, 10, 5, big.NewRat(0, 1), 10, false,
 	))
-	assert.False(t, d.CCApproved)
-	assert.False(t, d.Ratified)
+	assert.True(t, d.CCApproved)
+	assert.True(t, d.Ratified)
+}
+
+func TestShouldRatify_ZeroCommitteeQuorum(t *testing.T) {
+	t.Parallel()
+
+	pparams := conwayPParamsFixture(10)
+	pparams.MinCommitteeSize = 0
+	tally := &ProposalTally{
+		ActionType:     uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		DRepYesStake:   100,
+		DRepTotalStake: 100,
+	}
+	inputs := func(activeCC int, absent bool, quorum *big.Rat) RatifyInputs {
+		in := ratifyInputs(tally, pparams, 1, activeCC, quorum, 10, false)
+		in.CommitteeAbsent = absent
+		return in
+	}
+
+	for _, test := range []struct {
+		name         string
+		activeCC     int
+		absent       bool
+		quorum       *big.Rat
+		wantCC       bool
+		wantRatified bool
+	}{
+		{name: "zero quorum with active members", activeCC: 2, quorum: big.NewRat(0, 1), wantCC: true, wantRatified: true},
+		{name: "empty seated committee and zero minimum", quorum: big.NewRat(0, 1), wantCC: true, wantRatified: true},
+		{name: "nil quorum remains unavailable", quorum: nil},
+		{name: "absent committee cannot approve", absent: true, quorum: big.NewRat(0, 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decision := ShouldRatify(inputs(test.activeCC, test.absent, test.quorum))
+			assert.Equal(t, test.wantCC, decision.CCApproved)
+			assert.Equal(t, test.wantRatified, decision.Ratified)
+		})
+	}
 }
 
 func TestConwayRatifyQuorum_FromGenesis(t *testing.T) {

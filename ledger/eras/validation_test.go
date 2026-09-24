@@ -112,6 +112,21 @@ type mockConwayFeeTx struct {
 	proposalProcedures []lcommon.ProposalProcedure
 }
 
+type mockCommitteeEpochState struct {
+	*mockLedgerState
+	epoch uint64
+}
+
+func (s *mockCommitteeEpochState) EpochForSlot(uint64) (uint64, error) {
+	return s.epoch, nil
+}
+
+func (s *mockCommitteeEpochState) IsStakeCredentialRegistered(
+	_ lcommon.Credential,
+) bool {
+	return true
+}
+
 func (m *mockConwayFeeTx) Inputs() []lcommon.TransactionInput {
 	return m.inputs
 }
@@ -2828,6 +2843,106 @@ func TestValidateTxConwayReusesResolvedPlutusContext(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 2, ls.utxoLookups)
+}
+
+func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionPlomin,
+		},
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224([]byte("committee member")),
+	}
+	validCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.NewBlake2b224([]byte("valid committee member")),
+	}
+	anchor := lcommon.GovAnchor{
+		Url:      "https://example.test/committee",
+		DataHash: [32]byte{0x51},
+	}
+
+	for _, test := range []struct {
+		name        string
+		expiryEpoch uint64
+		wantExpired bool
+	}{
+		{name: "past epoch", expiryEpoch: 499, wantExpired: true},
+		{name: "current epoch", expiryEpoch: 500, wantExpired: true},
+		{name: "next epoch", expiryEpoch: 501},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, err := lcommon.NewUpdateCommitteeGovAction(
+				nil,
+				nil,
+				map[*lcommon.Credential]uint64{
+					&credential:      test.expiryEpoch,
+					&validCredential: 501,
+				},
+				cbor.Rat{Rat: big.NewRat(2, 3)},
+			)
+			require.NoError(t, err)
+			proposal, err := conway.NewConwayProposalProcedure(
+				0,
+				rewardAccount,
+				action,
+				anchor,
+			)
+			require.NoError(t, err)
+			input := shelley.ShelleyTransactionInput{
+				TxId:        lcommon.Blake2b256{0x51},
+				OutputIndex: 0,
+			}
+			output := babbage.BabbageTransactionOutput{
+				OutputAddress: newTestKeyAddress(t),
+				OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+			}
+			tx := &conway.ConwayTransaction{
+				Body: conway.ConwayTransactionBody{
+					TxInputs: conway.NewConwayTransactionInputSet(
+						[]shelley.ShelleyTransactionInput{input},
+					),
+					TxOutputs:            []babbage.BabbageTransactionOutput{output},
+					TxProposalProcedures: []conway.ConwayProposalProcedure{*proposal},
+				},
+				TxIsValid: true,
+			}
+			baseState := newMockLedgerState()
+			baseState.skipPhase2Validation = true
+			baseState.addUtxo(input, output)
+			state := &mockCommitteeEpochState{
+				mockLedgerState: baseState,
+				epoch:           500,
+			}
+
+			err = ValidateTxConway(tx, 1, state, pp)
+			var expired conway.CommitteeMemberAlreadyExpiredError
+			if test.wantExpired {
+				require.ErrorAs(t, err, &expired)
+				require.Equal(t, test.expiryEpoch, expired.ExpiryEpoch)
+				require.Equal(t, uint64(500), expired.CurrentEpoch)
+				return
+			}
+			require.NotErrorAs(t, err, &expired)
+			require.NoError(
+				t,
+				conway.UtxoValidateProposalProcedures(tx, 1, state, pp),
+			)
+		})
+	}
 }
 
 func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(

@@ -313,6 +313,11 @@ restores the connection's original foreign-key mode with an independent bounded
 context even when the migration context was canceled. A failed rebuild therefore
 leaves the original tables intact and a retry still begins from `expand`.
 
+Migration `v19` (`committee-zero-quorum`, integer version 19) converts legacy
+committee quorum rows whose value is `0` into SQL NULL. Those rows were written
+as NoConfidence clear markers; new clear markers use NULL, leaving numeric zero
+available as a valid enacted UnitInterval threshold.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -1089,7 +1094,7 @@ updates preserve the previous activity and expiry epochs.
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
-| `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
+| `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v19 converts legacy zero clear markers to NULL. |
 | `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 

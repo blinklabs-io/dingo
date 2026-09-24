@@ -55,6 +55,7 @@ type RatifyInputs struct {
 	CurrentEpoch          uint64
 	ActiveDRepCount       int // reserved for future min-DRep-count gate
 	ActiveCCCount         int
+	CommitteeAbsent       bool
 	CCQuorum              *big.Rat
 	MajorVersion          uint
 	CommitteeNoConfidence bool
@@ -156,25 +157,16 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	case in.CommitteeNoConfidence:
 		decision.CCApproved = false
 		decision.FailureReason = "cc in no-confidence state"
-	case in.ActiveCCCount == 0:
-		// Check zero-members before the min-size comparison so the
-		// failure reason distinguishes "no members" from "below
-		// minimum" even when MinCommitteeSize >= 1. Bootstrap bypasses
-		// only the minimum-size gate; it does not create committee approval
-		// when no active members exist.
+	case in.CommitteeAbsent:
 		decision.CCApproved = false
-		decision.FailureReason = "cc has no active members"
 	case !inBootstrap && in.ActiveCCCount < int(in.PParams.MinCommitteeSize): //nolint:gosec
 		decision.CCApproved = false
 		decision.FailureReason = "cc below minimum committee size"
-	case in.CCQuorum == nil || in.CCQuorum.Sign() == 0:
-		// Fail-safe: a missing or zero quorum signals a plumbing bug,
-		// not "no quorum required". Auto-approving here would silently
-		// ratify CC-gated actions (ParameterChange, HardForkInitiation,
-		// TreasuryWithdrawal, NewConstitution) whenever the caller
-		// forgot to pass a quorum.
+	case in.CCQuorum == nil:
 		decision.CCApproved = false
-		decision.FailureReason = "cc quorum missing or zero"
+		decision.FailureReason = "cc quorum missing"
+	case in.CCQuorum.Sign() == 0:
+		decision.CCApproved = true
 	default:
 		ratio := in.Tally.CCYesRatio()
 		decision.CCApproved = ratio.Cmp(in.CCQuorum) >= 0

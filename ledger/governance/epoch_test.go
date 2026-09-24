@@ -1425,6 +1425,25 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 	}))
 }
 
+func TestCommitteeAbsentUsesEnactedStateAndGenesis(t *testing.T) {
+	t.Parallel()
+
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{"keyHash-committee-member": 500},
+		},
+	}
+	require.True(t, committeeAbsent(nil, nil, false))
+	require.False(t, committeeAbsent(nil, genesis, false))
+	require.False(t, committeeAbsent(nil, nil, true))
+	require.False(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeUpdateCommittee),
+	}, nil, false))
+	require.True(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
+	}, genesis, true))
+}
+
 func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 	t.Parallel()
 

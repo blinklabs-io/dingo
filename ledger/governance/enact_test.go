@@ -766,6 +766,24 @@ func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
 	assert.Equal(t, 0, got.Cmp(big.NewRat(3, 5)))
 }
 
+func TestApplyUpdateCommittee_PersistsZeroQuorum(t *testing.T) {
+	t.Parallel()
+
+	db, _ := newTallyTestDB(t)
+	action := &lcommon.UpdateCommitteeGovAction{
+		Credentials: []lcommon.Credential{},
+		CredEpochs:  map[*lcommon.Credential]uint64{},
+		Quorum:      cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 4242}, action, 4000,
+	))
+	got, err := db.GetCommitteeQuorum(nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 0, got.Cmp(big.NewRat(0, 1)))
+}
+
 func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 	t *testing.T,
 ) {

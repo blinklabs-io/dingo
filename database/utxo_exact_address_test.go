@@ -1187,10 +1187,12 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 	for i := range addrs {
 		payload := make([]byte, 4)
 		binary.BigEndian.PutUint32(payload, uint32(i)+1)
+		derivationPath, err := cbor.Encode(payload)
+		require.NoError(t, err)
 		addr, err := lcommon.NewByronAddressFromParts(
 			0,
 			zeroPayment,
-			lcommon.ByronAddressAttributes{Payload: payload},
+			lcommon.ByronAddressAttributes{Payload: derivationPath},
 		)
 		require.NoError(t, err)
 		require.Equal(
