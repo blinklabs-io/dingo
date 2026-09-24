@@ -637,15 +637,33 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 					args: []any{slot},
 				},
 				{
-					query: "DELETE FROM governance_vote WHERE added_slot > ?",
-					args:  []any{slot},
+					// A vote with no surviving history cannot be restored.
+					// This is the pre-v22 fallback: a vote replaced before
+					// the v22 backfill ran only got one history row for its
+					// current-at-migration value (DATABASE.md's
+					// governance_vote_history entry documents this data-loss
+					// limit), so a rollback landing between that vote's
+					// added_slot and its pre-migration replacement deletes
+					// that one history row and leaves nothing to restore
+					// from. Falling back to deletion here matches the
+					// pre-fix behavior instead of writing NULL into the
+					// NOT NULL vote column below.
+					query: `DELETE FROM governance_vote
+				 WHERE added_slot > ?
+				    OR NOT EXISTS (
+				        SELECT 1 FROM governance_vote_history AS history
+				        WHERE history.vote_id = governance_vote.id
+				    )`,
+					args: []any{slot},
 				},
 				{
 					// Restore the vote value that was current at the
 					// rollback point from the latest surviving history
 					// entry (dingo#4463). This is a no-op for a vote whose
 					// vote_updated_slot was already at or before slot, since
-					// that entry is still the latest remaining one.
+					// that entry is still the latest remaining one. Scoped to
+					// rows with surviving history: every other row was just
+					// deleted above.
 					query: `UPDATE governance_vote
 				 SET vote = (
 				     SELECT history.vote
@@ -671,6 +689,10 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 				     WHERE history.vote_id = governance_vote.id
 				     ORDER BY history.transition_slot DESC, history.id DESC
 				     LIMIT 1
+				 )
+				 WHERE EXISTS (
+				     SELECT 1 FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
 				 )`,
 				},
 				{

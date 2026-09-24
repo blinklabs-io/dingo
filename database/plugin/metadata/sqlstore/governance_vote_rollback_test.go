@@ -15,11 +15,46 @@
 package sqlstore
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/stretchr/testify/require"
 )
+
+// newManagementTestStoreWithRawDB is newManagementTestStore plus the
+// underlying *sql.DB, for tests that need to write rows migrations would
+// have produced (e.g. a v22 backfill row) directly, bypassing the store's
+// own write path.
+func newManagementTestStoreWithRawDB(t *testing.T) (*Store, *sql.DB) {
+	t.Helper()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	store, err := New(Config{
+		WriteDB:         db,
+		Dialect:         SQLiteDialect(),
+		Migrations:      registry,
+		MigrationLocker: migrations.NewProcessLocker(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	return store, db
+}
 
 func seedGovernanceVoteProposal(t *testing.T, store *Store) uint {
 	t.Helper()
@@ -163,4 +198,61 @@ func TestGovernanceVoteRollbackRestoresAcrossMultipleReplacements(t *testing.T) 
 	require.Equal(t, uint8(models.VoteNo), votes[0].Vote)
 	require.NotNil(t, votes[0].VoteUpdatedSlot)
 	require.Equal(t, slot2, *votes[0].VoteUpdatedSlot)
+}
+
+// TestGovernanceVoteRollbackDeletesVoteWithNoSurvivingHistory covers a vote
+// that predates the v22 upgrade: the migration backfill writes only one
+// history row, for the value current at the time the migration ran, not for
+// any earlier replacement. If that single row's transition_slot falls after
+// the rollback target, the delete step removes it and leaves the vote with
+// no surviving history at all. The restore step must fall back to deleting
+// that vote (matching the pre-fix, pre-history behavior) instead of writing
+// a NULL into the non-nullable vote/anchor columns.
+func TestGovernanceVoteRollbackDeletesVoteWithNoSurvivingHistory(t *testing.T) {
+	t.Parallel()
+	store, rawDB := newManagementTestStoreWithRawDB(t)
+	proposalID := seedGovernanceVoteProposal(t, store)
+
+	voterCredential := credentialHash(0x45)
+	addedSlot := uint64(100)
+	preUpgradeReplacementSlot := uint64(200)
+	rollbackSlot := uint64(150)
+
+	_, err := rawDB.Exec(`
+INSERT INTO governance_vote (
+    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
+    added_slot, vote_updated_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		proposalID,
+		models.VoterTypeDRep,
+		0,
+		voterCredential,
+		models.VoteNo,
+		addedSlot,
+		preUpgradeReplacementSlot,
+	)
+	require.NoError(t, err)
+	// Mirrors the v22 backfill: exactly one history row, at the slot the
+	// vote's value was current when the migration ran, not at addedSlot.
+	_, err = rawDB.Exec(`
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote
+)
+SELECT id, ?, vote FROM governance_vote
+WHERE proposal_id = ? AND voter_credential = ?`,
+		preUpgradeReplacementSlot,
+		proposalID,
+		voterCredential,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, store.DeleteGovernanceVotesAfterSlot(rollbackSlot, nil))
+
+	votes, err := store.GetGovernanceVotes(proposalID, nil)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		votes,
+		"a vote with no surviving history must be dropped, not left with a NULL vote",
+	)
 }
