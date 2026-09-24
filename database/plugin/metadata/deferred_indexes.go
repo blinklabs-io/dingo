@@ -94,6 +94,9 @@ type ContextDeferredIndexBuilder interface {
 // DeferredIndexProgressBuilder is an optional companion used by restore
 // paths that need progress while a large index build is running.
 type DeferredIndexProgressBuilder interface {
+	// BuildDeferredIndexesContextWithProgress rebuilds missing full-manifest
+	// indexes with ctx. before runs immediately before each DDL statement;
+	// after runs after a successful build with its elapsed duration.
 	BuildDeferredIndexesContextWithProgress(
 		ctx context.Context,
 		before func(string),
