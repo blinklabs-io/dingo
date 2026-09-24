@@ -507,13 +507,13 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 }
 
 // TestCheckDetectsMissingKoiosTotalsOnUpgradedCache is a regression test for
-// the "upgraded cache" scenario the reviewer flagged: a cache.db that has a
-// koios_epoch_info row (from before /totals fetching was added to this tool,
-// or from a --skip-fetch run against such a cache) but no koios_totals row
-// for the same epoch. Before this fix, CompareEpochTotals silently skipped
-// comparison whenever koiosTotals was nil, so an epoch like this could report
-// a clean PASS despite treasury/reserves/fees never actually being validated.
-// This confirms Check now surfaces it as ERROR instead.
+// the "upgraded cache" scenario: a cache.db that has a koios_epoch_info row
+// (from before /totals fetching was added to this tool, or from a
+// --skip-fetch run against such a cache) but no koios_totals row for the
+// same epoch. CompareEpochTotals must not silently skip comparison whenever
+// koiosTotals is nil -- doing so would let an epoch like this report a
+// clean PASS despite treasury/reserves/fees never actually being validated.
+// This confirms Check surfaces it as ERROR instead.
 func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 	t.Parallel()
 
@@ -1476,7 +1476,7 @@ func seedDepartureFixtureWithCount(
 	return dingoDir, cachePath, poolBech32
 }
 
-// TestCheckDegradedActivePoolStillErrors is the reviewer's degraded-active-pool
+// TestCheckDegradedActivePoolStillErrors covers the degraded-active-pool
 // case. buildRewardStateInputs (ledger/snapshot/rotation.go) drops a pool with
 // stale registration data from reward_pool_input so one bad pool cannot wedge
 // the whole boundary capture, and says so explicitly: degraded pools are
@@ -1519,7 +1519,7 @@ func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
 	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
 }
 
-// TestCheckMissingRewardBundleStillErrors is the reviewer's no-bundle case.
+// TestCheckMissingRewardBundleStillErrors covers the no-bundle case.
 // saveSnapshotInTxn persists the mark pool_stake_snapshot and epoch summary on
 // every transition "regardless of reward-input availability", so a ready
 // epoch_summary at K+1 is compatible with the entire reward-input bundle
@@ -2435,4 +2435,121 @@ func TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch(t *testing.T) {
 		}
 	}
 	require.True(t, found, "epoch should have a persisted check status")
+}
+
+// TestCheckEpochResultNamesOnlyThePhasesItRan pins the verdict boundary the
+// two observer queues (dingo #4339) created: the aggregate queue and the
+// account queue both return an EpochCompareResult for the same epoch, and the
+// aggregate queue's check never looks at account data. Without CheckedScopes
+// its PASS is indistinguishable from the epoch's real verdict, so a consumer
+// reading Status alone would report an epoch clean while a recorded account
+// failure stands — the callback-side form of the stored-status defect
+// UpsertCheckEpochStatus fixes.
+func TestCheckEpochResultNamesOnlyThePhasesItRan(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// One account whose Dingo reward differs from the Koios reference below,
+	// so the account phase fails while the aggregate phase has nothing to
+	// disagree about.
+	badKey := testPoolKeyHash(t, 0x42)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  badKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x22),
+		RewardType:  "member",
+		Amount:      types.Uint64(2_000_000),
+		Spendable:   true,
+	}).Error)
+	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	require.NoError(t, err)
+	seedDingoBabbageProtocolParams(t, sqlDB, koiosEpoch)
+
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Network:   network,
+		Epoch:     koiosEpoch,
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{{
+			StakeAddress: badAddr,
+			RewardType:   "member",
+			Earned:       "2000001",
+			FetchedAt:    fetchedAt,
+		}},
+		1,
+		true,
+		fetchedAt,
+	))
+
+	withAccounts, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		true,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusFail, withAccounts.Status)
+	require.True(t, withAccounts.CoversScope(ScopeAggregate))
+	require.True(t, withAccounts.CoversScope(ScopeAccount),
+		"a check that ran the account comparison must say so")
+
+	aggregateOnly, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusPass, aggregateOnly.Status,
+		"the scenario must hold a passing aggregate phase, or the "+
+			"assertion below proves nothing")
+	require.True(t, aggregateOnly.CoversScope(ScopeAggregate))
+	require.False(t, aggregateOnly.CoversScope(ScopeAccount),
+		"an aggregate-only check must not present its verdict as the "+
+			"account phase's")
+
+	// The stored verdict is the merge of both phases, so the account failure
+	// the aggregate-only re-check never looked at still stands.
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusFail, statuses[0].Status)
+	require.Equal(t, StatusFail, statuses[0].AccountStatus)
 }

@@ -229,7 +229,7 @@ jobs:
     # Backstop only, replacing GitHub's 360-minute default; the per-step
     # -timeout values are the diagnostics. Higher than the other jobs here
     # because this one's slow steps serialize: db-integration (10m),
-    # live-lifecycle (20m) and go-test (30m) all precede each other.
+    # live-lifecycle (20m) and go-test (60m) all precede each other.
     timeout-minutes: 120
     services:
       postgres:
@@ -342,11 +342,23 @@ jobs:
         run: make test-live-lifecycle
       - name: go-test
         # No race instrumentation here on purpose: go-test (Linux, race)
-        # covers the same packages in parallel. -timeout is 30m rather than
-        # 20m because this job's service DSNs put internal/test/conformance on
-        # real Postgres and MySQL as well as SQLite, which took 917s of a 20m
-        # budget in run 33521250798.
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+        # covers the same packages in parallel.
+        #
+        # -timeout is a hang diagnostic rather than a budget: it panics with a
+        # goroutine dump naming the stuck test, which this job's
+        # timeout-minutes cannot do. That only holds while it sits clear of
+        # what the suite legitimately takes, and the previous 30m did not.
+        # This job's service DSNs put internal/test/conformance on real
+        # Postgres and MySQL as well as SQLite, which makes that package the
+        # long pole: it took 707-1238s across ten consecutive runs, a 1.75x
+        # spread on identical work, and reached 1800s in run 35509830038 with
+        # TestRulesConformanceVectorsMysql still issuing TRUNCATE statements
+        # rather than deadlocked. A ceiling 1.45x above the worst passing run
+        # fails pull requests for runner speed instead of for cause. 60m is
+        # 2.9x that worst run and leaves the 120m backstop 30m clear of this
+        # job's serialized 10m + 20m + 60m; internal/docsparity's
+        # TestPackageTimeoutsStayUnderJobBackstops keeps that ordering.
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
 
   # Stage 3. Race detection on every pull request, not only on a release tag.
   # The release-only arrangement is what abandoned v0.70.3: a genuine
@@ -402,10 +414,16 @@ jobs:
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
         # Same command as publish.yml's release gate, so a pull request cannot
-        # pass a check the release then fails. 30m rather than 20m because
-        # ./ledger alone runs 9-13 minutes under the race detector and reached
-        # the old 20m limit in run 33315370942.
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 30m ./...
+        # pass a check the release then fails.
+        #
+        # 60m for the reason go-test (Linux) carries it. ./ledger reached the
+        # original 20m limit in run 33315370942 and runs 255-437s here now;
+        # internal/test/conformance replays SQLite only in this job but does
+        # it under the race detector, which put it at 684-1134s across the
+        # same ten runs. 30m sat 1.6x above the slower of the two, which is
+        # not enough clearance for a ceiling whose panic is the only thing
+        # that names a stuck test. timeout-minutes: 90 remains the backstop.
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
 
   # Stage 3. windows-latest and macos-latest run the full ./... suite here so
   # platform breakage is caught before merge. That is how the Windows-only
@@ -617,7 +635,7 @@ jobs:
         with:
           fetch-depth: '0'
           persist-credentials: false
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1 https://github.com/docker/setup-buildx-action/releases/tag/v4.4.1
       - name: check
         run: docker build --check .
       - id: meta
@@ -625,7 +643,7 @@ jobs:
         with:
           images: ${{ env.GHCR_IMAGE_NAME }}
       - name: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0 https://github.com/docker/build-push-action/releases/tag/v7.4.0
         with:
           context: .
           push: false

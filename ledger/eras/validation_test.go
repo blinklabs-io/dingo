@@ -1603,22 +1603,6 @@ func requireIndexedRulesReplaceRuleIndex(
 	require.Fail(t, message)
 }
 
-func requireIndexedRulesIncludeFunc(
-	t *testing.T,
-	rules []indexedUtxoValidationRule,
-	want lcommon.UtxoValidationRuleFunc,
-	message string,
-) {
-	t.Helper()
-	wantName := utxoValidationRuleName(want)
-	for _, rule := range rules {
-		if utxoValidationRuleName(rule.validationFunc) == wantName {
-			return
-		}
-	}
-	require.Fail(t, message)
-}
-
 func TestTxSizeForFee(t *testing.T) {
 	tests := []struct {
 		name     string

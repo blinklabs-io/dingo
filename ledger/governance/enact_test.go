@@ -721,6 +721,11 @@ func mutateConwayPParams(
 	}
 }
 
+// TestStakeEpochFor pins stakeEpochFor to the identity function: the
+// ratify decision taken at the boundary into newEpoch uses mark[newEpoch],
+// the mark snapshot captured by SNAP at that same boundary. See
+// stakeEpochFor's doc comment for the upstream derivation and dingo#4441
+// for the live incident (Preview Plomin hard fork) this fixed.
 func TestStakeEpochFor(t *testing.T) {
 	t.Parallel()
 
@@ -729,10 +734,11 @@ func TestStakeEpochFor(t *testing.T) {
 		expected uint64
 	}{
 		{0, 0},
-		{1, 0},
-		{2, 0},
-		{3, 1},
-		{10, 8},
+		{1, 1},
+		{2, 2},
+		{3, 3},
+		{10, 10},
+		{742, 742},
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.expected, stakeEpochFor(tt.newEpoch))
@@ -875,6 +881,297 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 	)
 	require.NoError(t, err)
 	assert.True(t, resigned)
+}
+
+// TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewal
+// reproduces the blinklabs-io/dingo#4584 live Preview halt at its actual root
+// cause: applyUpdateCommittee previously stamped a fresh TermStartSlot onto
+// every credential in an enacted UpdateCommittee action's CredEpochs map,
+// including a continuing member whose term was simply being renewed. Because
+// GetCommitteeMember/GetActiveCommitteeMembers/IsCommitteeMemberResigned gate
+// on added_slot >= term_start_slot, that silently stopped the continuing
+// member's one-time hot-key authorization from resolving, and the next vote
+// cast with that hot key was rejected as an unknown voter. A continuing
+// member -- one already an active (non-deleted) committee member immediately
+// before this enactment -- must keep its existing TermStartSlot.
+func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewal(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	coldHash := testBytes(28, 51)
+	hotHash := testBytes(28, 52)
+	coldCredential := &lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(coldHash),
+	}
+
+	require.NoError(t, store.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(coldCredential.CredType),
+			ColdCredHash:      coldHash,
+			ExpiresEpoch:      50,
+			TermStartSlot:     10,
+			TermStartSlotSet:  true,
+			AddedSlot:         10,
+		}},
+		nil,
+	))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldHash,
+		HotCredential:  hotHash,
+		CertificateID:  1,
+		AddedSlot:      20,
+	})
+
+	// A later UpdateCommittee action re-elects the SAME cold credential
+	// without ever removing it: a term renewal for a continuing member, with
+	// no new AuthCommitteeHot or ResignCommitteeCold certificate. The
+	// action's own termStartSlot (40) must not be stamped onto it.
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 40},
+		&lcommon.UpdateCommitteeGovAction{
+			CredEpochs: map[*lcommon.Credential]uint64{
+				coldCredential: 80,
+			},
+			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		40,
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(
+		t,
+		uint64(10),
+		members[0].TermStartSlot,
+		"a continuing member's term start must survive a term renewal",
+	)
+	assert.Equal(t, uint64(80), members[0].ExpiresEpoch)
+
+	active, err := db.GetActiveCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		active,
+		1,
+		"the pre-renewal authorization must still resolve as active",
+	)
+	assert.Equal(t, hotHash, active[0].HotCredential)
+
+	resigned, err := db.IsCommitteeMemberResigned(
+		uint8(coldCredential.CredType),
+		coldHash,
+		members[0].TermStartSlot,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.False(t, resigned)
+
+	// GetResignedCommitteeMembers must agree with IsCommitteeMemberResigned
+	// for the identical credential and term (blinklabs-io/dingo#4584's
+	// review found these two disagree once one query is gated by term and
+	// the other is not).
+	resignedSet, err := db.GetResignedCommitteeMembers(
+		[]models.CommitteeCredential{{
+			CredentialTag: uint8(coldCredential.CredType),
+			Credential:    coldHash,
+			TermStartSlot: members[0].TermStartSlot,
+		}},
+		nil,
+	)
+	require.NoError(t, err)
+	key := models.CommitteeCredential{
+		CredentialTag: uint8(coldCredential.CredType),
+		Credential:    coldHash,
+	}.Key()
+	assert.False(t, resignedSet[key])
+}
+
+// TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization
+// covers the negative case a blanket query-gate deletion gets wrong: a
+// credential that is genuinely removed and later re-elected must not have
+// its stale, pre-removal hot-key authorization resolve as active before any
+// new AuthCommitteeHot certificate is submitted.
+func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	coldHash := testBytes(28, 61)
+	oldHotHash := testBytes(28, 62)
+	coldCredential := &lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(coldHash),
+	}
+
+	require.NoError(t, store.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(coldCredential.CredType),
+			ColdCredHash:      coldHash,
+			ExpiresEpoch:      50,
+			TermStartSlot:     10,
+			TermStartSlotSet:  true,
+			AddedSlot:         10,
+		}},
+		nil,
+	))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldHash,
+		HotCredential:  oldHotHash,
+		CertificateID:  1,
+		AddedSlot:      20,
+	})
+
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 40},
+		&lcommon.UpdateCommitteeGovAction{
+			Credentials: []lcommon.Credential{*coldCredential},
+			Quorum:      cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		40,
+	))
+	membersAfterRemoval, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Empty(t, membersAfterRemoval)
+
+	// Re-election: a later UpdateCommittee action re-elects the same cold
+	// credential. No new AuthCommitteeHot certificate has been submitted.
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 90},
+		&lcommon.UpdateCommitteeGovAction{
+			CredEpochs: map[*lcommon.Credential]uint64{
+				coldCredential: 200,
+			},
+			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		90,
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(
+		t,
+		uint64(90),
+		members[0].TermStartSlot,
+		"a credential rejoining after removal must get a fresh term start",
+	)
+
+	active, err := db.GetActiveCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		active,
+		"the stale pre-removal authorization must not resolve as active",
+	)
+
+	_, err = db.GetCommitteeMember(
+		uint8(coldCredential.CredType),
+		coldHash,
+		members[0].TermStartSlot,
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrCommitteeMemberNotFound)
+}
+
+// TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag
+// covers the other negative case: a member who resigned and was then
+// removed and re-elected must not read as permanently resigned. Resignation
+// is scoped to the membership term it occurred in (restored by this fix); a
+// fresh term after genuine removal and re-election starts clean.
+func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	coldHash := testBytes(28, 71)
+	coldCredential := &lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(coldHash),
+	}
+
+	require.NoError(t, store.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: uint8(coldCredential.CredType),
+			ColdCredHash:      coldHash,
+			ExpiresEpoch:      50,
+			TermStartSlot:     10,
+			TermStartSlotSet:  true,
+			AddedSlot:         10,
+		}},
+		nil,
+	))
+	seedTallyCommitteeResignation(t, store, models.ResignCommitteeCold{
+		ColdCredential: coldHash,
+		CertificateID:  1,
+		AddedSlot:      20,
+	})
+
+	resignedBeforeRemoval, err := db.IsCommitteeMemberResigned(
+		uint8(coldCredential.CredType), coldHash, 10, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, resignedBeforeRemoval)
+
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 40},
+		&lcommon.UpdateCommitteeGovAction{
+			Credentials: []lcommon.Credential{*coldCredential},
+			Quorum:      cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		40,
+	))
+
+	// Re-election, no new certificate submitted of either kind.
+	require.NoError(t, applyUpdateCommittee(
+		&EnactmentContext{DB: db, Slot: 90},
+		&lcommon.UpdateCommitteeGovAction{
+			CredEpochs: map[*lcommon.Credential]uint64{
+				coldCredential: 200,
+			},
+			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		90,
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, uint64(90), members[0].TermStartSlot)
+
+	resigned, err := db.IsCommitteeMemberResigned(
+		uint8(coldCredential.CredType),
+		coldHash,
+		members[0].TermStartSlot,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.False(
+		t,
+		resigned,
+		"a genuinely re-elected member must not remain stuck resigned forever",
+	)
+
+	// GetResignedCommitteeMembers must agree.
+	resignedSet, err := db.GetResignedCommitteeMembers(
+		[]models.CommitteeCredential{{
+			CredentialTag: uint8(coldCredential.CredType),
+			Credential:    coldHash,
+			TermStartSlot: members[0].TermStartSlot,
+		}},
+		nil,
+	)
+	require.NoError(t, err)
+	key := models.CommitteeCredential{
+		CredentialTag: uint8(coldCredential.CredType),
+		Credential:    coldHash,
+	}.Key()
+	assert.False(t, resignedSet[key])
 }
 
 func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(

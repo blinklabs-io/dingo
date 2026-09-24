@@ -31,34 +31,23 @@ func (b *Blockfrost) handleAccountUTXOs(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountUTXOs(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountUTXOs,
+		func(item AccountUTXOInfo) AccountUTXOResponse {
+			return AccountUTXOResponse{
+				Address:             item.Address,
+				TxHash:              item.TxHash,
+				TxIndex:             int(item.TxIndex),
+				OutputIndex:         int(item.OutputIndex),
+				Amount:              convertAddressAmounts(item.Amount),
+				Block:               item.Block,
+				DataHash:            item.DataHash,
+				InlineDatum:         item.InlineDatum,
+				ReferenceScriptHash: item.ReferenceScriptHash,
+			}
+		},
+		"failed to retrieve account UTxOs",
 	)
-	if err != nil {
-		b.writeAccountError(w, err, "failed to retrieve account UTxOs")
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make([]AccountUTXOResponse, 0, len(items))
-	for _, item := range items {
-		resp = append(resp, AccountUTXOResponse{
-			Address:             item.Address,
-			TxHash:              item.TxHash,
-			TxIndex:             int(item.TxIndex),
-			OutputIndex:         int(item.OutputIndex),
-			Amount:              convertAddressAmounts(item.Amount),
-			Block:               item.Block,
-			DataHash:            item.DataHash,
-			InlineDatum:         item.InlineDatum,
-			ReferenceScriptHash: item.ReferenceScriptHash,
-		})
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAccountWithdrawals handles
@@ -68,26 +57,13 @@ func (b *Blockfrost) handleAccountWithdrawals(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountWithdrawals(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountWithdrawals,
+		func(item AccountWithdrawalInfo) AccountWithdrawalResponse {
+			return AccountWithdrawalResponse(item)
+		},
+		"failed to retrieve account withdrawals",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account withdrawals",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make([]AccountWithdrawalResponse, 0, len(items))
-	for _, item := range items {
-		resp = append(resp, AccountWithdrawalResponse(item))
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAccountTransactions handles

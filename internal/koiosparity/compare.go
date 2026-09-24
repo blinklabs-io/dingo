@@ -145,6 +145,12 @@ const (
 )
 
 // EpochCompareResult holds the comparison outcome for one epoch.
+//
+// Status covers exactly the phases named in CheckedScopes, which is not
+// necessarily the whole epoch: the observer runs the aggregate and account
+// phases on independent queues, so both emit a result for the same epoch and
+// an aggregate-only PASS says nothing about the account phase's verdict. Read
+// CheckedScopes before treating Status as the epoch's answer.
 type EpochCompareResult struct {
 	Network        string
 	Epoch          uint64
@@ -154,6 +160,14 @@ type EpochCompareResult struct {
 	KoiosPoolCount int
 	OnlyDingo      []string
 	OnlyKoios      []string
+	// CheckedScopes names the check phases this result's Status is a verdict
+	// on, drawn from ScopeAggregate/ScopeAccount.
+	CheckedScopes []string
+}
+
+// CoversScope reports whether Status is a verdict on the named check phase.
+func (r *EpochCompareResult) CoversScope(scope string) bool {
+	return slices.Contains(r.CheckedScopes, scope)
 }
 
 // CompareEpochAggregates compares epoch-level fields from Dingo's database
@@ -420,10 +434,6 @@ func CompareEpochTotals(
 // Deliberately NOT compared, each verified against real preview data before
 // being excluded:
 //
-//   - coins_per_utxo_size. Koios reports Alonzo's per-word figure (34482 on
-//     preview epochs 0-2) where Dingo stores 4310; the two agree from Babbage
-//     onward. Which side is right for Alonzo needs its own investigation, so
-//     including it would attach an unexplained permanent FAIL to those epochs.
 //   - decentralisation and min_utxo_value. Neither exists in the Babbage or
 //     Conway parameter structs, so on every currently live era there is no
 //     Dingo-side value to compare.
@@ -531,6 +541,7 @@ func CompareEpochProtocolParams(
 		{"pparams_max_value_size", dingoParams.MaxValueSize, koios.MaxValueSize},
 		{"pparams_collateral_percentage", dingoParams.CollateralPercentage, koios.CollateralPercentage},
 		{"pparams_max_collateral_inputs", dingoParams.MaxCollateralInputs, koios.MaxCollateralInputs},
+		{"pparams_coins_per_utxo_size", dingoParams.CoinsPerUtxoSize, koios.CoinsPerUtxoSize},
 	} {
 		if f.dingo == "" && f.koios == "" {
 			// Both sides agree the era does not define this parameter.
@@ -1849,6 +1860,27 @@ func CountSignificant(mismatches []CheckMismatch) int {
 		}
 	}
 	return n
+}
+
+// referenceLagOnly reports whether mismatches has at least one significant
+// entry and every significant entry is reference_lag. That is the one
+// non-pass result a strict-mode observer does not treat as fatal: Koios's
+// data for the epoch is not yet complete, which is not evidence that Dingo
+// is wrong. dingo_db_missing, dingo_db_error and acct_coverage_incomplete
+// share reference_lag's ERROR severity but are not covered here, so a row
+// Dingo never wrote past the grace window still stops a strict node.
+func referenceLagOnly(mismatches []CheckMismatch) bool {
+	lag := false
+	for _, m := range mismatches {
+		if severityOf(m.Category) == severityInformational {
+			continue
+		}
+		if m.Category != CategoryReferenceLag {
+			return false
+		}
+		lag = true
+	}
+	return lag
 }
 
 // isZeroRewardAmount reports whether a lovelace decimal string is zero.

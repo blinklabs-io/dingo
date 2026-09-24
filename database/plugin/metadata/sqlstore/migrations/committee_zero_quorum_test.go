@@ -39,7 +39,7 @@ func TestCommitteeZeroQuorumMigrationConvertsLegacyClearMarkers(t *testing.T) {
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	run(registry[:18])
+	run(registry[:22])
 	_, err = db.Exec(
 		"INSERT INTO committee_quorum (quorum, added_slot) VALUES ('0', 10)",
 	)

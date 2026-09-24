@@ -52,6 +52,13 @@ type fakeEpochRef struct {
 	// after that — exercising the observer's fetch retry loop.
 	notYetClosedFor int32
 	attempts        atomic.Int32
+	// endTimeUnix, if nonzero, overrides the fake /epoch_info response's
+	// end_time (default: the fixed historical timestamp 2000, decades
+	// outside any graceHours window every other fixture in this file
+	// relies on). Set this to place an epoch's Koios close time inside a
+	// grace window deliberately, e.g. to drive CompareEpochAggregates'
+	// reference_lag (StatusError) path instead of dingo_db_missing.
+	endTimeUnix int64
 }
 
 // fakeKoiosAccountFixtures optionally extends newFakeKoiosServer with
@@ -148,6 +155,9 @@ func newFakeKoiosServer(
 					return
 				}
 				endTime := int64(2000)
+				if ref.endTimeUnix != 0 {
+					endTime = ref.endTimeUnix
+				}
 				if attempt := ref.attempts.Add(1); attempt <= ref.notYetClosedFor {
 					endTime = 0
 				}
@@ -899,6 +909,165 @@ func TestObserverNonStrictModeContinuesAfterFailure(t *testing.T) {
 	)
 }
 
+// TestObserverStrictModeDoesNotFatalOnReferenceLagOnly guards dingo #4645: an
+// epoch whose only significant mismatches are reference_lag (Koios's data had
+// not caught up, so the comparison could not be trusted yet) must never fire
+// FatalFunc in strict mode. Epoch 5 is left unseeded on the Dingo side while
+// its fake Koios epoch_info reports a recent end_time inside the configured
+// grace window, so the comparison emits only reference_lag mismatches. Epoch 7
+// is seeded normally and passes; both are published in the same batch (as in
+// TestObserverStrictModeCancelsOnFirstMismatch) so epoch 7 being checked at
+// all proves strict mode did not stop on epoch 5.
+//
+// It runs once per queue: processEpoch and processAccountEpoch each call fail
+// on their own result, so each call site needs its own proof.
+//
+// 7 rather than 6 because seedDingoEpochAggregate writes the epoch_summary
+// row at koiosEpoch-1: seeding epoch 6 would also create epoch 5's summary,
+// leaving epoch 5 half-present and yielding a dingo_db_missing
+// reward_ada_pots row instead of the reference_lag the incident reported.
+func TestObserverStrictModeDoesNotFatalOnReferenceLagOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, accounts := range []bool{false, true} {
+		t.Run(fmt.Sprintf("accounts=%t", accounts), func(t *testing.T) {
+			t.Parallel()
+			fatalCount, o := runStrictUnseededEpoch5(
+				t,
+				time.Now().Add(-time.Hour).Unix(),
+				accounts,
+			)
+			testutil.WaitForCondition(t, func() bool {
+				statuses, err := o.cache.GetStatusSummary("preview")
+				return err == nil && len(statuses) == 2
+			}, 5*time.Second,
+				"strict mode must still validate epoch 7 after epoch 5's "+
+					"reference_lag result")
+			if accounts {
+				// The account queue sorts 5 before 7, so an account phase
+				// for epoch 7 proves that queue did not stop on epoch 5.
+				testutil.WaitForCondition(t, func() bool {
+					statuses, err := o.cache.GetStatusSummary("preview")
+					if err != nil {
+						return false
+					}
+					for _, s := range statuses {
+						if s.Epoch == 7 && s.AccountStatus != "" {
+							return true
+						}
+					}
+					return false
+				}, 5*time.Second, "account queue must still validate epoch 7")
+			}
+
+			statuses, err := o.cache.GetStatusSummary("preview")
+			require.NoError(t, err)
+			byEpoch := map[uint64]string{}
+			for _, s := range statuses {
+				byEpoch[s.Epoch] = s.Status
+			}
+			require.Equal(t, StatusError, byEpoch[5])
+			require.Equal(t, StatusPass, byEpoch[7])
+			// Pin the ERROR to #4645's exact category: dingo_db_missing is
+			// also ERROR-severity but stays fatal (see
+			// TestObserverStrictModeFatalsOnDBMissingPastGrace).
+			mismatches, err := o.cache.GetMismatches("preview", 5, "")
+			require.NoError(t, err)
+			require.NotEmpty(t, mismatches)
+			for _, m := range mismatches {
+				require.Equal(
+					t,
+					CategoryReferenceLag,
+					m.Category,
+					"field %s",
+					m.Field,
+				)
+			}
+			require.Equal(
+				t,
+				int32(0),
+				fatalCount.Load(),
+				"strict mode must never call FatalFunc on a reference_lag-only result",
+			)
+		})
+	}
+}
+
+// TestObserverStrictModeFatalsOnDBMissingPastGrace is the negative control for
+// TestObserverStrictModeDoesNotFatalOnReferenceLagOnly: the same unseeded
+// epoch 5, but with Koios's end_time far outside the grace window, reads as
+// dingo_db_missing. That shares reference_lag's ERROR severity but means Dingo
+// never wrote a row it should have, so strict mode must still stop.
+func TestObserverStrictModeFatalsOnDBMissingPastGrace(t *testing.T) {
+	t.Parallel()
+
+	fatalCount, o := runStrictUnseededEpoch5(t, 0, false)
+	testutil.WaitForCondition(t, func() bool {
+		return fatalCount.Load() == 1
+	}, 5*time.Second,
+		"strict mode must call FatalFunc on dingo_db_missing past the "+
+			"grace window")
+
+	mismatches, err := o.cache.GetMismatches("preview", 5, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, mismatches)
+	for _, m := range mismatches {
+		require.Equal(t, CategoryDBMissing, m.Category, "field %s", m.Field)
+	}
+}
+
+// runStrictUnseededEpoch5 starts a strict observer (GraceHours 24) against a
+// fake Koios serving epochs 5 and 7, seeds only epoch 7 on the Dingo side, and
+// publishes both transitions in one batch. endTimeUnix overrides epoch 5's
+// Koios end_time; 0 keeps the fixture default, far outside the grace window.
+func runStrictUnseededEpoch5(
+	t *testing.T,
+	endTimeUnix int64,
+	accountsEnabled bool,
+) (*atomic.Int32, *Observer) {
+	t.Helper()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		5: {
+			activeStake: "1000000",
+			treasury:    "10",
+			reserves:    "20",
+			fees:        "30",
+			endTimeUnix: endTimeUnix,
+		},
+		7: {activeStake: "2000000", treasury: "11", reserves: "21", fees: "31"},
+	})
+
+	fatalCount := &atomic.Int32{}
+	o, err := NewObserver(ObserverConfig{
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source: source, Strict: true, GraceHours: 24,
+		AccountsEnabled: accountsEnabled,
+		Logger:          slog.New(slog.DiscardHandler),
+		FatalFunc:       func(error) { fatalCount.Add(1) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.Start(context.Background()))
+	eb := event.NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+	seedDingoEpochAggregate(t, source, 7, 2_000_000, 11, 21, 31)
+	publishEpochTransition(eb, 5)
+	publishEpochTransition(eb, 7)
+	return fatalCount, o
+}
+
 // TestObserverCancellationStopsPromptly confirms cancelling the context
 // passed to Start makes the background goroutine exit promptly, and that
 // Stop does not hang waiting for it.
@@ -942,14 +1111,14 @@ func TestObserverCancellationStopsPromptly(t *testing.T) {
 }
 
 // TestObserverStopIsIdempotent confirms Stop can be called more than once on
-// the same Observer instance without panicking. This models the real
-// double-invocation the reviewer found: node.go's own started-stack cleanup
-// calls Stop() on a startup failure that occurs after the koios-parity
-// observer has already been started but before Run() finishes, and
-// node_shutdown.go's shutdown() (the normal shutdown path, e.g. via
-// Node.Stop() or a signal) independently calls Stop() again on the same
-// instance. Before this fix, Stop() closed an owned "done" channel
-// unconditionally, so a second call panicked with "close of closed channel".
+// the same Observer instance without panicking. This models a real
+// double-invocation: node.go's own started-stack cleanup calls Stop() on a
+// startup failure that occurs after the koios-parity observer has already
+// been started but before Run() finishes, and node_shutdown.go's shutdown()
+// (the normal shutdown path, e.g. via Node.Stop() or a signal) independently
+// calls Stop() again on the same instance. Stop() must not close an owned
+// "done" channel unconditionally -- doing so panics on the second call with
+// "close of closed channel".
 func TestObserverStopIsIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -1171,12 +1340,21 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 
 	require.NoError(t, o.Start(context.Background()))
 
-	result := testutil.RequireReceive(
-		t,
-		results,
-		5*time.Second,
-		"epoch 5 should be picked up from Start's backlog purely due to missing account coverage",
-	)
+	// The aggregate queue checks the same epoch and reports first in the
+	// common case; only the account queue's result speaks for the coverage
+	// this test is about, so skip past anything that does not carry it.
+	var result *EpochCompareResult
+	for {
+		result = testutil.RequireReceive(
+			t,
+			results,
+			5*time.Second,
+			"epoch 5 should be picked up from Start's backlog purely due to missing account coverage",
+		)
+		if result.CoversScope(ScopeAccount) {
+			break
+		}
+	}
 	require.Equal(t, koiosEpoch, result.Epoch)
 	require.Equal(
 		t,
@@ -1434,6 +1612,347 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 			"not re-request /epoch_info")
 }
 
+// TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch is dingo #4339's
+// regression test: a slow per-account Koios fetch for one epoch must never
+// hold up the fast pool/aggregate check for a later epoch, since the fast
+// check alone is what can catch a reward-round defect in strict mode before
+// an unbounded per-account backlog develops.
+//
+// Epoch 5's /account_reward_history request blocks until the test releases
+// it, simulating #4339's live-observed ~17-minutes-per-epoch account-fetch
+// bottleneck. Epoch 6 carries a genuine Koios/Dingo aggregate mismatch.
+// Before the fix, Observer.run processed epochs strictly in order through one
+// fetchIfNeeded call that fetched pools+params+accounts before ever invoking
+// CheckEpoch, so epoch 6 was never even fetched — let alone checked — while
+// epoch 5's account fetch was blocked, and FatalFunc never fired. After the
+// fix, the fast aggregate queue never calls the account endpoint at all and
+// reaches epoch 6 independently of the slow account queue's own progress.
+func TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	const slowEpoch = uint64(5)
+	const mismatchEpoch = uint64(6)
+
+	stakingKey := testPoolKeyHash(t, 0x99)
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+
+	blockAccountFetch := make(chan struct{})
+	var accountFetchStarted atomic.Bool
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":999999}]`))
+			case "/pool_list", "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case "/account_list":
+				w.WriteHeader(http.StatusOK)
+				b, _ := json.Marshal(
+					[]map[string]string{{"stake_address": addr}},
+				)
+				_, _ = w.Write(b)
+			case "/account_reward_history":
+				var body struct {
+					StakeAddresses []string `json:"_stake_addresses"`
+					EpochNo        uint64   `json:"_epoch_no"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if body.EpochNo == slowEpoch {
+					accountFetchStarted.Store(true)
+					select {
+					case <-blockAccountFetch:
+					case <-r.Context().Done():
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case "/epoch_info":
+				epoch, perr := strconv.ParseUint(
+					r.URL.Query().Get("_epoch_no"), 10, 64,
+				)
+				require.NoError(t, perr)
+				activeStake := "1000000"
+				if epoch == mismatchEpoch {
+					activeStake = "999999999" // deliberately mismatched
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%d,"era":"conway","out_sum":"100","fees":"10",`+
+						`"tx_count":1,"blk_count":1,"start_time":1000,"end_time":2000,`+
+						`"first_block_time":1000,"last_block_time":1999,"active_stake":"%s",`+
+						`"total_rewards":"100","avg_blk_reward":"1"}]`,
+					epoch,
+					activeStake,
+				)
+			case "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					previewBabbageEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			case "/totals":
+				epoch, perr := strconv.ParseUint(
+					r.URL.Query().Get("_epoch_no"), 10, 64,
+				)
+				require.NoError(t, perr)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%d,"treasury":"10","reserves":"20","fees":"30","reward":"1"}]`,
+					epoch,
+				)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		},
+	))
+	t.Cleanup(srv.Close)
+	// Registered after srv's own t.Cleanup (LIFO: runs first), so the blocked
+	// account-fetch handler is released before httptest.Server.Close waits
+	// for in-flight handlers to return.
+	t.Cleanup(func() { close(blockAccountFetch) })
+
+	var fatalCount atomic.Int32
+	var fatalErr error
+	var mu sync.Mutex
+	o, err := NewObserver(ObserverConfig{
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
+		Network:            "preview",
+		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
+		Source:             source,
+		Strict:             true,
+		AccountsEnabled:    true,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 3,
+		FetchRetryDelay:    5 * time.Millisecond,
+		FatalFunc: func(err error) {
+			fatalCount.Add(1)
+			mu.Lock()
+			fatalErr = err
+			mu.Unlock()
+		},
+	})
+	require.NoError(t, err)
+	// Registered last (LIFO: runs before both cleanups above), which is safe
+	// regardless of ordering: Stop cancels the context Start derived, which
+	// aborts the in-flight account-fetch HTTP request client-side and
+	// releases the blocked handler via r.Context().Done() even if this runs
+	// before blockAccountFetch is explicitly closed.
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.Start(context.Background()))
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+
+	seedDingoEpochAggregate(t, source, slowEpoch, 1_000_000, 10, 20, 30)
+	seedDingoEpochAggregate(t, source, mismatchEpoch, 2_000_000, 10, 20, 30)
+	// Publish both in the same tick so they land in one sorted batch: epoch 5
+	// (whose account fetch will block) sorts before epoch 6 (the mismatch) in
+	// both the aggregate and account queues.
+	publishEpochTransition(eb, slowEpoch)
+	publishEpochTransition(eb, mismatchEpoch)
+
+	testutil.WaitForCondition(t, func() bool {
+		return accountFetchStarted.Load()
+	}, 5*time.Second, "epoch 5's account fetch should have started and blocked")
+
+	testutil.WaitForCondition(t, func() bool {
+		return fatalCount.Load() >= 1
+	}, 5*time.Second,
+		"the fast aggregate check must detect epoch 6's mismatch and fire "+
+			"FatalFunc without waiting for epoch 5's still-blocked account fetch",
+	)
+	mu.Lock()
+	require.Error(t, fatalErr)
+	mu.Unlock()
+}
+
+// TestObserverSeedBacklogQueuesUncachedEpochsForAccountCheck pins the half of
+// #4339's queue split that the split itself can silently drop: an epoch whose
+// Koios reference has never been fetched at all.
+//
+// Every other backlog-seed query reads FROM koios_epoch_info
+// (GetEpochsNeedingCheck) or requires a row in it
+// (GetEpochsMissingAccountCoverage), so a never-fetched epoch is visible only
+// to GetUncachedEpochs. Queuing that result into the aggregate queue alone
+// would leave #3097's per-account exact parity unrun for the entire seeded
+// backlog until the next restart — precisely the bulk-sync case #4339 is
+// about, where the whole backlog is uncached.
+func TestObserverSeedBacklogQueuesUncachedEpochsForAccountCheck(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            12,
+		TotalActiveStake: types.Uint64(1),
+		SnapshotReady:    true,
+	}).Error)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:         "preview",
+		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
+		Source:          source,
+		AccountsEnabled: true,
+		Logger:          slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.seedBacklog(context.Background()))
+
+	o.mu.Lock()
+	_, aggregateQueued := o.pending[11]
+	_, accountQueued := o.pendingAccounts[11]
+	o.mu.Unlock()
+
+	require.True(t, aggregateQueued,
+		"epoch 11 has no cached Koios reference and must be queued for the "+
+			"aggregate check")
+	require.True(t, accountQueued,
+		"an epoch with no cached Koios reference at all must also be queued "+
+			"for the per-account check, which no other seed query can select "+
+			"it for")
+}
+
+// TestObserverFetchesAggregateReferenceOncePerEpochAcrossQueues pins the
+// Koios request cost of #4339's queue split. Both queues need the same
+// pool/epoch-aggregate reference rows for an epoch, and both are woken by the
+// same epoch transition, so an ungated split issues the whole aggregate fetch
+// — pool universe resolution, /epoch_info, /epoch_params, /totals and every
+// chunked /pool_history request — twice for every epoch whenever accounts are
+// enabled. Koios quota is a bounded daily budget this observer is explicitly
+// designed around, so the second fetch must collapse into the first.
+//
+// /pool_list sleeps to hold the first fetch open long enough for the second
+// queue to reach the same epoch, which is what makes the doubled-cost failure
+// deterministic rather than timing-dependent.
+func TestObserverFetchesAggregateReferenceOncePerEpochAcrossQueues(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	countPath := func(path string) {
+		mu.Lock()
+		counts[path]++
+		mu.Unlock()
+	}
+	countOf := func(path string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return counts[path]
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			countPath(r.URL.Path)
+			switch r.URL.Path {
+			case "/tip":
+				_, _ = w.Write([]byte(`[{"epoch_no":999999}]`))
+			case "/pool_list", "/pool_updates":
+				time.Sleep(250 * time.Millisecond)
+				_, _ = w.Write([]byte(`[]`))
+			case "/account_list", "/account_reward_history":
+				_, _ = w.Write([]byte(`[]`))
+			case "/epoch_info":
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%s,"era":"conway","out_sum":"100","fees":"10",`+
+						`"tx_count":1,"blk_count":1,"start_time":1000,"end_time":2000,`+
+						`"first_block_time":1000,"last_block_time":1999,`+
+						`"active_stake":"1000000","total_rewards":"100",`+
+						`"avg_blk_reward":"1"}]`,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			case "/epoch_params":
+				_, _ = fmt.Fprintf(
+					w,
+					previewBabbageEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			case "/totals":
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%s,"treasury":"10","reserves":"20","fees":"30",`+
+						`"reward":"1"}]`,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		},
+	))
+	t.Cleanup(srv.Close)
+
+	var results atomic.Int32
+	o, err := NewObserver(ObserverConfig{
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
+		Network:            "preview",
+		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
+		Source:             source,
+		AccountsEnabled:    true,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 3,
+		FetchRetryDelay:    5 * time.Millisecond,
+		OnResult:           func(*EpochCompareResult) { results.Add(1) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	// Started against a source with no committed epoch data, so seedBacklog
+	// queues nothing and the counts below describe exactly one epoch.
+	require.NoError(t, o.Start(context.Background()))
+
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+	seedDingoEpochAggregate(t, source, 5, 1_000_000, 10, 20, 30)
+	publishEpochTransition(eb, 5)
+
+	// One result from each queue: both have finished the epoch, so no further
+	// fetch can arrive after this point.
+	testutil.WaitForCondition(t, func() bool {
+		return results.Load() >= 2
+	}, 30*time.Second, "both queues should report a result for epoch 5")
+
+	require.Equal(t, 1, countOf("/epoch_info"),
+		"the aggregate reference fetch must be issued once per epoch, not "+
+			"once per queue")
+	require.Equal(t, 1, countOf("/pool_list"),
+		"the pool universe must be resolved once per epoch, not once per queue")
+	require.Equal(t, 1, countOf("/epoch_params"),
+		"the protocol-parameter reference must be fetched once per epoch, "+
+			"not once per queue")
+}
+
 // TestObserverFailureReportsSignificantMismatchCount is the user-visible half
 // of the fix: the number an operator reads in the strict-mode fatal error and
 // in the observer's "epoch validation failed" log line.
@@ -1540,10 +2059,22 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 	got := slices.Clone(results)
 	mu.Unlock()
 
+	// The failing verdict is the account queue's. The aggregate queue checks
+	// the same epoch independently and passes it, so selecting by arrival
+	// order would read whichever queue happened to finish last.
+	var result EpochCompareResult
+	var found int
+	for i := range got {
+		if got[i].CoversScope(ScopeAccount) {
+			result = got[i]
+			found++
+		}
+	}
+	require.Equal(t, 1, found,
+		"exactly one result should carry the account phase's verdict")
+
 	// The scenario has to actually contain an informational mismatch, or the
 	// two numbers coincide and the assertion below proves nothing.
-	require.NotEmpty(t, got)
-	result := got[len(got)-1]
 	require.Equal(t, StatusFail, result.Status)
 	require.Greater(
 		t,

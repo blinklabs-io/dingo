@@ -30,33 +30,19 @@ func (d *Database) RestorePoolStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.RestorePoolStateAtSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to restore pool state at slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.RestorePoolStateAtSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to restore pool state at slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetPool returns a pool by its key hash
@@ -110,31 +96,17 @@ func (d *Database) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.UpdatePoolOpCertSequence(
-		pkh,
-		sequence,
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return err
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.UpdatePoolOpCertSequence(
+			pkh,
+			sequence,
+			slot,
+			txn.Metadata(),
+		); err != nil {
+			return err
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // LatestPoolOpCertSequence returns the highest observed op-cert sequence for
