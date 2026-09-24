@@ -9500,17 +9500,17 @@ func (ls *LedgerState) loadTip() error {
 }
 
 func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
-	return ls.withDestructiveDatabaseTransition(
-		ls.reconcilePrimaryChainTipWithLedgerTipLocked,
-	)
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.withDestructiveDatabaseTransition(
+			ls.reconcilePrimaryChainTipWithLedgerTipLocked,
+		)
+	})
 }
 
 func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
