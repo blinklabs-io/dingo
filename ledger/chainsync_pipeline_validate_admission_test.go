@@ -149,6 +149,10 @@ func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
 		},
 	}, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "opcert cold-key signature invalid")
+	assert.Contains(
+		t,
+		err.Error(),
+		"operational certificate cold signature invalid",
+	)
 	assert.Empty(t, ls.pendingBlockfetchEvents)
 }

@@ -511,6 +511,20 @@ func (d *Database) evaluateAndPersistGates(
 // never runs phase 1 on its own -- see node.go's dbNeedsRecovery handling,
 // which calls this explicitly once RecoverCommitTimestampConflict succeeds.
 func (d *Database) CheckNodeSettings() error {
+	// This check is part of phase 1 rather than init directly because the
+	// commit-timestamp recovery path re-enters here after init returned early.
+	// It must run before ordinary first-fill gates so an unclassified legacy
+	// database can never be silently blessed by the current configuration.
+	// Reconciliation is also deliberately idempotent here: if the process
+	// stopped after a committed rollback removed the final Alonzo row but
+	// before it rewrote the conservative legacy marker, a later ordinary open
+	// has matching commit timestamps and would not re-enter recovery.
+	if err := d.ReconcileAlonzoPParamsUnitAfterRecovery(); err != nil {
+		return err
+	}
+	if err := d.checkAlonzoPParamsUnit(); err != nil {
+		return err
+	}
 	configured, err := d.phase1GateValues()
 	if err != nil {
 		return err

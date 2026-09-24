@@ -383,14 +383,24 @@ func (s *Store) AddUtxos(
 		}
 		items[i] = item
 	}
-	return s.importUtxos(items, txn, false)
+	return s.importUtxos(items, txn, false, true)
 }
 
 func (s *Store) ImportUtxos(
 	utxos []models.Utxo,
 	txn types.Txn,
 ) error {
-	return s.importUtxos(utxos, txn, true)
+	return s.importUtxos(utxos, txn, true, true)
+}
+
+// ImportUtxosDeferredRewardLiveStakeRefresh bulk-loads snapshot UTxOs without
+// rebuilding the per-credential aggregate after every batch. The snapshot
+// importer performs one complete rebuild after all ledger state is present.
+func (s *Store) ImportUtxosDeferredRewardLiveStakeRefresh(
+	utxos []models.Utxo,
+	txn types.Txn,
+) error {
+	return s.importUtxos(utxos, txn, true, false)
 }
 
 func (s *Store) GetUtxoBalanceByAddress(
@@ -517,6 +527,7 @@ func (s *Store) importUtxos(
 	utxos []models.Utxo,
 	txn types.Txn,
 	hydrateProvenance bool,
+	refreshRewardLiveStake bool,
 ) error {
 	if len(utxos) == 0 {
 		return nil
@@ -613,14 +624,16 @@ func (s *Store) importUtxos(
 					}
 				}
 			}
-			for key, ref := range refs {
-				if err := s.refreshRewardLiveStakeAggregate(
-					ctx,
-					db,
-					ref,
-					slots[key],
-				); err != nil {
-					return err
+			if refreshRewardLiveStake {
+				for key, ref := range refs {
+					if err := s.refreshRewardLiveStakeAggregate(
+						ctx,
+						db,
+						ref,
+						slots[key],
+					); err != nil {
+						return err
+					}
 				}
 			}
 			return nil

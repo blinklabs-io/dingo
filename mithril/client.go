@@ -722,17 +722,25 @@ func requireSecureURL(
 ) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("parsing %s %q: %w", label, rawURL, err)
+		return fmt.Errorf(
+			"parsing %s %q: malformed URL",
+			label,
+			redactLocationURI(rawURL),
+		)
 	}
 	if parsed.Hostname() == "" {
 		return fmt.Errorf(
 			"parsing %s %q: URL must include a host",
 			label,
-			rawURL,
+			redactLocationURI(rawURL),
 		)
 	}
 	if parsed.User != nil {
-		return fmt.Errorf("parsing %s %q: userinfo is not allowed", label, rawURL)
+		return fmt.Errorf(
+			"parsing %s %q: URL must not include userinfo",
+			label,
+			redactLocationURI(rawURL),
+		)
 	}
 	switch parsed.Scheme {
 	case "https":
@@ -742,7 +750,7 @@ func requireSecureURL(
 				"%s %q must use https; set an explicit allow-insecure-http "+
 					"option for local development or tests",
 				label,
-				rawURL,
+				redactLocationURI(rawURL),
 			)
 		}
 	default:
@@ -750,7 +758,7 @@ func requireSecureURL(
 			"%s %q must use https; set an explicit allow-insecure-http "+
 				"option for local development or tests",
 			label,
-			rawURL,
+			redactLocationURI(rawURL),
 		)
 	}
 	if !allowInsecureHTTP && isBlockedMithrilHost(parsed.Hostname()) {
@@ -1009,7 +1017,10 @@ func (c *Client) doGet(
 		req,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("executing request: %w", err)
+		return nil, fmt.Errorf(
+			"executing request: %w",
+			redactLocationError(err, reqURL),
+		)
 	}
 	if resp == nil || resp.Body == nil {
 		return nil, errors.New("nil response from server")
@@ -1020,11 +1031,11 @@ func (c *Client) doGet(
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
-		return nil, fmt.Errorf(
+		return nil, redactLocationError(fmt.Errorf(
 			"unexpected status %d: %s",
 			resp.StatusCode,
 			string(bodyBytes),
-		)
+		), reqURL)
 	}
 
 	return &limitedReadCloser{

@@ -57,6 +57,13 @@ type Config struct {
 	NetworkMagic uint32
 	// StartEra is the experimental start era ("dijkstra" or empty).
 	StartEra string
+	// AlonzoLovelacePerUtxoWord is Alonzo genesis' lovelacePerUTxOWord. It
+	// is supplied by the configuration layer solely so a database carrying
+	// the pre-gouroboros-v0.205.7 per-byte value in its Alonzo
+	// protocol-parameter rows can be repaired in place instead of resynced
+	// (see alonzo_pparams_unit.go). Zero means "not supplied", which leaves
+	// such a database failing closed.
+	AlonzoLovelacePerUtxoWord uint64
 	// BlobPlugin and MetadataPlugin name the storage providers that
 	// produced this database.
 	BlobPlugin     string
@@ -325,6 +332,23 @@ func (d *Database) BlobTxn(readWrite bool) *Txn {
 // MetadataTxn starts a new metadata-only database transaction and returns a handle to it
 func (d *Database) MetadataTxn(readWrite bool) *Txn {
 	return NewMetadataOnlyTxn(d, readWrite)
+}
+
+// withMetadataWriteTxn runs fn in txn, or owns a metadata write transaction
+// when txn is nil. Callers keep ownership of transactions they provide.
+//
+// An owned transaction runs through Txn.Do, so a panic inside fn is recovered,
+// rolled back and returned as ErrTxnPanic. The hand-rolled owned-transaction
+// blocks this replaced let the panic propagate past their deferred rollback,
+// so this is a behavior change for every method that adopts it.
+func (d *Database) withMetadataWriteTxn(
+	txn *Txn,
+	fn func(*Txn) error,
+) error {
+	if txn != nil {
+		return fn(txn)
+	}
+	return d.MetadataTxn(true).Do(fn)
 }
 
 // Close cleans up the database connections

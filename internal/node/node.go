@@ -135,19 +135,45 @@ func shutdownNodeResources(
 	return err
 }
 
-// serveAuxiliaryListener runs a non-essential observability HTTP server (the
-// prometheus metrics endpoint or the pprof debug endpoint). A bind or serve
-// failure is logged but never fatal: losing metrics or pprof must not take
-// down a node that is otherwise healthy (for example a node that has just
-// finished an expensive backfill, started while the configured port is held
-// by another process). This mirrors how `dingo mithril sync` already tolerates
-// a metrics-port conflict.
-func serveAuxiliaryListener(
+// bindAuxiliaryListener binds the address of a non-essential observability
+// HTTP server (the prometheus metrics endpoint, the pprof debug endpoint or
+// the health probe). A bind failure is logged and reported as a nil
+// listener, never as an error: losing metrics, pprof or the probe must not
+// take down a node that is otherwise healthy (for example a node that has
+// just finished an expensive backfill, started while the configured port is
+// held by another process). This mirrors how `dingo mithril sync` already
+// tolerates a metrics-port conflict.
+func bindAuxiliaryListener(
 	name string,
 	srv *http.Server,
 	logger *slog.Logger,
+) net.Listener {
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		logger.Error(
+			name+" listener stopped; continuing without it",
+			"component", "node",
+			"addr", srv.Addr,
+			"error", err,
+		)
+		return nil
+	}
+	return listener
+}
+
+// serveAuxiliaryListenerOn serves a non-essential observability HTTP server
+// on a socket the caller has already bound. Binding is separated from
+// serving so the caller owns the listener rather than naming a port: a port
+// number learned from a listener that was then closed is not a reservation,
+// and anything asking the kernel for an arbitrary port can take it before
+// the rebind. A serve failure is logged but never fatal.
+func serveAuxiliaryListenerOn(
+	name string,
+	srv *http.Server,
+	listener net.Listener,
+	logger *slog.Logger,
 ) {
-	if err := srv.ListenAndServe(); err != nil &&
+	if err := srv.Serve(listener); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) {
 		logger.Error(
 			name+" listener stopped; continuing without it",
@@ -461,17 +487,31 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	)
 	defer signalCtxStop()
 
-	// Error channel for the node goroutine. The metrics and pprof debug
-	// listeners are non-essential observability endpoints handled by
-	// serveAuxiliaryListener; their bind/serve failures are logged but never
-	// queued here, so a port conflict on them cannot take down the node.
+	// Error channel for the node goroutine. The metrics, pprof debug and
+	// health listeners are non-essential observability endpoints; their
+	// bind/serve failures are logged but never queued here, so a port
+	// conflict on them cannot take down the node.
 	errChan := make(chan error, 1)
-	go serveAuxiliaryListener("metrics", metricsServer, logger)
+	if listener := bindAuxiliaryListener(
+		"metrics", metricsServer, logger,
+	); listener != nil {
+		go serveAuxiliaryListenerOn("metrics", metricsServer, listener, logger)
+	}
 	if debugServer != nil {
-		go serveAuxiliaryListener("pprof debug", debugServer, logger)
+		if listener := bindAuxiliaryListener(
+			"pprof debug", debugServer, logger,
+		); listener != nil {
+			go serveAuxiliaryListenerOn(
+				"pprof debug", debugServer, listener, logger,
+			)
+		}
 	}
 	if healthServer != nil {
-		go serveAuxiliaryListener("health", healthServer, logger)
+		if listener := bindAuxiliaryListener(
+			"health", healthServer, logger,
+		); listener != nil {
+			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
+		}
 	}
 	go func() {
 		//nolint:contextcheck
@@ -770,6 +810,14 @@ func buildDingoConfig(
 		dingo.WithShelleyOperationalCertificate(
 			cfg.ShelleyOperationalCertificate,
 		),
+		// node_forging.go gates agent-backed KES signing on a non-empty
+		// socket path, so dropping any of these three silently falls back
+		// to local-file signing on the serve path.
+		dingo.WithShelleyKESAgentSocket(cfg.ShelleyKESAgentSocket),
+		dingo.WithShelleyKESAgentMode(cfg.ShelleyKESAgentMode),
+		dingo.WithShelleyKESAgentSignTimeout(
+			cfg.ShelleyKESAgentSignTimeout,
+		),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),
@@ -789,6 +837,12 @@ func buildDingoConfig(
 			cfg.ForgeEndorserBlockStalenessSlots,
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
+		// consensus-affecting; off by default.
+		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
+		dingo.WithBlockPipelineValidateEnabled(
+			cfg.BlockPipelineValidateEnabled,
+		),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(
 			cfg.DelegatorInactivityEnabled,

@@ -31,6 +31,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,6 +83,7 @@ func dingoPParamsPreview380() *DingoProtocolParams {
 		MaxValueSize:         "5000",
 		CollateralPercentage: "150",
 		MaxCollateralInputs:  "3",
+		CoinsPerUtxoSize:     "4310",
 	}
 }
 
@@ -115,7 +119,61 @@ func koiosPParamsPreview380() *KoiosEpochParams {
 		MaxValueSize:         "5000",
 		CollateralPercentage: "150",
 		MaxCollateralInputs:  "3",
+		CoinsPerUtxoSize:     "4310",
 	}
+}
+
+func TestProtocolParamsFromNativePreservesEraNativeUtxoUnit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pp   lcommon.ProtocolParameters
+		want string
+	}{
+		{
+			name: "Alonzo words",
+			pp: &alonzo.AlonzoProtocolParameters{
+				AdaPerUtxoByte: 34482,
+			},
+			want: "34482",
+		},
+		{
+			name: "Babbage bytes",
+			pp: &babbage.BabbageProtocolParameters{
+				AdaPerUtxoByte: 4310,
+			},
+			want: "4310",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ProtocolParamsFromNative(tt.pp)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got.CoinsPerUtxoSize)
+		})
+	}
+}
+
+func TestCompareEpochProtocolParamsReportsUtxoUnitMismatch(t *testing.T) {
+	t.Parallel()
+
+	dingo := dingoPParamsPreview380()
+	dingo.CoinsPerUtxoSize = "34482"
+	got := CompareEpochProtocolParams(
+		"preview",
+		380,
+		koiosPParamsPreview380(),
+		dingo,
+		nil,
+		time.Now(),
+		0,
+		time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_coins_per_utxo_size", got[0].Field)
+	require.Equal(t, CategoryValueMismatch, got[0].Category)
 }
 
 // TestCompareEpochProtocolParamsRationalsMatchKoiosDecimals is trap #2 from
@@ -610,7 +668,7 @@ func seedKoiosBabbageProtocolParams(
 		))
 		require.Len(t, resp, 1)
 		require.NoError(t, cache.UpsertEpochParams(
-			epochParamsFromKoios(network, epoch, &resp[0], time.Now()),
+			EpochParamsFromKoios(network, epoch, &resp[0], time.Now()),
 		))
 	}
 }
@@ -627,7 +685,7 @@ func TestSeededProtocolParamsFixturesAgree(t *testing.T) {
 	defer dingo.Close() //nolint:errcheck
 	seedDingoBabbageProtocolParams(t, gdb, 10)
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	seedKoiosBabbageProtocolParams(t, cache, "preview", 10)
@@ -771,7 +829,7 @@ func seedProtocolParamsCheckFixture(
 	require.NoError(t, sqlDB.Close())
 
 	cachePath = filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -814,7 +872,7 @@ func runProtocolParamsCheck(
 	require.NoError(t, err)
 	require.Equal(t, 1, result.EpochsChecked)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")

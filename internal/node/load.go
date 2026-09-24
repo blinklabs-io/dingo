@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -232,6 +233,9 @@ func ensureDB(
 		StartEra:       string(cfg.StartEra),
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			nil, cfg.CardanoConfig, cfg.Network,
+		),
 	}
 	runtime, err := internalplugins.OpenDatabase(
 		context.Background(),
@@ -693,6 +697,20 @@ func LoadWithDB(
 	ls.SetEpochBoundarySnapshotStakeHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	)
+	// Governance's same-boundary SPO stake read (dingo#4441): RATIFY tallies
+	// mark[NewEpoch] -- this same boundary's own mark snapshot -- which is not
+	// durably written until the capture hook below runs, later in the same
+	// rollover. Load replays the exact same governance.ProcessEpoch path as
+	// serve mode, so it needs this wired too; without it, every SPO-gated
+	// action would silently see zero stake at every replayed boundary.
+	ls.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return snapshotMgr.CurrentBoundarySPOStakeRows(ctx, txn, evt)
 		},
 	)
 	if err := installEpochBoundarySnapshotHookForLoad(

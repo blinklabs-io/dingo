@@ -385,8 +385,10 @@ koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP
   # CLI: --koios-parity-allow-insecure-http
   allowInsecureHttp: false
-  # Stop/cancel the node on the first Koios/tool error or exact parity
-  # mismatch instead of logging it and continuing normal operation.
+  # Stop/cancel the node on the first Koios/tool error or non-pass parity
+  # result instead of logging it and continuing normal operation. An epoch
+  # whose only significant mismatches are reference_lag (Koios has not caught
+  # up yet) is logged and recorded but never stops the node.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
   # CLI: --koios-parity-strict
   strict: true

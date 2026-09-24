@@ -227,6 +227,7 @@ var stakeSnapshotStoreMethods = []string{
 	"GetStakeByPoolsAtSlot",
 	"GetEpochBoundaryStakeByPools",
 	"GetPoolOwnerStakeAtSlot",
+	"GetEpochBoundaryDelegatedPoolKeyHashes",
 	"GetEpochBoundaryRewardStakeInputsForPools",
 	"GetPointerStakeInputsForPools",
 }
