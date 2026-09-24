@@ -121,7 +121,7 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 const checkpointInterval = 2 * time.Minute
 
 // checkpointBusyTimeout bounds how long a single checkpoint attempt waits for
-// a reader's old snapshot to close before giving up for this tick.
+// any SQLite lock before giving up and retrying on the next tick.
 //
 // The attempt is deliberately never issued against writeDB. PRAGMA
 // wal_checkpoint(TRUNCATE) invokes the driver's busy handler synchronously
@@ -135,11 +135,10 @@ const checkpointInterval = 2 * time.Minute
 // measured, a checkpoint attempt against writeDB with one open readDB
 // snapshot took 30.04s, blocked a concurrent writeDB insert for 29.99s of
 // that, and still finished with busy=1 (no truncation). A dedicated
-// connection with a short busy_timeout hits the same busy=1 outcome, but
-// fast: measured 271ms to return. checkpointWAL below uses that dedicated
-// connection instead, so a blocked checkpoint tick costs at most this bound,
-// not up to 30 seconds, and never contends with writeDB at all.
-const checkpointBusyTimeout = 250 * time.Millisecond
+// connection with busy_timeout(0) returns the busy=1 outcome immediately.
+// checkpointWAL below uses that dedicated connection instead, so a blocked
+// checkpoint tick never waits while a reader or writer holds a SQLite lock.
+const checkpointBusyTimeout = 0 * time.Millisecond
 
 // checkpointWAL returns a Store.Checkpoint callback that attempts
 // PRAGMA wal_checkpoint on checkpointInterval's ticker (see openSQLStore) --
