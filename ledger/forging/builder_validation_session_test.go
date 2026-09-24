@@ -268,3 +268,58 @@ func TestBuildBlockAcceptsStableParentAcrossSelection(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, block.Transactions(), 3)
 }
+
+type ancestryTestTipValidator struct {
+	sessionMockTxValidator
+	appliedTip ochainsync.Tip
+	k          int
+}
+
+func (v *ancestryTestTipValidator) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return v.appliedTip, v.k
+}
+
+type ancestryTestChainTip struct {
+	tip      ochainsync.Tip
+	depth    uint64
+	ancestor bool
+}
+
+func (c ancestryTestChainTip) Tip() ochainsync.Tip { return c.tip }
+
+func (c ancestryTestChainTip) TipRelation(
+	ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	return c.tip, c.depth, c.ancestor, nil
+}
+
+func TestBuilderRequiresAppliedAncestorWithinKOfActualParent(t *testing.T) {
+	applied := ochainsync.Tip{
+		Point:       ocommon.NewPoint(10, []byte("applied")),
+		BlockNumber: 10,
+	}
+	primary := ochainsync.Tip{
+		Point:       ocommon.NewPoint(12, []byte("primary")),
+		BlockNumber: 12,
+	}
+	builder := &DefaultBlockBuilder{
+		chainTip:    ancestryTestChainTip{tip: primary, depth: 2, ancestor: false},
+		txValidator: &ancestryTestTipValidator{appliedTip: applied, k: 5},
+	}
+
+	err := builder.checkAppliedTipRelation(primary, primary.Point)
+	require.ErrorContains(t, err, "not within security parameter K")
+
+	builder.chainTip = ancestryTestChainTip{
+		tip: primary, depth: 2, ancestor: true,
+	}
+	require.NoError(t, builder.checkAppliedTipRelation(primary, applied.Point))
+
+	builder.chainTip = ancestryTestChainTip{
+		tip: primary, depth: 6, ancestor: true,
+	}
+	require.ErrorContains(t,
+		builder.checkAppliedTipRelation(primary, primary.Point),
+		"not within security parameter K",
+	)
+}

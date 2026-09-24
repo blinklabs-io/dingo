@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -103,19 +104,26 @@ func (l *forgerCountingLeader) callCount() int {
 }
 
 type forgerTestSlotClock struct {
-	currentSlot  uint64
-	chainTipSlot uint64
-	chainTipHash []byte
+	currentSlot         uint64
+	chainTipSlot        uint64
+	chainTipHash        []byte
+	chainTipBlockNumber uint64
 	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
 	// used verbatim. When false the primary tip mirrors the applied tip,
 	// which is the caught-up steady state and what every test that does not
 	// care about the distinction wants.
-	primaryTipExplicit bool
-	primaryTipSlot     uint64
-	primaryTipHash     []byte
-	upstreamTipSlot    uint64
-	upstreamActive     bool
-	slotsPerKESPeriod  uint64
+	primaryTipExplicit     bool
+	primaryTipSlot         uint64
+	primaryTipHash         []byte
+	primaryTipBlockNumber  uint64
+	primaryTipRelationSet  bool
+	primaryTipAncestor     bool
+	primaryTipDepth        uint64
+	upstreamTipSlot        uint64
+	upstreamTipBlockNumber uint64
+	upstreamActive         bool
+	securityParam          int
+	slotsPerKESPeriod      uint64
 }
 
 func (c forgerTestSlotClock) CurrentSlot() (uint64, error) {
@@ -128,6 +136,17 @@ func (c forgerTestSlotClock) SlotsPerKESPeriod() uint64 {
 
 func (c forgerTestSlotClock) ChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+}
+
+func (c forgerTestSlotClock) ChainTipSnapshot() ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       c.ChainTip(),
+		BlockNumber: c.chainTipBlockNumber,
+	}
+}
+
+func (c forgerTestSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return c.ChainTipSnapshot(), c.SecurityParam()
 }
 
 // PrimaryChainTip mirrors the applied tip unless the test describes a primary
@@ -153,6 +172,34 @@ func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 }
 
+func (c forgerTestSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	depth := uint64(0)
+	ancestor := true
+	if c.primaryTipRelationSet {
+		return ochainsync.Tip{
+			Point:       primary,
+			BlockNumber: c.primaryTipBlockNumber,
+		}, c.primaryTipDepth, c.primaryTipAncestor, nil
+	}
+	if primary.Slot < point.Slot {
+		ancestor = false
+	} else if primary.Slot == point.Slot && len(primary.Hash) > 0 &&
+		len(point.Hash) > 0 && !bytes.Equal(primary.Hash, point.Hash) {
+		ancestor = false
+	} else if c.primaryTipBlockNumber > c.chainTipBlockNumber {
+		depth = c.primaryTipBlockNumber - c.chainTipBlockNumber
+	} else if primary.Slot > point.Slot {
+		depth = primary.Slot - point.Slot
+	}
+	return ochainsync.Tip{
+		Point:       primary,
+		BlockNumber: c.primaryTipBlockNumber,
+	}, depth, ancestor, nil
+}
+
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
 	return time.Now(), nil
 }
@@ -172,11 +219,24 @@ func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return c.upstreamTipSlot, c.upstreamActive || c.upstreamTipSlot > 0
 }
 
-// TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget verifies that
-// an active upstream with no admitted target does not suppress forging based on
-// wall-clock distance from the local tip. That distance describes a network
-// quiet stretch, not whether a peer is ahead (issue #4201).
-func TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget(
+func (c forgerTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: c.upstreamTipSlot},
+		BlockNumber: c.upstreamTipBlockNumber,
+	}, c.upstreamActive || c.upstreamTipSlot > 0
+}
+
+func (c forgerTestSlotClock) SecurityParam() int {
+	if c.securityParam > 0 {
+		return c.securityParam
+	}
+	return 5
+}
+
+// TestCheckAndForgeProductionSkipsStaleTipWhenUpstreamTargetIsUnknown verifies
+// that an active upstream with no admitted target uses the local stale-tip
+// backstop instead of allowing continued forging on an old branch.
+func TestCheckAndForgeProductionSkipsStaleTipWhenUpstreamTargetIsUnknown(
 	t *testing.T,
 ) {
 	creds := setupTestCredentials(t)
@@ -204,8 +264,8 @@ func TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget(
 	require.NoError(t, err)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, broadcaster.calls)
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
 }
 
 func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {

@@ -1510,7 +1510,7 @@ type LedgerState struct {
 // combine an active flag from one peer with a target from another peer.
 type upstreamSyncState struct {
 	connectionKey string
-	targetSlot    uint64
+	target        ochainsync.Tip
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -3557,12 +3557,18 @@ func (ls *LedgerState) resolveRollbackTarget(
 		}
 		ls.config.Logger.Warn(
 			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
-			"component", "ledger",
-			"contested_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-			"ancestor_slot", ancestor.Slot,
-			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+			"component",
+			"ledger",
+			"contested_slot",
+			point.Slot,
+			"rollback_hash",
+			hex.EncodeToString(point.Hash),
+			"ledger_tip_hash",
+			hex.EncodeToString(currentTip.Point.Hash),
+			"ancestor_slot",
+			ancestor.Slot,
+			"ancestor_hash",
+			hex.EncodeToString(ancestor.Hash),
 		)
 		point = ancestor
 	}
@@ -3700,11 +3706,16 @@ func (ls *LedgerState) rollbackWithOptions(
 	if belowPruneFloor {
 		ls.config.Logger.Error(
 			"rollback target is below the consumed UTxO prune floor, refusing to rewind",
-			"component", "ledger",
-			"rollback_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_slot", currentTip.Point.Slot,
-			"utxo_prune_floor_slot", pruneFloor,
+			"component",
+			"ledger",
+			"rollback_slot",
+			point.Slot,
+			"rollback_hash",
+			hex.EncodeToString(point.Hash),
+			"ledger_tip_slot",
+			currentTip.Point.Slot,
+			"utxo_prune_floor_slot",
+			pruneFloor,
 			"hint",
 			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
 		)
@@ -6427,10 +6438,14 @@ func (ls *LedgerState) stopStuckLedgerPipeline(
 	if ls.config.Logger != nil {
 		ls.config.Logger.Error(
 			"ledger pipeline stopped after repeated no-progress restarts; operator intervention is required",
-			"component", "ledger",
-			"consecutive_no_progress", progress.consecutiveNoProgress,
-			"tip_slot", progress.lastTipSlot,
-			"error", err,
+			"component",
+			"ledger",
+			"consecutive_no_progress",
+			progress.consecutiveNoProgress,
+			"tip_slot",
+			progress.lastTipSlot,
+			"error",
+			err,
 		)
 	}
 }
@@ -11077,6 +11092,14 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 	return cloneTip(ls.loadTipSnapshot().currentTip)
 }
 
+// ForgeTipSnapshot returns the applied tip and its era's security parameter
+// from matching published ledger generations.
+func (ls *LedgerState) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	consensusState, tipState := ls.loadStateSnapshots()
+	return cloneTip(tipState.currentTip),
+		ls.securityParamForEraOrDefault(consensusState.currentEra.Id)
+}
+
 // SlotsBehindHead reports how many slots the applied ledger tip is behind the
 // wall-clock head (0 if at or ahead of it, or if the wall slot is unknown).
 // Unlike IsAtTip it distinguishes "chainsync reached the head" from "the ledger
@@ -11113,6 +11136,20 @@ func (ls *LedgerState) PrimaryChainTip() ochainsync.Tip {
 	return chain.Tip()
 }
 
+// PrimaryChainTipRelation checks point against one locked snapshot of the
+// primary chain and returns that snapshot's tip and block distance.
+func (ls *LedgerState) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	ls.RLock()
+	chain := ls.chain
+	ls.RUnlock()
+	if chain == nil {
+		return ochainsync.Tip{}, 0, false, errors.New("primary chain is nil")
+	}
+	return chain.TipRelation(point)
+}
+
 // PrimaryChainTipSlot returns the slot number of the primary chain tip. This
 // can be ahead of ChainTipSlot() while the ledger pipeline is still replaying
 // blocks into committed metadata state.
@@ -11135,7 +11172,7 @@ func (ls *LedgerState) UpstreamTipSlot() uint64 {
 	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
 		return 0
 	}
-	return state.targetSlot
+	return state.target.Point.Slot
 }
 
 // UpstreamSyncStatus reports whether a live upstream is selected and its
@@ -11153,7 +11190,26 @@ func (ls *LedgerState) UpstreamSyncStatus() (uint64, bool) {
 	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
 		return 0, true
 	}
-	return state.targetSlot, true
+	return state.target.Point.Slot, true
+}
+
+// UpstreamSyncTip returns the corroborated upstream tip with its block number
+// while preserving the active-connection generation check used by
+// UpstreamSyncStatus.
+func (ls *LedgerState) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		slot := ls.UpstreamTipSlot()
+		return ochainsync.Tip{Point: ocommon.Point{Slot: slot}}, slot != 0
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+		return ochainsync.Tip{}, false
+	}
+	state := ls.syncUpstreamState.Load()
+	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
+		return ochainsync.Tip{}, true
+	}
+	return cloneTip(state.target), true
 }
 
 func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
@@ -11214,7 +11270,7 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
 	}
 	ls.syncUpstreamState.Store(&upstreamSyncState{
 		connectionKey: connIdKey(connId),
-		targetSlot:    e.SyncTarget.Point.Slot,
+		target:        cloneTip(e.SyncTarget),
 	})
 }
 
