@@ -222,12 +222,8 @@ FROM drep WHERE added_slot > ?`,
 					) > 0 {
 					latest = update
 				}
-				expiry := uint64(0)
-				lastActivity := uint64(0)
-				if registration.position.slot == 0 {
-					expiry = item.expiry
-					lastActivity = item.lastActivity
-				}
+				expiry := item.expiry
+				lastActivity := item.lastActivity
 				if _, err := db.ExecContext(ctx, `
 UPDATE drep
 SET active = ?, anchor_url = ?, anchor_hash = ?, added_slot = ?,

@@ -172,6 +172,37 @@ func TestDrepActivityRenewalsRestoreAtRollbackPoint(t *testing.T) {
 	}
 }
 
+func TestDrepActivityAndExpirySurviveDeregistrationRollback(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	credential := bytes.Repeat([]byte{0x5d}, 28)
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			CredentialTag:     0,
+			Credential:        credential,
+			AddedSlot:         10,
+			LastActivityEpoch: 4,
+			ExpiryEpoch:       20,
+			Active:            true,
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: credential,
+			AddedSlot:      10,
+		},
+		nil,
+	))
+	require.NoError(t, store.SetDrep(0, credential, 100, "", nil, false, nil))
+
+	require.NoError(t, store.RestoreDrepStateAtSlot(50, nil))
+	drep, err := store.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.True(t, drep.Active)
+	require.Equal(t, uint64(4), drep.LastActivityEpoch)
+	require.Equal(t, uint64(20), drep.ExpiryEpoch)
+}
+
 func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	t.Parallel()
 
