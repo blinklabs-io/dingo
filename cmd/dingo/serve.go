@@ -377,6 +377,9 @@ func openConfiguredDatabase(
 			StartEra:       string(cfg.StartEra),
 			BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 			MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				nil, cfg.CardanoConfig, cfg.Network,
+			),
 		},
 		internalplugins.StorageSelections{
 			Blob:     cfg.Plugins.Storage.Blob,

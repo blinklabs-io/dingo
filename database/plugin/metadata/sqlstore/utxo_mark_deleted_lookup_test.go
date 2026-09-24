@@ -64,7 +64,7 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 			t.Logf("legacy MarkUtxosDeletedAtSlot plan (n=%d): %s", nTerms, legacyPlan)
 
 			txIDs, _ := distinctUtxoTxIDs(ids)
-			query, args := utxoRowIDsByTxIDQuery(txIDs)
+			query, args := utxoDeletionRowsByTxIDQuery(txIDs)
 			newPlan := queryPlan(t, store.writeDB, query, args...)
 			t.Logf("tx_id-IN mark lookup plan (n=%d): %s", nTerms, newPlan)
 

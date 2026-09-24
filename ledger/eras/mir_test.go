@@ -25,7 +25,7 @@ import (
 )
 
 // mirTx implements just enough of lcommon.Transaction for
-// validateMIRAccumulatedRewards: Certificates. It is deliberately not run
+// validateShelleyDelegCerts: Certificates, Withdrawals and IsValid. It is deliberately not run
 // through the full ValidateTxAlonzo/ValidateTxBabbage (that requires a fully
 // valid transaction to clear the unrelated UTXO validation rules first,
 // following the same direct-unit-test convention as
@@ -34,11 +34,32 @@ import (
 // unconditional call from both, visible directly in the diff.
 type mirTx struct {
 	lcommon.Transaction
-	certs []lcommon.Certificate
+	certs         []lcommon.Certificate
+	withdrawals   map[*lcommon.Address]*big.Int
+	phase2Invalid bool
 }
 
 func (t *mirTx) Certificates() []lcommon.Certificate {
 	return t.certs
+}
+
+func (t *mirTx) Withdrawals() map[*lcommon.Address]*big.Int {
+	return t.withdrawals
+}
+
+func (t *mirTx) IsValid() bool {
+	return !t.phase2Invalid
+}
+
+// majorPParams carries only the protocol major version, the one parameter
+// validateShelleyDelegCerts reads.
+type majorPParams struct {
+	lcommon.ProtocolParameters
+	major uint
+}
+
+func (p majorPParams) ProtocolMajorVersion() uint {
+	return p.major
 }
 
 // mirCredential returns a distinct stake key credential for the given seed
@@ -56,7 +77,10 @@ func mirCredential(seed byte) lcommon.Credential {
 
 // mirCert builds a reserves-sourced distribution MIR certificate with one
 // credential->delta entry. delta may be negative (delta_coin is signed).
-func mirCert(cred lcommon.Credential, delta int64) *lcommon.MoveInstantaneousRewardsCertificate {
+func mirCert(
+	cred lcommon.Credential,
+	delta int64,
+) *lcommon.MoveInstantaneousRewardsCertificate {
 	return mirCertFromPot(cred, 0, delta)
 }
 
@@ -91,9 +115,9 @@ func mirKeyFromPot(cred lcommon.Credential, pot uint) MIRCredentialKey {
 	}
 }
 
-// TestValidateMIRAccumulatedRewards_SingleTxSequential covers +10 then -11 and
+// TestValidateShelleyDelegCertsMIR_SingleTxSequential covers +10 then -11 and
 // +10 then -10 within one transaction, at Alonzo (PV6) and Babbage (PV8).
-func TestValidateMIRAccumulatedRewards_SingleTxSequential(t *testing.T) {
+func TestValidateShelleyDelegCertsMIR_SingleTxSequential(t *testing.T) {
 	t.Parallel()
 
 	for _, era := range []struct {
@@ -115,10 +139,21 @@ func TestValidateMIRAccumulatedRewards_SingleTxSequential(t *testing.T) {
 					mirCert(cred, -11),
 				}}
 				ls := newMockLedgerState()
-				err := validateMIRAccumulatedRewards(tx, 100, ls, era.major)
+				err := validateShelleyDelegCerts(
+					tx,
+					100,
+					ls,
+					majorPParams{major: era.major},
+				)
 				require.Error(t, err)
 				var negErr MIRProducesNegativeUpdateError
-				require.True(t, errors.As(err, &negErr), "expected MIRProducesNegativeUpdateError, got %T: %v", err, err)
+				require.True(
+					t,
+					errors.As(err, &negErr),
+					"expected MIRProducesNegativeUpdateError, got %T: %v",
+					err,
+					err,
+				)
 				assert.Equal(t, big.NewInt(10), negErr.Existing)
 				assert.Equal(t, big.NewInt(-11), negErr.Delta)
 			})
@@ -130,31 +165,44 @@ func TestValidateMIRAccumulatedRewards_SingleTxSequential(t *testing.T) {
 					mirCert(cred, -10),
 				}}
 				ls := newMockLedgerState()
-				err := validateMIRAccumulatedRewards(tx, 100, ls, era.major)
+				err := validateShelleyDelegCerts(
+					tx,
+					100,
+					ls,
+					majorPParams{major: era.major},
+				)
 				require.NoError(t, err)
 			})
 
-			t.Run("negative delta valid when result stays non-negative", func(t *testing.T) {
-				t.Parallel()
-				tx := &mirTx{certs: []lcommon.Certificate{
-					mirCert(cred, 20),
-					mirCert(cred, -5),
-				}}
-				ls := newMockLedgerState()
-				err := validateMIRAccumulatedRewards(tx, 100, ls, era.major)
-				require.NoError(t, err)
-			})
+			t.Run(
+				"negative delta valid when result stays non-negative",
+				func(t *testing.T) {
+					t.Parallel()
+					tx := &mirTx{certs: []lcommon.Certificate{
+						mirCert(cred, 20),
+						mirCert(cred, -5),
+					}}
+					ls := newMockLedgerState()
+					err := validateShelleyDelegCerts(
+						tx,
+						100,
+						ls,
+						majorPParams{major: era.major},
+					)
+					require.NoError(t, err)
+				},
+			)
 		})
 	}
 }
 
-// TestValidateMIRAccumulatedRewards_CrossTxSameEpoch covers +10 then -11 and
+// TestValidateShelleyDelegCertsMIR_CrossTxSameEpoch covers +10 then -11 and
 // +10 then -10 across separate transactions in the same epoch, simulating an
 // earlier transaction's certificate already committed to the database by
-// pre-populating pendingMIR (what *ledger.LedgerView.PendingMIRRewardDeltas
+// pre-populating pendingMIR (the Pending map *ledger.LedgerView.MIRDelegState
 // would report, whether the earlier transaction was in the same block or an
 // earlier block of the same epoch -- both look identical from this query).
-func TestValidateMIRAccumulatedRewards_CrossTxSameEpoch(t *testing.T) {
+func TestValidateShelleyDelegCertsMIR_CrossTxSameEpoch(t *testing.T) {
 	t.Parallel()
 
 	for _, era := range []struct {
@@ -176,10 +224,21 @@ func TestValidateMIRAccumulatedRewards_CrossTxSameEpoch(t *testing.T) {
 					mirKey(cred): big.NewInt(10),
 				}
 				tx := &mirTx{certs: []lcommon.Certificate{mirCert(cred, -11)}}
-				err := validateMIRAccumulatedRewards(tx, 200, ls, era.major)
+				err := validateShelleyDelegCerts(
+					tx,
+					200,
+					ls,
+					majorPParams{major: era.major},
+				)
 				require.Error(t, err)
 				var negErr MIRProducesNegativeUpdateError
-				require.True(t, errors.As(err, &negErr), "expected MIRProducesNegativeUpdateError, got %T: %v", err, err)
+				require.True(
+					t,
+					errors.As(err, &negErr),
+					"expected MIRProducesNegativeUpdateError, got %T: %v",
+					err,
+					err,
+				)
 			})
 
 			t.Run("+10 then -10 stays valid", func(t *testing.T) {
@@ -189,19 +248,24 @@ func TestValidateMIRAccumulatedRewards_CrossTxSameEpoch(t *testing.T) {
 					mirKey(cred): big.NewInt(10),
 				}
 				tx := &mirTx{certs: []lcommon.Certificate{mirCert(cred, -10)}}
-				err := validateMIRAccumulatedRewards(tx, 200, ls, era.major)
+				err := validateShelleyDelegCerts(
+					tx,
+					200,
+					ls,
+					majorPParams{major: era.major},
+				)
 				require.NoError(t, err)
 			})
 		})
 	}
 }
 
-// TestValidateMIRAccumulatedRewards_CrossPotIsolation proves a reserves
+// TestValidateShelleyDelegCertsMIR_CrossPotIsolation proves a reserves
 // surplus cannot offset a treasury deficit for the same credential: the
 // reference tracks iRReserves and iRTreasury as two entirely separate maps,
 // so a certificate drawing from one pot must never be able to fund a negative
 // delta drawn from the other.
-func TestValidateMIRAccumulatedRewards_CrossPotIsolation(t *testing.T) {
+func TestValidateShelleyDelegCertsMIR_CrossPotIsolation(t *testing.T) {
 	t.Parallel()
 
 	for _, era := range []struct {
@@ -216,58 +280,91 @@ func TestValidateMIRAccumulatedRewards_CrossPotIsolation(t *testing.T) {
 
 			cred := mirCredential(0x06)
 
-			t.Run("reserves +100 then treasury -50 in one tx rejects", func(t *testing.T) {
-				t.Parallel()
-				tx := &mirTx{certs: []lcommon.Certificate{
-					mirCertFromPot(cred, 0, 100),
-					mirCertFromPot(cred, 1, -50),
-				}}
-				ls := newMockLedgerState()
-				err := validateMIRAccumulatedRewards(tx, 100, ls, era.major)
-				require.Error(t, err,
-					"a reserves surplus must not offset a treasury deficit")
-				var negErr MIRProducesNegativeUpdateError
-				require.True(t, errors.As(err, &negErr), "expected MIRProducesNegativeUpdateError, got %T: %v", err, err)
-				assert.Equal(t, uint(1), negErr.Pot)
-				assert.Equal(t, big.NewInt(0), negErr.Existing)
-				assert.Equal(t, big.NewInt(-50), negErr.Delta)
-			})
+			t.Run(
+				"reserves +100 then treasury -50 in one tx rejects",
+				func(t *testing.T) {
+					t.Parallel()
+					tx := &mirTx{certs: []lcommon.Certificate{
+						mirCertFromPot(cred, 0, 100),
+						mirCertFromPot(cred, 1, -50),
+					}}
+					ls := newMockLedgerState()
+					err := validateShelleyDelegCerts(
+						tx,
+						100,
+						ls,
+						majorPParams{major: era.major},
+					)
+					require.Error(t, err,
+						"a reserves surplus must not offset a treasury deficit")
+					var negErr MIRProducesNegativeUpdateError
+					require.True(
+						t,
+						errors.As(err, &negErr),
+						"expected MIRProducesNegativeUpdateError, got %T: %v",
+						err,
+						err,
+					)
+					assert.Equal(t, uint(1), negErr.Pot)
+					assert.Equal(t, big.NewInt(0), negErr.Existing)
+					assert.Equal(t, big.NewInt(-50), negErr.Delta)
+				},
+			)
 
-			t.Run("reserves +100 pending, treasury -50 across txs rejects", func(t *testing.T) {
-				t.Parallel()
-				ls := newMockLedgerState()
-				ls.pendingMIR = map[MIRCredentialKey]*big.Int{
-					mirKeyFromPot(cred, 0): big.NewInt(100),
-				}
-				tx := &mirTx{certs: []lcommon.Certificate{
-					mirCertFromPot(cred, 1, -50),
-				}}
-				err := validateMIRAccumulatedRewards(tx, 200, ls, era.major)
-				require.Error(t, err,
-					"pending reserves state must not be visible to a treasury key")
-			})
+			t.Run(
+				"reserves +100 pending, treasury -50 across txs rejects",
+				func(t *testing.T) {
+					t.Parallel()
+					ls := newMockLedgerState()
+					ls.pendingMIR = map[MIRCredentialKey]*big.Int{
+						mirKeyFromPot(cred, 0): big.NewInt(100),
+					}
+					tx := &mirTx{certs: []lcommon.Certificate{
+						mirCertFromPot(cred, 1, -50),
+					}}
+					err := validateShelleyDelegCerts(
+						tx,
+						200,
+						ls,
+						majorPParams{major: era.major},
+					)
+					require.Error(
+						t,
+						err,
+						"pending reserves state must not be visible to a treasury key",
+					)
+				},
+			)
 
-			t.Run("same-pot accumulation still offsets correctly", func(t *testing.T) {
-				t.Parallel()
-				tx := &mirTx{certs: []lcommon.Certificate{
-					mirCertFromPot(cred, 1, 100),
-					mirCertFromPot(cred, 1, -50),
-				}}
-				ls := newMockLedgerState()
-				err := validateMIRAccumulatedRewards(tx, 100, ls, era.major)
-				require.NoError(t, err)
-			})
+			t.Run(
+				"same-pot accumulation still offsets correctly",
+				func(t *testing.T) {
+					t.Parallel()
+					tx := &mirTx{certs: []lcommon.Certificate{
+						mirCertFromPot(cred, 1, 100),
+						mirCertFromPot(cred, 1, -50),
+					}}
+					ls := newMockLedgerState()
+					err := validateShelleyDelegCerts(
+						tx,
+						100,
+						ls,
+						majorPParams{major: era.major},
+					)
+					require.NoError(t, err)
+				},
+			)
 		})
 	}
 }
 
-// TestValidateMIRAccumulatedRewards_PreAlonzoNoOp confirms this check does not
+// TestValidateShelleyDelegCertsMIR_PreAlonzoNoOp confirms this check does not
 // fire below protocol version 5: a bare negative delta there is
 // MIRNegativesNotCurrentlyAllowedError's job (enforced upstream by
 // gouroboros's shelley.validateMirDeltaSigns via the Shelley/Allegra/Mary
 // UtxoValidateDelegation rule already wired into alonzoUtxoValidationRules'
 // predecessors), not this function's.
-func TestValidateMIRAccumulatedRewards_PreAlonzoNoOp(t *testing.T) {
+func TestValidateShelleyDelegCertsMIR_PreAlonzoNoOp(t *testing.T) {
 	t.Parallel()
 
 	cred := mirCredential(0x03)
@@ -282,43 +379,60 @@ func TestValidateMIRAccumulatedRewards_PreAlonzoNoOp(t *testing.T) {
 		lcommon.ProtocolVersionAllegra,
 		lcommon.ProtocolVersionMary,
 	} {
-		err := validateMIRAccumulatedRewards(tx, 100, ls, major)
-		require.NoError(t, err, "protocol version %d must not trigger MIRProducesNegativeUpdate", major)
+		err := validateShelleyDelegCerts(
+			tx,
+			100,
+			ls,
+			majorPParams{major: major},
+		)
+		require.NoError(
+			t,
+			err,
+			"protocol version %d must not trigger MIRProducesNegativeUpdate",
+			major,
+		)
 	}
 }
 
-// TestValidateMIRAccumulatedRewards_NoMIRCerts confirms a transaction with no
+// TestValidateShelleyDelegCertsMIR_NoMIRCerts confirms a transaction with no
 // MIR certificates is untouched.
-func TestValidateMIRAccumulatedRewards_NoMIRCerts(t *testing.T) {
+func TestValidateShelleyDelegCertsMIR_NoMIRCerts(t *testing.T) {
 	t.Parallel()
 	tx := &mirTx{}
 	ls := newMockLedgerState()
-	err := validateMIRAccumulatedRewards(tx, 100, ls, lcommon.ProtocolVersionAlonzo)
+	err := validateShelleyDelegCerts(
+		tx,
+		100,
+		ls,
+		majorPParams{major: lcommon.ProtocolVersionAlonzo},
+	)
 	require.NoError(t, err)
 }
 
 // noMIRProviderLedgerState implements lcommon.LedgerState (via the embedded
-// nil interface) but not MIRPendingRewardsProvider, so it is never called: the
-// type assertion in validateMIRAccumulatedRewards must fail closed (no-op)
+// nil interface) but not MIRDelegStateProvider, so it is never called: the
+// type assertion in validateShelleyDelegCerts must fail closed (no-op)
 // rather than panic when the ledger state doesn't expose the capability.
 type noMIRProviderLedgerState struct {
 	lcommon.LedgerState
 }
 
-// TestValidateMIRAccumulatedRewards_NoProvider confirms the check is a no-op,
+// TestValidateShelleyDelegCertsMIR_NoProvider confirms the check is a no-op,
 // not a panic, when the ledger state does not implement
-// MIRPendingRewardsProvider (every production *ledger.LedgerView does; this
+// MIRDelegStateProvider (every production *ledger.LedgerView does; this
 // only guards the type assertion itself).
-func TestValidateMIRAccumulatedRewards_NoProvider(t *testing.T) {
+func TestValidateShelleyDelegCertsMIR_NoProvider(t *testing.T) {
 	t.Parallel()
 	cred := mirCredential(0x05)
 	tx := &mirTx{certs: []lcommon.Certificate{
 		mirCert(cred, 10),
 		mirCert(cred, -11),
 	}}
-	err := validateMIRAccumulatedRewards(
-		tx, 100, noMIRProviderLedgerState{}, lcommon.ProtocolVersionAlonzo,
+	err := validateShelleyDelegCerts(
+		tx,
+		100,
+		noMIRProviderLedgerState{},
+		majorPParams{major: lcommon.ProtocolVersionAlonzo},
 	)
 	require.NoError(t, err)
 }
-

@@ -503,10 +503,6 @@ func isZeroHash(hash []byte) bool {
 	return len(hash) == 0 || bytes.Equal(hash, make([]byte, len(hash)))
 }
 
-func tipsEqual(a, b format.Tip) bool {
-	return a.Slot == b.Slot && a.BlockNumber == b.BlockNumber && bytes.Equal(a.Hash, b.Hash)
-}
-
 func cloneServedMessages(messages []format.ServedMessage) []format.ServedMessage {
 	cloned := make([]format.ServedMessage, len(messages))
 	for i, message := range messages {
