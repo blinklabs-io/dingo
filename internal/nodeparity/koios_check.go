@@ -140,7 +140,7 @@ func NewKoiosClient(
 			network,
 		)
 	}
-	return koiosparity.NewKoiosClient(network, apiKey, baseURL, allowInsecureHTTP)
+	return koiosparity.NewKoiosClient(network, apiKey, baseURL, allowInsecureHTTP, false)
 }
 
 // CheckProtocolParams compares Dingo's own current protocol parameters
