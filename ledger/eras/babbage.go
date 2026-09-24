@@ -227,9 +227,7 @@ func ValidateTxBabbage(
 			)
 		}
 	}
-	if err := validateMIRAccumulatedRewards(
-		tx, slot, ls, tmpPparams.ProtocolMajorVersion(),
-	); err != nil {
+	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {

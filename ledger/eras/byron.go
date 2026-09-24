@@ -51,6 +51,25 @@ func EpochLengthByron(
 	if byronGenesis == nil {
 		return 0, 0, errors.New("unable to get byron genesis")
 	}
+	if byronGenesis.BlockVersionData.SlotDuration < 0 {
+		return 0, 0, fmt.Errorf(
+			"byron genesis: slotDuration must not be negative, got %d",
+			byronGenesis.BlockVersionData.SlotDuration,
+		)
+	}
+	// K is also validated at genesis load (config/cardano's
+	// validateSecurityParameters), by internal/node/load.go's
+	// loadSecurityParamForConfig, and by this package's own
+	// StabilityWindowForEra -- so a non-positive k should never reach a
+	// production call here. This guard is the same defense-in-depth as the
+	// SlotDuration check above: this specific uint conversion had no local
+	// guard of its own before either fix.
+	if byronGenesis.ProtocolConsts.K <= 0 {
+		return 0, 0, fmt.Errorf(
+			"byron genesis: security parameter (protocolConsts.k) must be positive, got %d",
+			byronGenesis.ProtocolConsts.K,
+		)
+	}
 	// These are known to be within uint range
 	// #nosec G115
 	return uint(byronGenesis.BlockVersionData.SlotDuration),
@@ -537,12 +556,25 @@ func byronValidateWitnesses(
 	}
 	// Byron redeem witnesses are constructor 2 values whose fields are
 	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
-	// values but do not expose them through TransactionWitnessSet.
+	// values but do not expose them through TransactionWitnessSet, and even
+	// a current release's VkeyWitness has no room for the chain-code half
+	// of a constructor-0 witness that byronAddressRootForParts needs, so
+	// this file must still decode Twit itself.
 	var redeemWitnesses []lcommon.VkeyWitness
 	var bootstrapWitnesses []byronBootstrapWitness
 	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
-		redeemWitnesses = byronRedeemWitnesses(byronTx.Twit)
-		bootstrapWitnesses = byronBootstrapWitnesses(byronTx.Twit)
+		var err error
+		bootstrapWitnesses, redeemWitnesses, err = byronDecodeWitnesses(
+			byronTx.Twit,
+		)
+		if err != nil {
+			return lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeTransaction,
+				"invalid byron transaction witness",
+				map[string]any{"err": err.Error()},
+				err,
+			)
+		}
 		if len(redeemWitnesses) > 0 || len(bootstrapWitnesses) > 0 {
 			txHash := tx.Hash()
 			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
@@ -647,71 +679,79 @@ type byronBootstrapWitness struct {
 	ChainCode []byte
 }
 
-func byronWitnessPayloads(
+// byronDecodeWitnesses strictly decodes every entry of a Byron transaction's
+// Twit list. The reference sum type (Cardano.Chain.UTxO.TxWitness) has
+// exactly two live constructors -- VKWitness (0) and RedeemWitness (2) --
+// and no catch-all case: a witness with an unrecognized constructor, or a
+// malformed payload for a known constructor, invalidates the whole
+// transaction rather than being dropped from the returned witnesses. A
+// transaction with a genuinely valid witness followed by such an entry must
+// not have its valid witness accepted while the invalid one is discarded,
+// since the witness proof covers the raw bytes of both.
+func byronDecodeWitnesses(
 	witnesses []cbor.Value,
-	expectedConstructor uint64,
-) [][][]byte {
-	var ret [][][]byte
-	for _, witness := range witnesses {
+) ([]byronBootstrapWitness, []lcommon.VkeyWitness, error) {
+	var bootstrap []byronBootstrapWitness
+	var redeem []lcommon.VkeyWitness
+	for idx, witness := range witnesses {
 		fields, ok := witness.Value().([]any)
 		if !ok || len(fields) != 2 {
-			continue
+			return nil, nil, fmt.Errorf(
+				"witness %d: not a 2-element TxInWitness", idx,
+			)
 		}
 		ctor, ok := fields[0].(uint64)
-		if !ok || ctor != expectedConstructor {
-			continue
+		if !ok {
+			return nil, nil, fmt.Errorf(
+				"witness %d: constructor tag is not an unsigned integer",
+				idx,
+			)
 		}
 		wrapped, ok := fields[1].(cbor.WrappedCbor)
 		if !ok {
-			continue
+			return nil, nil, fmt.Errorf(
+				"witness %d: payload is not tag-24-wrapped CBOR", idx,
+			)
 		}
 		var witnessFields [][]byte
-		if _, err := cbor.Decode(wrapped.Bytes(), &witnessFields); err != nil {
-			continue
+		wrappedBytes := wrapped.Bytes()
+		consumed, err := cbor.Decode(wrappedBytes, &witnessFields)
+		if err != nil || consumed != len(wrappedBytes) {
+			return nil, nil, fmt.Errorf(
+				"witness %d: failed to decode tag-24 payload", idx,
+			)
 		}
-		ret = append(ret, witnessFields)
-	}
-	return ret
-}
-
-func byronBootstrapWitnesses(
-	witnesses []cbor.Value,
-) []byronBootstrapWitness {
-	var ret []byronBootstrapWitness
-	for _, witnessFields := range byronWitnessPayloads(
-		witnesses,
-		lcommon.ByronAddressTypePubkey,
-	) {
-		if len(witnessFields) != 2 || len(witnessFields[0]) != 64 ||
-			len(witnessFields[1]) != 64 {
-			continue
+		switch ctor {
+		case lcommon.ByronAddressTypePubkey:
+			if len(witnessFields) != 2 || len(witnessFields[0]) != 64 ||
+				len(witnessFields[1]) != 64 {
+				return nil, nil, fmt.Errorf(
+					"witness %d: malformed VKWitness fields", idx,
+				)
+			}
+			bootstrap = append(bootstrap, byronBootstrapWitness{
+				PublicKey: witnessFields[0][:32],
+				ChainCode: witnessFields[0][32:],
+				Signature: witnessFields[1],
+			})
+		case lcommon.ByronAddressTypeRedeem:
+			if len(witnessFields) != 2 || len(witnessFields[0]) != 32 ||
+				len(witnessFields[1]) != 64 {
+				return nil, nil, fmt.Errorf(
+					"witness %d: malformed RedeemWitness fields", idx,
+				)
+			}
+			redeem = append(redeem, lcommon.VkeyWitness{
+				Vkey:      witnessFields[0],
+				Signature: witnessFields[1],
+			})
+		default:
+			return nil, nil, fmt.Errorf(
+				"witness %d: unknown TxInWitness constructor %d", idx, ctor,
+			)
 		}
-		ret = append(ret, byronBootstrapWitness{
-			PublicKey: witnessFields[0][:32],
-			ChainCode: witnessFields[0][32:],
-			Signature: witnessFields[1],
-		})
 	}
-	return ret
-}
-
-func byronRedeemWitnesses(
-	witnesses []cbor.Value,
-) []lcommon.VkeyWitness {
-	var ret []lcommon.VkeyWitness
-	for _, witnessFields := range byronWitnessPayloads(
-		witnesses,
-		lcommon.ByronAddressTypeRedeem,
-	) {
-		if len(witnessFields) != 2 {
-			continue
-		}
-		ret = append(ret, lcommon.VkeyWitness{
-			Vkey:      witnessFields[0],
-			Signature: witnessFields[1],
-		})
-	}
-	return ret
+	return bootstrap, redeem, nil
 }
 
 func validateByronInputWitnesses(

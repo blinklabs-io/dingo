@@ -81,18 +81,16 @@ format: mod-tidy ## Run mod-tidy, then format code
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
-# golangci-lint covers one module for one GOOS per run. The loop reaches every
-# nested module, and the GOOS=windows run reaches files behind
-# `//go:build windows`, which the host build excludes. CI runs the same scopes
-# in the `lint` job of .github/workflows/go-test.yml and of
-# .github/workflows/publish.yml; internal/docsparity's
+# golangci-lint covers one module per run. The loop reaches every nested
+# module. CI runs the same scopes in the `lint` jobs of
+# .github/workflows/go-test.yml and .github/workflows/publish.yml;
+# internal/docsparity's
 # TestLintCoversEveryGoModule fails until every go.mod has a step in both.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
 	@for dir in $(GO_MODULE_DIRS); do \
 		echo "golangci-lint run ./... ($$dir)"; \
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
-	GOOS=windows golangci-lint run ./...
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
 	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...

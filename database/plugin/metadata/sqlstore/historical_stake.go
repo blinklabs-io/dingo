@@ -1226,3 +1226,65 @@ func noHistorySQL(alias string, tables []string) string {
 	}
 	return ret.String()
 }
+
+// GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
+// boundary reconstruction attributes stake to at snapshotSlot, whether or not
+// that pool is still registered. It is the historical-path counterpart of
+// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator (dingo
+// #4660); see that function for why the denominator must not be enumerated
+// from the active pool set.
+//
+// It reconstructs from the same CTE the stake fetch uses, with the pool
+// predicate relaxed to "has a delegation at all", and applies neither the
+// expiry nor the inactivity gate: the result only widens the set of pools the
+// stake fetch is asked about, and that fetch applies both.
+func (s *Store) GetEpochBoundaryDelegatedPoolKeyHashes(
+	snapshotSlot uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	if boundarySlot <= snapshotSlot {
+		boundarySlot = 0
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: resolve db: %w",
+			err,
+		)
+	}
+	query, args, err := s.historicalStakeCTE(
+		ctx,
+		db,
+		snapshotSlot,
+		boundarySlot,
+		0,
+		0,
+		"active_delegation.pool_key_hash IS NOT NULL",
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, query+`
+SELECT DISTINCT pool_key_hash FROM active_delegator_stake`, args...)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		if len(hash) == 0 {
+			continue
+		}
+		ret = append(ret, hash)
+	}
+	return ret, rows.Err()
+}
