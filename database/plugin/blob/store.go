@@ -117,6 +117,35 @@ type BlobStore interface {
 	Sync() error
 }
 
+// TxnBudget is an optional extension for blob stores whose transactions hold
+// only a bounded number of staged mutations.
+//
+// badger is one: it rejects every further staged write once a transaction
+// reaches its per-transaction entry count or byte budget, and the last write
+// any combined transaction makes is the commit timestamp Txn.Commit puts into
+// that same blob transaction. Staging an unbounded set therefore does not
+// cost the caller only the tail of that set -- it costs the caller the whole
+// commit, which on the startup rollback path leaves a node that fails
+// identically on every start (blinklabs-io/dingo#4657). Callers that stage a
+// set they did not size themselves ask how much room is left and stop short
+// of it.
+//
+// A store that does not implement this has no per-transaction bound for
+// callers to respect: the cloud plugins stage mutations in memory and apply
+// them in Commit. Callers treat such a store as unbounded.
+type TxnBudget interface {
+	// RemainingTxnEntries reports how many further mutations, each costing
+	// entryBytes of key plus value, txn will still accept. Staging all of
+	// them fills the transaction, so a caller with anything left to write
+	// into it afterwards -- and every combined transaction has the commit
+	// timestamp -- keeps headroom of its own.
+	//
+	// The bool is false when the store cannot answer for this transaction
+	// -- a nil, finished, or foreign handle -- which callers read the same
+	// way as a store that does not implement the interface at all.
+	RemainingTxnEntries(txn types.Txn, entryBytes int) (int, bool)
+}
+
 // LocalBlockReader is an optional extension for wrappers that can bypass a
 // remote archive fallback. Database code uses it for bounded local probes
 // where a cache miss must remain a miss.

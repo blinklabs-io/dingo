@@ -24,6 +24,11 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/antithesis/internal/genesis"
 )
 
+// Analysis runs are bounded to avoid accidentally configuring a test that
+// waits for an impractical amount of time while still leaving ample room for
+// long-running Antithesis environments.
+const maxAnalysisDurationSeconds int64 = 24 * 60 * 60
+
 // Config holds all runtime configuration for the analysis binary.
 // Values are read from environment variables; defaults apply when a variable
 // is absent or empty.
@@ -81,25 +86,23 @@ func LoadConfig() (*Config, error) {
 	}
 
 	if v := os.Getenv("ANALYSIS_INITIAL_WAIT"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			return nil, fmt.Errorf(
-				"ANALYSIS_INITIAL_WAIT: must be a non-negative integer (seconds), got %q",
-				v,
-			)
+		var err error
+		cfg.InitialWait, err = parseAnalysisDuration(
+			"ANALYSIS_INITIAL_WAIT", v, true,
+		)
+		if err != nil {
+			return nil, err
 		}
-		cfg.InitialWait = time.Duration(n) * time.Second
 	}
 
 	if v := os.Getenv("ANALYSIS_CHECK_INTERVAL"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return nil, fmt.Errorf(
-				"ANALYSIS_CHECK_INTERVAL: must be a positive integer (seconds), got %q",
-				v,
-			)
+		var err error
+		cfg.CheckInterval, err = parseAnalysisDuration(
+			"ANALYSIS_CHECK_INTERVAL", v, false,
+		)
+		if err != nil {
+			return nil, err
 		}
-		cfg.CheckInterval = time.Duration(n) * time.Second
 	}
 
 	if v := os.Getenv("ANALYSIS_MAX_FORK_DEPTH"); v != "" {
@@ -167,6 +170,22 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseAnalysisDuration(name, value string, allowZero bool) (time.Duration, error) {
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || seconds < 0 || (!allowZero && seconds == 0) ||
+		seconds > maxAnalysisDurationSeconds {
+		qualifier := "a positive"
+		if allowZero {
+			qualifier = "a non-negative"
+		}
+		return 0, fmt.Errorf(
+			"%s: must be %s integer (seconds) <= %d, got %q",
+			name, qualifier, maxAnalysisDurationSeconds, value,
+		)
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 // envStringA returns the value of the named environment variable, or the
