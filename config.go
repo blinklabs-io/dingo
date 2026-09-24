@@ -53,7 +53,7 @@ const (
 	// are skipped. Suitable for block producers with no APIs.
 	StorageModeCore StorageMode = "core"
 	// StorageModeAPI stores everything needed for API queries
-	// (blockfrost, utxorpc, mesh) in addition to core data.
+	// (blockfrost, utxorpc, mesh, kupo) in addition to core data.
 	StorageModeAPI StorageMode = "api"
 )
 
