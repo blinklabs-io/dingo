@@ -691,6 +691,53 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 	}
 }
 
+// TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry pins the
+// flattened Mithril CertState layout where the dormant count follows the
+// nested committee state after the DRep map.
+func TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x44}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+
+	hotMap, resignMap := committeeVStateFixture(t)
+	committeeState := append([]byte{0x82}, hotMap...)
+	committeeState = append(committeeState, resignMap...)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	dstate := []byte{0xa2}
+	for _, tag := range []byte{0x77, 0x78} {
+		delegator, encodeErr := cbor.Encode(
+			[]any{uint64(CredentialTypeKey), bytes.Repeat([]byte{tag}, 28)},
+		)
+		require.NoError(t, encodeErr)
+		dstate = append(dstate, delegator...)
+		dstate = append(dstate, 0x80)
+	}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		committeeState,
+		{0x03},
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	require.NotNil(t, result)
+	require.Equal(t, uint64(3), result.DormantEpochs)
+	require.Len(t, result.DReps, 1)
+	require.Equal(t, uint64(13), result.DReps[0].ExpiryEpoch)
+}
+
 // DState and ccHotKeys are both credential-keyed, so picking DState by map size
 // alone claimed the committee map whenever DState was empty or smaller.
 func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
