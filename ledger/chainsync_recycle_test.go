@@ -131,8 +131,8 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 				ouroboros.ConnectionId,
 				ocommon.Point,
 				ocommon.Point,
-			) error {
-				return nil
+			) (uint64, error) {
+				return 0, nil
 			},
 		},
 	}
@@ -211,9 +211,9 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 				_ ouroboros.ConnectionId,
 				start ocommon.Point,
 				_ ocommon.Point,
-			) error {
+			) (uint64, error) {
 				requested <- start
-				return nil
+				return 0, nil
 			},
 		},
 	}

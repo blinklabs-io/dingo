@@ -15,7 +15,6 @@
 package models
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -26,7 +25,6 @@ import (
 
 type Asset struct {
 	Name        []byte
-	NameHex     []byte
 	PolicyId    []byte
 	Fingerprint []byte
 	ID          uint
@@ -112,7 +110,7 @@ func CheckedUint64FromBigInt(amount *big.Int) (uint64, error) {
 }
 
 // ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
-// Each asset is populated with its name, hex-encoded name, policy ID, fingerprint, and amount.
+// Each asset is populated with its name, policy ID, fingerprint, and amount.
 // Returns an empty slice if multiAsset is nil or contains no assets.
 func ConvertMultiAssetToModels(
 	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
@@ -153,7 +151,6 @@ func ConvertMultiAssetToModels(
 
 			asset := Asset{
 				Name:        assetNameBytes,
-				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
 				PolicyId:    policyIdBytes,
 				Fingerprint: []byte(fingerprint.String()),
 				Amount:      types.Uint64(amount),
