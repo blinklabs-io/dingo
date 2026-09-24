@@ -421,6 +421,26 @@ func TestValidateInboundBlockEnvelopeAcceptsSubstitutedByronEbbBody(t *testing.T
 		config,
 		envelopeParent{origin: true},
 	))
+
+	wrongProofValue := []byte(strings.Repeat("x", 32))
+	genuineEbb, ok := genuine.(*byron.ByronEpochBoundaryBlock)
+	require.True(t, ok)
+	originalProof, ok := genuineEbb.BlockHeader.BodyProof.([]byte)
+	require.True(t, ok)
+	require.Len(t, wrongProofValue, 32)
+	require.NotEqual(t, originalProof, wrongProofValue)
+	wrongProof := substituteByronEbbProof(t, genuine.Cbor(), wrongProofValue)
+	wrongProofBlock, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		wrongProof,
+	)
+	require.NoError(t, err)
+	require.NoError(t, validateInboundBlockEnvelope(
+		wrongProofBlock,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	))
 }
 
 func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
