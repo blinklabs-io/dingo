@@ -20,6 +20,7 @@ import (
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -339,6 +340,34 @@ func (e ParameterChangeProtocolVersionError) Error() string {
 	)
 }
 
+// parameterChangeSetsProtocolVersionKey reports whether a ParameterChange's
+// raw CBOR param-update map contains key 14 (protocolVersion) at all,
+// independent of what it decoded to. A present-but-null value decodes a
+// pointer field to the same nil the field takes when the key is absent
+// entirely, so the decoded pointer alone cannot distinguish "not requested"
+// from "requested null" -- the same distinction
+// conwayCurrentTreasuryValuePresent draws for transaction-body key 21. The
+// reference rejects a ParameterChange carrying key 14 whatever value it
+// holds, so presence, not a specific decoded value, is what must be
+// rejected.
+func parameterChangeSetsProtocolVersionKey(paramUpdateCbor []byte) bool {
+	if len(paramUpdateCbor) == 0 {
+		// No raw CBOR to inspect (e.g. an update built in Go without going
+		// through decode). The caller's decoded-pointer check already
+		// covers this case.
+		return false
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(paramUpdateCbor, &fields); err != nil {
+		// The type already decoded successfully from this CBOR, so a
+		// failure here means the raw bytes and typed value disagree. Fail
+		// closed rather than silently admit the proposal.
+		return true
+	}
+	_, ok := fields[14]
+	return ok
+}
+
 // validateParameterChangeExcludesProtocolVersion rejects a Conway or
 // Dijkstra ParameterChange governance action that carries protocol-version
 // key 14 (dingo#4439). The reference excludes protocol version from
@@ -358,10 +387,16 @@ func validateParameterChangeExcludesProtocolVersion(
 		switch action := proposal.GovAction().(type) {
 		case *conway.ConwayParameterChangeGovAction:
 			setsProtocolVersion = action != nil &&
-				action.ParamUpdate.ProtocolVersion != nil
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
 		case *gdijkstra.DijkstraParameterChangeGovAction:
 			setsProtocolVersion = action != nil &&
-				action.ParamUpdate.ProtocolVersion != nil
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
 		}
 		if setsProtocolVersion {
 			return ParameterChangeProtocolVersionError{ProposalIndex: i}

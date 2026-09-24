@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -135,6 +136,151 @@ func TestValidateParameterChangeExcludesProtocolVersionAllowsOrdinaryUpdate(
 			tx := &mockConwayFeeTx{
 				proposalProcedures: []lcommon.ProposalProcedure{
 					tc.proposal,
+				},
+			}
+			require.NoError(
+				t,
+				validateParameterChangeExcludesProtocolVersion(
+					tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+				),
+			)
+		})
+	}
+}
+
+// decodeConwayParamUpdateFromRawFields CBOR-encodes fields as a map and
+// decodes it into a ConwayProtocolParameterUpdate through the type's own
+// UnmarshalCBOR, so the returned value's Cbor() carries the real raw bytes
+// -- unlike a struct literal, which leaves Cbor() empty. This is what lets a
+// test exercise parameterChangeSetsProtocolVersionKey's raw-CBOR path.
+func decodeConwayParamUpdateFromRawFields(
+	t *testing.T,
+	fields map[uint]any,
+) conway.ConwayProtocolParameterUpdate {
+	t.Helper()
+	raw, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	var update conway.ConwayProtocolParameterUpdate
+	_, err = cbor.Decode(raw, &update)
+	require.NoError(t, err)
+	return update
+}
+
+// decodeDijkstraParamUpdateFromRawFields is the Dijkstra analogue of
+// decodeConwayParamUpdateFromRawFields.
+func decodeDijkstraParamUpdateFromRawFields(
+	t *testing.T,
+	fields map[uint]any,
+) gdijkstra.DijkstraProtocolParameterUpdate {
+	t.Helper()
+	raw, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	var update gdijkstra.DijkstraProtocolParameterUpdate
+	_, err = cbor.Decode(raw, &update)
+	require.NoError(t, err)
+	return update
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14
+// is the CodeRabbit-flagged case on PR #4699: a decoded ParamUpdate whose
+// raw CBOR carries key 14 with an explicit null value decodes ProtocolVersion
+// to the same nil the field takes when key 14 is absent entirely, so the
+// decoded-pointer check alone cannot reject it. The reference rejects a
+// ParameterChange carrying key 14 at all, regardless of its value, so this
+// must be rejected via the raw-CBOR path in
+// parameterChangeSetsProtocolVersionKey.
+func TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14(
+	t *testing.T,
+) {
+	minFeeA := uint(1)
+	for _, tc := range []struct {
+		name   string
+		action lcommon.GovAction
+	}{
+		{
+			"Conway",
+			&conway.ConwayParameterChangeGovAction{
+				ParamUpdate: decodeConwayParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA, 14: nil},
+				),
+			},
+		},
+		{
+			"Dijkstra",
+			&gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: decodeDijkstraParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA, 14: nil},
+				),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					conway.ConwayProposalProcedure{
+						PPGovAction: conway.ConwayGovAction{
+							Type: uint(
+								lcommon.GovActionTypeParameterChange,
+							),
+							Action: tc.action,
+						},
+					},
+				},
+			}
+			err := validateParameterChangeExcludesProtocolVersion(
+				tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+			)
+			var protocolVersionErr ParameterChangeProtocolVersionError
+			require.ErrorAs(t, err, &protocolVersionErr)
+		})
+	}
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionAllowsRawUpdateWithoutKey14
+// is the negative case alongside the test above: a raw-CBOR-decoded update
+// that never carries key 14 must still pass, proving
+// parameterChangeSetsProtocolVersionKey does not over-reject an ordinary
+// decoded update.
+func TestValidateParameterChangeExcludesProtocolVersionAllowsRawUpdateWithoutKey14(
+	t *testing.T,
+) {
+	minFeeA := uint(1)
+	for _, tc := range []struct {
+		name   string
+		action lcommon.GovAction
+	}{
+		{
+			"Conway",
+			&conway.ConwayParameterChangeGovAction{
+				ParamUpdate: decodeConwayParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA},
+				),
+			},
+		},
+		{
+			"Dijkstra",
+			&gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: decodeDijkstraParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA},
+				),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					conway.ConwayProposalProcedure{
+						PPGovAction: conway.ConwayGovAction{
+							Type: uint(
+								lcommon.GovActionTypeParameterChange,
+							),
+							Action: tc.action,
+						},
+					},
 				},
 			}
 			require.NoError(
