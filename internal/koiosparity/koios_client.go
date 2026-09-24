@@ -461,7 +461,7 @@ func restrictedDialContext(next func(context.Context, string, string) (net.Conn,
 			last = err
 		}
 		if last == nil {
-			last = errors.New("Koios hostname has no usable address")
+			last = errors.New("koios hostname has no usable address")
 		}
 		return nil, last
 	}
