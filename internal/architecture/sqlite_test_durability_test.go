@@ -166,6 +166,72 @@ func TestSQLiteOpensWithoutSynchronousDetector(t *testing.T) {
 			0,
 		},
 		{
+			"opaque dsn built with synchronous exempt",
+			`func f(p string) {
+				dsn := "file:" + p + "?_pragma=synchronous(OFF)"
+				sql.Open("sqlite", dsn)
+			}`,
+			0,
+		},
+		{
+			"dsn closure with memory exempt",
+			`func f() {
+				dsn := func() string { return "file:x?mode=memory" }
+				sql.Open("sqlite", dsn())
+			}`,
+			0,
+		},
+		{
+			"conditional append flagged",
+			`func f(p string, fast bool) {
+				dsn := p
+				if fast {
+					dsn += "?_pragma=synchronous(OFF)"
+				}
+				sql.Open("sqlite", dsn)
+			}`,
+			1,
+		},
+		{
+			"conditional reassignment flagged",
+			`func f(p string, full bool) {
+				dsn := "file:" + p + "?_pragma=synchronous(OFF)"
+				if full {
+					dsn = p
+				}
+				sql.Open("sqlite", dsn)
+			}`,
+			1,
+		},
+		{
+			"var without value flagged",
+			`func f(fast bool) {
+				var dsn string
+				if fast {
+					dsn = "file:x?_pragma=synchronous(OFF)"
+				}
+				sql.Open("sqlite", dsn)
+			}`,
+			1,
+		},
+		{
+			"marker elsewhere in declaration flagged",
+			`func f(p string) {
+				sql.Open("sqlite", "file::memory:")
+				dsn := p
+				sql.Open("sqlite", dsn)
+			}`,
+			1,
+		},
+		{
+			"call dsn with marker elsewhere flagged",
+			`func f(d string) {
+				_ = "_pragma=synchronous(OFF)"
+				sql.Open("sqlite", pathFor(d))
+			}`,
+			1,
+		},
+		{
 			"other driver ignored",
 			`func f(p string) { sql.Open("pgx", p) }`,
 			0,
@@ -264,11 +330,13 @@ func collectStringConsts(
 // Open/OpenDB call on the "sqlite" driver whose DSN carries none of
 // sqliteRelaxedMarkers.
 //
-// A DSN that is a bare identifier or a call (no string literal in it) cannot
-// be judged from the argument alone, so it is judged by the enclosing
-// top-level declaration instead: the DSN is built there or in a closure
-// there. Anything else is judged by the argument's own text, so a function
-// that opens one in-memory and one on-disk database cannot excuse the second.
+// A DSN is judged by its own text plus what its identifiers resolve to: a
+// string constant, or a variable assigned in the enclosing top-level
+// declaration. A variable counts only when every plain assignment to it
+// carries a marker, so a path that reassigns it, or a var declared with no
+// value, leaves the open flagged. A += is not credited: the detector cannot
+// tell whether it runs on every path to the open, and appending never
+// removes a pragma the assignments already set.
 func sqliteOpensWithoutSynchronous(
 	name string,
 	src []byte,
@@ -286,24 +354,20 @@ func sqliteOpensWithoutSynchronous(
 
 	var violations []string
 	for _, decl := range parsed.Decls {
-		declText := nodeSource(fset, src, decl)
+		resolver := dsnResolver{
+			fset:     fset,
+			src:      src,
+			consts:   own,
+			assigns:  plainAssignments(decl),
+			visiting: map[string]bool{},
+		}
 		ast.Inspect(decl, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok || !isSQLiteOpenCall(call) {
 				return true
 			}
 			dsn := call.Args[1]
-			text := nodeSource(fset, src, dsn)
-			if !containsStringLiteral(dsn) {
-				text = declText
-			}
-			ast.Inspect(dsn, func(inner ast.Node) bool {
-				if ident, ok := inner.(*ast.Ident); ok {
-					text += " " + own[ident.Name]
-				}
-				return true
-			})
-			if relaxesSynchronous(text) {
+			if resolver.relaxes(dsn) {
 				return true
 			}
 			violations = append(violations, fmt.Sprintf(
@@ -316,6 +380,93 @@ func sqliteOpensWithoutSynchronous(
 		})
 	}
 	return violations, nil
+}
+
+// plainAssignments maps each identifier assigned with =, := or a var/const
+// spec anywhere in decl to its right-hand sides. A nil entry is a value the
+// detector cannot see: a var with no initializer, one result of a
+// multi-value call, or a range variable.
+func plainAssignments(decl ast.Decl) map[string][]ast.Expr {
+	assigns := map[string][]ast.Expr{}
+	add := func(lhs ast.Expr, rhs ast.Expr) {
+		if ident, ok := lhs.(*ast.Ident); ok && ident.Name != "_" {
+			assigns[ident.Name] = append(assigns[ident.Name], rhs)
+		}
+	}
+	ast.Inspect(decl, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			if n.Tok != token.ASSIGN && n.Tok != token.DEFINE {
+				return true
+			}
+			for i, lhs := range n.Lhs {
+				var rhs ast.Expr
+				if len(n.Rhs) == len(n.Lhs) {
+					rhs = n.Rhs[i]
+				}
+				add(lhs, rhs)
+			}
+		case *ast.ValueSpec:
+			for i, ident := range n.Names {
+				var rhs ast.Expr
+				if len(n.Values) == len(n.Names) {
+					rhs = n.Values[i]
+				}
+				add(ident, rhs)
+			}
+		case *ast.RangeStmt:
+			if n.Tok == token.DEFINE {
+				add(n.Key, nil)
+				if n.Value != nil {
+					add(n.Value, nil)
+				}
+			}
+		}
+		return true
+	})
+	return assigns
+}
+
+type dsnResolver struct {
+	fset     *token.FileSet
+	src      []byte
+	consts   map[string]string
+	assigns  map[string][]ast.Expr
+	visiting map[string]bool
+}
+
+func (r dsnResolver) relaxes(expr ast.Expr) bool {
+	if relaxesSynchronous(nodeSource(r.fset, r.src, expr)) {
+		return true
+	}
+	found := false
+	ast.Inspect(expr, func(node ast.Node) bool {
+		if ident, ok := node.(*ast.Ident); ok && r.identRelaxes(ident.Name) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// identRelaxes prefers a local assignment over a package constant of the
+// same name, since the local one shadows it.
+func (r dsnResolver) identRelaxes(name string) bool {
+	if r.visiting[name] {
+		return false
+	}
+	r.visiting[name] = true
+	defer delete(r.visiting, name)
+
+	if values, ok := r.assigns[name]; ok {
+		for _, value := range values {
+			if value == nil || !r.relaxes(value) {
+				return false
+			}
+		}
+		return true
+	}
+	return relaxesSynchronous(r.consts[name])
 }
 
 // isSQLiteOpenCall matches sql.Open("sqlite", dsn) and
@@ -337,17 +488,6 @@ func relaxesSynchronous(dsnText string) bool {
 		sqliteRelaxedMarkers,
 		func(marker string) bool { return strings.Contains(dsnText, marker) },
 	)
-}
-
-func containsStringLiteral(expr ast.Expr) bool {
-	found := false
-	ast.Inspect(expr, func(node ast.Node) bool {
-		if lit, ok := node.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-			found = true
-		}
-		return !found
-	})
-	return found
 }
 
 func nodeSource(fset *token.FileSet, src []byte, node ast.Node) string {
