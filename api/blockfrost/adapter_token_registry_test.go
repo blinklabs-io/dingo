@@ -23,9 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-//go:fix inline
-func registryIntPtr(v int) *int { return new(v) }
-
 // TestTokenRegistryMetadataValueShape pins the object served in the
 // `metadata` field of GET /assets/{asset} to the Blockfrost CIP-26 shape:
 // name, description, ticker, url, logo, decimals.

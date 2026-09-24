@@ -81,8 +81,8 @@ func TestRollbackRequeuesRewardPrecompute(t *testing.T) {
 				cutoffSlot: 100,
 			}
 
-			require.NoError(t, ls.rollbackWithResync(
-				fixture.ancestorTip.Point, false,
+			require.NoError(t, ls.rollbackWithOptions(
+				fixture.ancestorTip.Point, false, false,
 			))
 
 			require.Zero(t, ls.rewardInputRollbackActive.Load())
@@ -156,8 +156,8 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			}
 			require.NoError(t, db.SetTip(ls.currentTip, nil))
 
-			require.NoError(t, ls.rollbackWithResync(
-				ocommon.NewPoint(ancestor.Slot, ancestor.Hash), false,
+			require.NoError(t, ls.rollbackWithOptions(
+				ocommon.NewPoint(ancestor.Slot, ancestor.Hash), false, false,
 			))
 			ls.rewardPrecomputeWG.Wait()
 
@@ -233,7 +233,7 @@ func TestRollbackDoesNotRestartRewardsWithoutRestoredState(t *testing.T) {
 				point = fixture.currentTip.Point
 			}
 
-			err := ls.rollbackWithResync(point, false)
+			err := ls.rollbackWithOptions(point, false, false)
 			if noop {
 				require.NoError(t, err)
 				require.Same(t, pending, ls.rewardPrecomputePending)

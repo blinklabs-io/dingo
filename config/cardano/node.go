@@ -17,7 +17,6 @@ package cardano
 import (
 	"bytes"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -174,7 +173,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		}
 		// Store computed hash if config does not contain hash.
 		c.ByronGenesisHash = byronHash
-		byronGenesis, err := byron.NewByronGenesisFromFile(byronGenesisPath)
+		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -462,9 +461,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.ByronGenesisHash = byronHash
-		byronGenesis, err := byron.NewByronGenesisFromReader(
-			bytes.NewReader(byronGenesisBytes),
-		)
+		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -791,11 +788,57 @@ func validateGenesisHash(
 }
 
 func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
-	var payload any
-	if err := json.Unmarshal(genesisBytes, &payload); err != nil {
+	parsed, err := parseByronCanonicalJSON(genesisBytes)
+	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(payload)
+	return renderByronCanonicalHash(parsed), nil
+}
+
+// loadByronGenesisFromBytes decodes a Byron genesis document into the
+// gouroboros schema type using the Byron reference's first-occurrence
+// semantics for duplicate object keys, then rejects genesis fields that are
+// unsigned in the reference schema but were parsed as negative.
+//
+// gouroboros's byron.ByronGenesis decoder (like encoding/json generally)
+// resolves duplicate JSON object keys last-occurrence-wins, which disagrees
+// with the Byron reference's first-occurrence rule. Rather than changing
+// that decoder (an upstream gouroboros concern -- see dingo#4424), this
+// pre-filters the parsed document down to one member per key, keeping
+// whichever occurred first, before handing it to the decoder.
+func loadByronGenesisFromBytes(
+	genesisBytes []byte,
+) (byron.ByronGenesis, error) {
+	parsed, err := parseByronCanonicalJSON(genesisBytes)
+	if err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	deduped := renderByronFirstOccurrenceJSON(parsed)
+	genesis, err := byron.NewByronGenesisFromReader(bytes.NewReader(deduped))
+	if err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	if err := validateByronGenesisUnsignedFields(&genesis); err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	return genesis, nil
+}
+
+// validateByronGenesisUnsignedFields rejects Byron genesis fields that the
+// reference schema declares unsigned but which gouroboros parses into a
+// signed Go int, allowing a negative value such as slotDuration "-1" through
+// genesis loading undetected. Left unchecked, a negative SlotDuration reaches
+// a bare uint conversion in the Byron era-shape calculation and wraps to a
+// very large duration instead of failing here, at the point the bad value
+// was introduced.
+func validateByronGenesisUnsignedFields(genesis *byron.ByronGenesis) error {
+	if genesis.BlockVersionData.SlotDuration < 0 {
+		return fmt.Errorf(
+			"byron genesis: slotDuration must not be negative, got %d",
+			genesis.BlockVersionData.SlotDuration,
+		)
+	}
+	return nil
 }
 
 func replaceGenesisLineEndings(genesisBytes []byte) []byte {
