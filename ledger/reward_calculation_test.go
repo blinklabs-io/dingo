@@ -34,9 +34,9 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -4184,6 +4184,12 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		require.True(t, ok)
 		require.NotNil(t, app)
 		require.True(t, app.precomputed)
+		require.Equal(
+			t,
+			rewards.Efficiency(app.totalBlocks, app.params),
+			app.rewardEfficiency,
+			"reused reward outputs must retain efficiency attribution",
+		)
 		require.Equal(t, uint64(100), app.snapshotCapturedSlot)
 		require.Equal(t, uint64(100), app.snapshotBoundarySlot)
 		require.NoError(t, txn.Rollback())
@@ -4942,17 +4948,27 @@ func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
 	t.Parallel()
 
 	ls, db := newRewardCalculationTestLedger(t)
+	ls.activeEras = append(
+		append([]eras.EraDesc(nil), eras.Eras...),
+		eras.DijkstraEraDesc,
+	)
 	ls.config.PledgeLeverageEnabled = true
 	ls.config.PledgeLeverage = 100
-	performancePParams := &conway.ConwayProtocolParameters{
-		NOpt:            10,
-		A0:              rewardCalcRat(1, 2),
-		Rho:             rewardCalcRat(1, 100),
-		Tau:             rewardCalcRat(0, 1),
-		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 9},
-	}
+	performancePParamsValue := mockledger.NewMockConwayProtocolParams()
+	performancePParamsValue.NOpt = 10
+	performancePParamsValue.A0 = rewardCalcRat(1, 2)
+	performancePParamsValue.Rho = rewardCalcRat(1, 100)
+	performancePParamsValue.Tau = rewardCalcRat(0, 1)
+	performancePParamsValue.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 9}
+	performancePParams := &performancePParamsValue
 	calculationPParams := &dijkstra.DijkstraProtocolParameters{
-		MaxPledgeLeverage: rewardCalcRat(1, 2),
+		ConwayProtocolParameters:  mockledger.NewMockConwayProtocolParams(),
+		RefScriptCostMultiplier:   rewardCalcRat(1, 1),
+		MaxPledgeLeverage:         rewardCalcRat(1, 2),
+		MinPoolMargin:             rewardCalcRat(1, 20),
+		LeiosQuorumStakeThreshold: rewardCalcRat(1, 2),
+		CommitteeStakeCoverage:    rewardCalcRat(1, 2),
+		QuorumStakeThreshold:      rewardCalcRat(1, 2),
 	}
 	performanceCBOR, err := cbor.Encode(performancePParams)
 	require.NoError(t, err)

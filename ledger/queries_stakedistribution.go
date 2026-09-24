@@ -100,9 +100,12 @@ func (ls *LedgerState) queryShelleyStakeDistribution(
 		}
 		targetSlot = tip.Point.Slot
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
+	}
+	if !found {
+		return nil, errEpochNotResolved(at)
 	}
 
 	calc := snapshot.NewCalculator(ls.db)

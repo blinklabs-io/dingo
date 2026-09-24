@@ -78,8 +78,8 @@ func TestBlockfetchContinuationPublishesHeaderInvalidationOnFailure(
 				ouroboros.ConnectionId,
 				ocommon.Point,
 				ocommon.Point,
-			) error {
-				return errors.New("request failed")
+			) (uint64, error) {
+				return 0, errors.New("request failed")
 			},
 		},
 	}
