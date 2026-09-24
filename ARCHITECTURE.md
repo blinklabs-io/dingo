@@ -11709,10 +11709,11 @@ of the anchor would then double-count once the historical backfill (issue
 #4061) has stored pre-anchor transactions locally. `ImportedEpochFees` is
 additive schema (migration `v23`). The migration marks a pre-v23 Mithril
 database whose imported anchor row lacks this basis for repair. Before
-`dingo serve` starts, core-mode databases with that marker automatically run a
-Mithril v2 catch-up against the latest certified state. Catch-up verifies the
-existing chain intersection before reconciling ledger rows, retains the local
-block history, and clears the marker only on completion. If the selected
+`dingo serve` starts, core- and API-mode databases with that marker automatically
+run a Mithril v2 catch-up against the latest certified state. Catch-up verifies
+the existing chain intersection before reconciling ledger rows, retains the local
+block history, and clears the marker only on completion. API mode also rebuilds
+its historical metadata through the certified ledger anchor. If the selected
 artifact does not cover the local tip, startup remains blocked and the database
 is left intact while Dingo retries the repair every five minutes; it is never
 treated as a clean bootstrap. Cancelling startup stops the retry without
