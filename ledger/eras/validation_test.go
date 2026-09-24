@@ -2989,22 +2989,29 @@ func TestConwayGovActionWellFormednessRejectsDuplicateCommitteeRemovals(
 	for _, test := range []struct {
 		name        string
 		credentials []lcommon.Credential
+		quorum      *big.Rat
 		wantError   bool
 	}{
 		{
 			name:        "duplicate logical credential",
 			credentials: []lcommon.Credential{keyCredential, keyCredential},
+			quorum:      big.NewRat(1, 2),
 			wantError:   true,
 		},
 		{
 			name:        "same hash with distinct credential types",
 			credentials: []lcommon.Credential{keyCredential, scriptCredential},
+			quorum:      big.NewRat(1, 2),
+		},
+		{
+			name:   "zero quorum",
+			quorum: big.NewRat(0, 1),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			action := &lcommon.UpdateCommitteeGovAction{
 				Credentials: test.credentials,
-				Quorum:      cbor.Rat{Rat: big.NewRat(1, 2)},
+				Quorum:      cbor.Rat{Rat: test.quorum},
 			}
 			encoded, err := cbor.Encode(action)
 			require.NoError(t, err)
@@ -3037,6 +3044,79 @@ func TestConwayGovActionWellFormednessRejectsDuplicateCommitteeRemovals(
 			require.NoError(t, ruleErr)
 		})
 	}
+}
+
+func TestConwayV3ProposalProcedureCanonicalizesCommitteeCollections(
+	t *testing.T,
+) {
+	key := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224{0x02},
+	}
+	scriptLow := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.Blake2b224{0x01},
+	}
+	scriptHigh := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.Blake2b224{0x02},
+	}
+	keyPtr, scriptLowPtr, scriptHighPtr := key, scriptLow, scriptHigh
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+
+	buildProcedure := func(removals []lcommon.Credential) data.PlutusData {
+		action := &lcommon.UpdateCommitteeGovAction{
+			Type:        uint(lcommon.GovActionTypeUpdateCommittee),
+			Credentials: removals,
+			CredEpochs: map[*lcommon.Credential]uint64{
+				&keyPtr:        3,
+				&scriptHighPtr: 2,
+				&scriptLowPtr:  1,
+			},
+			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+		}
+		procedure := conway.ConwayProposalProcedure{
+			PPRewardAccount: rewardAccount,
+			PPGovAction: conway.ConwayGovAction{
+				Type:   uint(lcommon.GovActionTypeUpdateCommittee),
+				Action: action,
+			},
+		}
+		return procedure.ToPlutusData()
+	}
+	first := buildProcedure([]lcommon.Credential{key, scriptHigh, scriptLow})
+	second := buildProcedure([]lcommon.Credential{scriptLow, key, scriptHigh})
+	firstCBOR, err := data.Encode(first)
+	require.NoError(t, err)
+	secondCBOR, err := data.Encode(second)
+	require.NoError(t, err)
+	require.Equal(t, firstCBOR, secondCBOR)
+
+	procedureData := first.(*data.Constr)
+	actionData := procedureData.Fields[2].(*data.Constr)
+	wantOrder := []data.PlutusData{
+		scriptLow.ToPlutusData(),
+		scriptHigh.ToPlutusData(),
+		key.ToPlutusData(),
+	}
+	removals := actionData.Fields[1].(*data.List)
+	require.Equal(t, wantOrder, removals.Items)
+	additions := actionData.Fields[2].(*data.Map)
+	require.Len(t, additions.Pairs, len(wantOrder))
+	for i, pair := range additions.Pairs {
+		require.Equal(t, wantOrder[i], pair[0])
+	}
+	repeatedCBOR, err := data.Encode(buildProcedure(
+		[]lcommon.Credential{key, scriptHigh, scriptLow},
+	))
+	require.NoError(t, err)
+	require.Equal(t, firstCBOR, repeatedCBOR)
 }
 
 func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(
