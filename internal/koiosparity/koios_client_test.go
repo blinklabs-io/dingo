@@ -78,11 +78,26 @@ func TestPostRejectsOversizedResponseAsPermanentNeverRetried(t *testing.T) {
 // limiter is disabled (limit 0) so retries are not slowed by the sliding window.
 func newTestKoiosClient(baseURL string) *KoiosClient {
 	return &KoiosClient{
-		baseURL: baseURL,
-		apiKey:  "testkey",
-		http:    &http.Client{Timeout: 5 * time.Second},
-		limiter: newBurstLimiter(0, koiosBurstWindow),
+		baseURL:                baseURL,
+		apiKey:                 "testkey",
+		http:                   &http.Client{Timeout: 5 * time.Second},
+		limiter:                newBurstLimiter(0, koiosBurstWindow),
+		koios408MaxRetries:     koios408MaxRetriesDefault,
+		koios408InitialBackoff: koios408InitialBackoffDefault,
+		koios408MaxBackoff:     koios408MaxBackoffDefault,
 	}
+}
+
+// newTestKoiosClientFast408 mirrors newTestKoiosClient but shrinks the 408
+// retry budget to milliseconds so tests that exhaust it don't pay the real
+// ~60-minute production budget (koios408MaxRetriesDefault/
+// koios408InitialBackoffDefault/koios408MaxBackoffDefault).
+func newTestKoiosClientFast408(baseURL string, maxRetries int) *KoiosClient {
+	k := newTestKoiosClient(baseURL)
+	k.koios408MaxRetries = maxRetries
+	k.koios408InitialBackoff = time.Millisecond
+	k.koios408MaxBackoff = 5 * time.Millisecond
+	return k
 }
 
 func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
@@ -233,6 +248,119 @@ func TestGetExhausted503IsNotPermanent(t *testing.T) {
 		errors.Is(err, ErrKoiosPermanent),
 		"an exhausted transient 503 must remain retryable/isolated, not permanent",
 	)
+}
+
+// TestGetRetries408ThenSucceeds proves dingo#4486's fix: a transient 408
+// ("Request Time-out") is retried via the 408-specific backoff budget
+// instead of being classified as ErrKoiosPermanent on the first occurrence.
+func TestGetRetries408ThenSucceeds(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) <= 2 {
+				w.WriteHeader(http.StatusRequestTimeout)
+				_, _ = w.Write(
+					[]byte(
+						"<html><body><h1>408 Request Time-out</h1></body></html>",
+					),
+				)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 5)
+	resp, err := k.get(context.Background(), "/tip", -1, -1)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 3, attempts.Load())
+}
+
+// TestGetFailsAfterExhausting408RetriesReturnsPermanent proves the 408
+// budget is bounded, not infinite: a 408 that persists past
+// koios408MaxRetries must still eventually give up and return
+// ErrKoiosPermanent as a last resort.
+func TestGetFailsAfterExhausting408RetriesReturnsPermanent(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusRequestTimeout)
+			_, _ = w.Write(
+				[]byte(
+					"<html><body><h1>408 Request Time-out</h1></body></html>",
+				),
+			)
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 4)
+	_, err := k.get(context.Background(), "/tip", -1, -1)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 4, attempts.Load())
+}
+
+// TestGet408RetriesDoNotConsumeThe5xxBudget pins the two retry budgets as
+// independent. A degraded Koios window mixes 408s with 502/503s, so if 408
+// retries were charged against koiosMaxRetries the first interleaved 5xx
+// would fail the whole request — defeating the 408 budget after roughly a
+// minute of a window that can last an hour.
+func TestGet408RetriesDoNotConsumeThe5xxBudget(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch attempts.Add(1) {
+			case 1, 2:
+				w.WriteHeader(http.StatusRequestTimeout)
+			case 3:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 16)
+	resp, err := k.get(context.Background(), "/tip", -1, -1)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 4, attempts.Load())
+}
+
+// TestGetDoesNotRetryOn404 guards the fix's boundary: a genuinely permanent
+// status must still fail immediately with no retry, unaffected by 408
+// getting its own budget.
+func TestGetDoesNotRetryOn404(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.get(context.Background(), "/tip", -1, -1)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 1, attempts.Load(), "a 404 must not be retried")
 }
 
 func TestGetRetriesBurst429HonoringRetryAfter(t *testing.T) {
@@ -426,6 +554,106 @@ func TestPostRetriesOn503ThenSucceeds(t *testing.T) {
 	require.EqualValues(t, 2, attempts.Load())
 }
 
+// TestPostRetries408ThenSucceeds mirrors TestGetRetries408ThenSucceeds for
+// post(), proving both request functions share the dingo#4486 fix.
+func TestPostRetries408ThenSucceeds(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodPost, r.Method)
+			if attempts.Add(1) <= 2 {
+				w.WriteHeader(http.StatusRequestTimeout)
+				_, _ = w.Write(
+					[]byte(
+						"<html><body><h1>408 Request Time-out</h1></body></html>",
+					),
+				)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"stake_address":"stake1x"}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 5)
+	resp, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{
+			"_stake_addresses": []string{"stake1x"},
+			"_epoch_no":        100,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 3, attempts.Load())
+}
+
+// TestPostFailsAfterExhausting408RetriesReturnsPermanent mirrors
+// TestGetFailsAfterExhausting408RetriesReturnsPermanent for post().
+func TestPostFailsAfterExhausting408RetriesReturnsPermanent(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusRequestTimeout)
+			_, _ = w.Write(
+				[]byte(
+					"<html><body><h1>408 Request Time-out</h1></body></html>",
+				),
+			)
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 4)
+	_, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{},
+	)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrKoiosPermanent))
+	require.EqualValues(t, 4, attempts.Load())
+}
+
+// TestPost408RetriesDoNotConsumeThe5xxBudget mirrors
+// TestGet408RetriesDoNotConsumeThe5xxBudget for post().
+func TestPost408RetriesDoNotConsumeThe5xxBudget(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch attempts.Add(1) {
+			case 1, 2:
+				w.WriteHeader(http.StatusRequestTimeout)
+			case 3:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"stake_address":"stake1x"}]`))
+			}
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClientFast408(srv.URL, 16)
+	resp, err := k.post(
+		context.Background(),
+		"/account_reward_history",
+		map[string]any{"_stake_addresses": []string{"stake1x"}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 4, attempts.Load())
+}
+
 func TestPostDoesNotRetryOnAuthFailure(t *testing.T) {
 	t.Parallel()
 
@@ -557,6 +785,82 @@ func TestGetAccountRewardHistoryEmptyAddressesNoRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, items)
 	require.False(t, called)
+}
+
+// TestGetTxInfosReturnsResultsInRequestOrder proves GetTxInfos reorders
+// Koios's response to match the caller's requested order, not whatever
+// order Koios happened to return -- required so a caller applying
+// dependent transactions (a UTxO created by one hash, spent by a later
+// one in the same request) does so in chain order.
+func TestGetTxInfosReturnsResultsInRequestOrder(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// Deliberately reversed vs. the request order below.
+			_, _ = w.Write([]byte(`[
+				{"tx_hash":"bbb","inputs":[],"outputs":[]},
+				{"tx_hash":"aaa","inputs":[],"outputs":[]}
+			]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	items, err := k.GetTxInfos(context.Background(), []string{"aaa", "bbb"})
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	require.Equal(t, "aaa", items[0].TxHash)
+	require.Equal(t, "bbb", items[1].TxHash)
+}
+
+// TestGetTxInfosErrorsOnIncompleteResponse proves that a transaction hash
+// the caller asked for but Koios omitted from the response must fail
+// loudly, not be silently treated as
+// "no changes for that hash" -- the from-genesis UTxO reconstruction can't
+// tell the difference between "this hash has no inputs/outputs" and "this
+// hash's real inputs/outputs were silently dropped," so it must never
+// proceed on an incomplete response.
+func TestGetTxInfosErrorsOnIncompleteResponse(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// Only "aaa" of the two requested hashes comes back.
+			_, _ = w.Write([]byte(`[{"tx_hash":"aaa","inputs":[],"outputs":[]}]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.GetTxInfos(context.Background(), []string{"aaa", "bbb"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "bbb")
+}
+
+// TestGetTxInfosErrorsOnDuplicateResult proves a defensively-unexpected
+// duplicate tx_hash in Koios's response (which would otherwise silently
+// pick one and lose data from the other) fails loudly instead.
+func TestGetTxInfosErrorsOnDuplicateResult(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"tx_hash":"aaa","inputs":[],"outputs":[]},
+				{"tx_hash":"aaa","inputs":[],"outputs":[]}
+			]`))
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.GetTxInfos(context.Background(), []string{"aaa"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duplicate")
 }
 
 // TestNewKoiosTransportResponseHeaderTimeout proves newKoiosTransport's
