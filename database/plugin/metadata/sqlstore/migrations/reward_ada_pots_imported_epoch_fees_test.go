@@ -25,7 +25,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestRewardAdaPotsImportedEpochFeesColumnIsAdditive covers dingo#3975's v22
+// TestRewardAdaPotsImportedEpochFeesColumnIsAdditive covers dingo#3975's v23
 // migration: a row written before the column existed must read back as NULL,
 // not fail the migration or silently coerce to zero (zero is a legitimate
 // "imported nothing before the anchor" value and must stay distinguishable
@@ -38,7 +38,7 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 22)
+	require.Len(t, registry, 23)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -51,9 +51,9 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 		require.NoError(t, runner.Run(context.Background()))
 	}
 
-	// Pre-v22 schema: write a row the way a live boundary always has, with
+	// Pre-v23 schema: write a row the way a live boundary always has, with
 	// no imported_epoch_fees column to fill in.
-	runTo(registry[:21])
+	runTo(registry[:22])
 	_, err = db.Exec(
 		"INSERT INTO reward_ada_pots "+
 			"(epoch, treasury, reserves, fees, rewards, captured_slot) "+
@@ -79,7 +79,7 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 	).Scan(&pending), sql.ErrNoRows,
 		"a legacy live database must not be marked for Mithril repair")
 
-	// A row written after v22, the way seedImportedRewardBasis does, must
+	// A row written after v23, the way seedImportedRewardBasis does, must
 	// round-trip a real value including zero.
 	_, err = db.Exec(
 		"INSERT INTO reward_ada_pots "+
@@ -117,7 +117,7 @@ func TestRewardAdaPotsImportedFeesMigrationSchedulesLegacyMithrilRepair(
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	runTo(registry[:21])
+	runTo(registry[:22])
 	_, err = db.Exec(`INSERT INTO sync_state (sync_key, value)
 VALUES ('mithril_ledger_slot', '121763516')`)
 	require.NoError(t, err)

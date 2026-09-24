@@ -56,6 +56,7 @@ const (
 	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
 	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
 	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
+	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 	rewardAdaPotsImportedFeesSchemaRelease        = "reward-ada-pots-imported-epoch-fees"
 )
 
@@ -130,11 +131,8 @@ var schemaVersions = []struct {
 		Name:    assetAmountFingerprintIndexDropSchemaRelease,
 		Dir:     "v21",
 	},
-	{
-		Version: 22,
-		Name:    rewardAdaPotsImportedFeesSchemaRelease,
-		Dir:     "v22",
-	},
+	{Version: 22, Name: governanceVoteHistorySchemaRelease, Dir: "v22"},
+	{Version: 23, Name: rewardAdaPotsImportedFeesSchemaRelease, Dir: "v23"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
