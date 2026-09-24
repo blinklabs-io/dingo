@@ -370,7 +370,7 @@ func decodeTxCbor(
 			fmt.Errorf("hex decode: %w", err),
 		)
 	}
-	txType, err := gledger.DetermineTransactionType(
+	txType, err := safedecode.TransactionType(
 		txBytes,
 	)
 	if err != nil {

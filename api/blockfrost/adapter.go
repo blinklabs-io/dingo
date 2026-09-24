@@ -3829,7 +3829,7 @@ func (a *NodeAdapter) TransactionSubmit(
 	if a.submitter == nil {
 		return "", ErrMempoolUnavailable
 	}
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return "", fmt.Errorf(
 			"%w: determine transaction type: %w",
@@ -3888,7 +3888,7 @@ func (a *NodeAdapter) TransactionSubmit(
 func (a *NodeAdapter) TransactionEvaluate(
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: determine transaction type: %w",

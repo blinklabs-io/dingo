@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -924,7 +923,7 @@ func (s *Server) handleConstructionSubmit(
 		return
 	}
 
-	txType, err := gledger.DetermineTransactionType(
+	txType, err := safedecode.TransactionType(
 		txBytes,
 	)
 	if err != nil {

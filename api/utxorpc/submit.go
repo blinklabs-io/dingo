@@ -69,7 +69,7 @@ func (s *submitServiceServer) SubmitTx(
 	resp := &submit.SubmitTxResponse{}
 
 	txRawBytes := txRaw.GetRaw()
-	txType, err := gledger.DetermineTransactionType(txRawBytes)
+	txType, err := safedecode.TransactionType(txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed decoding tx: %w", err)
 	}
@@ -273,14 +273,14 @@ func (s *submitServiceServer) EvalTx(
 
 	txRawBytes := txRaw.GetRaw()
 	// Decode TX
-	txType, err := gledger.DetermineTransactionType(txRawBytes)
+	txType, err := safedecode.TransactionType(txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"could not parse transaction to determine type: %w",
 			err,
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+	tx, err := safedecode.Transaction(txType, txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transaction CBOR: %w", err)
 	}
@@ -433,7 +433,7 @@ func (s *submitServiceServer) WatchMempool(
 				return
 			}
 			txRawBytes := addEvt.Body
-			txType, err := gledger.DetermineTransactionType(
+			txType, err := safedecode.TransactionType(
 				txRawBytes,
 			)
 			if err != nil {
@@ -443,7 +443,7 @@ func (s *submitServiceServer) WatchMempool(
 				)
 				return
 			}
-			tx, err := gledger.NewTransactionFromCbor(
+			tx, err := safedecode.Transaction(
 				txType,
 				txRawBytes,
 			)
