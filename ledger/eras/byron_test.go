@@ -524,15 +524,35 @@ func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
 	return m.protocolMagic, nil
 }
 
-func (m *mockLedgerState) ByronFeePolicy() (int64, int64, error) {
-	return m.byronFeeSummand, m.byronFeeMultiplier, nil
+// ByronProtocolParameters builds genesis-loaded parameters from the mock's
+// raw genesis fee policy, scaled by 10^9, and size limit.
+func (m *mockLedgerState) ByronProtocolParameters() (
+	*ByronProtocolParameters,
+	error,
+) {
+	return byronGenesisTestParams(
+		m.byronFeeSummand, m.byronFeeMultiplier, m.byronMaxTxSize,
+	)
 }
 
-func (m *mockLedgerState) ByronMaxTxSize() (uint64, error) {
-	if m.byronMaxTxSize == 0 {
-		return math.MaxUint64, nil
+// byronGenesisTestParams loads a Byron genesis carrying the given raw fee
+// policy and maxTxSize, zero meaning no practical limit.
+func byronGenesisTestParams(
+	summandNano, multiplierNano int64,
+	maxTxSize uint64,
+) (*ByronProtocolParameters, error) {
+	genesis := &byron.ByronGenesis{}
+	genesis.BlockVersionData.TxFeePolicy.Summand = summandNano
+	genesis.BlockVersionData.TxFeePolicy.Multiplier = multiplierNano
+	params, err := NewByronProtocolParametersFromGenesis(genesis)
+	if err != nil {
+		return nil, err
 	}
-	return m.byronMaxTxSize, nil
+	params.MaxTxSize = new(big.Int).SetUint64(maxTxSize)
+	if maxTxSize == 0 {
+		params.MaxTxSize = new(big.Int).SetUint64(math.MaxUint64)
+	}
+	return params, nil
 }
 
 func (m *mockLedgerState) SkipPhase2Validation() bool {

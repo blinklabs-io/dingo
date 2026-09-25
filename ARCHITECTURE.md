@@ -3035,8 +3035,10 @@ consistent as the boundary is crossed:
 
 - `validateInboundBlockEnvelope` validates decoded Byron main and epoch
   boundary blocks against the body proof in their header and the
-  `maxHeaderSize` and `maxBlockSize` limits in Byron genesis. It does not need
-  Shelley protocol parameters. Structured test or embedding block types with no
+  `maxHeaderSize` and `maxBlockSize` limits. A main block uses the limits its
+  Byron update state adopted for the block's epoch, passed as its pparams;
+  an epoch boundary block, or a caller without adopted parameters, uses Byron
+  genesis. It does not need Shelley protocol parameters. Structured test or embedding block types with no
   complete wire CBOR remain outside those wire-level checks.
 - `validateBlockHeaderProtocolVersion` returns before reading pparams when
   `HeaderProtocolMajor` reports no version, which is Byron -- headers there have
@@ -3044,10 +3046,11 @@ consistent as the boundary is crossed:
   validated while pparams is legitimately nil; reading them first rejects every
   block of the prefix under `ValidateHistorical`.
 
-Byron's own transaction rules need no parameters either: every rule
-`eras.ValidateTxByron` runs discards the argument. `ppMaxTxSize` and the fee
-policy come from Byron genesis through the ledger state
-(`ByronMaxTxSizeProvider`, `ByronFeePolicyProvider`). The rules follow the
+Byron's transaction rules read `ppMaxTxSize` and the fee policy from
+`eras.ByronProtocolParameters`. Block application passes the parameters the
+Byron update state adopted for the block's epoch as `ValidateTxByron`'s
+pparams; other callers get the parameters adopted as of the ledger tip, or
+Byron genesis, through `ByronProtocolParametersProvider`. The rules follow the
 reference `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a
 list, so a repeated input is valid, while balances restrict the UTxO to the
 input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
@@ -3304,7 +3307,41 @@ rollback, the delegation view is reconstructed from the canonical Byron chain
 through the applied tip, while the issuer window retains only its last `k`
 main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
-advance the issuer window.
+advance the issuer window. An epoch boundary block whose previous hash is a
+genesis hash -- in epoch 0, or later through the deprecated `255 => "Genesis"`
+attribute -- is rejected once the chain has a block, as the reference reads it
+as `Left GenesisHash` whatever its bytes.
+
+The same in-memory state carries the Byron update system
+(`ledger/byronupdate`, following cardano-ledger's
+`Cardano.Chain.Update.Validation.Interface`). Every Byron block first ticks it:
+entering a new epoch adopts the newest candidate that has been stable for `4k`
+slots by the epoch's first slot, replacing the protocol version and
+parameters and clearing every pending proposal, vote and endorsement. A main
+block then registers its update proposal, its votes in order and its issuer's
+endorsement of the header's protocol version, reading the delegation map as
+ticked to the block's slot. A failure rejects the block. Genesis initializes the
+parameters, which feed the Byron block-size, transaction-size and fee rules
+above. Slots are numbered as the reference does, epoch times `10k` plus the
+slot in the epoch. The state also records the block number at which each
+candidate appeared, which ouroboros-consensus uses to decide the transition to
+Shelley.
+
+Like the delegation view, the update state is rebuilt from the canonical Byron
+chain rather than stored, so a rollback restores it by replay. It is
+authoritative only when rebuilt from the chain's first block: a ledger started
+from a trusted point after genesis has not seen the proposals, votes or
+candidates registered before it. Such a partial state, and any trusted block
+applied without validation, follow the chain instead of rejecting it. A block
+failing the update rules there is logged and its update payload skipped.
+
+Under a version trigger (`TriggerAtVersion`), the epoch rollover out of Byron
+consults that state: the first block of the next era is accepted only in the
+epoch a stable candidate for the trigger's major version is adopted in, and a
+Byron block in or after that epoch is rejected. A candidate is stable when the
+tip is `2k` slots or `k` blocks past it. An epoch trigger
+(`TestShelleyHardForkAtEpoch`), a partial state, and a boundary block applied
+without validation keep the era schedule's own decision.
 
 Cached epochs resolve without forecast configuration, but still require a
 published nonce. Before forecasting an uncached epoch for a live header,

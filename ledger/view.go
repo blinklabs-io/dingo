@@ -321,13 +321,11 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
-// Byron minimum-fee validation requires the fee policy from Byron genesis.
-// Pin the optional capability to the concrete validation view so interface
-// drift fails at build time instead of disabling the rule.
-var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
-
-// The same holds for the Byron ppMaxTxSize rule.
-var _ eras.ByronMaxTxSizeProvider = (*LedgerView)(nil)
+// Byron minimum-fee and maximum-size validation read the adopted Byron
+// protocol parameters through this capability. Pin it to the concrete
+// validation view so interface drift fails at build time instead of disabling
+// the rules.
+var _ eras.ByronProtocolParametersProvider = (*LedgerView)(nil)
 
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
@@ -356,12 +354,11 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 	return lv.ls.ByronProtocolMagic()
 }
 
-func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
-	return lv.ls.ByronFeePolicy()
-}
-
-func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
-	return lv.ls.ByronMaxTxSize()
+func (lv *LedgerView) ByronProtocolParameters() (
+	*eras.ByronProtocolParameters,
+	error,
+) {
+	return lv.ls.ByronProtocolParameters()
 }
 
 func (lv *LedgerView) UtxoById(
