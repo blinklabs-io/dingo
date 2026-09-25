@@ -437,9 +437,10 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 // Every Shelley-family era delegates the rule to
 // shelley.UtxoValidateNoDuplicateInputs and therefore reports
 // shelley.DuplicateInputError for a duplicated regular, collateral, or
-// reference input. Byron has its own rule in ledger/eras and reports
-// eras.DuplicateInputByronError, which is the same structural verdict and
-// must not fall through to state-dependent producer resolution.
+// reference input. Byron permits a repeated input, but its size and
+// unknown-attribute limits are the same kind of verdict: they read only the
+// transaction and the protocol parameters, so they must not fall through to
+// state-dependent producer resolution either.
 //
 // lcommon.MalformedReferenceScriptsError and
 // lcommon.MalformedScriptWitnessesError are the same class: both are raised
@@ -562,7 +563,13 @@ func isDeterministicTxValidationError(err error) bool {
 	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
-	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
+	if _, ok := errors.AsType[eras.TxTooLargeByronError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[eras.UnknownAttributesByronError](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[eras.UnknownAddressAttributesByronError](err)
 	return ok
 }
 
@@ -1591,9 +1598,12 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	if floorErr != nil {
 		ls.config.Logger.Error(
 			"failed to read consumed UTxO prune floor, using ledger tip as the rewind target",
-			"component", "ledger",
-			"rewind_target_slot", rewindPoint.Slot,
-			"error", floorErr.Error(),
+			"component",
+			"ledger",
+			"rewind_target_slot",
+			rewindPoint.Slot,
+			"error",
+			floorErr.Error(),
 		)
 		rewindPoint = ledgerTip.Point
 	} else if belowPruneFloor {
@@ -1663,7 +1673,8 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// the failed block. Repeating the same failure at the same tip does not:
 	// the first repair already restored every UTxO above that tip, while
 	// re-running it would turn the retry loop into a full database rollback.
-	repairSameTip := !isSameFailure && pointMatches(rewindPoint, ledgerTip.Point)
+	repairSameTip := !isSameFailure &&
+		pointMatches(rewindPoint, ledgerTip.Point)
 	err := ls.withConsumedUtxoPruneBoundary(func() error {
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
@@ -2013,10 +2024,12 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 				if ls.config.Logger != nil {
 					ls.config.Logger.Warn(
 						"replay recovery producer parent is missing from the local block store",
-						"component", "ledger",
+						"component",
+						"ledger",
 						"producer_block_hash",
 						hex.EncodeToString(resolved.ProducerBlock.Hash),
-						"producer_block_slot", resolved.ProducerBlock.Slot,
+						"producer_block_slot",
+						resolved.ProducerBlock.Slot,
 						"producer_parent_hash",
 						hex.EncodeToString(resolved.ProducerBlock.PrevHash),
 					)
@@ -2227,12 +2240,14 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 			if ls.config.Logger != nil {
 				ls.config.Logger.Warn(
 					"replay recovery producer block is missing from the local block store",
-					"component", "ledger",
+					"component",
+					"ledger",
 					"producer_tx_hash",
 					hex.EncodeToString(producerTx.Hash),
 					"producer_block_hash",
 					hex.EncodeToString(producerTx.BlockHash),
-					"producer_block_slot", producerTx.Slot,
+					"producer_block_slot",
+					producerTx.Slot,
 				)
 			}
 		default:
@@ -2467,10 +2482,14 @@ func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 			if ls.config.Logger != nil {
 				ls.config.Logger.Warn(
 					"replay recovery tx blob names a block missing from the local block store",
-					"component", "ledger",
-					"tx_hash", hex.EncodeToString(txHash),
-					"block_slot", point.Slot,
-					"block_hash", hex.EncodeToString(point.Hash),
+					"component",
+					"ledger",
+					"tx_hash",
+					hex.EncodeToString(txHash),
+					"block_slot",
+					point.Slot,
+					"block_hash",
+					hex.EncodeToString(point.Hash),
 				)
 			}
 			return models.Block{}, false, nil
