@@ -848,8 +848,12 @@ func (m *DingoStateManager) ApplyTransaction(
 	}
 
 	certDeposits := m.certDepositsFor(tx.Certificates())
+	protocolMajor := uint64(0)
+	if versioned, ok := m.protocolParams.(common.PoolRuleProtocolParameters); ok {
+		protocolMajor = uint64(versioned.ProtocolMajorVersion())
+	}
 	if err := m.db.SetTransactionMetadataOnly(
-		tx, point, idx, certDeposits, txn,
+		tx, point, idx, certDeposits, txn, protocolMajor,
 	); err != nil {
 		return fmt.Errorf("apply certificates: %w", err)
 	}

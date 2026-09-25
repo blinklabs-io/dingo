@@ -156,6 +156,13 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// initialized during startup.
 	var pparams lcommon.ProtocolParameters
 	var snapshotLoaded bool
+	ls.RLock()
+	currentPParams := ls.currentPParams
+	ls.RUnlock()
+	protocolMajor := uint64(0)
+	if conwayPParams := conwayProtocolParameters(currentPParams); conwayPParams != nil {
+		protocolMajor = uint64(conwayPParams.ProtocolVersion.Major)
+	}
 	appliedTxs := make([]bool, len(d.Transactions))
 	for i, tr := range d.Transactions {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
@@ -212,6 +219,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			d.Offsets,
 			txn,
 			database.BatchedTxIngestOpts{
+				ProtocolMajor:                  protocolMajor,
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
 				StrictAppliedInputConservation: d.strictConsumedInputs,
 				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,

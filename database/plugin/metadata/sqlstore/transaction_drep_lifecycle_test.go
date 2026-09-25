@@ -16,9 +16,11 @@ package sqlstore
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -80,6 +82,129 @@ func TestDrepDeregistrationKeepsLaterSameTransactionDelegation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Equal(t, drepCredential, account.Drep)
+}
+
+func TestDrepDeregistrationUsesProtocolVersionedReverseDelegators(t *testing.T) {
+	t.Parallel()
+
+	for _, protocolMajor := range []uint64{9, 10} {
+		t.Run(fmt.Sprintf("PV%d", protocolMajor), func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			drepOne := bytes.Repeat([]byte{0x61}, 28)
+			drepTwo := bytes.Repeat([]byte{0x62}, 28)
+			stake := bytes.Repeat([]byte{0x63}, 28)
+			require.NoError(t, store.ImportDrep(
+				&models.Drep{
+					CredentialTag: 0,
+					Credential:    drepOne,
+					AddedSlot:     1,
+					Active:        true,
+					Delegators: []models.StakeCredentialRef{{
+						Tag: 0,
+						Key: stake,
+					}},
+				},
+				&models.RegistrationDrep{
+					CredentialTag:  0,
+					DrepCredential: drepOne,
+					AddedSlot:      1,
+					DepositAmount:  types.Uint64(500),
+				},
+				nil,
+			))
+			require.NoError(t, store.CreateDrep(nil, &models.Drep{
+				CredentialTag: 0,
+				Credential:    drepTwo,
+				AddedSlot:     1,
+				Active:        true,
+			}))
+			require.NoError(t, store.ImportAccount(&models.Account{
+				StakingKey:    stake,
+				CredentialTag: 0,
+				Drep:          drepOne,
+				DrepType:      models.DrepTypeAddrKeyHash,
+				AddedSlot:     1,
+				CreatedSlot:   1,
+				Active:        true,
+			}, nil))
+
+			setDelegation := func(slot uint64, id byte, drep []byte) {
+				stakeHash := common.NewBlake2b224(stake)
+				tx := mockledger.NewTransactionBuilder().WithCertificates(
+					&common.VoteDelegationCertificate{
+						CertType:        uint(common.CertificateTypeVoteDelegation),
+						StakeCredential: common.Credential{CredType: 0, Credential: stakeHash},
+						Drep:            common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: drep},
+					},
+				)
+				tx.WithId(bytes.Repeat([]byte{id}, 32))
+				tx.WithValid(true)
+				require.NoError(t, store.SetTransaction(
+					tx,
+					ocommon.Point{Slot: slot, Hash: tx.Hash().Bytes()},
+					0,
+					nil,
+					false,
+					nil,
+					protocolMajor,
+				))
+			}
+			setDelegation(20, 0x65, drepTwo)
+
+			drepHash := common.NewBlake2b224(drepOne)
+			deregistration := mockledger.NewTransactionBuilder().WithCertificates(
+				&common.DeregistrationDrepCertificate{
+					CertType:       uint(common.CertificateTypeDeregistrationDrep),
+					DrepCredential: common.Credential{CredType: 0, Credential: drepHash},
+					Amount:         500,
+				},
+			)
+			deregistration.WithId(bytes.Repeat([]byte{0x66}, 32))
+			deregistration.WithValid(true)
+			require.NoError(t, store.SetTransaction(
+				deregistration,
+				ocommon.Point{Slot: 30, Hash: deregistration.Hash().Bytes()},
+				0,
+				nil,
+				false,
+				nil,
+				protocolMajor,
+			))
+
+			account, err := store.GetAccountByCredential(0, stake, true, nil)
+			require.NoError(t, err)
+			require.NotNil(t, account)
+			if protocolMajor == 9 {
+				require.Nil(t, account.Drep, "PV9 retains D1's reverse link after redelegation")
+			} else {
+				require.Equal(t, drepTwo, account.Drep)
+			}
+
+			db, ctx, err := store.dbFromTxn(nil)
+			require.NoError(t, err)
+			var drepOneMembers int
+			require.NoError(t, db.QueryRowContext(ctx, `
+SELECT count(*) FROM drep_delegator
+WHERE drep_credential = ? AND removed_slot IS NULL`, drepOne).Scan(&drepOneMembers))
+			require.Zero(t, drepOneMembers)
+
+			require.NoError(t, store.RestoreDrepStateAtSlot(20, nil))
+			require.NoError(t, store.RestoreAccountStateAtSlot(20, nil))
+			account, err = store.GetAccountByCredential(0, stake, true, nil)
+			require.NoError(t, err)
+			require.NotNil(t, account)
+			require.Equal(t, drepTwo, account.Drep)
+			require.NoError(t, db.QueryRowContext(ctx, `
+SELECT count(*) FROM drep_delegator
+WHERE drep_credential = ? AND removed_slot IS NULL`, drepOne).Scan(&drepOneMembers))
+			if protocolMajor == 9 {
+				require.Equal(t, 1, drepOneMembers, "rollback must restore PV9 reverse membership")
+			} else {
+				require.Zero(t, drepOneMembers, "PV10 redelegation removes the old reverse membership")
+			}
+		})
+	}
 }
 
 func TestDrepUpdateRequiresActiveRegistration(t *testing.T) {

@@ -1203,6 +1203,10 @@ func (b *Backfill) processBlockTxsBatched(
 			b.skippedUtxoRefs += uint64(len(tx.Produced()))
 		}
 		setTxStart := time.Now()
+		protocolMajor := uint64(0)
+		if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
+			protocolMajor = uint64(versioned.ProtocolMajorVersion())
+		}
 		if err := b.db.SetTransactionBatchedWithOpts(
 			tx, point, uint32(i), // #nosec G115
 			updateEpoch, paramUpdates,
@@ -1222,6 +1226,7 @@ func (b *Backfill) processBlockTxsBatched(
 				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
 				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
 				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
+				ProtocolMajor:              protocolMajor,
 				// Historical replay follows the snapshot's complete reward
 				// state, not the balance at each historical slot. Preserve
 				// withdrawal history without applying the live-path balance

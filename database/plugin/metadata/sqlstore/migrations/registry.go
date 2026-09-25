@@ -59,6 +59,7 @@ const (
 	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 	drepExpiryHistorySchemaRelease                = "drep-expiry-history"
 	drepDormancyStateSchemaRelease                = "drep-dormancy-state"
+	drepDelegatorStateSchemaRelease               = "drep-delegator-state"
 )
 
 // alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
@@ -133,6 +134,7 @@ var schemaVersions = []struct {
 	{Version: 22, Name: governanceVoteHistorySchemaRelease, Dir: "v22"},
 	{Version: 23, Name: drepExpiryHistorySchemaRelease, Dir: "v23"},
 	{Version: 24, Name: drepDormancyStateSchemaRelease, Dir: "v24"},
+	{Version: 25, Name: drepDelegatorStateSchemaRelease, Dir: "v25"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

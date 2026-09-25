@@ -4,8 +4,10 @@ CREATE TABLE IF NOT EXISTS `drep_dormancy_state` (
 );
 
 INSERT INTO `drep_dormancy_state` (`id`, `dormant_epochs`)
-VALUES (1, 0)
-ON CONFLICT (`id`) DO NOTHING;
+SELECT 1, 0
+WHERE NOT EXISTS (
+    SELECT 1 FROM `drep_dormancy_state` WHERE `id` = 1
+);
 
 CREATE TABLE IF NOT EXISTS `drep_dormancy_history` (
     `id` INTEGER PRIMARY KEY AUTOINCREMENT,

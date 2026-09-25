@@ -92,13 +92,13 @@ func (s *Store) ImportDrep(
 				regParams,
 			)
 			if errors.Is(err, sql.ErrNoRows) {
-				return nil
+				return insertImportedDrepDelegators(ctx, db, drep)
 			}
 			if err != nil {
 				return fmt.Errorf("import drep registration: %w", err)
 			}
 			registration.ID = uint(registrationID)
-			return nil
+			return insertImportedDrepDelegators(ctx, db, drep)
 		},
 	)
 }
@@ -110,6 +110,15 @@ func (s *Store) RestoreDrepStateAtSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
+DELETE FROM drep_delegator WHERE added_slot > ?`, slot); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+UPDATE drep_delegator SET removed_slot = NULL
+WHERE removed_slot > ?`, slot); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM drep
 WHERE added_slot > ?

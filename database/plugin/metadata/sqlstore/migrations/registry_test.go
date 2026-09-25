@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 24)
+	require.Len(t, registry, 25)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -176,6 +176,32 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, "1", registry[19].BackfillRevision)
 }
 
+func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		registry func() ([]Migration, error)
+		dialect  string
+	}{
+		{name: "sqlite", registry: SQLiteRegistry, dialect: "sqlite"},
+		{name: "postgres", registry: PostgresRegistry, dialect: "postgres"},
+		{name: "mysql", registry: MySQLRegistry, dialect: "mysql"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry, err := tc.registry()
+			require.NoError(t, err)
+			require.NoError(t, validateRegistry(registry, tc.dialect))
+			require.Len(t, registry, 25)
+			migration := registry[23]
+			require.Equal(t, "drep-dormancy-state", migration.Name)
+			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
+			require.Contains(t, seed, "WHERE NOT EXISTS")
+			require.NotContains(t, strings.ToUpper(seed), "ON CONFLICT")
+		})
+	}
+}
+
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
 // renderings of the utxo_pointer table. The pointer position is joined against
 // certs and "transaction" when stake is computed, so an integer column that
@@ -299,7 +325,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 24)
+	require.Len(t, registry, 25)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

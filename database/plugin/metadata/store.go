@@ -1050,6 +1050,7 @@ type TransactionStore interface {
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); an absent key means the deposit is unknown and is stored as NULL, not zero
 		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
 		types.Txn,
+		...uint64, // protocol major version (optional for historical callers)
 	) error
 
 	// SetTransactionLeiosClosure stores a transaction on the Leios
@@ -1065,6 +1066,7 @@ type TransactionStore interface {
 		map[int]uint64, // certDeposits
 		bool, // skipWithdrawalWitness
 		types.Txn,
+		...uint64, // protocol major version (optional for historical callers)
 	) error
 
 	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
@@ -1087,6 +1089,7 @@ type TransactionStore interface {
 		bool, // skipWithdrawalWitness: see SetTransaction
 		types.MetadataBatchAccumulator,
 		types.Txn,
+		...uint64, // protocol major version (optional for historical callers)
 	) error
 
 	// SetGapBlockTransaction stores a transaction record and its
@@ -1099,6 +1102,7 @@ type TransactionStore interface {
 		uint32, // idx
 		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
+		...uint64, // protocol major version (optional for historical callers)
 	) error
 
 	// RecomputeGapCollateralFee recomputes and persists the collateral fee

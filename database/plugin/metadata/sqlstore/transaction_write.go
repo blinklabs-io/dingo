@@ -146,6 +146,7 @@ func (s *Store) SetTransactionBatched(
 	skipWithdrawalWitness bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -163,6 +164,7 @@ func (s *Store) SetTransactionBatched(
 		false,
 		accumulator,
 		txn,
+		protocolMajor...,
 	)
 }
 
@@ -179,6 +181,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	historicalBackfill bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -190,6 +193,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill, false,
 		accumulator, txn,
+		protocolMajor...,
 	)
 }
 
@@ -200,10 +204,11 @@ func (s *Store) SetTransaction(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, false, txn,
+		skipWithdrawalWitness, false, false, txn, protocolMajor...,
 	)
 }
 
@@ -217,11 +222,13 @@ func (s *Store) setTransactionBatched(
 	tolerateConsumedInputConflict bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
 		tolerateConsumedInputConflict, accumulator, txn,
+		protocolMajor...,
 	)
 }
 
@@ -241,10 +248,11 @@ func (s *Store) SetTransactionLeiosClosure(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, true, txn,
+		skipWithdrawalWitness, false, true, txn, protocolMajor...,
 	)
 }
 
@@ -268,11 +276,12 @@ func (s *Store) setTransaction(
 	// double-spend still fails.
 	tolerateConsumedInputConflict bool,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, nil, txn,
+		tolerateConsumedInputConflict, nil, txn, protocolMajor...,
 	)
 }
 
@@ -286,6 +295,7 @@ func (s *Store) setTransactionWithAccumulator(
 	tolerateConsumedInputConflict bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	if transaction == nil {
 		return errors.New("set transaction: nil transaction")
@@ -394,6 +404,7 @@ func (s *Store) setTransactionWithAccumulator(
 					index,
 					certDeposits,
 					requireKnownDeposits,
+					protocolMajor...,
 				)
 				if err != nil {
 					return err
@@ -618,6 +629,7 @@ func (s *Store) SetGapBlockTransaction(
 	index uint32,
 	certDeposits map[int]uint64,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	// Gap ingestion intentionally has no available input state, so this is
 	// equivalent to SetTransaction with the consumed-input update suppressed.
@@ -673,6 +685,7 @@ RETURNING id`,
 				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
 					point, index, certDeposits, allowUnknownDeposits,
+					protocolMajor...,
 				)
 				if err != nil {
 					return err

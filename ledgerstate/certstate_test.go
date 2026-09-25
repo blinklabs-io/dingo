@@ -691,6 +691,37 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 	}
 }
 
+func TestParseDRepMapPreservesReverseDelegators(t *testing.T) {
+	t.Parallel()
+
+	drepHash := bytes.Repeat([]byte{0x49}, 28)
+	delegatorKey := bytes.Repeat([]byte{0x4a}, 28)
+	delegatorScript := bytes.Repeat([]byte{0x4b}, 28)
+	drepCredential, err := cbor.Encode([]any{uint64(CredentialTypeKey), drepHash})
+	require.NoError(t, err)
+	delegatorKeyCredential, err := cbor.Encode([]any{uint64(CredentialTypeKey), delegatorKey})
+	require.NoError(t, err)
+	delegatorScriptCredential, err := cbor.Encode([]any{uint64(CredentialTypeScript), delegatorScript})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{
+		uint64(50), nil, uint64(500),
+		[]cbor.RawMessage{delegatorKeyCredential, delegatorScriptCredential},
+	})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, drepCredential...)
+	drepMap = append(drepMap, drepState...)
+
+	dreps, err := parseDRepMap(drepMap)
+	require.NoError(t, err)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(CredentialTypeKey), dreps[0].Credential.Type)
+	require.Equal(t, drepHash, dreps[0].Credential.Hash)
+	require.Equal(t, []Credential{
+		{Type: CredentialTypeKey, Hash: delegatorKey},
+		{Type: CredentialTypeScript, Hash: delegatorScript},
+	}, dreps[0].Delegators)
+}
+
 // TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry pins the
 // flattened Mithril CertState layout where the dormant count follows the
 // nested committee state after the DRep map.

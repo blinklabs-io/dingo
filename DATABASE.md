@@ -352,6 +352,16 @@ the consecutive no-proposal epoch count needed by PV9 DRep registration; each
 boundary increment and proposal-driven reset is journaled so rollback restores
 the prior count. Snapshot import initializes it from the parsed ledger state.
 
+Migration `v25` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
+reverse index of stake credentials recorded in each active DRep's ledger
+delegator set. The `added_slot`/`removed_slot` pair preserves membership
+history across rollback. Its initial backfill uses current account vote
+delegations only when the target DRep is registered; later certificate replay
+maintains the reverse set using the active protocol version's ledger rules.
+DRep deregistration clears the stake accounts named by that reverse set, even
+when PV9 redelegation left their forward account assignment pointing elsewhere.
+The schema also preserves reverse delegators imported from cert-state snapshots.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -1123,6 +1133,7 @@ updates preserve the previous activity and expiry epochs.
 | `drep_expiry_epoch_event` | `added_slot` | PK `added_slot` | Idempotence marker for dormant DRep expiry extension at an empty-proposal epoch boundary. Rollback removes markers after its target. |
 | `drep_dormancy_state` | `id`, `dormant_epochs` | PK `id` (singleton row id 1) | Consecutive epoch count with no governance proposals. PV9 DRep registrations use this count when deriving the initial effective expiry. |
 | `drep_dormancy_history` | `id`, `added_slot`, `previous_dormant_epochs` | PK `id`; index `added_slot` | Previous counter values for boundary increments and proposal resets, replayed in reverse order during rollback. |
+| `drep_delegator` | `id`, `drep_credential_tag`, `drep_credential`, `stake_credential_tag`, `stake_credential`, `added_slot`, `removed_slot` | PK `id`; indexes `(drep_credential_tag, drep_credential, removed_slot)`, `(added_slot, removed_slot)` | Rollbackable reverse membership from registered DReps to stake credentials. DRep deregistration clears the accounts recorded in this set, including PV9 stale memberships left by redelegation; snapshot import preserves the ledger's recorded reverse set. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |

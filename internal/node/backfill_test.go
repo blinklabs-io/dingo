@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -172,12 +173,25 @@ func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	backfill := NewBackfill(db, nil, slog.Default())
 	drepCredential := bytes.Repeat([]byte{0xA7}, 28)
 	stakeCredential := bytes.Repeat([]byte{0xC9}, 28)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
-		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
-		Credential:    drepCredential,
-		AddedSlot:     900,
-		Active:        true,
-	}))
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			Credential:    drepCredential,
+			AddedSlot:     900,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				Key: stakeCredential,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  uint8(lcommon.CredentialTypeAddrKeyHash),
+			DrepCredential: drepCredential,
+			AddedSlot:      900,
+			DepositAmount:  types.Uint64(500),
+		},
+		nil,
+	))
 	proposalHash := bytes.Repeat([]byte{0xB8}, 32)
 	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
 		StakingKey:    stakeCredential,

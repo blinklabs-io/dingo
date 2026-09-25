@@ -2064,6 +2064,29 @@ func parseDRepMap(data []byte) ([]ParsedDRep, error) {
 					drep.Deposit = deposit
 				}
 			}
+			if len(state) > 3 {
+				var rawDelegators []cbor.RawMessage
+				if _, err := cbor.Decode(state[3], &rawDelegators); err != nil {
+					return nil, fmt.Errorf(
+						"decoding DRep delegators for %x: %w",
+						cred.Hash,
+						err,
+					)
+				}
+				drep.Delegators = make([]Credential, 0, len(rawDelegators))
+				for index, rawDelegator := range rawDelegators {
+					delegator, err := parseCredential(rawDelegator)
+					if err != nil {
+						return nil, fmt.Errorf(
+							"decoding DRep delegator %d for %x: %w",
+							index,
+							cred.Hash,
+							err,
+						)
+					}
+					drep.Delegators = append(drep.Delegators, delegator)
+				}
+			}
 		}
 
 		dreps = append(dreps, drep)

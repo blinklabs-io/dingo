@@ -647,6 +647,10 @@ func processGapBlockTransactions(
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
+		protocolMajor := uint64(0)
+		if conwayPParams != nil {
+			protocolMajor = uint64(conwayPParams.ProtocolVersion.Major)
+		}
 		if err := db.SetGapBlockTransaction(
 			tx,
 			point,
@@ -654,6 +658,7 @@ func processGapBlockTransactions(
 			gapCertDeposits(logger, tx, point, eraId, pparams),
 			offsets,
 			txn,
+			protocolMajor,
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)
 		}

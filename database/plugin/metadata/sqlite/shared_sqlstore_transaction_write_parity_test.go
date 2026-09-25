@@ -36,6 +36,7 @@ type transactionWriteStore interface {
 		map[int]uint64,
 		bool,
 		types.Txn,
+		...uint64,
 	) error
 	SetTransactionBatchedHistorical(
 		lcommon.Transaction,
@@ -46,6 +47,7 @@ type transactionWriteStore interface {
 		bool,
 		types.MetadataBatchAccumulator,
 		types.Txn,
+		...uint64,
 	) error
 	GetTransactionByHash([]byte, types.Txn) (*models.Transaction, error)
 	GetUtxoIncludingSpent([]byte, uint32, types.Txn) (*models.Utxo, error)
