@@ -519,6 +519,29 @@ Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshot
 
 **Interrupted truncate marker.** Before `lifecycle.Truncate` begins its batched blob deletion, it records `database_lifecycle_truncate_pending` in `sync_state`, including the target ID/slot/hash, original blob-tip ID/slot/hash, Mithril floor, and a checksum covering the complete marker. The checksum prevents a damaged deletion bound from being resumed; the original blob tip cannot simply be required to remain present because an interrupted attempt may already have deleted it, and it may legitimately be ahead of the applied metadata tip. Recovery therefore accepts a current blob tip below the recorded tip as partial delete progress, requires an equal tip to match the recorded slot/hash, and fails closed if the current blob tip is newer than the authenticated upper bound. Tip identity is read directly from the highest `bi` index entry rather than by resolving its referenced block object: an irreversible cloud delete can fail after removing the block object but before removing that index, and the remaining authenticated index must be allowed to drive idempotent cleanup on retry. This prevents a stale-but-valid marker from deleting only its old blob range while metadata truncation removes state through a subsequently advanced tip. The marker remains durable if cancellation or a storage error lands after one or more blob batches commit, making the intermediate state detectable rather than leaving metadata silently referencing already-deleted block blobs. A subsequent truncate validates the marker, resumes the recorded operation (missing blobs are idempotently skipped), performs metadata truncation, and clears the marker in the same metadata transaction. Normal node startup refuses to serve while this marker exists and directs the operator to rerun truncate; the offline lifecycle service can open the database and complete that recovery.
 
+**Rollback notification outbox.** `ledger.rollback.pending` is a version-1
+JSON record in `sync_state` containing `format_version`, the target `slot` and
+hex `hash`, and a newest-first `blocks` array. Each block uses explicit JSON
+fields (`hash`, `prev_hash`, `cbor`, `id`, `slot`, `number`, `type`) rather than
+the Go storage model's field names. Peer-driven rollback records are written
+before chain truncation removes those block bodies. When the lagging ledger
+iterator reports a rollback after the chain has already removed them, it
+persists the iterator's captured `RollbackBlocks` payload before metadata
+truncation. A deeper multi-window rollback merges its blocks into the pending
+record rather than replacing an earlier payload. If a reconciliation rewind is
+refused before changing the chain, the prior point and payload are restored; a
+newly created intent is cleared. A matching record is cleared only after
+metadata rollback and ordered undo delivery complete. Recovery is at-least-once
+and consumers must tolerate a duplicate undo after a crash. The durable payload
+is limited to 4096 blocks
+and 64 MiB of raw block fields; a larger rollback logs a degraded-recovery
+warning and continues with live delivery rather than writing an unbounded
+value. A record recovery cannot replay as a truncation -- its point leads the
+applied ledger tip, or has left the primary chain -- still has its captured
+undo delivered before the record is removed. Malformed or unsupported records
+are logged and removed so one damaged notification record cannot permanently
+prevent startup.
+
 The truncate deletion range ends at the newest block in the indexed blob chain, not at the metadata ledger tip. During live synchronization, BlockFetch can have persisted a speculative blob tail that the ledger has not applied yet. If the requested target equals the metadata tip, that tail must still be deleted; treating the operation as a no-op would leave non-contiguous block indexes visible after the live node rebuild and prevent ChainSync from making forward progress.
 
 `lifecycle.Restore` accepts either a local directory or a cloud destination URI for `snapshotDir` — a cloud URI is downloaded into a temporary local directory first (`downloadCloudSnapshot`), then Restore proceeds exactly as it would for a local path. Restoring from the cloud requires the full per-snapshot URI (`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not the bare base destination, which is a catalog of potentially many snapshots. This is also how a snapshot captured on one node can be restored onto another, since the two never need to share a filesystem.
