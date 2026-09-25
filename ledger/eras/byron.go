@@ -724,18 +724,17 @@ func byronValidateWitnesses(
 	ls lcommon.LedgerState,
 	_ lcommon.ProtocolParameters,
 ) error {
-	// Verify vkey witness signatures
-	if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
-		return err
-	}
+	// Byron witnesses have constructor-specific signature domains and key
+	// layouts, so they must not pass through the generic witness verifier.
 	// Byron redeem witnesses are constructor 2 values whose fields are
-	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
-	// values but do not expose them through TransactionWitnessSet, and even
-	// a current release's VkeyWitness has no room for the chain-code half
-	// of a constructor-0 witness that byronAddressRootForParts needs, so
-	// this file must still decode Twit itself.
+	// wrapped in CBOR tag 24, and a VkeyWitness has no room for the
+	// chain-code half of a constructor-0 witness that
+	// byronAddressRootForParts needs, so this file decodes Twit itself.
 	byronTx, ok := tx.(*byron.ByronTransaction)
 	if !ok {
+		if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
+			return err
+		}
 		if err := lcommon.ValidateBootstrapWitnesses(tx); err != nil {
 			return err
 		}
@@ -763,7 +762,9 @@ func byronValidateWitnesses(
 	if err != nil {
 		return fmt.Errorf("get Byron protocol magic: %w", err)
 	}
-	txHash := tx.Hash()
+	// Byron witnesses sign the wire-encoded body ID. ByronTransaction.Hash
+	// is the canonical ledger ID, which may differ from those bytes.
+	txHash := byronTx.WireId()
 	messages := make(map[byte][]byte, 2)
 	for _, witness := range witnesses {
 		tag := byte(0x01)

@@ -134,7 +134,7 @@ func buildByronBlockTestTx(
 	require.NoError(t, err)
 	tx, err := byron.NewByronTransactionFromCbor(txCbor)
 	require.NoError(t, err)
-	require.Equal(t, bodyHash, tx.Hash())
+	require.Equal(t, bodyHash, tx.WireId())
 	return tx
 }
 
@@ -215,7 +215,7 @@ func TestLedgerProcessBlockByronReferenceRules(t *testing.T) {
 	nodeConfig := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		nodeConfig.LoadByronGenesisFromReader(strings.NewReader(`{
+		loadByronGenesisForTest(t, nodeConfig, strings.NewReader(`{
 		"blockVersionData": {
 			"slotDuration": "20000",
 			"maxTxSize": "600",

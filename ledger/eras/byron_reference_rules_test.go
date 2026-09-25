@@ -172,7 +172,7 @@ func (b byronTestTx) build(
 	require.NoError(t, err)
 	tx, err := byron.NewByronTransactionFromCbor(txCbor)
 	require.NoError(t, err)
-	require.Equal(t, bodyHash, tx.Hash())
+	require.Equal(t, bodyHash, tx.WireId())
 	return tx
 }
 

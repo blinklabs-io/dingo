@@ -224,6 +224,7 @@ func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
 	dingo.RewardsPending = true
 	mismatches := ComparePoolEpoch(
 		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
+		false,
 	)
 	require.Equal(
 		t,
@@ -234,6 +235,7 @@ func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
 	dingo.RewardsPending = false
 	mismatches = ComparePoolEpoch(
 		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
+		false,
 	)
 	require.Equal(
 		t,

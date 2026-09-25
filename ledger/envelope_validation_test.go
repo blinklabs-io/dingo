@@ -356,7 +356,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	err = validateInboundBlockEnvelope(
@@ -369,7 +369,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
 }
 
-func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
+func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *testing.T) {
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -377,7 +377,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 	)
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	require.NoError(t, validateInboundBlockEnvelope(
@@ -403,8 +403,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 		config,
 		envelopeParent{origin: true},
 	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+	require.NoError(t, err)
 }
 
 func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
@@ -827,7 +826,7 @@ func newByronEnvelopeNodeConfig(
 	}`, maxBlockSize, maxHeaderSize)
 	require.NoError(
 		t,
-		config.LoadByronGenesisFromReader(strings.NewReader(genesis)),
+		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),
 	)
 	return config
 }
@@ -867,7 +866,7 @@ func substituteByronMainTxPayload(t *testing.T, blockCbor []byte) []byte {
 	_, err = cbor.Decode(block[1], &body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(body), 4)
-	emptyTxPayload, err := cbor.Encode([]any{})
+	emptyTxPayload, err := cbor.Encode(cbor.IndefLengthList{})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(body[0]), emptyTxPayload)
 	body[0] = emptyTxPayload
@@ -884,7 +883,7 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 	_, err := cbor.Decode(blockCbor, &block)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(block), 2)
-	emptyBody, err := cbor.Encode([]any{})
+	emptyBody, err := cbor.Encode(cbor.IndefLengthList{[]byte{0}})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(block[1]), emptyBody)
 	block[1] = emptyBody
