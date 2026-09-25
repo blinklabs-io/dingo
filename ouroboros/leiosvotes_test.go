@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
-	"github.com/blinklabs-io/dingo/event"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -223,19 +222,20 @@ func TestLeiosVotesServerRequestNextCanceledOnConnectionClose(t *testing.T) {
 	started := make(chan struct{})
 	o.leiosVotes = &fakeLeiosVoteHandler{waitStarted: started}
 	connId := newTestConnId("127.0.0.1:3000", "127.0.0.2:3001")
+	connectionDone := make(chan any)
 	result := make(chan error, 1)
 	go func() {
 		_, err := o.leiosvotesServerRequestNext(
-			oleiosvotes.CallbackContext{ConnectionId: connId},
+			oleiosvotes.CallbackContext{
+				ConnectionId:       connId,
+				ConnectionDoneChan: connectionDone,
+			},
 			1,
 		)
 		result <- err
 	}()
 	<-started
-	o.HandleConnClosedEvent(event.Event{
-		Type: connmanager.ConnectionClosedEventType,
-		Data: connmanager.ConnectionClosedEvent{ConnectionId: connId},
-	})
+	close(connectionDone)
 
 	select {
 	case err := <-result:
