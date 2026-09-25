@@ -326,6 +326,9 @@ var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 // drift fails at build time instead of disabling the rule.
 var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
 
+// The same holds for the Byron ppMaxTxSize rule.
+var _ eras.ByronMaxTxSizeProvider = (*LedgerView)(nil)
+
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
 // when it misses: a failed assertion silently refunds a legacy stake
@@ -355,6 +358,10 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 
 func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
 	return lv.ls.ByronFeePolicy()
+}
+
+func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
+	return lv.ls.ByronMaxTxSize()
 }
 
 func (lv *LedgerView) UtxoById(
@@ -763,15 +770,26 @@ func (lv *LedgerView) CalculateRewards(
 	return nil, ErrNotImplemented
 }
 
-// GetAdaPots returns the current Ada pots.
-// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
-// tracked in network_state, but this interface also needs the current fee and
-// reward pots as one coherent validation snapshot.
+// GetAdaPots returns the current Ada pots, or a zero AdaPots when they cannot
+// be produced.
+//
+// It exists to satisfy common.RewardState, which gives it no way to report an
+// error, so an unavailable value is indistinguishable here from genuinely
+// zero pots. Every caller that can handle the difference must use
+// GetAdaPotsWithError; this one returns a zero value because a ledger rule
+// reaching it through the interface would otherwise kill the node.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
-	panic(ErrNotImplemented)
+	adaPots, err := lv.GetAdaPotsWithError()
+	if err != nil {
+		return lcommon.AdaPots{}
+	}
+	return adaPots
 }
 
 // GetAdaPotsWithError returns the current Ada pots.
+// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
+// tracked in network_state, but this interface also needs the current fee and
+// reward pots as one coherent validation snapshot.
 func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
 	return lcommon.AdaPots{}, ErrNotImplemented
 }
