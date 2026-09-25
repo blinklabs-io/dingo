@@ -6704,6 +6704,15 @@ the same signal to the active child, waits for it, and exits with its status.
 Successful bootstrap clears the tracked PID before the entrypoint hands off to
 `serve`, so the same lifecycle contract applies on both sides of startup.
 
+When a legacy imported database is marked for reward-state repair, `serve`
+blocks node startup until Mithril v2 reconciles the database against a
+certificate-backed artifact. The repair preserves configured artifact pins and
+resolves an omitted network name from the configured network magic. Its active
+marker is written before repair writes begin, so restart accepts only an
+interrupted sync that is positively identified as this repair. API-mode resumes
+continue from their immutable import marker only while the pending repair marker
+remains; ordinary API-mode metadata replacement is rejected.
+
 Two artifact backends are supported, selected by `mithril.backend`
 (`--mithril-backend`, `DINGO_MITHRIL_BACKEND`):
 
@@ -7420,6 +7429,14 @@ The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
+
+When serving a database marked for legacy Mithril reward-state repair, startup
+runs a v2 certified catch-up before exposing the node. The catch-up verifies
+the existing chain against the selected artifact before mutating ledger rows;
+API storage also resets and reruns historical metadata backfill through the
+certified ledger anchor. The repair marker remains until import and deferred
+index rebuilding complete, so an interrupted repair resumes with startup
+blocked instead of serving partially reconciled state.
 
 During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
 snapshot manager to ensure the initial stake snapshot state before starting the
@@ -11861,7 +11878,55 @@ pot from `UTxOState` -- so the round at the first boundary after import is not
 skipped for want of pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
-it. The per-credential reward basis is seeded from the same import: mark, set and
+it.
+
+That fee pot -- `SnapShots.ssFee` -- is exact for the imported epoch's own
+row and the boundary that reads it, but was not enough for the boundary after
+that one (issue #3975). `LedgerState.rewardEpochFees` computes the *following*
+epoch's fee pot by summing stored transaction fees over the whole epoch that
+just ended, reading only this node's local transactions. A node bootstrapped
+mid-epoch stores no transactions at or before its anchor, so that sum silently
+dropped every pre-anchor fee -- correct for the round the import itself seeded,
+wrong one boundary later, and permanently: the shortfall folds into reserves
+and both are then carried forward, so the same error recurs every following
+boundary a live node computes from a still-off basis, which is why a fresh
+re-bootstrap only ever bought one correct boundary. `seedImportedRewardBasis`
+also writes `RewardAdaPots.ImportedEpochFees`: `UTxOState.utxosFees` minus
+`SnapShots.ssFee`, the fees this epoch already collected up to and including
+the anchor. cardano-ledger's NEWEPOCH rule leaves `utxosFees` equal to the new
+`ssFee` after every boundary and only transactions add to it within an epoch,
+so a snapshot whose `utxosFees` is below its `ssFee` was not decoded as a
+consistent ledger state, and the import refuses it. Leaving the field `NULL`
+instead would be indistinguishable from a live-computed row and would credit
+the next round short with no record of why.
+`rewardEpochFees` reads the ended epoch's own pots row, and when its anchor
+(`CapturedSlot`) lies within that epoch -- its first and last slots included
+-- and `ImportedEpochFees` is set, sums local fees only over
+`(CapturedSlot, epochEnd]` and adds the imported amount instead of summing
+from the epoch start. The two ranges are
+disjoint by construction the same way the block-count import's observed and
+imported counts are (see below): a bootstrap applies no block, and files no
+transaction, at or below its anchor. Summing from the epoch start regardless
+of the anchor would then double-count once the historical backfill (issue
+#4061) has stored pre-anchor transactions locally. `ImportedEpochFees` is
+additive schema (migration `v24`). Migrations `v24` and `v25` mark legacy
+Mithril databases for repair when the anchor has no fee basis, including
+older imports that left no anchor reward-pot row. Before
+`dingo serve` starts, core- and API-mode databases with that marker automatically
+run a Mithril v2 catch-up against the latest certified state. Catch-up verifies
+the existing chain intersection before reconciling ledger rows, retains the local
+block history, and clears the marker only on completion. During reconciliation,
+the certified live UTxO set and each output's CBOR are restored together, so
+outputs live at the anchor remain available when replaying post-anchor blocks
+that spent them; UTxO-HD MemPack outputs are converted back to ledger TxOut
+CBOR for this purpose. API mode also rebuilds
+its historical metadata through the certified ledger anchor. If the selected
+artifact does not cover the local tip, startup remains blocked and the database
+is left intact while Dingo retries the repair every five minutes; it is never
+treated as a clean bootstrap. Cancelling startup stops the retry without
+changing the pending repair marker.
+
+The per-credential reward basis is seeded from the same import: mark, set and
 go each carry one epoch's per-credential stake and its credential-to-pool
 delegations, and the three of them line up with the three epochs a freshly
 bootstrapped node cannot otherwise compute. The seeding is the last step of `importSnapShots`, after every stage
