@@ -55,6 +55,8 @@ const (
 	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
 	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
 	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
+	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
+	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 )
 
 // alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
@@ -120,6 +122,16 @@ var schemaVersions = []struct {
 		Version: 20,
 		Name:    alonzoPParamsUnitSchemaRelease,
 		Dir:     "v20",
+	},
+	{
+		Version: 21,
+		Name:    assetAmountFingerprintIndexDropSchemaRelease,
+		Dir:     "v21",
+	},
+	{
+		Version: 22,
+		Name:    governanceVoteHistorySchemaRelease,
+		Dir:     "v22",
 	},
 }
 
@@ -1076,6 +1088,16 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_asset_name_hex`",
 				"DROP INDEX `idx_asset_name_hex` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_amount`",
+				"DROP INDEX `idx_asset_amount` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_fingerprint`",
+				"DROP INDEX `idx_asset_fingerprint` ON `asset`",
 			)
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {

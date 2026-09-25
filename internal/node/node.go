@@ -746,6 +746,11 @@ func buildDingoConfig(
 		dingo.WithGenesisCorroborationPeers(
 			cfg.GenesisBootstrap.CorroborationPeers,
 		),
+		dingo.WithGenesisLimitOnPatience(
+			cfg.GenesisBootstrap.LimitOnPatienceEnabled,
+			cfg.GenesisBootstrap.LimitOnPatienceCapacity,
+			cfg.GenesisBootstrap.LimitOnPatienceRate,
+		),
 		dingo.WithBootstrapPromotionMinDiversityGroups(
 			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
 		),
@@ -804,6 +809,14 @@ func buildDingoConfig(
 		dingo.WithShelleyOperationalCertificate(
 			cfg.ShelleyOperationalCertificate,
 		),
+		// node_forging.go gates agent-backed KES signing on a non-empty
+		// socket path, so dropping any of these three silently falls back
+		// to local-file signing on the serve path.
+		dingo.WithShelleyKESAgentSocket(cfg.ShelleyKESAgentSocket),
+		dingo.WithShelleyKESAgentMode(cfg.ShelleyKESAgentMode),
+		dingo.WithShelleyKESAgentSignTimeout(
+			cfg.ShelleyKESAgentSignTimeout,
+		),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),
@@ -823,6 +836,12 @@ func buildDingoConfig(
 			cfg.ForgeEndorserBlockStalenessSlots,
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
+		// consensus-affecting; off by default.
+		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
+		dingo.WithBlockPipelineValidateEnabled(
+			cfg.BlockPipelineValidateEnabled,
+		),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(
 			cfg.DelegatorInactivityEnabled,

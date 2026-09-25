@@ -831,6 +831,17 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	// Reinstall governance's same-boundary SPO stake hook too (dingo#4441) --
+	// see node.go's Run() for why a production node must always have this
+	// wired alongside the other two.
+	n.ledgerState.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
+		},
+	)
 
 	// Rebuild the Koios parity observer (if enabled) against the fresh
 	// n.db a live restore/truncate just reinitialized, and resubscribe it to
@@ -927,19 +938,10 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 
-	chainsyncCfg := chainsync.DefaultConfig()
-	if n.config.chainsyncMaxClients > 0 {
-		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
-	}
-	if n.config.chainsyncStallTimeout > 0 {
-		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
-	}
-	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
-	chainsyncCfg.PromRegistry = n.config.promRegistry
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
-		chainsyncCfg,
+		n.chainsyncConfig(),
 	)
 	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
 		chainsync.ClientRemoveRequestedEventType,

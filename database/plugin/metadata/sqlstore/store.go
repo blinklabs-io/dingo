@@ -129,6 +129,11 @@ type Store struct {
 	// which applies the default, rather than directly.
 	committeeAuthRetentionSlots uint64
 
+	// rewardLiveStakeBatchSize overrides rewardLiveStakeRebuildBatch when
+	// non-zero. Only tests set it, to drive the rebuild across many batch
+	// boundaries without a production-sized fixture.
+	rewardLiveStakeBatchSize int
+
 	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
 	// the live rollback-safe immutable slot (tip depth securityParam blocks
 	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
