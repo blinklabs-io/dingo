@@ -114,6 +114,7 @@ WHERE drep_credential_tag = ? AND drep_credential = ?
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	type delegator struct {
 		tag uint8
 		key []byte
@@ -122,13 +123,9 @@ WHERE drep_credential_tag = ? AND drep_credential = ?
 	for rows.Next() {
 		var item delegator
 		if err := rows.Scan(&item.tag, &item.key); err != nil {
-			rows.Close()
 			return err
 		}
 		delegators = append(delegators, item)
-	}
-	if err := rows.Close(); err != nil {
-		return err
 	}
 	if err := rows.Err(); err != nil {
 		return err

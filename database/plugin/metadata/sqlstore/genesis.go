@@ -263,6 +263,12 @@ WHERE NOT EXISTS (
 			return err
 		}
 		if len(drepCredential) > 0 {
+			if drepType > models.DrepTypeScriptHash {
+				return fmt.Errorf(
+					"genesis DRep credential has non-credential type: %d",
+					drepType,
+				)
+			}
 			if err := addDrepDelegator(
 				ctx,
 				db,
