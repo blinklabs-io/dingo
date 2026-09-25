@@ -478,11 +478,9 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// and the apply-time certified fetch. Invalid certificates therefore never
 	// trigger certified endorser-block work, including during replay. Resolve a
 	// parent announcement from this batch before falling back to persisted data.
-	if ls.config.ValidateLeiosCertificate != nil {
-		for _, block := range blocks {
-			if err := ls.validateDijkstraLeiosCertificate(block, annByHash); err != nil {
-				return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
-			}
+	for _, block := range blocks {
+		if err := ls.validateDijkstraLeiosCertificate(block, annByHash); err != nil {
+			return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
 		}
 	}
 	// On the Haskell-conformant (Musashi) path, settled-backlog fetches are
@@ -1346,6 +1344,11 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
 	prevHash []byte,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
+	if ls.db == nil {
+		return lcommon.Blake2b256{}, 0, 0, false, errors.New(
+			"resolve certifying block parent: database unavailable",
+		)
+	}
 	parent, perr := ls.BlockByHash(prevHash)
 	if perr != nil {
 		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(

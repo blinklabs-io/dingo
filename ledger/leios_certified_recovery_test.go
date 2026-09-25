@@ -104,6 +104,24 @@ func TestEnsureReferencedEndorserBlocksRejectsCertificateBeforeFetch(t *testing.
 		"invalid certificates must be rejected before fetching certified data")
 }
 
+func TestEnsureReferencedEndorserBlocksRejectsHeaderOnlyCertificateBeforeFetch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	probe := &leiosRecoveryProbe{err: errors.New("fetch must not run")}
+	ls := newLeiosRecoveryLedgerState(probe)
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorContains(t, err, "certificate body presence is false")
+	require.Zero(t, probe.attemptCount(),
+		"a certification header flag without its body certificate must not trigger a fetch")
+}
+
 // leiosRecoveryProbe is a scripted EndorserBlockFetcher/EndorserBlockProvider
 // pair standing in for the leios-fetch backfill. It records every fetch attempt
 // and can be told to make the endorser block available on the Nth attempt, so
@@ -192,6 +210,7 @@ func TestEnsureReferencedEndorserBlocksRetriesUntilCertifiedEbArrives(
 		),
 	}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -220,6 +239,7 @@ func TestEnsureReferencedEndorserBlocksBoundsCertifiedRetry(t *testing.T) {
 		),
 	}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	err := ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -254,6 +274,7 @@ func TestEnsureReferencedEndorserBlocksCertifiedRetryHonoursContext(
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{err: errors.New("no peers")}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -280,6 +301,7 @@ func TestEnsureReferencedEndorserBlocksAvailableEbIsNotFetched(t *testing.T) {
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{available: true}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
 		t.Context(),

@@ -54,10 +54,11 @@ type fakeLeiosAnnouncementLedger struct {
 	// e.g. so a test can make one slot's binding read as expired while
 	// another's does not. Every other caller leaves it nil and gets the
 	// single fixed slotTime as before.
-	slotTimeFunc func(uint64) time.Time
-	staleness    ledger.LeiosAnnouncementOCINStaleness
-	err          error
-	validated    int
+	slotTimeFunc    func(uint64) time.Time
+	staleness       ledger.LeiosAnnouncementOCINStaleness
+	err             error
+	txValidationErr error
+	validated       int
 }
 
 func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
@@ -85,7 +86,7 @@ func (f *fakeLeiosAnnouncementLedger) ValidateLeiosEndorserBlockTransactions(
 	gledger.BlockHeader,
 	[][]byte,
 ) error {
-	return f.err
+	return f.txValidationErr
 }
 
 func mustCbor(t *testing.T, value any) cbor.RawMessage {

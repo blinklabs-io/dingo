@@ -411,6 +411,58 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	require.Equal(t, point.Slot, votes.ebs[0].slot)
 }
 
+func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(41, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	ledger := &fakeLeiosAnnouncementLedger{
+		txValidationErr: errors.New("ledger-invalid endorser-block transaction"),
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ledger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	o.leiosVotes = votes
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+	announceTestEndorserBlock(
+		t,
+		o,
+		point.Slot,
+		testEbHash(point),
+		len(blockRaw),
+	)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	o.leiosValidationWG.Wait()
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(t, data.slotVerified)
+	require.Equal(t, leiosEBValidationInvalid, data.semanticValidationStatus)
+	require.Empty(t, votes.ebs,
+		"a hash- and size-valid endorser block with a ledger-invalid transaction must not be voted on")
+}
+
 // TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified is the
 // core issue #3513 attack in its store-first ordering: a peer offers an
 // authentic, correctly-hashed manifest under a slot of its choosing before
