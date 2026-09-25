@@ -285,6 +285,107 @@ func TestDecodeCachePrunesBySizeWhenOverCapacity(t *testing.T) {
 	)
 }
 
+func TestDecodeCachePrunesByRetainedBytes(t *testing.T) {
+	t.Parallel()
+
+	c := newDecodeCacheWithByteLimit[int](10)
+	keyA := decodeCacheKey{0xA1}
+	keyB := decodeCacheKey{0xB1}
+	keyLarge := decodeCacheKey{0xC1}
+	decode := func(value int) func() (int, error) {
+		return func() (int, error) { return value, nil }
+	}
+
+	_, _, decoded := c.getOrDecodeSized(keyA, 6, decode(1))
+	require.True(t, decoded)
+	_, _, decoded = c.getOrDecodeSized(keyB, 6, decode(2))
+	require.True(t, decoded)
+
+	c.mu.Lock()
+	require.LessOrEqual(t, c.retainedBytes, c.maxRetainedBytes)
+	_, keyAPresent := c.entries[keyA]
+	_, keyBPresent := c.entries[keyB]
+	c.mu.Unlock()
+	require.False(t, keyAPresent, "oldest retained entry is evicted first")
+	require.True(t, keyBPresent)
+
+	_, _, decoded = c.getOrDecodeSized(keyLarge, 11, decode(3))
+	require.True(t, decoded)
+	require.Equal(t, 1, decodeCacheLen(c), "an entry over budget is served but not retained")
+	c.remove(keyB)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	require.Zero(t, c.retainedBytes, "explicit invalidation releases its byte charge")
+	require.Empty(t, c.entries)
+}
+
+func TestOversizedRejectedDecodePreservesUsefulCacheEntry(t *testing.T) {
+	t.Parallel()
+	c := newDecodeCacheWithByteLimit[int](10)
+	usefulKey := decodeCacheKey{0xD1}
+	rejectedKey := decodeCacheKey{0xD2}
+	_, err, decoded := c.getOrDecodeSizedWithErrorRetention(
+		usefulKey,
+		6,
+		false,
+		func() (int, error) { return 1, nil },
+	)
+	require.NoError(t, err)
+	require.True(t, decoded)
+	_, err, decoded = c.getOrDecodeSizedWithErrorRetention(
+		rejectedKey,
+		11,
+		false,
+		func() (int, error) { return 0, errors.New("invalid maximum-size block") },
+	)
+	require.ErrorContains(t, err, "invalid maximum-size block")
+	require.True(t, decoded)
+	require.Equal(t, 1, decodeCacheLen(c))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, usefulRetained := c.entries[usefulKey]
+	_, rejectedRetained := c.entries[rejectedKey]
+	require.True(t, usefulRetained)
+	require.False(t, rejectedRetained)
+	require.Equal(t, 6, c.retainedBytes)
+}
+
+func TestDecodeCacheChargeForRawSaturates(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, int(^uint(0)>>1), decodeCacheChargeForRaw(int(^uint(0)>>1)))
+	require.Equal(t, decodeCacheEntryOverhead, decodeCacheChargeForRaw(0))
+	require.Equal(t, 10*decodeCacheRawSizeFactor+decodeCacheEntryOverhead,
+		decodeCacheChargeForRaw(10))
+}
+
+func TestHasCborArrayEnvelope(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, hasCborArrayEnvelope([]byte{0x80}))
+	require.True(t, hasCborArrayEnvelope([]byte{0x9f}))
+	require.False(t, hasCborArrayEnvelope(nil))
+	require.False(t, hasCborArrayEnvelope([]byte{0x60}))
+}
+
+func TestInvalidateBlockDecodeCacheRemovesRejectedEntry(t *testing.T) {
+	t.Parallel()
+
+	o := testOuroborosForDecodeCache(t)
+	raw := []byte{0x84, 0x01}
+	key := hashDecodeInput(7, raw)
+	_, _, decoded := o.blockDecodeCache.getOrDecodeSized(key, 516, func() (gledger.Block, error) {
+		return nil, nil
+	})
+	require.True(t, decoded)
+	require.Equal(t, 1, decodeCacheLen(o.blockDecodeCache))
+	o.InvalidateBlockDecodeCache(7, raw)
+	require.Zero(t, decodeCacheLen(o.blockDecodeCache))
+	o.blockDecodeCache.mu.Lock()
+	require.Zero(t, o.blockDecodeCache.retainedBytes)
+	o.blockDecodeCache.mu.Unlock()
+}
+
 // TestDecodeCacheConcurrentCallersShareOneDecode is the core correctness
 // property: many goroutines submitting the identical key at the same time
 // must trigger exactly one real decode, and every goroutine -- whether it

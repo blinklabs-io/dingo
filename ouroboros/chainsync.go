@@ -2162,9 +2162,14 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	}
 	arrivalTime := arrivalNow()
 	key := hashDecodeInput(blockType, blockData)
-	header, err := decodeWithPanicSafeMetrics(
+	cacheBytes := decodeCacheChargeForRaw(len(blockData))
+	if !hasCborArrayEnvelope(blockData) {
+		cacheBytes = int(^uint(0) >> 1)
+	}
+	header, err := decodeWithPanicSafeMetricsSized(
 		o.headerDecodeCache,
 		key,
+		cacheBytes,
 		func() (gledger.BlockHeader, error) {
 			return o.decodeChainsyncHeader(blockType, blockData)
 		},

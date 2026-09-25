@@ -34,8 +34,13 @@ import (
 // it exists purely to bound memory, not to invalidate stale-but-still-valid
 // answers.
 const (
-	decodeCacheMaxEntries = 1024
-	decodeCacheTTL        = 2 * time.Minute
+	decodeCacheMaxEntries     = 1024
+	decodeCacheTTL            = 2 * time.Minute
+	decodeCacheMaxBytes       = 128 << 20
+	blockDecodeCacheMaxBytes  = 128 << 20
+	headerDecodeCacheMaxBytes = 16 << 20
+	decodeCacheEntryOverhead  = 512
+	decodeCacheRawSizeFactor  = 8
 )
 
 // decodeCacheKey identifies raw decode input by content hash (block type plus
@@ -70,9 +75,10 @@ func hashDecodeInput(blockType uint, raw []byte) decodeCacheKey {
 // not a permanent poison -- it is bounded and evicted by the same TTL/size
 // rules as every other entry, same as a success.
 type decodeCacheEntry[T any] struct {
-	value      T
-	err        error
-	insertedAt time.Time
+	value         T
+	err           error
+	insertedAt    time.Time
+	retainedBytes int
 }
 
 // decodeCacheResult carries a decode outcome directly to a waiting caller
@@ -106,17 +112,24 @@ type decodeCacheResult[T any] struct {
 // not caching at all. Keeping an explicit insertion-order list turns
 // eviction into an O(1)-amortized pop from the front instead.
 type decodeCache[T any] struct {
-	mu       sync.Mutex
-	entries  map[decodeCacheKey]decodeCacheEntry[T]
-	order    *list.List // decodeCacheKey values, oldest-inserted at Front()
-	inFlight map[decodeCacheKey][]chan decodeCacheResult[T]
+	mu               sync.Mutex
+	entries          map[decodeCacheKey]decodeCacheEntry[T]
+	order            *list.List // decodeCacheKey values, oldest-inserted at Front()
+	inFlight         map[decodeCacheKey][]chan decodeCacheResult[T]
+	maxRetainedBytes int
+	retainedBytes    int
 }
 
 func newDecodeCache[T any]() *decodeCache[T] {
+	return newDecodeCacheWithByteLimit[T](decodeCacheMaxBytes)
+}
+
+func newDecodeCacheWithByteLimit[T any](maxRetainedBytes int) *decodeCache[T] {
 	return &decodeCache[T]{
-		entries:  make(map[decodeCacheKey]decodeCacheEntry[T]),
-		order:    list.New(),
-		inFlight: make(map[decodeCacheKey][]chan decodeCacheResult[T]),
+		entries:          make(map[decodeCacheKey]decodeCacheEntry[T]),
+		order:            list.New(),
+		inFlight:         make(map[decodeCacheKey][]chan decodeCacheResult[T]),
+		maxRetainedBytes: maxRetainedBytes,
 	}
 }
 
@@ -145,6 +158,23 @@ func newDecodeCache[T any]() *decodeCache[T] {
 // recorded it as a normal decode failure. See finishDecode.
 func (c *decodeCache[T]) getOrDecode(
 	key decodeCacheKey,
+	decodeFn func() (T, error),
+) (value T, err error, decoded bool) {
+	return c.getOrDecodeSized(key, 0, decodeFn)
+}
+
+func (c *decodeCache[T]) getOrDecodeSized(
+	key decodeCacheKey,
+	retainedBytes int,
+	decodeFn func() (T, error),
+) (value T, err error, decoded bool) {
+	return c.getOrDecodeSizedWithErrorRetention(key, retainedBytes, true, decodeFn)
+}
+
+func (c *decodeCache[T]) getOrDecodeSizedWithErrorRetention(
+	key decodeCacheKey,
+	retainedBytes int,
+	cacheErrors bool,
 	decodeFn func() (T, error),
 ) (value T, err error, decoded bool) {
 	c.mu.Lock()
@@ -209,14 +239,22 @@ func (c *decodeCache[T]) getOrDecode(
 		} else {
 			panicErr = fmt.Errorf("decode panicked: %v", r)
 		}
-		c.finishDecode(key, value, panicErr)
+		cacheBytes := retainedBytes
+		if !cacheErrors {
+			cacheBytes = int(^uint(0) >> 1)
+		}
+		c.finishDecodeSized(key, cacheBytes, value, panicErr)
 		err = panicErr
 		decoded = true
 	}()
 
 	value, err = decodeFn()
 	completed = true
-	c.finishDecode(key, value, err)
+	cacheBytes := retainedBytes
+	if err != nil && !cacheErrors {
+		cacheBytes = int(^uint(0) >> 1)
+	}
+	c.finishDecodeSized(key, cacheBytes, value, err)
 	return value, err, true
 }
 
@@ -250,12 +288,52 @@ func decodeWithPanicSafeMetrics[T any](
 	return value, err
 }
 
+func decodeWithPanicSafeMetricsSized[T any](
+	cache *decodeCache[T],
+	key decodeCacheKey,
+	retainedBytes int,
+	decodeFn func() (T, error),
+	recordOutcome func(isMiss bool),
+) (value T, err error) {
+	value, err, decoded := cache.getOrDecodeSizedWithErrorRetention(
+		key,
+		retainedBytes,
+		false,
+		decodeFn,
+	)
+	recordOutcome(decoded || err != nil)
+	return value, err
+}
+
+func decodeCacheChargeForRaw(rawBytes int) int {
+	if rawBytes < 0 || rawBytes > (int(^uint(0)>>1)-decodeCacheEntryOverhead)/decodeCacheRawSizeFactor {
+		return int(^uint(0) >> 1)
+	}
+	// The cache retains a CBOR copy and a decoded object graph whose slices,
+	// maps, and scalar values can expand substantially beyond the wire size.
+	// Use a conservative factor without depending on era-specific layouts.
+	return rawBytes*decodeCacheRawSizeFactor + decodeCacheEntryOverhead
+}
+
+func hasCborArrayEnvelope(raw []byte) bool {
+	return len(raw) > 0 && raw[0]>>5 == 4
+}
+
 // finishDecode records key's decode outcome, releases its in-flight claim,
 // and wakes every waiter with it. Shared by getOrDecode's normal-return path
 // and its panic-recovery path so both leave the cache in the same
 // consistent state -- a waiter never observes the difference between "the
 // leader's decodeFn returned an error" and "the leader's decodeFn panicked".
 func (c *decodeCache[T]) finishDecode(key decodeCacheKey, value T, err error) {
+	c.finishDecodeSized(key, 0, value, err)
+}
+
+func (c *decodeCache[T]) finishDecodeSized(
+	key decodeCacheKey,
+	retainedBytes int,
+	value T,
+	err error,
+) {
 	c.mu.Lock()
 	// now is captured under the lock, not before it: two concurrent
 	// finishDecode calls (for two different keys) acquire the lock in some
@@ -265,11 +343,15 @@ func (c *decodeCache[T]) finishDecode(key decodeCacheKey, value T, err error) {
 	// a front entry that looks fresh while a truly-older, later-positioned
 	// entry never gets checked.
 	now := time.Now()
-	c.order.PushBack(key)
-	c.entries[key] = decodeCacheEntry[T]{
-		value:      value,
-		err:        err,
-		insertedAt: now,
+	if retainedBytes <= c.maxRetainedBytes {
+		c.order.PushBack(key)
+		c.entries[key] = decodeCacheEntry[T]{
+			value:         value,
+			err:           err,
+			insertedAt:    now,
+			retainedBytes: retainedBytes,
+		}
+		c.retainedBytes += retainedBytes
 	}
 	waiters := c.inFlight[key]
 	delete(c.inFlight, key)
@@ -301,7 +383,10 @@ func (c *decodeCache[T]) finishDecode(key decodeCacheKey, value T, err error) {
 // access -- is an acceptable cost bounded by decodeCacheMaxEntries. The
 // caller must hold mu.
 func (c *decodeCache[T]) removeLocked(key decodeCacheKey) {
-	delete(c.entries, key)
+	if entry, ok := c.entries[key]; ok {
+		c.retainedBytes -= entry.retainedBytes
+		delete(c.entries, key)
+	}
 	for e := c.order.Front(); e != nil; e = e.Next() {
 		if e.Value.(decodeCacheKey) == key { //nolint:forcetypeassert
 			c.order.Remove(e)
@@ -332,17 +417,28 @@ func (c *decodeCache[T]) evictLocked(now time.Time) {
 			break
 		}
 		c.order.Remove(front)
+		c.retainedBytes -= entry.retainedBytes
 		delete(c.entries, key)
 	}
-	for len(c.entries) > decodeCacheMaxEntries {
+	for len(c.entries) > decodeCacheMaxEntries ||
+		c.retainedBytes > c.maxRetainedBytes {
 		front := c.order.Front()
 		if front == nil {
 			break
 		}
 		key := front.Value.(decodeCacheKey) //nolint:forcetypeassert
 		c.order.Remove(front)
-		delete(c.entries, key)
+		if entry, ok := c.entries[key]; ok {
+			c.retainedBytes -= entry.retainedBytes
+			delete(c.entries, key)
+		}
 	}
+}
+
+func (c *decodeCache[T]) remove(key decodeCacheKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.removeLocked(key)
 }
 
 // decodeCacheMetrics tracks hit/miss counts for the block and header decode

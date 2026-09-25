@@ -51,7 +51,7 @@ func TestNtCCleanupNormalCloseBeforeBlockedCallback(t *testing.T) {
 		waitForConnectionManagerWatchers(t, manager)
 	})
 	address := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002}
-	release := manager.reserveNtCSlot(address)
+	release := manager.reserveNtCSlot(address, false)
 	require.NotNil(t, release)
 	var releases atomic.Int32
 	require.True(t, manager.addConnectionImpl(
@@ -65,7 +65,7 @@ func TestNtCCleanupNormalCloseBeforeBlockedCallback(t *testing.T) {
 	testutil.RequireReceive(t, entered, time.Second, "close callback")
 	requireNtCCleanupCounts(t, manager, 0)
 	require.Nil(t, manager.GetConnectionById(connection.Id()))
-	probeRelease := manager.reserveNtCSlot(address)
+	probeRelease := manager.reserveNtCSlot(address, false)
 	require.NotNil(t, probeRelease, "blocked callback must allow a new client")
 	t.Cleanup(probeRelease)
 	releaseCallback()
@@ -120,7 +120,7 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 				waitForConnectionManagerWatchers(t, manager)
 			})
 			address := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002}
-			firstRelease := manager.reserveNtCSlot(address)
+			firstRelease := manager.reserveNtCSlot(address, false)
 			require.NotNil(t, firstRelease)
 			var releases atomic.Int32
 			require.True(t, manager.addConnectionImpl(
@@ -131,7 +131,7 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 			))
 			var secondRelease func()
 			if testCase.inbound {
-				secondRelease = manager.reserveNtCSlot(address)
+				secondRelease = manager.reserveNtCSlot(address, false)
 				require.NotNil(t, secondRelease)
 			}
 			requireNtCCleanupCounts(t, manager, testCase.remaining+1)
@@ -157,7 +157,7 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 			))
 			require.Same(t, second, manager.GetConnectionById(second.Id()))
 			require.False(t, manager.RemoveConnection(first.Id(), first))
-			probeRelease := manager.reserveNtCSlot(address)
+			probeRelease := manager.reserveNtCSlot(address, false)
 			require.NotNil(
 				t,
 				probeRelease,

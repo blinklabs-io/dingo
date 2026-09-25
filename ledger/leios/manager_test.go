@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -464,6 +466,132 @@ func TestVoteManagerHandleVoteAndServe(t *testing.T) {
 		vote.EndorserBlockHash,
 		result.votes[0].EndorserBlockHash,
 	)
+}
+
+func TestVoteManagerSkipsRepeatedVoteSignatureVerification(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	vote := fixture.makeVote(
+		t,
+		0,
+		577,
+		lcommon.NewBlake2b256([]byte("duplicate-vote")),
+	)
+	var verifyCalls atomic.Int64
+	fixture.mgr.verifyVoteSignature = func(
+		publicKey *bls12381.G2Affine,
+		message []byte,
+		signature []byte,
+	) error {
+		verifyCalls.Add(1)
+		return VerifyVoteSignature(publicKey, message, signature)
+	}
+
+	require.NoError(t, fixture.mgr.HandleVote("conn-a", vote))
+	require.NoError(t, fixture.mgr.HandleVote("conn-b", vote))
+	assert.EqualValues(t, 1, verifyCalls.Load())
+}
+
+func TestVoteManagerCoalescesConcurrentVoteVerification(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	vote := fixture.makeVote(
+		t,
+		0,
+		577,
+		lcommon.NewBlake2b256([]byte("in-flight-duplicate")),
+	)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var verifyCalls atomic.Int64
+	fixture.mgr.verifyVoteSignature = func(
+		publicKey *bls12381.G2Affine,
+		message []byte,
+		signature []byte,
+	) error {
+		verifyCalls.Add(1)
+		close(entered)
+		<-release
+		return VerifyVoteSignature(publicKey, message, signature)
+	}
+	done := make(chan error, 1)
+	go func() { done <- fixture.mgr.HandleVote("conn-a", vote) }()
+	<-entered
+	require.NoError(t, fixture.mgr.HandleVote("conn-b", vote))
+	assert.EqualValues(t, 1, verifyCalls.Load())
+	close(release)
+	require.NoError(t, <-done)
+}
+
+func TestVoteManagerInvalidSignatureDoesNotReserveVoteIdentity(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	valid := fixture.makeVote(
+		t,
+		0,
+		577,
+		lcommon.NewBlake2b256([]byte("invalid-then-valid")),
+	)
+	invalid := valid
+	invalid.VoteSignature = append([]byte(nil), valid.VoteSignature...)
+	invalid.VoteSignature[0] ^= 1
+	var verifyCalls atomic.Int64
+	fixture.mgr.verifyVoteSignature = func(
+		publicKey *bls12381.G2Affine,
+		message []byte,
+		signature []byte,
+	) error {
+		verifyCalls.Add(1)
+		return VerifyVoteSignature(publicKey, message, signature)
+	}
+
+	require.NoError(t, fixture.mgr.HandleVote("conn-a", invalid))
+	require.NoError(t, fixture.mgr.HandleVote("conn-b", valid))
+	assert.EqualValues(t, 2, verifyCalls.Load())
+}
+
+func TestVoteManagerBoundsSignatureVerificationPerPeer(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	for idx := range voteVerificationMaxPerPeer {
+		vote := lcommon.LeiosVote{
+			SlotNo: uint64(idx), VoterId: uint64(idx),
+			EndorserBlockHash: lcommon.NewBlake2b256(fmt.Appendf(nil, "vote-%d", idx)),
+		}
+		reserved, err := fixture.mgr.reserveIncomingVoteVerification("conn-a", vote)
+		require.NoError(t, err)
+		require.True(t, reserved)
+		fixture.mgr.releaseIncomingVoteVerification(vote)
+	}
+	reserved, err := fixture.mgr.reserveIncomingVoteVerification(
+		"conn-a",
+		lcommon.LeiosVote{SlotNo: 1000, VoterId: 1000},
+	)
+	require.ErrorContains(t, err, "peer vote verification budget exhausted")
+	require.False(t, reserved)
+	reserved, err = fixture.mgr.reserveIncomingVoteVerification(
+		"conn-b",
+		lcommon.LeiosVote{SlotNo: 1001, VoterId: 1001},
+	)
+	require.NoError(t, err)
+	require.True(t, reserved, "one peer's budget does not consume another peer's quota")
+}
+
+func TestVoteManagerDisconnectsPeerAfterRepeatedInvalidVotes(t *testing.T) {
+	t.Parallel()
+	fixture := newManagerFixture(t)
+	invalid := lcommon.LeiosVote{}
+	for range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandleVote("conn-a", invalid))
+	}
+	err := fixture.mgr.HandleVote("conn-a", invalid)
+	require.ErrorIs(t, err, ErrPeerMisbehavior)
+	require.NoError(t, fixture.mgr.HandleVote("conn-b", invalid),
+		"one connection's invalid-message count must not penalize another")
 }
 
 func TestVoteManagerDoesNotEchoToOrigin(t *testing.T) {

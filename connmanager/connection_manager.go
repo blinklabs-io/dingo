@@ -49,18 +49,20 @@ const (
 	// simultaneous inbound connections accepted by the connection manager.
 	// This prevents resource exhaustion from malicious or accidental
 	// connection floods.
-	DefaultMaxInboundConnections  = 100
-	DefaultMaxNtCConnections      = 100
-	DefaultMaxNtCConnectionsPerIP = 5
+	DefaultMaxInboundConnections         = 100
+	DefaultMaxNtCConnections             = 100
+	DefaultMaxNtCConnectionsPerIP        = 5
+	DefaultMaxTrustedLocalNtCConnections = 100
 )
 
 type connectionInfo struct {
-	conn      *ouroboros.Connection
-	onClose   func()
-	peerAddr  string
-	isInbound bool
-	isNtC     bool   // true for node-to-client (local) connections
-	ipKey     string // rate-limit key (IP or /64 prefix for IPv6)
+	conn         *ouroboros.Connection
+	onClose      func()
+	peerAddr     string
+	isInbound    bool
+	isNtC        bool // true for node-to-client (local) connections
+	trustedLocal bool
+	ipKey        string // rate-limit key (IP or /64 prefix for IPv6)
 }
 
 type ConnectionManager struct {
@@ -94,6 +96,7 @@ type ConnectionManager struct {
 	trackedConnCount     int
 	ntcAdmissionMutex    sync.Mutex
 	ntcCount             int
+	trustedLocalNtCCount int
 	ntcIPConns           map[string]int
 }
 
@@ -129,19 +132,23 @@ type ConnectionManagerConfig struct {
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
-	MaxConnectionsPerIP    int
-	MaxNtCConns            int
-	MaxNtCConnectionsPerIP int
+	MaxConnectionsPerIP     int
+	MaxNtCConns             int
+	MaxNtCConnectionsPerIP  int
+	MaxTrustedLocalNtCConns int
 }
 
 type connectionManagerMetrics struct {
-	incomingConns       prometheus.Gauge
-	outgoingConns       prometheus.Gauge
-	unidirectionalConns prometheus.Gauge
-	duplexConns         prometheus.Gauge
-	fullDuplexConns     prometheus.Gauge
-	prunableConns       prometheus.Gauge
-	ntcRejectedConns    *prometheus.CounterVec
+	incomingConns                prometheus.Gauge
+	outgoingConns                prometheus.Gauge
+	unidirectionalConns          prometheus.Gauge
+	duplexConns                  prometheus.Gauge
+	fullDuplexConns              prometheus.Gauge
+	prunableConns                prometheus.Gauge
+	ntcRejectedConns             *prometheus.CounterVec
+	ntcConnections               *prometheus.GaugeVec
+	ntcTrustedLocalBufferedBytes prometheus.GaugeFunc
+	ntcRemoteBufferedBytes       prometheus.GaugeFunc
 }
 
 type peerConnectionSummary struct {
@@ -195,6 +202,9 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	}
 	if cfg.MaxNtCConnectionsPerIP <= 0 {
 		cfg.MaxNtCConnectionsPerIP = DefaultMaxNtCConnectionsPerIP
+	}
+	if cfg.MaxTrustedLocalNtCConns <= 0 {
+		cfg.MaxTrustedLocalNtCConns = DefaultMaxTrustedLocalNtCConnections
 	}
 	c := &ConnectionManager{
 		config: cfg,
@@ -270,6 +280,24 @@ func (c *ConnectionManager) initMetrics() {
 			Help: "number of node-to-client connections rejected by admission limits",
 		},
 		[]string{"reason"},
+	)
+	c.metrics.ntcConnections = promautoFactory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: metricNamePrefix + "ntcConnections",
+		Help: "number of admitted node-to-client connections by listener trust class",
+	}, []string{"trusted_local"})
+	c.metrics.ntcTrustedLocalBufferedBytes = promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: metricNamePrefix + "ntcTrustedLocalBufferedBytes",
+			Help: "bytes reserved by incomplete message reassembly on trusted local node-to-client connections",
+		},
+		func() float64 { return c.ntcBufferedBytes(true) },
+	)
+	c.metrics.ntcRemoteBufferedBytes = promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: metricNamePrefix + "ntcRemoteBufferedBytes",
+			Help: "bytes reserved by incomplete message reassembly on remote node-to-client connections",
+		},
+		func() float64 { return c.ntcBufferedBytes(false) },
 	)
 	c.metrics.incomingConns = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: metricNamePrefix + "incomingConns",

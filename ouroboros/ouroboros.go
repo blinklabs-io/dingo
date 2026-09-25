@@ -254,6 +254,9 @@ type Ouroboros struct {
 	// second description of the same ranking block from being relayed.
 	leiosAnnouncementsMu       sync.Mutex
 	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosAnnouncementInFlight  map[string]struct{}
+	leiosInvalidAnnouncements  map[string]leiosInvalidAnnouncementState
+	leiosInvalidAnnouncementMu sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64
@@ -531,15 +534,21 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
-		blockDecodeCache:         newDecodeCache[gledger.Block](),
-		headerDecodeCache:        newDecodeCache[gledger.BlockHeader](),
-		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosClosureWaiters:      make(map[string][]chan struct{}),
+		blockDecodeCache: newDecodeCacheWithByteLimit[gledger.Block](
+			blockDecodeCacheMaxBytes,
+		),
+		headerDecodeCache: newDecodeCacheWithByteLimit[gledger.BlockHeader](
+			headerDecodeCacheMaxBytes,
+		),
+		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters: make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),
 		leiosEBLog:                 newLeiosForgedEBLog(),
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosAnnouncementInFlight:  make(map[string]struct{}),
+		leiosInvalidAnnouncements:  make(map[string]leiosInvalidAnnouncementState),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
 		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
@@ -699,6 +708,7 @@ func (o *Ouroboros) ConfigureListeners(
 				}
 			}
 			trusted := isTrustedNtCListener(l)
+			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				o.chainsyncConnectionConfigOption(false),

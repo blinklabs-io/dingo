@@ -565,6 +565,41 @@ func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
 	require.True(t, stillDeferred)
 }
 
+func TestAcceptLeiosAnnouncementDeduplicatesBeforeValidation(t *testing.T) {
+	t.Parallel()
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 10,
+		slotTime:    time.Now().Add(-time.Minute),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	require.NoError(t, o.acceptLeiosAnnouncement(raw, "first-peer"))
+	require.NoError(t, o.acceptLeiosAnnouncement(raw, "second-peer"))
+	require.Equal(t, 1, announcementLedger.validated,
+		"an identical announced ranking block must not repeat ledger validation")
+	require.Empty(t, o.leiosAnnouncementInFlight)
+}
+
+func TestRepeatedInvalidLeiosAnnouncementsArePenalizedPerConnection(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	invalid := errors.New("invalid ranking block")
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.recordInvalidLeiosAnnouncement("connection-a", invalid))
+	}
+	require.ErrorIs(t,
+		o.recordInvalidLeiosAnnouncement("connection-a", invalid), invalid,
+	)
+	require.NoError(t,
+		o.recordInvalidLeiosAnnouncement("connection-b", invalid),
+		"one connection's invalid-message count must not penalize another",
+	)
+}
+
 var errLeiosEndorserBlockNotCached = errors.New(
 	"leios endorser block not cached",
 )

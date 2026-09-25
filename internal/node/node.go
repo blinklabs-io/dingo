@@ -773,6 +773,10 @@ func buildDingoConfig(
 		),
 		dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
 		dingo.WithMaxInboundConns(cfg.MaxInboundConns),
+		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
+		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
+		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
+		dingo.WithSkipRewardLiveStakeBackfillCheck(cfg.SkipRewardLiveStakeBackfillCheck),
 		dingo.WithCacheConfig(
 			cfg.Cache.BlockLRUEntries,
 			cfg.Cache.HotUtxoEntries,

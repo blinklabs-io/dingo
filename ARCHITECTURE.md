@@ -891,19 +891,34 @@ never silently disables them. Cancellation closes an in-flight bearer, and faile
 setup releases its reserved inbound and per-IP slots.
 
 Node-to-client listeners share a separate admission budget across all their
-transports: `ConnectionManagerConfig.MaxNtCConns` defaults to 100 pending or
-established sessions. TCP clients also share a separate per-source budget,
+remotely reachable transports: `ConnectionManagerConfig.MaxNtCConns` defaults
+to 100 pending or established sessions. Trusted-local listeners have their
+own bounded budget, `MaxTrustedLocalNtCConns`, also defaulting to 100 and
+configurable with `--max-trusted-local-ntc-conns` or
+`DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS`. A trusted-local listener is only a Unix
+socket or a TCP listener whose resolved bind address is loopback; a wildcard
+or non-loopback bind remains subject to the remote profile. This separation
+means local query clients cannot occupy the remote admission quota, and remote
+clients cannot consume the local quota. TCP clients in the remote profile also
+share a separate per-source budget,
 `MaxNtCConnectionsPerIP`, defaulting to five sessions per IPv4 address or IPv6
-/64. Nonpositive settings use these defaults. Unix sockets and named pipes
-consume the total NtC budget without per-IP accounting. NtC admission never
-consumes N2N slots or N2N per-IP capacity. Admission reserves both budgets
-before launching a handshake worker; failed setup releases the reservation,
-and successful setup transfers the once-only release to the registered
-connection entry. Normal removal and collision eviction release outside the
-connection-map lock and before close callbacks run; the connection's close
-watcher is the backstop if an evicted entry is no longer present in the map.
+/64. Nonpositive settings use these defaults. NtC admission never consumes N2N
+slots or N2N per-IP capacity. Admission reserves the appropriate trust-class
+budget before launching a handshake worker; failed setup releases the
+reservation, and successful setup transfers the once-only release to the
+registered connection entry. Normal removal and collision eviction release
+outside the connection-map lock and before close callbacks run; the
+connection's close watcher is the backstop if an evicted entry is no longer
+present in the map.
 The `cardano_node_metrics_connectionManager_ntcRejectedConns_total` counter
-records rejections with `total_limit` or `per_ip_limit` as its `reason` label.
+records rejections with `total_limit`, `per_ip_limit`, or
+`trusted_local_limit` as its `reason` label. The `ntcConnections` gauge tracks
+occupied admission slots (including handshakes) with a `trusted_local` label;
+`ntcTrustedLocalBufferedBytes` and `ntcRemoteBufferedBytes` expose the muxer's
+currently reserved incomplete-message reassembly bytes for each class. The
+large trusted LocalStateQuery limit is not allocated at connection setup; the
+muxer reserves bytes only as an incomplete message arrives, subject to its
+per-connection budget.
 
 LocalTxSubmission preserves typed CBOR rejection reasons. Untyped Conway
 failures use the ledger's `ConwayMempoolFailure` constructor; Dijkstra uses its

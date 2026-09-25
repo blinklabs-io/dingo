@@ -190,12 +190,13 @@ const (
 	// Genesis fork resolution can need more than the normal K-sized history to
 	// compare a candidate's density, but retaining decoded headers for an
 	// entire slot window makes memory proportional to an attacker-controlled
-	// number of blocks. Store wire header bytes lazily and cap each peer's
-	// retained history independently of the configured slot window. The default
-	// Genesis quorum is one fast source plus two corroborators, so this leaves a
-	// bounded 24 MiB wire-history allowance across the three required peers.
-	// A path that does not fit this budget falls back to a fresh intersection.
+	// number of blocks. Store wire header bytes lazily and bound both each peer
+	// and all peers together. The global budget preserves at least the normal
+	// K-sized history where possible; when pressure requires retiring a peer,
+	// fork recovery falls back to a fresh intersection.
 	maxPeerHeaderHistoryBytesPerConn = 8 << 20
+	maxPeerHeaderHistoryBytesTotal   = 32 << 20
+	minPeerHeaderHistoryRecords      = maxPeerHeaderHistoryPerConn
 	peerHeaderHistoryRecordOverhead  = 512
 
 	// Match ouroboros-consensus' default maximum permissible clock skew. A
@@ -257,6 +258,7 @@ type peerHeaderRecord struct {
 	prevHash   []byte
 	decodeType uint
 	bytes      int
+	sequence   uint64
 }
 
 type peerHeaderChain struct {
@@ -316,7 +318,7 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 			"slot", e.Point.Slot,
 		)
 		ls.discardBufferedPeerHeaders(e.ConnectionId)
-		delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
+		ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 		return
 	}
 	if e.Rollback {
@@ -885,6 +887,9 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 		}
 	} else if e.Block != nil {
 		if err := ls.handleEventBlockfetchBlockDeferred(e, &pending); err != nil {
+			if ls.config.RejectBlockDecodeCacheFunc != nil && len(e.RawBlock) > 0 {
+				ls.config.RejectBlockDecodeCacheFunc(e.Type, e.RawBlock)
+			}
 			if strings.Contains(
 				err.Error(),
 				"block header crypto verification failed",
@@ -1116,7 +1121,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
 	ls.bufferedHeaderMutex.Unlock()
-	delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
+	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
 	// new headers from reconnected peers are queued behind a batch
@@ -1553,12 +1558,15 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	for len(history.order) > 0 &&
 		(history.retainedBytes+recordBytes > maxPeerHeaderHistoryBytesPerConn ||
 			len(history.order) >= ls.peerHeaderHistoryLimit()) {
-		evictKey := history.order[0]
-		history.order = history.order[1:]
-		if evicted, ok := history.byHash[evictKey]; ok {
-			history.retainedBytes -= evicted.bytes
-			delete(history.byHash, evictKey)
+		if !ls.evictOldestPeerHeaderRecord(key) {
+			return
 		}
+	}
+	if !ls.makePeerHeaderHistoryRoom(recordBytes, key) {
+		if len(history.order) == 0 {
+			delete(ls.peerHeaderHistory, key)
+		}
+		return
 	}
 	metadata := ChainsyncEvent{
 		ConnectionId: e.ConnectionId,
@@ -1575,16 +1583,91 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 		// overhead so this compatibility path cannot bypass the bound.
 		metadata.BlockHeader = e.BlockHeader
 	}
+	ls.peerHeaderHistorySequence++
 	record := peerHeaderRecord{
 		event:      metadata,
 		headerCbor: headerCbor,
 		prevHash:   prevHash,
 		decodeType: decodeType,
 		bytes:      recordBytes,
+		sequence:   ls.peerHeaderHistorySequence,
 	}
 	history.order = append(history.order, hashKey)
 	history.byHash[hashKey] = record
 	history.retainedBytes += recordBytes
+	ls.peerHeaderHistoryBytes += recordBytes
+}
+
+func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
+	history := ls.peerHeaderHistory[historyKey]
+	if history == nil || len(history.order) == 0 {
+		return false
+	}
+	key := history.order[0]
+	history.order = history.order[1:]
+	record, ok := history.byHash[key]
+	if !ok {
+		return true
+	}
+	history.retainedBytes -= record.bytes
+	ls.peerHeaderHistoryBytes -= record.bytes
+	delete(history.byHash, key)
+	return true
+}
+
+func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
+	history := ls.peerHeaderHistory[historyKey]
+	if history == nil {
+		return
+	}
+	ls.peerHeaderHistoryBytes -= history.retainedBytes
+	delete(ls.peerHeaderHistory, historyKey)
+}
+
+func (ls *LedgerState) makePeerHeaderHistoryRoom(
+	recordBytes int,
+	protectedKey string,
+) bool {
+	for ls.peerHeaderHistoryBytes+recordBytes > maxPeerHeaderHistoryBytesTotal {
+		oldestKey := ""
+		oldestSequence := ^uint64(0)
+		for key, history := range ls.peerHeaderHistory {
+			if len(history.order) <= minPeerHeaderHistoryRecords {
+				continue
+			}
+			oldest := history.byHash[history.order[0]]
+			if oldest.sequence < oldestSequence {
+				oldestKey = key
+				oldestSequence = oldest.sequence
+			}
+		}
+		if oldestKey != "" {
+			ls.evictOldestPeerHeaderRecord(oldestKey)
+			continue
+		}
+
+		// Keep each peer's minimum ancestry when possible. If every history
+		// has reached that floor, retire the oldest other peer's history so a
+		// newly active peer can build a fresh intersection within the process
+		// budget. If only the current peer remains, its next header is omitted.
+		oldestKey = ""
+		oldestSequence = ^uint64(0)
+		for key, history := range ls.peerHeaderHistory {
+			if key == protectedKey || len(history.order) == 0 {
+				continue
+			}
+			oldest := history.byHash[history.order[0]]
+			if oldest.sequence < oldestSequence {
+				oldestKey = key
+				oldestSequence = oldest.sequence
+			}
+		}
+		if oldestKey == "" {
+			return false
+		}
+		ls.removePeerHeaderHistory(oldestKey)
+	}
+	return true
 }
 
 func (r peerHeaderRecord) chainsyncEvent() (ChainsyncEvent, bool) {
