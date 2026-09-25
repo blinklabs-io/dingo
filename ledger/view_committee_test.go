@@ -1445,9 +1445,27 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 	}
 }
 
-func TestValidateTxConwayRejectsCommitteeUpdateVoteAtPV10(t *testing.T) {
+func TestValidateTxConwayRejectsCommitteeUpdateVoteBeforePV11(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		version uint
+	}{
+		{name: "PV9", version: lcommon.ProtocolVersionPlomin - 1},
+		{name: "PV10", version: lcommon.ProtocolVersionPlomin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			validateCommitteeUpdateVoteRejectedAtVersion(t, tc.version)
+		})
+	}
+}
+
+func validateCommitteeUpdateVoteRejectedAtVersion(t *testing.T, version uint) {
+	t.Helper()
 	pparams := &conway.ConwayProtocolParameters{}
-	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
+	pparams.ProtocolVersion.Major = version
 	lv, db := committeeTestView(t, pparams)
 	lv.skipPhase2Validation = true
 	cold := committeeTestCredential(0xd5)
