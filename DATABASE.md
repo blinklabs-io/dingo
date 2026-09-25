@@ -351,6 +351,9 @@ imported pool registrations whose source registration slot is unavailable, so
 the synthetic import slot cannot restart a key's protocol TTL.
 Migration `v26` (`leios-key-registration-epoch`, integer version 26) stores an
 imported registration's effective epoch when the reference state provides it.
+Migration `v27` (`leios-snapshot-registration-epoch-backfill`, integer
+version 27) restores snapshot key epochs from matching known registrations and
+retained epoch history. It leaves genuinely unknown imported ages NULL.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,

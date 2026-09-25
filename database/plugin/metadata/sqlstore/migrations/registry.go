@@ -35,32 +35,33 @@ import (
 var migrationSQL embed.FS
 
 const (
-	initialSchemaRelease                          = "v1alpha1"
-	leiosKeySchemaRelease                         = "leios-key-registration"
-	tokenRegistrySchemaRelease                    = "token-registry-metadata"
-	accountBaselineSchemaRelease                  = "account-import-baseline"
-	leiosSnapshotKeySchemaRelease                 = "leios-snapshot-keys"
-	governanceRatificationHistorySchemaRelease    = "governance-ratification-history"
-	accountDepositSchemaRelease                   = "account-import-deposit"
-	committeeCredentialTagsSchemaRelease          = "committee-credential-tags"
-	committeeTermStartPresenceSchemaRelease       = "committee-term-start-presence"
-	rewardSeedFailureSchemaRelease                = "reward-seed-failure"
-	importedPoolBlockCountSchemaRelease           = "imported-pool-block-count"
-	poolDepositHeldSchemaRelease                  = "pool-registration-deposit-held"
-	pointerAddressStakeSchemaRelease              = "pointer-address-stake"
-	collateralAssociationSchemaRelease            = "collateral-transaction-associations"
-	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
-	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
-	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
-	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
-	committeeZeroQuorumSchemaRelease              = "committee-zero-quorum"
-	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
-	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
-	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
-	leiosKeyAgeSchemaRelease                      = "leios-key-registration-effective-epoch"
-	leiosImportedKeyAgeSchemaRelease              = "leios-imported-key-age-unknown"
-	leiosKeyRegistrationEpochSchemaRelease         = "leios-key-registration-epoch"
-	governanceVoteHistorySchemaRelease            = "governance-vote-history"
+	initialSchemaRelease                                = "v1alpha1"
+	leiosKeySchemaRelease                               = "leios-key-registration"
+	tokenRegistrySchemaRelease                          = "token-registry-metadata"
+	accountBaselineSchemaRelease                        = "account-import-baseline"
+	leiosSnapshotKeySchemaRelease                       = "leios-snapshot-keys"
+	governanceRatificationHistorySchemaRelease          = "governance-ratification-history"
+	accountDepositSchemaRelease                         = "account-import-deposit"
+	committeeCredentialTagsSchemaRelease                = "committee-credential-tags"
+	committeeTermStartPresenceSchemaRelease             = "committee-term-start-presence"
+	rewardSeedFailureSchemaRelease                      = "reward-seed-failure"
+	importedPoolBlockCountSchemaRelease                 = "imported-pool-block-count"
+	poolDepositHeldSchemaRelease                        = "pool-registration-deposit-held"
+	pointerAddressStakeSchemaRelease                    = "pointer-address-stake"
+	collateralAssociationSchemaRelease                  = "collateral-transaction-associations"
+	rewardStakeVersionRestampSchemaRelease              = "reward-stake-calculation-version-restamp"
+	governanceProposalOptionalAnchorSchemaRelease       = "governance-proposal-optional-anchor"
+	governanceProposalDroppedSchemaRelease              = "governance-proposal-dropped-epoch"
+	rewardSnapshotExcludedStakeSchemaRelease            = "reward-snapshot-excluded-active-stake"
+	committeeZeroQuorumSchemaRelease                    = "committee-zero-quorum"
+	assetNameHexColumnDropSchemaRelease                 = "asset-name-hex-column-drop"
+	alonzoPParamsUnitSchemaRelease                      = "alonzo-pparams-unit-provenance"
+	assetAmountFingerprintIndexDropSchemaRelease        = "asset-amount-fingerprint-index-drop"
+	leiosKeyAgeSchemaRelease                            = "leios-key-registration-effective-epoch"
+	leiosImportedKeyAgeSchemaRelease                    = "leios-imported-key-age-unknown"
+	leiosKeyRegistrationEpochSchemaRelease              = "leios-key-registration-epoch"
+	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
+	governanceVoteHistorySchemaRelease                  = "governance-vote-history"
 )
 
 // alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
@@ -156,6 +157,11 @@ var schemaVersions = []struct {
 		Version: 26,
 		Name:    leiosKeyRegistrationEpochSchemaRelease,
 		Dir:     "v26",
+	},
+	{
+		Version: 27,
+		Name:    leiosSnapshotRegistrationEpochBackfillSchemaRelease,
+		Dir:     "v27",
 	},
 }
 
