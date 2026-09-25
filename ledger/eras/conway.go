@@ -338,8 +338,14 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	tx lcommon.Transaction,
 	_ uint64,
 	ls lcommon.LedgerState,
-	_ lcommon.ProtocolParameters,
+	pp lcommon.ProtocolParameters,
 ) error {
+	if err := script.ValidatePlutusV3ReferenceInputs(
+		tx,
+		protocolMajorVersion(pp),
+	); err != nil {
+		return conway.ScriptContextConstructionError{Err: err}
+	}
 	view, err := script.NewTxScriptView(tx, ls)
 	if err != nil {
 		if isInputResolutionError(err) {
@@ -583,7 +589,7 @@ func validateTxPlutusConwayWithContext(
 		ls,
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
-		pp.ProtocolVersion.Major,
+		protocolMajorVersion(pp),
 	)
 	synthetic := syntheticV2CostModelInEffect(ls)
 	for redeemerKey, redeemerValue := range plutusCtx.redeemers.Iter() {
@@ -597,7 +603,7 @@ func validateTxPlutusConwayWithContext(
 			tx.VotingProcedures(),
 			tx.ProposalProcedures(),
 			plutusCtx.witnessDatums,
-			pp.ProtocolVersion.Major,
+			protocolMajorVersion(pp),
 		)
 		if !ok {
 			return conway.ExtraRedeemerError{RedeemerKey: redeemerKey}
@@ -1212,7 +1218,7 @@ func evaluateConwayPlutusScript(
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV3,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
@@ -1258,7 +1264,7 @@ func evaluateConwayPlutusScript(
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV2,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
@@ -1296,7 +1302,7 @@ func evaluateConwayPlutusScript(
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV1,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
@@ -1439,7 +1445,7 @@ func EvaluateTxConway(
 		ls,
 		tx,
 		scriptInputs.resolvedAllInputs,
-		tmpPparams.ProtocolVersion.Major,
+		protocolMajorVersion(tmpPparams),
 	)
 	synthetic := syntheticV2CostModelInEffect(ls)
 	var txInfoV3 script.TxInfoV3

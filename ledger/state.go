@@ -12260,6 +12260,8 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 // rather than break the build. The mempool's identical interface is guarded in
 // the root package, which is where *LedgerState is wired in as its validator.
 var _ forging.TxValidationSessionProvider = (*LedgerState)(nil)
+var _ lcommon.GenesisDelegationState = (*LedgerState)(nil)
+var _ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerState)(nil)
 
 // WithTxValidationSession pins a mempool revalidation batch to one immutable
 // ledger publication, one validation slot/era/parameter set, and one

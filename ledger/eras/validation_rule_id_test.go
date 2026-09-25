@@ -316,10 +316,12 @@ func eraUtxoValidationRuleCompositions() []eraUtxoValidationRuleComposition {
 			descriptors: gdijkstra.UtxoValidationRuleDescriptors(),
 			upstream:    gdijkstra.UtxoValidationRules,
 			built:       dijkstraPhase1UtxoValidationRules,
-			dropped: map[lcommon.UtxoValidationRuleId]string{
-				lcommon.UtxoValidationRulePlutusScripts: "dijkstra.UtxoValidatePlutusScripts",
-			},
+			dropped:     map[lcommon.UtxoValidationRuleId]string{},
 			replaced: map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement{
+				lcommon.UtxoValidationRulePlutusScripts: {
+					upstreamFuncName: "dijkstra.UtxoValidatePlutusScripts",
+					dingoFunc:        validateDijkstraPlutusV3ReferenceInputs,
+				},
 				lcommon.UtxoValidationRuleCommitteeCertificates: {
 					upstreamFuncName: "dijkstra.UtxoValidateCommitteeCertificates",
 					dingoFunc:        validateCommitteeCertificates,

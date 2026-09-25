@@ -434,7 +434,12 @@ func (m *DingoStateManager) LoadInitialState(
 
 	var initialDRepDepositAmount uint64
 	initialDRepDepositResolved := false
-	resolveInitialDRepDeposit := func() (uint64, error) {
+	resolveInitialDRepDeposit := func(
+		credential mockledger.RewardAccountKey,
+	) (uint64, error) {
+		if deposit, ok := state.DRepDeposits[credential]; ok {
+			return deposit, nil
+		}
 		if initialDRepDepositResolved {
 			return initialDRepDepositAmount, nil
 		}
@@ -450,7 +455,7 @@ func (m *DingoStateManager) LoadInitialState(
 		if !registered {
 			continue
 		}
-		depositAmount, err := resolveInitialDRepDeposit()
+		depositAmount, err := resolveInitialDRepDeposit(credential)
 		if err != nil {
 			return err
 		}
@@ -476,7 +481,10 @@ func (m *DingoStateManager) LoadInitialState(
 		if hasDRepCredentialHash(state.DRepRegistrationsByCredential, hash) {
 			continue
 		}
-		depositAmount, err := resolveInitialDRepDeposit()
+		depositAmount, err := resolveInitialDRepDeposit(mockledger.RewardAccountKey{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: hash,
+		})
 		if err != nil {
 			return err
 		}

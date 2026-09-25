@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -51,6 +52,9 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	pp := &conway.ConwayProtocolParameters{DRepDeposit: 500_000_000}
 	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
 		DRepRegistrations: []common.Blake2b224{hash},
+		DRepDeposits: map[mockledger.RewardAccountKey]uint64{
+			key: 400_000_000, script: 500_000_000,
+		},
 		DRepRegistrationsByCredential: map[mockledger.RewardAccountKey]bool{
 			key: true, script: true,
 		},
@@ -70,7 +74,11 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.NotNil(t, deposit)
-		require.Equal(t, uint64(500_000_000), *deposit)
+		want := uint64(500_000_000)
+		if credentialTag == 0 {
+			want = 400_000_000
+		}
+		require.Equal(t, want, *deposit)
 	}
 
 	dreps, err := m.db.GetActiveDreps(nil)
@@ -92,7 +100,7 @@ func TestLoadInitialStateSkipsInactiveDRepsWithoutDeposit(t *testing.T) {
 		DRepRegistrationsByCredential: map[mockledger.RewardAccountKey]bool{
 			credential: false,
 		},
-	}, &conway.ConwayProtocolParameters{}))
+	}, &babbage.BabbageProtocolParameters{}))
 
 	dreps, err := m.db.GetActiveDreps(nil)
 	require.NoError(t, err)
