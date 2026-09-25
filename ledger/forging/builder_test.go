@@ -1392,7 +1392,6 @@ func makeMinimalTxCborWithInput(
 		},
 		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 		2: uint64(200000),
-		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 	}
 
 	txArr := []any{bodyMap, map[uint]any{}, true, nil}
