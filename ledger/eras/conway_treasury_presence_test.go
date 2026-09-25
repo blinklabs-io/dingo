@@ -129,6 +129,8 @@ func decodeConwayTreasuryTx(
 			[]shelley.ShelleyTransactionInput{input},
 			true,
 		),
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+		2: uint64(200_000),
 	}
 	if treasuryValue != nil {
 		bodyFields[21] = *treasuryValue
