@@ -1687,14 +1687,7 @@ func pruneParamEpochSnapshots(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-<<<<<<< HEAD
-	db, err := sql.Open(
-		"sqlite",
-		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
-	)
-=======
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
->>>>>>> 9ee42430 (test(sqlite): disable synchronous writes in fixtures)
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 	_, err = db.Exec(
@@ -2398,14 +2391,7 @@ func seedPoolCertificateHistory(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-<<<<<<< HEAD
-	db, err := sql.Open(
-		"sqlite",
-		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
-	)
-=======
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
->>>>>>> 9ee42430 (test(sqlite): disable synchronous writes in fixtures)
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
