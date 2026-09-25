@@ -98,7 +98,6 @@ type mockListener struct {
 	acceptErr   error
 	closed      atomic.Bool
 	closeCh     chan struct{}
-	acceptDelay time.Duration
 }
 
 func newMockListener() *mockListener {
@@ -109,9 +108,6 @@ func newMockListener() *mockListener {
 
 func (m *mockListener) Accept() (net.Conn, error) {
 	m.acceptCalls.Add(1)
-	if m.acceptDelay > 0 {
-		time.Sleep(m.acceptDelay)
-	}
 	if m.closed.Load() {
 		return nil, net.ErrClosed
 	}
@@ -151,6 +147,7 @@ type toggleMockListener struct {
 	successCount  atomic.Int32
 	errorCount    atomic.Int32
 	successSignal chan struct{} // signaled after each successful accept
+	errorSignal   chan struct{} // signals that errorCount changed
 	connCh        chan net.Conn // channel to provide mock connections
 	acceptEntered chan struct{} // signaled when Accept() is entered
 }
@@ -161,6 +158,7 @@ func newToggleMockListener() *toggleMockListener {
 		acceptErr:     errors.New("simulated accept error"),
 		timestamps:    make([]time.Time, 0),
 		successSignal: make(chan struct{}, 100),
+		errorSignal:   make(chan struct{}, 1),
 		connCh:        make(chan net.Conn, 100),
 		acceptEntered: make(chan struct{}, 100),
 	}
@@ -182,6 +180,10 @@ func (m *toggleMockListener) Accept() (net.Conn, error) {
 	}
 	if m.errorEnabled.Load() {
 		m.errorCount.Add(1)
+		select {
+		case m.errorSignal <- struct{}{}:
+		default:
+		}
 		return nil, m.acceptErr
 	}
 	// Try to get a connection from the channel, or wait for close
@@ -249,15 +251,19 @@ func (m *toggleMockListener) WaitForErrors(
 	minErrors int,
 	timeout time.Duration,
 ) int {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
 		current := int(m.errorCount.Load()) - baseline
 		if current >= minErrors {
 			return current
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-m.errorSignal:
+		case <-timer.C:
+			return int(m.errorCount.Load()) - baseline
+		}
 	}
-	return int(m.errorCount.Load()) - baseline
 }
 
 // WaitForAcceptEntered waits for Accept() to be called, or until timeout expires.
@@ -703,7 +709,8 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 		return mockLn.AcceptCount() >= 1
 	}, 2*time.Second, 5*time.Millisecond, "accept should be called at least once")
 
-	// Allow some time for backoff to accumulate a few calls
+	// Deliberate observation window: exercise several backoff intervals and
+	// compare the retry count with the tight-loop failure mode.
 	// With backoff starting at 10ms, we expect roughly:
 	// - First call: immediate
 	// - Second call: after 10ms (first error)

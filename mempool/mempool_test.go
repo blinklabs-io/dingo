@@ -3169,6 +3169,8 @@ func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
 	go func() {
 		defer close(refreshDone)
 		for range 6 {
+			// Deliberately pace refreshes across multiple cleanup ticks while
+			// keeping every refresh inside the transaction TTL.
 			time.Sleep(30 * time.Millisecond)
 			m.Lock()
 			if existingTx := m.txByHash["refresh-tx"]; existingTx != nil {

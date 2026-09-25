@@ -93,7 +93,23 @@ type rewardState struct {
 func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseRewardStore(t, store)
+	state := exerciseRewardStore(t, store)
+	require.NotNil(t, state.pots)
+	require.False(t, state.authoritativeClaim)
+	require.True(t, state.fallbackClaim)
+	require.NotNil(t, state.fallback)
+	require.Equal(t, uint64(250), uint64(state.fallback.TotalActiveStake))
+	require.Equal(t, uint64(60), state.fallback.BoundarySlot)
+	require.True(t, state.guardCreated)
+	require.Nil(t, state.guardRemoved)
+	require.True(t, state.provisionalGuard)
+	require.False(t, state.authoritativeGuard)
+	require.NotEmpty(t, state.poolInputs)
+	require.NotEmpty(t, state.stakeInputs)
+	require.NotEmpty(t, state.poolOutputs)
+	require.NotEmpty(t, state.accountOutputs)
+	require.Empty(t, state.rolledBackPoolOutputs)
+	require.Empty(t, state.rolledBackAccountOutput)
 }
 
 func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {

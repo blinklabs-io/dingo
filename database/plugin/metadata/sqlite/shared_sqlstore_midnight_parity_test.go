@@ -121,7 +121,18 @@ type midnightState struct {
 func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseMidnightStore(t, store)
+	state := exerciseMidnightStore(t, store)
+	require.NotEmpty(t, state.unspentAssets)
+	require.NotEmpty(t, state.unspentRegistrations)
+	require.NotEmpty(t, state.page)
+	require.NotNil(t, state.governance)
+	require.NotNil(t, state.latestAriadne)
+	require.NotNil(t, state.historicalAriadne)
+	require.Len(t, state.rollbacks, 1)
+	require.NotNil(t, state.candidates)
+	require.Len(t, state.registrations, 1)
+	require.NotEmpty(t, state.deletedCreates)
+	require.NotEmpty(t, state.deletedRegistrations)
 }
 
 func exerciseMidnightStore(t *testing.T, store midnightStore) midnightState {

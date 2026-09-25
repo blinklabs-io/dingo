@@ -109,7 +109,21 @@ type poolState struct {
 func TestSharedSQLStorePoolParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exercisePoolStore(t, store)
+	state := exercisePoolStore(t, store)
+	require.NotNil(t, state.Pool)
+	require.NotNil(t, state.ByVRF)
+	require.NotEmpty(t, state.Pools)
+	require.Nil(t, state.Missing)
+	require.True(t, state.SequenceSet)
+	require.True(t, state.HistoricalSequenceSet)
+	require.NotEmpty(t, state.Issuers)
+	require.NotEmpty(t, state.Active)
+	require.NotEmpty(t, state.ActiveAtSlot)
+	require.NotZero(t, state.Total)
+	require.NotZero(t, state.Stake)
+	require.NotEmpty(t, state.StakeMap)
+	require.NotEmpty(t, state.DelegatorMap)
+	require.NotEmpty(t, state.Retiring)
 }
 
 func exercisePoolStore(t *testing.T, store poolStore) poolState {

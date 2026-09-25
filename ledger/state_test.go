@@ -507,9 +507,15 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-		_ = cfg.LoadShelleyGenesisFromReader(
-			strings.NewReader(shelleyGenesisJSON),
+		require.NoError(
+			t,
+			loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+		)
+		require.NoError(
+			t,
+			cfg.LoadShelleyGenesisFromReader(
+				strings.NewReader(shelleyGenesisJSON),
+			),
 		)
 
 		ls := &LedgerState{
@@ -546,9 +552,15 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-		_ = cfg.LoadShelleyGenesisFromReader(
-			strings.NewReader(shelleyGenesisJSON),
+		require.NoError(
+			t,
+			loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+		)
+		require.NoError(
+			t,
+			cfg.LoadShelleyGenesisFromReader(
+				strings.NewReader(shelleyGenesisJSON),
+			),
 		)
 
 		ls := &LedgerState{
@@ -1502,7 +1514,7 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 		t.Fatal("timeout waiting for operation result")
 	}
 
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 }
 
 // TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError proves
@@ -1555,7 +1567,7 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 		t.Fatal("timeout waiting for post-panic operation result")
 	}
 
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 }
 
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
@@ -1569,43 +1581,53 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 
 	var completedCount atomic.Int32
-	var wg sync.WaitGroup
+	started := make(chan struct{}, 5)
+	unblock := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(unblock) })
+	}
+	defer release()
 
-	// Submit multiple operations
-	for range 5 {
-		wg.Add(1)
+	results := make([]chan DatabaseResult, 5)
+	for i := range results {
 		resultChan := make(chan DatabaseResult, 1)
+		results[i] = resultChan
 
 		pool.Submit(DatabaseOperation{
 			OpFunc: func(db *database.Database) error {
-				// Simulate work with short delay
-				time.Sleep(10 * time.Millisecond)
+				started <- struct{}{}
+				<-unblock
 				completedCount.Add(1)
 				return nil
 			},
 			ResultChan: resultChan,
 		})
-
-		// Drain result in goroutine
-		go func(ch chan DatabaseResult) {
-			defer wg.Done()
-			result := <-ch
-			// Error is expected if shutdown occurred before operation completed
-			// But we should receive the error in the channel
-			_ = result.Error
-		}(resultChan)
 	}
 
-	// Wait for at least one operation to start processing
-	require.Eventually(t, func() bool {
-		return completedCount.Load() > 0
-	}, testutil.AsyncWait, 5*time.Millisecond, "at least one operation should start")
-
-	// Shutdown the pool - this should wait for all operations to complete
-	pool.Shutdown(5 * time.Second)
-
-	// Wait for all result handlers
-	wg.Wait()
+	for range config.WorkerPoolSize {
+		testutil.RequireReceive(
+			t,
+			started,
+			testutil.AsyncWait,
+			"worker should start an operation",
+		)
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- pool.Shutdown(5 * time.Second) }()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown returned before in-flight operations completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	release()
+	require.NoError(t, <-shutdownDone)
+	for _, resultChan := range results {
+		result := testutil.RequireReceive(
+			t, resultChan, testutil.AsyncWait, "operation result should be sent",
+		)
+		require.NoError(t, result.Error)
+	}
 
 	// Verify all operations completed
 	assert.Equal(
@@ -1628,14 +1650,15 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 
 	var completedCount atomic.Int32
 
-	// Submit operations, some will error
+	// Submit operations, some will error.
+	results := make([]chan DatabaseResult, 3)
 	for i := range 3 {
 		resultChan := make(chan DatabaseResult, 1)
+		results[i] = resultChan
 		operationIndex := i
 
 		pool.Submit(DatabaseOperation{
 			OpFunc: func(db *database.Database) error {
-				time.Sleep(20 * time.Millisecond)
 				completedCount.Add(1)
 				if operationIndex == 1 {
 					return fmt.Errorf("operation %d failed", operationIndex)
@@ -1644,18 +1667,10 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 			},
 			ResultChan: resultChan,
 		})
-
-		// Drain results
-		go func() {
-			select {
-			case <-resultChan:
-			case <-time.After(10 * time.Second):
-			}
-		}()
 	}
 
 	// Shutdown should wait for all operations to complete
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 
 	// Verify all operations completed even with errors
 	assert.Equal(
@@ -1664,6 +1679,16 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 		completedCount.Load(),
 		"not all operations completed",
 	)
+	for i, resultChan := range results {
+		result := testutil.RequireReceive(
+			t, resultChan, testutil.AsyncWait, "operation result should be sent",
+		)
+		if i == 1 {
+			require.ErrorContains(t, result.Error, "operation 1 failed")
+		} else {
+			require.NoError(t, result.Error)
+		}
+	}
 }
 
 // TestDatabaseWorkerPoolQueueFull tests behavior when queue is full
@@ -1999,22 +2024,9 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	// storagetest.AssertNoGoroutineLeak's pattern -- since a leaked waiter
 	// goroutine would persist for the stuck operation's full duration, it
 	// would still be caught well within this deadline.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		after := runtime.NumGoroutine()
-		if after <= baseline {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"Shutdown's timeout path must not leave behind a goroutine "+
-					"of its own: baseline %d, now %d",
-				baseline,
-				after,
-			)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testutil.WaitForCondition(t, func() bool {
+		return runtime.NumGoroutine() <= baseline
+	}, 2*time.Second, "shutdown should not leave behind a waiter goroutine")
 
 	// Unblock the stuck operation so it doesn't leak past the test.
 	close(blockUntil)
