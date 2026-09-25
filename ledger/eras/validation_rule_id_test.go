@@ -491,6 +491,15 @@ func newConwayTreasuryTx(
 	body map[int]any,
 ) *conway.ConwayTransaction {
 	t.Helper()
+	if _, ok := body[0]; !ok {
+		body[0] = cbor.NewSetType([]shelley.ShelleyTransactionInput{}, true)
+	}
+	if _, ok := body[1]; !ok {
+		body[1] = []any{}
+	}
+	if _, ok := body[2]; !ok {
+		body[2] = uint64(0)
+	}
 	cborData, err := cbor.Encode(body)
 	require.NoError(t, err)
 	tx := &conway.ConwayTransaction{TxIsValid: true}

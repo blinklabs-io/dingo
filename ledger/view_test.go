@@ -59,9 +59,16 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	adaPots, err := lv.GetAdaPotsWithError()
 	require.ErrorIs(t, err, ErrNotImplemented)
 	require.Equal(t, lcommon.AdaPots{}, adaPots)
-	require.PanicsWithValue(t, ErrNotImplemented, func() {
-		_ = lv.GetAdaPots()
+
+	// GetAdaPots satisfies common.RewardState, which gives it no way to
+	// report the sentinel, so it stands in a zero value rather than killing
+	// a caller that reaches it through the interface.
+	var rewardState lcommon.RewardState = lv
+	var interfacePots lcommon.AdaPots
+	require.NotPanics(t, func() {
+		interfacePots = rewardState.GetAdaPots()
 	})
+	require.Equal(t, lcommon.AdaPots{}, interfacePots)
 
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)

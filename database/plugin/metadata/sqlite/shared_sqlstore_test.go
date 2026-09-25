@@ -338,7 +338,11 @@ func TestWALCheckpointTruncateIdleConnectionDoesNotBlock(t *testing.T) {
 		t.Helper()
 		db, err := sql.Open(
 			"sqlite",
-			fmt.Sprintf("%s?_pragma=busy_timeout(%d)", databaseURI, 250),
+			fmt.Sprintf(
+				"%s?_pragma=busy_timeout(%d)&_pragma=synchronous(OFF)",
+				databaseURI,
+				250,
+			),
 		)
 		require.NoError(t, err)
 		defer func() { require.NoError(t, db.Close()) }()

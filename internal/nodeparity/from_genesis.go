@@ -60,6 +60,10 @@ const txInfoConcurrency = 8
 // parallelize.
 const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosTxInfoBatchSize
 
+var errAcquireWithoutLocalStateQuery = errors.New(
+	"acquire succeeded without a local state query client",
+)
+
 // currentEpochNo Acquires point and asks Dingo directly which epoch it
 // falls in (queryShelleyEpochNo, an unbounded query with no retention
 // floor), rather than computing it client-side from the raw slot number.
@@ -89,6 +93,9 @@ func currentEpochNo(
 	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
 	if err != nil {
 		return 0, err
+	}
+	if conn == nil || lsq == nil || lsq.Client == nil {
+		return 0, errAcquireWithoutLocalStateQuery
 	}
 	defer conn.Close() //nolint:errcheck
 	epochNo, err := lsq.Client.GetEpochNo()
@@ -224,6 +231,10 @@ func runProtocolParamsAndStake(
 			// exhausted-retries return below, where the two checks DO run
 			// independently and must keep their own outcomes).
 			return nil, err, nil, err
+		}
+		if conn == nil || lsq == nil || lsq.Client == nil {
+			return nil, errAcquireWithoutLocalStateQuery,
+				nil, errAcquireWithoutLocalStateQuery
 		}
 
 		// Both checks run every attempt, regardless of whether the first
@@ -373,6 +384,9 @@ func captureGenesisBaseline(
 	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
 	if err != nil {
 		return nil, err
+	}
+	if conn == nil || lsq == nil || lsq.Client == nil {
+		return nil, errAcquireWithoutLocalStateQuery
 	}
 	defer conn.Close() //nolint:errcheck
 	utxos, err := lsq.Client.GetUTxOWhole()
@@ -900,6 +914,8 @@ func RunFromGenesis(
 							result.UTxOAttempted = true
 							if utxoConn, lsqUtxo, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
 								result.UTxOErr = err
+							} else if utxoConn == nil || lsqUtxo == nil || lsqUtxo.Client == nil {
+								result.UTxOErr = errAcquireWithoutLocalStateQuery
 							} else {
 								utxos, err := lsqUtxo.Client.GetUTxOWhole()
 								if err != nil {

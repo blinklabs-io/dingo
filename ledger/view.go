@@ -326,6 +326,9 @@ var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 // drift fails at build time instead of disabling the rule.
 var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
 
+// The same holds for the Byron ppMaxTxSize rule.
+var _ eras.ByronMaxTxSizeProvider = (*LedgerView)(nil)
+
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
 // when it misses: a failed assertion silently refunds a legacy stake
@@ -355,6 +358,10 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 
 func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
 	return lv.ls.ByronFeePolicy()
+}
+
+func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
+	return lv.ls.ByronMaxTxSize()
 }
 
 func (lv *LedgerView) UtxoById(
@@ -763,15 +770,26 @@ func (lv *LedgerView) CalculateRewards(
 	return nil, ErrNotImplemented
 }
 
-// GetAdaPots returns the current Ada pots.
-// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
-// tracked in network_state, but this interface also needs the current fee and
-// reward pots as one coherent validation snapshot.
+// GetAdaPots returns the current Ada pots, or a zero AdaPots when they cannot
+// be produced.
+//
+// It exists to satisfy common.RewardState, which gives it no way to report an
+// error, so an unavailable value is indistinguishable here from genuinely
+// zero pots. Every caller that can handle the difference must use
+// GetAdaPotsWithError; this one returns a zero value because a ledger rule
+// reaching it through the interface would otherwise kill the node.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
-	panic(ErrNotImplemented)
+	adaPots, err := lv.GetAdaPotsWithError()
+	if err != nil {
+		return lcommon.AdaPots{}
+	}
+	return adaPots
 }
 
 // GetAdaPotsWithError returns the current Ada pots.
+// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
+// tracked in network_state, but this interface also needs the current fee and
+// reward pots as one coherent validation snapshot.
 func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
 	return lcommon.AdaPots{}, ErrNotImplemented
 }
@@ -1076,30 +1094,10 @@ func withoutV2CostModelKey(
 // CommitteeStateAvailable reports whether this view can authoritatively answer
 // committee credential queries for its snapshot.
 //
-// Availability is derived from whether a committee was ever seated, not from
-// the store being reachable and not from the currently seated set. Only two
-// paths ever write committee_member: UpdateCommittee enactment
-// (ledger/governance/enact.go) and Mithril snapshot import
-// (ledgerstate/import.go). Dingo does not seed the Conway genesis committee --
-// genesis.Committee.Threshold is read for the CC quorum, but
-// genesis.Committee.Members is never persisted (blinklabs-io/dingo#3785). A
-// node synced from genesis therefore holds no committee rows at all for the
-// whole Conway era until the first UpdateCommittee enacts, while the real
-// chain has the genesis committee seated from the hard fork. Claiming
-// authority there would reject an authorization from a real committee member,
-// because the lookup returns no member.
-//
-// Removal is a soft delete: both SoftDeleteAllCommitteeMembers on NoConfidence
-// and SoftDeleteCommitteeMembers on UpdateCommittee removal set deleted_slot
-// and leave the row. So the include-deleted set separates the two empty
-// states exactly. No rows at all means never populated, which is the
-// genesis-synced ambiguity and reports false. Rows that are all soft-deleted
-// mean the committee was seated and is now authoritatively empty, which
-// reports true so a former member's authorization or resignation fails closed,
-// as the real chain rejects it.
-//
-// Once #3785 lands, the no-rows case becomes unambiguously authoritative too
-// and this can report true unconditionally.
+// Persisted history establishes authority even after every member is removed.
+// An explicitly empty Conway genesis committee is also authoritative, though
+// genesis initialization has no members to persist. Without either source,
+// an empty store alone cannot establish non-membership.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if lv == nil || lv.ls == nil || lv.ls.db == nil {
 		return false, nil
@@ -1113,7 +1111,14 @@ func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("get committee members: %w", err)
 	}
-	return len(members) > 0, nil
+	if len(members) > 0 {
+		return true, nil
+	}
+	if cfg := lv.ls.config.CardanoNodeConfig; cfg != nil {
+		genesis := cfg.ConwayGenesis()
+		return genesis != nil && len(genesis.Committee.Members) == 0, nil
+	}
+	return false, nil
 }
 
 // CommitteeMember preserves the legacy hash-only contract. It returns nil

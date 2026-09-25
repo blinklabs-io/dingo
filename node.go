@@ -1076,31 +1076,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	)
 	// Set mempool adapter in ledger state for block forging.
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
-	// Initialize chainsync state with multi-client configuration
-	chainsyncCfg := chainsync.DefaultConfig()
-	if n.config.chainsyncMaxClients > 0 {
-		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
-	}
-	if n.config.chainsyncStallTimeout > 0 {
-		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
-	}
-	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
-	chainsyncCfg.PromRegistry = n.config.promRegistry
-	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
-		if n.chainSelector == nil {
-			return 0
-		}
-		active, window := n.chainSelector.GenesisSelectionState()
-		if !active {
-			return 0
-		}
-		if window > uint64(math.MaxInt) {
-			return math.MaxInt
-		}
-		// The MaxInt check above makes this conversion safe on both 32- and
-		// 64-bit platforms.
-		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
-	}
+	chainsyncCfg := n.chainsyncConfig()
 	// LedgerState.Start above starts its slot-clock goroutine before Run
 	// creates chainsync state. Use the same lock live Restore/Truncate use
 	// for this initial publication so late-bound ledger callbacks cannot
@@ -2409,4 +2385,49 @@ func (n *Node) newTokenRegistrySync() (
 			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
 		},
 	)
+}
+
+// chainsyncConfig builds the chainsync state configuration. Run and the live
+// restore/truncate rebuild share it so a rebuilt state keeps the Genesis
+// hooks and Limit on Patience settings. The Genesis callbacks read
+// n.chainSelector lazily because it is created after the chainsync state.
+func (n *Node) chainsyncConfig() chainsync.Config {
+	chainsyncCfg := chainsync.DefaultConfig()
+	if n.config.chainsyncMaxClients > 0 {
+		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	}
+	if n.config.chainsyncStallTimeout > 0 {
+		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
+	}
+	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
+	chainsyncCfg.PromRegistry = n.config.promRegistry
+	genesisBootstrap := n.config.GenesisBootstrap()
+	chainsyncCfg.Patience = chainsync.PatienceConfig{
+		Enabled:  genesisBootstrap.LimitOnPatienceEnabled,
+		Capacity: genesisBootstrap.LimitOnPatienceCapacity,
+		Rate:     genesisBootstrap.LimitOnPatienceRate,
+	}
+	chainsyncCfg.PatienceActiveFunc = func() bool {
+		if n.chainSelector == nil {
+			return false
+		}
+		active, _ := n.chainSelector.GenesisSelectionState()
+		return active
+	}
+	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
+		if n.chainSelector == nil {
+			return 0
+		}
+		active, window := n.chainSelector.GenesisSelectionState()
+		if !active {
+			return 0
+		}
+		if window > uint64(math.MaxInt) {
+			return math.MaxInt
+		}
+		// The MaxInt check above makes this conversion safe on both 32- and
+		// 64-bit platforms.
+		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+	}
+	return chainsyncCfg
 }

@@ -263,18 +263,15 @@ existing entry for a member that is still in the committee it enacts
 authorize a hot key until it is removed from the committee and elected again.
 
 Committee validation derives its authority signal from the include-deleted
-member set, which separates the two empty states. Removal is a soft delete, so
-a committee emptied by a NoConfidence enactment still has rows carrying
-`deleted_slot`: that is an authoritative empty committee, and a former
-member's authorization or resignation is rejected. No rows at all means no
-committee history is currently persisted, which is not proof that none ever
-was: it is the whole Conway era on a genesis-synced node, because only
-`UpdateCommittee` enactment and Mithril snapshot import write the table and the
-Conway genesis committee is never persisted (blinklabs-io/dingo#3785), but a
-rollback to before the first enactment also returns the table to no rows. That
-state is ambiguous either way, so certificate and voter validation decline to
-reject on committee grounds they cannot establish. A failed lookup still fails
-closed in both cases.
+member set and the loaded Conway genesis. Genesis initialization seeds a
+nonempty genesis committee. Removal is a soft delete, so a committee emptied
+by a NoConfidence enactment still has rows carrying `deleted_slot` and remains
+authoritative. An explicitly empty genesis committee is also authoritative,
+without requiring a sentinel row. Certificate and voter membership checks
+remain enforced in both empty states. No rows without an empty genesis
+declaration do not establish authority; validation cannot infer non-membership
+from missing state. A failed database lookup still fails closed, even with an
+empty genesis committee.
 
 Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present
@@ -338,6 +335,11 @@ applied to vote replacement instead (dingo#4463). Like `v6` it ships only a
 SQLite `expand.sql` and backfills one history row per pre-existing vote from
 its current value, guarded by a `LEFT JOIN ... WHERE history.id IS NULL` so a
 replayed migration does not duplicate the backfilled row.
+
+Migration `v23` (`committee-zero-quorum`, integer version 23) converts legacy
+committee quorum rows whose value is `0` into SQL NULL. Those rows were written
+as NoConfidence clear markers; new clear markers use NULL, leaving numeric zero
+available as a valid enacted UnitInterval threshold.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -516,6 +518,29 @@ new ancestor entry is synchronized before publishing the manifest as well.
 Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshotCloudDestination` must be a well-formed `s3://` or `gcs://` URI, and those schemes are accepted only in a binary built with `dingo_extra_plugins`. A typoed or unavailable scheme therefore fails startup rather than waiting until an epoch-boundary upload to surface as a logged background error.
 
 **Interrupted truncate marker.** Before `lifecycle.Truncate` begins its batched blob deletion, it records `database_lifecycle_truncate_pending` in `sync_state`, including the target ID/slot/hash, original blob-tip ID/slot/hash, Mithril floor, and a checksum covering the complete marker. The checksum prevents a damaged deletion bound from being resumed; the original blob tip cannot simply be required to remain present because an interrupted attempt may already have deleted it, and it may legitimately be ahead of the applied metadata tip. Recovery therefore accepts a current blob tip below the recorded tip as partial delete progress, requires an equal tip to match the recorded slot/hash, and fails closed if the current blob tip is newer than the authenticated upper bound. Tip identity is read directly from the highest `bi` index entry rather than by resolving its referenced block object: an irreversible cloud delete can fail after removing the block object but before removing that index, and the remaining authenticated index must be allowed to drive idempotent cleanup on retry. This prevents a stale-but-valid marker from deleting only its old blob range while metadata truncation removes state through a subsequently advanced tip. The marker remains durable if cancellation or a storage error lands after one or more blob batches commit, making the intermediate state detectable rather than leaving metadata silently referencing already-deleted block blobs. A subsequent truncate validates the marker, resumes the recorded operation (missing blobs are idempotently skipped), performs metadata truncation, and clears the marker in the same metadata transaction. Normal node startup refuses to serve while this marker exists and directs the operator to rerun truncate; the offline lifecycle service can open the database and complete that recovery.
+
+**Rollback notification outbox.** `ledger.rollback.pending` is a version-1
+JSON record in `sync_state` containing `format_version`, the target `slot` and
+hex `hash`, and a newest-first `blocks` array. Each block uses explicit JSON
+fields (`hash`, `prev_hash`, `cbor`, `id`, `slot`, `number`, `type`) rather than
+the Go storage model's field names. Peer-driven rollback records are written
+before chain truncation removes those block bodies. When the lagging ledger
+iterator reports a rollback after the chain has already removed them, it
+persists the iterator's captured `RollbackBlocks` payload before metadata
+truncation. A deeper multi-window rollback merges its blocks into the pending
+record rather than replacing an earlier payload. If a reconciliation rewind is
+refused before changing the chain, the prior point and payload are restored; a
+newly created intent is cleared. A matching record is cleared only after
+metadata rollback and ordered undo delivery complete. Recovery is at-least-once
+and consumers must tolerate a duplicate undo after a crash. The durable payload
+is limited to 4096 blocks
+and 64 MiB of raw block fields; a larger rollback logs a degraded-recovery
+warning and continues with live delivery rather than writing an unbounded
+value. A record recovery cannot replay as a truncation -- its point leads the
+applied ledger tip, or has left the primary chain -- still has its captured
+undo delivered before the record is removed. Malformed or unsupported records
+are logged and removed so one damaged notification record cannot permanently
+prevent startup.
 
 The truncate deletion range ends at the newest block in the indexed blob chain, not at the metadata ledger tip. During live synchronization, BlockFetch can have persisted a speculative blob tail that the ledger has not applied yet. If the requested target equals the metadata tip, that tail must still be deleted; treating the operation as a no-op would leave non-contiguous block indexes visible after the live node rebuild and prevent ChainSync from making forward progress.
 
@@ -1063,18 +1088,9 @@ snapshot, so it skips both the era-neutral upper-bound check and the
 credit and debit through the snapshot's boundary, and re-subtracting a
 pre-boundary withdrawal from it would double-count. The withdrawal is still
 required to resolve an *active* `account` row for the credential during live
-ingestion; during historical backfill it is not, because a withdrawal that was
-valid on the canonical chain can name a stake credential with no active
-account row for two distinct reasons (issue #3788), which are not treated
-alike:
+ingestion. During historical backfill an inactive row is accepted, but a
+missing one is not (issue #3788):
 
-- No `account` row exists at all: the credential was deregistered before the
-  snapshot was taken, or never active in it. There is no real prior balance to
-  recover, so the backfill records the `account_reward_delta` row with
-  `previous_reward = 0` from the credential alone, and neither creates nor
-  reactivates an `account` row -- the journal's join to `account` is already
-  unenforced (see above), so the history is retained without fabricating
-  current stake-registration state.
 - A row exists but is inactive. `applyTransactionCertificates` runs
   unconditionally regardless of `historicalBackfill`, so backfill's own
   certificate replay can transiently deactivate a row Mithril imported active,
@@ -1085,6 +1101,14 @@ alike:
   inactive-inclusive lookup and journals that real `reward` as
   `previous_reward` instead of discarding it as `0`, while still leaving the
   row itself untouched.
+- No `account` row exists at all: the backfill returns
+  `models.ErrAccountNotFound` and the run stops. A canonical withdrawal
+  requires its reward account to have existed, so an absent row means the
+  certificate replay that should have created it was skipped -- a block whose
+  decode or offset computation failed, for instance. Journaling
+  `previous_reward = 0` in that state would record a balance nothing
+  established and hide the real defect, so the run fails closed and the
+  checkpoint stays before the block that failed.
 
 ### Pools
 
@@ -1116,7 +1140,7 @@ updates preserve the previous activity and expiry epochs.
 | `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here whenever the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
-| `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
+| `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
 | `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 
@@ -1586,6 +1610,21 @@ a different analysis.
 ## Blob Store Reference
 
 All blob plugins expose the same logical keys. Badger stores these binary keys directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may prepend the configured object prefix.
+
+### Badger Close and the Directory Lock
+
+Badger holds an exclusive `flock` on its `blob` directory and releases it only
+by closing the descriptor. A child process forked while that descriptor is open
+holds a copy until its exec completes, so on Unix a concurrent `os/exec` call
+can keep the directory locked briefly after `badger.DB.Close` returns. Restore,
+truncate, and startup preflight reopen the same directory in process, so
+`BlobStoreBadger.CloseContext` does not signal completion until
+`waitForDirLockRelease` (`dirlock_unix.go`) has either acquired and explicitly
+unlocked the directory or reached its five-second bound. Completion therefore
+does not guarantee a free lock: one held past the bound most likely belongs to
+another process, so `Close` logs a warning and returns, and the next open
+reports the lock. Windows children do not inherit the handle,
+so the wait is a no-op there.
 
 ### Cross-Store Durability Contract
 

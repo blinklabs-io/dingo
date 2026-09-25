@@ -20,11 +20,13 @@ import (
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
@@ -133,9 +135,50 @@ func shouldSkipPhase2Validation(
 	return ok && skipper.SkipPhase2Validation()
 }
 
+// CommitteeMemberAlreadyResignedError indicates a committee cold-key
+// resignation certificate for a member already resigned, in ledger state or
+// by an earlier certificate of the same transaction.
+//
+// Reference: ConwayCommitteeHasPreviouslyResigned in GOVCERT,
+// eras/conway/impl/src/Cardano/Ledger/Conway/Rules/GovCert.hs.
+type CommitteeMemberAlreadyResignedError struct {
+	ColdCredential lcommon.Credential
+}
+
+func (e CommitteeMemberAlreadyResignedError) Error() string {
+	return fmt.Sprintf(
+		"committee member already resigned: %x",
+		e.ColdCredential.Credential[:],
+	)
+}
+
+// committeeCredentialKey is a comparable identity for a committee cold
+// credential. Credential embeds cbor.DecodeStoreCbor, which is not itself
+// comparable, so a full tagged identity must be projected out to use as a map
+// key; a hash-only key would conflate a key-hash and script-hash credential
+// that happen to share hash bytes.
+type committeeCredentialKey struct {
+	credType   uint
+	credential lcommon.CredentialHash
+}
+
+func committeeCredentialKeyFor(
+	credential lcommon.Credential,
+) committeeCredentialKey {
+	return committeeCredentialKey{
+		credType:   credential.CredType,
+		credential: credential.Credential,
+	}
+}
+
 // validateCommitteeCertificates preserves the full cold credential identity
 // when the ledger state exposes Dingo's tag-aware capability. Other state
 // implementations retain the upstream hash-only behavior.
+//
+// Committee certificates are processed sequentially within the transaction:
+// a resignation certificate is tracked in resignedInTx so a later certificate
+// for the same credential sees it, rather than every certificate querying
+// only the pre-transaction snapshot.
 func validateCommitteeCertificates(
 	tx lcommon.Transaction,
 	slot uint64,
@@ -173,6 +216,7 @@ func validateCommitteeCertificates(
 		member, err := state.CommitteeCredentialMember(coldCredential)
 		return member, true, err
 	}
+	resignedInTx := make(map[committeeCredentialKey]bool)
 	for _, cert := range tx.Certificates() {
 		var (
 			credential lcommon.Credential
@@ -190,6 +234,7 @@ func validateCommitteeCertificates(
 		default:
 			continue
 		}
+		key := committeeCredentialKeyFor(credential)
 		member, authoritative, err := committeeMember(credential)
 		if err != nil {
 			// A failed lookup is never authorization: fail closed.
@@ -201,11 +246,26 @@ func validateCommitteeCertificates(
 		if member == nil {
 			if !authoritative {
 				// Dingo holds no committee state for this snapshot, so
-				// non-membership cannot be established. Rejecting here would
-				// reject a real genesis committee member, because Dingo does
-				// not seed the Conway genesis committee
-				// (blinklabs-io/dingo#3785). See
+				// non-membership cannot be established beyond what this
+				// transaction's own certificates have already done. An
+				// earlier certificate's resignation must still be honored,
+				// or a resign-then-resign or resign-then-authorize sequence
+				// within one transaction would pass uninspected whenever
+				// committee state happens to be unavailable. See
 				// LedgerView.CommitteeStateAvailable.
+				if resignedInTx[key] {
+					if authorize {
+						return conway.ResignedCommitteeMemberHotKeyError{
+							ColdKey: credential.Credential,
+						}
+					}
+					return CommitteeMemberAlreadyResignedError{
+						ColdCredential: credential,
+					}
+				}
+				if !authorize {
+					resignedInTx[key] = true
+				}
 				continue
 			}
 			return conway.NotCommitteeMemberError{
@@ -213,10 +273,19 @@ func validateCommitteeCertificates(
 				Operation:  operation,
 			}
 		}
-		if authorize && member.Resigned {
-			return conway.ResignedCommitteeMemberHotKeyError{
-				ColdKey: credential.Credential,
+		resigned := member.Resigned || resignedInTx[key]
+		if resigned {
+			if authorize {
+				return conway.ResignedCommitteeMemberHotKeyError{
+					ColdKey: credential.Credential,
+				}
 			}
+			return CommitteeMemberAlreadyResignedError{
+				ColdCredential: credential,
+			}
+		}
+		if !authorize {
+			resignedInTx[key] = true
 		}
 	}
 	return nil
@@ -311,7 +380,7 @@ func validateUnknownVoters(
 				}
 			}
 			// An unauthoritative nil member cannot establish an unknown
-			// voter (blinklabs-io/dingo#3785). See
+			// voter. See
 			// LedgerView.CommitteeStateAvailable.
 			if (member == nil && authoritative) ||
 				(member != nil && member.Resigned) {
@@ -319,6 +388,85 @@ func validateUnknownVoters(
 			}
 		default:
 			return conway.UnknownVoterError{Voter: *voter}
+		}
+	}
+	return nil
+}
+
+// ParameterChangeProtocolVersionError indicates that a ParameterChange
+// governance action set protocol-version key 14, which the reference
+// excludes from PParamsUpdate entirely.
+type ParameterChangeProtocolVersionError struct {
+	ProposalIndex int
+}
+
+func (e ParameterChangeProtocolVersionError) Error() string {
+	return fmt.Sprintf(
+		"proposal %d: ParameterChange must not set protocol-version (key 14); only HardForkInitiation can change protocol version",
+		e.ProposalIndex,
+	)
+}
+
+// parameterChangeSetsProtocolVersionKey reports whether a ParameterChange's
+// raw CBOR param-update map contains key 14 (protocolVersion) at all,
+// independent of what it decoded to. A present-but-null value decodes a
+// pointer field to the same nil the field takes when the key is absent
+// entirely, so the decoded pointer alone cannot distinguish "not requested"
+// from "requested null" -- the same distinction
+// conwayCurrentTreasuryValuePresent draws for transaction-body key 21. The
+// reference rejects a ParameterChange carrying key 14 whatever value it
+// holds, so presence, not a specific decoded value, is what must be
+// rejected.
+func parameterChangeSetsProtocolVersionKey(paramUpdateCbor []byte) bool {
+	if len(paramUpdateCbor) == 0 {
+		// No raw CBOR to inspect (e.g. an update built in Go without going
+		// through decode). The caller's decoded-pointer check already
+		// covers this case.
+		return false
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(paramUpdateCbor, &fields); err != nil {
+		// The type already decoded successfully from this CBOR, so a
+		// failure here means the raw bytes and typed value disagree. Fail
+		// closed rather than silently admit the proposal.
+		return true
+	}
+	_, ok := fields[14]
+	return ok
+}
+
+// validateParameterChangeExcludesProtocolVersion rejects a Conway or
+// Dijkstra ParameterChange governance action that carries protocol-version
+// key 14 (dingo#4439). The reference excludes protocol version from
+// PParamsUpdate: a protocol change must go through HardForkInitiation
+// instead, which carries separate SPO/DRep threshold semantics and, at PV9,
+// bootstrap restrictions that a same-purpose ParameterChange would
+// otherwise bypass. Rejecting here, before ProcessProposals, keeps a
+// malformed proposal from ever being persisted or reaching enactment.
+func validateParameterChangeExcludesProtocolVersion(
+	tx lcommon.Transaction,
+	_ uint64,
+	_ lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	for i, proposal := range tx.ProposalProcedures() {
+		var setsProtocolVersion bool
+		switch action := proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
+		case *gdijkstra.DijkstraParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
+		}
+		if setsProtocolVersion {
+			return ParameterChangeProtocolVersionError{ProposalIndex: i}
 		}
 	}
 	return nil

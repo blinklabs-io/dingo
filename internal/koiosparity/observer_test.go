@@ -222,7 +222,7 @@ func lookupFakeEpoch(
 func TestFetchAccountsIfNeededSkipsPreStakingEpoch(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cache.Close() })
 	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
@@ -1228,7 +1228,7 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 	)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	seedKoiosSource(t, cache, "preview", srv.URL)
 
@@ -1540,7 +1540,7 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	defer srv.Close()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	cache, err := openTestCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	seedKoiosSource(t, cache, network, srv.URL)
 	fetchedAt := time.Now().UTC().Add(-time.Hour)
@@ -1594,7 +1594,7 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	require.NoError(t, o.Start(context.Background()))
 
 	require.Eventually(t, func() bool {
-		reopened, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+		reopened, err := openTestCache(cachePath, slog.New(slog.DiscardHandler))
 		if err != nil {
 			return false
 		}

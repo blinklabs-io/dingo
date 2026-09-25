@@ -2662,7 +2662,21 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return nil, nil, nil, nil, err
 	}
 
-	if len(labForEta) == 0 {
+	// The extraEntropy protocol parameter is the third term of the TICKN
+	// assembly. This path runs before the rollover enacts the new epoch's
+	// parameters, so the value is forecast the way cardano-ledger's TICKF
+	// supplies it to TICKN. Mainnet set a non-neutral value for exactly one
+	// epoch (259); everywhere else this resolves to NeutralNonce and leaves
+	// the result unchanged.
+	extraEntropy, err := ls.forecastExtraEntropyForEpoch(
+		prevEpoch.EpochId+1,
+		prevEpoch.EraId,
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	if len(labForEta) == 0 && len(extraEntropy) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		ls.config.Logger.Debug(
@@ -2679,10 +2693,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	result, err := lcommon.CalculateEpochNonce(
+	result, err := assembleEpochNonce(
 		candidateNonce,
 		labForEta,
-		nil,
+		extraEntropy,
 	)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf(
@@ -2700,9 +2714,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		hex.EncodeToString(labNonceToSave),
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
 		"evolving_nonce", hex.EncodeToString(evolvingNonce),
-		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"epoch_nonce", hex.EncodeToString(result),
+		"extra_entropy", hex.EncodeToString(extraEntropy),
 		"component", "ledger",
 	)
 
-	return result.Bytes(), evolvingNonce, candidateNonce, labNonceToSave, nil
+	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
 }
