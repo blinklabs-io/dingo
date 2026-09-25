@@ -3852,22 +3852,37 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 	var addEvents atomic.Int32
 	var removeEvents atomic.Int32
 
-	m.eventBus.SubscribeFunc(
+	addSubscriptionID := m.eventBus.SubscribeFuncWithBufferPolicy(
 		AddTransactionEventType,
+		600,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			// Access mempool during event handling
 			_, _ = m.GetTransaction("any")
 			addEvents.Add(1)
 		},
 	)
-	m.eventBus.SubscribeFunc(
+	removeSubscriptionID := m.eventBus.SubscribeFuncWithBufferPolicy(
 		RemoveTransactionEventType,
+		400,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			// Access mempool during event handling
 			_ = m.Transactions()
 			removeEvents.Add(1)
 		},
 	)
+	t.Cleanup(func() {
+		m.eventBus.UnsubscribeAndWait(
+			AddTransactionEventType,
+			addSubscriptionID,
+		)
+		m.eventBus.UnsubscribeAndWait(
+			RemoveTransactionEventType,
+			removeSubscriptionID,
+		)
+	})
+	addMockTransactions(t, m, 400)
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -3912,7 +3927,7 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 			defer wg.Done()
 			<-start
 			for j := range 200 {
-				hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
+				hash := fmt.Sprintf("tx-hash-%d", id*200+j)
 				m.RemoveTransaction(hash)
 			}
 		}(i)
@@ -3928,11 +3943,18 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 
 	select {
 	case <-waitCh:
-		t.Logf(
-			"Add events: %d, Remove events: %d",
-			addEvents.Load(),
-			removeEvents.Load(),
+		require.Eventually(t, func() bool {
+			return addEvents.Load() == 600 && removeEvents.Load() == 400
+		}, 5*time.Second, 10*time.Millisecond,
+			"all published events should be handled",
 		)
+		require.Equal(t, int32(600), addEvents.Load())
+		require.Equal(t, int32(400), removeEvents.Load())
+		require.Len(t, m.Transactions(), 600)
+		for i := range 400 {
+			_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+			require.False(t, exists)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal(
 			"deadlock detected during concurrent publish operations",
