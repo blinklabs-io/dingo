@@ -3044,9 +3044,15 @@ consistent as the boundary is crossed:
   validated while pparams is legitimately nil; reading them first rejects every
   block of the prefix under `ValidateHistorical`.
 
-Byron's own transaction rules need no parameters either: `eras.ValidateTxByron`
-runs `byronValidateBadInputs`, `byronValidateValueConserved` and
-`byronValidateWitnesses`, each of which discards the argument.
+Byron's own transaction rules need no parameters either: every rule
+`eras.ValidateTxByron` runs discards the argument. `ppMaxTxSize` and the fee
+policy come from Byron genesis through the ledger state
+(`ByronMaxTxSizeProvider`, `ByronFeePolicyProvider`). The rules follow the
+reference `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a
+list, so a repeated input is valid, while balances restrict the UTxO to the
+input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
+pairing the two lists as `zip` does; and a witness's address root is hashed
+over the canonical encoding of the address's decoded attributes.
 
 The Byron start applies to an empty database only. `setEpochCache` returns as
 soon as `epochCache` is populated, which is what keeps an already-synced node
@@ -5231,9 +5237,10 @@ missing-input failures. In particular a duplicate input -- regular, collateral,
 or reference -- cannot be repaired by selecting a different UTxO producer
 history. Every Shelley-family era delegates that rule to
 `shelley.UtxoValidateNoDuplicateInputs` and so reports
-`shelley.DuplicateInputError`; Byron has its own rule and reports
-`eras.DuplicateInputByronError`. `isDeterministicTxValidationError` classifies
-both. Replay recovery therefore rejects the primary-chain branch
+`shelley.DuplicateInputError`. Byron permits a repeated input, but its
+`eras.TxTooLargeByronError`, `eras.UnknownAttributesByronError` and
+`eras.UnknownAddressAttributesByronError` read only the transaction and the
+protocol parameters. `isDeterministicTxValidationError` classifies all of them. Replay recovery therefore rejects the primary-chain branch
 and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors

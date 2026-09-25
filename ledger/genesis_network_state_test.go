@@ -204,7 +204,7 @@ func TestCreateGenesisBlockRejectsAvvmNonAvvmCollisionBeforeWriting(t *testing.T
 		},
 	}
 	err = ls.createGenesisBlock()
-	require.ErrorContains(t, err, "duplicate genesis UTxO reference")
+	require.ErrorContains(t, err, "duplicate Byron genesis UTxO reference")
 
 	state, stateErr := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, stateErr)
@@ -442,15 +442,8 @@ func TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision(t *testing.T) {
 			redeemAddr.String(): "2000000",
 		},
 	}
-	utxos, err := byronGenesis.GenesisUtxos()
-	require.NoError(t, err)
-	require.Len(t, utxos, 2)
-
-	require.ErrorContains(
-		t,
-		rejectDuplicateGenesisUtxos(utxos),
-		"duplicate genesis UTxO reference",
-	)
+	_, err = byronGenesis.GenesisUtxos()
+	require.ErrorContains(t, err, "duplicate Byron genesis UTxO reference")
 }
 
 // TestRejectDuplicateGenesisUtxosAllowsDistinctRefs guards against an

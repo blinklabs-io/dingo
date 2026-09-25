@@ -3500,7 +3500,8 @@ func (ls *LedgerState) utxoPruningDeferredForCatchup(
 	if upstreamActive && upstreamTip == 0 {
 		return true
 	}
-	return upstreamTip != 0 && !nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow)
+	return upstreamTip != 0 &&
+		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow)
 }
 
 // resolveRollbackTarget returns the point a rollback will actually truncate to,
@@ -3553,12 +3554,18 @@ func (ls *LedgerState) resolveRollbackTarget(
 		}
 		ls.config.Logger.Warn(
 			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
-			"component", "ledger",
-			"contested_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-			"ancestor_slot", ancestor.Slot,
-			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+			"component",
+			"ledger",
+			"contested_slot",
+			point.Slot,
+			"rollback_hash",
+			hex.EncodeToString(point.Hash),
+			"ledger_tip_hash",
+			hex.EncodeToString(currentTip.Point.Hash),
+			"ancestor_slot",
+			ancestor.Slot,
+			"ancestor_hash",
+			hex.EncodeToString(ancestor.Hash),
 		)
 		point = ancestor
 	}
@@ -3696,11 +3703,16 @@ func (ls *LedgerState) rollbackWithOptions(
 	if belowPruneFloor {
 		ls.config.Logger.Error(
 			"rollback target is below the consumed UTxO prune floor, refusing to rewind",
-			"component", "ledger",
-			"rollback_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_slot", currentTip.Point.Slot,
-			"utxo_prune_floor_slot", pruneFloor,
+			"component",
+			"ledger",
+			"rollback_slot",
+			point.Slot,
+			"rollback_hash",
+			hex.EncodeToString(point.Hash),
+			"ledger_tip_slot",
+			currentTip.Point.Slot,
+			"utxo_prune_floor_slot",
+			pruneFloor,
 			"hint",
 			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
 		)
@@ -5238,7 +5250,10 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 func (ls *LedgerState) readConsumedUtxoPruneFloor(
 	txn *database.Txn,
 ) (uint64, error) {
-	marker, err := ls.db.GetSyncState(database.ConsumedUtxoPruneFloorSyncKey, txn)
+	marker, err := ls.db.GetSyncState(
+		database.ConsumedUtxoPruneFloorSyncKey,
+		txn,
+	)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"read consumed UTxO prune floor: %w",
@@ -6423,10 +6438,14 @@ func (ls *LedgerState) stopStuckLedgerPipeline(
 	if ls.config.Logger != nil {
 		ls.config.Logger.Error(
 			"ledger pipeline stopped after repeated no-progress restarts; operator intervention is required",
-			"component", "ledger",
-			"consecutive_no_progress", progress.consecutiveNoProgress,
-			"tip_slot", progress.lastTipSlot,
-			"error", err,
+			"component",
+			"ledger",
+			"consecutive_no_progress",
+			progress.consecutiveNoProgress,
+			"tip_slot",
+			progress.lastTipSlot,
+			"error",
+			err,
 		)
 	}
 }
@@ -11914,6 +11933,26 @@ func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
 	}
 	policy := genesis.BlockVersionData.TxFeePolicy
 	return policy.Summand, policy.Multiplier, nil
+}
+
+// ByronMaxTxSize returns ppMaxTxSize from the Byron genesis protocol
+// parameters.
+func (ls *LedgerState) ByronMaxTxSize() (uint64, error) {
+	if ls == nil || ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("byron genesis configuration is unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if genesis == nil {
+		return 0, errors.New("byron genesis configuration is unavailable")
+	}
+	maxTxSize := genesis.BlockVersionData.MaxTxSize
+	if maxTxSize <= 0 {
+		return 0, fmt.Errorf(
+			"byron genesis maxTxSize must be positive, got %d",
+			maxTxSize,
+		)
+	}
+	return uint64(maxTxSize), nil
 }
 
 // UtxoByRef returns a single UTxO by reference

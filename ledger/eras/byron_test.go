@@ -193,10 +193,8 @@ func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 	require.NoError(t, err)
 	redeemTx, err := byron.NewByronTransactionFromCbor(txCbor)
 	require.NoError(t, err)
-	// v0.193.3 does not expose the tag-24-wrapped constructor-2 witness
-	// through TransactionWitnessSet; the ledger must retain and validate it
-	// from the raw Byron witness values.
-	assert.Empty(t, redeemTx.Witnesses().Vkey())
+	// Byron witnesses exposed through TransactionWitnessSet still require
+	// their constructor-specific signature domain.
 
 	producerOutputCbor, err := hex.DecodeString(
 		"82582b82d818582183581c4041adf6b03851a9c85db3f028995504fb4ba48b50703ab1b9841350a0021ad658e71f1a000f4240",
@@ -351,6 +349,8 @@ func TestValidateTxByron_NilOutputs(t *testing.T) {
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
+// TestValidateTxByron_DuplicateInputs covers #4401: the reference keeps
+// inputs as a list and has no duplicate-input rejection.
 func TestValidateTxByron_DuplicateInputs(t *testing.T) {
 	tx := &testByronTx{
 		inputs: []lcommon.TransactionInput{
@@ -361,10 +361,7 @@ func TestValidateTxByron_DuplicateInputs(t *testing.T) {
 			newTestOutput(1_000_000),
 		},
 	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &DuplicateInputByronError{})
-	assert.Contains(t, err.Error(), "duplicate input")
+	require.NoError(t, ValidateTxByron(tx, 0, nil, nil))
 }
 
 func TestValidateTxByron_SameTxDifferentIndex(t *testing.T) {
@@ -417,9 +414,11 @@ type mockLedgerState struct {
 	protocolMagic uint32
 	// protocolMagicErr, when set, makes ByronProtocolMagic fail, so a test
 	// can prove a rule surfaces the lookup failure rather than skipping.
-	protocolMagicErr     error
-	byronFeeSummand      int64
-	byronFeeMultiplier   int64
+	protocolMagicErr   error
+	byronFeeSummand    int64
+	byronFeeMultiplier int64
+	// byronMaxTxSize backs ByronMaxTxSize; zero means no limit.
+	byronMaxTxSize       uint64
 	skipPhase2Validation bool
 	utxoLookups          int
 	// slotToTime, when set, replaces the zero-time default so a test can
@@ -527,6 +526,13 @@ func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
 
 func (m *mockLedgerState) ByronFeePolicy() (int64, int64, error) {
 	return m.byronFeeSummand, m.byronFeeMultiplier, nil
+}
+
+func (m *mockLedgerState) ByronMaxTxSize() (uint64, error) {
+	if m.byronMaxTxSize == 0 {
+		return math.MaxUint64, nil
+	}
+	return m.byronMaxTxSize, nil
 }
 
 func (m *mockLedgerState) SkipPhase2Validation() bool {
@@ -841,11 +847,11 @@ func TestValidateTxByron_MinimumFee(t *testing.T) {
 	}{
 		{
 			name:   "fee equals minimum",
-			output: 988,
+			output: 989,
 		},
 		{
 			name:      "fee is one lovelace below minimum",
-			output:    989,
+			output:    990,
 			wantError: true,
 		},
 	}
@@ -870,8 +876,10 @@ func TestValidateTxByron_MinimumFee(t *testing.T) {
 				require.Error(t, err)
 				var feeErr FeeTooLowByronError
 				require.ErrorAs(t, err, &feeErr)
-				assert.Equal(t, big.NewInt(11), feeErr.Actual)
-				assert.Equal(t, big.NewInt(12), feeErr.Required)
+				// 1_000_000_001 div 10^9 + ceiling(1 * 10), not one
+				// ceiling over the scaled sum (12).
+				assert.Equal(t, big.NewInt(10), feeErr.Actual)
+				assert.Equal(t, big.NewInt(11), feeErr.Required)
 				assert.Equal(t, uint64(txSize), feeErr.Size)
 				return
 			}
@@ -953,21 +961,19 @@ func TestValidateTxByron_CombinedStructuralAndUtxoErrors(
 	t *testing.T,
 ) {
 	ls := newMockLedgerState()
-	// Duplicate inputs AND bad inputs
-	input1 := newTestInput(0x01, 0)
+	// Negative output AND bad inputs
 	tx := &testByronTx{
 		inputs: []lcommon.TransactionInput{
-			input1,
-			input1, // duplicate
+			newTestInput(0x01, 0),
 		},
 		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
+			testOutput{amount: big.NewInt(-1)},
 		},
 	}
 	err := ValidateTxByron(tx, 0, ls, nil)
 	require.Error(t, err)
 	// Both structural and UTxO errors should be reported
-	assert.ErrorAs(t, err, &DuplicateInputByronError{})
+	assert.ErrorAs(t, err, &OutputNegativeByronError{})
 	assert.ErrorAs(t, err, &BadInputsByronError{})
 }
 
@@ -1042,7 +1048,7 @@ func TestByronValidateMinFee_RedeemOnlyExemption(t *testing.T) {
 				var feeErr FeeTooLowByronError
 				require.ErrorAs(t, err, &feeErr)
 				assert.Zero(t, feeErr.Actual.Sign())
-				assert.Equal(t, 0, feeErr.Required.Cmp(big.NewInt(12)))
+				assert.Equal(t, 0, feeErr.Required.Cmp(big.NewInt(11)))
 				assert.Equal(t, uint64(txSize), feeErr.Size)
 				return
 			}
@@ -1152,15 +1158,16 @@ func TestByronDecodeWitnesses(t *testing.T) {
 				[]any{redeemPk32, sig64},
 			),
 		}
-		bootstrap, redeem, err := byronDecodeWitnesses(witnesses)
+		decoded, err := byronDecodeWitnesses(witnesses)
 		require.NoError(t, err)
-		require.Len(t, bootstrap, 1)
-		require.Len(t, redeem, 1)
-		assert.Equal(t, pk64[:32], bootstrap[0].PublicKey)
-		assert.Equal(t, pk64[32:], bootstrap[0].ChainCode)
-		assert.Equal(t, sig64, bootstrap[0].Signature)
-		assert.Equal(t, redeemPk32, []byte(redeem[0].Vkey))
-		assert.Equal(t, sig64, []byte(redeem[0].Signature))
+		require.Len(t, decoded, 2)
+		assert.False(t, decoded[0].redeem)
+		assert.Equal(t, pk64[:32], decoded[0].publicKey)
+		assert.Equal(t, pk64[32:], decoded[0].chainCode)
+		assert.Equal(t, sig64, decoded[0].signature)
+		assert.True(t, decoded[1].redeem)
+		assert.Equal(t, redeemPk32, decoded[1].publicKey)
+		assert.Equal(t, sig64, decoded[1].signature)
 	})
 
 	t.Run("unknown constructor 1 is rejected", func(t *testing.T) {
@@ -1168,7 +1175,7 @@ func TestByronDecodeWitnesses(t *testing.T) {
 		witnesses := []cbor.Value{
 			byronTestWitness(t, 1, []any{pk, sig}),
 		}
-		_, _, err := byronDecodeWitnesses(witnesses)
+		_, err := byronDecodeWitnesses(witnesses)
 		require.Error(t, err)
 	})
 
@@ -1177,65 +1184,77 @@ func TestByronDecodeWitnesses(t *testing.T) {
 		witnesses := []cbor.Value{
 			byronTestWitness(t, 3, []any{pk64, sig64, pk64, sig64}),
 		}
-		_, _, err := byronDecodeWitnesses(witnesses)
+		_, err := byronDecodeWitnesses(witnesses)
 		require.Error(t, err)
 	})
 
-	t.Run("malformed constructor-0 field count is rejected", func(t *testing.T) {
-		t.Parallel()
-		witnesses := []cbor.Value{
-			byronTestWitness(
-				t,
-				lcommon.ByronAddressTypePubkey,
-				[]any{pk64},
-			),
-		}
-		_, _, err := byronDecodeWitnesses(witnesses)
-		require.Error(t, err)
-	})
+	t.Run(
+		"malformed constructor-0 field count is rejected",
+		func(t *testing.T) {
+			t.Parallel()
+			witnesses := []cbor.Value{
+				byronTestWitness(
+					t,
+					lcommon.ByronAddressTypePubkey,
+					[]any{pk64},
+				),
+			}
+			_, err := byronDecodeWitnesses(witnesses)
+			require.Error(t, err)
+		},
+	)
 
-	t.Run("malformed constructor-0 field length is rejected", func(t *testing.T) {
-		t.Parallel()
-		witnesses := []cbor.Value{
-			byronTestWitness(
-				t,
-				lcommon.ByronAddressTypePubkey,
-				[]any{pk, sig},
-			),
-		}
-		_, _, err := byronDecodeWitnesses(witnesses)
-		require.Error(t, err)
-	})
+	t.Run(
+		"malformed constructor-0 field length is rejected",
+		func(t *testing.T) {
+			t.Parallel()
+			witnesses := []cbor.Value{
+				byronTestWitness(
+					t,
+					lcommon.ByronAddressTypePubkey,
+					[]any{pk, sig},
+				),
+			}
+			_, err := byronDecodeWitnesses(witnesses)
+			require.Error(t, err)
+		},
+	)
 
-	t.Run("malformed constructor-2 field count is rejected", func(t *testing.T) {
-		t.Parallel()
-		witnesses := []cbor.Value{
-			byronTestWitness(
-				t,
-				lcommon.ByronAddressTypeRedeem,
-				[]any{redeemPk32, sig64, sig64},
-			),
-		}
-		_, _, err := byronDecodeWitnesses(witnesses)
-		require.Error(t, err)
-	})
+	t.Run(
+		"malformed constructor-2 field count is rejected",
+		func(t *testing.T) {
+			t.Parallel()
+			witnesses := []cbor.Value{
+				byronTestWitness(
+					t,
+					lcommon.ByronAddressTypeRedeem,
+					[]any{redeemPk32, sig64, sig64},
+				),
+			}
+			_, err := byronDecodeWitnesses(witnesses)
+			require.Error(t, err)
+		},
+	)
 
-	t.Run("malformed constructor-2 field length is rejected", func(t *testing.T) {
-		t.Parallel()
-		// A redeem key and signature that are the wrong length for Byron's
-		// Ed25519-based redeem crypto (32-byte key, 64-byte signature) must
-		// be rejected as a malformed witness during decoding, not accepted
-		// here and left to fail later as a signature-verification error.
-		witnesses := []cbor.Value{
-			byronTestWitness(
-				t,
-				lcommon.ByronAddressTypeRedeem,
-				[]any{pk, sig},
-			),
-		}
-		_, _, err := byronDecodeWitnesses(witnesses)
-		require.Error(t, err)
-	})
+	t.Run(
+		"malformed constructor-2 field length is rejected",
+		func(t *testing.T) {
+			t.Parallel()
+			// A redeem key and signature that are the wrong length for Byron's
+			// Ed25519-based redeem crypto (32-byte key, 64-byte signature) must
+			// be rejected as a malformed witness during decoding, not accepted
+			// here and left to fail later as a signature-verification error.
+			witnesses := []cbor.Value{
+				byronTestWitness(
+					t,
+					lcommon.ByronAddressTypeRedeem,
+					[]any{pk, sig},
+				),
+			}
+			_, err := byronDecodeWitnesses(witnesses)
+			require.Error(t, err)
+		},
+	)
 
 	t.Run("untagged witness is rejected", func(t *testing.T) {
 		t.Parallel()
@@ -1245,7 +1264,7 @@ func TestByronDecodeWitnesses(t *testing.T) {
 		require.NoError(t, err)
 		var v cbor.Value
 		require.NoError(t, v.UnmarshalCBOR(outer))
-		_, _, err = byronDecodeWitnesses([]cbor.Value{v})
+		_, err = byronDecodeWitnesses([]cbor.Value{v})
 		require.Error(t, err)
 	})
 
@@ -1263,7 +1282,7 @@ func TestByronDecodeWitnesses(t *testing.T) {
 		require.NoError(t, err)
 		var v cbor.Value
 		require.NoError(t, v.UnmarshalCBOR(outer))
-		_, _, err = byronDecodeWitnesses([]cbor.Value{v})
+		_, err = byronDecodeWitnesses([]cbor.Value{v})
 		require.Error(t, err)
 	})
 
@@ -1279,7 +1298,7 @@ func TestByronDecodeWitnesses(t *testing.T) {
 				),
 				byronTestWitness(t, 1, []any{pk, sig}),
 			}
-			_, _, err := byronDecodeWitnesses(witnesses)
+			_, err := byronDecodeWitnesses(witnesses)
 			require.Error(t, err)
 		},
 	)
