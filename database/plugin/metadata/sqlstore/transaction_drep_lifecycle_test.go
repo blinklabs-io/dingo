@@ -238,12 +238,10 @@ func TestDrepActivityAndExpirySurviveDeregistrationRollback(t *testing.T) {
 	credential := bytes.Repeat([]byte{0x5d}, 28)
 	require.NoError(t, store.ImportDrep(
 		&models.Drep{
-			CredentialTag:     0,
-			Credential:        credential,
-			AddedSlot:         10,
-			LastActivityEpoch: 4,
-			ExpiryEpoch:       20,
-			Active:            true,
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     10,
+			Active:        true,
 		},
 		&models.RegistrationDrep{
 			CredentialTag:  0,
@@ -252,7 +250,32 @@ func TestDrepActivityAndExpirySurviveDeregistrationRollback(t *testing.T) {
 		},
 		nil,
 	))
-	require.NoError(t, store.SetDrep(0, credential, 100, "", nil, false, nil))
+	require.NoError(t, store.UpdateDRepActivity(
+		0,
+		credential,
+		10,
+		4,
+		16,
+		nil,
+	))
+	credentialHash := common.NewBlake2b224(credential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.DeregistrationDrepCertificate{
+			CertType:       uint(common.CertificateTypeDeregistrationDrep),
+			DrepCredential: common.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x5e}, 32))
+	tx.WithValid(true)
+	require.NoError(t, store.SetTransaction(
+		tx,
+		ocommon.Point{Slot: 100, Hash: tx.Hash().Bytes()},
+		0,
+		map[int]uint64{0: 500},
+		false,
+		nil,
+	))
 
 	require.NoError(t, store.RestoreDrepStateAtSlot(50, nil))
 	drep, err := store.GetDrepByCredential(0, credential, true, nil)
