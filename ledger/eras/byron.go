@@ -550,9 +550,12 @@ func byronValidateWitnesses(
 	ls lcommon.LedgerState,
 	_ lcommon.ProtocolParameters,
 ) error {
-	// Verify vkey witness signatures
-	if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
-		return err
+	// Byron witnesses have constructor-specific signature domains and key
+	// layouts, so they must not pass through the generic witness verifier.
+	if _, ok := tx.(*byron.ByronTransaction); !ok {
+		if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
+			return err
+		}
 	}
 	// Byron redeem witnesses are constructor 2 values whose fields are
 	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
@@ -576,7 +579,9 @@ func byronValidateWitnesses(
 			)
 		}
 		if len(redeemWitnesses) > 0 || len(bootstrapWitnesses) > 0 {
-			txHash := tx.Hash()
+			// Byron witnesses sign the wire-encoded body ID. ByronTransaction.Hash
+			// is the canonical ledger ID, which may differ from those bytes.
+			txHash := byronTx.WireId()
 			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
 			if !ok {
 				return errors.New(

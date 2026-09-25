@@ -3504,7 +3504,8 @@ func (ls *LedgerState) utxoPruningDeferredForCatchup(
 	if upstreamActive && upstreamTip == 0 {
 		return true
 	}
-	return upstreamTip != 0 && !nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow)
+	return upstreamTip != 0 &&
+		!nearUpstreamTip(tipSlot, upstreamTip, stabilityWindow)
 }
 
 // resolveRollbackTarget returns the point a rollback will actually truncate to,
@@ -5253,7 +5254,10 @@ func (ls *LedgerState) persistConsumedUtxoPruneFloor(
 func (ls *LedgerState) readConsumedUtxoPruneFloor(
 	txn *database.Txn,
 ) (uint64, error) {
-	marker, err := ls.db.GetSyncState(database.ConsumedUtxoPruneFloorSyncKey, txn)
+	marker, err := ls.db.GetSyncState(
+		database.ConsumedUtxoPruneFloorSyncKey,
+		txn,
+	)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"read consumed UTxO prune floor: %w",
@@ -11961,6 +11965,26 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	}
 	// #nosec G115 -- the protocol magic is checked against the uint32 range above.
 	return uint32(protocolMagic), nil
+}
+
+// ByronMaxTxSize returns ppMaxTxSize from the Byron genesis protocol
+// parameters.
+func (ls *LedgerState) ByronMaxTxSize() (uint64, error) {
+	if ls == nil || ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("byron genesis configuration is unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if genesis == nil {
+		return 0, errors.New("byron genesis configuration is unavailable")
+	}
+	maxTxSize := genesis.BlockVersionData.MaxTxSize
+	if maxTxSize <= 0 {
+		return 0, fmt.Errorf(
+			"byron genesis maxTxSize must be positive, got %d",
+			maxTxSize,
+		)
+	}
+	return uint64(maxTxSize), nil
 }
 
 // ByronFeePolicy returns the fee policy from the active Byron genesis.
