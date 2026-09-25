@@ -45,15 +45,23 @@ func (m *plainIndexManager) HasDeferredIndexesPending() (bool, error) {
 // metadata.MissingDeferredIndexLister.
 type ctxIndexManager struct {
 	plainIndexManager
-	missing   []string
-	ctxBuilds int
-	sawErr    error
-	loggedAt  string
-	logBuffer *bytes.Buffer
+	missing    []string
+	ctxBuilds  int
+	sawErr     error
+	sawListErr error
+	loggedAt   string
+	logBuffer  *bytes.Buffer
 }
 
 func (m *ctxIndexManager) MissingDeferredIndexes() ([]string, error) {
 	return m.missing, nil
+}
+
+func (m *ctxIndexManager) MissingDeferredIndexesContext(
+	ctx context.Context,
+) ([]string, error) {
+	m.sawListErr = ctx.Err()
+	return m.missing, m.sawListErr
 }
 
 func (m *ctxIndexManager) BuildDeferredIndexesContext(
@@ -95,6 +103,7 @@ func TestRebuildRestoredDeferredIndexesHonoursCancellation(t *testing.T) {
 	err := rebuildRestoredDeferredIndexes(ctx, manager, nil)
 
 	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, manager.sawListErr, context.Canceled)
 	require.Equal(t, 1, manager.ctxBuilds)
 	require.Zero(
 		t, manager.built,

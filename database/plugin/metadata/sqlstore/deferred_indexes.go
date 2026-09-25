@@ -348,10 +348,17 @@ func (s *Store) MissingCriticalDeferredIndexes() ([]string, error) {
 // repair paths use it to name what a rebuild is about to build before it
 // starts; the rebuild itself is silent while it runs.
 func (s *Store) MissingDeferredIndexes() ([]string, error) {
+	return s.MissingDeferredIndexesContext(context.Background())
+}
+
+// MissingDeferredIndexesContext reports every manifest entry absent from the
+// schema using the caller's cancellation context and no DDL.
+func (s *Store) MissingDeferredIndexesContext(
+	ctx context.Context,
+) ([]string, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
 	db := s.instrumentedQueryer(s.readDB)
 	var missing []string
 	for _, index := range deferred.Manifest {

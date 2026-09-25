@@ -1132,22 +1132,26 @@ func rebuildRestoredDeferredIndexes(
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	if lister, ok := manager.(metadata.MissingDeferredIndexLister); ok {
-		missing, err := lister.MissingDeferredIndexes()
-		if err != nil {
-			logger.Warn(
-				"could not list missing deferred metadata indexes in the "+
-					"restored database; rebuilding without naming them",
-				"error", err,
-			)
-		} else if len(missing) > 0 {
-			logger.Info(
-				"rebuilding missing deferred metadata indexes in the "+
-					"restored database",
-				"indexes", strings.Join(missing, ","),
-				"count", len(missing),
-			)
-		}
+	var missing []string
+	var listErr error
+	if lister, ok := manager.(metadata.ContextMissingDeferredIndexLister); ok {
+		missing, listErr = lister.MissingDeferredIndexesContext(ctx)
+	} else if lister, ok := manager.(metadata.MissingDeferredIndexLister); ok {
+		missing, listErr = lister.MissingDeferredIndexes()
+	}
+	if listErr != nil {
+		logger.Warn(
+			"could not list missing deferred metadata indexes in the "+
+				"restored database; rebuilding without naming them",
+			"error", listErr,
+		)
+	} else if len(missing) > 0 {
+		logger.Info(
+			"rebuilding missing deferred metadata indexes in the "+
+				"restored database",
+			"indexes", strings.Join(missing, ","),
+			"count", len(missing),
+		)
 	}
 	start := time.Now()
 	var err error

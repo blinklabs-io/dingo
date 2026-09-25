@@ -78,6 +78,12 @@ type MissingDeferredIndexLister interface {
 	MissingDeferredIndexes() ([]string, error)
 }
 
+// ContextMissingDeferredIndexLister is an optional companion to
+// MissingDeferredIndexLister for cancellable operations such as restore.
+type ContextMissingDeferredIndexLister interface {
+	MissingDeferredIndexesContext(ctx context.Context) ([]string, error)
+}
+
 // ContextDeferredIndexBuilder is an optional companion to
 // DeferredIndexManager for callers that own a cancellable context.
 //
