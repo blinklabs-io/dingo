@@ -193,6 +193,16 @@ func TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14(
 	t *testing.T,
 ) {
 	minFeeA := uint(1)
+	conwayRaw, err := cbor.Encode(map[uint]any{0: minFeeA, 14: nil})
+	require.NoError(t, err)
+	dijkstraRaw, err := cbor.Encode(map[uint]any{0: minFeeA, 14: nil})
+	require.NoError(t, err)
+	var conwayUpdate conway.ConwayProtocolParameterUpdate
+	conwayUpdate.MinFeeA = &minFeeA
+	conwayUpdate.SetCbor(conwayRaw)
+	var dijkstraUpdate gdijkstra.DijkstraProtocolParameterUpdate
+	dijkstraUpdate.MinFeeA = &minFeeA
+	dijkstraUpdate.SetCbor(dijkstraRaw)
 	for _, tc := range []struct {
 		name   string
 		action lcommon.GovAction
@@ -200,19 +210,13 @@ func TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14(
 		{
 			"Conway",
 			&conway.ConwayParameterChangeGovAction{
-				ParamUpdate: decodeConwayParamUpdateFromRawFields(
-					t,
-					map[uint]any{0: minFeeA, 14: nil},
-				),
+				ParamUpdate: conwayUpdate,
 			},
 		},
 		{
 			"Dijkstra",
 			&gdijkstra.DijkstraParameterChangeGovAction{
-				ParamUpdate: decodeDijkstraParamUpdateFromRawFields(
-					t,
-					map[uint]any{0: minFeeA, 14: nil},
-				),
+				ParamUpdate: dijkstraUpdate,
 			},
 		},
 	} {
