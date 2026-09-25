@@ -64,7 +64,7 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 			t.Logf("legacy MarkUtxosDeletedAtSlot plan (n=%d): %s", nTerms, legacyPlan)
 
 			txIDs, _ := distinctUtxoTxIDs(ids)
-			query, args := utxoDeletionRowsByTxIDQuery(txIDs)
+			query, args := utxoDeletionRowsByTxIDQuery(txIDs, false)
 			newPlan := queryPlan(t, store.writeDB, query, args...)
 			t.Logf("tx_id-IN mark lookup plan (n=%d): %s", nTerms, newPlan)
 
@@ -83,6 +83,16 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUtxoDeletionRowsByTxIDQueryLocksNonSQLiteRows(t *testing.T) {
+	t.Parallel()
+
+	txIDs := [][]byte{[]byte("tx-a"), []byte("tx-b")}
+	query, _ := utxoDeletionRowsByTxIDQuery(txIDs, true)
+	require.Contains(t, query, "ORDER BY id FOR UPDATE")
+	query, _ = utxoDeletionRowsByTxIDQuery(txIDs, false)
+	require.NotContains(t, query, "FOR UPDATE")
 }
 
 // TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows proves the indexed

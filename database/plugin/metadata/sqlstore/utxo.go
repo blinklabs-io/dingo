@@ -342,6 +342,7 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 				ctx,
 				db,
 				ids,
+				s.dialect.Name() != "sqlite",
 			)
 			if err != nil {
 				return err
@@ -1185,15 +1186,22 @@ func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 // SQLite drive the lookup from a deleted_slot index when sqlite_stat1 is
 // absent. Other dialects retain a liveness predicate on the primary-key
 // update to protect against another transaction changing a selected row.
-func utxoDeletionRowsByTxIDQuery(txIDs [][]byte) (string, []any) {
+func utxoDeletionRowsByTxIDQuery(
+	txIDs [][]byte,
+	lockRows bool,
+) (string, []any) {
 	args := make([]any, len(txIDs))
 	for i, txID := range txIDs {
 		args[i] = txID
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(txIDs)), ",")
-	return "SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
+	query := "SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
 		"staking_key FROM utxo " +
-		"WHERE tx_id IN (" + placeholders + ")", args
+		"WHERE tx_id IN (" + placeholders + ")"
+	if lockRows {
+		query += " ORDER BY id FOR UPDATE"
+	}
+	return query, args
 }
 
 // markUtxosDeletedQuery builds the primary-key update for the live row IDs
@@ -1243,6 +1251,7 @@ func queryUtxoDeletionRows(
 	ctx context.Context,
 	db queryer,
 	ids []models.UtxoId,
+	lockRows bool,
 ) ([]int64, []models.StakeCredentialRef, error) {
 	ids = dedupeUtxoIDs(ids)
 	if len(ids) == 0 {
@@ -1255,7 +1264,10 @@ func queryUtxoDeletionRows(
 	seenStakeRefs := make(map[string]struct{})
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
-		query, args := utxoDeletionRowsByTxIDQuery(txIDs[start:end])
+		query, args := utxoDeletionRowsByTxIDQuery(
+			txIDs[start:end],
+			lockRows,
+		)
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, nil, err
