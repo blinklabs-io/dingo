@@ -605,7 +605,8 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				observedTipSet: true,
 				VRFOutput:      vrfOutput,
 				PraosView:      praosView,
-				LastUpdated:    time.Now(),
+				nowFn:          cs.nowFn,
+				LastUpdated:    cs.now(),
 			}
 			peerTip.recordObservedPoint(
 				observedTip.Point,
@@ -2466,11 +2467,14 @@ func (cs *ChainSelector) registerPeerFromRollbackLocked(
 	if !ok {
 		return nil, RollbackRegistrationAtCapacity
 	}
-	cs.peerTips[e.ConnectionId] = newPeerChainTipFromRollback(
+	newPeer := newPeerChainTipFromRollback(
 		e.ConnectionId,
 		e.Point,
 		e.Tip,
 	)
+	newPeer.nowFn = cs.nowFn
+	newPeer.LastUpdated = cs.now()
+	cs.peerTips[e.ConnectionId] = newPeer
 	cs.advanceSelectionModeLocked()
 	cs.config.Logger.Info(
 		"registered peer from chainsync rollback",

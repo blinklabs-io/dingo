@@ -55,6 +55,7 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 		d.RewardsPending = true
 		m := find(t, ComparePoolEpoch(
 			"preview", 96, koios, d, now, 0, time.Time{}, false,
+			false,
 		))
 		assert.Equal(t, CategoryReferenceLag, m.Category,
 			"a pending forfeiture must not be reported as a divergence")
@@ -65,6 +66,7 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 		d.RewardsPending = false
 		m := find(t, ComparePoolEpoch(
 			"preview", 96, koios, d, now, 0, time.Time{}, false,
+			false,
 		))
 		assert.Equal(t, CategoryValueMismatch, m.Category,
 			"once applied, a difference is a genuine mismatch")
@@ -76,6 +78,7 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 		d.SpendableMemberRewardTotal = koiosPaid
 		for _, m := range ComparePoolEpoch(
 			"preview", 96, koios, d, now, 0, time.Time{}, false,
+			false,
 		) {
 			assert.NotEqual(t, "member_rewards", m.Field,
 				"the spendable sum equals Koios, so nothing to report")
@@ -122,6 +125,7 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 		func(t *testing.T) {
 			m := find(t, ComparePoolEpoch(
 				"preview", 44, koios, missing(true), now, 24, longClosed, false,
+				false,
 			))
 			assert.Equal(
 				t,
@@ -135,6 +139,7 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 	t.Run("past the boundary a missing row is a real gap", func(t *testing.T) {
 		m := find(t, ComparePoolEpoch(
 			"preview", 44, koios, missing(false), now, 24, longClosed, false,
+			false,
 		))
 		assert.Equal(t, CategoryDBMissing, m.Category,
 			"once Dingo has had its chance, absence is a genuine gap")
@@ -144,6 +149,7 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 		m := find(t, ComparePoolEpoch(
 			"preview", 44, koios, missing(false), now, 24,
 			now.Add(-1*time.Hour), false,
+			false,
 		))
 		assert.Equal(t, CategoryReferenceLag, m.Category,
 			"a recently closed epoch keeps the existing grace behaviour")
