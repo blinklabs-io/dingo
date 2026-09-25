@@ -12269,7 +12269,7 @@ func (ls *LedgerState) WithTxValidationSession(
 		stillCurrent func() bool,
 	) error,
 ) error {
-	return ls.withTxValidationSession(nil, nil, func(
+	return ls.withTxValidationSession(nil, nil, false, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
 		stillCurrent func() bool,
 		_ txValidationApplyFunc,
@@ -12281,6 +12281,7 @@ func (ls *LedgerState) WithTxValidationSession(
 func (ls *LedgerState) withTxValidationSession(
 	expectedParentHash []byte,
 	referenceSlot *uint64,
+	readWrite bool,
 	fn func(
 		validate func(
 			tx ledger.Transaction,
@@ -12300,7 +12301,7 @@ func (ls *LedgerState) withTxValidationSession(
 		snapshot.referenceSlot = *referenceSlot
 	}
 
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(readWrite)
 	// Validation sessions may stage ledger effects so later transactions see
 	// prior certificate and governance changes, but must never persist them.
 	rollbackValidationSession := errRollbackLedgerValidationSession
@@ -12376,6 +12377,22 @@ func (ls *LedgerState) withTxValidationSession(
 			delta := NewLedgerDelta(point, eraID, blockNumber)
 			delta.addTransaction(tx, index)
 			defer delta.Release()
+			txHash := tx.Hash().Bytes()
+			var txHashArray [32]byte
+			copy(txHashArray[:], txHash)
+			offset := database.CborOffset{BlockSlot: point.Slot}
+			copy(offset.BlockHash[:], point.Hash)
+			utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+			for _, utxo := range tx.Produced() {
+				utxoOffsets[database.UtxoRef{
+					TxId:      txHashArray,
+					OutputIdx: utxo.Id.Index(),
+				}] = offset
+			}
+			delta.Offsets = &database.BlockIngestionResult{
+				TxOffsets:   map[[32]byte]database.CborOffset{txHashArray: offset},
+				UtxoOffsets: utxoOffsets,
+			}
 			return delta.applyWithoutRecordingDonations(ls, txn)
 		}
 		if err := fn(validate, stillCurrent, applyTx); err != nil {
@@ -12430,6 +12447,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 	return ls.withTxValidationSession(
 		parentHash,
 		&slot,
+		true,
 		func(
 			validate func(
 				tx ledger.Transaction,
