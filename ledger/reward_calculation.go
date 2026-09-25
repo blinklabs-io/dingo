@@ -2860,6 +2860,14 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	poolInputByKey := make(map[string]*models.RewardPoolInput, len(poolInputs))
 	poolKeys := make([]string, 0, len(poolInputs))
 	for _, poolInput := range poolInputs {
+		if poolInput == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward stake inputs contain a nil retained pool",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+			)
+			return nil
+		}
 		key := string(poolInput.PoolKeyHash)
 		if _, ok := poolInputByKey[key]; !ok {
 			poolKeys = append(poolKeys, key)
@@ -2885,7 +2893,11 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		}
 	}
 	for _, key := range poolKeys {
-		expected := uint64(poolInputByKey[key].DelegatedStake)
+		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
+		expected := uint64(poolInput.DelegatedStake)
 		actual := actualByPool[key]
 		if actual == expected {
 			continue
@@ -2964,7 +2976,11 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		}
 	}
 	for _, key := range poolKeys {
-		expected := uint64(poolInputByKey[key].OwnerStake)
+		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
+		expected := uint64(poolInput.OwnerStake)
 		actual := actualOwnerByPool[key]
 		if actual == expected {
 			continue
@@ -2986,6 +3002,15 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		// an intolerable gap.
 		largestOwner := largestOwnerInputByPool[key]
 		counterparty := largestNonOwnerInputByPool[key]
+		if largestOwner == nil || counterparty == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward owner stake inputs cannot be reconciled without owner and non-owner credentials",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+			)
+			return nil
+		}
 		// The donor is whichever row this transfer subtracts diff from:
 		// counterparty when the owner subset reconstructed too little
 		// (expected > actual, so largestOwner gains and counterparty pays),
@@ -3058,6 +3083,9 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	pruned := make([]*models.RewardStakeInput, 0, len(rebuilt))
 	for _, key := range poolKeys {
 		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
 		rows := rowsByPool[key]
 		expectedCount := poolInput.DelegatorCount
 		if uint64(len(rows)) == expectedCount {
