@@ -159,6 +159,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			return n.ouroboros().
 				BlockfetchClientRequestRange(connId, start, end)
 		},
+		RejectBlockDecodeCacheFunc: func(blockType uint, raw []byte) {
+			n.ouroboros().InvalidateBlockDecodeCache(blockType, raw)
+		},
 		PeersWithBlockFunc: func(
 			origin ouroboros.ConnectionId,
 			point ocommon.Point,

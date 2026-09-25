@@ -110,14 +110,13 @@ func testConcurrentCachedHash[T gledger.BlockHeader](
 	hashes := make([]common.Blake2b256, readers)
 	for reader := range readers {
 		go func() {
-			values[reader], errors[reader], _ = cache.getOrDecode(
-				key, func() (T, error) {
-					if decodeCalls.Add(1) == 1 {
-						close(decodeStarted)
-					}
-					<-releaseDecode
-					return decode()
-				})
+			values[reader], errors[reader], _ = cache.getOrDecodeSizedWithErrorRetention(key, 0, true, func() (T, error) {
+				if decodeCalls.Add(1) == 1 {
+					close(decodeStarted)
+				}
+				<-releaseDecode
+				return decode()
+			})
 			ready <- struct{}{}
 			<-startHash
 			if errors[reader] == nil {
@@ -148,7 +147,7 @@ func testConcurrentCachedHash[T gledger.BlockHeader](
 			require.Equal(t, expected, block.Header().Hash())
 		}
 	}
-	cached, err, decoded := cache.getOrDecode(key, decode)
+	cached, err, decoded := cache.getOrDecodeSizedWithErrorRetention(key, 0, true, decode)
 	require.NoError(t, err)
 	require.False(t, decoded)
 	require.Same(t, values[0], cached)

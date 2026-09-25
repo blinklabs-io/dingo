@@ -242,9 +242,15 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	blockData []byte,
 ) error {
 	key := hashDecodeInput(blockType, blockData)
-	block, err := decodeWithPanicSafeMetrics(
+	cacheBytes := decodeCacheChargeForRaw(len(blockData))
+	if !hasCborArrayEnvelope(blockData) {
+		cacheBytes = int(^uint(0) >> 1)
+	}
+	block, err := decodeWithPanicSafeMetricsSized(
 		o.blockDecodeCache,
 		key,
+		cacheBytes,
+		false,
 		func() (gledger.Block, error) {
 			decodeStart := time.Now()
 			block, err := o.decodeBlockfetchBlock(blockType, blockData)
@@ -265,6 +271,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 		)
 	}
 	if block == nil {
+		o.blockDecodeCache.remove(key)
 		// decodeCache's contract is (nil value, non-nil err) on failure, but
 		// that is a convention on decodeFn, not something the generic cache
 		// itself enforces -- guard explicitly rather than trust it silently.
@@ -274,6 +281,12 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 		)
 	}
 	return o.blockfetchClientBlock(ctx, blockType, block)
+}
+
+// InvalidateBlockDecodeCache removes a decoded block when the ledger rejects it
+// after asynchronous blockfetch event delivery.
+func (o *Ouroboros) InvalidateBlockDecodeCache(blockType uint, raw []byte) {
+	o.blockDecodeCache.remove(hashDecodeInput(blockType, raw))
 }
 
 func (o *Ouroboros) blockfetchServerRequestRange(
@@ -889,6 +902,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 				ledger.BlockfetchEvent{
 					ConnectionId: ctx.ConnectionId,
 					RequestId:    ctx.RequestId,
+					RawBlock:     block.Cbor(),
 					Point: ocommon.NewPoint(
 						block.SlotNumber(),
 						block.Hash().Bytes(),

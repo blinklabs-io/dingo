@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -118,6 +119,20 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "crypto verification failed")
 	assert.Empty(t, ls.pendingBlockfetchEvents)
+
+	var (
+		rejectedType uint
+		rejectedRaw  []byte
+	)
+	ls.config.RejectBlockDecodeCacheFunc = func(blockType uint, raw []byte) {
+		rejectedType = blockType
+		rejectedRaw = append([]byte(nil), raw...)
+	}
+	ls.shadowBlockReceivedHashes = nil
+	evt.RawBlock = []byte{0x84, 0x01}
+	ls.handleEventBlockfetch(event.NewEvent(BlockfetchEventType, evt))
+	assert.Equal(t, evt.Type, rejectedType)
+	assert.Equal(t, evt.RawBlock, rejectedRaw)
 }
 
 func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
