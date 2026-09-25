@@ -615,6 +615,21 @@ var flagSpecs = []flagSpec{
 		"genesis-bootstrap-corroboration-peers",
 		"independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)",
 	),
+	boolFlag(
+		"GenesisBootstrap.LimitOnPatienceEnabled",
+		"genesis-bootstrap-limit-on-patience-enabled",
+		"disconnect ChainSync peers that deliver advertised progress too slowly during Genesis sync",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceCapacity",
+		"genesis-bootstrap-limit-on-patience-capacity",
+		"Genesis Limit on Patience bucket capacity in tokens (0 uses the default of 1000)",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceRate",
+		"genesis-bootstrap-limit-on-patience-rate",
+		"Genesis Limit on Patience leak rate in tokens per second (0 uses the default of 5)",
+	),
 
 	// Logging
 	transformStringFlag(
