@@ -1855,7 +1855,7 @@ func spliceEndorserTxsIntoDijkstraBlock(
 		return nil, fmt.Errorf("encode cleared leios certificate: %w", err)
 	}
 	newBody, err := cbor.Encode([]cbor.RawMessage{
-		cbor.RawMessage(newTxs), cbor.RawMessage(nilCert), body[2],
+		cbor.RawMessage(newTxsRaw), cbor.RawMessage(nilCert), body[2],
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode merged block body: %w", err)
@@ -1885,6 +1885,20 @@ func dijkstraBlockTransactionCbor(
 		components = append(components, validity)
 	case 4:
 		var valid bool
+		if len(components[3]) == 1 &&
+			(components[3][0] == 0xf4 || components[3][0] == 0xf5) {
+			if _, err := cbor.Decode(components[3], &valid); err != nil {
+				return nil, fmt.Errorf("decode transaction validity: %w", err)
+			}
+			if !valid {
+				return nil, errors.New("dijkstra transaction is marked invalid")
+			}
+			return txCbor, nil
+		}
+		if len(components[2]) != 1 ||
+			(components[2][0] != 0xf4 && components[2][0] != 0xf5) {
+			return nil, errors.New("dijkstra transaction has no validity boolean")
+		}
 		if _, err := cbor.Decode(components[2], &valid); err != nil {
 			return nil, fmt.Errorf("decode transaction validity: %w", err)
 		}
