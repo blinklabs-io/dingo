@@ -1051,6 +1051,23 @@ PostgreSQL/MySQL repeatable-read read-only transactions.
 | `move_instantaneous_rewards` | `id`, `pot`, `certificate_id`, `added_slot`, `other_pot` | PK `id`; indexes `pot`, `certificate_id`, `added_slot` | MIR certificate header. `pot`: 0 = Reserves, 1 = Treasury. `other_pot` is non-zero for pot-to-pot transfer certs (no child rows); zero for credential distribution certs (child rows in `move_instantaneous_rewards_reward`). Applied at each epoch boundary by the Shelley INSTANT rule. |
 | `move_instantaneous_rewards_reward` | `id`, `mir_id`, `credential`, `credential_tag`, `amount` | PK `id`; index `mir_id`; composite index `(credential_tag, credential)` | MIR reward rows. Join `mir_id -> move_instantaneous_rewards.id`. `credential_tag` distinguishes key (0) vs script (1) stake credentials sharing a hash; `GetAccountSumsByCredential` filters on `(credential_tag, credential)` to attribute reserves/treasury totals to an account. `amount` is signed decimal text: the wire format types a MIR reward as `delta_coin`, so a certificate may reduce a reward scheduled earlier in the same epoch. `other_pot` on the parent row is `coin` and stays non-negative. |
 
+#### Classic Shelley PPUP and MIR validation reads
+
+`ledger.LedgerView` implements gouroboros' `GenesisDelegationState` and
+`ClassicProtocolParameterUpdateWindowState` for Shelley through Babbage
+validation. Active genesis delegates come from Shelley genesis configuration
+overlaid by the latest `genesis_delegation` certificate before the transaction
+slot; when validation holds a metadata transaction, that same transaction is
+used for the certificate lookup. The MIR quorum comes from Shelley genesis'
+`updateQuorum`, so it is configuration state rather than a metadata row.
+
+The PPUP voting window maps the transaction slot through the `epoch` table to
+its current epoch, start slot, and length, then derives the slot of no return
+from Shelley genesis' `securityParam` and `activeSlotsCoeff`. Proposals before
+that boundary target the current epoch; proposals at or after it target the
+next epoch. These lookups use the existing certificate and epoch data; they
+do not add a schema migration.
+
 #### Reward Withdrawal Persistence
 
 Protocol validation reads the active account's current reward balance before

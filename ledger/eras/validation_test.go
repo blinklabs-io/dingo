@@ -652,19 +652,33 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		descriptors,
 		gdijkstra.UtxoValidationRules,
 		lcommon.UtxoValidationRuleCommitteeCertificates,
-		"conway.UtxoValidateCommitteeCertificates",
+		"dijkstra.UtxoValidateCommitteeCertificates",
 	)
 	votersIndex := requireRuleIdResolvesToFunc(
 		t,
 		descriptors,
 		gdijkstra.UtxoValidationRules,
 		lcommon.UtxoValidationRuleUnknownVoters,
-		"conway.UtxoValidateUnknownVoters",
+		"dijkstra.UtxoValidateUnknownVoters",
 	)
 	require.Len(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		len(gdijkstra.UtxoValidationRules)-1,
+		len(gdijkstra.UtxoValidationRules),
+	)
+	plutusIndex := requireRuleIdResolvesToFunc(
+		t,
+		descriptors,
+		gdijkstra.UtxoValidationRules,
+		lcommon.UtxoValidationRulePlutusScripts,
+		"dijkstra.UtxoValidatePlutusScripts",
+	)
+	requireIndexedRulesReplaceRuleIndex(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		plutusIndex,
+		validateDijkstraPlutusV3ReferenceInputs,
+		"Dijkstra validation must enforce PV11 Plutus V3 reference-input disjointness",
 	)
 	requireIndexedRulesReplaceRuleIndex(
 		t,
@@ -680,6 +694,120 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		validateUnknownVoters,
 		"Dijkstra validation must preserve committee hot credential tags",
 	)
+}
+
+func TestDijkstraCommitteeValidatorChecksSubtransactionLevels(t *testing.T) {
+	t.Parallel()
+	cold := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224Hash([]byte("nested committee cold")),
+	}
+	hot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224Hash([]byte("nested committee hot")),
+	}
+	resign := &lcommon.ResignCommitteeColdCertificate{ColdCredential: cold}
+	authorize := &lcommon.AuthCommitteeHotCertificate{
+		ColdCredential: cold,
+		HotCredential:  hot,
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		TxIsValid: true,
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType([]gdijkstra.DijkstraSubTransaction{
+				{Body: gdijkstra.DijkstraSubTransactionBody{
+					TxCertificates: []lcommon.CertificateWrapper{{
+						Type:        uint(lcommon.CertificateTypeResignCommitteeCold),
+						Certificate: resign,
+					}},
+				}},
+				{Body: gdijkstra.DijkstraSubTransactionBody{
+					TxCertificates: []lcommon.CertificateWrapper{{
+						Type:        uint(lcommon.CertificateTypeAuthCommitteeHot),
+						Certificate: authorize,
+					}},
+				}},
+			}, true),
+		},
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		cold: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(cold): {ColdKey: cold.Credential},
+		},
+	}
+	pp := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: lcommon.ProtocolVersionDijkstra,
+			},
+		},
+	}
+	err := validateCommitteeCertificates(tx, 0, state, pp)
+	require.ErrorAs(t, err, &conway.ResignedCommitteeMemberHotKeyError{})
+}
+
+type classicPPUPTestLedgerState struct {
+	*mockLedgerState
+	delegate lcommon.Blake2b224
+	epoch    uint64
+	cutoff   uint64
+}
+
+func (s classicPPUPTestLedgerState) GenesisDelegateKeyHashes(
+	uint64,
+) ([]lcommon.Blake2b224, error) {
+	return []lcommon.Blake2b224{s.delegate}, nil
+}
+
+func (s classicPPUPTestLedgerState) GenesisDelegateForGenesisKey(
+	lcommon.Blake2b224,
+	uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return s.delegate, true, nil
+}
+
+func (classicPPUPTestLedgerState) GenesisUpdateQuorum() (uint, error) {
+	return 1, nil
+}
+
+func (s classicPPUPTestLedgerState) ProtocolParameterUpdateWindow(
+	uint64,
+) (uint64, uint64, error) {
+	return s.epoch, s.cutoff, nil
+}
+
+func TestShelleyClassicProtocolParameterUpdateRuleAcceptsValidUpdate(t *testing.T) {
+	t.Parallel()
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	tx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	targetEpoch, updates := tx.ProtocolParameterUpdates()
+	require.NotEmpty(t, updates)
+
+	witnesses := tx.Witnesses().Vkey()
+	require.NotEmpty(t, witnesses)
+	state := classicPPUPTestLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		delegate:        lcommon.Blake2b224Hash(witnesses[0].Vkey),
+		epoch:           targetEpoch,
+		cutoff:          100,
+	}
+	pp := &shelley.ShelleyProtocolParameters{
+		ProtocolMajor: 2,
+	}
+
+	var validate lcommon.UtxoValidationRuleFunc
+	for _, descriptor := range shelley.UtxoValidationRuleDescriptors() {
+		if descriptor.Id == lcommon.UtxoValidationRuleProtocolParameterUpdates {
+			validate = descriptor.Validator
+			break
+		}
+	}
+	require.NotNil(t, validate)
+	require.NoError(t, validate(tx, 1, state, pp))
 }
 
 type taggedCommitteeLedgerState struct {
@@ -1449,6 +1577,7 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 		tx,
 		resolved,
 		script.StrictValidityUpperBoundForTransaction(tx),
+		0,
 	)
 
 	require.NoError(t, err)
@@ -1715,10 +1844,9 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	assert.Equal(t, big.NewInt(206_245), tx.Fee())
 	assert.NoError(t, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
 
-	// Negative case: the null-expanded encoding of the same body is 1366
-	// bytes, so the declared fee of 206245 is below the minimum. Sizing
-	// pre-Alonzo transactions from anything other than their wire bytes must
-	// not make this variant pass.
+	// The null-expanded encoding preserves the bytes but represents the A0
+	// protocol parameter as an empty map. The classic update decoder now
+	// rejects that out-of-domain value before fee validation.
 	reencodedCbor, err := hex.DecodeString(
 		preprodShelleyUpdateTxReencodedCborHex,
 	)
@@ -1726,21 +1854,22 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	require.Len(t, reencodedCbor, 1_366)
 
 	reencodedTx, err := shelley.NewShelleyTransactionFromCbor(reencodedCbor)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1_366), TxSizeForFee(reencodedTx))
-	assert.Equal(t, uint64(215_485), CalculateMinFee(
-		TxSizeForFee(reencodedTx),
-		lcommon.ExUnits{},
-		minFeeA,
-		minFeeB,
-		nil,
-		nil,
-	))
-	assert.ErrorContains(
+	require.ErrorContains(
 		t,
-		ValidateTxFee(reencodedTx, minFeeA, minFeeB, nil, nil),
-		"transaction fee 206245 is less than the calculated minimum fee 215485",
+		err,
+		"protocol parameter update a0: must be a bounded rational",
 	)
+	assert.Nil(t, reencodedTx)
+
+	// An indefinite transaction array is a distinct, valid wire encoding of
+	// the same classic update. Fee sizing must keep its received envelope byte.
+	indefiniteCbor := append([]byte(nil), txCbor...)
+	require.Equal(t, byte(0x83), indefiniteCbor[0])
+	indefiniteCbor[0] = 0x9f
+	indefiniteCbor = append(indefiniteCbor, 0xff)
+	indefiniteTx, err := shelley.NewShelleyTransactionFromCbor(indefiniteCbor)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(indefiniteCbor)), TxSizeForFee(indefiniteTx))
 }
 
 func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(
@@ -4118,7 +4247,7 @@ func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(
 
 	// A tx that mints nothing still carries the ada entry, so no mint fixture
 	// is needed to observe the rendering.
-	cache := newTxInfoCache(ls, tx, resolved)
+	cache := newTxInfoCache(ls, tx, resolved, 0)
 	v1, err := cache.v1()
 	require.NoError(t, err)
 	v2, err := cache.v2()

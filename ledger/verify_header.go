@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -888,10 +889,23 @@ func (ls *LedgerState) activeGenesisDelegationForSlot(
 	initial genesisDelegation,
 	slot uint64,
 ) (genesisDelegation, error) {
+	return ls.activeGenesisDelegationForSlotWithTxn(initial, slot, nil)
+}
+
+func (ls *LedgerState) activeGenesisDelegationForSlotWithTxn(
+	initial genesisDelegation,
+	slot uint64,
+	txn types.Txn,
+) (genesisDelegation, error) {
+	if ls.db == nil {
+		return genesisDelegation{}, errors.New(
+			"genesis delegation state has no metadata database",
+		)
+	}
 	row, err := ls.db.Metadata().GetGenesisDelegationForSlot(
 		initial.genesisHash,
 		slot,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return genesisDelegation{}, fmt.Errorf(
@@ -918,6 +932,143 @@ func (ls *LedgerState) activeGenesisDelegationForSlot(
 		delegateHash: append([]byte(nil), row.GenesisDelegateHash...),
 		vrfHash:      append([]byte(nil), row.VrfKeyHash...),
 	}, nil
+}
+
+// GenesisDelegateKeyHashes returns the active Shelley genesis delegate keys
+// used by the classic PPUP and MIR rules at slot.
+func (ls *LedgerState) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return ls.genesisDelegateKeyHashes(slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateKeyHashes(
+	slot uint64,
+	txn types.Txn,
+) ([]lcommon.Blake2b224, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, errors.New("unable to get cardano node config")
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	delegates := make(map[lcommon.Blake2b224]struct{}, len(genesis))
+	for _, initial := range genesis {
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		delegates[delegate] = struct{}{}
+	}
+	ret := make([]lcommon.Blake2b224, 0, len(delegates))
+	for delegate := range delegates {
+		ret = append(ret, delegate)
+	}
+	slices.SortFunc(ret, func(a, b lcommon.Blake2b224) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return ret, nil
+}
+
+// GenesisDelegateForGenesisKey resolves the active delegate for a Shelley
+// genesis key at slot.
+func (ls *LedgerState) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return ls.genesisDelegateForGenesisKey(genesisKeyHash, slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+	txn types.Txn,
+) (lcommon.Blake2b224, bool, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return lcommon.Blake2b224{}, false, errors.New(
+			"unable to get cardano node config",
+		)
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return lcommon.Blake2b224{}, false, err
+	}
+	for _, initial := range genesis {
+		if !bytes.Equal(initial.genesisHash, genesisKeyHash[:]) {
+			continue
+		}
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return lcommon.Blake2b224{}, false, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		return delegate, true, nil
+	}
+	return lcommon.Blake2b224{}, false, nil
+}
+
+// GenesisUpdateQuorum returns the quorum configured by Shelley genesis.
+func (ls *LedgerState) GenesisUpdateQuorum() (uint, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("unable to get cardano node config")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return 0, errors.New("unable to get shelley genesis")
+	}
+	return uint(genesis.UpdateQuorum), nil
+}
+
+// ProtocolParameterUpdateWindow returns the current epoch and the first slot
+// where proposals target the following epoch.
+func (ls *LedgerState) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, 0, errors.New("unable to get cardano node config")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.ActiveSlotsCoeff.Rat == nil ||
+		genesis.ActiveSlotsCoeff.Sign() <= 0 || genesis.SecurityParam <= 0 {
+		return 0, 0, errors.New("invalid Shelley genesis PPUP parameters")
+	}
+	epochLength := uint64(epoch.LengthInSlots)
+	if epoch.StartSlot > ^uint64(0)-epochLength {
+		return 0, 0, errors.New("epoch end slot overflows")
+	}
+	// Shelley stops accepting proposals for the current epoch 6k/f slots
+	// before its end, where k is the security parameter and f the active-slot
+	// coefficient. Use the same integer slot boundary as the reference rule.
+	votingWindow := new(big.Rat).SetFrac(
+		new(big.Int).Mul(big.NewInt(6), big.NewInt(int64(genesis.SecurityParam))),
+		big.NewInt(1),
+	)
+	votingWindow.Quo(votingWindow, genesis.ActiveSlotsCoeff.Rat)
+	windowSlots := new(big.Int).Quo(votingWindow.Num(), votingWindow.Denom())
+	if !windowSlots.IsUint64() || windowSlots.Uint64() >= epochLength {
+		return epoch.EpochId, epoch.StartSlot, nil
+	}
+	return epoch.EpochId, epoch.StartSlot + epochLength - windowSlots.Uint64(), nil
 }
 
 func classifyGenesisOverlaySlot(
