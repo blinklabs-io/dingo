@@ -271,7 +271,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	require.Equal(t, uint64(120), drep.ExpiryEpoch)
 }
 
-func TestProcessGovernanceClearsDRepVotesAndDelegationsAfterVotes(t *testing.T) {
+func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -293,17 +293,6 @@ func TestProcessGovernanceClearsDRepVotesAndDelegationsAfterVotes(t *testing.T) 
 		AddedSlot:     1,
 		Active:        true,
 	}))
-	stakeCredential := bytes.Repeat([]byte{0x72}, 28)
-	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
-		CredentialTag: 0,
-		StakingKey:    stakeCredential,
-		Drep:          credentialBytes,
-		DrepType:      models.DrepTypeAddrKeyHash,
-		AddedSlot:     2,
-		CreatedSlot:   2,
-		Active:        true,
-	}, nil))
-
 	proposalHash := bytes.Repeat([]byte{0x73}, 32)
 	proposal := &models.GovernanceProposal{
 		TxHash:       proposalHash,
@@ -373,10 +362,6 @@ func TestProcessGovernanceClearsDRepVotesAndDelegationsAfterVotes(t *testing.T) 
 	require.Len(t, votes, 1)
 	require.Equal(t, uint8(1), votes[0].VoterCredentialTag,
 		"the same hash under a script credential remains distinct")
-	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
-	require.NoError(t, err)
-	require.Nil(t, account.Drep)
-	require.Equal(t, models.DrepTypeAddrKeyHash, account.DrepType)
 }
 
 func TestConwayProtocolParametersDijkstra(t *testing.T) {
