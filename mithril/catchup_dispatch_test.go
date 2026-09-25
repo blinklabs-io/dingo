@@ -229,10 +229,6 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			cbor.RawMessage(headerCBOR), []any{}, []any{}, map[uint]any{},
 		})
 		require.NoError(t, err)
-		blockCBOR, err := cbor.Encode([]any{
-			uint64(shelley.BlockTypeShelley), cbor.RawMessage(blockBodyCBOR),
-		})
-		require.NoError(t, err)
 		dataDir := t.TempDir()
 		db, err := dbtest.NewDatabase(t, &database.Config{
 			DataDir:     dataDir,
@@ -244,7 +240,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Slot:     999,
 			Hash:     firstHash,
 			PrevHash: bytes.Repeat([]byte{0}, 32),
-			Cbor:     blockCBOR,
+			Cbor:     blockBodyCBOR,
 			Number:   1,
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
