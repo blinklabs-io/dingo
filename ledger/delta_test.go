@@ -364,6 +364,88 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		"the same hash under a script credential remains distinct")
 }
 
+func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	drepCredential := bytes.Repeat([]byte{0x51}, lcommon.Blake2b224Size)
+	stakeCredential := bytes.Repeat([]byte{0x52}, lcommon.Blake2b224Size)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drepCredential,
+		AddedSlot:     10,
+		Active:        true,
+	}))
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		CreatedSlot:   10,
+		Active:        true,
+	}, nil))
+
+	drepHash := lcommon.NewBlake2b224(drepCredential)
+	stakeHash := lcommon.NewBlake2b224(stakeCredential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.DeregistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: lcommon.CredentialTypeAddrKeyHash, Credential: drepHash},
+			Amount:         500,
+		},
+		&lcommon.RegistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: lcommon.CredentialTypeAddrKeyHash, Credential: drepHash},
+			Amount:         500,
+		},
+		&lcommon.VoteDelegationCertificate{
+			CertType:        uint(lcommon.CertificateTypeVoteDelegation),
+			StakeCredential: lcommon.Credential{CredType: lcommon.CredentialTypeAddrKeyHash, Credential: stakeHash},
+			Drep:            lcommon.Drep{Type: lcommon.DrepTypeAddrKeyHash, Credential: drepCredential},
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x53}, 32))
+	tx.WithValid(true)
+	txHash := tx.Hash().Bytes()
+	var txHashArray [32]byte
+	copy(txHashArray[:], txHash)
+
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.DRepDeposit = 500
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   models.Epoch{EpochId: 10},
+		currentPParams: &pparams,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	point := ocommon.Point{Slot: 20, Hash: bytes.Repeat([]byte{0x54}, lcommon.Blake2b256Size)}
+	delta := NewLedgerDelta(point, uint(conway.EraIdConway), 1)
+	defer delta.Release()
+	delta.addTransaction(tx, 0)
+	delta.Offsets = &database.BlockIngestionResult{
+		TxOffsets:   map[[32]byte]database.CborOffset{txHashArray: {}},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return delta.apply(ls, txn)
+	}))
+
+	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, drepCredential, account.Drep)
+	activeDrep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, activeDrep)
+}
+
 func TestConwayProtocolParametersDijkstra(t *testing.T) {
 	t.Parallel()
 
