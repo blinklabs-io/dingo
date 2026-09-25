@@ -9771,27 +9771,35 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 			continue
 		}
 		labForEta := epochs[i-1].LastEpochBlockNonce
-		var expectedNonce []byte
-		if len(labForEta) == 0 {
-			// NeutralNonce is the identity element of ⭒:
-			//   candidateNonce ⭒ NeutralNonce = candidateNonce
-			expectedNonce = cloneNonce(candidateNonce)
-		} else {
-			res, err := lcommon.CalculateEpochNonce(
-				candidateNonce,
-				labForEta,
-				nil,
+		// This epoch is in the past, so its extraEntropy protocol parameter
+		// is already enacted and on record; no forecast is involved. Mainnet
+		// carried a non-neutral value for epoch 259 only, and every other
+		// epoch resolves to NeutralNonce, leaving the result unchanged.
+		extraEntropy, err := ls.recordedExtraEntropyForEpoch(
+			ep.EpochId, ep.EraId,
+		)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to resolve extra entropy during lab recovery",
+				"epoch", ep.EpochId,
+				"error", err,
+				"component", "ledger",
 			)
-			if err != nil {
-				ls.config.Logger.Warn(
-					"failed to recompute epoch nonce during lab recovery",
-					"epoch", ep.EpochId,
-					"error", err,
-					"component", "ledger",
-				)
-				continue
-			}
-			expectedNonce = res.Bytes()
+			continue
+		}
+		expectedNonce, err := assembleEpochNonce(
+			candidateNonce,
+			labForEta,
+			extraEntropy,
+		)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to recompute epoch nonce during lab recovery",
+				"epoch", ep.EpochId,
+				"error", err,
+				"component", "ledger",
+			)
+			continue
 		}
 		if !bytes.Equal(ep.Nonce, expectedNonce) {
 			previousNonce := cloneNonce(ep.Nonce)
