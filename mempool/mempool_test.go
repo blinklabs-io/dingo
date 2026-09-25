@@ -1084,6 +1084,10 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock detected - test timed out")
 	}
+	for i := range 50 {
+		_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+		assert.False(t, exists, "original transaction %d should be removed", i)
+	}
 }
 
 func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
@@ -1163,6 +1167,10 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 		t.Logf("Total transactions read: %d", total)
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock detected")
+	}
+	for i := range 100 {
+		_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+		assert.False(t, exists, "original transaction %d should be removed", i)
 	}
 }
 

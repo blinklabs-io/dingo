@@ -1677,6 +1677,14 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 	started := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorker := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(func() {
+		releaseWorker()
+		require.NoError(t, pool.Shutdown(5*time.Second))
+	})
 	firstResult := make(chan DatabaseResult, 1)
 	pool.Submit(DatabaseOperation{
 		OpFunc: func(db *database.Database) error {
@@ -1710,8 +1718,8 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 		t.Fatal("full queue did not reject the operation")
 	}
 
-	close(release)
-	pool.Shutdown(5 * time.Second)
+	releaseWorker()
+	require.NoError(t, pool.Shutdown(5*time.Second))
 	select {
 	case result := <-firstResult:
 		require.NoError(t, result.Error)
