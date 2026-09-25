@@ -4525,3 +4525,267 @@ func TestConwayCommitteeRulesFailClosedOnLookupError(t *testing.T) {
 		&lookup,
 	)
 }
+
+// committeeCert builds a single committee certificate: resign when authorize
+// is false, otherwise authorize hot key.
+func committeeCert(
+	credential lcommon.Credential,
+	authorize bool,
+) lcommon.CertificateWrapper {
+	if authorize {
+		return lcommon.CertificateWrapper{
+			Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+			Certificate: &lcommon.AuthCommitteeHotCertificate{
+				CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+				ColdCredential: credential,
+			},
+		}
+	}
+	return lcommon.CertificateWrapper{
+		Type: uint(lcommon.CertificateTypeResignCommitteeCold),
+		Certificate: &lcommon.ResignCommitteeColdCertificate{
+			CertType:       uint(lcommon.CertificateTypeResignCommitteeCold),
+			ColdCredential: credential,
+		},
+	}
+}
+
+// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins
+// dingo#4377: a committee cold credential resignation is rejected both when
+// it was already resigned before the transaction and when an earlier
+// certificate in the same transaction resigned it. Dingo's replacement
+// previously checked member.Resigned only on the authorize path and queried
+// every certificate against the pre-transaction snapshot, so a same-tx
+// resign-then-resign or resign-then-authorize sequence was wrongly accepted.
+func TestConwayCommitteeCertificateRuleRejectsRepeatedResignation(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd6
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	newState := func(resigned bool) *taggedCommitteeLedgerState {
+		return &taggedCommitteeLedgerState{
+			mockLedgerState: newMockLedgerState(),
+			available:       true,
+			cold: map[string]*lcommon.CommitteeMember{
+				taggedCommitteeCredentialKey(credential): {
+					ColdKey:  hash,
+					Resigned: resigned,
+				},
+			},
+		}
+	}
+	newTx := func(certs ...lcommon.CertificateWrapper) *conway.ConwayTransaction {
+		return &conway.ConwayTransaction{
+			TxIsValid: true,
+			Body: conway.ConwayTransactionBody{
+				TxCertificates: certs,
+			},
+		}
+	}
+
+	tests := []struct {
+		name            string
+		alreadyResigned bool
+		certs           []lcommon.CertificateWrapper
+		wantErr         bool
+		wantHotKeyErr   bool
+	}{
+		{
+			name:            "previously resigned then resign",
+			alreadyResigned: true,
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, false),
+			},
+			wantErr: true,
+		},
+		{
+			name:            "previously resigned then authorize hot",
+			alreadyResigned: true,
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, true),
+			},
+			wantErr:       true,
+			wantHotKeyErr: true,
+		},
+		{
+			name: "active then resign then resign",
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, false),
+				committeeCert(credential, false),
+			},
+			wantErr: true,
+		},
+		{
+			name: "active then resign then authorize",
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, false),
+				committeeCert(credential, true),
+			},
+			wantErr:       true,
+			wantHotKeyErr: true,
+		},
+		{
+			name: "active then authorize then resign",
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, true),
+				committeeCert(credential, false),
+			},
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newState(tc.alreadyResigned)
+			err := rule(
+				newTx(tc.certs...),
+				0,
+				state,
+				&conway.ConwayProtocolParameters{},
+			)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			if tc.wantHotKeyErr {
+				var hotKeyErr conway.ResignedCommitteeMemberHotKeyError
+				require.ErrorAs(t, err, &hotKeyErr)
+				return
+			}
+			var resignedErr CommitteeMemberAlreadyResignedError
+			require.ErrorAs(t, err, &resignedErr)
+		})
+	}
+}
+
+// TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity proves
+// the in-transaction resignation overlay keys on full tagged credential
+// identity: resigning a key-hash credential must not make a script-hash
+// credential sharing the same hash bytes appear resigned.
+func TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd7
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	scriptCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		cold: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(keyCredential):    {ColdKey: hash},
+			taggedCommitteeCredentialKey(scriptCredential): {ColdKey: hash},
+		},
+	}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{
+				committeeCert(keyCredential, false),
+				committeeCert(scriptCredential, false),
+			},
+		},
+	}
+
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	require.NoError(
+		t,
+		rule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+	)
+}
+
+// TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable
+// covers a CodeRabbit finding on this PR: when CommitteeStateAvailable
+// reports false (e.g. a genesis committee member Dingo does not persist,
+// blinklabs-io/dingo#3785), every certificate for that credential takes the
+// non-authoritative continue branch. That branch must still consult and
+// update resignedInTx, or a resign-then-resign or resign-then-authorize
+// sequence in one transaction passes uninspected because neither
+// certificate ever reaches the ledger-state Resigned check.
+func TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd8
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	newState := func() *taggedCommitteeLedgerState {
+		return &taggedCommitteeLedgerState{
+			mockLedgerState: newMockLedgerState(),
+			available:       false,
+		}
+	}
+	newTx := func(
+		certs ...lcommon.CertificateWrapper,
+	) *conway.ConwayTransaction {
+		return &conway.ConwayTransaction{
+			TxIsValid: true,
+			Body: conway.ConwayTransactionBody{
+				TxCertificates: certs,
+			},
+		}
+	}
+
+	t.Run("resign then resign rejects", func(t *testing.T) {
+		err := rule(
+			newTx(
+				committeeCert(credential, false),
+				committeeCert(credential, false),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		)
+		var resignedErr CommitteeMemberAlreadyResignedError
+		require.ErrorAs(t, err, &resignedErr)
+	})
+	t.Run("resign then authorize rejects", func(t *testing.T) {
+		err := rule(
+			newTx(
+				committeeCert(credential, false),
+				committeeCert(credential, true),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		)
+		var hotKeyErr conway.ResignedCommitteeMemberHotKeyError
+		require.ErrorAs(t, err, &hotKeyErr)
+	})
+	t.Run("authorize then resign passes", func(t *testing.T) {
+		require.NoError(t, rule(
+			newTx(
+				committeeCert(credential, true),
+				committeeCert(credential, false),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		))
+	})
+}
