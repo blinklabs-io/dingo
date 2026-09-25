@@ -1367,8 +1367,7 @@ func ParseActivePoolDistribution(
 		var leiosKey *lcommon.LeiosKey
 		var keyRegistrationEpoch *uint64
 		if len(fields) == 4 {
-			leiosKey, keyRegistrationEpoch, err =
-				decodeOptionalLeiosKey(fields[3])
+			leiosKey, keyRegistrationEpoch, err = decodeOptionalLeiosKey(fields[3])
 			if err != nil {
 				return nil, fmt.Errorf(
 					"active pool distribution entry %d: %w",

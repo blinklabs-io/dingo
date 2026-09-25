@@ -969,8 +969,7 @@ func parsePoolParams(
 		)
 	}
 
-	leiosOffset, leiosKey, keyRegistrationEpoch, err :=
-		optionalLeiosKeyOffset(params, 2)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -1069,8 +1068,7 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	leiosOffset, leiosKey, keyRegistrationEpoch, err :=
-		optionalLeiosKeyOffset(params, 1)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 1)
 	if err != nil {
 		return nil, true, err
 	}
@@ -1427,7 +1425,7 @@ func parseSnapshotPoolParams(
 		// #nosec G115 -- credential type is 0 or 1
 		RewardAccountCredentialTag: uint8(rewardAccount.Type),
 		Owners:                     owners,
-		LeiosKeyRegistrationEpoch: keyRegistrationEpoch,
+		LeiosKeyRegistrationEpoch:  keyRegistrationEpoch,
 	}
 	if leiosKey != nil {
 		pool.LeiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
