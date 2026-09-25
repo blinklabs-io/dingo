@@ -1646,6 +1646,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainsync.client_removed` | ChainsyncState | Client tracking removed |
 | `chainsync.client_synced` | ChainsyncState | Client caught up |
 | `chainsync.client_stalled` | ChainsyncState | Client stall detected |
+| `chainsync.client_patience_exhausted` | ChainsyncState | Client exhausted the Genesis Limit on Patience; the stall recycler disconnects it |
 | `chainsync.fork_detected` | ChainsyncState | Chainsync fork detected |
 | `chainsync.client_remove_requested` | Node | Stalled client removal |
 | `chainsync.resync` | LedgerState | Chainsync resync request |
@@ -4560,6 +4561,56 @@ overlap that independent witnesses have observed. Density-at-intersection can
 compare an unseen suffix with the local candidate, but does not independently
 corroborate that suffix.
 
+#### Genesis Limit on Patience
+
+The stall watchdog (`chainsync.CheckStalledClients`) only detects a silent
+peer: any header refreshes `LastActivity`, so a peer that advertises a far
+better tip and drips one valid header per 110 seconds never stalls, keeps a
+ChainSync client slot, and keeps its misleading candidate in consideration.
+The Limit on Patience (LoP) bounds the delivery *rate* instead. Each tracked,
+non-observability client carries a leaky token bucket
+(`chainsync.PatienceState`, exposed on `TrackedClient.Patience`) that starts
+full at `limitOnPatienceCapacity` tokens and leaks `limitOnPatienceRate`
+tokens per second. It follows the reference ChainSync client:
+
+- A header earns one token when it clears verification and raises the highest
+  block number the peer has delivered, so a rollback and re-delivery of the
+  same chain earns nothing. The level is capped at capacity.
+- The leak runs while the peer owes a message. It pauses once the peer has
+  delivered its own advertised tip (the MsgAwaitReply state) and resumes on
+  its next roll-forward or rollback. It also pauses for this node's own work:
+  `ouroboros.chainsyncClientRollForwardAt` charges the peer only up to the
+  header's network arrival (`PatienceMessageArrived`) and resumes after the
+  callback (`PatienceHeaderAccepted`), so decoding, future-header admission
+  waits, verification and ledger backpressure are not charged, and a
+  ChainSync restart pauses it (`PatiencePause`). A new bucket starts paused
+  until the peer's first accepted header or rollback, because tracked clients
+  are registered inside their first callback. Headers from a peer that is
+  not ingress-eligible are not verified, so they pause the bucket rather than
+  leak it.
+- It applies only while Genesis selection is active
+  (`ChainSelector.GenesisSelectionState`, wired as
+  `chainsync.Config.PatienceActiveFunc` by `Node.chainsyncConfig`); outside it
+  the bucket is held full, like the reference node outside GSM `Syncing`.
+- At zero the bucket latches exhausted. The latch clears, and the bucket
+  refills, if Genesis selection ends or the client becomes observability-only
+  before it is reported, so a peer is never disconnected once the limit has
+  stopped applying to it. The stall recycler's tick calls
+  `CheckPatienceExhausted`, which publishes
+  `chainsync.client_patience_exhausted` and increments
+  `dingo_chainsync_patience_exhausted_total`, and then requests
+  `connmanager.connection_recycle_requested` with reason
+  `genesis_patience_exhausted`. That disconnect skips the stall path's grace,
+  cooldown, and only-eligible-peer guard, and is reported once per
+  connection.
+
+The defaults are 1000 tokens and 5 tokens per second: a 200-second allowance,
+the same budget as the reference node's 100,000 tokens at 500 per second. The
+rate is lower than the reference because Dingo pipelines 10 ChainSync
+requests, so one honest peer delivers about `10/RTT` headers per second; at 5
+per second a peer with up to two seconds of round-trip time keeps a full
+bucket. The Limit on Eagerness (#3270) is separate and not implemented.
+
 #### Anti-flap incumbent pin
 
 The active connection (the peer that drives the chainsync+blockfetch pipeline
@@ -4609,7 +4660,11 @@ pin to a dead/minority peer:
   repeated same-or-lower tip updates (including rollbacks) do NOT reset the
   stall clock, so a stalled incumbent cannot keep the pin alive by re-reporting
   an unchanged tip. The clock is fed by an injectable `nowFn` (defaulting to
-  `time.Now`) for deterministic tests.
+  `time.Now`) for deterministic tests. `ChainSelector` propagates the same
+  `nowFn` into each `PeerChainTip` it creates, so `PeerChainTip.IsStale`
+  (`StaleTipThreshold`) is driven by the identical clock instead of a separate
+  `time.Now()` call — a test can hold both the stall clock and per-peer
+  staleness fixed and advance them together.
 
 The existing equal-tip incumbent preservation (when `ComparePraosTips` returns
 `ChainEqual`, and the same-block transport tiebreaker) is preserved and runs
@@ -8585,13 +8640,54 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   side of the split, not with `blocks_produced`, because they are read at K-1
   (dingo #3484).
 
+  **Zero-stake pools (dingo #4691).** A pool that stays registered but whose
+  delegated stake reaches zero at the K+1 boundary — its only delegator
+  redelegates away or deregisters — is neither of the above: it did not
+  depart the pool set (no retirement, still listed with delegators), and it
+  is not missing input either. `rewardStakeDistribution`
+  (`ledger/snapshot/rotation.go`) correctly drops zero-stake pools before
+  building `reward_pool_input`, so such a pool simply never gets a K+1 row,
+  and neither departure route above can classify it: `pool_stake_snapshot`
+  membership proves nothing here (the pool genuinely has no reward-input row,
+  but it also never "left"), and the `epoch_summary.TotalPoolCount` fallback
+  can structurally never close, because that count includes every delegated
+  pool regardless of stake while `reward_pool_input` only ever held the
+  positive-stake ones — a network with any zero-stake-but-delegated pool has
+  the two permanently mismatched by that pool's own count (observed on
+  Preview: epoch 160 declared 113 pools via `epoch_summary` against 111 real
+  reward-input rows, with `reward_snapshot` for the same epoch reporting
+  `total_pool_count=111`, `excluded_active_stake=0`).
+
+  `checkEpoch` resolves this with a third, independent completeness proof:
+  `RewardParitySource.GetRewardSnapshot` reads the mark `reward_snapshot` row
+  for the K+1 epoch, whose `TotalPoolCount` — unlike `epoch_summary`'s — is
+  written by `buildRewardStateInputs` from exactly the set `reward_pool_input`
+  holds rows for. When that count equals the size of the K+1 reward-input set
+  *and* `ExcludedActiveStake` is known and zero (so no degraded pool's
+  exclusion, dingo #4025, is hiding inside the gap), the reward-input set is
+  proven to be the network's complete positive-stake pool set, and any pool
+  absent from it genuinely has zero stake for a proven reason. `ComparePoolEpoch`
+  reports that case as `pool_zero_stake` rather than `pool_departed` — the pool
+  never left the network, so folding it into the departure category would
+  misstate that — and rather than `dingo_db_missing`, since it is not a gap in
+  Dingo's own computation. `reward_snapshot` rows are retained for the life of
+  the database (never pruned by `cleanupOldSnapshots`), so this proof survives
+  the same snapshot-retention window that closes off `pool_stake_snapshot`
+  membership for a trailing observer. A nonzero or unknown
+  `ExcludedActiveStake` leaves the route closed and the stricter
+  `dingo_db_missing` classification stands, the same fail-closed shape as the
+  other two routes.
+
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (absence may be transient — either the epoch
 closed within --grace-hours, or the chain tip has not yet reached the boundary
 that applies this stake epoch's rewards; see "Reward timing" below),
 `pool_departed` (informational: the pool left the pool set
-at K+1, so its epoch-K block count has no row to live on), plus #3097's
+at K+1, so its epoch-K block count has no row to live on), `pool_zero_stake`
+(informational: the pool is still registered but its delegated stake reached
+zero at K+1, proven via `reward_snapshot`'s own pool count rather than
+`epoch_summary`'s — see "Zero-stake pools" above), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
 reward_type, pool) row within one side — a data-integrity problem, not a
@@ -8691,10 +8787,11 @@ second sync:
 - **`DatabaseSource`** (same file) is the narrow, in-process adapter: it
   wraps an already-open, live `*database.Database` and reads
   `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
-  `reward_account_output` through the existing typed `MetadataStore`
-  accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
-  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`, and
-  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above) inside a
+  `reward_account_output`/`reward_snapshot` through the existing typed
+  `MetadataStore` accessors (`GetEpochSummary`, `GetRewardAdaPots`,
+  `GetRewardPoolInputs`, `GetRewardPoolOutputs`, `GetRewardAccountOutputs`,
+  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above, and
+  `GetRewardSnapshot` for the zero-stake completeness proof above) inside a
   fresh read-only transaction per call — the same tables `ledger/snapshot/rotation.go`
   already populates at every epoch boundary, with no new table and no
   metadata export. `GetRewardAccountOutputs` is what #3097's per-account
@@ -8894,6 +8991,36 @@ second sync:
     may already have failed — cannot be read as the epoch's own answer. The
     observer's `epoch validated` log line and `reportError`'s synthesized
     `ERROR` carry that set too.
+  - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this,
+    a FAIL/ERROR result was visible only by grepping the node's log or
+    querying `check_epoch_status`/`check_mismatches` directly. `Observer
+    .emitResult` — the single choke point every `OnResult` call already goes
+    through (`processEpoch`'s and `processAccountEpoch`'s success paths, and
+    `reportError`'s synthesized `ERROR` path) — also calls
+    `metrics.recordResult`, so all three are covered from one call site:
+    `dingo_koiosparity_epoch_result_total` (by network/queue/status),
+    `dingo_koiosparity_mismatch_total` (by network/queue/category/severity, mirroring
+    `check_mismatches.category`), `dingo_koiosparity_last_checked_epoch`, and
+    `dingo_koiosparity_epoch_mismatch_count` (mirroring
+    `check_epoch_status.mismatch_count`). Every series carries a `queue`
+    label (`aggregate`/`account`, from the result's `CheckedScopes`): both
+    queues emit a result for the same epoch and the account queue can lag
+    arbitrarily, so a shared gauge would let a late account-queue PASS
+    overwrite the aggregate queue's latest FAIL. `dingo_koiosparity_last_fail_epoch`/
+    `_last_error_epoch` are deliberately sticky — set on a FAIL/ERROR result
+    and never cleared by a later PASS — so a stale, undiagnosed mismatch does
+    not silently disappear from a dashboard. The metric's severity label comes
+    from `severityLabel`, a thin wrapper over `severityOf` (the same
+    classification `DetermineStatus`/`CountSignificant` already use), so the
+    label can never drift from the persisted `Status`. `ObserverConfig
+    .PromRegistry`, wired from `node_koiosparity.go`'s
+    `n.config.promRegistry`, follows every other component's own
+    `PromRegistry` field; `newMetrics` returns nil for a nil registerer (the
+    standalone `cmd/koios-parity` CLI, and any test that builds an
+    `ObserverConfig` without one), and every `recordResult` call tolerates a
+    nil receiver. A live restore/truncate re-runs `startKoiosParityObserver`
+    against the same registry, so `newMetrics` reuses already-registered
+    collectors instead of registering them again.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/

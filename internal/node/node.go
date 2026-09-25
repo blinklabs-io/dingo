@@ -752,6 +752,11 @@ func buildDingoConfig(
 		dingo.WithGenesisCorroborationPeers(
 			cfg.GenesisBootstrap.CorroborationPeers,
 		),
+		dingo.WithGenesisLimitOnPatience(
+			cfg.GenesisBootstrap.LimitOnPatienceEnabled,
+			cfg.GenesisBootstrap.LimitOnPatienceCapacity,
+			cfg.GenesisBootstrap.LimitOnPatienceRate,
+		),
 		dingo.WithBootstrapPromotionMinDiversityGroups(
 			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
 		),
