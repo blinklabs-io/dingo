@@ -1702,7 +1702,7 @@ func parsePoolMetadata(
 }
 
 // parseVState decodes the voting/DRep state.
-// VState = [dreps, ccHotKeys, numDormantEpochs, ...]
+// VState = [dreps, committeeState, numDormantEpochs, ...].
 func parseVState(data []byte) (
 	[]ParsedDRep, []ParsedCommitteeHotKey, []Credential, uint64, error,
 ) {
@@ -1726,8 +1726,22 @@ func parseVState(data []byte) (
 		)
 	}
 	var dormant uint64
-	if len(vs) > 2 {
-		dormant, err = parseDormantEpochCount(vs[2])
+	dormantIndex := 2
+	if len(vs) > 3 && !isCborArray(vs[1]) {
+		_, hotKeysErr := decodeMapEntries(vs[1])
+		_, resignationsErr := decodeMapEntries(vs[2])
+		if hotKeysErr == nil && resignationsErr == nil {
+			// Older encodings flatten CommitteeState into ccHotKeys and ccRes.
+			dormantIndex = 3
+		}
+	}
+	if len(vs) > dormantIndex {
+		if !isCborUnsigned(vs[dormantIndex]) {
+			return nil, nil, nil, 0, fmt.Errorf(
+				"parsing dormant epoch count: expected unsigned CBOR value",
+			)
+		}
+		dormant, err = parseDormantEpochCount(vs[dormantIndex])
 		if err != nil {
 			return nil, nil, nil, 0, fmt.Errorf("parsing dormant epoch count: %w", err)
 		}

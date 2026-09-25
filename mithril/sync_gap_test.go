@@ -38,6 +38,7 @@ import (
 
 type mockGapGovernanceTransaction struct {
 	hash               lcommon.Blake2b256
+	certificates       []lcommon.Certificate
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
 	isValid            bool
@@ -100,7 +101,7 @@ func (m *mockGapGovernanceTransaction) Collateral() []lcommon.TransactionInput {
 }
 
 func (m *mockGapGovernanceTransaction) Certificates() []lcommon.Certificate {
-	return nil
+	return m.certificates
 }
 
 func (m *mockGapGovernanceTransaction) ProtocolParameterUpdates() (
@@ -354,7 +355,7 @@ func testGapConwayProtocolParameters() *conway.ConwayProtocolParameters {
 	}
 }
 
-func TestProcessGapBlockTransactionsProcessesGovernance(
+func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -425,6 +426,36 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 			},
 		},
 	}
+	drepCred := testGapHash28("drep-voter")
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drepCred,
+		Active:        true,
+	}))
+	var drepVoterHash [28]byte
+	copy(drepVoterHash[:], drepCred)
+	drepVoter := &lcommon.Voter{
+		Type: lcommon.VoterTypeDRepKeyHash,
+		Hash: drepVoterHash,
+	}
+	voteTx.votingProcedures[drepVoter] = map[*lcommon.GovActionId]lcommon.VotingProcedure{
+		actionID: {Vote: models.VoteYes},
+	}
+
+	var deregHash lcommon.Blake2b256
+	copy(deregHash[:], testGapHash32("drep-deregistration-tx"))
+	deregTx := &mockGapGovernanceTransaction{
+		hash:    deregHash,
+		isValid: true,
+		certificates: []lcommon.Certificate{&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   0,
+				Credential: lcommon.NewBlake2b224(drepCred),
+			},
+			Amount: 500,
+		}},
+	}
 
 	point := ocommon.Point{
 		Slot: 1000,
@@ -436,6 +467,8 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 	copy(proposalTxHashArray[:], proposalTxHash.Bytes())
 	var voteTxHashArray [32]byte
 	copy(voteTxHashArray[:], voteTxHash.Bytes())
+	var deregTxHashArray [32]byte
+	copy(deregTxHashArray[:], deregHash.Bytes())
 	// The TxOffsets entries below are placeholders, not real offsets
 	// into a stored block: the test builds proposalTxHash from the
 	// in-memory proposalBodyCbor and never persists that CBOR to the
@@ -461,6 +494,12 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 				ByteOffset: 1,
 				ByteLength: 1,
 			},
+			deregTxHashArray: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteOffset: 2,
+				ByteLength: 1,
+			},
 		},
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
@@ -470,7 +509,7 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
-		[]lcommon.Transaction{proposalTx, voteTx},
+		[]lcommon.Transaction{proposalTx, voteTx, deregTx},
 		offsets,
 		100,
 		conway.EraIdConway,

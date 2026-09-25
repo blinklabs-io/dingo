@@ -7561,6 +7561,13 @@ batch only when it is non-empty, hash-linked from the requested start point,
 and terminates at the exact requested end point; a mismatch falls through to
 the next bootstrap peer before any block is stored.
 
+When that compatibility path replays a gap transaction, it applies governance
+effects in ledger order: votes, DRep registration/update activity, proposals,
+then DRep deregistration cleanup. A deregistration-only transaction still
+clears that DRep's votes on active proposals. Conway certificate-state import
+also preserves the dormant-epoch count from both nested VState and historical
+flattened committee-state encodings, applying it to active DRep expiries.
+
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce`, where the carried
 `LastEpochBlockNonce` is cardano-ledger's `praosStateLastEpochBlockNonce`:

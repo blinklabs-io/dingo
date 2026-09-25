@@ -555,6 +555,38 @@ func TestParseVStateAddsDormantEpochsToDRepExpiry(t *testing.T) {
 	require.Equal(t, uint64(13), dreps[0].ExpiryEpoch)
 }
 
+func TestParseVStateReadsDormancyAfterFlattenedCommitteeState(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x47}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	_, resignMap := committeeVStateFixture(t)
+	hotMap := []byte{0xa0}
+
+	encodedVState, err := cbor.Encode([]any{
+		cbor.RawMessage(drepMap),
+		cbor.RawMessage(hotMap),
+		cbor.RawMessage(resignMap),
+		uint64(3),
+	})
+	require.NoError(t, err)
+
+	dreps, hotKeys, resignations, dormant, err := parseVState(encodedVState)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormant)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(13), dreps[0].ExpiryEpoch)
+	require.Empty(t, hotKeys)
+	require.Len(t, resignations, 1)
+}
+
 func toFixed28(src []byte) [28]byte {
 	var dst [28]byte
 	copy(dst[:], src)
