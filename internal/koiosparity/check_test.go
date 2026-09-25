@@ -1747,7 +1747,10 @@ func seedRewardSnapshotForZeroStakeProof(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
+	)
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 	var excluded any
