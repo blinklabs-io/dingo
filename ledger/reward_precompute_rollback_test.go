@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -104,6 +105,56 @@ func TestRollbackRequeuesRewardPrecompute(t *testing.T) {
 				"a rolled-away prefilter retry must not replace fresh work")
 		})
 	}
+}
+
+func TestRollbackTransactionFailureRestoresRewardPrecompute(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	nonce := testHashBytes("reward-epoch")
+	require.NoError(t, ls.db.SetEpoch(
+		0, 3, nonce, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1000, 100, nil,
+	))
+	epoch, err := ls.db.Metadata().GetEpoch(3, nil)
+	require.NoError(t, err)
+	ls.currentEpoch = *epoch
+	ls.currentEra = eras.ShelleyEraDesc
+	ls.rewardPrecomputeRunning = true
+	queued := &event.EpochTransitionEvent{
+		NewEpoch:     4,
+		BoundarySlot: 300,
+		EpochNonce:   nonce,
+	}
+	ls.rewardPrecomputePending = queued
+	retry := &stakeRewardPrecomputeRetry{
+		epochEvent: event.EpochTransitionEvent{NewEpoch: 4},
+		cutoffSlot: 300,
+		generation: ls.rewardInputGeneration.Load(),
+	}
+	ls.rewardPrecomputeRetry = retry
+	transactionErr := errors.New("injected rollback transaction failure")
+	failLedgerRollbackAfterChainTruncation(t, ls, transactionErr)
+
+	err = ls.rollbackWithOptions(fixture.ancestorTip.Point, false, false)
+
+	require.ErrorIs(t, err, transactionErr)
+	ls.rewardPrecomputeMu.Lock()
+	defer ls.rewardPrecomputeMu.Unlock()
+	require.NotNil(t, ls.rewardPrecomputePending,
+		"a failed rollback must restore the queued transition")
+	require.Equal(t, queued.NewEpoch, ls.rewardPrecomputePending.NewEpoch)
+	require.Equal(t, queued.BoundarySlot, ls.rewardPrecomputePending.BoundarySlot)
+	require.Equal(t, queued.EpochNonce, ls.rewardPrecomputePending.EpochNonce)
+	require.NotNil(t, ls.rewardPrecomputeRetry,
+		"a failed rollback must restore the deferred prefilter retry")
+	require.Equal(t, retry.cutoffSlot, ls.rewardPrecomputeRetry.cutoffSlot)
+	require.Equal(t, retry.epochEvent.NewEpoch,
+		ls.rewardPrecomputeRetry.epochEvent.NewEpoch)
+	require.Equal(t, ls.rewardInputGeneration.Load(),
+		ls.rewardPrecomputeRetry.generation,
+		"the restored retry must use the new stable generation")
 }
 
 func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {

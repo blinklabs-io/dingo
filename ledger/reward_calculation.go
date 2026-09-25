@@ -193,6 +193,13 @@ type stakeRewardPrecomputeRetry struct {
 	generation uint64
 }
 
+type rewardPrecomputeRollbackSnapshot struct {
+	pending      *event.EpochTransitionEvent
+	retry        *stakeRewardPrecomputeRetry
+	committed    bool
+	reloadFailed bool
+}
+
 // reportSkips distinguishes the authoritative application from the
 // opportunistic precompute that runs the same calculation ahead of it. Only
 // the authoritative caller passes true: a precompute that finds an input
