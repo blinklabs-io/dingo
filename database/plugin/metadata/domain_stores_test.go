@@ -95,8 +95,11 @@ var governanceStoreMethods = []string{
 	"GetDRepDelegators",
 	"GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
+	"GetDormantDRepEpochs",
 	"UpdateDRepActivity",
 	"BumpDormantDRepExpiries",
+	"ResetDormantDRepEpochs",
+	"SetImportedDormantDRepEpochs",
 	"GetExpiredDReps",
 	"RestoreDrepStateAtSlot",
 
