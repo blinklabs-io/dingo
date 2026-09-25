@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -140,6 +141,134 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func TestBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.SetDelegatorInactivityEnabled(false)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+
+	stakeKeyBytes := bytes.Repeat([]byte{0x51}, lcommon.AddressHashSize)
+	stakeKey := lcommon.NewBlake2b224(stakeKeyBytes)
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: stakeKey,
+	}
+	registration := &lcommon.StakeRegistrationCertificate{
+		CertType:        uint(lcommon.CertificateTypeStakeRegistration),
+		StakeCredential: credential,
+	}
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x52}, lcommon.AddressHashSize),
+		stakeKeyBytes,
+	)
+	require.NoError(t, err)
+	_, err = db.GetAccountByCredential(0, stakeKeyBytes, true, nil)
+	require.ErrorIs(t, err, models.ErrAccountNotFound)
+
+	makeTransaction := func(
+		id byte,
+		certificates []lcommon.Certificate,
+		withdrawals map[*lcommon.Address]uint64,
+	) lcommon.Transaction {
+		idBytes := bytes.Repeat([]byte{id}, 32)
+		input, inputErr := mockledger.NewTransactionInputBuilder().
+			WithTxId(bytes.Repeat([]byte{id + 1}, 32)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, inputErr)
+		output, outputErr := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, outputErr)
+
+		tx := mockledger.NewTransactionBuilder().WithCertificates(certificates...)
+		tx.WithId(idBytes)
+		tx.WithInputs(input)
+		tx.WithOutputs(output)
+		tx.WithWithdrawals(withdrawals)
+		tx.WithValid(true)
+		built, buildErr := tx.Build()
+		require.NoError(t, buildErr)
+		return built
+	}
+	makeOffsets := func(
+		tx lcommon.Transaction,
+		slot uint64,
+	) *database.BlockIngestionResult {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+		for _, produced := range tx.Produced() {
+			var producedTxID [32]byte
+			copy(producedTxID[:], produced.Id.Id().Bytes())
+			utxoOffsets[database.UtxoRef{
+				TxId:      producedTxID,
+				OutputIdx: produced.Id.Index(),
+			}] = database.CborOffset{BlockSlot: slot, ByteLength: 1}
+		}
+		return &database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				txHash: {BlockSlot: slot, ByteLength: 1},
+			},
+			UtxoOffsets: utxoOffsets,
+		}
+	}
+	process := func(
+		tx lcommon.Transaction,
+		slot uint64,
+	) error {
+		return backfill.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			ocommon.Point{
+				Slot: slot,
+				Hash: bytes.Repeat([]byte{byte(slot)}, 32),
+			},
+			0,
+			eras.ConwayEraDesc.Id,
+			nil,
+			makeOffsets(tx, slot),
+			acc,
+			txn,
+			nil,
+			true,
+		)
+	}
+
+	registrationTx := makeTransaction(
+		0x61,
+		[]lcommon.Certificate{registration},
+		nil,
+	)
+	require.NoError(t, process(registrationTx, 100))
+
+	withdrawalTx := makeTransaction(
+		0x63,
+		nil,
+		map[*lcommon.Address]uint64{&address: 1},
+	)
+	require.NoError(t, process(withdrawalTx, 200))
+	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+
+	account, err := db.GetAccountByCredential(0, stakeKeyBytes, true, nil)
+	require.NoError(t, err)
+	assert.True(t, account.Active)
+	count, err := db.CountAccountWithdrawalHistoryByCredential(
+		0, stakeKeyBytes, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
 }
 
 func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
