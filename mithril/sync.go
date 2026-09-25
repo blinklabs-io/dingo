@@ -551,7 +551,7 @@ func Sync(
 		}
 		if !repairPending || mode == syncModeBootstrap {
 			return SyncResult{}, errors.New(
-				"Mithril reward-state repair requires a pending repair marker " +
+				"mithril reward-state repair requires a pending repair marker " +
 					"on an existing database",
 			)
 		}
