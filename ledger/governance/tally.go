@@ -53,9 +53,11 @@ type ProposalTally struct {
 }
 
 // TallyContext carries the inputs needed to tally a proposal.
-// StakeEpoch is the epoch whose "mark" snapshot provides SPO stake
-// distribution — callers should pass currentEpoch-2 so the rotation
-// lines up with the "Go" snapshot used for voting.
+// StakeEpoch is the epoch whose "mark" snapshot provides the SPO stake
+// distribution. The boundary tick passes stakeEpochFor(newEpoch), which
+// resolves to newEpoch itself; the mid-epoch ratifiability check passes
+// predictedBoundaryStakeEpochFor(currentEpoch), which is a different and
+// necessarily older snapshot. Both doc comments explain why.
 type TallyContext struct {
 	DB           *database.Database
 	Txn          *database.Txn
@@ -86,6 +88,7 @@ type TallyContext struct {
 // counts in the denominator only while its cold credential is seated, its term
 // is current, and it has an active hot-key authorization.
 type CommitteeVotingState struct {
+	CommitteePresent      bool
 	ActiveMemberCount     int
 	MemberHotCredentials  []string
 	HotCredentialPresence map[string]struct{}
@@ -160,6 +163,7 @@ func LoadCommitteeVotingState(
 	}
 
 	return &CommitteeVotingState{
+		CommitteePresent:      len(members) > 0,
 		ActiveMemberCount:     len(memberHotCredentials),
 		MemberHotCredentials:  memberHotCredentials,
 		HotCredentialPresence: hotCredentialPresence,

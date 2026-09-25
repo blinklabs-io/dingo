@@ -96,6 +96,12 @@ func (n *listPaginationNode) AccountTransactions(
 	return []AccountTransactionInfo{}, 0, nil
 }
 
+// TestListRoutesRejectOutOfRangePagination is the only test that drives the
+// six paginated account routes through the router, so it is the only guard on
+// handlePaginatedAccountRequest's parse gate: removing that gate leaves every
+// other test in this package green. It is also the only test that pins the
+// parsed defaults (100/1/asc) reaching the adapter, since nothing else
+// references DefaultPaginationCount or DefaultPaginationPage.
 func TestListRoutesRejectOutOfRangePagination(t *testing.T) {
 	routes := []string{
 		"/api/v0/pools/extended",

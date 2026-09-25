@@ -164,6 +164,7 @@ type observedLedgerState struct {
 // validates while still reporting as "routed".
 var (
 	_ common.LedgerState            = (*observedLedgerState)(nil)
+	_ common.EpochState             = (*observedLedgerState)(nil)
 	_ eras.CommitteeCredentialState = (*observedLedgerState)(nil)
 )
 

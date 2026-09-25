@@ -2181,132 +2181,81 @@ func (b *Blockfrost) handleAccount(
 	writeJSON(w, http.StatusOK, AccountResponse(account))
 }
 
-func (b *Blockfrost) handleAccountAssociatedAddresses(
+func handlePaginatedAccountRequest[Item, Response any](
+	b *Blockfrost,
 	w http.ResponseWriter,
 	r *http.Request,
+	fetch func(string, PaginationParams) ([]Item, int, error),
+	convert func(Item) Response,
+	errorMessage string,
 ) {
 	params, ok := parsePaginationOrWriteError(w, r)
 	if !ok {
 		return
 	}
-	items, total, err := b.node.AccountAssociatedAddresses(
-		r.PathValue("stake_address"),
-		params,
-	)
+	items, total, err := fetch(r.PathValue("stake_address"), params)
 	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account addresses",
-		)
+		b.writeAccountError(w, err, errorMessage)
 		return
 	}
 	SetPaginationHeaders(w, total, params)
-	resp := make(
-		[]AccountAssociatedAddressResponse,
-		0,
-		len(items),
-	)
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountAssociatedAddressResponse(item),
-		)
+	resp := make([]Response, len(items))
+	for i, item := range items {
+		resp[i] = convert(item)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (b *Blockfrost) handleAccountAssociatedAddresses(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountAssociatedAddresses,
+		func(item AccountAssociatedAddressInfo) AccountAssociatedAddressResponse {
+			return AccountAssociatedAddressResponse(item)
+		},
+		"failed to retrieve account addresses",
+	)
 }
 
 func (b *Blockfrost) handleAccountDelegationHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountDelegationHistory(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountDelegationHistory,
+		func(item AccountDelegationHistoryInfo) AccountDelegationHistoryResponse {
+			return AccountDelegationHistoryResponse(item)
+		},
+		"failed to retrieve account delegation history",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account delegation history",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make(
-		[]AccountDelegationHistoryResponse,
-		0,
-		len(items),
-	)
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountDelegationHistoryResponse(item),
-		)
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) handleAccountRegistrationHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountRegistrationHistory(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountRegistrationHistory,
+		func(item AccountRegistrationHistoryInfo) AccountRegistrationHistoryResponse {
+			return AccountRegistrationHistoryResponse(item)
+		},
+		"failed to retrieve account registration history",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account registration history",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make(
-		[]AccountRegistrationHistoryResponse,
-		0,
-		len(items),
-	)
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountRegistrationHistoryResponse(item),
-		)
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) handleAccountRewardHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
-	if !ok {
-		return
-	}
-	items, total, err := b.node.AccountRewardHistory(
-		r.PathValue("stake_address"),
-		params,
+	handlePaginatedAccountRequest(
+		b, w, r, b.node.AccountRewardHistory,
+		func(item AccountRewardHistoryInfo) AccountRewardHistoryResponse {
+			return AccountRewardHistoryResponse(item)
+		},
+		"failed to retrieve account reward history",
 	)
-	if err != nil {
-		b.writeAccountError(
-			w, err, "failed to retrieve account reward history",
-		)
-		return
-	}
-	SetPaginationHeaders(w, total, params)
-	resp := make([]AccountRewardHistoryResponse, 0, len(items))
-	for _, item := range items {
-		resp = append(
-			resp,
-			AccountRewardHistoryResponse(item),
-		)
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) writeAccountError(

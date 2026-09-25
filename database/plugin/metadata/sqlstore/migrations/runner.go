@@ -926,8 +926,9 @@ func parseDropColumnStatement(statement string) (string, string, bool) {
 
 // parseMySQLDropIndexStatement extracts the index and table names from the
 // translated "DROP INDEX <name> ON <table>" MySQL form (see
-// translateSchemaSQLInSchema's `idx_asset_name_hex`/
-// `idx_committee_member_cold_cred_hash` rewrites). SQLite and PostgreSQL keep
+// translateSchemaSQLInSchema's `idx_asset_name_hex`/`idx_asset_amount`/
+// `idx_asset_fingerprint`/`idx_committee_member_cold_cred_hash` rewrites).
+// SQLite and PostgreSQL keep
 // "DROP INDEX IF EXISTS", which those engines already tolerate on replay
 // without reaching this guard at all, so only the MySQL form needs it.
 func parseMySQLDropIndexStatement(statement string) (string, string, bool) {

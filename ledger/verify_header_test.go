@@ -628,24 +628,19 @@ func TestVerifyBlockHeader_TamperedVRFProof(t *testing.T) {
 	)
 }
 
-// TestVerifyBlockHeader_TamperedOpCertSignature verifies that the
-// VerifyBlock-based crypto path (verifyBlockHeaderHex) does not, by itself,
-// validate the OpCert cold-key signature: it runs with SkipStakePoolValidation.
-// Inbound OpCert validation lives in the sibling verifyOpCertHeaderCrypto
-// (exercised by verify_opcert_test.go), which verifyBlockHeaderCrypto invokes
-// alongside this path. This test pins the boundary so the two layers stay
-// distinct.
+// TestVerifyBlockHeader_TamperedOpCertSignature verifies that the generic
+// VerifyBlock crypto path rejects an OpCert whose hot KES key was not
+// authorized by the claimed pool cold key. Dingo's sibling OpCert validation
+// remains defense in depth and additionally enforces KES-period expiry.
 func TestVerifyBlockHeader_TamperedOpCertSignature(t *testing.T) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{4}, 77, tamperOpCertSig)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
-	// The hex/VerifyBlock layer does not verify the OpCert signature, so
-	// tampering does not cause an error here; verifyOpCertHeaderCrypto does.
-	assert.NoError(
+	assert.ErrorContains(
 		t,
 		err,
-		"OpCert signature not validated by the VerifyBlock crypto layer",
+		"operational certificate cold signature invalid",
 	)
 }
 
@@ -1003,7 +998,7 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 432 }
 	}`
-	err := cfg.LoadByronGenesisFromReader(
+	err := loadByronGenesisForTest(t, cfg,
 		strings.NewReader(byronGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1650,7 +1645,7 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
@@ -1700,7 +1695,7 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),

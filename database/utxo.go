@@ -57,9 +57,10 @@ var errExactAddressCandidateScanLimit = errors.New(
 
 // deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
 // Metadata remains the authoritative source of truth; blob deletions are
-// supplementary. The caller [*Txn] is ignored — this function always creates
-// and commits its own blob-only batches via the [Database], so callers should
-// not expect blob deletes to participate in any outer transaction.
+// supplementary. A caller [*Txn] holding a blob handle stages the deletes in
+// that transaction, so they commit or roll back with the metadata delete they
+// accompany; without one, this function creates and commits its own blob-only
+// batches via the [Database].
 //
 // Failures do not stop the remaining deletes, but they are counted and
 // reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
@@ -117,7 +118,34 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 		if blob == nil {
 			return types.ErrBlobStoreUnavailable
 		}
-		deleteBatch(blob, txn.Blob(), utxos)
+		// Stage only what that transaction can still hold. Past its budget
+		// the store rejects every further staged write, including the
+		// commit timestamp Txn.Commit puts into this same transaction, so
+		// an unbounded stage costs the caller its whole commit rather than
+		// just the tail of this set (blinklabs-io/dingo#4657). What is left
+		// unstaged is counted with the deletes that failed and reported
+		// through ErrBlobDeleteIncomplete below: the metadata naming these
+		// objects goes away either way, so both are orphans rather than
+		// silently dropped work.
+		staged := len(utxos)
+		if staged > 0 {
+			staged = stagedBlobDeleteLimit(
+				blob,
+				txn.Blob(),
+				len(types.UtxoBlobKey(utxos[0].TxId, utxos[0].OutputIdx)),
+				staged,
+			)
+		}
+		deleteBatch(blob, txn.Blob(), utxos[:staged])
+		if skipped := len(utxos) - staged; skipped > 0 {
+			deleteErrors += skipped
+			d.logger.Warn(
+				"UTxO blob deletes left unstaged to keep the transaction committable",
+				"skipped", skipped,
+				"staged", staged,
+				"total", len(utxos),
+			)
+		}
 	} else {
 		for start := 0; start < len(utxos); start += batchSize {
 			end := min(start+batchSize, len(utxos))

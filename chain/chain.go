@@ -1984,8 +1984,24 @@ func (c *Chain) rollbackLocked(
 	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
-	// Collect and delete rolled-back blocks in a single pass
 	var rolledBackBlocks []models.Block
+	// An ephemeral rollback mutates an in-memory slice one block at a time.
+	// Resolve the complete undo payload first so a corrupt lookup cannot leave
+	// the chain shortened with an incomplete rollback event.
+	if !c.persistent {
+		for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
+			block, err := c.blockByIndexLocked(i)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"preflight rollback block at index %d: %w",
+					i,
+					err,
+				)
+			}
+			rolledBackBlocks = append(rolledBackBlocks, block)
+		}
+	}
+	// Delete only after every fallible ephemeral lookup has succeeded.
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
 			// Remove block from persistent store, returns the removed block
@@ -1995,23 +2011,8 @@ func (c *Chain) rollbackLocked(
 					"remove block at index %d: %w", i, err,
 				)
 			}
-			if c.eventBus != nil {
-				rolledBackBlocks = append(rolledBackBlocks, block)
-			}
+			rolledBackBlocks = append(rolledBackBlocks, block)
 		} else {
-			// Collect block for event emission before deletion
-			if c.eventBus != nil {
-				block, err := c.blockByIndexLocked(i)
-				if err != nil {
-					slog.Default().Warn(
-						"failed to get block for rollback event",
-						"index", i,
-						"error", err,
-					)
-				} else {
-					rolledBackBlocks = append(rolledBackBlocks, block)
-				}
-			}
 			// Blocks at or below the fork point belong to the
 			// common prefix held by the primary chain, not to this
 			// fork's in-memory buffer, so there is nothing to delete
@@ -2076,6 +2077,20 @@ func (c *Chain) rollbackLocked(
 			// Don't update rollback point if the iterator already has an older one pending
 			if iter.needsRollback && point.Slot > iter.rollbackPoint.Slot {
 				continue
+			}
+			// The iterator cannot deliver blocks while a rollback marker is
+			// pending. A later rollback may remove regrown blocks above the
+			// first marker that were never delivered, but it can also remove
+			// blocks below that marker that were delivered before it. Retain
+			// the former payload and append only the latter.
+			if !iter.needsRollback {
+				iter.rollbackBlocks = slices.Clone(rolledBackBlocks)
+			} else if point.Slot < iter.rollbackPoint.Slot {
+				for _, block := range rolledBackBlocks {
+					if block.Slot <= iter.rollbackPoint.Slot {
+						iter.rollbackBlocks = append(iter.rollbackBlocks, block)
+					}
+				}
 			}
 			iter.rollbackPoint = point
 			iter.needsRollback = true
@@ -2420,6 +2435,38 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 	return startPoint, endPoint
 }
 
+// HeaderRangeAfter returns the range of up to count queued headers starting
+// skip entries after the head of the queue, and how many headers actually lie
+// in that window.
+//
+// HeaderRange always starts at c.headers[0], because headers only pop once
+// their block is applied -- not when a batch is dispatched for them -- so
+// calling it again before an in-flight batch's blocks are applied returns the
+// identical range. A caller that wants to describe a second, not-yet-fetched
+// batch beyond one already claimed (skip is the header count that batch
+// already covers) needs a windowed read instead.
+//
+// available is 0 when skip is at or past the end of the queue and less than
+// count when the queue is shorter than skip+count; callers must check it
+// rather than treating a zero-value start/end pair as a valid single-header
+// range, since skip==0, count==0 is also a legitimate call shape.
+func (c *Chain) HeaderRangeAfter(
+	skip, count int,
+) (start, end ocommon.Point, available int) {
+	if c == nil || count <= 0 || skip < 0 {
+		return ocommon.Point{}, ocommon.Point{}, 0
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if skip >= len(c.headers) {
+		return ocommon.Point{}, ocommon.Point{}, 0
+	}
+	available = min(count, len(c.headers)-skip)
+	start = c.headers[skip].point
+	end = c.headers[skip+available-1].point
+	return start, end, available
+}
+
 // FromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
 // will start at the specified point. Otherwise it will start at the point following the specified point
 func (c *Chain) FromPoint(
@@ -2737,8 +2784,10 @@ func (c *Chain) iterNext(
 			ret := &ChainIteratorResult{}
 			ret.Point = iter.rollbackPoint
 			ret.Rollback = true
+			ret.RollbackBlocks = iter.rollbackBlocks
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
+			iter.rollbackBlocks = nil
 			if iter.rollbackPoint.Slot > 0 ||
 				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point

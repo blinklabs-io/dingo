@@ -35,7 +35,7 @@ var errRollbackEpochReloadInjected = errors.New(
 
 // getEpochsFailingMetadataStore fails GetEpochs while leaving every other
 // metadata operation -- including the rollback truncation itself -- working,
-// so the injected failure lands exactly where rollbackWithResync reloads
+// so the injected failure lands exactly where rollbackWithBlocks reloads
 // epochCache/currentEra/currentPParams, after the metadata transaction that
 // performs the truncation has already committed.
 type getEpochsFailingMetadataStore struct {
@@ -50,7 +50,7 @@ func (s getEpochsFailingMetadataStore) GetEpochs(
 }
 
 // TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit pins case R3
-// of blinklabs-io/dingo#1649: rollbackWithResync's post-commit reload of
+// of blinklabs-io/dingo#1649: rollbackWithBlocks's post-commit reload of
 // epochCache/currentEra/currentPParams can fail after the metadata truncation
 // has already committed. Today that failure is logged at Warn and the
 // rollback still reports success (nil), leaving those in-memory caches at
@@ -89,7 +89,13 @@ func TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit(
 		fatalErr = err
 	}
 
-	rbErr := ls.rollbackWithResync(fixture.ancestorTip.Point, false)
+	rbErr := ls.rollbackWithBlocksAndIntent(
+		fixture.ancestorTip.Point,
+		nil,
+		false,
+		false,
+		false,
+	)
 
 	require.Error(
 		t,
@@ -138,7 +144,13 @@ func TestRollbackWithResyncSucceedsWithoutFatalWhenReloadWorks(t *testing.T) {
 		fatalCalled = true
 	}
 
-	rbErr := ls.rollbackWithResync(fixture.ancestorTip.Point, false)
+	rbErr := ls.rollbackWithBlocksAndIntent(
+		fixture.ancestorTip.Point,
+		nil,
+		false,
+		false,
+		false,
+	)
 
 	require.NoError(t, rbErr)
 	require.False(
@@ -150,7 +162,7 @@ func TestRollbackWithResyncSucceedsWithoutFatalWhenReloadWorks(t *testing.T) {
 }
 
 // epochsOverrideMetadataStore returns a fixed epoch list from the
-// transaction-less GetEpochs read rollbackWithResync performs after its
+// transaction-less GetEpochs read rollbackWithBlocks performs after its
 // metadata transaction commits, so a test can steer that reload into a
 // specific era without writing epoch rows the truncation would delete.
 type epochsOverrideMetadataStore struct {
@@ -206,7 +218,7 @@ func (s syncStateReadFailingMetadataStore) GetSyncState(
 }
 
 // TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure covers every
-// post-commit reload failure rollbackWithResync reports, one injection each,
+// post-commit reload failure rollbackWithBlocks reports, one injection each,
 // including a failure the durable tip-floor check runs into as well.
 func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 	t *testing.T,
@@ -325,7 +337,13 @@ func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 				fatalErrs = append(fatalErrs, err)
 			}
 
-			rbErr := ls.rollbackWithResync(fixture.ancestorTip.Point, false)
+			rbErr := ls.rollbackWithBlocksAndIntent(
+				fixture.ancestorTip.Point,
+				nil,
+				false,
+				false,
+				false,
+			)
 
 			var committedErr *rollbackCommittedError
 			require.ErrorAs(t, rbErr, &committedErr)

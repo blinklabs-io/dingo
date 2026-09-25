@@ -2925,7 +2925,7 @@ func fillBasePParamsInfo(
 func fillAlonzoPParamsInfo(
 	info *ProtocolParamsInfo,
 	minPoolCost uint64,
-	coinsPerUtxoByte uint64,
+	coinsPerUtxoUnit uint64,
 	executionCosts lcommon.ExUnitPrice,
 	maxTxExUnits lcommon.ExUnits,
 	maxBlockExUnits lcommon.ExUnits,
@@ -2936,7 +2936,10 @@ func fillAlonzoPParamsInfo(
 ) {
 	// Execution pricing, ex-units, collateral, and coins-per-UTxO sizing only
 	info.MinPoolCost = strconv.FormatUint(minPoolCost, 10)
-	info.CoinsPerUtxoSize = strconv.FormatUint(coinsPerUtxoByte, 10)
+	// Alonzo stores the protocol's per-word value while Babbage and later
+	// store the per-byte value. Blockfrost uses one era-neutral field for
+	// both, so preserve the native unit instead of relabelling it here.
+	info.CoinsPerUtxoSize = strconv.FormatUint(coinsPerUtxoUnit, 10)
 	info.PriceMem = ratToFloat64(executionCosts.MemPrice)
 	info.PriceStep = ratToFloat64(executionCosts.StepPrice)
 	info.MaxTxExMem = exUnitsMemString(maxTxExUnits)
@@ -3829,7 +3832,7 @@ func (a *NodeAdapter) TransactionSubmit(
 	if a.submitter == nil {
 		return "", ErrMempoolUnavailable
 	}
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return "", fmt.Errorf(
 			"%w: determine transaction type: %w",
@@ -3888,7 +3891,7 @@ func (a *NodeAdapter) TransactionSubmit(
 func (a *NodeAdapter) TransactionEvaluate(
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: determine transaction type: %w",

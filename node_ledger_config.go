@@ -155,7 +155,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			connId ouroboros.ConnectionId,
 			start ocommon.Point,
 			end ocommon.Point,
-		) error {
+		) (uint64, error) {
 			return n.ouroboros().
 				BlockfetchClientRequestRange(connId, start, end)
 		},

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -111,19 +112,37 @@ func (ls *LedgerState) applyStakeRewards(
 }
 
 type stakeRewardApplication struct {
-	pparams          lcommon.ProtocolParameters
-	params           rewards.Parameters
-	pots             *models.RewardAdaPots
-	poolOutputs      []*models.RewardPoolOutput
-	accountOutputs   []*models.RewardAccountOutput
-	epochs           stakeRewardEpochs
-	totalRewardPot   uint64
-	availableRewards uint64
-	effectiveRewards uint64
-	undistributed    uint64
-	unspendable      uint64
-	precomputed      bool
-	outputsUpdated   bool
+	pparams        lcommon.ProtocolParameters
+	params         rewards.Parameters
+	pots           *models.RewardAdaPots
+	poolOutputs    []*models.RewardPoolOutput
+	accountOutputs []*models.RewardAccountOutput
+	// reconstructedStakeInputs carries retention-pruned per-credential rows
+	// from the calculation transaction to the transaction that owns the
+	// resulting application. The async precompute calculation is read-only, so
+	// only its guarded write phase may persist these rows. The synchronous path
+	// persists them in the same write transaction that applies the rewards.
+	reconstructedStakeInputs []*models.RewardStakeInput
+	epochs                   stakeRewardEpochs
+	totalRewardPot           uint64
+	availableRewards         uint64
+	effectiveRewards         uint64
+	undistributed            uint64
+	unspendable              uint64
+	precomputed              bool
+	outputsUpdated           bool
+	// totalCirculation, totalBlocks and rewardEfficiency record the global
+	// reward-round inputs that scale every pool's reward by the same factor,
+	// so a uniform network-wide shortfall can be attributed to the input that
+	// caused it (dingo #4660). Each pool's reward is
+	// (beta/sigmaA) * optimalPoolReward(R, sigma), so totalActiveStake moves it
+	// 1:1, reserves move it through both R and sigma, and totalBlocks cancels
+	// between R's efficiency term and beta -- which is why a block-count
+	// undercount cannot produce a uniform shortfall and the pots and snapshot
+	// totals must be logged to tell the remaining candidates apart.
+	totalCirculation uint64
+	totalBlocks      uint64
+	rewardEfficiency *big.Rat
 	// guardedRewardCredentials is the CIP-0163 reward-crediting guard set,
 	// populated only at application time when the delegator-inactivity gate is
 	// on (nil otherwise, so the gate-off path is byte-identical). Its keys are
@@ -277,20 +296,36 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// are retained for the life of the database (see DATABASE.md, Snapshot and
 	// Reward-State Retention). An epoch whose per-credential rows have aged out
 	// therefore still presents complete-looking pots and snapshot rows here.
-	// Skip it, the way an epoch with no pots row is skipped above: proceeding
-	// would hand validateRewardCalculatorInputs a snapshot whose pool stake
-	// cannot reconcile against an empty credential set, and that error fails the
-	// whole epoch rollover. Reaching this needs a rewind across more than the
-	// retained epochs, far beyond k, so it is not expected on a healthy chain.
 	//
-	// Routed through reportSkippedStakeRewards like every other skip in this
-	// function: this used to log inline at Warn with no metric, so the same
-	// permanent-shortfall condition the other three skips count and describe in
-	// detail went untracked by monitoring built on skippedStakeRewardRounds. The
-	// reportSkips gate matches its siblings too, so the opportunistic precompute
-	// pass (which reads the same possibly-not-yet-retained inputs ahead of the
-	// boundary and is expected to miss sometimes) does not double-report a round
-	// the authoritative call still applies.
+	// Rather than skip outright, rebuild the missing per-credential rows from
+	// the same historical CTE the live epoch-boundary capture falls back to
+	// (snapshot.Calculator.getBatchPoolsDelegatedStake /
+	// GetEpochBoundaryRewardStakeInputsForPools), keyed on this epoch's own
+	// retained reward_pool_input pool set and reward_snapshot's captured/
+	// boundary slot. This is exactly the situation `dingo database truncate`
+	// creates: it rolls state back to a slot whose reward-lag epochs (up to 3
+	// behind the resumed tip) already had their reward_stake_input rows aged
+	// out by ordinary retention pruning during the run being truncated, so
+	// resuming finds a retained reward_snapshot/reward_pool_input pair with no
+	// reward_stake_input to match -- not a genuine chain rewind past
+	// retention. Reconstructing here, rather than in the truncate command
+	// itself, also covers the same gap for a live node whose own replay
+	// recovery ever rewinds and reprocesses an epoch boundary older than the
+	// retention window.
+	var reconstructedStakeInputs []*models.RewardStakeInput
+	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
+		rebuilt, rebuildErr := ls.rebuildPrunedRewardStakeInputs(
+			meta, metaTxn, rewardSnapshotEpoch, rewardSnapshot, poolInputs,
+		)
+		if rebuildErr != nil {
+			return nil, false, fmt.Errorf(
+				"rebuild pruned reward stake inputs for epoch %d: %w",
+				rewardSnapshotEpoch, rebuildErr,
+			)
+		}
+		stakeInputs = rebuilt
+		reconstructedStakeInputs = rebuilt
+	}
 	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
 		if reportSkips {
 			ls.reportSkippedStakeRewards(
@@ -419,11 +454,15 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		pots:                        pots,
 		poolOutputs:                 poolOutputs,
 		accountOutputs:              accountOutputs,
+		reconstructedStakeInputs:    reconstructedStakeInputs,
 		totalRewardPot:              result.TotalRewardPot,
 		availableRewards:            result.AvailableRewards,
 		effectiveRewards:            result.EffectiveRewards,
 		undistributed:               result.Undistributed,
 		unspendable:                 result.Unspendable,
+		totalCirculation:            result.TotalCirculation,
+		totalBlocks:                 result.TotalBlocks,
+		rewardEfficiency:            result.Efficiency,
 		snapshotCapturedSlot:        rewardSnapshot.CapturedSlot,
 		snapshotBoundarySlot:        rewardSnapshot.BoundarySlot,
 		snapshotEpochNonce:          rewardSnapshot.EpochNonce,
@@ -447,6 +486,9 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
+	if err := saveReconstructedRewardStakeInputs(meta, metaTxn, app); err != nil {
+		return err
+	}
 
 	// CIP-0163 reward-crediting guard (Mechanism B, Task 10). A pool's reward
 	// (leader) account is credited its leader reward independent of its own
@@ -546,6 +588,12 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"effective_rewards", app.effectiveRewards,
 		"undistributed_rewards", app.undistributed,
 		"unspendable_rewards", app.unspendable,
+		"reserves", uint64(app.pots.Reserves),
+		"fees", uint64(app.pots.Fees),
+		"total_active_stake", uint64(app.snapshotTotalActiveStake),
+		"total_circulation", app.totalCirculation,
+		"total_blocks", app.totalBlocks,
+		"reward_efficiency", rewardEfficiencyLogValue(app.rewardEfficiency),
 	)
 	return nil
 }
@@ -979,6 +1027,9 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		poolOutputs:              poolOutputs,
 		accountOutputs:           accountOutputs,
 		totalRewardPot:           uint64(pots.Rewards),
+		totalCirculation:         totalCirculation,
+		totalBlocks:              totalBlocks,
+		rewardEfficiency:         rewards.Efficiency(totalBlocks, params),
 		precomputed:              true,
 		outputsUpdated:           outputsUpdated,
 		snapshotCapturedSlot:     rewardSnapshot.CapturedSlot,
@@ -2251,6 +2302,9 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 	capturedSlot uint64,
 	boundarySlot uint64,
 ) error {
+	if err := saveReconstructedRewardStakeInputs(meta, metaTxn, app); err != nil {
+		return err
+	}
 	if err := saveStakeRewardOutputs(meta, metaTxn, app); err != nil {
 		return err
 	}
@@ -2273,6 +2327,27 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 		"undistributed_rewards", app.undistributed,
 		"unspendable_rewards", app.unspendable,
 	)
+	return nil
+}
+
+func saveReconstructedRewardStakeInputs(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	app *stakeRewardApplication,
+) error {
+	if app == nil || len(app.reconstructedStakeInputs) == 0 {
+		return nil
+	}
+	if err := meta.SaveRewardStakeInputs(
+		app.reconstructedStakeInputs,
+		metaTxn,
+	); err != nil {
+		return fmt.Errorf(
+			"save reconstructed reward stake inputs for epoch %d: %w",
+			app.epochs.snapshot,
+			err,
+		)
+	}
 	return nil
 }
 
@@ -2581,6 +2656,532 @@ func (ls *LedgerState) reportSkippedStakeRewards(
 			" bootstrap and ledgerstate import warnings for the cause)",
 		args...,
 	)
+}
+
+// rewardStakeReconstructionToleranceRatio bounds how far a pool's
+// reconstructed reward-stake-input total may drift from its retained
+// reward_pool_input.DelegatedStake before rebuildPrunedRewardStakeInputs
+// treats it as corruption rather than accumulated cross-method rounding. A
+// gap passes only when it is within one part in denominator of the pool's
+// stake AND at or below absoluteCeiling lovelace outright -- the second
+// bound keeps a very large pool's one-part-in-a-million allowance from
+// growing large enough to plausibly hide a missing delegator. See the
+// comment at its call site for the observed magnitudes (up to ~6e-9
+// relative) that motivated these values, both well inside a wide safety
+// margin here.
+var rewardStakeReconstructionToleranceRatio = struct {
+	denominator     uint64
+	absoluteCeiling uint64
+}{
+	denominator:     1_000_000,
+	absoluteCeiling: 10_000_000,
+}
+
+// compareRewardStakeInputIdentity is the final ordering key for every
+// reconstruction adjustment, so equal stakes cannot inherit query order.
+func compareRewardStakeInputIdentity(
+	a, b *models.RewardStakeInput,
+) int {
+	if cmp := bytes.Compare(a.PoolKeyHash, b.PoolKeyHash); cmp != 0 {
+		return cmp
+	}
+	if a.CredentialTag < b.CredentialTag {
+		return -1
+	}
+	if a.CredentialTag > b.CredentialTag {
+		return 1
+	}
+	return bytes.Compare(a.StakingKey, b.StakingKey)
+}
+
+func rewardStakeInputLess(a, b *models.RewardStakeInput) bool {
+	if a.Stake != b.Stake {
+		return a.Stake < b.Stake
+	}
+	return compareRewardStakeInputIdentity(a, b) < 0
+}
+
+func rewardStakeInputOutranks(
+	candidate, current *models.RewardStakeInput,
+) bool {
+	return current == nil || rewardStakeInputLess(current, candidate)
+}
+
+// rebuildPrunedRewardStakeInputs reconstructs the per-credential
+// reward_stake_input rows for rewardSnapshotEpoch when GetRewardStakeInputs
+// finds them already aged out by retention pruning, but the epoch's
+// reward_snapshot/reward_pool_input rows (both retained for the life of the
+// database, see DATABASE.md) are still present. It uses the same historical
+// CTE the live epoch-boundary capture falls back to
+// (snapshot.Calculator.getBatchPoolsDelegatedStake /
+// GetEpochBoundaryRewardStakeInputsForPools), keyed on the retained
+// snapshot's own captured/boundary slot. The caller carries the result to the
+// write transaction that owns the reward application; this helper is strictly
+// read-only. Returns (nil, nil) if the reconstruction itself comes back empty,
+// leaving the caller's existing skip path to handle that as before.
+func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	rewardSnapshotEpoch uint64,
+	rewardSnapshot *models.RewardSnapshot,
+	poolInputs []*models.RewardPoolInput,
+) ([]*models.RewardStakeInput, error) {
+	if len(poolInputs) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(poolInputs))
+	poolKeyHashes := make([][]byte, 0, len(poolInputs))
+	for _, poolInput := range poolInputs {
+		key := string(poolInput.PoolKeyHash)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		poolKeyHashes = append(poolKeyHashes, poolInput.PoolKeyHash)
+	}
+	sort.Slice(poolKeyHashes, func(i, j int) bool {
+		return bytes.Compare(poolKeyHashes[i], poolKeyHashes[j]) < 0
+	})
+	// Mirrors snapshot.Manager.expiryEpoch/inactivityPeriod: the CIP-0163 gate
+	// is off unless the operator enabled it, in which case the gate argument
+	// is the snapshot epoch itself (see LedgerStateConfig.DelegatorInactivityEnabled).
+	var expiryEpoch, inactivityPeriod uint64
+	if ls.config.DelegatorInactivityEnabled {
+		expiryEpoch = rewardSnapshotEpoch
+		inactivityPeriod = ls.config.DelegatorInactivity
+	}
+	rebuilt, err := meta.GetEpochBoundaryRewardStakeInputsForPools(
+		poolKeyHashes,
+		rewardSnapshot.CapturedSlot,
+		rewardSnapshot.BoundarySlot,
+		expiryEpoch,
+		inactivityPeriod,
+		metaTxn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reconstruct reward stake inputs: %w", err)
+	}
+	if len(rebuilt) == 0 {
+		return nil, nil
+	}
+	for _, input := range rebuilt {
+		input.Epoch = rewardSnapshotEpoch
+		input.CapturedSlot = rewardSnapshot.CapturedSlot
+		input.BoundarySlot = rewardSnapshot.BoundarySlot
+	}
+	// GetEpochBoundaryRewardStakeInputsForPools has no notion of pool
+	// ownership -- it reconstructs delegated stake from active_delegation,
+	// not from a pool's registered owner-key list -- so every row comes back
+	// with Owner left at its zero value. rewardStakeInputs (the live capture
+	// path) resolves ownership separately, from each pool's certificate
+	// effective for the ended epoch; do the same here so an owner's stake is
+	// flagged and validateRewardCalculatorInputs's owner-stake reconciliation
+	// (poolOwnerStakeByKey vs the Owner-flagged rows) does not see every
+	// pool's owner stake as entirely missing.
+	endedEpoch, err := meta.GetEpoch(rewardSnapshotEpoch, metaTxn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get ended epoch %d for owner resolution: %w",
+			rewardSnapshotEpoch, err,
+		)
+	}
+	if endedEpoch != nil {
+		poolIDs := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
+		for _, hash := range poolKeyHashes {
+			var poolID lcommon.PoolKeyHash
+			copy(poolID[:], hash)
+			poolIDs = append(poolIDs, poolID)
+		}
+		registrations, regErr := meta.GetPoolRegistrationsEffectiveForEpoch(
+			poolIDs,
+			endedEpoch.StartSlot,
+			rewardSnapshotEpoch,
+			rewardSnapshot.CapturedSlot,
+			metaTxn,
+		)
+		if regErr != nil {
+			return nil, fmt.Errorf(
+				"get pool registrations for owner resolution: %w",
+				regErr,
+			)
+		}
+		ownersByPool := make(map[string]map[string]struct{}, len(registrations))
+		for _, registration := range registrations {
+			owners := make(map[string]struct{}, len(registration.Owners))
+			for _, owner := range registration.Owners {
+				owners[models.NewStakeCredentialRef(
+					0, owner.KeyHash,
+				).MapKey()] = struct{}{}
+			}
+			ownersByPool[string(registration.PoolKeyHash)] = owners
+		}
+		for _, input := range rebuilt {
+			owners := ownersByPool[string(input.PoolKeyHash)]
+			if _, ok := owners[models.NewStakeCredentialRef(
+				input.CredentialTag, input.StakingKey,
+			).MapKey()]; ok {
+				input.Owner = true
+			}
+		}
+	}
+	return ls.reconcileRebuiltRewardStakeInputs(
+		rebuilt,
+		poolInputs,
+		rewardSnapshotEpoch,
+	), nil
+}
+
+func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
+	rebuilt []*models.RewardStakeInput,
+	poolInputs []*models.RewardPoolInput,
+	rewardSnapshotEpoch uint64,
+) []*models.RewardStakeInput {
+	// The retained reward_pool_input row for each pool carries the exact
+	// per-pool total the live capture observed at the time (DelegatedStake).
+	// validateRewardCalculatorInputs enforces that the per-credential rows
+	// sum to precisely that total; a retention-pruned epoch never reached
+	// that check before (it was always skipped first), so a disagreement
+	// between the live incremental aggregate and this CTE reconstruction
+	// would otherwise surface there as a hard error instead of the softer
+	// outcome a merely-unavailable epoch gets.
+	//
+	// Observed live (dingo #4578): every disagreement seen so far
+	// is retained-pool-total minus reconstructed, a few to a few hundred
+	// thousand lovelace out of a multi-trillion-lovelace pool (roughly 1e-11
+	// to 6e-9 relative) -- consistent with the two computation paths
+	// accumulating fractional-lovelace rounding differently across many
+	// per-credential reward calculations, not with a missing delegator or
+	// corrupt input (either of which would be a much larger fraction of the
+	// pool's stake). Below rewardStakeReconstructionToleranceRatio, the gap
+	// is folded into the pool's largest credential so the reconstructed set
+	// still reconciles exactly with the retained total; at or above it, this
+	// pool's whole epoch is discarded and falls back to the caller's
+	// existing skip path, the same as before this tolerance existed.
+	poolInputByKey := make(map[string]*models.RewardPoolInput, len(poolInputs))
+	poolKeys := make([]string, 0, len(poolInputs))
+	for _, poolInput := range poolInputs {
+		if poolInput == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward stake inputs contain a nil retained pool",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+			)
+			return nil
+		}
+		key := string(poolInput.PoolKeyHash)
+		if _, ok := poolInputByKey[key]; !ok {
+			poolKeys = append(poolKeys, key)
+		}
+		poolInputByKey[key] = poolInput
+	}
+	sort.Slice(poolKeys, func(i, j int) bool {
+		return bytes.Compare([]byte(poolKeys[i]), []byte(poolKeys[j])) < 0
+	})
+	actualByPool := make(map[string]uint64, len(poolInputByKey))
+	largestInputByPool := make(
+		map[string]*models.RewardStakeInput,
+		len(poolInputByKey),
+	)
+	for _, input := range rebuilt {
+		key := string(input.PoolKeyHash)
+		actualByPool[key] += uint64(input.Stake)
+		if current := largestInputByPool[key]; rewardStakeInputOutranks(
+			input,
+			current,
+		) {
+			largestInputByPool[key] = input
+		}
+	}
+	for _, key := range poolKeys {
+		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
+		expected := uint64(poolInput.DelegatedStake)
+		actual := actualByPool[key]
+		if actual == expected {
+			continue
+		}
+		var diff uint64
+		if expected > actual {
+			diff = expected - actual
+		} else {
+			diff = actual - expected
+		}
+		tolerable := expected > 0 &&
+			diff <= rewardStakeReconstructionToleranceRatio.absoluteCeiling &&
+			diff*rewardStakeReconstructionToleranceRatio.denominator <= expected
+		largest := largestInputByPool[key]
+		if !tolerable || largest == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward stake inputs disagree with the "+
+					"retained pool total; leaving this epoch's reward "+
+					"round skipped rather than applying a mismatched "+
+					"reconstruction",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+				"reconstructed_stake", actual,
+				"retained_pool_stake", expected,
+			)
+			return nil
+		}
+		ls.config.Logger.Warn(
+			"reconstructed reward stake inputs differ from the retained "+
+				"pool total by a tolerance-bounded amount; folding the "+
+				"gap into the pool's largest credential",
+			"component", "ledger",
+			"reward_snapshot_epoch", rewardSnapshotEpoch,
+			"pool_key_hash", hex.EncodeToString([]byte(key)),
+			"reconstructed_stake", actual,
+			"retained_pool_stake", expected,
+			"credential_tag", largest.CredentialTag,
+			"staking_key", hex.EncodeToString(largest.StakingKey),
+		)
+		if expected > actual {
+			largest.Stake += types.Uint64(diff)
+		} else {
+			largest.Stake -= types.Uint64(diff)
+		}
+	}
+	// Same tolerance treatment, restricted to the Owner-flagged subset: the
+	// owner resolution above only sets which rows are the pool's own stake,
+	// it does not change their amounts, so the same cross-method rounding
+	// gap validateRewardCalculatorInputs would otherwise reject can show up
+	// again here against the retained OwnerStake total.
+	actualOwnerByPool := make(map[string]uint64, len(poolInputByKey))
+	largestOwnerInputByPool := make(
+		map[string]*models.RewardStakeInput, len(poolInputByKey),
+	)
+	largestNonOwnerInputByPool := make(
+		map[string]*models.RewardStakeInput, len(poolInputByKey),
+	)
+	for _, input := range rebuilt {
+		key := string(input.PoolKeyHash)
+		if input.Owner {
+			actualOwnerByPool[key] += uint64(input.Stake)
+			if current := largestOwnerInputByPool[key]; rewardStakeInputOutranks(
+				input,
+				current,
+			) {
+				largestOwnerInputByPool[key] = input
+			}
+			continue
+		}
+		if current := largestNonOwnerInputByPool[key]; rewardStakeInputOutranks(
+			input,
+			current,
+		) {
+			largestNonOwnerInputByPool[key] = input
+		}
+	}
+	for _, key := range poolKeys {
+		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
+		expected := uint64(poolInput.OwnerStake)
+		actual := actualOwnerByPool[key]
+		if actual == expected {
+			continue
+		}
+		var diff uint64
+		if expected > actual {
+			diff = expected - actual
+		} else {
+			diff = actual - expected
+		}
+		// The pool's overall total was already reconciled against
+		// DelegatedStake above; moving diff into the owner subset in
+		// isolation would throw that back out of balance. Transfer it from
+		// (or to) the pool's largest non-owner credential instead, so the
+		// owner subset and the pool total both stay exact. That transfer
+		// needs a non-owner row and room to absorb diff without underflow --
+		// absent either, this pool's reconstruction cannot be corrected in
+		// place and falls back to the caller's existing skip path, same as
+		// an intolerable gap.
+		largestOwner := largestOwnerInputByPool[key]
+		counterparty := largestNonOwnerInputByPool[key]
+		if largestOwner == nil || counterparty == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward owner stake inputs cannot be reconciled without owner and non-owner credentials",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+			)
+			return nil
+		}
+		// The donor is whichever row this transfer subtracts diff from:
+		// counterparty when the owner subset reconstructed too little
+		// (expected > actual, so largestOwner gains and counterparty pays),
+		// largestOwner when it reconstructed too much (the reverse). Only
+		// the donor's balance can underflow, so it is the one that must be
+		// checked against diff before either assignment below runs.
+		var donor *models.RewardStakeInput
+		if largestOwner != nil && counterparty != nil {
+			donor = largestOwner
+			if expected > actual {
+				donor = counterparty
+			}
+		}
+		tolerable := expected > 0 &&
+			diff <= rewardStakeReconstructionToleranceRatio.absoluteCeiling &&
+			diff*rewardStakeReconstructionToleranceRatio.denominator <= expected
+		if !tolerable || donor == nil || uint64(donor.Stake) < diff {
+			ls.config.Logger.Warn(
+				"reconstructed reward owner stake inputs disagree with the "+
+					"retained pool owner total; leaving this epoch's "+
+					"reward round skipped rather than applying a "+
+					"mismatched reconstruction",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+				"reconstructed_owner_stake", actual,
+				"retained_pool_owner_stake", expected,
+			)
+			return nil
+		}
+		ls.config.Logger.Warn(
+			"reconstructed reward owner stake inputs differ from the "+
+				"retained pool owner total by a tolerance-bounded amount; "+
+				"transferring the gap between the pool's largest owner and "+
+				"non-owner credentials",
+			"component", "ledger",
+			"reward_snapshot_epoch", rewardSnapshotEpoch,
+			"pool_key_hash", hex.EncodeToString([]byte(key)),
+			"reconstructed_owner_stake", actual,
+			"retained_pool_owner_stake", expected,
+			"credential_tag", largestOwner.CredentialTag,
+			"staking_key", hex.EncodeToString(largestOwner.StakingKey),
+		)
+		if expected > actual {
+			largestOwner.Stake += types.Uint64(diff)
+			counterparty.Stake -= types.Uint64(diff)
+		} else {
+			largestOwner.Stake -= types.Uint64(diff)
+			counterparty.Stake += types.Uint64(diff)
+		}
+	}
+	// The retained DelegatorCount can also disagree with len(rebuilt): the
+	// two reconstructions apply the same "drop zero-stake rows" rule (see
+	// getRewardStakeInputsForPools), but a credential whose reconstructed
+	// stake rounds to a small nonzero amount here, and to exactly zero in
+	// the live aggregate this epoch originally captured, is retained by one
+	// side and dropped by the other. The stake and owner-stake totals above
+	// already reconcile exactly against the retained pool, so any such extra
+	// row's amount is by construction a leftover of that same rounding, not
+	// a genuine additional delegator; merge it into the pool's largest
+	// non-owner row (preserving both totals) rather than discard the whole
+	// epoch over a count difference. A shortfall (fewer reconstructed rows
+	// than retained) has no such safe correction -- a delegator cannot be
+	// fabricated -- and falls back to the caller's existing skip path.
+	rowsByPool := make(map[string][]*models.RewardStakeInput, len(poolInputs))
+	for _, input := range rebuilt {
+		key := string(input.PoolKeyHash)
+		rowsByPool[key] = append(rowsByPool[key], input)
+	}
+	pruned := make([]*models.RewardStakeInput, 0, len(rebuilt))
+	for _, key := range poolKeys {
+		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
+		rows := rowsByPool[key]
+		expectedCount := poolInput.DelegatorCount
+		if uint64(len(rows)) == expectedCount {
+			pruned = append(pruned, rows...)
+			continue
+		}
+		if uint64(len(rows)) < expectedCount {
+			ls.config.Logger.Warn(
+				"reconstructed reward stake inputs have fewer delegators "+
+					"than the retained pool total; leaving this epoch's "+
+					"reward round skipped rather than applying an "+
+					"incomplete reconstruction",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+				"reconstructed_delegators", len(rows),
+				"retained_pool_delegators", expectedCount,
+			)
+			return nil
+		}
+		excess := uint64(len(rows)) - expectedCount
+		sort.Slice(rows, func(i, j int) bool {
+			return rewardStakeInputLess(rows[i], rows[j])
+		})
+		var largest *models.RewardStakeInput
+		for _, row := range rows {
+			if row.Owner {
+				continue
+			}
+			if rewardStakeInputOutranks(row, largest) {
+				largest = row
+			}
+		}
+		if largest == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward stake inputs have more delegators "+
+					"than the retained pool total and no non-owner "+
+					"credential to fold the excess into; leaving this "+
+					"epoch's reward round skipped",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+				"reconstructed_delegators", len(rows),
+				"retained_pool_delegators", expectedCount,
+			)
+			return nil
+		}
+		kept := make([]*models.RewardStakeInput, 0, expectedCount)
+		var foldedCount uint64
+		for _, row := range rows {
+			if foldedCount < excess && row != largest && !row.Owner {
+				largest.Stake += row.Stake
+				foldedCount++
+				continue
+			}
+			kept = append(kept, row)
+		}
+		if uint64(len(kept)) != expectedCount {
+			ls.config.Logger.Warn(
+				"reconstructed reward stake inputs have more delegators "+
+					"than the retained pool total and too few non-owner "+
+					"credentials to fold the excess away; leaving this "+
+					"epoch's reward round skipped",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+				"reconstructed_delegators", len(rows),
+				"retained_pool_delegators", expectedCount,
+			)
+			return nil
+		}
+		ls.config.Logger.Warn(
+			"reconstructed reward stake inputs have more delegators than "+
+				"the retained pool total; folding the excess credentials' "+
+				"stake into the pool's largest non-owner credential",
+			"component", "ledger",
+			"reward_snapshot_epoch", rewardSnapshotEpoch,
+			"pool_key_hash", hex.EncodeToString([]byte(key)),
+			"reconstructed_delegators", len(rows),
+			"retained_pool_delegators", expectedCount,
+			"folded", foldedCount,
+		)
+		pruned = append(pruned, kept...)
+	}
+	rebuilt = pruned
+	sort.Slice(rebuilt, func(i, j int) bool {
+		return compareRewardStakeInputIdentity(rebuilt[i], rebuilt[j]) < 0
+	})
+	ls.config.Logger.Warn(
+		"reconstructed reward stake inputs pruned by retention before this "+
+			"epoch's reward round applied",
+		"component", "ledger",
+		"reward_snapshot_epoch", rewardSnapshotEpoch,
+		"rows", len(rebuilt),
+	)
+	return rebuilt
 }
 
 func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
@@ -3869,6 +4470,14 @@ func stakeRewardSourceHash(
 	h.Write(reward.Credential.Hash[:])     //nolint:errcheck
 	h.Write([]byte(reward.Type))           //nolint:errcheck
 	return h.Sum(nil)
+}
+
+// rewardEfficiencyLogValue renders eta for the applied-rewards log line.
+func rewardEfficiencyLogValue(efficiency *big.Rat) string {
+	if efficiency == nil {
+		return ""
+	}
+	return efficiency.RatString()
 }
 
 func ratOrZero(r *types.Rat) *big.Rat {

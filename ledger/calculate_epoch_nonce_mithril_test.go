@@ -179,6 +179,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 			epochEnd,
 			eras.ConwayEraDesc,
 			ls.currentEpoch,
+			nil,
 		)
 		candidate = c
 		evolving = ev
@@ -310,6 +311,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 			epochEnd,
 			eras.ConwayEraDesc,
 			ls.currentEpoch,
+			nil,
 		)
 		candidate = c
 		evolving = ev
@@ -453,6 +455,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
 			epochEnd,
 			eras.ConwayEraDesc,
 			ls.currentEpoch,
+			nil,
 		)
 		candidate = c
 		evolving = ev
@@ -599,6 +602,7 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 			epochEnd,
 			eras.ConwayEraDesc,
 			prevEpoch,
+			nil,
 		)
 		rNonce = n
 		rEvolving = ev
@@ -658,7 +662,7 @@ func newConwayBootstrapStabilityCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42

@@ -37,6 +37,29 @@ import (
 // instead of presenting as a silent stalled epoch rollover.
 const slowGovernanceTallyThreshold = 30 * time.Second
 
+// ErrMissingCurrentBoundarySPOState reports that the RATIFY phase has no SPO
+// stake distribution to tally against: EpochInput.CurrentBoundarySPOState was
+// nil, the mark[NewEpoch] fallback read returned no rows, and mark[NewEpoch-1]
+// does hold pool stake -- so the chain has SPO stake and this boundary's copy
+// of it is simply unavailable.
+//
+// A real epoch rollover reaches this whenever
+// LedgerState.SetCurrentBoundarySPOStakeHook is not installed and the chain
+// already carries a mark[NewEpoch-1], because mark[NewEpoch] is written at
+// the end of the same rollover, after RATIFY. Tallying anyway would put zero
+// in the SPO denominator and silently refuse every SPO-gated action forever,
+// so the boundary fails loudly instead.
+//
+// The previous boundary's mark is what makes the empty read a contradiction,
+// so a boundary with no earlier mark is outside this guard: an un-wired
+// caller there tallies zero and ratifies nothing with no error, even when
+// live delegation would have cleared the threshold. ledger's
+// TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook pins that
+// residual case.
+var ErrMissingCurrentBoundarySPOState = errors.New(
+	"no same-boundary SPO stake distribution for the RATIFY tally",
+)
+
 // EpochInput collects the inputs needed at an epoch boundary
 // to drive the governance state machine.
 type EpochInput struct {
@@ -63,6 +86,33 @@ type EpochInput struct {
 	// to NewEpoch. Defaults false (gate off), keeping the tally
 	// byte-identical to the pre-CIP behavior.
 	DelegatorInactivityOn bool
+	// CurrentBoundarySPOState, when non-nil, is the SPO pool-stake voting
+	// state for stakeEpochFor(NewEpoch) -- which is NewEpoch itself, per
+	// stakeEpochFor's doc comment -- supplied by the caller instead of being
+	// loaded from the persisted "mark" pool_stake_snapshot table.
+	//
+	// The persisted mark[NewEpoch] row does not exist yet at this point in a
+	// real epoch-rollover transaction: it is written only at the very end of
+	// the rollover (ledger's epochSnapshotHook), after this RATIFY phase
+	// runs, because the write needs the new epoch's nonce and post-enactment
+	// protocol version. A real caller (ledger/chainsync.go) must therefore
+	// supply the same-boundary distribution it already computed earlier in
+	// the same transaction (or reconstructed the same way the persisted row
+	// will be) rather than let this fall through to LoadSPOVotingState, which
+	// would silently see zero rows and zero stake for every SPO-gated action
+	// at every boundary.
+	//
+	// Nil is correct only for a standalone/test caller that seeds
+	// mark[NewEpoch] directly. When it is nil and that row is empty while
+	// the previous boundary's mark holds stake, ProcessEpoch fails the
+	// boundary with ErrMissingCurrentBoundarySPOState rather than tally a
+	// zero SPO denominator.
+	//
+	// EvaluateRatifiableHardForkInitiation does not take this route at all:
+	// it reads mark[CurrentEpoch], a different and already-committed
+	// snapshot, because the one this field carries does not exist until the
+	// boundary runs. See predictedBoundaryStakeEpochFor.
+	CurrentBoundarySPOState *SPOVotingState
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -519,9 +569,53 @@ func ProcessEpoch(
 			return nil, fmt.Errorf("load drep voting state: %w", err)
 		}
 		tallyCtx.DRepState = drepState
-		spoState, err = LoadSPOVotingState(in.DB, in.Txn, tallyCtx.StakeEpoch)
-		if err != nil {
-			return nil, fmt.Errorf("load spo voting state: %w", err)
+		if in.CurrentBoundarySPOState != nil {
+			// See CurrentBoundarySPOState's doc comment: stakeEpochFor
+			// always resolves to NewEpoch, whose mark row this same
+			// transaction has not written yet, so the caller-supplied
+			// same-boundary distribution takes priority over the DB read.
+			spoState = in.CurrentBoundarySPOState
+		} else {
+			spoState, err = LoadSPOVotingState(in.DB, in.Txn, tallyCtx.StakeEpoch)
+			if err != nil {
+				return nil, fmt.Errorf("load spo voting state: %w", err)
+			}
+			// An empty mark[NewEpoch] is not a tally input: tallySPOVotes
+			// returns early on it, leaving a zero SPO denominator that
+			// refuses every SPO-gated action. On a chain that has active
+			// pools it means only one thing -- the same-boundary hook was
+			// never installed, so the row RATIFY needs is still unwritten
+			// -- and the node would diverge from the network without
+			// logging anything. Fail the boundary instead.
+			//
+			// Gated on the previous boundary's mark holding stake, because
+			// that is what makes the empty read a contradiction rather
+			// than a fact: a chain whose pools have never held snapshot
+			// stake has nothing to tally under any wiring. A standalone
+			// caller that seeded mark[NewEpoch] itself has rows here and
+			// never reaches this check.
+			if len(spoState.Dist) == 0 && in.NewEpoch > 0 {
+				prev, err := LoadSPOVotingState(
+					in.DB, in.Txn, in.NewEpoch-1,
+				)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"load previous spo voting state: %w", err,
+					)
+				}
+				if len(prev.Dist) > 0 {
+					return nil, fmt.Errorf(
+						"%w: mark[%d] is empty while mark[%d] holds %d "+
+							"pools and EpochInput.CurrentBoundarySPOState "+
+							"is nil (see "+
+							"LedgerState.SetCurrentBoundarySPOStakeHook)",
+						ErrMissingCurrentBoundarySPOState,
+						tallyCtx.StakeEpoch,
+						in.NewEpoch-1,
+						len(prev.Dist),
+					)
+				}
+			}
 		}
 		tallyCtx.SPOState = spoState
 	}
@@ -698,13 +792,17 @@ func ProcessEpoch(
 			parameterChange = a
 		}
 		decision := ShouldRatify(RatifyInputs{
-			Tally:                 tally,
-			PParams:               conwayPParams,
-			ParameterChange:       parameterChange,
-			GovAction:             action,
-			CurrentEpoch:          in.NewEpoch,
-			ActiveDRepCount:       activeDRepCount,
-			ActiveCCCount:         activeCCCount,
+			Tally:           tally,
+			PParams:         conwayPParams,
+			ParameterChange: parameterChange,
+			GovAction:       action,
+			CurrentEpoch:    in.NewEpoch,
+			ActiveDRepCount: activeDRepCount,
+			ActiveCCCount:   activeCCCount,
+			CommitteeAbsent: committeeAbsent(
+				rootsByPurpose[purposeCommittee], in.ConwayGenesis,
+				committeeState.CommitteePresent,
+			),
 			CCQuorum:              ccQuorum,
 			MajorVersion:          majorVersion,
 			CommitteeNoConfidence: ccInNoConfidence,
@@ -883,9 +981,9 @@ func ratificationEnactmentPrecondition(
 		}
 		return treasuryRemaining - total, nil
 	case *lcommon.UpdateCommitteeGovAction:
-		if a.Quorum.Rat == nil || a.Quorum.Sign() <= 0 {
+		if a.Quorum.Rat == nil || a.Quorum.Sign() < 0 {
 			return treasuryRemaining, errors.New(
-				"committee quorum must be positive",
+				"committee quorum must be non-negative",
 			)
 		}
 	case *lcommon.InfoGovAction:
@@ -905,18 +1003,73 @@ func ratificationEnactmentPrecondition(
 	return treasuryRemaining, nil
 }
 
-// stakeEpochFor returns the epoch whose "mark" snapshot should be used
-// for vote-weight calculations in the given new epoch. Mark captured
-// at end of N is used for voting in N+2, hence newEpoch-2. For early
-// epochs we fall back to newEpoch-1 or 0.
+// stakeEpochFor returns the epoch whose "mark" snapshot the SPO
+// ratification tally at the boundary into newEpoch must use.
+//
+// Derived from cardano-ledger's Conway/Rules/Epoch.hs (master and tag
+// cardano-ledger-conway-1.16.0.0 agree): SNAP runs first in the EPOCH
+// transition, producing snapshots1, and `ssStakeMarkPoolDistr snapshots1`
+// seeds the fresh DRep pulser for the epoch the boundary opens
+// (`setFreshDRepPulsingState eNo stakePoolDistr`). That pulser is not
+// evaluated until RATIFY at the *next* boundary transition -- so upstream's
+// RATIFY at the boundary into epoch X consumes the mark captured by SNAP at
+// the boundary into X-1.
+//
+// Dingo does not run an incremental pulser: it makes the ratify decision in
+// full at one boundary tick and defers ENACT to the next tick (see
+// ProcessEpoch's ENACT-before-RATIFY ordering and its caller in
+// ledger/chainsync.go). So dingo's decision at the boundary into M is what
+// reproduces upstream's decision at the boundary into M+1 -- which, by the
+// rule above, consumes mark[(M+1)-1] = mark[M]. M here is newEpoch: this
+// tick's ratify decision, taken at the boundary into newEpoch, must use
+// mark[newEpoch].
+//
+// Confirmed against the Preview Plomin hard fork (dingo#4441): mark[742]'s
+// SPO yes ratio was 0.6283 (>= the 0.51 pvtHardForkInitiation threshold),
+// matching the real network's ratified_epoch=742/enacted_epoch=743; mark[740]
+// (0.4779) and mark[741] (0.4757) do not clear the threshold and reproduce
+// the observed permanent-stall bug when used instead.
+//
+// The persisted mark[newEpoch] row is not readable from the
+// pool_stake_snapshot table until the very end of the boundary transaction
+// that computes this value (it needs the new epoch's nonce and
+// post-enactment protocol version, both decided after RATIFY runs) -- see
+// EpochInput.CurrentBoundarySPOState, which is how a real epoch-rollover
+// caller supplies this same-boundary data instead.
 func stakeEpochFor(newEpoch uint64) uint64 {
-	switch {
-	case newEpoch >= 2:
-		return newEpoch - 2
-	case newEpoch >= 1:
-		return newEpoch - 1
-	}
-	return 0
+	return newEpoch
+}
+
+// predictedBoundaryStakeEpochFor returns the epoch whose "mark" snapshot
+// EvaluateRatifiableHardForkInitiation tallies SPO votes against while
+// currentEpoch is still being applied.
+//
+// It is deliberately not the stakeEpochFor(currentEpoch+1) the boundary it
+// predicts will consume. SNAP captures that snapshot at the boundary itself,
+// from ledger state that keeps moving until the boundary slot, so no
+// mid-epoch caller can read it: LoadSPOVotingState would find no rows and
+// tally a zero SPO denominator, which refuses every action. mark[currentEpoch]
+// -- written at the boundary that opened the current epoch -- is the most
+// recent distribution that is durably committed and can no longer move.
+//
+// So the mid-epoch answer is an estimate, and that is what makes it advisory:
+// votes do freeze at the voting deadline, but the SPO denominator does not,
+// and stake moving across the boundary can carry an action over or under its
+// threshold after this answer was computed. Preview's Plomin hard fork
+// (dingo#4441) straddled the 0.51 SPO threshold exactly that way --
+// mark[741] 0.4757 against mark[742] 0.6283 -- so the mid-epoch check
+// published nothing through epoch 741 and the boundary into 742 ratified.
+// The boundary decision is the authoritative one; this one only surfaces it
+// early when the two snapshots agree.
+//
+// Estimating mark[currentEpoch+1] from live stake instead would be worse:
+// LedgerState.transitionInfo feeds hardfork.BuildSummary, which bounds the
+// current era at the announced boundary and appends a successor era, and
+// verify_header.go's forecast-horizon gate reads that summary. An estimate
+// that can still move before the boundary buys an earlier announcement by
+// risking a wrong one, and a wrong era layout is the more damaging error.
+func predictedBoundaryStakeEpochFor(currentEpoch uint64) uint64 {
+	return currentEpoch
 }
 
 // countActiveDReps returns the number of credential-backed DReps
@@ -951,6 +1104,21 @@ func committeeNoConfidenceState(
 	return committeeRoot != nil &&
 		lcommon.GovActionType(committeeRoot.ActionType) ==
 			lcommon.GovActionTypeNoConfidence
+}
+
+func committeeAbsent(
+	committeeRoot *models.GovernanceProposal,
+	genesis *conway.ConwayGenesis,
+	hasStoredMembers bool,
+) bool {
+	if committeeRoot != nil {
+		return lcommon.GovActionType(committeeRoot.ActionType) !=
+			lcommon.GovActionTypeUpdateCommittee
+	}
+	if hasStoredMembers {
+		return false
+	}
+	return genesis == nil
 }
 
 func govActionPriority(proposal *models.GovernanceProposal) int {

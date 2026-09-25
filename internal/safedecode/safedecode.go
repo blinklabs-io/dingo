@@ -46,11 +46,8 @@ var ErrDecodePanic = errors.New("cbor decode panicked")
 // state: recovering there converts a crash into silent corruption, which is
 // worse.
 //
-// completed, not recover()'s return value, decides whether decode panicked.
-// recover() returns nil both when no panic is in flight and when the panic
-// value is itself nil, so testing r == nil alone would report a panicking
-// decode as a successful one and hand the caller a zero value with no error.
-// See blinklabs-io/gouroboros#2075.
+// completed records whether decode returned normally rather than inferring
+// completion from recover's value. See blinklabs-io/gouroboros#2075.
 func Guard[T any](decode func() (T, error)) (value T, err error) {
 	completed := false
 	defer func() {
@@ -67,6 +64,14 @@ func Guard[T any](decode func() (T, error)) (value T, err error) {
 	value, err = decode()
 	completed = true
 	return value, err
+}
+
+// TransactionType determines the era for one transaction body while
+// containing decoder panics from era-specific CBOR constructors.
+func TransactionType(txCbor []byte) (uint, error) {
+	return Guard(func() (uint, error) {
+		return ledger.DetermineTransactionType(txCbor)
+	})
 }
 
 // Transaction decodes one transaction body from CBOR, containing decoder
