@@ -3326,6 +3326,31 @@ gate flag in from config through `governance.ProcessEpoch`'s `EpochInput`.
 API/ledger-view queries, not the epoch-boundary tally) accepts the same
 parameter but its callers always pass `0`.
 
+None of the three queries add an active governance proposal's own deposit to
+its return account's delegated DRep voting power (CIP-1694 counts an active
+proposal's deposit as part of the depositor's active voting stake). Every
+caller that reports DRep voting power makes up that gap itself, in Go, rather
+than in the SQL above: `governance.ActiveProposalDepositDRepPower`
+(`ledger/governance/proposal_deposits.go`) reads
+`GetActiveGovernanceProposals(currentEpoch)`, decodes each deposit-bearing
+proposal's `ReturnAddress` into a stake credential, and batches those
+credentials through `GetAccountsByCredential` to read each one's `drep`/
+`drep_type` delegation and `active`/`expiration_epoch` gates directly, adding
+the deposit onto the delegated DRep's (or `AlwaysNoConfidence`'s) power
+before it is merged with `GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`'s
+results. `ledger/governance.LoadDRepVotingState` (the epoch-boundary
+ratification tally), the Blockfrost adapter's three DRep voting-power call
+sites (`predefinedDRep`, `drepByCredentialTag`, and the `DReps` list handler's
+`fillAmounts`, all in `api/blockfrost/adapter.go`), and `LedgerView.
+GetDRepVotingPower` (the local-state-query path noted above, currently
+unwired to any caller) each call it directly with `expiryEpoch` set the same
+way they already set it for the base query -- `LoadDRepVotingState`'s
+CIP-0163 gate value for the ratification tally, `0` (ungated) for the two
+point-in-time reads -- so every reporting path agrees with what real
+ratification uses instead of only the plain UTxO+reward figure. See
+ARCHITECTURE.md's `LoadDRepVotingState` section
+(blinklabs-io/dingo#4355) for the full rule.
+
 `GetDRepVotingPowerByType`'s inner subquery joins outward from `account`
 to `utxo` with the same join shape as `GetDRepVotingPowerBatch` below, but
 filters on `drep_type` where the batch form filters on `drep`. Its inner
