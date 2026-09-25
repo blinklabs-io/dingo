@@ -1737,7 +1737,7 @@ func parseVState(data []byte) (
 	}
 	if len(vs) > dormantIndex {
 		if !isCborUnsigned(vs[dormantIndex]) {
-			return nil, nil, nil, 0, fmt.Errorf(
+			return nil, nil, nil, 0, errors.New(
 				"parsing dormant epoch count: expected unsigned CBOR value",
 			)
 		}

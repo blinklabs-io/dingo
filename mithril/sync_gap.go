@@ -668,8 +668,7 @@ func processGapBlockTransactions(
 		hasGovernance := len(tx.ProposalProcedures()) > 0 ||
 			len(tx.VotingProcedures()) > 0
 		hasDRepActivity := governance.HasDRepActivityCertificates(tx)
-		hasDRepDeregistration :=
-			governance.HasDRepDeregistrationCertificates(tx)
+		hasDRepDeregistration := governance.HasDRepDeregistrationCertificates(tx)
 		if !hasGovernance && !hasDRepActivity && !hasDRepDeregistration {
 			continue
 		}
