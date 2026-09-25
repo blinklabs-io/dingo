@@ -7937,14 +7937,22 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
 	// per cardano-ledger PR 5785.
 	if shouldValidate {
-		if err := validateInboundBlockEnvelopeWithByronParams(
-			block,
-			pparams,
-			ls.config.CardanoNodeConfig,
-			parent,
-			activeByronParams,
-		); err != nil {
-			return nil, err
+		var envelopeErr error
+		if activeByronParams == nil {
+			envelopeErr = validateInboundBlockEnvelope(
+				block, pparams, ls.config.CardanoNodeConfig, parent,
+			)
+		} else {
+			envelopeErr = validateInboundBlockEnvelopeWithByronParams(
+				block,
+				pparams,
+				ls.config.CardanoNodeConfig,
+				parent,
+				activeByronParams,
+			)
+		}
+		if envelopeErr != nil {
+			return nil, envelopeErr
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
