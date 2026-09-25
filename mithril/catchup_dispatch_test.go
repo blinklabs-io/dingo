@@ -328,6 +328,9 @@ func TestDecideCatchUp(t *testing.T) {
 		} else {
 			require.NoError(t, db.DeleteSyncState(syncKeyImmutableMax, nil))
 		}
+		require.NoError(t, db.DeleteSyncState(
+			RewardStateRepairPendingKey, nil,
+		))
 		require.NoError(t, db.DeleteSyncState(syncKeyCatchUpActive, nil))
 	}
 	modeOf := func(t *testing.T) syncMode {
@@ -390,6 +393,14 @@ func TestDecideCatchUp(t *testing.T) {
 			require.False(t, dec.engage)
 			require.False(t, dec.upToDate)
 		})
+
+	t.Run("api catch-up with marker is rejected without reward repair", func(t *testing.T) {
+		setState(t, "", 1, true)
+		_, err := decideCatchUp(
+			ctx, db, modeOf(t), BackendV2, "api", noAggregator, true, discard,
+		)
+		require.ErrorContains(t, err, "API-mode metadata replacement")
+	})
 
 	t.Run("v1 backend never engages", func(t *testing.T) {
 		setState(t, "", 2, true)
@@ -460,9 +471,12 @@ func TestDecideCatchUp(t *testing.T) {
 			require.EqualValues(t, 7, dec.start)
 		})
 
-	t.Run("interrupted api sync with marker resumes normally",
+	t.Run("interrupted api sync with marker resumes repair from marker",
 		func(t *testing.T) {
 			setState(t, syncStatusInProgress, 7, true)
+			require.NoError(t, db.SetSyncState(
+				RewardStateRepairPendingKey, "1", nil,
+			))
 			dec, err := decideCatchUp(
 				ctx,
 				db,
@@ -474,7 +488,8 @@ func TestDecideCatchUp(t *testing.T) {
 				discard,
 			)
 			require.NoError(t, err)
-			require.False(t, dec.engage)
+			require.True(t, dec.engage)
+			require.EqualValues(t, 7, dec.start)
 			require.False(t, dec.upToDate)
 		})
 

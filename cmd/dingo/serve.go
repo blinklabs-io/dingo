@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/mithril"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/spf13/cobra"
 )
 
@@ -139,7 +140,11 @@ func checkSyncState(
 	if err != nil {
 		return err
 	}
-	if pendingRepair {
+	repairActive, err := mithril.RewardStateRepairActive(db)
+	if err != nil {
+		return err
+	}
+	if val == syncStatusInProgress && pendingRepair && repairActive {
 		return nil
 	}
 	return fmt.Errorf(
@@ -169,14 +174,13 @@ func repairPendingMithrilRewardState(
 		"reconciling legacy Mithril reward state before serving",
 		"component", "node",
 	)
-	repairCfg := *cfg
-	repairCfg.Mithril.Backend = mithril.BackendV2
-	// Artifact pins are only valid for a fresh import. Repair always selects
-	// the latest certified state, then verifies its chain intersection.
-	repairCfg.Mithril.PinnedDigest = ""
-	network := repairCfg.Network
-	if network == "" {
-		network = "preview"
+	repairCfg, err := mithrilRewardRepairConfig(cfg)
+	if err != nil {
+		return err
+	}
+	network, err := mithrilRewardRepairNetwork(repairCfg)
+	if err != nil {
+		return err
 	}
 	if err := retryMithrilRewardStateRepair(
 		ctx,
@@ -184,7 +188,7 @@ func repairPendingMithrilRewardState(
 		mithrilRewardRepairRetryInterval,
 		func() error {
 			return runMithrilSyncForRewardRepair(
-				ctx, &repairCfg, logger, network,
+				ctx, repairCfg, logger, network,
 			)
 		},
 	); err != nil {
@@ -202,6 +206,33 @@ func repairPendingMithrilRewardState(
 		)
 	}
 	return nil
+}
+
+func mithrilRewardRepairConfig(cfg *config.Config) (*config.Config, error) {
+	if cfg.Mithril.Backend != "" &&
+		cfg.Mithril.Backend != mithril.BackendV2 {
+		return nil, fmt.Errorf(
+			"Mithril reward-state repair requires backend %q; configured backend is %q",
+			mithril.BackendV2, cfg.Mithril.Backend,
+		)
+	}
+	repairCfg := *cfg
+	repairCfg.Mithril.Backend = mithril.BackendV2
+	return &repairCfg, nil
+}
+
+func mithrilRewardRepairNetwork(cfg *config.Config) (string, error) {
+	if cfg.Network != "" {
+		return cfg.Network, nil
+	}
+	network, ok := ouroboros.NetworkByNetworkMagic(cfg.NetworkMagic)
+	if !ok {
+		return "", fmt.Errorf(
+			"cannot resolve Mithril reward-state repair network from network magic %d",
+			cfg.NetworkMagic,
+		)
+	}
+	return network.Name, nil
 }
 
 const mithrilRewardRepairRetryInterval = 5 * time.Minute

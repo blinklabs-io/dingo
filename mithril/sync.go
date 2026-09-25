@@ -179,6 +179,13 @@ func decideCatchUp(
 		return catchUpDecision{}, nil
 	case syncModeResume:
 		if isAPIMode(storageMode) {
+			repairPending, pendingErr := RewardStateRepairPending(db)
+			if pendingErr != nil {
+				return catchUpDecision{}, pendingErr
+			}
+			if repairPending {
+				return catchUpDecision{engage: true, start: marker}, nil
+			}
 			return catchUpDecision{}, nil
 		}
 		if hasMarker {
@@ -386,7 +393,18 @@ func pctOf(cur, total int64) float64 {
 // called at the first actual write rather than before bootstrap, so a bootstrap
 // that fails before writing anything leaves an existing healthy database
 // untouched. Idempotent: safe to call more than once per sync.
-func markSyncInProgress(db *database.Database, storageMode string) error {
+func markSyncInProgress(
+	db *database.Database,
+	storageMode string,
+	repairLegacyRewardState bool,
+) error {
+	if repairLegacyRewardState {
+		if err := db.SetSyncState(
+			RewardStateRepairActiveKey, "1", nil,
+		); err != nil {
+			return fmt.Errorf("marking reward-state repair in-progress: %w", err)
+		}
+	}
 	if err := db.SetSyncState(
 		"sync_status", syncStatusInProgress, nil,
 	); err != nil {
@@ -679,7 +697,9 @@ func Sync(
 		// bootstrap), so a bootstrap that fails before any write leaves an
 		// existing healthy database untouched.
 		if !pipeCopied {
-			if merr := markSyncInProgress(db, cfg.StorageMode); merr != nil {
+			if merr := markSyncInProgress(
+				db, cfg.StorageMode, cfg.RepairLegacyRewardState,
+			); merr != nil {
 				return merr
 			}
 		}
@@ -893,7 +913,9 @@ func Sync(
 	// (for example the v1 backend, which has no per-chunk hook). Idempotent
 	// when the pipelined copy already set it. Set after a successful bootstrap
 	// and before any post-bootstrap write or deferred-index drop.
-	if err := markSyncInProgress(db, cfg.StorageMode); err != nil {
+	if err := markSyncInProgress(
+		db, cfg.StorageMode, cfg.RepairLegacyRewardState,
+	); err != nil {
 		return SyncResult{}, err
 	}
 

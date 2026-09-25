@@ -39,6 +39,11 @@ const syncKeyImmutableMax = "mithril_immutable_max"
 // imported reward-pot row at the recorded Mithril anchor.
 const RewardStateRepairPendingKey = "mithril_reward_repair_pending"
 
+// RewardStateRepairActiveKey marks a reward-state repair whose first database
+// write has begun. It is ephemeral and is cleared with sync_status when the
+// import completes.
+const RewardStateRepairActiveKey = "mithril_reward_repair_active"
+
 // setImmutableImportMarker records num as the highest immutable file number
 // imported by a Mithril sync.
 func setImmutableImportMarker(db *database.Database, num uint64) error {
@@ -87,6 +92,18 @@ func RewardStateRepairPending(db *database.Database) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf(
 			"reading Mithril reward repair marker: %w", err,
+		)
+	}
+	return value == "1", nil
+}
+
+// RewardStateRepairActive reports whether an interrupted reward-state repair
+// is the operation represented by the current in-progress sync status.
+func RewardStateRepairActive(db *database.Database) (bool, error) {
+	value, err := db.GetSyncState(RewardStateRepairActiveKey, nil)
+	if err != nil {
+		return false, fmt.Errorf(
+			"reading Mithril reward repair activity marker: %w", err,
 		)
 	}
 	return value == "1", nil

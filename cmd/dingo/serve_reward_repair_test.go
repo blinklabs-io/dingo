@@ -26,7 +26,68 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMithrilRewardRepairConfig(t *testing.T) {
+	t.Parallel()
+
+	for _, backend := range []string{"", mithril.BackendV2} {
+		t.Run("backend="+backend, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Mithril.Backend = backend
+			cfg.Mithril.PinnedDigest = "pinned-digest"
+
+			repairCfg, err := mithrilRewardRepairConfig(cfg)
+			require.NoError(t, err)
+			require.Equal(t, mithril.BackendV2, repairCfg.Mithril.Backend)
+			require.Equal(t, "pinned-digest", repairCfg.Mithril.PinnedDigest)
+		})
+	}
+
+	cfg := &config.Config{}
+	cfg.Mithril.Backend = "v1"
+	_, err := mithrilRewardRepairConfig(cfg)
+	require.ErrorContains(t, err, "requires backend")
+}
+
+func TestMithrilRewardRepairNetwork(t *testing.T) {
+	t.Parallel()
+
+	name, err := mithrilRewardRepairNetwork(&config.Config{NetworkMagic: 764824073})
+	require.NoError(t, err)
+	require.Equal(t, "mainnet", name)
+
+	_, err = mithrilRewardRepairNetwork(&config.Config{NetworkMagic: 987654321})
+	require.ErrorContains(t, err, "cannot resolve")
+}
+
 func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{
+		RunMode:      config.RunModeServe,
+		StorageMode:  "core",
+		Network:      "preview",
+		DatabasePath: t.TempDir(),
+		Plugins:      testStoragePlugins(),
+	}
+	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Database.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+	require.NoError(t, runtime.Database.SetSyncState(
+		mithril.RewardStateRepairPendingKey, "1", nil,
+	))
+	require.NoError(t, runtime.Database.SetSyncState(
+		mithril.RewardStateRepairActiveKey, "1", nil,
+	))
+	require.NoError(t, runtime.Close(context.Background()))
+
+	require.NoError(t, checkSyncState(cfg, logger),
+		"serve must resume an interrupted in-place repair before node startup")
+}
+
+func TestCheckSyncStateDoesNotIgnoreOtherInterruptedSyncForRewardRepair(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -47,8 +108,8 @@ func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	require.NoError(t, checkSyncState(cfg, logger),
-		"serve must resume an interrupted in-place repair before node startup")
+	err = checkSyncState(cfg, logger)
+	require.ErrorContains(t, err, "incomplete sync detected")
 }
 
 func TestRetryMithrilRewardStateRepairWaitsForNewSnapshot(t *testing.T) {
