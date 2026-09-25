@@ -140,9 +140,6 @@ func (s *Store) GetDormantDRepEpochs(txn types.Txn) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := s.ensureDormantDRepState(db, ctx); err != nil {
-		return 0, err
-	}
 	var dormant int64
 	if err := db.QueryRowContext(ctx, `
 SELECT dormant_epochs

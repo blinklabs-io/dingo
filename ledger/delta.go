@@ -447,20 +447,6 @@ func (d *LedgerDelta) processGovernance(
 		)
 	}
 
-	// Process governance proposals
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.GovActionValidityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance proposals: %w", err)
-		}
-	}
-
 	// Process governance votes
 	if len(votes) > 0 {
 		if err := governance.ProcessVotes(
@@ -486,6 +472,19 @@ func (d *LedgerDelta) processGovernance(
 			txn,
 		); err != nil {
 			return fmt.Errorf("process DRep activity certificates: %w", err)
+		}
+	}
+	// Process proposals after activity certificates, which consume dormant epochs.
+	if len(proposals) > 0 {
+		if err := governance.ProcessProposals(
+			tx,
+			d.Point,
+			currentEpoch,
+			conwayPParams.GovActionValidityPeriod,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process governance proposals: %w", err)
 		}
 	}
 

@@ -649,17 +649,6 @@ func (b *Backfill) processBlockGovernance(
 	if conwayPP == nil {
 		return nil
 	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, epochId,
-			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance proposals: %w", err,
-			)
-		}
-	}
 	if len(votes) > 0 {
 		if err := governance.ProcessVotes(
 			tx, point, epochId,
@@ -684,6 +673,15 @@ func (b *Backfill) processBlockGovernance(
 			return fmt.Errorf(
 				"DRep activity certificates: %w", err,
 			)
+		}
+	}
+	if len(proposals) > 0 {
+		if err := governance.ProcessProposals(
+			tx, point, epochId,
+			conwayPP.GovActionValidityPeriod,
+			b.db, txn,
+		); err != nil {
+			return fmt.Errorf("governance proposals: %w", err)
 		}
 	}
 	if hasDRepDeregistrations {

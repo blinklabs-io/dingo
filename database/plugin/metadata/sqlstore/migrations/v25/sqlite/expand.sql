@@ -22,6 +22,7 @@ SELECT account.drep_type, account.drep, account.credential_tag,
 FROM account
 JOIN drep ON drep.credential_tag = account.drep_type
          AND drep.credential = account.drep
+         AND drep.active = TRUE
 WHERE account.drep IS NOT NULL
   AND account.drep_type IN (0, 1)
   AND NOT EXISTS (
