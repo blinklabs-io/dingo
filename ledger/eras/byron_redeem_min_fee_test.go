@@ -364,7 +364,7 @@ func TestValidateTxByron_RedeemOnlyPreservesWitnessRequirement(
 	require.Error(t, err)
 	var feeErr FeeTooLowByronError
 	require.NotErrorAs(t, err, &feeErr)
-	assert.Contains(t, err.Error(), "invalid Byron vkey witness")
+	assert.Contains(t, err.Error(), "signature verification failed")
 }
 
 // TestValidateTxByron_RedeemOnlyNegativeFeeRejected proves the zero

@@ -86,10 +86,11 @@ func (p *DingoStateProvider) NetworkId() uint {
 	return 0
 }
 
-// EpochForSlot maps conformance slots to their epoch using the harness's
-// fixed slots-per-epoch value.
-func (p *DingoStateProvider) EpochForSlot(slot uint64) (uint64, error) {
-	return slot / conformanceSlotsPerEpoch, nil
+// EpochForSlot returns the epoch carried by the current conformance state.
+// The corpus supplies epoch state directly; transaction slots are synthetic
+// markers and do not define the vector's epoch timeline.
+func (p *DingoStateProvider) EpochForSlot(_ uint64) (uint64, error) {
+	return p.manager.currentEpoch, nil
 }
 
 // CostModels returns which Plutus language versions have cost models

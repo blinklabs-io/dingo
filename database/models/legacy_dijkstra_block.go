@@ -23,6 +23,16 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
+// DecodeDijkstraPeerBlock only accepts the current Dijkstra wire schema.
+// Historical Musashi blocks are normalized by DecodeDijkstraBlock for storage
+// and replay, but remain invalid on the peer path.
+func DecodeDijkstraPeerBlock(
+	raw []byte,
+	config ...common.VerifyConfig,
+) (ledger.Block, error) {
+	return dijkstra.NewDijkstraBlockFromCbor(raw, config...)
+}
+
 // DecodeDijkstraBlock accepts current Dijkstra blocks and the earlier
 // four-component block body retained in Musashi history. The legacy body is
 // normalized only for typed decoding; its original bytes remain attached to

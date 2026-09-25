@@ -263,7 +263,11 @@ func newMultiEraForecastCfg(
 	forkEpoch uint64,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	cfg := newTestCardanoNodeConfig(t, 1)
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 1 }
+	}`)))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.4,
 		"securityParam": 1,

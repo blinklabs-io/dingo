@@ -29,6 +29,12 @@ import (
 // Full mainnet-ish config with both genesis files present.
 func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
+	byron := `{
+		"avvmDistr": {},
+		"blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+		"protocolConsts":{"k":432,"protocolMagic":164},"startTime":1788739200,
+		"bootStakeholders":{},"heavyDelegation":{},"nonAvvmBalances":{}
+	}`
 	shelley := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -36,11 +42,8 @@ func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 		"epochLength": 432000,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
-	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
-		cardano.EmbeddedConfigFS,
-		"mainnet/config.json",
-	)
-	require.NoError(t, err)
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byron)))
 	require.NoError(
 		t,
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
@@ -68,12 +71,12 @@ func newShelleyOnlyCfg(t *testing.T) *cardano.CardanoNodeConfig {
 
 // ---------------------------------------------------------------- StabilityWindow
 
-// Byron: window = 2k = 4320 for mainnet k=2160.
+// Byron: window = 2k = 864 for k=432.
 func TestStabilityWindowForEra_Byron(t *testing.T) {
 	cfg := newTestCfg(t)
 	w, err := eras.StabilityWindowForEra(cfg, eras.ByronEraDesc.Id)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(4_320), w)
+	assert.Equal(t, uint64(864), w)
 }
 
 // Shelley: window = ceil(3k/f) = ceil(3*432/0.05) = 25_920.
@@ -111,9 +114,9 @@ func TestBuildEraParams_Byron(t *testing.T) {
 	cfg := newTestCfg(t)
 	p, err := eras.BuildEraParams(cfg, eras.ByronEraDesc)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(21_600), p.EpochSize) // mainnet k=2160 → 10k
+	assert.Equal(t, uint64(4320), p.EpochSize) // k=432 → 10k = 4320 slots
 	assert.Equal(t, 20*time.Second, p.SlotLength)
-	assert.Equal(t, uint64(4_320), p.SafeZoneSlots)
+	assert.Equal(t, uint64(864), p.SafeZoneSlots)
 }
 
 func TestBuildEraParams_Shelley(t *testing.T) {

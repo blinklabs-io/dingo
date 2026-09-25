@@ -55,6 +55,7 @@ type RatifyInputs struct {
 	CurrentEpoch          uint64
 	ActiveDRepCount       int // reserved for future min-DRep-count gate
 	ActiveCCCount         int
+	CommitteeAbsent       bool
 	CCQuorum              *big.Rat
 	MajorVersion          uint
 	CommitteeNoConfidence bool
@@ -156,25 +157,17 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	case in.CommitteeNoConfidence:
 		decision.CCApproved = false
 		decision.FailureReason = "cc in no-confidence state"
-	case in.ActiveCCCount == 0:
-		// Check zero-members before the min-size comparison so the
-		// failure reason distinguishes "no members" from "below
-		// minimum" even when MinCommitteeSize >= 1. Bootstrap bypasses
-		// only the minimum-size gate; it does not create committee approval
-		// when no active members exist.
+	case in.CommitteeAbsent:
 		decision.CCApproved = false
-		decision.FailureReason = "cc has no active members"
+		decision.FailureReason = "committee absent"
 	case !inBootstrap && in.ActiveCCCount < int(in.PParams.MinCommitteeSize): //nolint:gosec
 		decision.CCApproved = false
 		decision.FailureReason = "cc below minimum committee size"
-	case in.CCQuorum == nil || in.CCQuorum.Sign() == 0:
-		// Fail-safe: a missing or zero quorum signals a plumbing bug,
-		// not "no quorum required". Auto-approving here would silently
-		// ratify CC-gated actions (ParameterChange, HardForkInitiation,
-		// TreasuryWithdrawal, NewConstitution) whenever the caller
-		// forgot to pass a quorum.
+	case in.CCQuorum == nil:
 		decision.CCApproved = false
-		decision.FailureReason = "cc quorum missing or zero"
+		decision.FailureReason = "cc quorum missing"
+	case in.CCQuorum.Sign() == 0:
+		decision.CCApproved = true
 	default:
 		ratio := in.Tally.CCYesRatio()
 		decision.CCApproved = ratio.Cmp(in.CCQuorum) >= 0
@@ -375,9 +368,10 @@ const (
 )
 
 // parameterChangeDRepGroups classifies the fields touched by a concrete
-// Conway or Dijkstra parameter-change action. Dijkstra keys 34 through 37 are
-// network-group parameters for DRep voting and security-group parameters for
-// SPO voting (the latter is supplied by SecurityGroupFields above).
+// Conway or Dijkstra parameter-change action. Dijkstra keys 34-37 and 40-48
+// are NetworkGroup parameters, while keys 38-39 are TechnicalGroup and
+// EconomicGroup parameters respectively. SecurityGroupFields supplies the
+// independent SPO threshold classification.
 func parameterChangeDRepGroups(
 	action lcommon.ParameterChangeGovAction,
 ) drepParameterGroups {
@@ -401,9 +395,23 @@ func parameterChangeDRepGroups(
 			a.ParamUpdate.MaxRefScriptSizePerTx != nil ||
 			a.ParamUpdate.RefScriptCostStride != nil ||
 			a.ParamUpdate.RefScriptCostMultiplier != nil ||
-			a.ParamUpdate.CommitteeStakeCoverage != nil ||
-			a.ParamUpdate.QuorumStakeThreshold != nil {
+			a.ParamUpdate.LeiosAnnouncementPeriodLength != nil ||
+			a.ParamUpdate.LeiosVotePeriodLength != nil ||
+			a.ParamUpdate.LeiosDiffusionPeriodLength != nil ||
+			a.ParamUpdate.LeiosCommitteeSize != nil ||
+			a.ParamUpdate.LeiosQuorumStakeThreshold != nil ||
+			a.ParamUpdate.MaxEndorserBlockReferencesSize != nil ||
+			a.ParamUpdate.MaxEndorserBlockTxsSize != nil ||
+			a.ParamUpdate.MaxEndorserBlockExUnits != nil ||
+			a.ParamUpdate.MaxRefScriptSizePerEndorserBlock != nil {
 			groups |= drepParameterGroupNetwork
+		}
+		if a.ParamUpdate.MaxPledgeLeverageSet ||
+			a.ParamUpdate.MaxPledgeLeverage != nil {
+			groups |= drepParameterGroupTechnical
+		}
+		if a.ParamUpdate.MinPoolMargin != nil {
+			groups |= drepParameterGroupEconomic
 		}
 	default:
 		return allDRepParameterGroups

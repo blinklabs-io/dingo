@@ -4907,8 +4907,13 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 
 	db := newTestDB(t)
 	txCbor, err := cbor.Encode([]any{
-		map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)},
+		map[uint]any{
+			0: cbor.Tag{Number: 258, Content: []any{}},
+			1: []any{},
+			2: uint64(0),
+		},
 		map[uint]any{},
+		true,
 		nil,
 	})
 	require.NoError(t, err)

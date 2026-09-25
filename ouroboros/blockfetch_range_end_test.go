@@ -17,7 +17,6 @@ package ouroboros
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -349,34 +348,16 @@ func smallSecurityParamCardanoConfig(
 	k int,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	byronGenesisJSON, err := cardano.EmbeddedConfigFS.ReadFile(
-		"mainnet/byron-genesis.json",
-	)
-	require.NoError(t, err)
-	var byronGenesis map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(byronGenesisJSON, &byronGenesis))
-	var protocolConsts map[string]json.RawMessage
-	require.NoError(
-		t,
-		json.Unmarshal(byronGenesis["protocolConsts"], &protocolConsts),
-	)
-	protocolConsts["k"], err = json.Marshal(k)
-	require.NoError(t, err)
-	byronGenesis["protocolConsts"], err = json.Marshal(protocolConsts)
-	require.NoError(t, err)
-	byronGenesisJSON, err = json.Marshal(byronGenesis)
-	require.NoError(t, err)
 	shelleyGenesisJSON := fmt.Sprintf(
 		`{"activeSlotsCoeff": 0.05, "securityParam": %d, "systemStart": "2022-10-25T00:00:00Z"}`,
 		k,
 	)
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	}
-	require.NoError(
-		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(string(byronGenesisJSON))),
+	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
 	)
+	require.NoError(t, err)
+	cfg.ByronGenesis().ProtocolConsts.K = k
 	require.NoError(
 		t,
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),

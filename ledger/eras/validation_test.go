@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"iter"
@@ -110,6 +111,21 @@ type mockConwayFeeTx struct {
 	outputs            []lcommon.TransactionOutput
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
+}
+
+type mockCommitteeEpochState struct {
+	*mockLedgerState
+	epoch uint64
+}
+
+func (s *mockCommitteeEpochState) EpochForSlot(uint64) (uint64, error) {
+	return s.epoch, nil
+}
+
+func (s *mockCommitteeEpochState) IsStakeCredentialRegistered(
+	_ lcommon.Credential,
+) bool {
+	return true
 }
 
 func (m *mockConwayFeeTx) Inputs() []lcommon.TransactionInput {
@@ -2812,6 +2828,295 @@ func TestValidateTxConwayReusesResolvedPlutusContext(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 2, ls.utxoLookups)
+}
+
+func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionPlomin,
+		},
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224([]byte("committee member")),
+	}
+	validCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.NewBlake2b224([]byte("valid committee member")),
+	}
+	anchor := lcommon.GovAnchor{
+		Url:      "https://example.test/committee",
+		DataHash: [32]byte{0x51},
+	}
+
+	for _, test := range []struct {
+		name        string
+		expiryEpoch uint64
+		wantExpired bool
+	}{
+		{name: "past epoch", expiryEpoch: 499, wantExpired: true},
+		{name: "current epoch", expiryEpoch: 500, wantExpired: true},
+		{name: "next epoch", expiryEpoch: 501},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, err := lcommon.NewUpdateCommitteeGovAction(
+				nil,
+				nil,
+				map[*lcommon.Credential]uint64{
+					&credential:      test.expiryEpoch,
+					&validCredential: 501,
+				},
+				cbor.Rat{Rat: big.NewRat(2, 3)},
+			)
+			require.NoError(t, err)
+			proposal, err := conway.NewConwayProposalProcedure(
+				0,
+				rewardAccount,
+				action,
+				anchor,
+			)
+			require.NoError(t, err)
+			input := shelley.ShelleyTransactionInput{
+				TxId:        lcommon.Blake2b256{0x51},
+				OutputIndex: 0,
+			}
+			seed := make([]byte, ed25519.SeedSize)
+			seed[0] = 0x51
+			privateKey := ed25519.NewKeyFromSeed(seed)
+			publicKey := privateKey.Public().(ed25519.PublicKey)
+			paymentHash := lcommon.Blake2b224Hash(publicKey)
+			paymentAddress, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyNone,
+				lcommon.AddressNetworkTestnet,
+				paymentHash[:],
+				nil,
+			)
+			require.NoError(t, err)
+			output := babbage.BabbageTransactionOutput{
+				OutputAddress: paymentAddress,
+				OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+			}
+			tx := &conway.ConwayTransaction{
+				Body: conway.ConwayTransactionBody{
+					TxInputs: conway.NewConwayTransactionInputSet(
+						[]shelley.ShelleyTransactionInput{input},
+					),
+					TxOutputs:            []babbage.BabbageTransactionOutput{output},
+					TxProposalProcedures: []conway.ConwayProposalProcedure{*proposal},
+				},
+				TxIsValid: true,
+			}
+			baseState := newMockLedgerState()
+			baseState.skipPhase2Validation = true
+			baseState.addUtxo(input, output)
+			state := &mockCommitteeEpochState{
+				mockLedgerState: baseState,
+				epoch:           500,
+			}
+			bodyCbor, err := cbor.Encode(tx.Body)
+			require.NoError(t, err)
+			tx.Body.SetCbor(bodyCbor)
+			txHash := tx.Hash()
+			tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+				[]lcommon.VkeyWitness{{
+					Vkey:      publicKey,
+					Signature: ed25519.Sign(privateKey, txHash[:]),
+				}},
+				false,
+			)
+
+			err = ValidateTxConway(tx, 1, state, pp)
+			var expired conway.CommitteeMemberAlreadyExpiredError
+			if test.wantExpired {
+				require.ErrorAs(t, err, &expired)
+				require.Equal(t, test.expiryEpoch, expired.ExpiryEpoch)
+				require.Equal(t, uint64(500), expired.CurrentEpoch)
+				return
+			}
+			require.NoError(t, err)
+			require.NotErrorAs(t, err, &expired)
+			require.NoError(
+				t,
+				conway.UtxoValidateProposalProcedures(tx, 1, state, pp),
+			)
+		})
+	}
+}
+
+func TestConwayGovActionWellFormednessRejectsDuplicateCommitteeRemovals(
+	t *testing.T,
+) {
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionPlomin,
+		},
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+	baseCredential := lcommon.NewBlake2b224([]byte("committee removal"))
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: baseCredential,
+	}
+	scriptCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: baseCredential,
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	anchor := lcommon.GovAnchor{
+		Url:      "https://example.test/committee",
+		DataHash: [32]byte{0x52},
+	}
+	for _, test := range []struct {
+		name        string
+		credentials []lcommon.Credential
+		quorum      *big.Rat
+		wantError   bool
+	}{
+		{
+			name:        "duplicate logical credential",
+			credentials: []lcommon.Credential{keyCredential, keyCredential},
+			quorum:      big.NewRat(1, 2),
+			wantError:   true,
+		},
+		{
+			name:        "same hash with distinct credential types",
+			credentials: []lcommon.Credential{keyCredential, scriptCredential},
+			quorum:      big.NewRat(1, 2),
+		},
+		{
+			name:   "zero quorum",
+			quorum: big.NewRat(0, 1),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action := &lcommon.UpdateCommitteeGovAction{
+				Credentials: test.credentials,
+				Quorum:      cbor.Rat{Rat: test.quorum},
+			}
+			encoded, err := cbor.Encode(action)
+			require.NoError(t, err)
+			var decoded lcommon.UpdateCommitteeGovAction
+			_, decodeErr := cbor.Decode(encoded, &decoded)
+			proposal, err := conway.NewConwayProposalProcedure(
+				0,
+				rewardAccount,
+				action,
+				anchor,
+			)
+			require.NoError(t, err)
+			tx := &conway.ConwayTransaction{
+				Body: conway.ConwayTransactionBody{
+					TxProposalProcedures: []conway.ConwayProposalProcedure{
+						*proposal,
+					},
+				},
+				TxIsValid: true,
+			}
+			ruleErr := conway.UtxoValidateGovActionWellFormedness(
+				tx, 1, newMockLedgerState(), pp,
+			)
+			if test.wantError {
+				require.Error(t, decodeErr)
+				require.Error(t, ruleErr)
+				return
+			}
+			require.NoError(t, decodeErr)
+			require.NoError(t, ruleErr)
+		})
+	}
+}
+
+func TestConwayV3ProposalProcedureCanonicalizesCommitteeCollections(
+	t *testing.T,
+) {
+	key := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224{0x02},
+	}
+	scriptLow := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.Blake2b224{0x01},
+	}
+	scriptHigh := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.Blake2b224{0x02},
+	}
+	keyPtr, scriptLowPtr, scriptHighPtr := key, scriptLow, scriptHigh
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+
+	buildProcedure := func(removals []lcommon.Credential) data.PlutusData {
+		action := &lcommon.UpdateCommitteeGovAction{
+			Type:        uint(lcommon.GovActionTypeUpdateCommittee),
+			Credentials: removals,
+			CredEpochs: map[*lcommon.Credential]uint64{
+				&keyPtr:        3,
+				&scriptHighPtr: 2,
+				&scriptLowPtr:  1,
+			},
+			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+		}
+		procedure := conway.ConwayProposalProcedure{
+			PPRewardAccount: rewardAccount,
+			PPGovAction: conway.ConwayGovAction{
+				Type:   uint(lcommon.GovActionTypeUpdateCommittee),
+				Action: action,
+			},
+		}
+		return procedure.ToPlutusData()
+	}
+	first := buildProcedure([]lcommon.Credential{key, scriptHigh, scriptLow})
+	second := buildProcedure([]lcommon.Credential{scriptLow, key, scriptHigh})
+	firstCBOR, err := data.Encode(first)
+	require.NoError(t, err)
+	secondCBOR, err := data.Encode(second)
+	require.NoError(t, err)
+	require.Equal(t, firstCBOR, secondCBOR)
+
+	procedureData := first.(*data.Constr)
+	actionData := procedureData.Fields[2].(*data.Constr)
+	wantOrder := []data.PlutusData{
+		scriptLow.ToPlutusData(),
+		scriptHigh.ToPlutusData(),
+		key.ToPlutusData(),
+	}
+	removals := actionData.Fields[1].(*data.List)
+	require.Equal(t, wantOrder, removals.Items)
+	additions := actionData.Fields[2].(*data.Map)
+	require.Len(t, additions.Pairs, len(wantOrder))
+	for i, pair := range additions.Pairs {
+		require.Equal(t, wantOrder[i], pair[0])
+	}
+	repeatedCBOR, err := data.Encode(buildProcedure(
+		[]lcommon.Credential{key, scriptHigh, scriptLow},
+	))
+	require.NoError(t, err)
+	require.Equal(t, firstCBOR, repeatedCBOR)
 }
 
 func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(

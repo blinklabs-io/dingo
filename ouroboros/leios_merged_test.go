@@ -834,7 +834,7 @@ func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 
 // buildDijkstraLeiosBlockRaw assembles a Dijkstra block [header, block_body]
 // whose header carries the 12-field Leios extension. The extension elements
-// (ext) and the current three-element block_body (bodyElems) are supplied as raw CBOR.
+// (ext) and three-element block_body (bodyElems) are supplied as raw CBOR.
 // The header is assembled directly because DijkstraBlockHeader.MarshalCBOR
 // drops the extension for in-process-constructed headers.
 func buildDijkstraLeiosBlockRaw(
@@ -917,17 +917,18 @@ func testDijkstraCertRBRaw(
 
 func testDijkstraTx(t *testing.T, seed byte) cbor.RawMessage {
 	t.Helper()
-	// A complete Dijkstra transaction: [transaction_body, witness_set, aux/nil].
-	hash := make([]byte, lcommon.Blake2b256Size)
-	hash[0] = seed
+	// A complete Dijkstra block transaction: [body, witness_set, aux, is_valid].
+	txHash := make([]byte, lcommon.Blake2b256Size)
+	txHash[0] = seed
 	return mustCbor(t, []cbor.RawMessage{
 		mustCbor(t, map[uint]any{
-			0: cbor.Tag{Number: 258, Content: []any{[]any{hash, uint64(0)}}},
-			1: []any{},
+			0: cbor.Tag{Number: 258, Content: []any{[]any{txHash, uint64(0)}}},
+			1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 			2: 100_000 + uint64(seed),
 		}),
 		mustCbor(t, map[uint]any{}),
 		mustCbor(t, nil),
+		mustCbor(t, true),
 	})
 }
 
@@ -1286,7 +1287,7 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Equal(t, []byte(origTop[0]), []byte(mergedTop[0]))
 
 	// The transaction segment now holds the endorser block's transactions; the
-	// certificate and peras segments retain their three-component positions.
+	// The peras segment is preserved and the certificate is cleared.
 	origBody := make([]cbor.RawMessage, 0)
 	mergedBody := make([]cbor.RawMessage, 0)
 	_, err = cbor.Decode(origTop[1], &origBody)
@@ -1308,17 +1309,8 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	_, err = cbor.Decode(mergedBody[0], &mergedTxs)
 	require.NoError(t, err)
 	require.Len(t, mergedTxs, 2)
-	for idx := range ebTxs {
-		var inputFields, blockFields []cbor.RawMessage
-		_, err = cbor.Decode(ebTxs[idx], &inputFields)
-		require.NoError(t, err)
-		_, err = cbor.Decode(mergedTxs[idx], &blockFields)
-		require.NoError(t, err)
-		require.Len(t, inputFields, 3)
-		require.Len(t, blockFields, 4)
-		require.Equal(t, inputFields, blockFields[:3])
-		require.Equal(t, cbor.RawMessage{0xf5}, blockFields[3])
-	}
+	require.Equal(t, []byte(ebTxs[0]), []byte(mergedTxs[0]))
+	require.Equal(t, []byte(ebTxs[1]), []byte(mergedTxs[1]))
 
 	// The merged block deliberately has a stale body hash: the preserved header
 	// still commits to the original empty body, so a full parse (which verifies

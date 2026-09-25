@@ -980,17 +980,6 @@ func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
 
 // --- verifyBlockHeaderCrypto tests ---
 
-func newTestCardanoNodeConfig(t testing.TB, k int) *cardano.CardanoNodeConfig {
-	t.Helper()
-	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
-		cardano.EmbeddedConfigFS,
-		"mainnet/config.json",
-	)
-	require.NoError(t, err)
-	cfg.ByronGenesis().ProtocolConsts.K = k
-	return cfg
-}
-
 // newTestShelleyGenesisCfg creates a CardanoNodeConfig with Shelley genesis
 // loaded for use in verifyBlockHeaderCrypto tests.
 func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
@@ -1004,8 +993,15 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
-	cfg := newTestCardanoNodeConfig(t, 432)
-	var err error
+	cfg := &cardano.CardanoNodeConfig{}
+	byronGenesisJSON := `{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 432 }
+	}`
+	err := loadByronGenesisForTest(t, cfg,
+		strings.NewReader(byronGenesisJSON),
+	)
+	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
@@ -1647,8 +1643,10 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
-	cfg := newTestCardanoNodeConfig(t, 432)
-	var err error
+	cfg := &cardano.CardanoNodeConfig{}
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
@@ -1695,8 +1693,10 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 			}
 		}
 	}`
-	cfg := newTestCardanoNodeConfig(t, 432)
-	var err error
+	cfg := &cardano.CardanoNodeConfig{}
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)

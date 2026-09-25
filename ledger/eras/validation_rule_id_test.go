@@ -492,7 +492,7 @@ func newConwayTreasuryTx(
 ) *conway.ConwayTransaction {
 	t.Helper()
 	if _, ok := body[0]; !ok {
-		body[0] = []any{}
+		body[0] = cbor.NewSetType([]shelley.ShelleyTransactionInput{}, true)
 	}
 	if _, ok := body[1]; !ok {
 		body[1] = []any{}

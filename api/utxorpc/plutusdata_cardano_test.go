@@ -257,7 +257,7 @@ func TestRedeemerPlutusDataByKey_DecodedWitness(t *testing.T) {
 			Number:  258,
 			Content: []any{[]any{txHash, uint64(0)}},
 		},
-		1: []any{},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 		2: uint64(200000),
 	}
 

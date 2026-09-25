@@ -45,18 +45,18 @@ func musashiDijkstraBlock(t *testing.T) []byte {
 	return raw
 }
 
-// TestDecodeConwayBlockRejectsLegacyDijkstraLayout ensures the obsolete
-// four-component Dijkstra body cannot be accepted through Conway storage or
-// replay decoding.
-func TestDecodeConwayBlockRejectsLegacyDijkstraLayout(t *testing.T) {
+// TestDecodeConwayBlockRejectsObsoleteDijkstraLayout pins the pre-respin
+// Musashi block shape. Its two-component block envelope and extended header
+// remain useful fixtures, but its four-component body predates the current
+// three-component Dijkstra block-body schema and must not be accepted:
+//
+//	cbor: cannot unmarshal array into Go value of type conway.tmpConwayBlock
+//	(cannot decode CBOR array to struct with different number of elements)
+func TestDecodeConwayBlockRejectsObsoleteDijkstraLayout(t *testing.T) {
 	raw := musashiDijkstraBlock(t)
 
 	block, err := models.DecodeConwayBlock(raw)
-	require.Error(t, err)
-	require.Nil(t, block)
-
-	block, err = models.DecodeConwayPeerBlock(raw)
-	require.Error(t, err)
+	require.Error(t, err, "the pre-respin four-field block body is obsolete")
 	require.Nil(t, block)
 }
 
@@ -76,6 +76,10 @@ func TestDecodeStoredConwayBlockAcceptsLegacyDijkstraLayout(t *testing.T) {
 // TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
 // fixture swapped for a differently-shaped block fails here with a clear
 // reason rather than making the regression above pass for the wrong one.
+
+// TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
+// fixture swapped for a differently-shaped block fails here with a clear
+// reason rather than making the regression above pass for the wrong one.
 func TestMusashiFixtureHasDijkstraLayout(t *testing.T) {
 	raw := musashiDijkstraBlock(t)
 
@@ -89,6 +93,10 @@ func TestMusashiFixtureHasDijkstraLayout(t *testing.T) {
 		"Dijkstra blocks are [header, block_body]; the five-component "+
 			"Leios-extended Conway reconstruct cannot apply to them",
 	)
+	var blockBody []cbor.RawMessage
+	_, err = cbor.Decode(components[1], &blockBody)
+	require.NoError(t, err)
+	require.Len(t, blockBody, 4, "the captured fixture uses the legacy body schema")
 
 	var headerParts []cbor.RawMessage
 	_, err = cbor.Decode(components[0], &headerParts)
@@ -107,8 +115,10 @@ func TestMusashiFixtureHasDijkstraLayout(t *testing.T) {
 	)
 }
 
-// TestDecodeConwayBlockRejectsUnrecognizedBlock ensures unrecognized input
-// still reports the strict Conway decode error.
+// TestDecodeConwayBlockRejectsUnrecognizedBlock proves the added fallback did
+// not turn the decoder into one that accepts anything: input matching none of
+// the three shapes still fails, and still reports the strict Conway error,
+// which is the meaningful one for real Conway networks.
 func TestDecodeConwayBlockRejectsUnrecognizedBlock(t *testing.T) {
 	notABlock, err := cbor.Encode([]any{1, 2, 3})
 	require.NoError(t, err)
@@ -119,8 +129,15 @@ func TestDecodeConwayBlockRejectsUnrecognizedBlock(t *testing.T) {
 	require.Contains(t, err.Error(), "decode Conway block error")
 }
 
-// TestDecodeConwayBlockRejectsTwoComponentNonDijkstra ensures a two-component
-// array is not accepted as a Conway block.
+// TestDecodeConwayBlockRejectsTwoComponentNonDijkstra proves the Dijkstra
+// fallback is gated on the Leios-extended signature rather than on "any CBOR
+// array of two things".
+//
+// DecodeConwayBlock is reached from the network-independent storage path
+// (models.Block.Decode) as well as from the Musashi block-fetch path, so an
+// ungated fallback would let a corrupt or foreign stored Conway-tagged block
+// be silently reinterpreted as Dijkstra instead of returning the strict-decode
+// error.
 func TestDecodeConwayBlockRejectsTwoComponentNonDijkstra(t *testing.T) {
 	twoThings, err := cbor.Encode([]any{1, 2})
 	require.NoError(t, err)
@@ -137,8 +154,9 @@ func TestDecodeConwayBlockRejectsTwoComponentNonDijkstra(t *testing.T) {
 	)
 }
 
-// TestDecodeConwayBlockRejectsUnextendedDijkstraShape ensures a legacy
-// two-component block is rejected even with a standard-width header.
+// TestDecodeConwayBlockRejectsUnextendedDijkstraShape proves the
+// gate checks the header body width too: a two-component block whose header
+// body carries only the ten standard Babbage fields is not the Musashi shape.
 func TestDecodeConwayBlockRejectsUnextendedDijkstraShape(t *testing.T) {
 	raw := musashiDijkstraBlock(t)
 

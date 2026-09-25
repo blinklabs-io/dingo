@@ -692,7 +692,6 @@ func (b *DefaultBlockBuilder) buildBlock(
 				)
 				candidateBodyCbor, encodeErr := encodeDijkstraBlockBodyCbor(
 					candidateTransactions,
-					[]uint{},
 					nil,
 				)
 				if encodeErr != nil {
@@ -1217,7 +1216,6 @@ func computeBlockBodyHash(
 	if era == eraDijkstra {
 		bodyCbor, err := encodeDijkstraBlockBodyCbor(
 			transactions,
-			invalidTxs,
 			leiosCert,
 		)
 		if err != nil {
@@ -1480,8 +1478,9 @@ type rawBabbageEraBlock struct {
 	InvalidTransactions    []uint
 }
 
-// rawDijkstraBlockBody encodes the current three-component Dijkstra
-// block_body. CertRBs populate leios_certificate; peras remains CBOR null.
+// rawDijkstraBlockBody encodes the current Dijkstra block_body:
+// [[* transaction], leios_certificate / nil, peras_certificate / nil].
+// CertRBs populate leios_certificate; peras remains CBOR null.
 type rawDijkstraBlockBody struct {
 	cbor.StructAsArray
 	Transactions     []cbor.RawMessage
@@ -1539,10 +1538,10 @@ func dijkstraLeiosAnnouncementForHeader(
 	return cbor.RawMessage(raw), nil
 }
 
-// encodeBlockCbor selects the era-correct raw-block envelope and
-// encodes it. The forge path never produces invalid_transactions so
-// the list is always empty when present; we still emit it because
-// each Alonzo+ decoder expects exactly five array elements.
+// encodeBlockCbor selects the era-correct raw-block envelope and encodes it.
+//
+// Alonzo through Conway carry invalid transaction indexes in the block body;
+// Dijkstra moves validity onto each block transaction.
 func encodeBlockCbor(
 	era eraKind,
 	header cbor.RawMessage,
@@ -1555,7 +1554,6 @@ func encodeBlockCbor(
 	if era == eraDijkstra {
 		body, err := rawDijkstraBlockBodyForEncoding(
 			transactions,
-			nil,
 			leiosCert,
 		)
 		if err != nil {
@@ -1594,12 +1592,10 @@ func encodeBlockCbor(
 
 func encodeDijkstraBlockBodyCbor(
 	transactions []cbor.RawMessage,
-	invalidTxs []uint,
 	leiosCert *dijkstra.DijkstraLeiosCertificate,
 ) ([]byte, error) {
 	body, err := rawDijkstraBlockBodyForEncoding(
 		transactions,
-		invalidTxs,
 		leiosCert,
 	)
 	if err != nil {
@@ -1610,60 +1606,11 @@ func encodeDijkstraBlockBodyCbor(
 
 func rawDijkstraBlockBodyForEncoding(
 	transactions []cbor.RawMessage,
-	invalidTxs []uint,
 	leiosCert *dijkstra.DijkstraLeiosCertificate,
 ) (rawDijkstraBlockBody, error) {
 	if transactions == nil {
 		transactions = []cbor.RawMessage{}
 	}
-	invalid := make(map[uint]struct{}, len(invalidTxs))
-	for _, idx := range invalidTxs {
-		if uint64(idx) >= uint64(len(transactions)) {
-			return rawDijkstraBlockBody{}, fmt.Errorf(
-				"invalid Dijkstra transaction index %d for %d transactions",
-				idx,
-				len(transactions),
-			)
-		}
-		if _, exists := invalid[idx]; exists {
-			return rawDijkstraBlockBody{}, fmt.Errorf(
-				"duplicate invalid Dijkstra transaction index %d",
-				idx,
-			)
-		}
-		invalid[idx] = struct{}{}
-	}
-	if len(invalid) > 0 {
-		transactions = append([]cbor.RawMessage(nil), transactions...)
-		for idx := range transactions {
-			if _, exists := invalid[uint(idx)]; !exists {
-				continue
-			}
-			var fields []cbor.RawMessage
-			if _, err := cbor.Decode(transactions[idx], &fields); err != nil {
-				return rawDijkstraBlockBody{}, fmt.Errorf(
-					"decode Dijkstra transaction %d: %w", idx, err,
-				)
-			}
-			if len(fields) != 4 {
-				return rawDijkstraBlockBody{}, fmt.Errorf(
-					"invalid Dijkstra transaction %d: expected 4 components, got %d",
-					idx,
-					len(fields),
-				)
-			}
-			encoded, err := cbor.Encode([]any{
-				fields[0], fields[1], fields[2], false,
-			})
-			if err != nil {
-				return rawDijkstraBlockBody{}, fmt.Errorf(
-					"encode invalid Dijkstra transaction %d: %w", idx, err,
-				)
-			}
-			transactions[idx] = encoded
-		}
-	}
-	var err error
 	nullCert, err := encodeCborNull("Dijkstra certificate")
 	if err != nil {
 		return rawDijkstraBlockBody{}, err

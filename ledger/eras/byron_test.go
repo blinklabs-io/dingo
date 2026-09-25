@@ -196,6 +196,8 @@ func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 	// The decoded witness omits Byron's tag-24 payload and chain-specific
 	// signing fields, so validation must still use the raw Byron witness.
 	assert.Len(t, redeemTx.Witnesses().Vkey(), 1)
+	// Byron witnesses exposed through TransactionWitnessSet still require
+	// their constructor-specific signature domain.
 
 	producerOutputCbor, err := hex.DecodeString(
 		"82582b82d818582183581c4041adf6b03851a9c85db3f028995504fb4ba48b50703ab1b9841350a0021ad658e71f1a000f4240",

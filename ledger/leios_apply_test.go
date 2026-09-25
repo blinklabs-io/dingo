@@ -62,8 +62,8 @@ func leiosApplyTestTx(
 ) (cbor.RawMessage, []byte, lcommon.Transaction) {
 	t.Helper()
 	bodyCbor, err := cbor.Encode(map[uint]any{
-		0: []any{}, // inputs
-		1: []any{}, // outputs
+		0: cbor.Tag{Number: 258, Content: []any{[]any{bytes.Repeat([]byte{seed}, 32), uint64(0)}}},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 		2: 200_000 + uint64(seed),
 	})
 	require.NoError(t, err)
@@ -125,6 +125,14 @@ func requireLeiosApplyTestEndorserBlob(
 	}))
 }
 
+func leiosApplyTestBlob(body []byte, tx lcommon.Transaction) []byte {
+	blob := append([]byte(nil), body...)
+	for _, utxo := range tx.Produced() {
+		blob = append(blob, utxo.Output.Cbor()...)
+	}
+	return blob
+}
+
 func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	t.Parallel()
 
@@ -151,7 +159,7 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 
 	require.Equal(t, 1, applied)
 	requireLeiosApplyTestTxCount(t, gdb, 1)
-	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, leiosApplyTestBlob(bodyCbor, tx))
 	// The transaction is recorded under the ranking block's point.
 	var got int64
 	require.NoError(t, gdb.QueryRow(
@@ -166,8 +174,8 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
-	rawTx1, body1, _ := leiosApplyTestTx(t, 0x02)
-	rawTx2, body2, _ := leiosApplyTestTx(t, 0x03)
+	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x02)
+	rawTx2, body2, tx2 := leiosApplyTestTx(t, 0x03)
 
 	const ebSlot = uint64(300)
 	ebHash := leiosApplyTestEbHash(0x44)
@@ -188,9 +196,8 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 
 	require.Equal(t, 2, applied)
 	requireLeiosApplyTestTxCount(t, gdb, 2)
-	// The blob is a flat concatenation of each transaction's body CBOR (these
-	// transactions produce no outputs).
-	want := append(append([]byte{}, body1...), body2...)
+	// The blob contains each body followed by its produced output CBOR.
+	want := append(leiosApplyTestBlob(body1, tx1), leiosApplyTestBlob(body2, tx2)...)
 	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, want)
 }
 
@@ -199,7 +206,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
-	rawTx1, body1, _ := leiosApplyTestTx(t, 0x04)
+	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x04)
 	rawTx2, _, _ := leiosApplyTestTx(t, 0x05)
 
 	appliedFirst := -1
@@ -250,7 +257,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 		db,
 		500,
 		leiosApplyTestEbHash(0x82),
-		body1,
+		leiosApplyTestBlob(body1, tx1),
 	)
 
 	appliedCommittedDuplicate := -1
@@ -310,7 +317,7 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 		tx.Hash().Bytes(),
 	).Scan(&gotTx.Slot))
 	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
-	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, leiosApplyTestBlob(bodyCbor, tx))
 }
 
 // leiosApplyTestTxWithOutput builds a Dijkstra endorser transaction that
@@ -324,7 +331,7 @@ func leiosApplyTestTxWithOutput(
 	// Enterprise testnet address: header byte 0x60 + 28-byte payment key hash.
 	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
 	bodyCbor, err := cbor.Encode(map[uint]any{
-		0: []any{}, // inputs
+		0: cbor.Tag{Number: 258, Content: []any{}},
 		1: []any{ // outputs
 			map[uint]any{
 				0: addr,
@@ -437,14 +444,14 @@ SELECT slot, block_index FROM "transaction" WHERE hash = ?`,
 		db,
 		600,
 		leiosApplyTestEbHash(0x92),
-		append(append([]byte{}, bodyCbor...), bodyCbor...),
+		append(leiosApplyTestBlob(bodyCbor, tx), leiosApplyTestBlob(bodyCbor, tx)...),
 	)
 	requireLeiosApplyTestEndorserBlob(
 		t,
 		db,
 		601,
 		leiosApplyTestEbHash(0x94),
-		bodyCbor,
+		leiosApplyTestBlob(bodyCbor, tx),
 	)
 }
 

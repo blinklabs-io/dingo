@@ -234,6 +234,19 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 	assert.Equal(t, uint64(1001), block.SlotNumber())
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, 0, len(block.Transactions()))
+	var blockItems []cbor.RawMessage
+	_, err = cbor.Decode(blockCbor, &blockItems)
+	require.NoError(t, err)
+	require.Len(t, blockItems, 2)
+	var bodyItems []cbor.RawMessage
+	_, err = cbor.Decode(blockItems[1], &bodyItems)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		bodyItems,
+		3,
+		"current Dijkstra block bodies omit the obsolete invalid_transactions field",
+	)
 
 	// The forged block's body hash must match the header commitment, i.e.
 	// the encoded Dijkstra block_body with null certificate fields. A

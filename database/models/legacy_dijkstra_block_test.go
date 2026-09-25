@@ -27,6 +27,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDecodeDijkstraPeerBlockRejectsLegacyMusashiBody(t *testing.T) {
+	rawText, err := os.ReadFile("testdata/musashi_dijkstra_block.hex")
+	require.NoError(t, err)
+	raw, err := hex.DecodeString(strings.TrimSpace(string(rawText)))
+	require.NoError(t, err)
+
+	block, err := models.DecodeDijkstraPeerBlock(raw)
+	require.ErrorContains(t, err, "expected 3 components, got 4")
+	require.Nil(t, block)
+}
+
 func TestDecodeDijkstraBlockPreservesLegacyMusashiBody(t *testing.T) {
 	rawText, err := os.ReadFile("testdata/musashi_dijkstra_block.hex")
 	require.NoError(t, err)

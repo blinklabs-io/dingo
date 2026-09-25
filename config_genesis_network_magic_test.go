@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -62,24 +61,24 @@ func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			byronGenesisJSON, err := cardano.EmbeddedConfigFS.ReadFile(
-				"mainnet/byron-genesis.json",
-			)
-			require.NoError(t, err)
-			var byronGenesis map[string]json.RawMessage
-			require.NoError(t, json.Unmarshal(byronGenesisJSON, &byronGenesis))
-			var protocolConsts map[string]json.RawMessage
-			require.NoError(
-				t,
-				json.Unmarshal(byronGenesis["protocolConsts"], &protocolConsts),
-			)
-			protocolMagic, err := json.Marshal(tt.byronProtocolMagic)
-			require.NoError(t, err)
-			protocolConsts["protocolMagic"] = protocolMagic
-			byronGenesis["protocolConsts"], err = json.Marshal(protocolConsts)
-			require.NoError(t, err)
-			byronGenesisJSON, err = json.Marshal(byronGenesis)
-			require.NoError(t, err)
+			byronGenesisJSON := `{
+				"avvmDistr": {},
+				"blockVersionData": {
+					"heavyDelThd":"300000000000","maxBlockSize":"2000000",
+					"maxHeaderSize":"2000000","maxProposalSize":"700",
+					"maxTxSize":"4096","mpcThd":"20000000000000",
+					"scriptVersion":0,"slotDuration":"20000",
+					"softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},
+					"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},
+					"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000",
+					"updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"
+				},
+				"startTime": 1666656000,
+				"bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {},
+				"protocolConsts": {"k": 108, "protocolMagic": ` + strconv.Itoa(
+				tt.byronProtocolMagic,
+			) + `}
+			}`
 
 			nodeCfg := &cardano.CardanoNodeConfig{}
 			require.NoError(
@@ -91,7 +90,7 @@ func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 			require.NoError(
 				t,
 				nodeCfg.LoadByronGenesisFromReader(
-					strings.NewReader(string(byronGenesisJSON)),
+					strings.NewReader(byronGenesisJSON),
 				),
 			)
 
@@ -104,13 +103,13 @@ func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 				WithNetworkMagic(shelleyMagic),
 				WithCardanoNodeConfig(nodeCfg),
 			)
-			n := &Node{config: cfg}
-			err = n.configValidate()
+			n, err := New(cfg)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
+			t.Cleanup(func() { _ = n.Stop() })
 		})
 	}
 }

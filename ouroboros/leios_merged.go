@@ -1589,18 +1589,19 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 // segment, matching the node-to-client "merged" block the prototype serves for
 // a certifying ranking block. The Dijkstra block is [header, block_body] with
 // block_body = [transactions, leios_certificate, peras_certificate]. The
-// transactions element (index 0) is replaced and the leios_certificate element
-// (index 1) is cleared, because CIP-0164 permits a certificate or transactions
-// and not both. The header and peras element are preserved verbatim so the served block's
-// hash (a hash of the header) is unchanged; the header's block_body_hash
+// transactions element is replaced and the leios_certificate element is
+// cleared, because CIP-0164 permits a certificate or transactions and not
+// both. The header and peras element are preserved verbatim so the served
+// block's hash (a hash of the header) is unchanged; the header's block_body_hash
 // intentionally no longer matches, which is acceptable over node-to-client
 // because local clients do not re-verify the body hash.
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
-// three, and the existing transactions segment must be empty. ebTxsRaw contains
-// Dijkstra mempool transactions ([transaction_body, transaction_witness_set,
-// auxiliary_data/nil]) in endorser-block order.
+// three, and the existing transactions segment must be empty. ebTxsRaw must be
+// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
+// auxiliary_data/nil, is_valid]) in endorser-block order. The older three-field
+// mempool representation is normalized with is_valid=true.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
 	ebTxsRaw []cbor.RawMessage,
@@ -1641,16 +1642,23 @@ func spliceEndorserTxsIntoDijkstraBlock(
 		if _, err := cbor.Decode(rawTx, &fields); err != nil {
 			return nil, fmt.Errorf("decode endorser transaction %d: %w", idx, err)
 		}
-		if len(fields) != 3 {
+		if len(fields) != 3 && len(fields) != 4 {
 			return nil, fmt.Errorf(
-				"endorser transaction %d has %d elements, expected 3",
+				"endorser transaction %d has %d elements, expected 3 or 4",
 				idx,
 				len(fields),
 			)
 		}
-		encoded, err := cbor.Encode([]cbor.RawMessage{
-			fields[0], fields[1], fields[2], {0xf5},
-		})
+		blockTx := fields
+		if len(fields) == 3 {
+			blockTx = []cbor.RawMessage{fields[0], fields[1], fields[2], {0xf5}}
+		} else {
+			var isValid bool
+			if _, err := cbor.Decode(fields[3], &isValid); err != nil {
+				return nil, fmt.Errorf("decode endorser transaction %d validity: %w", idx, err)
+			}
+		}
+		encoded, err := cbor.Encode(blockTx)
 		if err != nil {
 			return nil, fmt.Errorf("encode endorser transaction %d: %w", idx, err)
 		}
