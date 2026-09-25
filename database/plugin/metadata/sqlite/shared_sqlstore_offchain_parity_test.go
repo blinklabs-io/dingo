@@ -62,7 +62,14 @@ type offchainState struct {
 func TestSharedSQLStoreOffchainParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseOffchainStore(t, store)
+	state := exerciseOffchainStore(t, store)
+	require.Equal(t, 1, state.created)
+	require.Zero(t, state.createdAgain)
+	require.Len(t, state.firstBatch, 1)
+	require.Empty(t, state.secondBatch)
+	require.NotNil(t, state.fetched)
+	require.Equal(t, models.OffchainMetadataStatusFetched, state.fetched.Status)
+	require.Equal(t, []byte(`{"name":"constitution"}`), state.fetched.Content)
 }
 
 func exerciseOffchainStore(t *testing.T, store offchainStore) offchainState {

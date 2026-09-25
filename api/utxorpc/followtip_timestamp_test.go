@@ -135,6 +135,29 @@ func TestFollowTipResponse_RollbackSucceedsWithTimestamp(t *testing.T) {
 	)
 }
 
+func TestFollowTipResponse_RollbackToOrigin(t *testing.T) {
+	t.Parallel()
+	stub := &followTipTimestampLedger{
+		tip: ochainsync.Tip{Point: ocommon.NewPoint(0, nil)},
+	}
+	srv := newFollowTipTimestampServer(stub)
+
+	resp, err := srv.followTipResponse(&chain.ChainIteratorResult{
+		Point:    ocommon.NewPoint(0, nil),
+		Rollback: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
+	require.True(t, ok)
+	require.NotNil(t, reset.Reset_)
+	require.Zero(t, reset.Reset_.Slot)
+	require.Empty(t, reset.Reset_.Hash)
+	require.Zero(t, reset.Reset_.Height)
+	require.Zero(t, reset.Reset_.Timestamp)
+}
+
 // TestFollowTipResponse_TipSlotToTimeErrorPropagates covers the second
 // SlotToTime call site: the current-tip timestamp populated on every
 // response, reset or apply. Using a rollback-to-origin result reaches this
