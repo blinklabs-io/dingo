@@ -1675,25 +1675,55 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	config.TaskQueueSize = 1 // Very small queue
 
 	pool := NewDatabaseWorkerPool(nil, config)
-
-	// Submit some operations
-	for range 3 {
-		resultChan := make(chan DatabaseResult, 1)
-		pool.Submit(DatabaseOperation{
-			OpFunc: func(db *database.Database) error {
-				return nil
-			},
-			ResultChan: resultChan,
-		})
-
-		// Drain result
-		go func(ch chan DatabaseResult) {
-			<-ch
-		}(resultChan)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			close(started)
+			<-release
+			return nil
+		},
+		ResultChan: firstResult,
+	})
+	select {
+	case <-started:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("first operation did not start")
 	}
 
-	// Shutdown should complete successfully
+	queuedResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc:     func(db *database.Database) error { return nil },
+		ResultChan: queuedResult,
+	})
+
+	fullResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc:     func(db *database.Database) error { return nil },
+		ResultChan: fullResult,
+	})
+	select {
+	case result := <-fullResult:
+		require.EqualError(t, result.Error, "database worker pool queue full")
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("full queue did not reject the operation")
+	}
+
+	close(release)
 	pool.Shutdown(5 * time.Second)
+	select {
+	case result := <-firstResult:
+		require.NoError(t, result.Error)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("first operation did not complete")
+	}
+	select {
+	case result := <-queuedResult:
+		require.NoError(t, result.Error)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("queued operation did not complete")
+	}
 }
 
 // TestDatabaseWorkerPoolSubmitAfterShutdown tests that submitting after shutdown fails
@@ -2640,6 +2670,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	var wg sync.WaitGroup
 	readCount := atomic.Int32{}
 	txnStarted := make(chan struct{})
+	readersFinished := make(chan struct{}, 5)
 	txnDone := make(chan struct{})
 	rolloverErr := make(chan error, 1)
 
@@ -2652,15 +2683,16 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		snapshotPParams := ls.currentPParams
 		ls.RUnlock()
 
-		// Signal that transaction is starting
-		close(txnStarted)
-
 		// Execute transaction (simulates DB work)
 		var result *EpochRolloverResult
 		txn := db.Transaction(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			// Add a small delay to give readers time to run
-			time.Sleep(50 * time.Millisecond)
+			close(txnStarted)
+			// Hold the transaction open until each reader has observed the
+			// current ledger state, making the concurrency assertion deterministic.
+			for range 5 {
+				<-readersFinished
+			}
 			var err error
 			result, err = ls.processEpochRollover(
 				txn,
@@ -2688,26 +2720,17 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		close(txnDone)
 	})
 
-	// Start multiple reader goroutines that try to read during the transaction
+	// Start multiple reader goroutines that read while the transaction is open.
 	for range 5 {
 		wg.Go(func() {
 			// Wait for transaction to start
 			<-txnStarted
-
-			// Try to read multiple times during the transaction
-			for range 10 {
-				select {
-				case <-txnDone:
-					return
-				default:
-					ls.RLock()
-					_ = ls.currentEra   // Read era
-					_ = ls.currentEpoch // Read epoch
-					readCount.Add(1)
-					ls.RUnlock()
-					time.Sleep(5 * time.Millisecond)
-				}
-			}
+			ls.RLock()
+			_ = ls.currentEra   // Read era
+			_ = ls.currentEpoch // Read epoch
+			readCount.Add(1)
+			ls.RUnlock()
+			readersFinished <- struct{}{}
 		})
 	}
 
