@@ -481,17 +481,26 @@ func (m *DingoStateManager) LoadInitialState(
 		if hasDRepCredentialHash(state.DRepRegistrationsByCredential, hash) {
 			continue
 		}
-		depositAmount, err := resolveInitialDRepDeposit(mockledger.RewardAccountKey{
-			CredType:   common.CredentialTypeAddrKeyHash,
-			Credential: hash,
-		})
+		credential, err := legacyDRepCredential(state, hash)
+		if err != nil {
+			return fmt.Errorf("resolve legacy DRep credential: %w", err)
+		}
+		depositAmount, err := resolveInitialDRepDeposit(credential)
 		if err != nil {
 			return err
 		}
-		drep := &models.Drep{Credential: hash[:], Active: true}
+		credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+		if err != nil {
+			return fmt.Errorf("seed legacy drep credential tag: %w", err)
+		}
+		drep := &models.Drep{
+			Credential:    hash[:],
+			CredentialTag: credentialTag,
+			Active:        true,
+		}
 		registration := &models.RegistrationDrep{
 			DrepCredential: drep.Credential,
-			CredentialTag:  drep.CredentialTag,
+			CredentialTag:  credentialTag,
 			DepositAmount:  types.Uint64(depositAmount),
 		}
 		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
@@ -1111,6 +1120,35 @@ func hasDRepCredentialHash(
 		}
 	}
 	return false
+}
+
+func legacyDRepCredential(
+	state *conformance.ParsedInitialState,
+	hash common.Blake2b224,
+) (mockledger.RewardAccountKey, error) {
+	keyCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	var match mockledger.RewardAccountKey
+	found := false
+	for credential := range state.DRepDeposits {
+		if credential.Credential != hash {
+			continue
+		}
+		if found && credential != match {
+			return mockledger.RewardAccountKey{}, fmt.Errorf(
+				"legacy DRep %x has ambiguous credential types in initial deposits",
+				hash,
+			)
+		}
+		match = credential
+		found = true
+	}
+	if found {
+		return match, nil
+	}
+	return keyCredential, nil
 }
 
 func (m *DingoStateManager) updateStakeDepositForCertificate(

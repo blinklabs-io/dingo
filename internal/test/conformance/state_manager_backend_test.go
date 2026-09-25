@@ -86,6 +86,34 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	require.Len(t, dreps, 2)
 }
 
+func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
+	t.Parallel()
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	hash := testHash28(0xd4)
+	script := mockledger.RewardAccountKey{
+		CredType: common.CredentialTypeScriptHash, Credential: hash,
+	}
+	const recordedDeposit = uint64(400_000_000)
+	pp := &conway.ConwayProtocolParameters{DRepDeposit: 500_000_000}
+	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
+		DRepRegistrations: []common.Blake2b224{hash},
+		DRepDeposits: map[mockledger.RewardAccountKey]uint64{
+			script: recordedDeposit,
+		},
+	}, pp))
+
+	drep, err := m.db.GetDrepByCredential(1, hash[:], false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	deposit, err := m.db.GetDrepLastRegistrationDeposit(1, hash[:], nil)
+	require.NoError(t, err)
+	require.NotNil(t, deposit)
+	require.Equal(t, recordedDeposit, *deposit)
+}
+
 func TestLoadInitialStateSkipsInactiveDRepsWithoutDeposit(t *testing.T) {
 	t.Parallel()
 	m, err := NewDingoStateManager()
