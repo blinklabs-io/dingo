@@ -1954,7 +1954,7 @@ func (ls *LedgerState) queueRewardPrecompute(
 	precompute func(event.EpochTransitionEvent) error,
 ) {
 	ls.rewardPrecomputeMu.Lock()
-	start := ls.queueRewardPrecomputeLocked(epochEvent, precompute)
+	start := ls.queueRewardPrecomputeLocked(epochEvent)
 	ls.rewardPrecomputeMu.Unlock()
 	if start {
 		go ls.runRewardPrecompute(precompute)
@@ -1965,7 +1965,6 @@ func (ls *LedgerState) queueRewardPrecompute(
 // invalidating it during rollback cannot enqueue events in the wrong order.
 func (ls *LedgerState) queueRewardPrecomputeLocked(
 	epochEvent event.EpochTransitionEvent,
-	precompute func(event.EpochTransitionEvent) error,
 ) bool {
 	if ls.closed.Load() {
 		return false
@@ -2040,7 +2039,6 @@ func (ls *LedgerState) maybeQueueStakeRewardPrecomputeRetry(
 	epochEvent.BoundarySlot = capturedSlot
 	start := ls.queueRewardPrecomputeLocked(
 		epochEvent,
-		ls.precomputeStakeRewardsAfterEpochTransition,
 	)
 	ls.rewardPrecomputeMu.Unlock()
 	if start {
