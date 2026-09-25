@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
@@ -215,6 +216,23 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		})
 		files, _ := validImmutableFiles(t, 1000)
 		firstHash := bytes.Clone(files["immutable/00000.secondary"][16:48])
+		headerCBOR, err := cbor.Encode(shelley.ShelleyBlockHeader{
+			Body: shelley.ShelleyBlockHeaderBody{
+				BlockNumber:       1,
+				Slot:              999,
+				BlockBodySize:     0,
+				ProtoMajorVersion: 1,
+			},
+		})
+		require.NoError(t, err)
+		blockBodyCBOR, err := cbor.Encode([]any{
+			cbor.RawMessage(headerCBOR), []any{}, []any{}, map[uint]any{},
+		})
+		require.NoError(t, err)
+		blockCBOR, err := cbor.Encode([]any{
+			uint64(shelley.BlockTypeShelley), cbor.RawMessage(blockBodyCBOR),
+		})
+		require.NoError(t, err)
 		dataDir := t.TempDir()
 		db, err := dbtest.NewDatabase(t, &database.Config{
 			DataDir:     dataDir,
@@ -226,7 +244,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Slot:     999,
 			Hash:     firstHash,
 			PrevHash: bytes.Repeat([]byte{0}, 32),
-			Cbor:     []byte{0x80},
+			Cbor:     blockCBOR,
 			Number:   1,
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
