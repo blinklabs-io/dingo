@@ -78,6 +78,18 @@ func validateInboundBlockEnvelope(
 	nodeConfig *cardano.CardanoNodeConfig,
 	parent envelopeParent,
 ) error {
+	return validateInboundBlockEnvelopeWithByronParams(
+		block, pparams, nodeConfig, parent, nil,
+	)
+}
+
+func validateInboundBlockEnvelopeWithByronParams(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+	nodeConfig *cardano.CardanoNodeConfig,
+	parent envelopeParent,
+	byronParams *byron.ByronGenesisBlockVersionData,
+) error {
 	if block == nil {
 		return errors.New("validate inbound block envelope: nil block")
 	}
@@ -108,7 +120,7 @@ func validateInboundBlockEnvelope(
 		default:
 			return nil
 		}
-		return validateByronBlockSizes(block, nodeConfig)
+		return validateByronBlockSizes(block, nodeConfig, byronParams)
 	}
 	if err := validateBlockSizes(block, pparams); err != nil {
 		return err
@@ -300,6 +312,7 @@ func validateBlockSizes(
 func validateByronBlockSizes(
 	block gledger.Block,
 	config *cardano.CardanoNodeConfig,
+	activeParams *byron.ByronGenesisBlockVersionData,
 ) error {
 	if _, isEbb := block.(*byron.ByronEpochBoundaryBlock); isEbb {
 		const maxEbbSize = 2_000_000
@@ -315,8 +328,12 @@ func validateByronBlockSizes(
 	if config == nil || config.ByronGenesis() == nil {
 		return errors.New("byron genesis is required for block size validation")
 	}
-	genesis := config.ByronGenesis()
-	version := genesis.BlockVersionData
+	var version byron.ByronGenesisBlockVersionData
+	if activeParams != nil {
+		version = *activeParams
+	} else {
+		version = config.ByronGenesis().BlockVersionData
+	}
 	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
 		return errors.New("byron genesis has invalid block size limits")
 	}
@@ -331,6 +348,16 @@ func validateByronBlockSizes(
 			"byron block size %d exceeds maxBlockSize %d",
 			len(block.Cbor()), version.MaxBlockSize,
 		)
+	}
+	if mainBlock, ok := block.(*byron.ByronMainBlock); ok {
+		for index, tx := range mainBlock.Body.TxPayload {
+			if txSize := len(tx.Cbor()); txSize > version.MaxTxSize {
+				return fmt.Errorf(
+					"byron transaction %d size %d exceeds maxTxSize %d",
+					index, txSize, version.MaxTxSize,
+				)
+			}
+		}
 	}
 	return nil
 }

@@ -355,7 +355,7 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
 	require.NoError(t, err)
 
 	state, err = ls.advanceByronPBFTState(state, block, true)
@@ -383,7 +383,7 @@ func TestAdvanceByronPBFTStateRejectsMalformedUpdateProposal(t *testing.T) {
 	ls := &LedgerState{config: LedgerStateConfig{CardanoNodeConfig: config}}
 	byronConfig, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(byronConfig)
+	state, err := newByronPBFTState(byronConfig, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
 	require.NoError(t, err)
 
 	_, err = ls.advanceByronPBFTState(state, block, false)
@@ -495,7 +495,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -695,7 +695,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256

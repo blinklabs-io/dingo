@@ -575,6 +575,37 @@ func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
 	}
 }
 
+func TestValidateByronBlockSizesUsesActiveParameters(t *testing.T) {
+	block := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_regular",
+		uint(gledger.BlockTypeByronMain),
+	)
+	blockSize := len(block.Cbor())
+	headerSize := len(block.Header().Cbor())
+	config := newByronEnvelopeNodeConfig(t, blockSize-1, headerSize-1)
+	activeParams := &byron.ByronGenesisBlockVersionData{
+		MaxBlockSize:  blockSize,
+		MaxHeaderSize: headerSize,
+		MaxTxSize:     1_000,
+	}
+	require.NoError(t, validateByronBlockSizes(block, config, activeParams))
+
+	activeParams.MaxBlockSize = blockSize - 1
+	require.ErrorContains(
+		t,
+		validateByronBlockSizes(block, config, activeParams),
+		"exceeds maxBlockSize",
+	)
+	activeParams.MaxBlockSize = blockSize
+	activeParams.MaxTxSize = len(block.(*byron.ByronMainBlock).Body.TxPayload[0].Cbor()) - 1
+	require.ErrorContains(
+		t,
+		validateByronBlockSizes(block, config, activeParams),
+		"exceeds maxTxSize",
+	)
+}
+
 // TestValidateInboundBlockEnvelopeOrdering checks normal block number and
 // slot ordering failures, including Byron main blocks reusing parent numbers.
 func TestValidateInboundBlockEnvelopeOrdering(t *testing.T) {
@@ -824,7 +855,7 @@ func newByronEnvelopeNodeConfig(
 			"maxBlockSize": "%d",
 			"maxHeaderSize": "%d",
 			"maxProposalSize": "0",
-			"maxTxSize": "0",
+			"maxTxSize": "%d",
 			"mpcThd": "0",
 			"scriptVersion": 0,
 			"slotDuration": "20000",
@@ -844,7 +875,7 @@ func newByronEnvelopeNodeConfig(
 		"bootStakeholders": {},
 		"heavyDelegation": {},
 		"nonAvvmBalances": {}
-	}`, maxBlockSize, maxHeaderSize)
+	}`, maxBlockSize, maxHeaderSize, maxBlockSize)
 	require.NoError(
 		t,
 		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),

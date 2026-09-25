@@ -3305,6 +3305,21 @@ main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
 
+Byron main-block application also replays the update interface alongside the
+delegation view. Update proposals are signature-checked, limited by the active
+`maxProposalSize`, and checked against the successor-version, parameter, and
+software-version rules. Votes are attributed to genesis keys through the
+active delegation map and counted once per key; application versions change
+when their proposal is confirmed. Protocol-version endorsements are attributed
+to the delegate certificate in the block header. Endorsements can accumulate
+before a proposal is stable, but the block that reaches the adoption threshold
+is valid only after the proposal has been confirmed for at least `2k` slots.
+The candidate protocol version and its parameters take effect at the first
+eligible epoch slot after the `4k` stability cutoff. Those active parameters
+drive Byron block, header, and transaction size checks and the linear minimum
+fee policy. The update state is rebuilt from canonical blocks on startup or
+rollback, so no separate database record can become stale.
+
 Cached epochs resolve without forecast configuration, but still require a
 published nonce. Before forecasting an uncached epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
