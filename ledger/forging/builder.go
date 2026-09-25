@@ -403,7 +403,11 @@ func (b *DefaultBlockBuilder) buildBlock(
 		nextBlockNumber = blockCtx.BlockNumber
 		isGenesis = false
 	}
-	if err := b.checkAppliedTipRelation(currentTip, parentPoint); err != nil {
+	if err := b.checkAppliedTipRelation(
+		currentTip,
+		parentPoint,
+		blockCtx != nil,
+	); err != nil {
 		return nil, nil, err
 	}
 
@@ -814,7 +818,11 @@ func (b *DefaultBlockBuilder) buildBlock(
 			selectErr,
 		)
 	}
-	if err := b.checkAppliedTipRelation(currentTip, parentPoint); err != nil {
+	if err := b.checkAppliedTipRelation(
+		currentTip,
+		parentPoint,
+		blockCtx != nil,
+	); err != nil {
 		return nil, nil, err
 	}
 
@@ -1210,6 +1218,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 func (b *DefaultBlockBuilder) checkAppliedTipRelation(
 	currentTip ochainsync.Tip,
 	parentPoint ocommon.Point,
+	allowAlternativeParent bool,
 ) error {
 	appliedProvider, hasAppliedTip := b.txValidator.(AppliedTipProvider)
 	relationProvider, hasRelation := b.chainTip.(ChainTipRelationProvider)
@@ -1243,8 +1252,21 @@ func (b *DefaultBlockBuilder) checkAppliedTipRelation(
 			securityParam,
 		)
 	}
-	if !pointsEqual(parentPoint, currentTip.Point) &&
-		!pointsEqual(parentPoint, appliedTip.Point) {
+	if pointsEqual(parentPoint, currentTip.Point) {
+		return nil
+	}
+	if allowAlternativeParent {
+		parentTip, parentDepth, parentAncestor, err :=
+			relationProvider.TipRelation(parentPoint)
+		if err != nil {
+			return fmt.Errorf("check alternative forge parent ancestry: %w", err)
+		}
+		if !tipsEqual(parentTip, currentTip) || !parentAncestor || parentDepth != 1 {
+			return errors.New("alternative forge parent is not the direct chain-tip predecessor")
+		}
+		return nil
+	}
+	if !pointsEqual(parentPoint, appliedTip.Point) {
 		return errors.New("alternative forge parent does not match the applied ledger tip")
 	}
 	return nil

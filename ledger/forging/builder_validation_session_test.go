@@ -307,19 +307,19 @@ func TestBuilderRequiresAppliedAncestorWithinKOfActualParent(t *testing.T) {
 		txValidator: &ancestryTestTipValidator{appliedTip: applied, k: 5},
 	}
 
-	err := builder.checkAppliedTipRelation(primary, primary.Point)
+	err := builder.checkAppliedTipRelation(primary, primary.Point, false)
 	require.ErrorContains(t, err, "not within security parameter K")
 
 	builder.chainTip = ancestryTestChainTip{
 		tip: primary, depth: 2, ancestor: true,
 	}
-	require.NoError(t, builder.checkAppliedTipRelation(primary, applied.Point))
+	require.NoError(t, builder.checkAppliedTipRelation(primary, applied.Point, false))
 
 	builder.chainTip = ancestryTestChainTip{
 		tip: primary, depth: 6, ancestor: true,
 	}
 	require.ErrorContains(t,
-		builder.checkAppliedTipRelation(primary, primary.Point),
+		builder.checkAppliedTipRelation(primary, primary.Point, false),
 		"not within security parameter K",
 	)
 }
