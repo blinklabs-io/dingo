@@ -263,18 +263,15 @@ existing entry for a member that is still in the committee it enacts
 authorize a hot key until it is removed from the committee and elected again.
 
 Committee validation derives its authority signal from the include-deleted
-member set, which separates the two empty states. Removal is a soft delete, so
-a committee emptied by a NoConfidence enactment still has rows carrying
-`deleted_slot`: that is an authoritative empty committee, and a former
-member's authorization or resignation is rejected. No rows at all means no
-committee history is currently persisted, which is not proof that none ever
-was: it is the whole Conway era on a genesis-synced node, because only
-`UpdateCommittee` enactment and Mithril snapshot import write the table and the
-Conway genesis committee is never persisted (blinklabs-io/dingo#3785), but a
-rollback to before the first enactment also returns the table to no rows. That
-state is ambiguous either way, so certificate and voter validation decline to
-reject on committee grounds they cannot establish. A failed lookup still fails
-closed in both cases.
+member set and the loaded Conway genesis. Genesis initialization seeds a
+nonempty genesis committee. Removal is a soft delete, so a committee emptied
+by a NoConfidence enactment still has rows carrying `deleted_slot` and remains
+authoritative. An explicitly empty genesis committee is also authoritative,
+without requiring a sentinel row. Certificate and voter membership checks
+remain enforced in both empty states. No rows without an empty genesis
+declaration do not establish authority; validation cannot infer non-membership
+from missing state. A failed database lookup still fails closed, even with an
+empty genesis committee.
 
 Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present
@@ -1068,18 +1065,9 @@ snapshot, so it skips both the era-neutral upper-bound check and the
 credit and debit through the snapshot's boundary, and re-subtracting a
 pre-boundary withdrawal from it would double-count. The withdrawal is still
 required to resolve an *active* `account` row for the credential during live
-ingestion; during historical backfill it is not, because a withdrawal that was
-valid on the canonical chain can name a stake credential with no active
-account row for two distinct reasons (issue #3788), which are not treated
-alike:
+ingestion. During historical backfill an inactive row is accepted, but a
+missing one is not (issue #3788):
 
-- No `account` row exists at all: the credential was deregistered before the
-  snapshot was taken, or never active in it. There is no real prior balance to
-  recover, so the backfill records the `account_reward_delta` row with
-  `previous_reward = 0` from the credential alone, and neither creates nor
-  reactivates an `account` row -- the journal's join to `account` is already
-  unenforced (see above), so the history is retained without fabricating
-  current stake-registration state.
 - A row exists but is inactive. `applyTransactionCertificates` runs
   unconditionally regardless of `historicalBackfill`, so backfill's own
   certificate replay can transiently deactivate a row Mithril imported active,
@@ -1090,6 +1078,14 @@ alike:
   inactive-inclusive lookup and journals that real `reward` as
   `previous_reward` instead of discarding it as `0`, while still leaving the
   row itself untouched.
+- No `account` row exists at all: the backfill returns
+  `models.ErrAccountNotFound` and the run stops. A canonical withdrawal
+  requires its reward account to have existed, so an absent row means the
+  certificate replay that should have created it was skipped -- a block whose
+  decode or offset computation failed, for instance. Journaling
+  `previous_reward = 0` in that state would record a balance nothing
+  established and hide the real defect, so the run fails closed and the
+  checkpoint stays before the block that failed.
 
 ### Pools
 

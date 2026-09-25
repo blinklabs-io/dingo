@@ -249,9 +249,9 @@ func validateCommitteeCertificates(
 				// non-membership cannot be established beyond what this
 				// transaction's own certificates have already done. An
 				// earlier certificate's resignation must still be honored,
-				// or a genesis committee member Dingo does not persist
-				// (blinklabs-io/dingo#3785) could be resigned twice, or
-				// resigned then reauthorized, within one transaction. See
+				// or a resign-then-resign or resign-then-authorize sequence
+				// within one transaction would pass uninspected whenever
+				// committee state happens to be unavailable. See
 				// LedgerView.CommitteeStateAvailable.
 				if resignedInTx[key] {
 					if authorize {
@@ -380,7 +380,7 @@ func validateUnknownVoters(
 				}
 			}
 			// An unauthoritative nil member cannot establish an unknown
-			// voter (blinklabs-io/dingo#3785). See
+			// voter. See
 			// LedgerView.CommitteeStateAvailable.
 			if (member == nil && authoritative) ||
 				(member != nil && member.Resigned) {
