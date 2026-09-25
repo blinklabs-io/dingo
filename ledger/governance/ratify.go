@@ -159,6 +159,7 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 		decision.FailureReason = "cc in no-confidence state"
 	case in.CommitteeAbsent:
 		decision.CCApproved = false
+		decision.FailureReason = "committee absent"
 	case !inBootstrap && in.ActiveCCCount < int(in.PParams.MinCommitteeSize): //nolint:gosec
 		decision.CCApproved = false
 		decision.FailureReason = "cc below minimum committee size"

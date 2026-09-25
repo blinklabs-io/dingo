@@ -1118,7 +1118,7 @@ func committeeAbsent(
 	if hasStoredMembers {
 		return false
 	}
-	return genesis == nil || len(genesis.Committee.Members) == 0
+	return genesis == nil
 }
 
 func govActionPriority(proposal *models.GovernanceProposal) int {

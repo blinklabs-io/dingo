@@ -1238,18 +1238,54 @@ func TestShouldRatify_ZeroCommitteeQuorum(t *testing.T) {
 		quorum       *big.Rat
 		wantCC       bool
 		wantRatified bool
+		wantReason   string
 	}{
 		{name: "zero quorum with active members", activeCC: 2, quorum: big.NewRat(0, 1), wantCC: true, wantRatified: true},
 		{name: "empty seated committee and zero minimum", quorum: big.NewRat(0, 1), wantCC: true, wantRatified: true},
-		{name: "nil quorum remains unavailable", quorum: nil},
-		{name: "absent committee cannot approve", absent: true, quorum: big.NewRat(0, 1)},
+		{
+			name:       "nil quorum remains unavailable",
+			quorum:     nil,
+			wantReason: "cc quorum missing",
+		},
+		{
+			name:       "absent committee cannot approve",
+			absent:     true,
+			quorum:     big.NewRat(0, 1),
+			wantReason: "committee absent",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			decision := ShouldRatify(inputs(test.activeCC, test.absent, test.quorum))
 			assert.Equal(t, test.wantCC, decision.CCApproved)
 			assert.Equal(t, test.wantRatified, decision.Ratified)
+			if test.wantReason != "" {
+				assert.Equal(t, test.wantReason, decision.FailureReason)
+			}
 		})
 	}
+}
+
+func TestShouldRatify_EmptyGenesisCommitteeWithZeroQuorum(t *testing.T) {
+	t.Parallel()
+
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{},
+		},
+	}
+	pparams := conwayPParamsFixture(10)
+	pparams.MinCommitteeSize = 0
+	tally := &ProposalTally{
+		ActionType:     uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		DRepYesStake:   100,
+		DRepTotalStake: 100,
+	}
+	in := ratifyInputs(tally, pparams, 0, 0, big.NewRat(0, 1), 10, false)
+	in.CommitteeAbsent = committeeAbsent(nil, genesis, false)
+	decision := ShouldRatify(in)
+	assert.False(t, in.CommitteeAbsent)
+	assert.True(t, decision.CCApproved)
+	assert.True(t, decision.Ratified)
 }
 
 func TestConwayRatifyQuorum_FromGenesis(t *testing.T) {
