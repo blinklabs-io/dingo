@@ -1049,7 +1049,7 @@ func (ls *LedgerState) ProtocolParameterUpdateWindow(
 	}
 	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if genesis == nil || genesis.ActiveSlotsCoeff.Rat == nil ||
-		genesis.ActiveSlotsCoeff.Rat.Sign() <= 0 || genesis.SecurityParam <= 0 {
+		genesis.ActiveSlotsCoeff.Sign() <= 0 || genesis.SecurityParam <= 0 {
 		return 0, 0, errors.New("invalid Shelley genesis PPUP parameters")
 	}
 	epochLength := uint64(epoch.LengthInSlots)

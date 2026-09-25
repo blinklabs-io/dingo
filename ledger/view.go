@@ -318,8 +318,10 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 
 // PPUP and MIR rules discover these optional capabilities through the
 // transaction-scoped LedgerView passed to ValidateTx.
-var _ lcommon.GenesisDelegationState = (*LedgerView)(nil)
-var _ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerView)(nil)
+var (
+	_ lcommon.GenesisDelegationState                    = (*LedgerView)(nil)
+	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerView)(nil)
+)
 
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
