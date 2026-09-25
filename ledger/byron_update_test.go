@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/byronupdate"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -189,7 +190,7 @@ func TestValidateByronBlockSizesUsesAdoptedLimits(t *testing.T) {
 // that cannot know the candidate and so follows the chain.
 func TestByronShelleyTransitionRequiresAdoptedCandidate(t *testing.T) {
 	t.Parallel()
-	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	ls, lastByron, firstShelley := newByronShelleyBoundaryLedger(t)
 	genesisParams, err := ls.byronGenesisProtocolParameters()
 	require.NoError(t, err)
 	config, err := ls.byronPBFTConfig()
@@ -203,14 +204,69 @@ func TestByronShelleyTransitionRequiresAdoptedCandidate(t *testing.T) {
 	ls.byronPBFT.initialized = true
 	ls.Unlock()
 
+	done := make(chan struct{})
 	results := make(chan readChainResult, 1)
-	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	results <- readChainResult{
+		blocks: []gledger.Block{firstShelley},
+		done:   done,
+	}
+	close(results)
+	err = ls.ledgerProcessBlocksFromSource(context.Background(), results)
+	// The rejection is deterministic, so the boundary block is dropped from
+	// the primary chain and the pipeline restarts rather than re-reading it.
+	require.ErrorIs(t, err, errRestartLedgerPipeline)
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"the reader must be signalled when the transition is rejected",
+	)
+	require.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)
+	require.Equal(t, lastByron.SlotNumber(), ls.chain.Tip().Point.Slot)
+	require.Equal(t, uint64(208), firstShelley.SlotNumber()/21_600)
+}
+
+// TestByronShelleyTransitionErrorIdentifiesBoundaryBlock pins what the
+// rejection carries when there is nothing to rewind: the transition error,
+// wrapped as a rejected header of the boundary block.
+func TestByronShelleyTransitionErrorIdentifiesBoundaryBlock(t *testing.T) {
+	t.Parallel()
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	genesisParams, err := ls.byronGenesisProtocolParameters()
+	require.NoError(t, err)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(config, genesisParams)
+	require.NoError(t, err)
+	state.update = state.update.Advance(0, 0)
+	ls.Lock()
+	ls.byronPBFT.state = state
+	ls.byronPBFT.tip = ls.currentTip.Point
+	ls.byronPBFT.initialized = true
+	// Without a chain manager the recovery declines to rewind.
+	ls.config.ChainManager = nil
+	ls.Unlock()
+
+	done := make(chan struct{})
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{
+		blocks: []gledger.Block{firstShelley},
+		done:   done,
+	}
 	close(results)
 	err = ls.ledgerProcessBlocksFromSource(context.Background(), results)
 	var notAdopted byronupdate.TransitionNotAdoptedError
 	require.ErrorAs(t, err, &notAdopted)
 	require.Equal(t, uint64(208), notAdopted.Epoch)
-	require.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)
+	var rejected *headerValidationError
+	require.ErrorAs(t, err, &rejected)
+	require.Equal(t, firstShelley.SlotNumber(), rejected.BlockPoint.Slot)
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"the reader must be signalled when the transition is rejected",
+	)
 }
 
 func byronTestEbbHeader(

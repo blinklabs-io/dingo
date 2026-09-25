@@ -6803,7 +6803,34 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					snapshotEpoch.EpochId+1,
 					nextEpochEraId,
 				); err != nil {
-					return err
+					// The boundary block waits in cachedNextBatch, so the
+					// reader is still blocked on this read result.
+					if len(cachedNextBatch) == 0 {
+						completeReadResult()
+						return fmt.Errorf("byron transition: %w", err)
+					}
+					// The verdict is deterministic and the block is already
+					// on the primary chain, so a plain restart would re-read
+					// it and fail again. Rewind past it as a rejected header.
+					boundary := cachedNextBatch[0]
+					err = &headerValidationError{
+						BlockPoint: ocommon.Point{
+							Slot: boundary.SlotNumber(),
+							Hash: boundary.Hash().Bytes(),
+						},
+						Cause: err,
+					}
+					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+						err,
+					)
+					completeReadResult()
+					if recoverErr != nil {
+						return fmt.Errorf("byron transition: %w", recoverErr)
+					}
+					if recovered {
+						return errRestartLedgerPipeline
+					}
+					return fmt.Errorf("byron transition: %w", err)
 				}
 			}
 
