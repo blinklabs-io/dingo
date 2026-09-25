@@ -86,10 +86,9 @@ func (p *DingoStateProvider) NetworkId() uint {
 	return 0
 }
 
-// EpochForSlot reports the epoch currently being replayed by the conformance
-// state manager. The Blueprint vectors provide current-epoch state directly
-// and do not define a network slot timeline, so the harness cannot derive an
-// epoch from the slot number alone.
+// EpochForSlot returns the epoch carried by the current conformance state.
+// The corpus supplies epoch state directly; transaction slots are synthetic
+// markers and do not define the vector's epoch timeline.
 func (p *DingoStateProvider) EpochForSlot(_ uint64) (uint64, error) {
 	return p.manager.currentEpoch, nil
 }

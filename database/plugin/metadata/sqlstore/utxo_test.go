@@ -257,10 +257,10 @@ func TestGetUtxosByAddressDetectsOverflowAcrossOverlappingChunks(t *testing.T) {
 	for i := range fillerCount {
 		payload := make([]byte, 4)
 		binary.BigEndian.PutUint32(payload, uint32(i)+1)
-		payloadCBOR, err := cbor.Encode(payload)
+		derivationPath, err := cbor.Encode(payload)
 		require.NoError(t, err)
 		addr, err := lcommon.NewByronAddressFromParts(
-			0, zeroPayment, lcommon.ByronAddressAttributes{Payload: payloadCBOR},
+			0, zeroPayment, lcommon.ByronAddressAttributes{Payload: derivationPath},
 		)
 		require.NoError(t, err)
 		addrBytes, err := addr.Bytes()

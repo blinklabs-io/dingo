@@ -233,6 +233,7 @@ func TestLedgerViewGovernanceProposalAncestry(t *testing.T) {
 		1_000, 10, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
 	enactedEpoch := uint64(10)
+	olderEnactedEpoch := uint64(9)
 	rootID := governanceTestID(0x31, 0)
 	oldRootID := governanceTestID(0x32, 0)
 	pendingID := governanceTestID(0x33, 0)
@@ -244,7 +245,7 @@ func TestLedgerViewGovernanceProposalAncestry(t *testing.T) {
 		slot    uint64
 	}{
 		{rootID, 12, &enactedEpoch, 200},
-		{oldRootID, 12, &enactedEpoch, 100},
+		{oldRootID, 12, &olderEnactedEpoch, 100},
 		{pendingID, 12, nil, 0},
 		{expiredID, 10, nil, 0},
 	} {
@@ -283,25 +284,15 @@ func TestLedgerViewGovernanceProposalAncestry(t *testing.T) {
 		var ancestryErr conway.InvalidGovActionAncestorError
 		require.ErrorAs(t, err, &ancestryErr)
 	}
-
-	// RATIFY classifies an expired action before EPOCH removes it from the
-	// proposal tree. It remains a valid predecessor until that removal lands.
-	expiredEpoch := uint64(12)
-	storeGovernanceTestProposal(t, db, &models.GovernanceProposal{
-		TxHash:        expiredID.TransactionId[:],
-		ActionIndex:   expiredID.GovActionIdx,
-		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
-		ProposedEpoch: 10,
-		ExpiresEpoch:  10,
-		ExpiredEpoch:  &expiredEpoch,
-	}, hardForkGovernanceTestAction(t, nil, 10, 0))
+	// Expiry is applied by EPOCH. Until then, the proposal remains in its
+	// purpose tree and may still be named as an ancestor.
 	tx := governanceProposalTestTx(
 		t,
 		hardForkGovernanceTestAction(t, &expiredID, 10, 1),
 	)
-	err := conway.UtxoValidateProposalAncestry(tx, 1_250, lv, pparams)
-	var ancestryErr conway.InvalidGovActionAncestorError
-	require.ErrorAs(t, err, &ancestryErr)
+	require.NoError(t, conway.UtxoValidateProposalAncestry(
+		tx, 1_250, lv, pparams,
+	))
 }
 
 func TestLedgerViewGovernanceActionContentDrivesRules(t *testing.T) {

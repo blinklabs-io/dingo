@@ -313,8 +313,8 @@ func newByronShelleyBoundaryLedger(
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("42", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(
-		strings.NewReader(completeTestByronGenesisJSON(t, byronGenesisJSON)),
+	require.NoError(t, loadByronGenesisForTest(t, cfg,
+		strings.NewReader(byronGenesisJSON),
 	))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),

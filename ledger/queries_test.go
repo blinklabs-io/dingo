@@ -59,7 +59,7 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(testByronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),

@@ -200,9 +200,11 @@ func splitTxCbor(txCbor []byte) (body, witnesses cbor.RawMessage, err error) {
 	return parts[0], parts[1], nil
 }
 
-// dijkstraBlockTransactionCbor returns the Dijkstra block-transaction form.
-// Mempool transactions put is_valid before auxiliary data when present, while
-// block transactions put the validity flag last.
+// dijkstraBlockTransactionCbor returns the Dijkstra block-body form of a
+// transaction. Local tx submission uses [body, witnesses, is_valid, aux],
+// while Dijkstra blocks use [body, witnesses, aux, is_valid]. Dijkstra
+// removed the block-body invalid transaction index field but keeps validity
+// per transaction.
 func dijkstraBlockTransactionCbor(
 	txCbor []byte,
 ) (cbor.RawMessage, error) {
@@ -211,18 +213,6 @@ func dijkstraBlockTransactionCbor(
 		return nil, fmt.Errorf("decode Dijkstra tx as array: %w", decErr)
 	}
 	switch len(parts) {
-	case 3:
-		valid, err := cbor.Encode(true)
-		if err != nil {
-			return nil, fmt.Errorf("encode Dijkstra transaction validity: %w", err)
-		}
-		blockTxCbor, err := cbor.Encode([]cbor.RawMessage{
-			parts[0], parts[1], parts[2], valid,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("encode Dijkstra block transaction: %w", err)
-		}
-		return cbor.RawMessage(blockTxCbor), nil
 	case 4:
 		var isValid bool
 		if _, decErr := cbor.Decode(parts[2], &isValid); decErr != nil {
@@ -248,7 +238,7 @@ func dijkstraBlockTransactionCbor(
 		return cbor.RawMessage(blockTxCbor), nil
 	default:
 		return nil, fmt.Errorf(
-			"expected 3-4 element Dijkstra tx array, got %d",
+			"expected 4 element mempool transaction, got %d",
 			len(parts),
 		)
 	}

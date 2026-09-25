@@ -1786,19 +1786,18 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 // segment, matching the node-to-client "merged" block the prototype serves for
 // a certifying ranking block. The Dijkstra block is [header, block_body] with
 // block_body = [transactions, leios_certificate, peras_certificate]. The
-// transactions element (index 0) is replaced and the leios_certificate
-// element (index 1) is cleared, because CIP-0164 permits a certificate or
-// transactions and not both. The header and peras certificate are preserved
-// verbatim so the served block's
-// hash (a hash of the header) is unchanged; the header's block_body_hash
+// transactions element is replaced and the leios_certificate element is
+// cleared, because CIP-0164 permits a certificate or transactions and not
+// both. The header and peras element are preserved verbatim so the served
+// block's hash (a hash of the header) is unchanged; the header's block_body_hash
 // intentionally no longer matches, which is acceptable over node-to-client
 // because local clients do not re-verify the body hash.
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
 // three, and the existing transactions segment must be empty. ebTxsRaw must be
-// complete Dijkstra mempool transactions in endorser-block order. They are
-// converted to the block-specific transaction tuple before insertion.
+// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
+// auxiliary_data/nil]) in endorser-block order.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
 	ebTxsRaw []cbor.RawMessage,
@@ -1856,7 +1855,7 @@ func spliceEndorserTxsIntoDijkstraBlock(
 		return nil, fmt.Errorf("encode cleared leios certificate: %w", err)
 	}
 	newBody, err := cbor.Encode([]cbor.RawMessage{
-		cbor.RawMessage(newTxsRaw), cbor.RawMessage(nilCert), body[2],
+		cbor.RawMessage(newTxs), cbor.RawMessage(nilCert), body[2],
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode merged block body: %w", err)

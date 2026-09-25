@@ -50,7 +50,7 @@ func newBabbageQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(completeTestByronGenesisJSON(t, `{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 1,
 			"protocolMagic": 42

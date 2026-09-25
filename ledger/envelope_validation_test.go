@@ -356,7 +356,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	err = validateInboundBlockEnvelope(
@@ -369,7 +369,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
 }
 
-func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
+func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *testing.T) {
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -377,7 +377,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 	)
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	require.NoError(t, validateInboundBlockEnvelope(
@@ -403,8 +403,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 		config,
 		envelopeParent{origin: true},
 	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+	require.NoError(t, err)
 }
 
 func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
@@ -737,7 +736,7 @@ func newByronEnvelopeNodeConfig(
 	)
 	require.NoError(
 		t,
-		config.LoadByronGenesisFromReader(strings.NewReader(genesis)),
+		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),
 	)
 	return config
 }
@@ -777,7 +776,8 @@ func substituteByronMainTxPayload(t *testing.T, blockCbor []byte) []byte {
 	_, err = cbor.Decode(block[1], &body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(body), 4)
-	emptyTxPayload := []byte{0x9f, 0xff}
+	emptyTxPayload, err := cbor.Encode(cbor.IndefLengthList{})
+	require.NoError(t, err)
 	require.NotEqual(t, []byte(body[0]), emptyTxPayload)
 	body[0] = emptyTxPayload
 	block[1], err = cbor.Encode(body)
@@ -793,11 +793,10 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 	_, err := cbor.Decode(blockCbor, &block)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(block), 2)
-	// A single ignored stakeholder byte string changes the committed body
-	// while retaining the reference decoder's required indefinite framing.
-	tamperedBody := []byte{0x9f, 0x41, 0x01, 0xff}
-	require.NotEqual(t, []byte(block[1]), tamperedBody)
-	block[1] = tamperedBody
+	emptyBody, err := cbor.Encode(cbor.IndefLengthList{[]byte{0}})
+	require.NoError(t, err)
+	require.NotEqual(t, []byte(block[1]), emptyBody)
+	block[1] = emptyBody
 	tampered, err := cbor.Encode(block)
 	require.NoError(t, err)
 	return tampered

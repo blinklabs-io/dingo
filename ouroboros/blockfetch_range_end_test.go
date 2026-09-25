@@ -348,36 +348,16 @@ func smallSecurityParamCardanoConfig(
 	k int,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	byronGenesisJSON := fmt.Sprintf(
-		`{
-  "avvmDistr": {},
-  "blockVersionData": {
-    "heavyDelThd": "0", "maxBlockSize": "1",
-    "maxHeaderSize": "1", "maxProposalSize": "1",
-    "maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
-    "slotDuration": "1",
-    "softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
-    "txFeePolicy": {"multiplier": "0", "summand": "0"},
-    "unlockStakeEpoch": "0", "updateImplicit": "0",
-    "updateProposalThd": "0", "updateVoteThd": "0"
-  },
-  "protocolConsts": {"k": %d, "protocolMagic": 2},
-  "startTime": 0, "bootStakeholders": {},
-  "heavyDelegation": {}, "nonAvvmBalances": {}
-}`,
-		k,
-	)
 	shelleyGenesisJSON := fmt.Sprintf(
 		`{"activeSlotsCoeff": 0.05, "securityParam": %d, "systemStart": "2022-10-25T00:00:00Z"}`,
 		k,
 	)
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	}
-	require.NoError(
-		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
 	)
+	require.NoError(t, err)
+	cfg.ByronGenesis().ProtocolConsts.K = k
 	require.NoError(
 		t,
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),

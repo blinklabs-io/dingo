@@ -234,6 +234,19 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 	assert.Equal(t, uint64(1001), block.SlotNumber())
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, 0, len(block.Transactions()))
+	var blockItems []cbor.RawMessage
+	_, err = cbor.Decode(blockCbor, &blockItems)
+	require.NoError(t, err)
+	require.Len(t, blockItems, 2)
+	var bodyItems []cbor.RawMessage
+	_, err = cbor.Decode(blockItems[1], &bodyItems)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		bodyItems,
+		3,
+		"current Dijkstra block bodies omit the obsolete invalid_transactions field",
+	)
 
 	// The forged block's body hash must match the header commitment, i.e.
 	// the encoded Dijkstra block_body with null certificate fields. A
@@ -578,33 +591,7 @@ func TestBuildBlockDijkstraNormalizesAdmittedTxForBlock(t *testing.T) {
 	assert.Equal(t, originalFields[0], blockTxFields[0])
 	assert.Equal(t, originalFields[1], blockTxFields[1])
 	assert.Equal(t, originalFields[3], blockTxFields[2])
-	assert.Equal(t, []byte{0xf5}, []byte(blockTxFields[3]))
-}
-
-func TestDijkstraBlockBodyEncodesInvalidityOnTransaction(t *testing.T) {
-	t.Parallel()
-
-	blockTx, err := dijkstraBlockTransactionCbor(
-		makeMinimalTxCbor(t, 0x02, 0),
-	)
-	require.NoError(t, err)
-	bodyCbor, err := encodeDijkstraBlockBodyCbor(
-		[]cbor.RawMessage{blockTx},
-		[]uint{0},
-		nil,
-	)
-	require.NoError(t, err)
-
-	var bodyFields []cbor.RawMessage
-	_, err = cbor.Decode(bodyCbor, &bodyFields)
-	require.NoError(t, err)
-	require.Len(t, bodyFields, 3)
-
-	var body dijkstra.DijkstraBlockBody
-	_, err = cbor.Decode(bodyCbor, &body)
-	require.NoError(t, err)
-	require.Len(t, body.Transactions, 1)
-	assert.False(t, body.Transactions[0].TxIsValid)
+	assert.Equal(t, originalFields[2], blockTxFields[3])
 }
 
 func TestBuildBlockDijkstraRespectsActualBlockBodySize(t *testing.T) {
