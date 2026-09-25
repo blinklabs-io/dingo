@@ -107,18 +107,29 @@ func ProcessDRepActivityCertificates(
 	point ocommon.Point,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
+	protocolMajor uint64,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
 	updated := make(map[string]struct{})
+	dormantEpochs := uint64(0)
+	if protocolMajor < 10 {
+		var err error
+		dormantEpochs, err = db.GetDormantDRepEpochs(txn)
+		if err != nil {
+			return fmt.Errorf("read dormant DRep epochs: %w", err)
+		}
+	}
 	for i, cert := range tx.Certificates() {
 		var credential lcommon.Credential
+		registration := false
 		switch c := cert.(type) {
 		case *lcommon.RegistrationDrepCertificate:
 			if c == nil {
 				continue
 			}
 			credential = c.DrepCredential
+			registration = true
 		case *lcommon.UpdateDrepCertificate:
 			if c == nil {
 				continue
@@ -142,12 +153,19 @@ func ProcessDRepActivityCertificates(
 		if _, ok := updated[key]; ok {
 			continue
 		}
+		inactivityPeriod := drepInactivityPeriod
+		if registration && protocolMajor < 10 {
+			if dormantEpochs > ^uint64(0)-inactivityPeriod {
+				return fmt.Errorf("renew DRep activity for certificate %d: expiry overflows", i)
+			}
+			inactivityPeriod += dormantEpochs
+		}
 		if err := db.UpdateDRepActivity(
 			credentialTag,
 			credential.Credential[:],
 			point.Slot,
 			currentEpoch,
-			drepInactivityPeriod,
+			inactivityPeriod,
 			txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -197,6 +215,9 @@ func persistGovernanceProposals(
 	proposals := tx.ProposalProcedures()
 	if len(proposals) == 0 {
 		return nil
+	}
+	if err := db.ResetDormantDRepEpochs(point.Slot, txn); err != nil {
+		return fmt.Errorf("reset dormant DRep epochs before proposal processing: %w", err)
 	}
 
 	txHash := tx.Id().Bytes()

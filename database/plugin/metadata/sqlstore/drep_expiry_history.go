@@ -84,6 +84,9 @@ func (s *Store) BumpDormantDRepExpiries(
 			if inserted == 0 {
 				return nil
 			}
+			if err := s.incrementDormantDRepEpochs(db, ctx, slotValue); err != nil {
+				return err
+			}
 
 			var overflows bool
 			if err := db.QueryRowContext(ctx, `
@@ -130,6 +133,141 @@ WHERE active = TRUE AND expiry_epoch > 0`)
 		},
 	)
 	return affected, err
+}
+
+func (s *Store) GetDormantDRepEpochs(txn types.Txn) (uint64, error) {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.ensureDormantDRepState(db, ctx); err != nil {
+		return 0, err
+	}
+	var dormant int64
+	if err := db.QueryRowContext(ctx, `
+SELECT dormant_epochs
+FROM drep_dormancy_state
+WHERE id = 1`).Scan(&dormant); err != nil {
+		return 0, fmt.Errorf("get dormant DRep epoch count: %w", err)
+	}
+	if dormant < 0 {
+		return 0, fmt.Errorf("invalid negative dormant DRep epoch count: %d", dormant)
+	}
+	return uint64(dormant), nil
+}
+
+func (s *Store) ResetDormantDRepEpochs(
+	slot uint64,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		if err := s.ensureDormantDRepState(db, ctx); err != nil {
+			return err
+		}
+		slotValue, err := checkedInt64(slot)
+		if err != nil {
+			return err
+		}
+		var dormant int64
+		if err := db.QueryRowContext(ctx, `
+SELECT dormant_epochs
+FROM drep_dormancy_state
+WHERE id = 1`).Scan(&dormant); err != nil {
+			return fmt.Errorf("read dormant DRep epoch count: %w", err)
+		}
+		if dormant == 0 {
+			return nil
+		}
+		if err := s.recordDormantDRepEpochHistory(db, ctx, slotValue, dormant); err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(ctx, `
+UPDATE drep_dormancy_state
+SET dormant_epochs = 0
+WHERE id = 1`); err != nil {
+			return fmt.Errorf("reset dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Store) SetImportedDormantDRepEpochs(
+	dormantEpochs uint64,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		if err := s.ensureDormantDRepState(db, ctx); err != nil {
+			return err
+		}
+		dormant, err := checkedInt64(dormantEpochs)
+		if err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(ctx, `
+UPDATE drep_dormancy_state
+SET dormant_epochs = ?
+WHERE id = 1`, dormant); err != nil {
+			return fmt.Errorf("set imported dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Store) incrementDormantDRepEpochs(
+	db queryer,
+	ctx context.Context,
+	slot int64,
+) error {
+	if err := s.ensureDormantDRepState(db, ctx); err != nil {
+		return err
+	}
+	var dormant int64
+	if err := db.QueryRowContext(ctx, `
+SELECT dormant_epochs
+FROM drep_dormancy_state
+WHERE id = 1`).Scan(&dormant); err != nil {
+		return fmt.Errorf("read dormant DRep epoch count: %w", err)
+	}
+	if dormant == math.MaxInt64 {
+		return fmt.Errorf("dormant DRep epoch count exceeds storage range at slot %d", slot)
+	}
+	if err := s.recordDormantDRepEpochHistory(db, ctx, slot, dormant); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `
+UPDATE drep_dormancy_state
+SET dormant_epochs = dormant_epochs + 1
+WHERE id = 1`); err != nil {
+		return fmt.Errorf("increment dormant DRep epoch count: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureDormantDRepState(db queryer, ctx context.Context) error {
+	query := `INSERT INTO drep_dormancy_state (id, dormant_epochs) VALUES (1, 0)`
+	if s.dialect.Name() == "mysql" {
+		query = strings.Replace(query, "INSERT INTO", "INSERT IGNORE INTO", 1)
+	} else {
+		query += " ON CONFLICT (id) DO NOTHING"
+	}
+	if _, err := db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("ensure dormant DRep state row: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) recordDormantDRepEpochHistory(
+	db queryer,
+	ctx context.Context,
+	slot int64,
+	dormant int64,
+) error {
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO drep_dormancy_history (added_slot, previous_dormant_epochs)
+VALUES (?, ?)`, slot, dormant); err != nil {
+		return fmt.Errorf("record dormant DRep epoch history: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) restoreDrepExpiryHistory(
@@ -191,6 +329,53 @@ WHERE credential_tag = ? AND credential = ?`,
 	}
 	if _, err := db.ExecContext(ctx,
 		`DELETE FROM drep_expiry_epoch_event WHERE added_slot > ?`, slot); err != nil {
+		return err
+	}
+	if err := s.restoreDormantDRepEpochHistory(db, ctx, slot); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) restoreDormantDRepEpochHistory(
+	db queryer,
+	ctx context.Context,
+	slot uint64,
+) error {
+	rows, err := db.QueryContext(ctx, `
+SELECT id, previous_dormant_epochs
+FROM drep_dormancy_history
+WHERE added_slot > ?
+ORDER BY id DESC`, slot)
+	if err != nil {
+		return err
+	}
+	type historyRow struct {
+		id      int64
+		dormant int64
+	}
+	var items []historyRow
+	for rows.Next() {
+		var item historyRow
+		if err := rows.Scan(&item.id, &item.dormant); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if _, err := db.ExecContext(ctx, `
+UPDATE drep_dormancy_state
+SET dormant_epochs = ?
+WHERE id = 1`, item.dormant); err != nil {
+			return fmt.Errorf("restore dormant DRep epoch count from history %d: %w", item.id, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM drep_dormancy_history WHERE added_slot > ?`, slot); err != nil {
 		return err
 	}
 	return nil

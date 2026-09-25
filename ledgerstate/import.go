@@ -995,6 +995,12 @@ func importCertState(
 			"warning", err.Error(),
 		)
 	}
+	if err := cfg.Database.SetImportedDormantDRepEpochs(
+		certState.DormantEpochs,
+		nil,
+	); err != nil {
+		return 0, fmt.Errorf("importing dormant DRep epochs: %w", err)
+	}
 
 	// Catch-up reconcile: record the snapshot's live cert-state keys (the
 	// registered accounts/pools/DReps at this tip) so the post-import reconcile

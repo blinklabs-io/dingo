@@ -496,6 +496,17 @@ type GovernanceStore interface {
 	// recorded for rollback by RestoreDrepStateAtSlot.
 	BumpDormantDRepExpiries(uint64, types.Txn) (int, error)
 
+	// GetDormantDRepEpochs returns the consecutive no-proposal epoch count.
+	GetDormantDRepEpochs(types.Txn) (uint64, error)
+
+	// ResetDormantDRepEpochs clears the counter when a governance proposal is
+	// processed and records the change for rollback.
+	ResetDormantDRepEpochs(uint64, types.Txn) error
+
+	// SetImportedDormantDRepEpochs initializes the counter from imported ledger
+	// state at its anchor.
+	SetImportedDormantDRepEpochs(uint64, types.Txn) error
+
 	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
 	// or before the given epoch.
 	GetExpiredDReps(

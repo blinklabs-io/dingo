@@ -677,6 +677,7 @@ func (b *Backfill) processBlockGovernance(
 			point,
 			epochId,
 			conwayPP.DRepInactivityPeriod,
+			uint64(conwayPP.ProtocolVersion.Major),
 			b.db,
 			txn,
 		); err != nil {

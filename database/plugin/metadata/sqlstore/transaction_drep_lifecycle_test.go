@@ -163,9 +163,15 @@ func TestDormantDRepExpiryBumpIsIdempotentAndRollbackable(t *testing.T) {
 	updated, err := store.BumpDormantDRepExpiries(30, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, updated)
+	dormant, err := store.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), dormant)
 	updated, err = store.BumpDormantDRepExpiries(30, nil)
 	require.NoError(t, err)
 	require.Zero(t, updated, "replaying a boundary must not extend expiry twice")
+	dormant, err = store.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), dormant, "replaying a boundary must not increment dormancy twice")
 
 	require.NoError(t, store.UpdateDRepActivity(0, credential, 40, 25, 5, nil))
 	drep, err := store.GetDrepByCredential(0, credential, true, nil)
@@ -182,10 +188,31 @@ func TestDormantDRepExpiryBumpIsIdempotentAndRollbackable(t *testing.T) {
 	require.Equal(t, uint64(4), drep.LastActivityEpoch)
 
 	require.NoError(t, store.restoreDrepExpiryHistory(db, ctx, 29))
+	dormant, err = store.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Zero(t, dormant, "rollback before the dormant boundary restores the counter")
 	drep, err = store.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(20), drep.ExpiryEpoch)
 	require.Equal(t, uint64(4), drep.LastActivityEpoch)
+}
+
+func TestDormantDRepEpochResetRestoresAtRollbackPoint(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	require.NoError(t, store.SetImportedDormantDRepEpochs(3, nil))
+	require.NoError(t, store.ResetDormantDRepEpochs(40, nil))
+	dormant, err := store.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Zero(t, dormant)
+
+	db, ctx, err := store.dbFromTxn(nil)
+	require.NoError(t, err)
+	require.NoError(t, store.restoreDrepExpiryHistory(db, ctx, 39))
+	dormant, err = store.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormant)
 }
 
 func TestDrepActivityRenewalsRestoreAtRollbackPoint(t *testing.T) {

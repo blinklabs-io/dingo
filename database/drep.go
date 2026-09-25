@@ -310,6 +310,41 @@ func (d *Database) BumpDormantDRepExpiries(
 	return affected, err
 }
 
+func (d *Database) GetDormantDRepEpochs(txn *Txn) (uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDormantDRepEpochs(txn.Metadata())
+}
+
+func (d *Database) ResetDormantDRepEpochs(slot uint64, txn *Txn) error {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().ResetDormantDRepEpochs(
+			slot,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to reset dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *Database) SetImportedDormantDRepEpochs(
+	dormantEpochs uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetImportedDormantDRepEpochs(
+			dormantEpochs,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to import dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
 // GetExpiredDReps returns all active DReps whose expiry epoch is at
 // or before the given epoch.
 func (d *Database) GetExpiredDReps(

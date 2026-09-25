@@ -2941,7 +2941,11 @@ the ledger's dormant-DRep rule. The boundary write is idempotent across restart
 replay and records the prior expiry and activity state by slot so rollback
 restores both. Mithril certificate-state import folds its recorded dormant
 epoch count into each imported DRep expiry before the row enters this same
-effective-expiry model.
+effective-expiry model. Dingo also persists that count separately: PV9 DRep
+registrations include the accumulated count when computing their initial
+expiry, while PV10 and later use the already-adjusted expiry model. Processing
+a governance proposal resets the consecutive dormant count, and both boundary
+increments and resets are slot-journaled for rollback.
 
 ### Era-Specific Validation
 

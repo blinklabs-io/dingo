@@ -346,6 +346,12 @@ updates and dormant-epoch expiry extensions to roll back together. The event
 table makes each empty-governance boundary idempotent when the boundary is
 replayed after a restart.
 
+Migration `v24` (`drep-dormancy-state`) adds the singleton
+`drep_dormancy_state` counter and `drep_dormancy_history`. The counter preserves
+the consecutive no-proposal epoch count needed by PV9 DRep registration; each
+boundary increment and proposal-driven reset is journaled so rollback restores
+the prior count. Snapshot import initializes it from the parsed ledger state.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -1112,9 +1118,11 @@ updates preserve the previous activity and expiry epochs.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; each empty-proposal epoch boundary extends registered DRep expiry by one. Snapshot import adds the snapshot's dormant epoch count to each recorded expiry before persisting the effective expiry. Activity refresh, boundary extension, and their rollback state commit atomically. `expiry_epoch = 0` means unset and remains exempt from expiry. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; a PV9 registration also includes accumulated dormant epochs. Each empty-proposal epoch boundary extends registered DRep expiry by one. Snapshot import adds the snapshot's dormant epoch count to each recorded expiry before persisting the effective expiry. Activity refresh, boundary extension, and their rollback state commit atomically. `expiry_epoch = 0` means unset and remains exempt from expiry. |
 | `drep_expiry_history` | `credential_tag`, `credential`, `added_slot`, `previous_expiry_epoch`, `previous_last_activity_epoch` | PK `(credential_tag, credential, added_slot)`; index `added_slot` | First pre-mutation DRep activity/expiry state at each slot. Rollback restores the captured values for rows after its target, then removes those history rows. |
 | `drep_expiry_epoch_event` | `added_slot` | PK `added_slot` | Idempotence marker for dormant DRep expiry extension at an empty-proposal epoch boundary. Rollback removes markers after its target. |
+| `drep_dormancy_state` | `id`, `dormant_epochs` | PK `id` (singleton row id 1) | Consecutive epoch count with no governance proposals. PV9 DRep registrations use this count when deriving the initial effective expiry. |
+| `drep_dormancy_history` | `id`, `added_slot`, `previous_dormant_epochs` | PK `id`; index `added_slot` | Previous counter values for boundary increments and proposal resets, replayed in reverse order during rollback. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |

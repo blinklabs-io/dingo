@@ -473,6 +473,7 @@ func (d *LedgerDelta) processGovernance(
 			d.Point,
 			currentEpoch,
 			conwayPParams.DRepInactivityPeriod,
+			uint64(conwayPParams.ProtocolVersion.Major),
 			ls.db,
 			txn,
 		); err != nil {

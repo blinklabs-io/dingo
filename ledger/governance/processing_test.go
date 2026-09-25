@@ -162,6 +162,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 		},
 	)
 	require.True(t, HasDRepActivityCertificates(tx))
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
 
 	txn := db.Transaction(true)
 	defer txn.Release()
@@ -171,6 +172,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 			ocommon.Point{Slot: 1},
 			100,
 			20,
+			9,
 			db,
 			txn,
 		)
@@ -179,7 +181,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	keyDRep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), keyDRep.LastActivityEpoch)
-	assert.Equal(t, uint64(120), keyDRep.ExpiryEpoch)
+	assert.Equal(t, uint64(123), keyDRep.ExpiryEpoch)
 
 	scriptDRep, err := db.GetDrepByCredential(1, credentialBytes, true, nil)
 	require.NoError(t, err)

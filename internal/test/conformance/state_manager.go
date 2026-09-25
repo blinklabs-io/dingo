@@ -883,8 +883,12 @@ func (m *DingoStateManager) ApplyTransaction(
 	}
 
 	if governance.HasDRepActivityCertificates(tx) {
+		protocolMajor := uint64(0)
+		if conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+			protocolMajor = uint64(conwayPP.ProtocolVersion.Major)
+		}
 		if err := governance.ProcessDRepActivityCertificates(
-			tx, point, m.currentEpoch, drepInactivityPeriod, m.db, txn,
+			tx, point, m.currentEpoch, drepInactivityPeriod, protocolMajor, m.db, txn,
 		); err != nil {
 			return fmt.Errorf("process drep activity certs: %w", err)
 		}
