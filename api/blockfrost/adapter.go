@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -3831,7 +3832,7 @@ func (a *NodeAdapter) TransactionSubmit(
 	if a.submitter == nil {
 		return "", ErrMempoolUnavailable
 	}
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return "", fmt.Errorf(
 			"%w: determine transaction type: %w",
@@ -3839,7 +3840,7 @@ func (a *NodeAdapter) TransactionSubmit(
 			err,
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	tx, err := safedecode.Transaction(txType, txCbor)
 	if err != nil {
 		return "", fmt.Errorf(
 			"decode transaction: %w: %w",
@@ -3890,7 +3891,7 @@ func (a *NodeAdapter) TransactionSubmit(
 func (a *NodeAdapter) TransactionEvaluate(
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: determine transaction type: %w",
@@ -3898,7 +3899,7 @@ func (a *NodeAdapter) TransactionEvaluate(
 			err,
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	tx, err := safedecode.Transaction(txType, txCbor)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: decode transaction: %w",
