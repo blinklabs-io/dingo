@@ -1091,18 +1091,9 @@ snapshot, so it skips both the era-neutral upper-bound check and the
 credit and debit through the snapshot's boundary, and re-subtracting a
 pre-boundary withdrawal from it would double-count. The withdrawal is still
 required to resolve an *active* `account` row for the credential during live
-ingestion; during historical backfill it is not, because a withdrawal that was
-valid on the canonical chain can name a stake credential with no active
-account row for two distinct reasons (issue #3788), which are not treated
-alike:
+ingestion. During historical backfill an inactive row is accepted, but a
+missing one is not (issue #3788):
 
-- No `account` row exists at all: the credential was deregistered before the
-  snapshot was taken, or never active in it. There is no real prior balance to
-  recover, so the backfill records the `account_reward_delta` row with
-  `previous_reward = 0` from the credential alone, and neither creates nor
-  reactivates an `account` row -- the journal's join to `account` is already
-  unenforced (see above), so the history is retained without fabricating
-  current stake-registration state.
 - A row exists but is inactive. `applyTransactionCertificates` runs
   unconditionally regardless of `historicalBackfill`, so backfill's own
   certificate replay can transiently deactivate a row Mithril imported active,
@@ -1113,6 +1104,14 @@ alike:
   inactive-inclusive lookup and journals that real `reward` as
   `previous_reward` instead of discarding it as `0`, while still leaving the
   row itself untouched.
+- No `account` row exists at all: the backfill returns
+  `models.ErrAccountNotFound` and the run stops. A canonical withdrawal
+  requires its reward account to have existed, so an absent row means the
+  certificate replay that should have created it was skipped -- a block whose
+  decode or offset computation failed, for instance. Journaling
+  `previous_reward = 0` in that state would record a balance nothing
+  established and hide the real defect, so the run fails closed and the
+  checkpoint stays before the block that failed.
 
 ### Pools
 
