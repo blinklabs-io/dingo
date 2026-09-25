@@ -59,6 +59,7 @@ const (
 	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
 	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 	rewardAdaPotsImportedFeesSchemaRelease        = "reward-ada-pots-imported-epoch-fees"
+	mithrilRewardRepairCoverageSchemaRelease      = "mithril-reward-repair-coverage"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -146,6 +147,11 @@ var schemaVersions = []struct {
 		Version: 24,
 		Name:    rewardAdaPotsImportedFeesSchemaRelease,
 		Dir:     "v24",
+	},
+	{
+		Version: 25,
+		Name:    mithrilRewardRepairCoverageSchemaRelease,
+		Dir:     "v25",
 	},
 }
 
@@ -263,6 +269,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = importedRewardRepairBackfill
 		}
+		if version.Name == mithrilRewardRepairCoverageSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = mithrilRewardRepairCoverageBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
@@ -313,6 +323,91 @@ func importedRewardRepairBackfill(
 		)
 	}
 	if !needsRepair {
+		return BatchResult{Done: true}, nil
+	}
+	var existing string
+	err = batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		mithrilRewardRepairPendingKey,
+	).Scan(&existing)
+	if err == nil {
+		if existing != "1" {
+			if _, err := batch.Tx.ExecContext(
+				ctx,
+				batch.Rebind(`UPDATE sync_state SET value = ? WHERE sync_key = ?`),
+				"1", mithrilRewardRepairPendingKey,
+			); err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"update Mithril reward repair marker: %w", err,
+				)
+			}
+		}
+		return BatchResult{Rows: 1, Done: true}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril reward repair marker: %w", err,
+		)
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`),
+		mithrilRewardRepairPendingKey,
+		"1",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"set Mithril reward repair marker: %w", err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
+}
+
+// mithrilRewardRepairCoverageBackfill catches legacy Mithril databases whose
+// anchor reward-pot row was not written by older import paths. Version 24 can
+// identify the common case by its row, but a missing row must not make an
+// already-imported database look repaired: the anchor itself is durable proof
+// that its reward state came from Mithril and needs reconciliation unless the
+// imported epoch now carries the fee basis added in version 24.
+func mithrilRewardRepairCoverageBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var rawSlot string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot",
+	).Scan(&rawSlot)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && rawSlot == "") {
+		return BatchResult{Done: true}, nil
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril ledger anchor for reward repair coverage: %w", err,
+		)
+	}
+	anchorSlot, err := strconv.ParseUint(rawSlot, 10, 64)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"parse Mithril ledger anchor %q for reward repair coverage: %w",
+			rawSlot, err,
+		)
+	}
+	var hasFeeBasis bool
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT EXISTS (
+    SELECT 1 FROM reward_ada_pots
+    WHERE captured_slot = ? AND imported_epoch_fees IS NOT NULL
+)`),
+		anchorSlot,
+	).Scan(&hasFeeBasis); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"check Mithril imported fee basis for reward repair: %w", err,
+		)
+	}
+	if hasFeeBasis {
 		return BatchResult{Done: true}, nil
 	}
 	var existing string
