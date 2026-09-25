@@ -6,6 +6,8 @@ github.com/bits-and-blooms/bitset v1.24.6 h1:qcrftZUVBIwfs+m+nhoCBAPT+ZPZZjti8Sb
 github.com/bits-and-blooms/bitset v1.24.6/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blinklabs-io/gouroboros v0.207.4 h1:nGrgULwsJGVv+v+HAJjbDZXexG68NYMSnwv9cAoDx5c=
 github.com/blinklabs-io/gouroboros v0.207.4/go.mod h1:bKkoFOmtAiRyZv+l9QtSzHrLCC3LY4/VWUXsyohnxwU=
+github.com/blinklabs-io/gouroboros v0.207.5 h1:kNSGJR/OIKa/uQ973nh9KuAOAqkWczkwSK0kcmvsmaM=
+github.com/blinklabs-io/gouroboros v0.207.5/go.mod h1:4j53uNlCs4leIv7RnTMWHCI96FoUFM3YnX1uOAgVcXQ=
 github.com/blinklabs-io/ouroboros-mock v0.20.2 h1:TW7B7O6XgfWvj3vxWE8ZvFgoLuQa4XF4BnUSu2KDUBA=
 github.com/blinklabs-io/ouroboros-mock v0.20.2/go.mod h1:UqITUSH8u9y6Hx3IvqrCoQmu7poWPW8hUT+lJCQauFI=
 github.com/blinklabs-io/plutigo v0.7.1 h1:dLjbqeIw8o0/5N6WY3lIM3RDaDuZDbi4x8/L8ekVjAo=

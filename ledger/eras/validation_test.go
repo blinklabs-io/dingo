@@ -652,14 +652,14 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		descriptors,
 		gdijkstra.UtxoValidationRules,
 		lcommon.UtxoValidationRuleCommitteeCertificates,
-		"conway.UtxoValidateCommitteeCertificates",
+		"dijkstra.UtxoValidateCommitteeCertificates",
 	)
 	votersIndex := requireRuleIdResolvesToFunc(
 		t,
 		descriptors,
 		gdijkstra.UtxoValidationRules,
 		lcommon.UtxoValidationRuleUnknownVoters,
-		"conway.UtxoValidateUnknownVoters",
+		"dijkstra.UtxoValidateUnknownVoters",
 	)
 	require.Len(
 		t,
@@ -1449,6 +1449,7 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 		tx,
 		resolved,
 		script.StrictValidityUpperBoundForTransaction(tx),
+		0,
 	)
 
 	require.NoError(t, err)
@@ -1715,10 +1716,9 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	assert.Equal(t, big.NewInt(206_245), tx.Fee())
 	assert.NoError(t, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
 
-	// Negative case: the null-expanded encoding of the same body is 1366
-	// bytes, so the declared fee of 206245 is below the minimum. Sizing
-	// pre-Alonzo transactions from anything other than their wire bytes must
-	// not make this variant pass.
+	// The null-expanded encoding preserves the bytes but represents the A0
+	// protocol parameter as an empty map. The classic update decoder now
+	// rejects that out-of-domain value before fee validation.
 	reencodedCbor, err := hex.DecodeString(
 		preprodShelleyUpdateTxReencodedCborHex,
 	)
@@ -1726,21 +1726,12 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	require.Len(t, reencodedCbor, 1_366)
 
 	reencodedTx, err := shelley.NewShelleyTransactionFromCbor(reencodedCbor)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1_366), TxSizeForFee(reencodedTx))
-	assert.Equal(t, uint64(215_485), CalculateMinFee(
-		TxSizeForFee(reencodedTx),
-		lcommon.ExUnits{},
-		minFeeA,
-		minFeeB,
-		nil,
-		nil,
-	))
-	assert.ErrorContains(
+	require.ErrorContains(
 		t,
-		ValidateTxFee(reencodedTx, minFeeA, minFeeB, nil, nil),
-		"transaction fee 206245 is less than the calculated minimum fee 215485",
+		err,
+		"protocol parameter update a0: must be a bounded rational",
 	)
+	assert.Nil(t, reencodedTx)
 }
 
 func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(
@@ -4118,7 +4109,7 @@ func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(
 
 	// A tx that mints nothing still carries the ada entry, so no mint fixture
 	// is needed to observe the rendering.
-	cache := newTxInfoCache(ls, tx, resolved)
+	cache := newTxInfoCache(ls, tx, resolved, 0)
 	v1, err := cache.v1()
 	require.NoError(t, err)
 	v2, err := cache.v2()

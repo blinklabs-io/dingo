@@ -432,6 +432,10 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 	}
 
+	initialDRepDeposit, err := initialDRepDeposit(pp)
+	if err != nil && (len(state.DRepRegistrations) > 0 || len(state.DRepRegistrationsByCredential) > 0) {
+		return fmt.Errorf("resolve initial DRep deposit: %w", err)
+	}
 	for credential, registered := range state.DRepRegistrationsByCredential {
 		if !registered {
 			continue
@@ -445,7 +449,12 @@ func (m *DingoStateManager) LoadInitialState(
 			CredentialTag: credentialTag,
 			Active:        true,
 		}
-		if err := m.db.CreateDrep(txn, drep); err != nil {
+		registration := &models.RegistrationDrep{
+			DrepCredential: drep.Credential,
+			CredentialTag:  drep.CredentialTag,
+			DepositAmount:  types.Uint64(initialDRepDeposit),
+		}
+		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
 			return fmt.Errorf("seed drep: %w", err)
 		}
 	}
@@ -454,7 +463,12 @@ func (m *DingoStateManager) LoadInitialState(
 			continue
 		}
 		drep := &models.Drep{Credential: hash[:], Active: true}
-		if err := m.db.CreateDrep(txn, drep); err != nil {
+		registration := &models.RegistrationDrep{
+			DrepCredential: drep.Credential,
+			CredentialTag:  drep.CredentialTag,
+			DepositAmount:  types.Uint64(initialDRepDeposit),
+		}
+		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
 			return fmt.Errorf("seed legacy drep: %w", err)
 		}
 	}
@@ -529,6 +543,18 @@ func (m *DingoStateManager) LoadInitialState(
 	}
 
 	return txn.Commit()
+}
+
+func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
+	provider, ok := pp.(interface{ DRepDepositAmount() *big.Int })
+	if !ok {
+		return 0, errors.New("protocol parameters do not define a DRep deposit")
+	}
+	deposit := provider.DRepDepositAmount()
+	if deposit == nil || deposit.Sign() < 0 || !deposit.IsUint64() {
+		return 0, errors.New("protocol parameters contain an invalid DRep deposit")
+	}
+	return deposit.Uint64(), nil
 }
 
 // resolveInitialStakeRegistrations mirrors the original

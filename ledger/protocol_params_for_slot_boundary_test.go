@@ -315,8 +315,8 @@ func TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary(
 	// (shelley genesis updateQuorum = 1). Per the Shelley update system a
 	// proposal carries its submission epoch (0) and is enacted as epoch 1's
 	// parameters at the epoch 0->1 boundary.
-	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
-		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 2)},
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		12: cbor.Rat{Rat: big.NewRat(1, 2)},
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(

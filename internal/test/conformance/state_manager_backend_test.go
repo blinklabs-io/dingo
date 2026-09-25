@@ -48,12 +48,13 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	script := mockledger.RewardAccountKey{
 		CredType: common.CredentialTypeScriptHash, Credential: hash,
 	}
+	pp := &conway.ConwayProtocolParameters{DRepDeposit: 500_000_000}
 	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
 		DRepRegistrations: []common.Blake2b224{hash},
 		DRepRegistrationsByCredential: map[mockledger.RewardAccountKey]bool{
 			key: true, script: true,
 		},
-	}, &conway.ConwayProtocolParameters{}))
+	}, pp))
 
 	keyDRep, err := m.db.GetDrepByCredential(0, hash[:], false, nil)
 	require.NoError(t, err)
@@ -61,6 +62,16 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	scriptDRep, err := m.db.GetDrepByCredential(1, hash[:], false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), scriptDRep.CredentialTag)
+	for _, credentialTag := range []uint8{0, 1} {
+		deposit, err := m.db.GetDrepLastRegistrationDeposit(
+			credentialTag,
+			hash[:],
+			nil,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, deposit)
+		require.Equal(t, uint64(500_000_000), *deposit)
+	}
 
 	dreps, err := m.db.GetActiveDreps(nil)
 	require.NoError(t, err)
