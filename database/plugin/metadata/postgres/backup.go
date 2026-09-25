@@ -573,7 +573,8 @@ func refuseIfTargetHasData(
 		quoted := pgQuoteIdentifier(t.schema) + "." + pgQuoteIdentifier(t.name)
 		query := "SELECT EXISTS (SELECT 1 FROM " + quoted + ")"
 		var args []any
-		if t.name == nodeSettingsGateTableName && t.schema == migrationsSchema {
+		switch {
+		case t.name == nodeSettingsGateTableName && t.schema == migrationsSchema:
 			query = "SELECT EXISTS (SELECT 1 FROM " + quoted +
 				" WHERE NOT (name = $1 AND value = $2" +
 				" AND recorded_epoch = 0 AND recorded_slot = 0))"
@@ -581,7 +582,7 @@ func refuseIfTargetHasData(
 				nodesettings.AlonzoPParamsUnitGateName,
 				nodesettings.AlonzoPParamsUnitWordV1,
 			}
-		} else if t.name == drepDormancyStateTableName && t.schema == migrationsSchema {
+		case t.name == drepDormancyStateTableName && t.schema == migrationsSchema:
 			query = "SELECT EXISTS (SELECT 1 FROM " + quoted +
 				" WHERE NOT (id = 1 AND dormant_epochs = 0))"
 		}

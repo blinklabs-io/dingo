@@ -445,7 +445,8 @@ func refuseIfTargetHasData(
 		)
 		query := "SELECT EXISTS (SELECT 1 FROM " + quoted + ")"
 		var args []any
-		if name == nodeSettingsGateTableName {
+		switch name {
+		case nodeSettingsGateTableName:
 			query = "SELECT EXISTS (SELECT 1 FROM " + quoted +
 				" WHERE NOT (name = ? AND value = ?" +
 				" AND recorded_epoch = 0 AND recorded_slot = 0))"
@@ -453,7 +454,7 @@ func refuseIfTargetHasData(
 				nodesettings.AlonzoPParamsUnitGateName,
 				nodesettings.AlonzoPParamsUnitWordV1,
 			}
-		} else if name == drepDormancyStateTableName {
+		case drepDormancyStateTableName:
 			query = "SELECT EXISTS (SELECT 1 FROM " + quoted +
 				" WHERE NOT (id = 1 AND dormant_epochs = 0))"
 		}
