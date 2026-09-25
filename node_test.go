@@ -1185,6 +1185,7 @@ func newChainSelectorSubscriptionTestNode(
 type blockingNodeTestLogHandler struct {
 	entered     chan struct{}
 	release     chan struct{}
+	calls       atomic.Int32
 	once        sync.Once
 	releaseOnce sync.Once
 }
@@ -1200,6 +1201,7 @@ func (h *blockingNodeTestLogHandler) Handle(
 	if record.Level < slog.LevelWarn {
 		return nil
 	}
+	h.calls.Add(1)
 	h.once.Do(func() {
 		close(h.entered)
 		<-h.release
@@ -1264,7 +1266,7 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 	queueFilled := make(chan struct{})
 	published := make(chan struct{})
 	go func() {
-		for i := 0; i < event.DefaultSubscriberBuffer+2; i++ {
+		for i := range event.DefaultSubscriberBuffer + 2 {
 			bus.Publish(
 				chainselection.PeerTipUpdateEventType,
 				event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
@@ -1338,7 +1340,7 @@ func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) 
 	queueFilled := make(chan struct{})
 	published := make(chan struct{})
 	go func() {
-		for i := 0; i < event.DefaultSubscriberBuffer+2; i++ {
+		for i := range event.DefaultSubscriberBuffer + 2 {
 			bus.Publish(forkEvent, fork)
 			if i == event.DefaultSubscriberBuffer-1 {
 				close(queueFilled)
@@ -1357,10 +1359,18 @@ func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) 
 		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
 	}
 	loggerHandler.unblock()
-
-	// The observer has been removed even though its already-running callback is
-	// still blocked; a later event must not queue another diagnostic callback.
+	// Detachment preserves events accepted before the timeout, so wait for that
+	// backlog to drain before checking that later publications have no observer.
+	acceptedCallbacks := int32(event.DefaultSubscriberBuffer + 1)
+	require.Eventually(t, func() bool {
+		return loggerHandler.calls.Load() == acceptedCallbacks
+	}, time.Second, 5*time.Millisecond,
+		"accepted diagnostic events should drain after the callback returns")
 	bus.Publish(forkEvent, fork)
+	require.Never(t, func() bool {
+		return loggerHandler.calls.Load() > acceptedCallbacks
+	}, 100*time.Millisecond, 5*time.Millisecond,
+		"detached diagnostic observer must not receive a later event")
 }
 
 // TestNodePeerEligibilityEventUpdatesChainSelector verifies the node wiring:

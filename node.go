@@ -1104,10 +1104,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// n.chainsyncState is rebuilt during a live database restore/truncate.
 	// Client-removal requests are one-shot; dropping one leaves a chainsync
 	// client alive after its owner has asked it to stop.
-	n.chainsyncClientRemoveSubId = n.subscribeRequiredEvent(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 	// Initialize chain selector for multi-peer chain selection
 	chainSelectorSecurityParam := uint64(0)
 	if k := n.ledgerState.SecurityParam(); k > 0 {
@@ -1861,7 +1858,9 @@ func (n *Node) handleConnManagerClosedOwner(
 
 // subscribeRequiredEvent keeps an internal node consumer attached when its
 // callback queue saturates. These event streams carry one-shot state
-// transitions that have no safe full-state replay after detachment.
+// transitions that have no safe full-state replay after detachment. Its
+// handler must not synchronously publish to an EventBus path that can wait on
+// this subscriber; move such follow-up work out of the callback instead.
 func (n *Node) subscribeRequiredEvent(
 	eventType event.EventType,
 	handler event.EventHandlerFunc,
@@ -1871,6 +1870,28 @@ func (n *Node) subscribeRequiredEvent(
 		event.DefaultSubscriberBuffer,
 		event.SubscriberBackpressureBlock,
 		handler,
+	)
+}
+
+// subscribeDetachableEvent is for observers whose missed events do not leave
+// node state stale. Such callbacks must not be used for state transitions that
+// have no replay or resynchronization path.
+func (n *Node) subscribeDetachableEvent(
+	eventType event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
+		eventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureDetach,
+		handler,
+	)
+}
+
+func (n *Node) subscribeChainsyncClientRemoveRequests() event.EventSubscriberId {
+	return n.subscribeRequiredEvent(
+		chainsync.ClientRemoveRequestedEventType,
+		n.chainsyncState.HandleClientRemoveRequestedEvent,
 	)
 }
 
@@ -2073,7 +2094,7 @@ func (n *Node) subscribeChainSelectorEvents() {
 	)
 	// Subscribe to chain fork events for monitoring
 	// This observer only emits diagnostics; dropping it does not affect state.
-	n.eventBus.SubscribeFunc(
+	n.subscribeDetachableEvent(
 		chain.ChainForkEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chain.ChainForkEvent)

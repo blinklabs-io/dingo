@@ -88,6 +88,23 @@ func newTestState(
 	return chainsync.NewStateWithConfig(bus, nil, cfg)
 }
 
+type blockingEventSubscriber struct {
+	entered chan struct{}
+	release chan struct{}
+	enter   sync.Once
+	close   sync.Once
+}
+
+func (s *blockingEventSubscriber) Deliver(event.Event) error {
+	s.enter.Do(func() { close(s.entered) })
+	<-s.release
+	return nil
+}
+
+func (s *blockingEventSubscriber) Close() {
+	s.close.Do(func() { close(s.release) })
+}
+
 // --- Client registry tests ---
 
 func TestAddAndRemoveClientConnId(t *testing.T) {
@@ -904,6 +921,138 @@ func TestClientRemovedEvent(t *testing.T) {
 	require.Equal(t, conn, removedEvt.ConnId)
 	require.Equal(t, 0, removedEvt.TotalClients)
 	require.True(t, removedEvt.WasPrimary)
+}
+
+func TestClientRemoveRequestDoesNotWaitForAsyncQueueCapacity(t *testing.T) {
+	bus := newTestEventBus(t)
+	cfg := chainsync.DefaultConfig()
+	cfg.MaxClients = event.AsyncQueueSize + 1
+	s := newTestState(t, bus, cfg)
+	conn := newTestConnId(1)
+	require.True(t, s.AddClientConnId(conn))
+	_, removed := bus.Subscribe(chainsync.ClientRemovedEventType)
+	bus.SubscribeFuncWithBufferPolicy(
+		chainsync.ClientRemoveRequestedEventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
+		s.HandleClientRemoveRequestedEvent,
+	)
+
+	blockers := make([]*blockingEventSubscriber, event.AsyncWorkerPoolSize)
+	defer func() {
+		for _, blocker := range blockers {
+			if blocker != nil {
+				blocker.Close()
+			}
+		}
+	}()
+	for i := range event.AsyncWorkerPoolSize {
+		eventType := event.EventType(fmt.Sprintf("chainsync.test.worker_block.%d", i))
+		blockers[i] = &blockingEventSubscriber{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		bus.RegisterSubscriber(eventType, blockers[i])
+		require.True(t, bus.PublishAsync(eventType, event.NewEvent(eventType, nil)))
+	}
+	for _, blocker := range blockers {
+		testutil.RequireReceive(t, blocker.entered, time.Second,
+			"all async workers must be held before saturating the queue")
+	}
+
+	const queueFillType event.EventType = "chainsync.test.async_queue_fill"
+	for range event.AsyncQueueSize {
+		require.True(t, bus.PublishAsync(queueFillType,
+			event.NewEvent(queueFillType, nil)))
+	}
+
+	handlerDone := make(chan struct{})
+	go func() {
+		s.HandleClientRemoveRequestedEvent(event.NewEvent(
+			chainsync.ClientRemoveRequestedEventType,
+			chainsync.ClientRemoveRequestedEvent{ConnId: conn},
+		))
+		close(handlerDone)
+	}()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("client removal callback waited for async queue capacity")
+	}
+	require.False(t, s.HasClientConnId(conn))
+
+	for _, blocker := range blockers {
+		blocker.Close()
+	}
+	removedEvent := testutil.RequireReceive(
+		t, removed, 5*time.Second, "deferred removal notification should be delivered",
+	)
+	require.Equal(t, conn, removedEvent.Data.(chainsync.ClientRemovedEvent).ConnId)
+}
+
+func TestClientStateNotificationsDoNotWaitForAsyncQueueCapacity(t *testing.T) {
+	bus := newTestEventBus(t)
+	cfg := chainsync.DefaultConfig()
+	cfg.MaxClients = 2
+	s := newTestState(t, bus, cfg)
+	first := newTestConnId(1)
+	second := newTestConnId(2)
+	require.True(t, s.AddClientConnId(first))
+
+	blockers := make([]*blockingEventSubscriber, event.AsyncWorkerPoolSize)
+	defer func() {
+		for _, blocker := range blockers {
+			if blocker != nil {
+				blocker.Close()
+			}
+		}
+	}()
+	for i := range event.AsyncWorkerPoolSize {
+		eventType := event.EventType(fmt.Sprintf("chainsync.test.state_block.%d", i))
+		blockers[i] = &blockingEventSubscriber{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		bus.RegisterSubscriber(eventType, blockers[i])
+		require.True(t, bus.PublishAsync(eventType, event.NewEvent(eventType, nil)))
+	}
+	for _, blocker := range blockers {
+		testutil.RequireReceive(t, blocker.entered, time.Second,
+			"all async workers must be held before saturating the queue")
+	}
+	const queueFillType event.EventType = "chainsync.test.state_queue_fill"
+	for range event.AsyncQueueSize {
+		require.True(t, bus.PublishAsync(queueFillType,
+			event.NewEvent(queueFillType, nil)))
+	}
+
+	assertReturns := func(name string, operation func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			operation()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s callback waited for async queue capacity", name)
+		}
+	}
+	assertReturns("client demotion", func() {
+		require.True(t, s.SetClientObservabilityOnly(first, true))
+	})
+	assertReturns("client promotion", func() {
+		require.True(t, s.SetClientObservabilityOnly(first, false))
+	})
+	assertReturns("client registration", func() {
+		require.True(t, s.TryAddClientConnId(second, cfg.MaxClients))
+	})
+	require.True(t, s.HasClientConnId(second))
+
+	for _, blocker := range blockers {
+		blocker.Close()
+	}
 }
 
 func TestClientRemovedEvent_NonPrimary(t *testing.T) {
