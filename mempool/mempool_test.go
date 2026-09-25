@@ -3195,11 +3195,13 @@ func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
 }
 
 func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 30*time.Millisecond, 10*time.Millisecond)
+	m := newTestMempoolWithTTL(t, time.Minute, 10*time.Millisecond)
 	defer m.Stop(context.Background())
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
+	expiredInserted := make(chan struct{})
+	addDone := make(chan struct{})
 
 	// Add a deterministic mix of expired and live transactions while cleanup
 	// and consumer reads run concurrently.
@@ -3208,7 +3210,7 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 		for i := range 200 {
 			lastSeen := time.Now()
 			if i%2 == 0 {
-				lastSeen = lastSeen.Add(-time.Minute)
+				lastSeen = lastSeen.Add(-time.Hour)
 			}
 			m.Lock()
 			m.consumersMutex.Lock()
@@ -3224,13 +3226,20 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 			m.metrics.txsInMempool.Inc()
 			m.consumersMutex.Unlock()
 			m.Unlock()
+			if i == 0 {
+				close(expiredInserted)
+			}
 		}
+		close(addDone)
 	})
 	wg.Go(func() {
 		<-start
+		<-expiredInserted
 		for range 200 {
 			m.removeExpiredTransactions()
 		}
+		<-addDone
+		m.removeExpiredTransactions()
 	})
 
 	// Goroutine reading transactions via consumer
@@ -3253,14 +3262,18 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 
 	select {
 	case <-waitCh:
-		// Success - no deadlock or race
 		m.RLock()
-		t.Logf(
-			"Final mempool state: %d transactions, %d bytes",
-			len(m.transactions),
-			m.currentSizeBytes,
-		)
+		transactionCount := len(m.transactions)
+		present := make(map[int]bool, 200)
+		for i := range 200 {
+			_, exists := m.txByHash[fmt.Sprintf("concurrent-tx-%d", i)]
+			present[i] = exists
+		}
 		m.RUnlock()
+		require.Equal(t, 100, transactionCount)
+		for i := range 200 {
+			require.Equal(t, i%2 != 0, present[i])
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock with concurrent expiry and addition")
 	}
