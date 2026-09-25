@@ -28,9 +28,10 @@ import (
 // hot key), in every era. A counter that skips ahead of it is rejected
 // only when enforceNoGap is set: the over-increment (no-gap) rule is
 // Praos-only (Babbage onward); TPraos eras (Shelley-Alonzo) accept any
-// candidate at or above stored. When there is no recorded counter (found
-// is false) there is no baseline to compare against, so the candidate is
-// accepted.
+// candidate at or above stored. For a registered active pool with no recorded
+// counter (found is false), the reference rules use zero as the baseline. The
+// caller establishes producer eligibility separately; this function applies
+// only the counter transition.
 //
 // The gap comparison checks candidate > stored before subtracting, rather
 // than comparing candidate > stored+1, so a stored value of
@@ -43,7 +44,7 @@ func ValidateOpCertCounter(
 	enforceNoGap bool,
 ) error {
 	if !found {
-		return nil
+		stored = 0
 	}
 	if candidate < stored {
 		return fmt.Errorf(
