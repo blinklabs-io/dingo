@@ -11834,7 +11834,7 @@ imported counts are (see below): a bootstrap applies no block, and files no
 transaction, at or below its anchor. Summing from the epoch start regardless
 of the anchor would then double-count once the historical backfill (issue
 #4061) has stored pre-anchor transactions locally. `ImportedEpochFees` is
-additive schema (migration `v23`). The migration marks a pre-v23 Mithril
+additive schema (migration `v24`). The migration marks a pre-v24 Mithril
 database whose imported anchor row lacks this basis for repair. Before
 `dingo serve` starts, core- and API-mode databases with that marker automatically
 run a Mithril v2 catch-up against the latest certified state. Catch-up verifies
