@@ -102,6 +102,22 @@ type RewardParitySource interface {
 		epoch uint64,
 		boundarySlot uint64,
 	) (map[string]struct{}, error)
+	// GetRewardSnapshot returns the mark reward_snapshot completeness fields
+	// for epoch, or nil, nil when no such row exists. checkEpoch uses it to
+	// prove the K+1 reward-input set is the network's complete
+	// positive-stake pool set (dingo #4691): reward_snapshot.TotalPoolCount
+	// is written by ledger/snapshot/rotation.go's buildRewardStateInputs
+	// from exactly the set reward_pool_input holds rows for, unlike
+	// epoch_summary.TotalPoolCount (GetEpochData/DingoEpochData), which
+	// counts every delegated pool regardless of stake. reward_snapshot rows
+	// are retained for the life of the database (never pruned by
+	// Manager.cleanupOldSnapshots), so this proof survives the same
+	// snapshot-retention window that closes GetPoolStakeSnapshotMembers for
+	// a trailing observer.
+	GetRewardSnapshot(
+		ctx context.Context,
+		epoch uint64,
+	) (*DingoRewardSnapshotSummary, error)
 	// GetProtocolParams returns the protocol parameters in force for epoch,
 	// resolved from the `pparams` row that actually applies to it and
 	// decoded as the era the `epoch` table records for that epoch — see
@@ -391,6 +407,43 @@ func (s *DatabaseSource) GetPoolsRetiredByEpoch(
 		retired[hex.EncodeToString(keyHash)] = struct{}{}
 	}
 	return retired, nil
+}
+
+// GetRewardSnapshot implements RewardParitySource by reading the mark
+// reward_snapshot row for epoch directly through the metadata store's own
+// GetRewardSnapshot -- see RewardParitySource's doc comment for why this
+// table, not epoch_summary, is the source of the K+1 completeness proof.
+func (s *DatabaseSource) GetRewardSnapshot(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoRewardSnapshotSummary, error) {
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	snapshot, err := s.db.Metadata().GetRewardSnapshot(
+		epoch,
+		snapshotTypeMark,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reward_snapshot epoch %d: %w", epoch, err)
+	}
+	if snapshot == nil {
+		return nil, nil
+	}
+	out := &DingoRewardSnapshotSummary{
+		TotalPoolCount: snapshot.TotalPoolCount,
+	}
+	if snapshot.ExcludedActiveStake != nil {
+		out.ExcludedActiveStake = uint64(*snapshot.ExcludedActiveStake)
+		out.ExcludedActiveStakeKnown = true
+	}
+	return out, nil
 }
 
 func (s *DatabaseSource) GetPoolEpochDataMap(
