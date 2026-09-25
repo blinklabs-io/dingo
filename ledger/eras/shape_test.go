@@ -29,7 +29,12 @@ import (
 // Full mainnet-ish config with both genesis files present.
 func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
-	byron := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	byron := `{
+		"avvmDistr": {},
+		"blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+		"protocolConsts":{"k":432,"protocolMagic":164},"startTime":1788739200,
+		"bootStakeholders":{},"heavyDelegation":{},"nonAvvmBalances":{}
+	}`
 	shelley := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
