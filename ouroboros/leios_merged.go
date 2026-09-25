@@ -1598,10 +1598,11 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
-// three, and the existing transactions segment must be empty. ebTxsRaw must be
-// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
-// auxiliary_data/nil, is_valid]) in endorser-block order. The older three-field
-// mempool representation is normalized with is_valid=true.
+// three, and the existing transactions segment must be empty. Three-field
+// transactions are normalized with is_valid=true. Four-field transactions in
+// mempool order ([body, witnesses, is_valid, auxiliary_data]) are converted to
+// Dijkstra block order ([body, witnesses, auxiliary_data, is_valid]); inputs
+// already in block order are preserved.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
 	ebTxsRaw []cbor.RawMessage,
@@ -1654,8 +1655,16 @@ func spliceEndorserTxsIntoDijkstraBlock(
 			blockTx = []cbor.RawMessage{fields[0], fields[1], fields[2], {0xf5}}
 		} else {
 			var isValid bool
-			if _, err := cbor.Decode(fields[3], &isValid); err != nil {
-				return nil, fmt.Errorf("decode endorser transaction %d validity: %w", idx, err)
+			if _, err := cbor.Decode(fields[2], &isValid); err == nil {
+				blockTx = []cbor.RawMessage{
+					fields[0], fields[1], fields[3], fields[2],
+				}
+			} else if _, err := cbor.Decode(fields[3], &isValid); err != nil {
+				return nil, fmt.Errorf(
+					"decode endorser transaction %d validity: %w",
+					idx,
+					err,
+				)
 			}
 		}
 		encoded, err := cbor.Encode(blockTx)
