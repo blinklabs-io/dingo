@@ -228,6 +228,19 @@ func persistGovernanceProposals(
 
 	for i, proposal := range proposals {
 		govAction := proposal.GovAction()
+		if updateCommittee, ok := govAction.(*lcommon.UpdateCommitteeGovAction); ok {
+			for _, expiryEpoch := range updateCommittee.CredEpochs {
+				if expiryEpoch <= currentEpoch {
+					return fmt.Errorf(
+						"proposal %d in tx %s: committee member expiry epoch %d is not after current epoch %d",
+						i,
+						txHashForLog,
+						expiryEpoch,
+						currentEpoch,
+					)
+				}
+			}
+		}
 		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
 			govAction,
 		)

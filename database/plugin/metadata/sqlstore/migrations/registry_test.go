@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 25)
+	require.Len(t, registry, 26)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -192,8 +192,8 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 25)
-			migration := registry[23]
+			require.Len(t, registry, 26)
+			migration := registry[24]
 			require.Equal(t, "drep-dormancy-state", migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
 			require.Contains(t, seed, "WHERE NOT EXISTS")
@@ -325,7 +325,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 25)
+	require.Len(t, registry, 26)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,
@@ -421,7 +421,7 @@ func TestMySQLRegistryPrefixesDRepExpiryHistoryCredentialPrimaryKey(t *testing.T
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	expand := registry[22].SQL["mysql"].Expand
+	expand := registry[23].SQL["mysql"].Expand
 	require.Len(t, expand, 3)
 	require.Contains(
 		t,

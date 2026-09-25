@@ -53,6 +53,7 @@ const (
 	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
 	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
 	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
+	committeeZeroQuorumSchemaRelease              = "committee-zero-quorum"
 	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
 	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
 	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
@@ -131,10 +132,19 @@ var schemaVersions = []struct {
 		Name:    assetAmountFingerprintIndexDropSchemaRelease,
 		Dir:     "v21",
 	},
-	{Version: 22, Name: governanceVoteHistorySchemaRelease, Dir: "v22"},
-	{Version: 23, Name: drepExpiryHistorySchemaRelease, Dir: "v23"},
-	{Version: 24, Name: drepDormancyStateSchemaRelease, Dir: "v24"},
-	{Version: 25, Name: drepDelegatorStateSchemaRelease, Dir: "v25"},
+	{
+		Version: 22,
+		Name:    governanceVoteHistorySchemaRelease,
+		Dir:     "v22",
+	},
+	{
+		Version: 23,
+		Name:    committeeZeroQuorumSchemaRelease,
+		Dir:     "v23",
+	},
+	{Version: 24, Name: drepExpiryHistorySchemaRelease, Dir: "v24"},
+	{Version: 25, Name: drepDormancyStateSchemaRelease, Dir: "v25"},
+	{Version: 26, Name: drepDelegatorStateSchemaRelease, Dir: "v26"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
