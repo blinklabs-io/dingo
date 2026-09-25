@@ -327,8 +327,8 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 // without failing TestLoadLeiosEBFromDBServesOversizedEntryUncached above,
 // since that test only reaches the per-entry early return.
 func TestLoadLeiosEBFromDBPrunesAggregateBudgetAfterReload(t *testing.T) {
-	point1, manifest1, txs1 := leiosPersistedTestEntry(t, 1, 0, 20)
-	point2, manifest2, txs2 := leiosPersistedTestEntry(t, 2, 100, 20)
+	point1, manifest1, txs1 := leiosPersistedTestEntry(t, 1, 0, 10)
+	point2, manifest2, txs2 := leiosPersistedTestEntry(t, 2, 100, 10)
 
 	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 1500)
 	o := newTestOuroborosWithLeiosDB(t)
