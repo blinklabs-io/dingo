@@ -1378,12 +1378,17 @@ func TestDijkstraBlockTransactionCborConvertsStandaloneForm(t *testing.T) {
 		components[0], components[1], valid, components[2],
 	})
 	require.NoError(t, err)
+	standaloneWithoutValidity, err := cbor.Encode([]cbor.RawMessage{
+		components[0], components[1], components[2],
+	})
+	require.NoError(t, err)
 
 	for _, tc := range []struct {
 		name string
 		raw  cbor.RawMessage
 	}{
-		{name: "without explicit validity", raw: standalone},
+		{name: "block transaction validity after auxiliary data", raw: standalone},
+		{name: "without explicit validity", raw: standaloneWithoutValidity},
 		{name: "standalone validity before auxiliary data", raw: standaloneWithValidity},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

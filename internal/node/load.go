@@ -671,6 +671,13 @@ func LoadWithDB(
 			// serve node.
 			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
+			// Immutable load replays blocks already accepted into the trusted
+			// database. Structural Leios certificate checks still run;
+			// cryptographic verification belongs to live admission, where the
+			// vote manager is available.
+			ValidateLeiosCertificate: func(uint64, []byte, []byte, []byte) error {
+				return nil
+			},
 			ManualBlockProcessing: true,
 			// CIP-0163 reward-account inactivity expiry: consensus-affecting,
 			// must match serve mode (node.go) on replay of the same DB.

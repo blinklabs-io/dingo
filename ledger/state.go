@@ -12251,6 +12251,14 @@ var _ forging.TxValidationSessionProvider = (*LedgerState)(nil)
 // repeatable-read database transaction. stillCurrent lets the mempool reject
 // the candidate immediately before its atomic swap if a block or rollback
 // published a newer generation while validation was running.
+type txValidationApplyFunc func(
+	tx ledger.Transaction,
+	index int,
+	point ocommon.Point,
+	eraID uint,
+	blockNumber uint64,
+) error
+
 func (ls *LedgerState) WithTxValidationSession(
 	fn func(
 		validate func(
@@ -12261,7 +12269,13 @@ func (ls *LedgerState) WithTxValidationSession(
 		stillCurrent func() bool,
 	) error,
 ) error {
-	return ls.withTxValidationSession(nil, nil, fn)
+	return ls.withTxValidationSession(nil, nil, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
+		stillCurrent func() bool,
+		_ txValidationApplyFunc,
+	) error {
+		return fn(validate, stillCurrent)
+	})
 }
 
 func (ls *LedgerState) withTxValidationSession(
@@ -12274,6 +12288,7 @@ func (ls *LedgerState) withTxValidationSession(
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
 		) error,
 		stillCurrent func() bool,
+		applyTx txValidationApplyFunc,
 	) error,
 ) error {
 	snapshot := ls.txValidationSnapshot()
@@ -12286,7 +12301,10 @@ func (ls *LedgerState) withTxValidationSession(
 	}
 
 	txn := ls.db.Transaction(false)
-	return txn.Do(func(txn *database.Txn) error {
+	// Validation sessions may stage ledger effects so later transactions see
+	// prior certificate and governance changes, but must never persist them.
+	rollbackValidationSession := errRollbackLedgerValidationSession
+	err := txn.Do(func(txn *database.Txn) error {
 		validate := func(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
@@ -12348,9 +12366,32 @@ func (ls *LedgerState) withTxValidationSession(
 			return currentConsensus.generation == snapshot.generation &&
 				currentTip.generation == snapshot.generation
 		}
-		return fn(validate, stillCurrent)
+		applyTx := func(
+			tx ledger.Transaction,
+			index int,
+			point ocommon.Point,
+			eraID uint,
+			blockNumber uint64,
+		) error {
+			delta := NewLedgerDelta(point, eraID, blockNumber)
+			delta.addTransaction(tx, index)
+			defer delta.Release()
+			return delta.applyWithoutRecordingDonations(ls, txn)
+		}
+		if err := fn(validate, stillCurrent, applyTx); err != nil {
+			return err
+		}
+		return rollbackValidationSession
 	})
+	if errors.Is(err, rollbackValidationSession) {
+		return nil
+	}
+	return err
 }
+
+var errRollbackLedgerValidationSession = errors.New(
+	"rollback ledger validation session",
+)
 
 // ValidateLeiosEndorserBlockTransactions validates an announced endorser
 // block against the exact ledger snapshot named by the ranking block's
@@ -12396,6 +12437,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				createdUtxos map[utxoref.Key]lcommon.Utxo,
 			) error,
 			stillCurrent func() bool,
+			applyTx txValidationApplyFunc,
 		) error {
 			consumed := make(map[utxoref.Key]struct{}, len(txs)*2)
 			created := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
@@ -12423,6 +12465,18 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 						slot,
 						err,
 					)
+				}
+				// Match block application order so later transactions validate
+				// against all earlier ledger effects, not only earlier UTxOs.
+				applyErr := applyTx(
+					tx,
+					i,
+					ocommon.NewPoint(slot, header.Hash().Bytes()),
+					uint(header.Era().Id),
+					header.BlockNumber(),
+				)
+				if applyErr != nil {
+					return fmt.Errorf("apply leios endorser transaction %d: %w", i, applyErr)
 				}
 				for _, utxo := range tx.Produced() {
 					created[utxoref.ForUtxo(utxo)] = utxo
