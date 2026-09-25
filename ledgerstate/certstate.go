@@ -216,6 +216,7 @@ func parseCertStateConway(
 	}
 	_ = drepFound
 	if drepIdx >= 0 && drepIdx+2 < len(certState) &&
+		looksLikeFlattenedCommitteeState(certState[drepIdx+1]) &&
 		isCborUnsigned(certState[drepIdx+2]) {
 		dormant, dormantErr := parseDormantEpochCount(certState[drepIdx+2])
 		if dormantErr != nil {
@@ -310,6 +311,33 @@ func parseCertStateConway(
 	}
 
 	return result, errors.Join(warnings...)
+}
+
+func looksLikeFlattenedCommitteeState(data []byte) bool {
+	if looksLikeCommitteeCredentialMap(data) {
+		return true
+	}
+	if entries, err := decodeMapEntries(data); err == nil && len(entries) == 0 {
+		return true
+	}
+	if !isCborArray(data) {
+		return false
+	}
+	fields, err := decodeRawElements(data)
+	if err != nil || len(fields) < 2 {
+		return false
+	}
+	if !looksLikeCommitteeCredentialMap(fields[0]) {
+		entries, mapErr := decodeMapEntries(fields[0])
+		if mapErr != nil || len(entries) != 0 {
+			return false
+		}
+	}
+	if _, mapErr := decodeMapEntries(fields[1]); mapErr == nil {
+		return true
+	}
+	_, arrayErr := decodeRawArray(fields[1])
+	return arrayErr == nil
 }
 
 // parsePStateConway decodes the Conway-era pool state where

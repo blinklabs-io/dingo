@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -170,7 +171,23 @@ func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	db := newTestDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	drepCredential := bytes.Repeat([]byte{0xA7}, 28)
+	stakeCredential := bytes.Repeat([]byte{0xC9}, 28)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Credential:    drepCredential,
+		AddedSlot:     900,
+		Active:        true,
+	}))
 	proposalHash := bytes.Repeat([]byte{0xB8}, 32)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Drep:          drepCredential,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     950,
+		CreatedSlot:   950,
+		Active:        true,
+	}, nil))
 	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
 		TxHash:        proposalHash,
 		ActionIndex:   0,
@@ -204,21 +221,53 @@ func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	tx.WithValid(true)
 	pparams := mockledger.NewMockConwayProtocolParams()
 
+	point := ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32))
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
+		},
+	}
+	acc := db.NewBatchAccumulator()
 	txn := db.Transaction(true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return backfill.processBlockGovernance(
-			tx,
-			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+		if err := backfill.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			point,
 			100,
+			eras.ConwayEraDesc.Id,
 			&pparams,
+			offsets,
+			acc,
 			txn,
-		)
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
 	}))
 
 	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
 	require.NoError(t, err)
 	require.Empty(t, votes, "backfill must apply DRep deregistration cleanup")
+	account, err := db.GetAccountByCredential(
+		uint8(lcommon.CredentialTypeAddrKeyHash),
+		stakeCredential,
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Nil(t, account.Drep, "backfill must clear deregistered DRep delegations")
 }
 
 func closeTestDB(db *database.Database) error {

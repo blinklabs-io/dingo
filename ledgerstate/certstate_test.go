@@ -738,6 +738,47 @@ func TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry(t *testing.T) {
 	require.Equal(t, uint64(13), result.DReps[0].ExpiryEpoch)
 }
 
+func TestParseCertStateConwayIgnoresUnrelatedIntegerAfterDRepMap(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x45}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	dstate := []byte{0xa2}
+	for _, tag := range []byte{0x76, 0x77} {
+		delegator, encodeErr := cbor.Encode([]any{
+			uint64(CredentialTypeKey),
+			bytes.Repeat([]byte{tag}, 28),
+		})
+		require.NoError(t, encodeErr)
+		dstate = append(dstate, delegator...)
+		dstate = append(dstate, 0x80)
+	}
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		{0x00}, // unrelated field; the following integer is not VState dormancy
+		{0x03},
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	require.NotNil(t, result)
+	require.Zero(t, result.DormantEpochs)
+	require.Len(t, result.DReps, 1)
+	require.Equal(t, uint64(10), result.DReps[0].ExpiryEpoch)
+}
+
 // DState and ccHotKeys are both credential-keyed, so picking DState by map size
 // alone claimed the committee map whenever DState was empty or smaller.
 func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {

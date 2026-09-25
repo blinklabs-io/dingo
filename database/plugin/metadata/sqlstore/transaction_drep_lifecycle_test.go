@@ -20,8 +20,67 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDrepDeregistrationKeepsLaterSameTransactionDelegation(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	drepCredential := bytes.Repeat([]byte{0x51}, 28)
+	stakeCredential := bytes.Repeat([]byte{0x52}, 28)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drepCredential,
+		AddedSlot:     10,
+		Active:        true,
+	}))
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		CreatedSlot:   10,
+		Active:        true,
+	}, nil))
+
+	drepHash := common.NewBlake2b224(drepCredential)
+	stakeHash := common.NewBlake2b224(stakeCredential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.DeregistrationDrepCertificate{
+			CertType:       uint(common.CertificateTypeDeregistrationDrep),
+			DrepCredential: common.Credential{CredType: 0, Credential: drepHash},
+			Amount:         500,
+		},
+		&common.RegistrationDrepCertificate{
+			CertType:       uint(common.CertificateTypeRegistrationDrep),
+			DrepCredential: common.Credential{CredType: 0, Credential: drepHash},
+			Amount:         500,
+		},
+		&common.VoteDelegationCertificate{
+			CertType:        uint(common.CertificateTypeVoteDelegation),
+			StakeCredential: common.Credential{CredType: 0, Credential: stakeHash},
+			Drep:            common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: drepCredential},
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x53}, 32))
+	tx.WithValid(true)
+	point := ocommon.Point{Slot: 20, Hash: tx.Hash().Bytes()}
+	require.NoError(t, store.SetTransaction(
+		tx,
+		point,
+		0,
+		map[int]uint64{0: 500, 1: 500},
+		false,
+		nil,
+	))
+
+	account, err := store.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, drepCredential, account.Drep)
+}
 
 func TestDrepUpdateRequiresActiveRegistration(t *testing.T) {
 	t.Parallel()
