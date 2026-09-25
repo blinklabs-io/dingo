@@ -1979,8 +1979,8 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 // The current implementation tracks in-flight operations with a
 // mutex-guarded counter and a drained channel Shutdown selects directly, so
 // no goroutine is ever spawned by the timeout path.
-// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
-// concurrent tests perturb.
+// Not t.Parallel: a concurrent worker-pool shutdown could look like this
+// test's shutdown waiter in the process-wide goroutine profile.
 func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	t *testing.T,
 ) {
@@ -1993,8 +1993,22 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	started := make(chan struct{})
 	blockUntil := make(chan struct{})
 	resultChan := make(chan DatabaseResult, 1)
+	workerDone := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorker := func() {
+		releaseOnce.Do(func() { close(blockUntil) })
+	}
+	t.Cleanup(func() {
+		releaseWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(testutil.AsyncWait):
+			t.Error("timeout waiting for database worker to stop")
+		}
+	})
 	pool.Submit(DatabaseOperation{
 		OpFunc: func(db *database.Database) error {
+			defer close(workerDone)
 			close(started)
 			<-blockUntil
 			return nil
@@ -2008,28 +2022,31 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 		t.Fatal("timeout waiting for operation to start")
 	}
 
-	// The stuck worker goroutine is already running at this point, so it's
-	// part of the baseline count -- only a goroutine spawned by Shutdown
-	// itself would show up as growth below. GC first so a transient
-	// runtime/GC goroutine isn't baked into the baseline.
-	runtime.GC()
-	baseline := runtime.NumGoroutine()
-
 	err := pool.Shutdown(50 * time.Millisecond)
 	require.Error(t, err)
 
-	// A single immediate snapshot is flaky: a short-lived runtime/GC
-	// goroutine can transiently push the count above baseline with no
-	// relation to Shutdown. Poll briefly instead, matching
-	// storagetest.AssertNoGoroutineLeak's pattern -- since a leaked waiter
-	// goroutine would persist for the stuck operation's full duration, it
-	// would still be caught well within this deadline.
-	testutil.WaitForCondition(t, func() bool {
-		return runtime.NumGoroutine() <= baseline
-	}, 2*time.Second, "shutdown should not leave behind a waiter goroutine")
+	stack := make([]byte, 1<<20)
+	stackSize := runtime.Stack(stack, true)
+	shutdownWaiters := 0
+	for _, goroutine := range strings.Split(
+		string(stack[:stackSize]),
+		"\n\n",
+	) {
+		if strings.Contains(
+			goroutine,
+			"DatabaseWorkerPool).Shutdown",
+		) && strings.Contains(goroutine, "sync.(*WaitGroup).Wait") {
+			shutdownWaiters++
+		}
+	}
+	assert.Zero(
+		t,
+		shutdownWaiters,
+		"Shutdown should not leave behind a goroutine blocked on WaitGroup.Wait",
+	)
 
 	// Unblock the stuck operation so it doesn't leak past the test.
-	close(blockUntil)
+	releaseWorker()
 	select {
 	case <-resultChan:
 	case <-time.After(testutil.AsyncWait):
