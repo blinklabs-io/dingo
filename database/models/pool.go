@@ -98,6 +98,7 @@ type PoolRegistration struct {
 	MetadataHash               []byte
 	LeiosKeyPublic             []byte
 	LeiosKeyPossessionProof    []byte
+	LeiosKeyRegistrationEpoch  *uint64
 	// LeiosKeyRegistrationAgeUnknown marks imported pool parameters whose
 	// original registration slot is unavailable. AddedSlot is the import slot
 	// for those rows and must not restart the voting-key TTL.

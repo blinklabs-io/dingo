@@ -55,7 +55,7 @@ func newBabbageQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"k": 1,
 			"protocolMagic": 42
 		}
-	}`))))
+	}`)))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 1,

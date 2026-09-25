@@ -2164,12 +2164,12 @@ func (lv *LedgerView) GetLeiosKeys(
 			len(snapshot.LeiosKeyPossessionProof) == 0 {
 			continue
 		}
-		// Legacy and imported snapshots can retain valid key material without
-		// enough history to establish its registration epoch. Preserve that key
-		// for certificate validation; enforce the age bound whenever its age is
-		// known.
-		if registrationEpoch := snapshot.LeiosKeyRegistrationEpoch; registrationEpoch != nil &&
-			(*registrationEpoch > epoch || epoch-*registrationEpoch >= maxKeyAgeEpochs) {
+		// Reference ledger state carries a registration epoch with each BLS key.
+		// A snapshot without that epoch cannot establish key eligibility.
+		registrationEpoch := snapshot.LeiosKeyRegistrationEpoch
+		if registrationEpoch == nil ||
+			*registrationEpoch > epoch ||
+			epoch-*registrationEpoch >= maxKeyAgeEpochs {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{

@@ -213,7 +213,7 @@ func TestImportedLeiosKeyMigrationKeepsAgeUnknown(t *testing.T) {
 	require.NoError(t, err)
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
-	for _, statement := range registry[23].SQL["sqlite"].Expand {
+	for _, statement := range registry[24].SQL["sqlite"].Expand {
 		_, err := db.Exec(statement)
 		require.NoError(t, err)
 	}
@@ -505,7 +505,7 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
 	// v2 adds four columns, v5 two, v7/v8/v17/v22/v23 one each.
-	const shippedAddColumns = 17
+	const shippedAddColumns = 18
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after

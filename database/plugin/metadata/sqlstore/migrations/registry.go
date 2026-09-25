@@ -59,6 +59,7 @@ const (
 	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
 	leiosKeyAgeSchemaRelease                      = "leios-key-registration-effective-epoch"
 	leiosImportedKeyAgeSchemaRelease              = "leios-imported-key-age-unknown"
+	leiosKeyRegistrationEpochSchemaRelease         = "leios-key-registration-epoch"
 	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 )
 
@@ -140,6 +141,21 @@ var schemaVersions = []struct {
 		Version: 23,
 		Name:    committeeZeroQuorumSchemaRelease,
 		Dir:     "v23",
+	},
+	{
+		Version: 24,
+		Name:    leiosKeyAgeSchemaRelease,
+		Dir:     "v24",
+	},
+	{
+		Version: 25,
+		Name:    leiosImportedKeyAgeSchemaRelease,
+		Dir:     "v25",
+	},
+	{
+		Version: 26,
+		Name:    leiosKeyRegistrationEpochSchemaRelease,
+		Dir:     "v26",
 	},
 }
 

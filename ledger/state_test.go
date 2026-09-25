@@ -705,6 +705,12 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 	t.Parallel()
 
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -897,6 +903,12 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 	t.Parallel()
 
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 1000000,
@@ -930,6 +942,12 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 func newNonceReadyTestConfig(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
 
+	byronGenesisJSON := `{
+		"protocolConsts": {
+			"k": 432,
+			"protocolMagic": 2
+		}
+	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.5,
 		"securityParam": 1,

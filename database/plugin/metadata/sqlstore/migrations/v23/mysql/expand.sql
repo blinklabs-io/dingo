@@ -1,2 +1,1 @@
-ALTER TABLE `pool_stake_snapshot`
-    ADD COLUMN `leios_key_registration_epoch` BIGINT NULL;
+UPDATE committee_quorum SET quorum = NULL WHERE quorum = '0';

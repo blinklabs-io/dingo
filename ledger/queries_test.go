@@ -51,6 +51,10 @@ import (
 // and the security parameters needed by calculateStabilityWindowForEra.
 func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
+	byronGenesisJSON := `{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 432 }
+	}`
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,

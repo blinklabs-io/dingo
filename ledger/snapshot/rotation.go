@@ -373,7 +373,10 @@ func (m *Manager) snapshotLeiosKeys(
 			continue
 		}
 		registrationEpoch, ageKnown := uint64(0), false
-		if !registration.LeiosKeyRegistrationAgeUnknown {
+		if registration.LeiosKeyRegistrationEpoch != nil {
+			registrationEpoch = *registration.LeiosKeyRegistrationEpoch
+			ageKnown = true
+		} else if !registration.LeiosKeyRegistrationAgeUnknown {
 			registrationEpoch, ageKnown = epochForSlot(
 				epochs,
 				registration.AddedSlot,
@@ -381,7 +384,9 @@ func (m *Manager) snapshotLeiosKeys(
 		}
 		var effectiveEpoch *uint64
 		if ageKnown && registrationEpoch != ^uint64(0) {
-			registrationEpoch++ // pool parameters take effect after POOLREAP
+			if registration.LeiosKeyRegistrationEpoch == nil {
+				registrationEpoch++ // on-chain pool parameters take effect after POOLREAP
+			}
 			if registrationEpoch > snapshotEpoch {
 				continue
 			}
