@@ -72,12 +72,12 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestCount++
 				requestedConnId = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -146,12 +146,12 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
@@ -232,11 +232,11 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}

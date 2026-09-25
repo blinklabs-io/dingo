@@ -37,6 +37,23 @@ func (d *testDB) Create(value any) testResult {
 	case *models.PoolStakeSnapshot:
 		query = `INSERT INTO pool_stake_snapshot (epoch,snapshot_type,pool_key_hash,total_stake,stake_denominator,delegator_count,captured_slot) VALUES (?,?,?,?,?,?,?)`
 		args = []any{v.Epoch, v.SnapshotType, v.PoolKeyHash, v.TotalStake, v.StakeDenominator, v.DelegatorCount, v.CapturedSlot}
+	case *models.RewardSnapshot:
+		query = `INSERT INTO reward_snapshot (epoch,snapshot_type,total_active_stake,total_pool_count,total_delegators,captured_slot,boundary_slot,epoch_nonce,protocol_version,authoritative,calculation_version,excluded_active_stake) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+		// ExcludedActiveStake is *types.Uint64: nil means "unknown" (a
+		// snapshot captured before dingo #4025 added the tracking), and its
+		// Value() has a value receiver, so passing a nil pointer straight
+		// through would panic dereferencing it. Convert nil to a real SQL
+		// NULL instead of a driver.Valuer that can't be called.
+		var excludedActiveStake any
+		if v.ExcludedActiveStake != nil {
+			excludedActiveStake = *v.ExcludedActiveStake
+		}
+		args = []any{
+			v.Epoch, v.SnapshotType, v.TotalActiveStake, v.TotalPoolCount,
+			v.TotalDelegators, v.CapturedSlot, v.BoundarySlot, v.EpochNonce,
+			v.ProtocolVersion, v.Authoritative, v.CalculationVersion,
+			excludedActiveStake,
+		}
 	default:
 		return testResult{Error: fmt.Errorf("unsupported test row %T", value)}
 	}
@@ -56,7 +73,10 @@ func (d *testDB) Exec(query string, args ...any) testResult {
 func openTestSQLDB(t testingT, dir string, includePools bool) *testDB {
 	t.Helper()
 	path := filepath.Join(dir, "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
+	)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -121,6 +141,12 @@ func testSchema(includePools bool) []string {
 			// includePools=true test with "table epoch already exists".
 			`CREATE TABLE tip (hash BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER, block_number INTEGER)`,
 			`CREATE TABLE reward_pool_output (apparent_performance TEXT, pool_key_hash BLOB NOT NULL, id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL, optimal_reward TEXT NOT NULL DEFAULT '0', total_reward TEXT NOT NULL DEFAULT '0', leader_reward TEXT NOT NULL DEFAULT '0', member_reward_total TEXT NOT NULL DEFAULT '0', owner_stake TEXT NOT NULL DEFAULT '0', undistributed TEXT NOT NULL DEFAULT '0', unspendable TEXT NOT NULL DEFAULT '0', captured_slot INTEGER NOT NULL DEFAULT 0, boundary_slot INTEGER NOT NULL DEFAULT 0)`,
+			// Column set mirrors the production schema
+			// (database/plugin/metadata/sqlstore/queries/sqlite/schema.sql)
+			// exactly, since testDB.Create's *models.RewardSnapshot case is
+			// shared with source_test.go's sourceSQLDB, which seeds the real
+			// production schema through the same INSERT statement.
+			`CREATE TABLE reward_snapshot (id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL, snapshot_type TEXT NOT NULL, total_active_stake TEXT NOT NULL, total_pool_count INTEGER NOT NULL, total_delegators INTEGER NOT NULL, captured_slot INTEGER NOT NULL, boundary_slot INTEGER NOT NULL, epoch_nonce BLOB, protocol_version INTEGER NOT NULL, authoritative BOOLEAN NOT NULL DEFAULT FALSE, calculation_version INTEGER NOT NULL DEFAULT 0, excluded_active_stake TEXT, UNIQUE (epoch, snapshot_type))`,
 		)
 	}
 	return ret

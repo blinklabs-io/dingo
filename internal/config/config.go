@@ -300,6 +300,19 @@ type GenesisBootstrapConfig struct {
 	// is denied selection and stalls rather than steering the local chain. A
 	// zero value disables corroboration (density-only Genesis selection).
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
+	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
+	// Genesis selection is syncing, a ChainSync peer that delivers its
+	// advertised progress more slowly than LimitOnPatienceRate headers per
+	// second, beyond a LimitOnPatienceCapacity token allowance, is
+	// disconnected.
+	LimitOnPatienceEnabled bool `yaml:"limitOnPatienceEnabled"      envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_ENABLED"`
+	// LimitOnPatienceCapacity is the per-peer patience bucket size in tokens
+	// (one token per header that raises the peer's block number). 0 selects
+	// the default of 1000.
+	LimitOnPatienceCapacity uint64 `yaml:"limitOnPatienceCapacity"     envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY"`
+	// LimitOnPatienceRate is the bucket leak rate in tokens per second. 0
+	// selects the default of 5.
+	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
@@ -344,9 +357,11 @@ type KoiosParityConfig struct {
 	// tamperable in flight -- a MITM could induce a false PASS. Local dev and
 	// test only, mirroring Mithril.AllowInsecureHTTP.
 	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"    envconfig:"DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP"`
-	// Strict stops/cancels the node on the first Koios/tool error or exact
-	// parity mismatch, rather than logging it and continuing normal node
-	// operation.
+	// Strict stops/cancels the node on the first Koios/tool error or
+	// non-pass parity result, rather than logging it and continuing normal
+	// operation. The one exception is an epoch whose only significant
+	// mismatches are reference_lag (Koios's data has not caught up yet),
+	// which is logged and recorded but never stops the node.
 	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather
@@ -466,7 +481,8 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 // configuration values.
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
-		Enabled: true,
+		Enabled:                true,
+		LimitOnPatienceEnabled: true,
 	}
 }
 

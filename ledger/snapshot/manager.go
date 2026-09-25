@@ -138,6 +138,31 @@ func (m *Manager) takeBoundaryDistribution(
 	return pending.distribution
 }
 
+// peekBoundaryDistribution returns the SNAP-point distribution computed for
+// exactly this boundary WITHOUT clearing it, so a caller earlier in the same
+// rollover transaction (governance's same-boundary SPO tally) can read it and
+// leave takeBoundaryDistribution's later persist-time read undisturbed. Same
+// matching rule as takeBoundaryDistribution, minus the consuming clear.
+func (m *Manager) peekBoundaryDistribution(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+	expiryEpoch uint64,
+) *StakeDistribution {
+	m.mu.Lock()
+	pending := m.pendingBoundary
+	m.mu.Unlock()
+	if pending == nil || pending.txn != txn {
+		return nil
+	}
+	if pending.newEpoch != evt.NewEpoch ||
+		pending.boundarySlot != evt.BoundarySlot ||
+		pending.snapshotSlot != evt.SnapshotSlot ||
+		pending.expiryEpoch != expiryEpoch {
+		return nil
+	}
+	return pending.distribution
+}
+
 // boundaryChangesEra reports whether the epoch the boundary slot opens runs at
 // a different era than the epoch the snapshot slot closes.
 //
@@ -832,6 +857,94 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	)
 
 	return nil
+}
+
+// CurrentBoundarySPOStakeRows returns the mark[evt.NewEpoch] pool-stake rows
+// governance.ProcessEpoch's RATIFY phase needs for its same-boundary SPO
+// tally (see dingo's governance.stakeEpochFor), with the CIP-1694
+// reward-account auto-vote resolved. It writes nothing: the durable
+// pool_stake_snapshot row for this same epoch is written later in this same
+// rollover transaction, by CaptureEpochBoundarySnapshot, once the new
+// epoch's nonce and post-enactment protocol version exist -- too late for
+// RATIFY, which runs first.
+//
+// It prefers the SNAP-point distribution ComputeEpochBoundarySnapshot already
+// stashed earlier in this same transaction (peeked, not consumed, so
+// CaptureEpochBoundarySnapshot's later take of the same value is
+// undisturbed), falling back to the same historical boundary reconstruction
+// CaptureEpochBoundarySnapshot itself falls back to when nothing is stashed
+// (no ComputeEpochBoundarySnapshot hook installed, or its read failed), and
+// applying the same era-crossing discard rule via boundaryChangesEra.
+//
+// On the peek path this returns byte-for-byte what the later persisted row
+// holds, because both read the one stashed distribution. On the fallback path
+// it does not: the caller runs this at the SNAP point, while
+// CaptureEpochBoundarySnapshot runs its own fallback at the end of the
+// rollover, and the reconstruction counts reward deltas up to and including
+// the boundary slot -- so the persisted row also absorbs the POOLREAP deposit
+// refunds and enactment credits recorded there. The SNAP-point value is the
+// one cardano-ledger's RATIFY consumes, which is why this is called where it
+// is; ledger's TestProcessEpochRollover_SnapStakeReadOrdering locks that
+// position.
+func (m *Manager) CurrentBoundarySPOStakeRows(
+	ctx context.Context,
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) ([]*models.PoolStakeSnapshot, error) {
+	m.lockConfiguration()
+	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
+
+	distribution := m.peekBoundaryDistribution(txn, evt, expiryEpoch)
+	if distribution != nil {
+		crossed, err := m.boundaryChangesEra(txn, evt)
+		if err != nil {
+			return nil, err
+		}
+		if crossed {
+			distribution = nil
+		}
+	}
+	if distribution == nil {
+		calculator := NewCalculator(m.db)
+		var err error
+		distribution, err = calculator.calculateHistoricalBoundaryStakeDistributionInTxn(
+			ctx,
+			txn,
+			evt.SnapshotSlot,
+			evt.BoundarySlot,
+			expiryEpoch,
+			m.inactivityPeriod(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate stake distribution: %w", err)
+		}
+	}
+
+	rows := make(
+		[]*models.PoolStakeSnapshot,
+		0,
+		len(distribution.PoolStakes),
+	)
+	for poolKeyHash, stake := range distribution.PoolStakes {
+		rows = append(rows, &models.PoolStakeSnapshot{
+			Epoch:              evt.NewEpoch,
+			SnapshotType:       "mark",
+			PoolKeyHash:        poolKeyHash[:],
+			TotalStake:         types.Uint64(stake),
+			DelegatorCount:     distribution.DelegatorCount[poolKeyHash],
+			CapturedSlot:       distribution.Slot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
+		})
+	}
+	// Reads only the live Pool/Account tables, so this needs no persisted
+	// snapshot rows to exist -- see ResolvePoolRewardAccountAutoVotes's doc
+	// comment. Resolved against the same live state
+	// calculateStakeDistributionInTxn just read, matching CaptureEpochBoundary
+	// Snapshot's own resolveAutoVote=true call for the authoritative capture.
+	if err := m.db.ResolvePoolRewardAccountAutoVotes(rows, txn); err != nil {
+		return nil, fmt.Errorf("resolve reward-account auto-votes: %w", err)
+	}
+	return rows, nil
 }
 
 // calculateSnapshotDistribution computes a snapshot distribution outside the

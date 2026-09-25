@@ -400,8 +400,10 @@ koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP
   # CLI: --koios-parity-allow-insecure-http
   allowInsecureHttp: false
-  # Stop/cancel the node on the first Koios/tool error or exact parity
-  # mismatch instead of logging it and continuing normal operation.
+  # Stop/cancel the node on the first Koios/tool error or non-pass parity
+  # result instead of logging it and continuing normal operation. An epoch
+  # whose only significant mismatches are reference_lag (Koios has not caught
+  # up yet) is logged and recorded but never stops the node.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
   # CLI: --koios-parity-strict
   strict: true
@@ -685,6 +687,14 @@ genesisBootstrap:
   # with a trustable localRoots peer plus a ledger peer snapshot in the topology
   # file. 0 disables corroboration (density-only Genesis selection).
   corroborationPeers: 0
+  # Genesis Limit on Patience: while Genesis selection is active, disconnect a
+  # ChainSync peer that delivers its advertised progress more slowly than
+  # limitOnPatienceRate headers per second, beyond a limitOnPatienceCapacity
+  # token allowance. Each header that raises the peer's block number earns one
+  # token. 0 selects the defaults (1000 tokens, 5 per second).
+  limitOnPatienceEnabled: true
+  limitOnPatienceCapacity: 0
+  limitOnPatienceRate: 0
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
