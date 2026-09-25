@@ -3672,8 +3672,11 @@ The `LedgerView` interface provides query access to ledger state:
 - The credential-aware committee capability reports separately whether its
   SQL view is authoritative, resolves cold and hot credentials with their
   key/script tags intact, and treats an authoritative empty committee as real
-  state rather than an omitted provider. `CommitteeCredentialMember` resolves
-  both seated members and members proposed by active `UpdateCommittee`
+  state rather than an omitted provider. Authority comes from persisted
+  committee history (including soft-deleted members) or an explicitly empty
+  Conway genesis committee, not merely from database reachability.
+  `CommitteeCredentialMember` resolves both seated members and members
+  proposed by active `UpdateCommittee`
   actions. Proposed members retain the latest persisted authorization or
   term-scoped permanent resignation, including a resignation with no earlier
   authorization. Each membership carries a `term_start_slot`; explicit removal
