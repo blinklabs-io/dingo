@@ -1954,8 +1954,11 @@ func (ls *LedgerState) queueRewardPrecompute(
 	precompute func(event.EpochTransitionEvent) error,
 ) {
 	ls.rewardPrecomputeMu.Lock()
-	defer ls.rewardPrecomputeMu.Unlock()
-	ls.queueRewardPrecomputeLocked(epochEvent, precompute)
+	start := ls.queueRewardPrecomputeLocked(epochEvent, precompute)
+	ls.rewardPrecomputeMu.Unlock()
+	if start {
+		go ls.runRewardPrecompute(precompute)
+	}
 }
 
 // The caller holds rewardPrecomputeMu so releasing a prefilter retry and
@@ -1963,21 +1966,20 @@ func (ls *LedgerState) queueRewardPrecompute(
 func (ls *LedgerState) queueRewardPrecomputeLocked(
 	epochEvent event.EpochTransitionEvent,
 	precompute func(event.EpochTransitionEvent) error,
-) {
+) bool {
 	if ls.closed.Load() {
-		return
+		return false
 	}
 	// Store an independent copy because EventBus callbacks do not own the
 	// publisher's payload after returning.
 	epochEvent.EpochNonce = slices.Clone(epochEvent.EpochNonce)
 	ls.rewardPrecomputePending = &epochEvent
 	if ls.rewardPrecomputeRunning {
-		return
+		return false
 	}
 	ls.rewardPrecomputeRunning = true
 	ls.rewardPrecomputeWG.Add(1)
-
-	go ls.runRewardPrecompute(precompute)
+	return true
 }
 
 // deferStakeRewardPrecompute records the pre-Babbage RUPD cutoff. The retry is
@@ -2023,22 +2025,29 @@ func (ls *LedgerState) maybeQueueStakeRewardPrecomputeRetry(
 	capturedSlot uint64,
 ) {
 	ls.rewardPrecomputeMu.Lock()
-	defer ls.rewardPrecomputeMu.Unlock()
 	retry := ls.rewardPrecomputeRetry
 	if retry == nil || capturedSlot < retry.cutoffSlot || ls.closed.Load() {
+		ls.rewardPrecomputeMu.Unlock()
 		return
 	}
 	ls.rewardPrecomputeRetry = nil
 	if ls.rewardInputRollbackActive.Load() != 0 ||
 		retry.generation != ls.rewardInputGeneration.Load() {
+		ls.rewardPrecomputeMu.Unlock()
 		return
 	}
 	epochEvent := retry.epochEvent
 	epochEvent.BoundarySlot = capturedSlot
-	ls.queueRewardPrecomputeLocked(
+	start := ls.queueRewardPrecomputeLocked(
 		epochEvent,
 		ls.precomputeStakeRewardsAfterEpochTransition,
 	)
+	ls.rewardPrecomputeMu.Unlock()
+	if start {
+		go ls.runRewardPrecompute(
+			ls.precomputeStakeRewardsAfterEpochTransition,
+		)
+	}
 }
 
 func (ls *LedgerState) runRewardPrecompute(

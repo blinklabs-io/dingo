@@ -3617,7 +3617,7 @@ func (ls *LedgerState) rollbackWithOptions(
 	point ocommon.Point,
 	repairSameTip bool,
 	publishResync bool,
-) error {
+) (resultErr error) {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
@@ -3721,11 +3721,11 @@ func (ls *LedgerState) rollbackWithOptions(
 	// rollbacks from exposing an apparently stable even generation.
 	ls.rewardInputRollbackActive.Add(1)
 	ls.rewardInputGeneration.Add(1)
-	restartRewardPrecompute := false
+	var postCommitReloadErr error
 	defer func() {
 		ls.rewardInputGeneration.Add(1)
 		remaining := ls.rewardInputRollbackActive.Add(-1)
-		if restartRewardPrecompute && remaining == 0 {
+		if postCommitReloadErr == nil && remaining == 0 {
 			ls.queueStartupRewardPrecompute()
 		}
 	}()
@@ -3857,7 +3857,6 @@ func (ls *LedgerState) rollbackWithOptions(
 	// the database before any later block validates against them --
 	// regardless of which caller (chainsync rollback, primary-chain
 	// reconciliation, tip-floor enforcement) reached this function.
-	var postCommitReloadErr error
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
 	newCurrentEra = ls.currentEra
@@ -4125,11 +4124,11 @@ func (ls *LedgerState) rollbackWithOptions(
 		return &rollbackCommittedError{err: fatalErr}
 	}
 	if floorErr != nil {
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(floorErr)
+		}
 		return &rollbackCommittedError{err: floorErr}
 	}
-	// Queue only after the surviving epoch and tip have been reloaded and
-	// the deferred generation update has made the inputs stable again.
-	restartRewardPrecompute = true
 	return nil
 }
 
