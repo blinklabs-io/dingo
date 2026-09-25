@@ -132,8 +132,8 @@ func (d *Database) SetCommitteeQuorum(
 	if quorum == nil {
 		return errors.New("committee quorum cannot be nil")
 	}
-	if quorum.Sign() <= 0 {
-		return errors.New("committee quorum must be positive")
+	if quorum.Sign() < 0 {
+		return errors.New("committee quorum cannot be negative")
 	}
 	stored := &types.Rat{Rat: new(big.Rat).Set(quorum)}
 	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
@@ -149,7 +149,7 @@ func (d *Database) SetCommitteeQuorum(
 // ClearCommitteeQuorum records at the given slot that no quorum is
 // in effect (e.g. after a NoConfidence action is enacted). A later
 // GetCommitteeQuorum will return nil until a subsequent
-// SetCommitteeQuorum writes a new positive value.
+// SetCommitteeQuorum writes a new threshold.
 func (d *Database) ClearCommitteeQuorum(
 	slot uint64,
 	txn *Txn,

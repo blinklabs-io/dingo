@@ -193,10 +193,8 @@ func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 	require.NoError(t, err)
 	redeemTx, err := byron.NewByronTransactionFromCbor(txCbor)
 	require.NoError(t, err)
-	// v0.193.3 does not expose the tag-24-wrapped constructor-2 witness
-	// through TransactionWitnessSet; the ledger must retain and validate it
-	// from the raw Byron witness values.
-	assert.Empty(t, redeemTx.Witnesses().Vkey())
+	// Byron witnesses exposed through TransactionWitnessSet still require
+	// their constructor-specific signature domain.
 
 	producerOutputCbor, err := hex.DecodeString(
 		"82582b82d818582183581c4041adf6b03851a9c85db3f028995504fb4ba48b50703ab1b9841350a0021ad658e71f1a000f4240",
