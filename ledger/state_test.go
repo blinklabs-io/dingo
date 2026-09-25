@@ -2000,6 +2000,9 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	}
 	t.Cleanup(func() {
 		releaseWorker()
+		if err := pool.Shutdown(testutil.AsyncWait); err != nil {
+			t.Errorf("shutdown database worker pool during cleanup: %v", err)
+		}
 		select {
 		case <-workerDone:
 		case <-time.After(testutil.AsyncWait):
