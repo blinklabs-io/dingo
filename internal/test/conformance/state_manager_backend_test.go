@@ -78,6 +78,27 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	require.Len(t, dreps, 2)
 }
 
+func TestLoadInitialStateSkipsInactiveDRepsWithoutDeposit(t *testing.T) {
+	t.Parallel()
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	hash := testHash28(0xd3)
+	credential := mockledger.RewardAccountKey{
+		CredType: common.CredentialTypeAddrKeyHash, Credential: hash,
+	}
+	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
+		DRepRegistrationsByCredential: map[mockledger.RewardAccountKey]bool{
+			credential: false,
+		},
+	}, &conway.ConwayProtocolParameters{}))
+
+	dreps, err := m.db.GetActiveDreps(nil)
+	require.NoError(t, err)
+	require.Empty(t, dreps)
+}
+
 func TestDRepDeregistrationPreservesOtherCredentialType(t *testing.T) {
 	t.Parallel()
 	m, err := NewDingoStateManager()

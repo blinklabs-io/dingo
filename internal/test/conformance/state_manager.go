@@ -432,13 +432,27 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 	}
 
-	initialDRepDeposit, err := initialDRepDeposit(pp)
-	if err != nil && (len(state.DRepRegistrations) > 0 || len(state.DRepRegistrationsByCredential) > 0) {
-		return fmt.Errorf("resolve initial DRep deposit: %w", err)
+	var initialDRepDepositAmount uint64
+	initialDRepDepositResolved := false
+	resolveInitialDRepDeposit := func() (uint64, error) {
+		if initialDRepDepositResolved {
+			return initialDRepDepositAmount, nil
+		}
+		deposit, err := initialDRepDeposit(pp)
+		if err != nil {
+			return 0, fmt.Errorf("resolve initial DRep deposit: %w", err)
+		}
+		initialDRepDepositAmount = deposit
+		initialDRepDepositResolved = true
+		return initialDRepDepositAmount, nil
 	}
 	for credential, registered := range state.DRepRegistrationsByCredential {
 		if !registered {
 			continue
+		}
+		depositAmount, err := resolveInitialDRepDeposit()
+		if err != nil {
+			return err
 		}
 		credentialTag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
@@ -452,7 +466,7 @@ func (m *DingoStateManager) LoadInitialState(
 		registration := &models.RegistrationDrep{
 			DrepCredential: drep.Credential,
 			CredentialTag:  drep.CredentialTag,
-			DepositAmount:  types.Uint64(initialDRepDeposit),
+			DepositAmount:  types.Uint64(depositAmount),
 		}
 		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
 			return fmt.Errorf("seed drep: %w", err)
@@ -462,11 +476,15 @@ func (m *DingoStateManager) LoadInitialState(
 		if hasDRepCredentialHash(state.DRepRegistrationsByCredential, hash) {
 			continue
 		}
+		depositAmount, err := resolveInitialDRepDeposit()
+		if err != nil {
+			return err
+		}
 		drep := &models.Drep{Credential: hash[:], Active: true}
 		registration := &models.RegistrationDrep{
 			DrepCredential: drep.Credential,
 			CredentialTag:  drep.CredentialTag,
-			DepositAmount:  types.Uint64(initialDRepDeposit),
+			DepositAmount:  types.Uint64(depositAmount),
 		}
 		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
 			return fmt.Errorf("seed legacy drep: %w", err)
