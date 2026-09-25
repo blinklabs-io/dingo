@@ -543,7 +543,37 @@ func Sync(
 	if modeErr != nil {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
-	if mode == syncModeCatchUp && cfg.PinnedDigest != "" {
+	pinnedDigest := cfg.PinnedDigest
+	if cfg.RepairLegacyRewardState {
+		repairPending, pendingErr := RewardStateRepairPending(db)
+		if pendingErr != nil {
+			return SyncResult{}, pendingErr
+		}
+		if !repairPending || mode == syncModeBootstrap {
+			return SyncResult{}, errors.New(
+				"Mithril reward-state repair requires a pending repair marker " +
+					"on an existing database",
+			)
+		}
+		if mode == syncModeResume {
+			repairActive, activeErr := RewardStateRepairActive(db)
+			if activeErr != nil {
+				return SyncResult{}, activeErr
+			}
+			if !repairActive {
+				return SyncResult{}, errors.New(
+					"cannot resume Mithril reward-state repair without its " +
+						"in-progress marker",
+				)
+			}
+		}
+		// A configured pin selects a fresh bootstrap artifact. Repair must
+		// catch up to the latest artifact instead. If an earlier repair run
+		// was interrupted, the durable pin below still selects its exact
+		// artifact; only the stale configuration pin is ignored.
+		pinnedDigest = ""
+	}
+	if mode == syncModeCatchUp && pinnedDigest != "" {
 		return SyncResult{}, errors.New(
 			"explicit Mithril artifact pin requires a fresh database; " +
 				"a complete database cannot select a bootstrap artifact",
@@ -575,7 +605,6 @@ func Sync(
 	// partially imported one, and the fresh-bootstrap import neither
 	// reconciles nor diverges-checks, so both snapshots' UTxOs, accounts,
 	// pools and DReps are left live.
-	pinnedDigest := cfg.PinnedDigest
 	var resumePin pinnedArtifact
 	if mode == syncModeResume {
 		pin, hasPin, pinErr := getPinnedArtifact(db)

@@ -181,6 +181,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			DataDir:                 dataDir,
 			StorageMode:             "core",
 			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
 			AggregatorURL:           fixture.server.URL,
 			AllowInsecureHTTP:       true,
 			StoragePlugins:          testStoragePlugins(),
@@ -204,6 +205,77 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot,
 			"repair must retain the existing chain anchor")
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	t.Run("legacy reward repair resumes its durable artifact pin", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		_, anchorHash := validImmutableFiles(t, 1000)
+		dataDir := t.TempDir()
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1000,
+			Hash:     anchorHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, setImmutableImportMarker(db, 0))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairActiveKey, "1", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			"sync_status", syncStatusInProgress, nil,
+		))
+		require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
+			Backend:             BackendV2,
+			Network:             "preprod",
+			Digest:              fixture.artifact.Hash,
+			Epoch:               fixture.artifact.Beacon.Epoch,
+			ImmutableFileNumber: fixture.artifact.Beacon.ImmutableFileNumber,
+			CertificateHash:     fixture.artifact.CertificateHash,
+		}))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		result, err := Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			AggregatorURL:           fixture.server.URL,
+			AllowInsecureHTTP:       true,
+			StoragePlugins:          testStoragePlugins(),
+			DatabaseWorkers:         1,
+			Logger:                  discard,
+			RepairLegacyRewardState: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.Snapshot)
+
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		pending, err := RewardStateRepairPending(db)
+		require.NoError(t, err)
+		require.False(t, pending)
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
@@ -303,6 +375,55 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.True(t, checkpoint.Completed)
 		require.GreaterOrEqual(t, checkpoint.LastSlot, uint64(1000))
 		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+}
+
+func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
+	t.Parallel()
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("complete database has no repair marker", func(t *testing.T) {
+		dataDir := t.TempDir()
+		seedCompleteDB(t, dataDir, "core", 0, false)
+		_, err := Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			RepairLegacyRewardState: true,
+			Logger:                  discard,
+		})
+		require.ErrorContains(t, err, "pending repair marker")
+	})
+
+	t.Run("interrupted sync is not an active repair", func(t *testing.T) {
+		dataDir := t.TempDir()
+		seedCompleteDB(t, dataDir, "core", 0, false)
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			"sync_status", syncStatusInProgress, nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		_, err = Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			RepairLegacyRewardState: true,
+			Logger:                  discard,
+		})
+		require.ErrorContains(t, err, "without its in-progress marker")
 	})
 }
 
