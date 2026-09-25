@@ -350,6 +350,7 @@ ORDER BY id DESC`, slot)
 	if err != nil {
 		return err
 	}
+	defer rows.Close() //nolint:errcheck
 	type historyRow struct {
 		id      int64
 		dormant int64
@@ -358,12 +359,11 @@ ORDER BY id DESC`, slot)
 	for rows.Next() {
 		var item historyRow
 		if err := rows.Scan(&item.id, &item.dormant); err != nil {
-			rows.Close()
 			return err
 		}
 		items = append(items, item)
 	}
-	if err := rows.Close(); err != nil {
+	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, item := range items {
