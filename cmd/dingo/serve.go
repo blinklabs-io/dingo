@@ -212,7 +212,7 @@ func mithrilRewardRepairConfig(cfg *config.Config) (*config.Config, error) {
 	if cfg.Mithril.Backend != "" &&
 		cfg.Mithril.Backend != mithril.BackendV2 {
 		return nil, fmt.Errorf(
-			"Mithril reward-state repair requires backend %q; configured backend is %q",
+			"mithril reward-state repair requires backend %q; configured backend is %q",
 			mithril.BackendV2, cfg.Mithril.Backend,
 		)
 	}
