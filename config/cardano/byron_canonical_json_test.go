@@ -61,7 +61,10 @@ func TestLoadGenesisConfigsByronDuplicateKeys(t *testing.T) {
 		t.Parallel()
 
 		cfg := writeByronGenesisConfig(t, `{
-  "protocolConsts": {"protocolMagic": 42, "protocolMagic": 43, "k": 2160}
+  "avvmDistr": {},
+  "blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+  "protocolConsts": {"protocolMagic": 42, "protocolMagic": 43, "k": 2160},
+  "startTime": 1, "bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {}
 }`)
 		require.NoError(t, cfg.loadGenesisConfigs())
 
@@ -91,7 +94,10 @@ func TestLoadGenesisConfigsByronDuplicateKeys(t *testing.T) {
 		t.Parallel()
 
 		cfg := writeByronGenesisConfig(t, `{
-  "protocolConsts": {"k": 2160, "k": 1, "protocolMagic": 42}
+  "avvmDistr": {},
+  "blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+  "protocolConsts": {"k": 2160, "k": 1, "protocolMagic": 42},
+  "startTime": 1, "bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {}
 }`)
 		require.NoError(t, cfg.loadGenesisConfigs())
 
@@ -104,9 +110,12 @@ func TestLoadGenesisConfigsByronDuplicateKeys(t *testing.T) {
 		t.Parallel()
 
 		cfg := writeByronGenesisConfig(t, `{
+  "avvmDistr": {},
+  "blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
   "startTime": 1,
   "startTime": 2,
-  "protocolConsts": {"k": 2160}
+  "protocolConsts": {"k": 2160, "protocolMagic": 42},
+  "bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {}, "avvmDistr": {}
 }`)
 		require.NoError(t, cfg.loadGenesisConfigs())
 
@@ -256,8 +265,10 @@ func TestCanonicalizeByronGenesisJSONAcceptsReferenceSupportedEscapes(t *testing
 		t.Parallel()
 
 		cfg := writeByronGenesisConfig(t, `{
-  "protocolConsts": {"k": 2160},
-  "avvmDistr": {"a\"b\\c": "1"}
+  "protocolConsts": {"k": 2160, "protocolMagic": 42},
+  "avvmDistr": {"a\"b\\c": "1"},
+  "blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+  "startTime": 1, "bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {}
 }`)
 		require.NoError(t, cfg.loadGenesisConfigs())
 	})
@@ -301,7 +312,10 @@ func TestLoadGenesisConfigsRejectsNegativeByronSlotDuration(t *testing.T) {
 	t.Parallel()
 
 	cfg := writeByronGenesisConfig(t, `{
-  "blockVersionData": {"slotDuration": "-1"}
+  "avvmDistr": {},
+  "blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"-1","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+  "protocolConsts": {"k": 2160, "protocolMagic": 42}, "startTime": 1,
+  "bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {}
 }`)
 	err := cfg.loadGenesisConfigs()
 	require.Error(t, err)
@@ -316,8 +330,10 @@ func TestLoadGenesisConfigsAcceptsNonNegativeByronSlotDuration(t *testing.T) {
 	t.Parallel()
 
 	cfg := writeByronGenesisConfig(t, `{
-  "blockVersionData": {"slotDuration": "20000"},
-  "protocolConsts": {"k": 2160}
+  "avvmDistr": {},
+  "blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+  "protocolConsts": {"k": 2160, "protocolMagic": 42}, "startTime": 1,
+  "bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {}
 }`)
 	require.NoError(t, cfg.loadGenesisConfigs())
 	g := cfg.ByronGenesis()

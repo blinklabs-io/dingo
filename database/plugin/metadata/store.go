@@ -358,14 +358,15 @@ type GovernanceStore interface {
 
 	// ClearCommitteeQuorum records that the committee has no
 	// enacted quorum as of the given slot. Used by NoConfidence
-	// enactment so GetCommitteeQuorum falls back to Conway
-	// genesis until a subsequent UpdateCommittee sets a new
-	// quorum.
+	// enactment so GetCommitteeQuorum falls back to Conway genesis
+	// until a subsequent UpdateCommittee sets a new quorum. A zero
+	// quorum is a valid threshold and is distinct from this clear.
 	ClearCommitteeQuorum(uint64, types.Txn) error
 
 	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
 	// Returns (nil, nil) when no quorum has been enacted or when the
-	// most recent record is a ClearCommitteeQuorum marker.
+	// most recent record is a ClearCommitteeQuorum marker. A zero
+	// threshold is returned as a non-nil rational.
 	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
 
 	// GetCommitteeMembers retrieves all active (non-deleted)
@@ -839,9 +840,8 @@ type UtxoStore interface {
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
-	// row are silently ignored (the SQL filter is deleted_slot == 0,
-	// so already-deleted rows don't get rewritten). Rollback
-	// un-deletion is handled by SetUtxosNotDeletedAfterSlot.
+	// row are silently ignored. Rollback un-deletion is handled by
+	// SetUtxosNotDeletedAfterSlot.
 	MarkUtxosDeletedAtSlot(
 		txn types.Txn,
 		refs []types.UtxoKey,
@@ -1895,12 +1895,11 @@ type MetadataStore interface {
 	// first-ever registration is immediate). Callers must pass the current
 	// epoch's start slot, not an arbitrary point in the past.
 	//
-	// A key a pool proposed earlier in the same epoch and then superseded
-	// with a later re-registration (A -> B -> C) also still counts as
-	// claimed by that pool for the rest of the epoch, even though it is
-	// no longer that pool's pending value either: psVRFKeyHashes retains
-	// every key placed in psFutureStakePoolParams during the epoch, not
-	// only the current one.
+	// Only the pool's latest same-epoch registration reserves its key. A
+	// key proposed earlier in the same epoch and then superseded by a
+	// later re-registration (A -> B -> C) is freed once superseded: it was
+	// never placed in psStakePools and is no longer the pending value in
+	// psFutureStakePoolParams, so a different pool may claim it.
 	GetPoolByVrfKeyHash(
 		vrfKeyHash []byte,
 		epochStartSlot uint64,

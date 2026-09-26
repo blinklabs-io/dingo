@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -134,7 +135,7 @@ func TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement(t *testing.T) {
 		})
 	}
 
-	validated, err := validateTxsubmissionReply(requested, returned)
+	validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 	require.NoError(t, err)
 	require.Len(t, validated, len(returned))
 }
@@ -176,7 +177,7 @@ func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
 			requested := []txsubmission.TxIdAndSize{
 				{TxId: fixture.txId, Size: tc.size},
 			}
-			validated, err := validateTxsubmissionReply(requested, returned)
+			validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 			require.ErrorContains(t, err, tc.match)
 			require.Nil(t, validated)
 		})
@@ -316,7 +317,7 @@ func TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted(
 		},
 	}
 
-	validated, err := validateTxsubmissionReply(requested, returned)
+	validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 	require.Nil(t, validated)
 	require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
 	// The operator needs both numbers and the era to tell an undersized
@@ -373,7 +374,7 @@ func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
 	t.Run("accepted counts three bodies", func(t *testing.T) {
 		reg := prometheus.NewRegistry()
 		o := newOuroboros(OuroborosConfig{PromRegistry: reg})
-		validated, err := validateTxsubmissionReply(requested, returned)
+		validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 3)
 		o.recordTxsubmissionReplyOutcome(validated, len(returned), err)
@@ -406,7 +407,7 @@ func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
 				bad[badIdx].Size += 40
 				reg := prometheus.NewRegistry()
 				o := newOuroboros(OuroborosConfig{PromRegistry: reg})
-				validated, err := validateTxsubmissionReply(bad, returned)
+				validated, err := validateTxsubmissionReply(bad, returned, gledger.NewTransactionFromCbor)
 				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
 				o.recordTxsubmissionReplyOutcome(
 					validated,

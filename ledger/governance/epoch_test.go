@@ -43,6 +43,30 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	assert.Same(t, pparams, out.UpdatedPParams)
 }
 
+func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
+	t.Parallel()
+
+	action := &lcommon.UpdateCommitteeGovAction{
+		Type:   uint(lcommon.GovActionTypeUpdateCommittee),
+		Quorum: cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	actionCbor, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+		GovActionCbor: actionCbor,
+	}
+
+	remaining, err := ratificationEnactmentPrecondition(
+		conwayPParamsFixture(10),
+		nil,
+		proposal,
+		0,
+	)
+	require.NoError(t, err)
+	assert.Zero(t, remaining)
+}
+
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	t.Parallel()
 
@@ -1425,17 +1449,44 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 	}))
 }
 
+func TestCommitteeAbsentUsesEnactedStateAndGenesis(t *testing.T) {
+	t.Parallel()
+
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{"keyHash-committee-member": 500},
+		},
+	}
+	emptyGenesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{},
+		},
+	}
+	require.True(t, committeeAbsent(nil, nil, false))
+	require.False(t, committeeAbsent(nil, genesis, false))
+	require.False(t, committeeAbsent(nil, emptyGenesis, false))
+	require.False(t, committeeAbsent(nil, nil, true))
+	require.False(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeUpdateCommittee),
+	}, nil, false))
+	require.True(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
+	}, genesis, true))
+}
+
 func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 	t.Parallel()
 
 	const currentEpoch = uint64(10)
 	uintPtr := func(value uint64) *uint64 { return &value }
 	tests := []struct {
-		name         string
-		termLimit    uint64
-		memberExpiry *uint64
-		actionType   lcommon.GovActionType
-		wantRatified bool
+		name          string
+		termLimit     uint64
+		memberExpiry  *uint64
+		actionType    lcommon.GovActionType
+		wantRatified  bool
+		zeroQuorum    bool
+		wantEnactment bool
 	}{
 		{
 			name:         "within limit",
@@ -1443,6 +1494,15 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			memberExpiry: uintPtr(14),
 			actionType:   lcommon.GovActionTypeUpdateCommittee,
 			wantRatified: true,
+		},
+		{
+			name:          "zero quorum ratifies and enacts",
+			termLimit:     5,
+			memberExpiry:  uintPtr(14),
+			actionType:    lcommon.GovActionTypeUpdateCommittee,
+			wantRatified:  true,
+			zeroQuorum:    true,
+			wantEnactment: true,
 		},
 		{
 			name:         "exact boundary",
@@ -1496,10 +1556,14 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 					)
 					members[credential] = *test.memberExpiry
 				}
+				quorum := newRat(2, 3)
+				if test.zeroQuorum {
+					quorum = newRat(0, 1)
+				}
 				action = &lcommon.UpdateCommitteeGovAction{
 					Type:       uint(test.actionType),
 					CredEpochs: members,
-					Quorum:     newRat(2, 3),
+					Quorum:     quorum,
 				}
 			case lcommon.GovActionTypeNoConfidence:
 				action = &lcommon.NoConfidenceGovAction{
@@ -1564,6 +1628,31 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			if test.wantRatified {
 				require.NotNil(t, proposal.RatifiedEpoch)
 				assert.Equal(t, currentEpoch, *proposal.RatifiedEpoch)
+				if test.wantEnactment {
+					nextTxn := db.MetadataTxn(true)
+					nextOut, nextErr := ProcessEpoch(&EpochInput{
+						DB:           db,
+						Txn:          nextTxn,
+						PrevEpoch:    currentEpoch,
+						NewEpoch:     currentEpoch + 1,
+						BoundarySlot: 600,
+						PParams:      out.UpdatedPParams,
+						UpdateFn: func(
+							pparams lcommon.ProtocolParameters,
+							_ any,
+						) (lcommon.ProtocolParameters, error) {
+							return pparams, nil
+						},
+					})
+					require.NoError(t, nextErr)
+					require.NoError(t, nextTxn.Commit())
+					nextTxn.Release()
+					require.Equal(t, 1, nextOut.EnactedCount)
+					proposal, err = db.GetGovernanceProposal(txHash, 0, nil)
+					require.NoError(t, err)
+					require.NotNil(t, proposal.EnactedEpoch)
+					assert.Equal(t, currentEpoch+1, *proposal.EnactedEpoch)
+				}
 			} else {
 				assert.Nil(t, proposal.RatifiedEpoch)
 				assert.Nil(t, proposal.RatifiedSlot)

@@ -98,6 +98,7 @@ func ratifyInputs(
 		GovAction:             govAction,
 		ActiveDRepCount:       activeDReps,
 		ActiveCCCount:         activeCC,
+		CommitteeAbsent:       false,
 		CCQuorum:              ccQuorum,
 		MajorVersion:          majorVersion,
 		CommitteeNoConfidence: committeeNoConfidence,
@@ -119,7 +120,7 @@ func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
 	assert.False(t, d.Ratified)
 }
 
-func TestShouldRatify_DijkstraOnlyParametersUseNetworkAndSecurityGroups(
+func TestShouldRatify_DijkstraParameterGroupsMatchPV12(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -128,59 +129,202 @@ func TestShouldRatify_DijkstraOnlyParametersUseNetworkAndSecurityGroups(
 	maxTx := uint32(1_000)
 	stride := uint32(128)
 	multiplier := &cbor.Rat{Rat: big.NewRat(7, 4)}
+	maxPledge := newRat(5, 2)
+	minMargin := newRat(1, 20)
+	period := uint32(6)
+	committeeSize := uint16(17)
+	quorum := newRat(2, 3)
+	referencesSize := uint32(8_192)
+	txsSize := uint32(16_384)
+	exUnits := lcommon.ExUnits{Memory: 100, Steps: 200}
+	maxRefPerEndorser := uint32(4_096)
 	actions := []struct {
-		name   string
-		update gdijkstra.DijkstraProtocolParameterUpdate
+		name         string
+		update       gdijkstra.DijkstraProtocolParameterUpdate
+		wantGroups   drepParameterGroups
+		wantSecurity bool
 	}{
 		{
-			name: "key-34",
+			name:         "key-34",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
 			update: gdijkstra.DijkstraProtocolParameterUpdate{
 				MaxRefScriptSizePerBlock: &maxBlock,
 			},
 		},
 		{
-			name: "key-35",
+			name:         "key-35",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
 			update: gdijkstra.DijkstraProtocolParameterUpdate{
 				MaxRefScriptSizePerTx: &maxTx,
 			},
 		},
 		{
-			name: "key-36",
+			name:         "key-36",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
 			update: gdijkstra.DijkstraProtocolParameterUpdate{
 				RefScriptCostStride: &stride,
 			},
 		},
 		{
-			name: "key-37",
+			name:         "key-37",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
 			update: gdijkstra.DijkstraProtocolParameterUpdate{
 				RefScriptCostMultiplier: multiplier,
 			},
 		},
+		{
+			name:       "key-38",
+			wantGroups: drepParameterGroupTechnical,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxPledgeLeverage: &maxPledge,
+			},
+		},
+		{
+			name:       "key-38-clear",
+			wantGroups: drepParameterGroupTechnical,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxPledgeLeverageSet: true,
+			},
+		},
+		{
+			name:       "key-39",
+			wantGroups: drepParameterGroupEconomic,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MinPoolMargin: &minMargin,
+			},
+		},
+		{
+			name:         "key-40",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				LeiosAnnouncementPeriodLength: &period,
+			},
+		},
+		{
+			name:         "key-41",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				LeiosVotePeriodLength: &period,
+			},
+		},
+		{
+			name:         "key-42",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				LeiosDiffusionPeriodLength: &period,
+			},
+		},
+		{
+			name:         "key-43",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				LeiosCommitteeSize: &committeeSize,
+			},
+		},
+		{
+			name:         "key-44",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				LeiosQuorumStakeThreshold: &quorum,
+			},
+		},
+		{
+			name:         "key-45",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxEndorserBlockReferencesSize: &referencesSize,
+			},
+		},
+		{
+			name:         "key-46",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxEndorserBlockTxsSize: &txsSize,
+			},
+		},
+		{
+			name:         "key-47",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxEndorserBlockExUnits: &exUnits,
+			},
+		},
+		{
+			name:         "key-48",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerEndorserBlock: &maxRefPerEndorser,
+			},
+		},
 	}
-	pparams := conwayPParamsFixture(gdijkstra.MinProtocolVersionDijkstra)
-	pparams.MinCommitteeSize = 1
-	pparams.DRepVotingThresholds.PpNetworkGroup = newRat(3, 4)
-	pparams.DRepVotingThresholds.PpGovGroup = newRat(1, 1)
-	pparams.PoolVotingThresholds.PpSecurityGroup = newRat(3, 4)
-
 	for _, test := range actions {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			action := &gdijkstra.DijkstraParameterChangeGovAction{
 				Type:        uint(lcommon.GovActionTypeParameterChange),
 				ParamUpdate: test.update,
 			}
-			require.Equal(
-				t,
-				drepParameterGroupNetwork,
-				parameterChangeDRepGroups(action),
-			)
-			require.NotEmpty(t, action.SecurityGroupFields())
+			require.Equal(t, test.wantGroups, parameterChangeDRepGroups(action))
+			require.Equal(t, test.wantSecurity, len(action.SecurityGroupFields()) > 0)
+			pparams := conwayPParamsFixture(gdijkstra.MinProtocolVersionDijkstra)
+			pparams.MinCommitteeSize = 1
+			pparams.DRepVotingThresholds.PpNetworkGroup = newRat(1, 1)
+			pparams.DRepVotingThresholds.PpEconomicGroup = newRat(1, 1)
+			pparams.DRepVotingThresholds.PpTechnicalGroup = newRat(1, 1)
+			pparams.DRepVotingThresholds.PpGovGroup = newRat(1, 1)
+			pparams.PoolVotingThresholds.PpSecurityGroup = newRat(3, 4)
+			switch test.wantGroups {
+			case drepParameterGroupNetwork:
+				pparams.DRepVotingThresholds.PpNetworkGroup = newRat(3, 4)
+			case drepParameterGroupEconomic:
+				pparams.DRepVotingThresholds.PpEconomicGroup = newRat(3, 4)
+			case drepParameterGroupTechnical:
+				pparams.DRepVotingThresholds.PpTechnicalGroup = newRat(3, 4)
+			default:
+				t.Fatalf("unexpected Dijkstra parameter group %b", test.wantGroups)
+			}
+			spoYes := uint64(0)
+			if test.wantSecurity {
+				spoYes = 74
+				decision := ShouldRatify(RatifyInputs{
+					Tally: &ProposalTally{
+						ActionType:     uint8(lcommon.GovActionTypeParameterChange),
+						DRepYesStake:   75,
+						DRepTotalStake: 100,
+						SPOYesStake:    spoYes,
+						SPOTotalStake:  100,
+						CCYesCount:     1,
+						CCTotalCount:   1,
+					},
+					PParams:         pparams,
+					ParameterChange: action,
+					ActiveDRepCount: 1,
+					ActiveCCCount:   1,
+					CCQuorum:        big.NewRat(1, 1),
+					MajorVersion:    gdijkstra.MinProtocolVersionDijkstra,
+				})
+				require.False(t, decision.Ratified, "below PpSecurityGroup must reject")
+				spoYes = 75
+			}
 			decision := ShouldRatify(RatifyInputs{
 				Tally: &ProposalTally{
 					ActionType:     uint8(lcommon.GovActionTypeParameterChange),
 					DRepYesStake:   75,
 					DRepTotalStake: 100,
-					SPOYesStake:    75,
+					SPOYesStake:    spoYes,
 					SPOTotalStake:  100,
 					CCYesCount:     1,
 					CCTotalCount:   1,
@@ -193,6 +337,74 @@ func TestShouldRatify_DijkstraOnlyParametersUseNetworkAndSecurityGroups(
 				MajorVersion:    gdijkstra.MinProtocolVersionDijkstra,
 			})
 			require.True(t, decision.Ratified)
+		})
+	}
+}
+
+func TestShouldRatify_DijkstraMixedParameterGroupsUseMostRestrictiveThreshold(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	period := uint32(6)
+	maxPledge := newRat(5, 2)
+	minMargin := newRat(1, 20)
+	for _, tc := range []struct {
+		name   string
+		update gdijkstra.DijkstraProtocolParameterUpdate
+	}{
+		{
+			name: "network and technical",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				LeiosAnnouncementPeriodLength: &period,
+				MaxPledgeLeverage:             &maxPledge,
+			},
+		},
+		{
+			name: "network and economic",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				LeiosAnnouncementPeriodLength: &period,
+				MinPoolMargin:                 &minMargin,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			action := &gdijkstra.DijkstraParameterChangeGovAction{
+				Type:        uint(lcommon.GovActionTypeParameterChange),
+				ParamUpdate: tc.update,
+			}
+			pparams := conwayPParamsFixture(gdijkstra.MinProtocolVersionDijkstra)
+			pparams.MinCommitteeSize = 1
+			pparams.DRepVotingThresholds.PpNetworkGroup = newRat(1, 2)
+			pparams.DRepVotingThresholds.PpEconomicGroup = newRat(3, 4)
+			pparams.DRepVotingThresholds.PpTechnicalGroup = newRat(3, 4)
+			pparams.DRepVotingThresholds.PpGovGroup = newRat(1, 1)
+			pparams.PoolVotingThresholds.PpSecurityGroup = newRat(3, 4)
+			inputs := RatifyInputs{
+				Tally: &ProposalTally{
+					ActionType:     uint8(lcommon.GovActionTypeParameterChange),
+					DRepYesStake:   60,
+					DRepTotalStake: 100,
+					SPOYesStake:    75,
+					SPOTotalStake:  100,
+					CCYesCount:     1,
+					CCTotalCount:   1,
+				},
+				PParams:         pparams,
+				ParameterChange: action,
+				ActiveDRepCount: 1,
+				ActiveCCCount:   1,
+				CCQuorum:        big.NewRat(1, 1),
+				MajorVersion:    gdijkstra.MinProtocolVersionDijkstra,
+			}
+			require.False(
+				t,
+				ShouldRatify(inputs).Ratified,
+				"the 75% threshold from the touched non-network group must apply",
+			)
+			inputs.Tally.DRepYesStake = 75
+			require.True(t, ShouldRatify(inputs).Ratified)
 		})
 	}
 }
@@ -993,14 +1205,87 @@ func TestShouldRatify_CCQuorumMissingFailsSafe(t *testing.T) {
 	))
 	assert.False(t, d.CCApproved)
 	assert.False(t, d.Ratified)
-	assert.Equal(t, "cc quorum missing or zero", d.FailureReason)
+	assert.Equal(t, "cc quorum missing", d.FailureReason)
 
-	// Same, but with an explicit zero quorum.
+	// Zero is a valid UnitInterval threshold and short-circuits approval.
 	d = ShouldRatify(ratifyInputs(
 		tally, pparams, 10, 5, big.NewRat(0, 1), 10, false,
 	))
-	assert.False(t, d.CCApproved)
-	assert.False(t, d.Ratified)
+	assert.True(t, d.CCApproved)
+	assert.True(t, d.Ratified)
+}
+
+func TestShouldRatify_ZeroCommitteeQuorum(t *testing.T) {
+	t.Parallel()
+
+	pparams := conwayPParamsFixture(10)
+	pparams.MinCommitteeSize = 0
+	tally := &ProposalTally{
+		ActionType:     uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		DRepYesStake:   100,
+		DRepTotalStake: 100,
+	}
+	inputs := func(activeCC int, absent bool, quorum *big.Rat) RatifyInputs {
+		in := ratifyInputs(tally, pparams, 1, activeCC, quorum, 10, false)
+		in.CommitteeAbsent = absent
+		return in
+	}
+
+	for _, test := range []struct {
+		name         string
+		activeCC     int
+		absent       bool
+		quorum       *big.Rat
+		wantCC       bool
+		wantRatified bool
+		wantReason   string
+	}{
+		{name: "zero quorum with active members", activeCC: 2, quorum: big.NewRat(0, 1), wantCC: true, wantRatified: true},
+		{name: "empty seated committee and zero minimum", quorum: big.NewRat(0, 1), wantCC: true, wantRatified: true},
+		{
+			name:       "nil quorum remains unavailable",
+			quorum:     nil,
+			wantReason: "cc quorum missing",
+		},
+		{
+			name:       "absent committee cannot approve",
+			absent:     true,
+			quorum:     big.NewRat(0, 1),
+			wantReason: "committee absent",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decision := ShouldRatify(inputs(test.activeCC, test.absent, test.quorum))
+			assert.Equal(t, test.wantCC, decision.CCApproved)
+			assert.Equal(t, test.wantRatified, decision.Ratified)
+			if test.wantReason != "" {
+				assert.Equal(t, test.wantReason, decision.FailureReason)
+			}
+		})
+	}
+}
+
+func TestShouldRatify_EmptyGenesisCommitteeWithZeroQuorum(t *testing.T) {
+	t.Parallel()
+
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{},
+		},
+	}
+	pparams := conwayPParamsFixture(10)
+	pparams.MinCommitteeSize = 0
+	tally := &ProposalTally{
+		ActionType:     uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		DRepYesStake:   100,
+		DRepTotalStake: 100,
+	}
+	in := ratifyInputs(tally, pparams, 0, 0, big.NewRat(0, 1), 10, false)
+	in.CommitteeAbsent = committeeAbsent(nil, genesis, false)
+	decision := ShouldRatify(in)
+	assert.False(t, in.CommitteeAbsent)
+	assert.True(t, decision.CCApproved)
+	assert.True(t, decision.Ratified)
 }
 
 func TestConwayRatifyQuorum_FromGenesis(t *testing.T) {

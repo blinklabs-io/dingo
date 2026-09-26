@@ -50,7 +50,7 @@ func newBabbageQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 1,
 			"protocolMagic": 42
@@ -87,11 +87,8 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 	// version from Babbage (8) to Conway (9), submitted in epoch 0 (the
 	// submission epoch for enactment at the epoch 0->1 boundary). Shelley
 	// genesis updateQuorum=1, so this one proposal already meets quorum.
-	updateCbor, err := cbor.Encode(&babbage.BabbageProtocolParameterUpdate{
-		ProtocolVersion: &lcommon.ProtocolParametersProtocolVersion{
-			Major: 9,
-			Minor: 0,
-		},
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
@@ -204,11 +201,8 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
-	updateCbor, err := cbor.Encode(&babbage.BabbageProtocolParameterUpdate{
-		ProtocolVersion: &lcommon.ProtocolParametersProtocolVersion{
-			Major: 9,
-			Minor: 0,
-		},
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		14: lcommon.ProtocolParametersProtocolVersion{Major: 9, Minor: 0},
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
