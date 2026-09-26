@@ -1279,7 +1279,7 @@ func TestStoredEpochPParamsIgnoresEraWithoutDecoder(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.SetPParams([]byte{0x80}, 0, 0, eras.ByronEraDesc.Id, nil))
 	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	pp, ok, err := bf.storedEpochPParams(0, eras.ByronEraDesc.Id)
+	pp, ok, err := bf.storedEpochPParams(0, eras.ByronEraDesc.Id, nil)
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, pp)

@@ -69,6 +69,8 @@ func TestBackfillAnchorOnPostgresAndMySQL(t *testing.T) {
 			testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold,
 		},
 		{"KeepsImportedProtocolParameters", testRun_KeepsImportedProtocolParameters},
+		{"EnactsPendingUpdateBeforeHardFork", testRunEnactsPendingUpdateBeforeHardFork},
+		{"RederivesPParamsBelowTheAnchor", testRunRederivesPParamsBelowTheAnchor},
 	}
 	for _, backend := range backends {
 		t.Run(backend.name, func(t *testing.T) {

@@ -1156,11 +1156,16 @@ snapshot holds it. Any other replayed proposal was settled before the anchor
 so it is stored as expired and dropped at its own epoch and slot and no later
 boundary selects it for ratification, expiry, or refund.
 
-Backfill derives protocol parameters from genesis and hard forks for the epochs
-it replays, and adopts the row already recorded for an epoch instead of
-writing one. The import records its epoch's parameters, which carry
-governance-enacted changes derivation cannot reproduce, and `GetPParams`
-prefers the newest row for an epoch, so a derived row would replace them.
+Backfill resolves each epoch's protocol parameters when replay reaches it,
+after the proposals of the epoch before have been stored, and follows the live
+rollover: the classic updates agreed for the boundary are enacted under the era
+they were proposed in (`ComputeAndApplyPParamUpdates`), and at an era boundary
+the hard fork then translates the updated parameters. The epoch before the
+Mithril anchor's and the anchor's own keep the row the import recorded, which
+carries governance-enacted changes derivation cannot reproduce; `GetPParams`
+prefers the newest row for an epoch, so a derived row would replace it. A row
+for an older epoch can only be one backfill derived, possibly before the
+proposals it depends on were stored, and is derived again.
 
 ### Pools
 
