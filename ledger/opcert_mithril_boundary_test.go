@@ -70,7 +70,7 @@ func TestMithrilBoundaryOpCertCertifiedBaselineIgnoresStaleHistory(
 	)
 }
 
-func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(
+func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterUsesZeroBaseline(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -95,7 +95,13 @@ func TestMithrilBoundaryOpCertPoolWithoutCertifiedCounterAllowsFirst(
 	)
 	require.NoError(t, err)
 	require.False(t, found)
-	require.NoError(t, validateOpCertCounter(stored, found, 490, true))
+	require.NoError(t, validateOpCertCounter(stored, found, 1, true))
+	require.ErrorContains(
+		t,
+		validateOpCertCounter(stored, found, 2, true),
+		"gapped rotation",
+	)
+	require.NoError(t, validateOpCertCounter(stored, found, 490, false))
 }
 
 // TestLatestOpCertSequenceRespectsMithrilBoundary pins that
