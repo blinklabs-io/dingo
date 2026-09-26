@@ -369,6 +369,15 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	if err != nil {
 		return nil, err
 	}
+	pendingDeposits, err := pendingGovernanceDepositsByCredential(
+		ctx, meta, metaTxn, slot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pending governance deposits: %w", err)
+	}
+	if err := applyPendingGovernanceDeposits(inputs, pendingDeposits); err != nil {
+		return nil, err
+	}
 	dist.StakeInputs = make([]StakeInput, 0, len(inputs))
 	for _, input := range inputs {
 		var poolHash lcommon.PoolKeyHash
@@ -551,6 +560,26 @@ func (c *Calculator) calculateFromHistoricalStake(
 		return fmt.Errorf("get batch pools historical stake: %w", err)
 	}
 
+	pendingDepositsByPool, err := c.pendingGovernanceDepositsByPool(
+		ctx, meta, metaTxn, pools, slot, boundarySlot, expiryEpoch,
+		inactivityPeriod,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"get pending governance deposits by pool: %w",
+			err,
+		)
+	}
+	for poolHash, deposit := range pendingDepositsByPool {
+		if stakeMap[poolHash] > ^uint64(0)-deposit {
+			return fmt.Errorf(
+				"pending governance deposit overflow for pool %x",
+				poolHash[:],
+			)
+		}
+		stakeMap[poolHash] += deposit
+	}
+
 	for _, poolHash := range pools {
 		delegators := delegatorMap[poolHash]
 		if delegators > 0 {
@@ -602,7 +631,7 @@ func (c *Calculator) getActivePoolsAtSlot(
 // leader-election totals at slot so they agree even when live account state has
 // advanced beyond the boundary.
 func (c *Calculator) getBatchPoolsDelegatedStake(
-	_ context.Context,
+	ctx context.Context,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	pools []lcommon.PoolKeyHash,
@@ -650,6 +679,15 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 	}
 	inputs, err := rewardStakeInputsFromRows(rawInputs)
 	if err != nil {
+		return nil, err
+	}
+	pendingDeposits, err := pendingGovernanceDepositsByCredential(
+		ctx, meta, metaTxn, slot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pending governance deposits: %w", err)
+	}
+	if err := applyPendingGovernanceDeposits(inputs, pendingDeposits); err != nil {
 		return nil, err
 	}
 	for _, input := range inputs {
@@ -724,6 +762,183 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 type rewardStakeAggregation struct {
 	inputs []StakeInput
 	values map[lcommon.PoolKeyHash]uint64
+}
+
+// pendingGovernanceDepositsByCredential sums, per depositor stake credential,
+// every governance-action-proposal deposit still outstanding as of slot (see
+// GetPendingGovernanceProposalDeposits). The key matches the one
+// mergePointerStakeInputs and applyPendingGovernanceDeposits use: the
+// credential tag byte followed by the raw staking-key hash.
+//
+// A proposal's return_address is a full reward-account address (a one-byte
+// header plus the 28-byte credential hash), the same encoding
+// refundProposalDeposit's rewardAccountStakeCredential decodes when it
+// eventually credits the refund -- decoding it the same way here keeps the
+// two sides of the deposit's lifecycle (spend it out of stake, add it back
+// while pending, credit it back for real at refund) using one definition of
+// which credential a proposal belongs to.
+func pendingGovernanceDepositsByCredential(
+	_ context.Context,
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	slot uint64,
+) (map[string]uint64, error) {
+	proposals, err := meta.GetPendingGovernanceProposalDeposits(slot, metaTxn)
+	if err != nil {
+		return nil, err
+	}
+	if len(proposals) == 0 {
+		return nil, nil
+	}
+	deposits := make(map[string]uint64, len(proposals))
+	for _, proposal := range proposals {
+		if proposal == nil || proposal.Deposit == 0 ||
+			len(proposal.ReturnAddress) == 0 {
+			continue
+		}
+		credentialTag, stakingKey, err := rewardAccountStakeCredential(
+			proposal.ReturnAddress,
+		)
+		if err != nil {
+			// A malformed or non-reward return address cannot be resolved to
+			// a stake credential at all -- skip it rather than fail the
+			// whole snapshot. The deposit is genuinely unattributable, not a
+			// crash-worthy corruption; refundProposalDeposit already has to
+			// tolerate the same "not a registered reward account" case by
+			// returning the deposit to the treasury instead.
+			continue
+		}
+		key := string([]byte{credentialTag}) + string(stakingKey)
+		current := deposits[key]
+		if current > ^uint64(0)-proposal.Deposit {
+			return nil, fmt.Errorf(
+				"pending governance deposit overflow for credential %d:%x",
+				credentialTag,
+				stakingKey,
+			)
+		}
+		deposits[key] = current + proposal.Deposit
+	}
+	return deposits, nil
+}
+
+// rewardAccountStakeCredential decodes a reward-account address (as stored in
+// governance_proposal.return_address) into the (credential_tag, staking_key)
+// pair reward_live_stake and StakeInput key their rows on. Kept in lockstep
+// with ledger/governance's own rewardAccountStakeCredential, which decodes
+// the same column for the refund side of a proposal's deposit; the two must
+// agree on which credential a proposal belongs to.
+func rewardAccountStakeCredential(returnAddress []byte) (uint8, []byte, error) {
+	addr, err := lcommon.NewAddressFromBytes(returnAddress)
+	if err != nil {
+		return 0, nil, fmt.Errorf("decode return reward account: %w", err)
+	}
+	var credentialTag uint8
+	switch addr.Type() {
+	case lcommon.AddressTypeNoneKey:
+		credentialTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	case lcommon.AddressTypeNoneScript:
+		credentialTag = uint8(lcommon.CredentialTypeScriptHash)
+	default:
+		return 0, nil, fmt.Errorf(
+			"return address is not a reward account: address type %d",
+			addr.Type(),
+		)
+	}
+	stakeHash := addr.StakeKeyHash()
+	return credentialTag, append([]byte(nil), stakeHash[:]...), nil
+}
+
+// applyPendingGovernanceDeposits adds each matching pending deposit onto the
+// stake input already computed for that credential, in place. A depositor who
+// is not currently a delegator of one of the pools inputs was built for has
+// no entry to add onto and is silently skipped -- an undelegated credential's
+// stake, deposit or otherwise, does not contribute to any pool's stake or the
+// shared active-stake denominator, matching every other stake source here.
+func applyPendingGovernanceDeposits(
+	inputs []StakeInput,
+	deposits map[string]uint64,
+) error {
+	if len(deposits) == 0 {
+		return nil
+	}
+	for i := range inputs {
+		key := string([]byte{inputs[i].CredentialTag}) +
+			string(inputs[i].StakingKey)
+		deposit, ok := deposits[key]
+		if !ok || deposit == 0 {
+			continue
+		}
+		if inputs[i].Stake > ^uint64(0)-deposit {
+			return fmt.Errorf(
+				"pending governance deposit overflow for credential %d:%x",
+				inputs[i].CredentialTag,
+				inputs[i].StakingKey,
+			)
+		}
+		inputs[i].Stake += deposit
+	}
+	return nil
+}
+
+// pendingGovernanceDepositsByPool resolves each outstanding governance-action
+// deposit to the pool its depositor currently delegates to, for the historical
+// pool-total reconstruction (getBatchPoolsHistoricalStake), which -- unlike
+// the live path and getBatchPoolsDelegatedStake's reward-input side -- works
+// entirely in pool-aggregated sums and never builds a per-credential
+// StakeInput to add the deposit onto directly.
+//
+// getBatchPoolsDelegatedStake already resolves exactly this credential-to-pool
+// assignment for the same (slot, boundarySlot) reward-input reconstruction, so
+// this reuses it rather than re-deriving the resolution a second way; the two
+// per-credential views are required to agree by construction (see
+// calculateHistoricalBoundaryStakeDistributionInTxn's cross-check), so
+// borrowing one to correct the other cannot introduce a new disagreement
+// between them.
+func (c *Calculator) pendingGovernanceDepositsByPool(
+	ctx context.Context,
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	pools []lcommon.PoolKeyHash,
+	slot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+) (map[lcommon.PoolKeyHash]uint64, error) {
+	deposits, err := pendingGovernanceDepositsByCredential(
+		ctx, meta, metaTxn, slot,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(deposits) == 0 {
+		return nil, nil
+	}
+	delegated, err := c.getBatchPoolsDelegatedStake(
+		ctx, meta, metaTxn, pools, slot, boundarySlot, expiryEpoch,
+		inactivityPeriod,
+	)
+	if err != nil {
+		return nil, err
+	}
+	byPool := make(map[lcommon.PoolKeyHash]uint64, len(pools))
+	for _, input := range delegated.inputs {
+		key := string([]byte{input.CredentialTag}) + string(input.StakingKey)
+		deposit, ok := deposits[key]
+		if !ok || deposit == 0 {
+			continue
+		}
+		var poolHash lcommon.PoolKeyHash
+		copy(poolHash[:], input.PoolKeyHash)
+		if byPool[poolHash] > ^uint64(0)-deposit {
+			return nil, fmt.Errorf(
+				"pending governance deposit overflow for pool %x",
+				poolHash[:],
+			)
+		}
+		byPool[poolHash] += deposit
+	}
+	return byPool, nil
 }
 
 // mergePointerStakeInputs adds pointer-derived stake onto the live rows
