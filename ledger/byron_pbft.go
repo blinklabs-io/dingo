@@ -31,10 +31,13 @@ import (
 )
 
 type byronPBFTCache struct {
-	config      *byronconsensus.ByronConfig
-	state       byronPBFTState
-	tip         ocommon.Point
-	initialized bool
+	config *byronconsensus.ByronConfig
+	// noGenesisIssuers records a configured Byron genesis with no boot
+	// stakeholders; see errByronNoGenesisIssuers.
+	noGenesisIssuers bool
+	state            byronPBFTState
+	tip              ocommon.Point
+	initialized      bool
 }
 
 type byronPBFTState struct {
@@ -46,27 +49,28 @@ var errByronPBFTCurrentSlotUnavailable = errors.New(
 	"byron PBFT current slot unavailable",
 )
 
+// errByronNoGenesisIssuers rejects every Byron block on a chain whose Byron
+// genesis declares no boot stakeholders. OBFT assigns every Byron slot leader
+// from that set, so no Byron main block can be valid there. An epoch-boundary
+// block carries no PBFT signature and would otherwise pass header validation
+// on the genesis anchor and slot bound alone, so it is refused as well: the
+// only chains using this genesis shape hard-fork away from Byron at epoch 0,
+// where the reference admits no Byron block of either kind.
+var errByronNoGenesisIssuers = errors.New(
+	"byron genesis declares no boot stakeholders, so this chain cannot contain Byron blocks",
+)
+
 func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 	if lsConfig.CardanoNodeConfig == nil ||
 		lsConfig.CardanoNodeConfig.ByronGenesis() == nil {
 		return byronPBFTCache{}, nil
 	}
 	genesis := lsConfig.CardanoNodeConfig.ByronGenesis()
-	// A Byron genesis with no boot stakeholders has no possible PBFT
-	// signer: Byron's OBFT round-robin schedule assigns every slot leader
-	// from this set (byronconsensus.ByronConfig.SlotLeader), so this chain
-	// can never produce a single valid Byron main block. Real cardano-node
-	// tolerates exactly this genesis shape -- internal/test/devnet's
-	// testnet-generation-tool configurator deliberately zeroes both
-	// bootStakeholders and heavyDelegation for a network that hard-forks
-	// away from Byron at genesis, and the same cardano-node binary runs as
-	// the conformance harness's reference producer against it. Treat the
-	// cache as absent instead of failing ledger-state construction; if a
-	// Byron block nonetheless appears on such a chain,
-	// byronconsensus.ValidatePBFTHeaderCrypto still fails closed on the
-	// same empty issuer set. A real Byron chain (mainnet, preprod,
-	// preview) always has at least one boot stakeholder, so this never
-	// relaxes validation for one.
+	// byronconsensus.NewPBFTDelegationState refuses an empty issuer set, but
+	// cardano-node starts from exactly this genesis when it hard-forks away
+	// from Byron at epoch 0. Record the shape instead of failing ledger-state
+	// construction, and reject every Byron block on this chain instead; see
+	// errByronNoGenesisIssuers.
 	keyHashes, err := genesis.GenesisDelegateKeyHashes()
 	if err != nil {
 		return byronPBFTCache{}, fmt.Errorf(
@@ -75,7 +79,7 @@ func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 		)
 	}
 	if len(keyHashes) == 0 {
-		return byronPBFTCache{}, nil
+		return byronPBFTCache{noGenesisIssuers: true}, nil
 	}
 	config, err := byronconsensus.NewByronConfigFromGenesis(genesis)
 	if err != nil {
@@ -91,16 +95,40 @@ func (ls *LedgerState) byronPBFTConfig() (byronconsensus.ByronConfig, error) {
 	if ls.byronPBFT.config != nil {
 		return *ls.byronPBFT.config, nil
 	}
-	cache, err := newByronPBFTCache(ls.config)
+	config, noGenesisIssuers, err := ls.byronPBFTGenesis()
 	if err != nil {
 		return byronconsensus.ByronConfig{}, err
 	}
-	if cache.config == nil {
+	if noGenesisIssuers {
+		return byronconsensus.ByronConfig{}, errByronNoGenesisIssuers
+	}
+	if config == nil {
 		return byronconsensus.ByronConfig{}, errors.New(
 			"byron PBFT validation requires Byron genesis configuration",
 		)
 	}
-	return *cache.config, nil
+	return *config, nil
+}
+
+// byronPBFTGenesis returns the cache's genesis-derived fields, deriving them
+// from the ledger config for a LedgerState constructed without the cache.
+// Header validation calls this without the ledger lock, which is safe only
+// because NewLedgerState sets these two fields once; the cache's state, tip
+// and initialized fields are written under the lock during apply and must not
+// be read here.
+func (ls *LedgerState) byronPBFTGenesis() (
+	*byronconsensus.ByronConfig,
+	bool,
+	error,
+) {
+	if ls.byronPBFT.config != nil || ls.byronPBFT.noGenesisIssuers {
+		return ls.byronPBFT.config, ls.byronPBFT.noGenesisIssuers, nil
+	}
+	cache, err := newByronPBFTCache(ls.config)
+	if err != nil {
+		return nil, false, err
+	}
+	return cache.config, cache.noGenesisIssuers, nil
 }
 
 func (ls *LedgerState) validateByronPBFTHeader(
@@ -143,6 +171,17 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	if block == nil {
 		return errors.New(
 			"cannot validate nil Byron PBFT block",
+		)
+	}
+	_, noGenesisIssuers, err := ls.byronPBFTGenesis()
+	if err != nil {
+		return err
+	}
+	if noGenesisIssuers {
+		return fmt.Errorf(
+			"byron block at slot %d: %w",
+			block.SlotNumber(),
+			errByronNoGenesisIssuers,
 		)
 	}
 	// Header-only blocks cannot preserve the enclosing block discriminator, so

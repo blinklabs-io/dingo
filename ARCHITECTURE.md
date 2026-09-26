@@ -3345,17 +3345,20 @@ bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
 
 `newByronPBFTCache` (`ledger/byron_pbft.go`) tolerates a Byron genesis that
-declares no boot stakeholders: it caches no PBFT config instead of failing
-ledger-state construction, because Byron's OBFT round-robin schedule then has
-no signer to assign any slot to, so the chain can never produce a valid Byron
-main block regardless of Byron's nominal slot range. `internal/test/devnet`'s
-testnet generator produces exactly this genesis shape for a network that
-hard-forks away from Byron at genesis (every `TestXHardForkAtEpoch` set to 0),
-matching real cardano-node's own tolerant genesis loading. A real Byron chain
-(mainnet, preprod, preview) always declares at least one boot stakeholder, so
-this does not relax validation there; if a Byron main block nonetheless
-reaches a chain with no cached PBFT config, `byronPBFTConfig` still fails
-closed with "byron PBFT validation requires Byron genesis configuration".
+declares no boot stakeholders. `byronconsensus.NewPBFTDelegationState` refuses
+an empty issuer set, but `internal/test/devnet`'s testnet generator produces
+exactly this genesis for a network that hard-forks away from Byron at epoch 0
+(every `TestXHardForkAtEpoch` set to 0), and cardano-node starts from it.
+Instead of failing ledger-state construction, the cache records the shape and
+every Byron block on that chain is rejected with `errByronNoGenesisIssuers`.
+OBFT assigns every Byron slot leader from the boot stakeholders, so no Byron
+main block can be valid there. An epoch-boundary block carries no PBFT
+signature and would otherwise pass on the genesis anchor and current-slot bound
+alone, so `validateByronPBFTHeaderCrypto` refuses it too, which covers every
+header entry point (chainsync, blockfetch, chain selection, and Leios
+announcements); `byronPBFTConfig` returns the same error on the ledger apply
+path. Every Byron genesis under `config/cardano/` declares at least one boot
+stakeholder, so their PBFT validation is unchanged.
 
 Cached epochs resolve without forecast configuration, but still require a
 published nonce. Before forecasting an uncached epoch for a live header,
