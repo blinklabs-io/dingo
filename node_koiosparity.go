@@ -131,7 +131,7 @@ func (n *Node) startKoiosParityObserver() error {
 		return fmt.Errorf("start koios parity observer: %w", err)
 	}
 	n.koiosParityObserver = observer
-	n.koiosParitySubId = n.eventBus.SubscribeFunc(
+	n.koiosParitySubId = n.subscribeRequiredEvent(
 		event.EpochTransitionEventType,
 		observer.HandleEpochTransitionEvent,
 	)

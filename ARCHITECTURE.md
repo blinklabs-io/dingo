@@ -1648,6 +1648,22 @@ cross-component notifications. Synchronous state queries still use direct
 method calls, callbacks, or narrow interfaces injected by the node composition
 layer.
 
+Node-owned subscriptions classify delivery explicitly. State consumers of
+one-shot connection, peer-selection, and chainsync transitions use
+`Node.subscribeRequiredEvent`, which blocks publishers while a callback queue is
+full so ordinary back-pressure cannot silently detach the consumer. Use this
+only when the event has no safe replay or full-state resynchronization; such a
+consumer can back-pressure its publishers until it drains or the bus shuts
+down. A required handler must not synchronously publish to an EventBus path
+whose delivery can wait on that handler's subscriber; this can exhaust the
+shared async workers while the handler waits for queue capacity. Move follow-up
+publication out of that callback or keep the subscriber detachable until the
+cycle is removed. The chain-fork logger is intentionally detachable because it
+only emits diagnostics. Every node-owned callback registration must use
+`subscribeRequiredEvent`, `subscribeDetachableEvent`, or a specialized helper
+with an explicit policy at its wiring site; required consumers need blocking
+delivery or an explicit recovery/resubscription path.
+
 ```
 Publisher ---publish---> EventBus ---deliver---> Subscribers
                             |

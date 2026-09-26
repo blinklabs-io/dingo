@@ -18,15 +18,21 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -1179,6 +1185,414 @@ func newChainSelectorSubscriptionTestNode(
 		eventBus:      bus,
 		chainSelector: cs,
 	}
+}
+
+type blockingNodeTestLogHandler struct {
+	entered     chan struct{}
+	release     chan struct{}
+	calls       atomic.Int32
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (h *blockingNodeTestLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *blockingNodeTestLogHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Level < slog.LevelWarn {
+		return nil
+	}
+	h.calls.Add(1)
+	h.once.Do(func() {
+		close(h.entered)
+		<-h.release
+	})
+	return nil
+}
+
+func (h *blockingNodeTestLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) unblock() {
+	h.releaseOnce.Do(func() { close(h.release) })
+}
+
+var nodeRequiredSubscriptionGroups = []struct {
+	function string
+	count    int
+}{
+	{function: "Run", count: 3},
+	{function: "subscribeChainsyncClientRemoveRequests", count: 1},
+	{function: "subscribeConnectionEvents", count: 3},
+	{function: "subscribeChainSelectorEvents", count: 8},
+	{function: "initLeiosVoteManager", count: 2},
+	{function: "startKoiosParityObserver", count: 1},
+}
+
+func TestNodeEventSubscriptionClassifications(t *testing.T) {
+	t.Parallel()
+
+	expectedRequired := make(map[string]int, len(nodeRequiredSubscriptionGroups))
+	for _, group := range nodeRequiredSubscriptionGroups {
+		expectedRequired[group.function] = group.count
+	}
+	expectedDetachable := map[string]int{
+		"subscribeChainSelectorEvents": 1,
+	}
+	expectedPolicies := map[string]string{
+		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
+		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
+		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
+		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
+	}
+	expectedChainsyncRegistrations := map[string]int{
+		"Run":                        1,
+		"reinitializeNetworkingCore": 1,
+	}
+
+	files, err := filepath.Glob("node*.go")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	actualRequired := make(map[string]int)
+	actualDetachable := make(map[string]int)
+	actualPolicies := make(map[string]string)
+	actualChainsyncRegistrations := make(map[string]int)
+	var unclassified []string
+	for _, filename := range files {
+		if strings.HasSuffix(filename, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filename, nil, 0)
+		require.NoError(t, err)
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				switch selector.Sel.Name {
+				case "subscribeRequiredEvent":
+					actualRequired[function.Name.Name]++
+				case "subscribeDetachableEvent":
+					actualDetachable[function.Name.Name]++
+				case "subscribeChainsyncClientRemoveRequests":
+					actualChainsyncRegistrations[function.Name.Name]++
+				case "Subscribe", "SubscribeWithBuffer", "SubscribeFunc",
+					"SubscribeFuncWithBuffer", "SubscribeFuncStrict":
+					unclassified = append(
+						unclassified,
+						fmt.Sprintf("%s:%s", filename, function.Name.Name),
+					)
+				case "SubscribeFuncWithBufferPolicy":
+					_, ok := actualPolicies[function.Name.Name]
+					if ok {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("duplicate policy helper: %s", function.Name.Name),
+						)
+						return true
+					}
+					if len(call.Args) < 3 {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("policy missing: %s:%s", filename, function.Name.Name),
+						)
+						return true
+					}
+					policySelector, ok := call.Args[2].(*ast.SelectorExpr)
+					if !ok {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("policy not explicit: %s:%s", filename, function.Name.Name),
+						)
+						return true
+					}
+					actualPolicies[function.Name.Name] = policySelector.Sel.Name
+				}
+				return true
+			})
+		}
+	}
+
+	require.Empty(t, unclassified,
+		"node-owned EventBus function subscriptions must use a policy helper")
+	require.Equal(t, expectedRequired, actualRequired)
+	require.Equal(t, expectedDetachable, actualDetachable)
+	require.Equal(t, expectedPolicies, actualPolicies)
+	require.Equal(t, expectedChainsyncRegistrations, actualChainsyncRegistrations)
+}
+
+func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
+	t.Parallel()
+
+	type subscriberCase struct {
+		name        string
+		eventType   event.EventType
+		logger      *blockingNodeTestLogHandler
+		queueFilled chan struct{}
+		published   chan struct{}
+	}
+	var cases []subscriberCase
+	for _, group := range nodeRequiredSubscriptionGroups {
+		for i := range group.count {
+			cases = append(cases, subscriberCase{
+				name: fmt.Sprintf("%s %d", group.function, i+1),
+				eventType: event.EventType(fmt.Sprintf(
+					"node.required.test.%d", len(cases),
+				)),
+				logger: &blockingNodeTestLogHandler{
+					entered: make(chan struct{}),
+					release: make(chan struct{}),
+				},
+				queueFilled: make(chan struct{}),
+				published:   make(chan struct{}),
+			})
+		}
+	}
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() {
+		for _, testCase := range cases {
+			testCase.logger.unblock()
+		}
+		bus.Stop()
+	})
+	n := &Node{eventBus: bus}
+	for _, testCase := range cases {
+		logger := slog.New(testCase.logger)
+		n.subscribeRequiredEvent(testCase.eventType, func(event.Event) {
+			logger.Warn("blocked test subscriber")
+		})
+		bus.Publish(testCase.eventType, event.NewEvent(testCase.eventType, nil))
+		testutil.RequireReceive(
+			t,
+			testCase.logger.entered,
+			time.Second,
+			"required subscriber callback should enter",
+		)
+	}
+
+	for _, testCase := range cases {
+		go func(testCase subscriberCase) {
+			defer close(testCase.published)
+			for i := range event.DefaultSubscriberBuffer + 2 {
+				bus.Publish(
+					testCase.eventType,
+					event.NewEvent(testCase.eventType, nil),
+				)
+				if i == event.DefaultSubscriberBuffer-1 {
+					close(testCase.queueFilled)
+				}
+			}
+		}(testCase)
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for _, testCase := range cases {
+		select {
+		case <-testCase.queueFilled:
+		case <-deadline.C:
+			t.Fatalf("%s subscriber queue did not fill", testCase.name)
+		}
+	}
+
+	allPublished := make(chan struct{})
+	go func() {
+		for _, testCase := range cases {
+			<-testCase.published
+		}
+		close(allPublished)
+	}()
+	select {
+	case <-allPublished:
+		t.Fatal("a required subscriber detached while its handler was stalled")
+	case <-time.After(event.RemoteDeliverTimeout + 250*time.Millisecond):
+	}
+
+	for _, testCase := range cases {
+		testCase.logger.unblock()
+	}
+	select {
+	case <-allPublished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publishers did not resume after required subscribers drained")
+	}
+	for _, testCase := range cases {
+		require.Eventually(t, func() bool {
+			return testCase.logger.calls.Load() == event.DefaultSubscriberBuffer+3
+		}, time.Second, 5*time.Millisecond,
+			"subscriber queue should drain: %s", testCase.name)
+	}
+}
+
+func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		Logger:        slog.New(loggerHandler),
+		SecurityParam: 1,
+	})
+	referenceConn := newNodeTestConnId(5101)
+	cs.UpdatePeerTip(referenceConn, ochainsync.Tip{
+		Point:       ocommon.NewPoint(10, []byte("reference")),
+		BlockNumber: 1,
+	}, nil)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := newChainSelectorSubscriptionTestNode(t, bus, cs)
+	n.subscribeChainSelectorEvents()
+
+	// The first impossible advertised tip blocks in the real selector callback's
+	// warning logger. Further publications fill the production subscriber queue.
+	stalled := chainselection.PeerTipUpdateEvent{
+		ConnectionId: newNodeTestConnId(5102),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(1000, []byte("untrusted")),
+			BlockNumber: 1000,
+		},
+	}
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+	)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := range event.DefaultSubscriberBuffer + 2 {
+			bus.Publish(
+				chainselection.PeerTipUpdateEventType,
+				event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+			)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback queue did not fill")
+	}
+	select {
+	case <-published:
+		t.Fatal("required Node subscription stopped applying back-pressure")
+	case <-time.After(event.RemoteDeliverTimeout + time.Second):
+	}
+	loggerHandler.unblock()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("required Node subscription did not resume publishing after callback recovery")
+	}
+
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType,
+			chainselection.PeerTipUpdateEvent{
+				ConnectionId: referenceConn,
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(20, []byte("recovered")),
+					BlockNumber: 2,
+				},
+			}),
+	)
+	require.Eventually(t, func() bool {
+		got := cs.GetPeerTip(referenceConn)
+		return got != nil && got.Tip.BlockNumber == 2
+	}, time.Second, 5*time.Millisecond,
+		"required Node subscription must process events after the callback drains")
+}
+
+func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := &Node{
+		config:   Config{logger: slog.New(loggerHandler)},
+		eventBus: bus,
+	}
+	n.subscribeChainSelectorEvents()
+
+	const forkEvent = chain.ChainForkEventType
+	fork := event.NewEvent(forkEvent, chain.ChainForkEvent{})
+	bus.Publish(forkEvent, fork)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := range event.DefaultSubscriberBuffer + 2 {
+			bus.Publish(forkEvent, fork)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback queue did not fill")
+	}
+	select {
+	case <-published:
+	case <-time.After(event.RemoteDeliverTimeout + 2*time.Second):
+		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
+	}
+	loggerHandler.unblock()
+	// Detachment preserves events accepted before the timeout, so wait for that
+	// backlog to drain before checking that later publications have no observer.
+	acceptedCallbacks := int32(event.DefaultSubscriberBuffer + 1)
+	require.Eventually(t, func() bool {
+		return loggerHandler.calls.Load() == acceptedCallbacks
+	}, time.Second, 5*time.Millisecond,
+		"accepted diagnostic events should drain after the callback returns")
+	bus.Publish(forkEvent, fork)
+	require.Never(t, func() bool {
+		return loggerHandler.calls.Load() > acceptedCallbacks
+	}, 100*time.Millisecond, 5*time.Millisecond,
+		"detached diagnostic observer must not receive a later event")
 }
 
 // TestNodePeerEligibilityEventUpdatesChainSelector verifies the node wiring:

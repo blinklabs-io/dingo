@@ -241,7 +241,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	// stale subscription from every earlier cycle stays permanently
 	// active alongside the new one, and a single emitted vote gets
 	// enqueued (and diffused to peers) once per accumulated subscription.
-	n.leiosVoteEmittedSubId = n.eventBus.SubscribeFunc(
+	n.leiosVoteEmittedSubId = n.subscribeRequiredEvent(
 		leios.VoteEmittedEventType,
 		func(evt event.Event) {
 			data, ok := evt.Data.(leios.VoteEmittedEvent)
@@ -256,7 +256,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	// forwards it, so a block producer behind that relay never observes
 	// quorum. Tracked and unsubscribed alongside leiosVoteEmittedSubId for
 	// the same live-lifecycle-reinit reason.
-	n.leiosVoteReceivedSubId = n.eventBus.SubscribeFunc(
+	n.leiosVoteReceivedSubId = n.subscribeRequiredEvent(
 		leios.VoteReceivedEventType,
 		func(evt event.Event) {
 			data, ok := evt.Data.(leios.VoteReceivedEvent)

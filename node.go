@@ -1088,11 +1088,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainsyncCfg,
 	)
 	n.liveLifecycleMu.Unlock()
-	n.eventBus.SubscribeFunc(
+	// Both consumers update state from one-shot eligibility transitions; a
+	// detach would leave peer governance or connection routing stale forever.
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		func(evt event.Event) {
 			n.ouroboros().HandlePeerEligibilityChangedEvent(evt)
@@ -1100,10 +1102,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	)
 	// Subscriber ID captured for the same reason as chainManager's above —
 	// n.chainsyncState is rebuilt during a live database restore/truncate.
-	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	// Client-removal requests are one-shot; dropping one leaves a chainsync
+	// client alive after its owner has asked it to stop.
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 	// Initialize chain selector for multi-peer chain selection
 	chainSelectorSecurityParam := uint64(0)
 	if k := n.ledgerState.SecurityParam(); k > 0 {
@@ -1297,7 +1298,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// pin this subscription to the replaced one forever, so outbound
 	// connections would be handled by a closed Ouroboros and the node would
 	// silently stop starting chainsync clients after any restore.
-	n.eventBus.SubscribeFunc(
+	// Outbound connection events are emitted once; losing one leaves an
+	// established connection without its Ouroboros protocols.
+	n.subscribeRequiredEvent(
 		peergov.OutboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleOutboundConnEvent(evt) },
 	)
@@ -1853,6 +1856,45 @@ func (n *Node) handleConnManagerClosedOwner(
 	}
 }
 
+// subscribeRequiredEvent keeps an internal node consumer attached when its
+// callback queue saturates. These event streams carry one-shot state
+// transitions that have no safe full-state replay after detachment. Its
+// handler must not synchronously publish to an EventBus path that can wait on
+// this subscriber; move such follow-up work out of the callback instead.
+func (n *Node) subscribeRequiredEvent(
+	eventType event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
+		eventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
+}
+
+// subscribeDetachableEvent is for observers whose missed events do not leave
+// node state stale. Such callbacks must not be used for state transitions that
+// have no replay or resynchronization path.
+func (n *Node) subscribeDetachableEvent(
+	eventType event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
+		eventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureDetach,
+		handler,
+	)
+}
+
+func (n *Node) subscribeChainsyncClientRemoveRequests() event.EventSubscriberId {
+	return n.subscribeRequiredEvent(
+		chainsync.ClientRemoveRequestedEventType,
+		n.chainsyncState.HandleClientRemoveRequestedEvent,
+	)
+}
+
 // subscribeConnectionRecycleRequests subscribes handler to
 // connmanager.ConnectionRecycleRequestedEventType with lossless delivery.
 //
@@ -1928,13 +1970,16 @@ func (n *Node) subscribeConnectionEvents() {
 	// These are closures rather than method values because this runs before
 	// n.ouroboros is constructed; each resolves it when the event fires,
 	// which cannot happen until the listeners below are open.
-	n.eventBus.SubscribeFunc(
+	// Connection closure is a one-shot lifecycle transition. Ouroboros must
+	// release the protocols and state attached to that connection.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) { n.ouroboros().HandleConnClosedEvent(evt) },
 	)
 	// Translate connmanager connection-closed events to ledger-owned events so
 	// ledger/ does not import connmanager/.
-	n.eventBus.SubscribeFunc(
+	// The translated close event drives ledger cleanup and is not replayed.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
@@ -1953,7 +1998,9 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Inbound connections are delivered once; dropping the event leaves the
+	// accepted connection unhandled for its lifetime.
+	n.subscribeRequiredEvent(
 		connmanager.InboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
@@ -1997,11 +2044,15 @@ func (n *Node) buildChainSelectorConfig(
 // peergov/.
 func (n *Node) subscribeChainSelectorEvents() {
 	// Subscribe chain selector to peer tip update events
-	n.eventBus.SubscribeFunc(
+	// Every peer tip observation contributes to chain selection; detachment
+	// would leave its view stale with no complete resnapshot operation.
+	n.subscribeRequiredEvent(
 		chainselection.PeerTipUpdateEventType,
 		n.chainSelector.HandlePeerTipUpdateEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	// Peer activity refreshes liveness and selection state. A missed event
+	// cannot be recovered after permanent detachment.
+	n.subscribeRequiredEvent(
 		chainselection.PeerTipUpdateEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
@@ -2011,7 +2062,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 			n.peerGov.TouchPeerByConnId(e.ConnectionId)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Activity events refresh selector and peer-governance liveness; the
+	// subscription must resume after transient queue saturation.
+	n.subscribeRequiredEvent(
 		chainselection.PeerActivityEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chainselection.PeerActivityEvent)
@@ -2025,19 +2078,23 @@ func (n *Node) subscribeChainSelectorEvents() {
 		},
 	)
 	// Subscribe to chain switch events to update active connection
-	n.eventBus.SubscribeFunc(
+	// Chain switches update the active connection used by ledger processing.
+	n.subscribeRequiredEvent(
 		chainselection.ChainSwitchEventType,
 		n.handleChainSwitchEvent,
 	)
 	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
 	// uncorroborated Genesis fast source). The handler clears the ledger's active
 	// connection so it cannot retain a source ChainSelector no longer accepts.
-	n.eventBus.SubscribeFunc(
+	// A selected-to-none transition must clear the ledger's active connection;
+	// losing it can leave the node applying from a rejected source.
+	n.subscribeRequiredEvent(
 		chainselection.ChainSelectedNoneEventType,
 		n.handleChainSelectedNoneEvent,
 	)
 	// Subscribe to chain fork events for monitoring
-	n.eventBus.SubscribeFunc(
+	// This observer only emits diagnostics; dropping it does not affect state.
+	n.subscribeDetachableEvent(
 		chain.ChainForkEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chain.ChainForkEvent)
@@ -2054,7 +2111,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 		},
 	)
 	// Subscribe to connection closed events to remove peers from chain selector
-	n.eventBus.SubscribeFunc(
+	// Connection removal updates selector eligibility and ingress bookkeeping;
+	// the close event is not replayed if this subscription detaches.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
@@ -2068,7 +2127,8 @@ func (n *Node) subscribeChainSelectorEvents() {
 	// Forward peer-governance eligibility and priority updates to the chain
 	// selector. Subscription is placed here (node composition layer) so that
 	// chainselection/ has no dependency on peergov/.
-	n.eventBus.SubscribeFunc(
+	// Eligibility transitions gate future chain selection and must not be lost.
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
@@ -2078,7 +2138,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 			n.chainSelector.SetConnectionEligible(e.ConnectionId, e.Eligible)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Priority transitions affect source ranking and have no later full-state
+	// resynchronization, so keep this consumer attached under back-pressure.
+	n.subscribeRequiredEvent(
 		peergov.PeerPriorityChangedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
