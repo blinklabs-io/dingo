@@ -1825,6 +1825,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
+	// sequence row recorded at exactly slot. A Mithril restore writes the
+	// certified HeaderState counter map at its anchor slot and applies no
+	// block there, so no row at a recorded trust boundary means the certified
+	// counters were never imported.
+	PoolOpCertSequencesExistAtSlot(
+		uint64, // slot
+		types.Txn,
+	) (bool, error)
+
 	// LatestPoolOpCertSequences returns the highest observed op-cert sequence
 	// for every pool that has issued a block, keyed by pool key hash. Pools
 	// that have never issued one are absent rather than reported as zero.

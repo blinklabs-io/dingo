@@ -985,8 +985,9 @@ blocks it has durably adopted:
 
 - **Validate the producer counter for the active era.** Before the node starts
   block production, `node_forging.go` checks the loaded OpCert issue number
-  against the observed on-chain counter. A counter below the observed value is
-  refused in every era. The no-gap rule is era-scoped, so it is applied only
+  against the observed on-chain counter, or against zero when the pool has
+  none, with the rule block application uses. A counter below the observed
+  value is refused in every era. The no-gap rule is era-scoped, so it is applied only
   when the era can be resolved, and the slot it is resolved from is the applied
   chain tip — the same pipeline stage that produces the observed counter, never
   the wall clock. TPraos permits forward counter movement; Praos refuses a
@@ -3597,12 +3598,20 @@ dependency across two points in the pipeline:
   only for Praos eras (Babbage onward, via `opCertNoGapRuleApplies`); TPraos
   eras (Shelley–Alonzo) enforce only monotonicity, so the gap rule is scoped by
   era rather than by validation mode (`shouldValidate` can be true for
-  historical or near-tip TPraos blocks). A pool with no recorded counter has no
-  baseline and is accepted as the baseline. A Mithril restore imports the
-  certified Praos HeaderState counter map at its trusted tip, so each included
-  pool has an authoritative baseline before the first replayed block; only a
-  pool absent from that map can establish a first local counter. Rollback safety
-  is inherited from the per-`(pool, slot)`
+  historical or near-tip TPraos blocks). A pool with no recorded counter is
+  judged against zero, the reference's baseline for a pool in the stake
+  distribution (ouroboros-consensus Praos `currentIssueNo`, cardano-ledger
+  TPraos `currentIssueNo`): its first Praos counter must be 0 or 1, while
+  TPraos accepts any first counter. Producer eligibility is not decided here:
+  header validation rejects a pool absent from the leader stake distribution,
+  the reference's `VRFKeyUnknown`. A Mithril restore imports the certified Praos HeaderState
+  counter map at its trusted tip, so each included pool has an authoritative
+  baseline before the first replayed block and a pool absent from that map is
+  absent from the reference state too. A Mithril-restored database with no
+  certified row at its boundary never imported the map, so the counter of a
+  pool not observed since the boundary is unknown rather than zero; the read
+  fails with a rebootstrap error instead of rejecting that pool's next valid
+  block. Rollback safety is inherited from the per-`(pool, slot)`
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
   is later rolled back.
