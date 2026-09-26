@@ -1458,7 +1458,19 @@ type LedgerState struct {
 	rewardPrecomputePending  *event.EpochTransitionEvent
 	rewardPrecomputeRetry    *stakeRewardPrecomputeRetry
 	rewardPrecomputeRollback *rewardPrecomputeRollbackSnapshot
-	validationEnabled        bool
+	// rewardPrecomputeWriteMu orders the precompute write phase against the
+	// rollback bracket's generation bump. The write phase holds it from its
+	// guard through commit, and the bump takes it, so any write that passed
+	// the guard has committed before the rollback's truncation starts and
+	// that truncation deletes its rows. SQLite's single write connection
+	// already imposes this order; Postgres and MySQL run the two transactions
+	// concurrently, and without it the stale write lands after the delete.
+	rewardPrecomputeWriteMu sync.Mutex
+	// rewardPrecomputeBeforeSaveHook is a test seam, nil in production. It
+	// runs inside the precompute write transaction after the rollback guard
+	// passes and before the outputs are written.
+	rewardPrecomputeBeforeSaveHook func()
+	validationEnabled              bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -3795,6 +3807,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// state, or account history. The active count also keeps overlapping
 	// rollbacks from exposing an apparently stable even generation.
 	var postCommitReloadErr error
+	ls.rewardPrecomputeWriteMu.Lock()
 	ls.rewardPrecomputeMu.Lock()
 	if ls.rewardPrecomputeRollback == nil {
 		ls.rewardPrecomputeRollback = &rewardPrecomputeRollbackSnapshot{}
@@ -3817,6 +3830,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	ls.rewardPrecomputePending = nil
 	ls.rewardPrecomputeRetry = nil
 	ls.rewardPrecomputeMu.Unlock()
+	ls.rewardPrecomputeWriteMu.Unlock()
 	defer func() {
 		ls.rewardPrecomputeMu.Lock()
 		ls.rewardInputGeneration.Add(1)

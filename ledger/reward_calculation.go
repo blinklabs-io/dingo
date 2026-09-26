@@ -2182,7 +2182,10 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 
 	// Write phase: re-verify the calculation is still valid, then persist.
 	// This holds the single SQLite writer only for a guard check plus a
-	// handful of upserts, not for the calculation above.
+	// handful of upserts, not for the calculation above. The lock spans
+	// guard through commit; see rewardPrecomputeWriteMu.
+	ls.rewardPrecomputeWriteMu.Lock()
+	defer ls.rewardPrecomputeWriteMu.Unlock()
 	writeTxn := ls.db.Transaction(true)
 	return writeTxn.Do(func(txn *database.Txn) error {
 		meta := ls.db.Metadata()
@@ -2225,6 +2228,9 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 				applicationBoundarySlot,
 			)
 			return nil
+		}
+		if ls.rewardPrecomputeBeforeSaveHook != nil {
+			ls.rewardPrecomputeBeforeSaveHook()
 		}
 
 		return ls.saveStakeRewardPrecompute(

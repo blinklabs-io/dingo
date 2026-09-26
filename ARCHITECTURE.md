@@ -13034,8 +13034,13 @@ queued transition and prefilter retry, re-stamping the retry with the new
 generation, and queues the current epoch when nothing was queued; after
 `Close` it restores nothing.
 Prefilter retries carry their calculation's generation, preventing an old
-calculation from reinstalling a retry after rollback. A no-op rollback leaves
-queued work untouched. The boundary retains its authoritative fallback.
+calculation from reinstalling a retry after rollback. The precompute write
+phase holds `rewardPrecomputeWriteMu` from its guard through commit and the
+rollback bracket takes it for the generation bump, so a write that passed the
+guard commits before the rollback's truncation starts and is deleted by it;
+SQLite's single writer already gives that order, while Postgres and MySQL
+would otherwise commit the stale write after the delete. A no-op rollback
+leaves queued work untouched. The boundary retains its authoritative fallback.
 Pre-Babbage precomputation is deferred until applied block
 progress reaches the RUPD prefilter slot, which queues a retry using the actual
 captured slot; later eras can precompute immediately.

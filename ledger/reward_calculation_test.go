@@ -5654,17 +5654,7 @@ func newRewardCalculationTestLedger(
 	t *testing.T,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: strings.Repeat("11", 32),
-	}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"activeSlotsCoeff": 0.1,
-		"epochLength": 100,
-		"maxLovelaceSupply": 100010000,
-		"securityParam": 10,
-		"slotLength": 1,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`)))
+	cfg := newRewardCalculationTestNodeConfig(t)
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -5681,12 +5671,42 @@ func newRewardCalculationTestLedger(
 	}, db
 }
 
+func newRewardCalculationTestNodeConfig(
+	t *testing.T,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 100010000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	return cfg
+}
+
 func seedRewardPrecomputeTimingState(
 	t *testing.T,
 	protocolMajor uint,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
 	ls, db := newRewardCalculationTestLedger(t)
+	seedRewardPrecomputeTimingInputs(t, db, protocolMajor)
+	return ls, db
+}
+
+// seedRewardPrecomputeTimingInputs writes the one-pool reward round that
+// seedRewardPrecomputeTimingState uses onto any metadata backend.
+func seedRewardPrecomputeTimingInputs(
+	t *testing.T,
+	db *database.Database,
+	protocolMajor uint,
+) {
+	t.Helper()
 	meta := db.Metadata()
 
 	const (
@@ -5813,7 +5833,6 @@ func seedRewardPrecomputeTimingState(
 		StakingKey: member,
 		Active:     true,
 	}))
-	return ls, db
 }
 
 func rewardCalcHash(fill byte) []byte {
