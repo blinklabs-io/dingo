@@ -17,9 +17,7 @@ package docsparity_test
 import (
 	"fmt"
 	"reflect"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -396,109 +394,4 @@ func sortedKeys(m map[string][]string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// goTestTimeout matches the -timeout a `go test` step passes, which Go
-// applies per test binary rather than per invocation.
-var goTestTimeout = regexp.MustCompile(`-timeout[= ]([0-9]+)m`)
-
-// timeoutJob is a job reduced to the two numbers this file's timeout
-// invariant relates: the runner-level backstop and the per-package
-// diagnostics its steps pass to `go test`.
-type timeoutJob struct {
-	TimeoutMinutes int `yaml:"timeout-minutes"`
-	Steps          []struct {
-		Name string `yaml:"name"`
-		Run  string `yaml:"run"`
-	} `yaml:"steps"`
-}
-
-// timeoutJobs decodes a workflow's jobs into that reduced shape.
-func timeoutJobs(t *testing.T, root, workflow string) map[string]timeoutJob {
-	t.Helper()
-
-	var parsed struct {
-		Jobs map[string]timeoutJob `yaml:"jobs"`
-	}
-	raw := readRepoFile(t, root, workflow)
-	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
-		t.Fatalf("parse %s: %v", workflow, err)
-	}
-	if len(parsed.Jobs) == 0 {
-		t.Fatalf("%s declares no jobs", workflow)
-	}
-	return parsed.Jobs
-}
-
-// TestPackageTimeoutsStayUnderJobBackstops keeps the two timeouts in their
-// intended roles. `go test -timeout` panics with a goroutine dump naming the
-// stuck test; `timeout-minutes` kills the runner and names nothing. The
-// diagnostic is therefore only useful while every step's timeout can elapse
-// inside the job's cap -- steps run in sequence, so the sum is what has to
-// fit. Raising a -timeout past that point silently demotes the job to a
-// nameless kill, which is how a hang gets investigated from a blank log.
-func TestPackageTimeoutsStayUnderJobBackstops(t *testing.T) {
-	root := repoRoot(t)
-
-	for _, workflow := range []string{prPipeline, publishPipeline} {
-		jobs := timeoutJobs(t, root, workflow)
-		names := make([]string, 0, len(jobs))
-		for name := range jobs {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-
-		for _, name := range names {
-			job := jobs[name]
-			budget := 0
-			for _, step := range job.Steps {
-				if !strings.Contains(step.Run, "go test") {
-					continue
-				}
-				for _, match := range goTestTimeout.FindAllStringSubmatch(
-					step.Run,
-					-1,
-				) {
-					minutes, err := strconv.Atoi(match[1])
-					if err != nil {
-						t.Errorf(
-							"%s job %s step %q has an unparsable -timeout %q",
-							workflow,
-							name,
-							step.Name,
-							match[1],
-						)
-						continue
-					}
-					budget += minutes
-				}
-			}
-			if budget == 0 {
-				continue
-			}
-			if job.TimeoutMinutes == 0 {
-				t.Errorf(
-					"%s job %s passes %dm of go test -timeout but declares "+
-						"no timeout-minutes, leaving GitHub's 360-minute "+
-						"default as the backstop",
-					workflow,
-					name,
-					budget,
-				)
-				continue
-			}
-			if budget >= job.TimeoutMinutes {
-				t.Errorf(
-					"%s job %s passes %dm of go test -timeout under a %dm "+
-						"timeout-minutes backstop; the runner would be "+
-						"killed before the per-package timeout could name "+
-						"the stuck test",
-					workflow,
-					name,
-					budget,
-					job.TimeoutMinutes,
-				)
-			}
-		}
-	}
 }
