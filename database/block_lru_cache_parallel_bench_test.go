@@ -53,7 +53,7 @@ func benchmarkBlockLRUParallel(b *testing.B, workingSet int, writeEvery int) {
 		// successive ops landing on different keys/shards.
 		i := 0
 		for pb.Next() {
-			idx := (i * 2654435761) % workingSet
+			idx := int((int64(i) * 2654435761) % int64(workingSet))
 			if idx < 0 {
 				idx += workingSet
 			}

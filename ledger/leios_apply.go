@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sync"
 	"time"
 
@@ -366,7 +365,7 @@ func buildEndorserBlockBlob(
 	}
 	writeRange := func(b []byte) (uint32, uint32, error) {
 		off := buf.Len()
-		if off > math.MaxUint32 || len(b) > math.MaxUint32 {
+		if !fitsUint32(off) || !fitsUint32(len(b)) {
 			return 0, 0, errors.New(
 				"endorser block blob offset out of uint32 range",
 			)

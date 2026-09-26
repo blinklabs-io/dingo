@@ -17,7 +17,6 @@ package ledger
 import (
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -158,7 +157,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	var snapshotLoaded bool
 	appliedTxs := make([]bool, len(d.Transactions))
 	for i, tr := range d.Transactions {
-		if tr.Index < 0 || tr.Index > math.MaxUint32 {
+		if !fitsUint32(tr.Index) {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
 

@@ -17,12 +17,21 @@ package ouroboros
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
+
+// maxLocalStateQueryReadBufferSize caps the reassembly of a multi-segment
+// LocalStateQuery reply, overriding gouroboros' 16MB anti-DoS default, which
+// a whole-UTxO-set reply exceeds on a real chain. 2GiB is one byte wider than
+// a 32-bit int can hold, so the value is clamped to math.MaxInt there; the
+// clamp is not a weaker bound, because a bytes.Buffer on such a target cannot
+// reach either size before the process exhausts its address space.
+const maxLocalStateQueryReadBufferSize = min(2*1024*1024*1024, math.MaxInt)
 
 // localstatequeryServerConnOpts returns this listener's LocalStateQuery
 // server options. trusted gates the relaxed timeout/buffer options below it
@@ -73,7 +82,7 @@ func (o *Ouroboros) localstatequeryServerConnOpts(
 		// buffer here is a real unbounded memory-growth risk, not just an
 		// unnecessary wait.
 		olocalstatequery.WithQueryTimeout(0),
-		olocalstatequery.WithMaxReadBufferSize(2<<30),
+		olocalstatequery.WithMaxReadBufferSize(maxLocalStateQueryReadBufferSize),
 	)
 }
 

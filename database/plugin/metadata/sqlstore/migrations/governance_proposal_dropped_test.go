@@ -64,14 +64,14 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 			"action_type, proposed_epoch, expires_epoch, deposit, "+
 			"expired_epoch, expired_slot, added_slot) "+
 			"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		expiredHash, 0, 6, 670, 673, 100000000000, 674, 58100000, 57000000,
+		expiredHash, 0, 6, 670, 673, int64(100000000000), 674, 58100000, 57000000,
 	)
 	require.NoError(t, err)
 	_, err = db.Exec(
 		"INSERT INTO governance_proposal (tx_hash, action_index, "+
 			"action_type, proposed_epoch, expires_epoch, deposit, "+
 			"added_slot) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		activeHash, 0, 6, 676, 682, 100000000000, 58600000,
+		activeHash, 0, 6, 676, 682, int64(100000000000), 58600000,
 	)
 	require.NoError(t, err)
 
