@@ -61,7 +61,7 @@ func TestLeiosSnapshotRegistrationEpochBackfill(t *testing.T) {
 		_, err := db.Exec(statement)
 		require.NoError(t, err)
 	}
-	for _, statement := range registry[26].SQL["sqlite"].Expand {
+	for _, statement := range registry[28].SQL["sqlite"].Expand {
 		_, err := db.Exec(statement)
 		require.NoError(t, err)
 	}

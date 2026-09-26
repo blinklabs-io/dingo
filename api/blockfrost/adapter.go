@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -3831,7 +3832,7 @@ func (a *NodeAdapter) TransactionSubmit(
 	if a.submitter == nil {
 		return "", ErrMempoolUnavailable
 	}
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return "", fmt.Errorf(
 			"%w: determine transaction type: %w",
@@ -3839,7 +3840,7 @@ func (a *NodeAdapter) TransactionSubmit(
 			err,
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	tx, err := safedecode.Transaction(txType, txCbor)
 	if err != nil {
 		return "", fmt.Errorf(
 			"decode transaction: %w: %w",
@@ -3890,7 +3891,7 @@ func (a *NodeAdapter) TransactionSubmit(
 func (a *NodeAdapter) TransactionEvaluate(
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
-	txType, err := gledger.DetermineTransactionType(txCbor)
+	txType, err := safedecode.TransactionType(txCbor)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: determine transaction type: %w",
@@ -3898,7 +3899,7 @@ func (a *NodeAdapter) TransactionEvaluate(
 			err,
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	tx, err := safedecode.Transaction(txType, txCbor)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: decode transaction: %w",
@@ -4560,10 +4561,6 @@ func (a *NodeAdapter) TransactionRedeemers(
 		return []TransactionRedeemerInfo{}, nil
 	}
 
-	metadata, err := a.transactionRedeemerMetadata(hash, tx, decodedTx)
-	if err != nil {
-		return nil, err
-	}
 	pparams, err := a.protocolParamsForSlot(tx.Slot)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -4571,6 +4568,23 @@ func (a *NodeAdapter) TransactionRedeemers(
 			hash,
 			err,
 		)
+	}
+	protocolMajor, err := protocolMajorFromPParams(pparams)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get protocol version for transaction %x redeemer metadata: %w",
+			hash,
+			err,
+		)
+	}
+	metadata, err := a.transactionRedeemerMetadata(
+		hash,
+		tx,
+		decodedTx,
+		protocolMajor,
+	)
+	if err != nil {
+		return nil, err
 	}
 	executionCosts, err := executionCostsFromPParams(pparams)
 	if err != nil {
@@ -4826,6 +4840,7 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 	hash []byte,
 	tx *models.Transaction,
 	decodedTx lcommon.Transaction,
+	protocolMajor uint,
 ) (map[lcommon.RedeemerKey]transactionRedeemerMetadata, error) {
 	ret := make(map[lcommon.RedeemerKey]transactionRedeemerMetadata)
 	if len(tx.Redeemers) == 0 {
@@ -4899,6 +4914,7 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 			decodedTx.VotingProcedures(),
 			decodedTx.ProposalProcedures(),
 			witnessDatums,
+			protocolMajor,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -5112,6 +5128,26 @@ func executionCostsFromPParams(
 	default:
 		return lcommon.ExUnitPrice{}, fmt.Errorf(
 			"protocol parameters %T do not include execution prices",
+			pparams,
+		)
+	}
+}
+
+func protocolMajorFromPParams(
+	pparams lcommon.ProtocolParameters,
+) (uint, error) {
+	switch pp := pparams.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		return pp.ProtocolMajor, nil
+	case *babbage.BabbageProtocolParameters:
+		return pp.ProtocolMajor, nil
+	case *conway.ConwayProtocolParameters:
+		return pp.ProtocolVersion.Major, nil
+	case *dijkstra.DijkstraProtocolParameters:
+		return pp.ProtocolVersion.Major, nil
+	default:
+		return 0, fmt.Errorf(
+			"protocol parameters %T do not include Plutus script contexts",
 			pparams,
 		)
 	}

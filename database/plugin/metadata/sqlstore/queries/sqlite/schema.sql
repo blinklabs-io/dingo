@@ -174,7 +174,8 @@ CREATE TABLE reward_ada_pots (
     reserves TEXT NOT NULL,
     fees TEXT NOT NULL,
     rewards TEXT NOT NULL,
-    captured_slot INTEGER NOT NULL
+    captured_slot INTEGER NOT NULL,
+    imported_epoch_fees TEXT
 );
 
 CREATE TABLE reward_snapshot (

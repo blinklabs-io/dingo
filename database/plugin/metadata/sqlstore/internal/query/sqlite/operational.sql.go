@@ -3086,7 +3086,8 @@ func (q *Queries) GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]R
 }
 
 const getRewardAdaPots = `-- name: GetRewardAdaPots :one
-SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot
+SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
 FROM reward_ada_pots
 WHERE epoch = ?
 `
@@ -3102,6 +3103,7 @@ func (q *Queries) GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaP
 		&i.Fees,
 		&i.Rewards,
 		&i.CapturedSlot,
+		&i.ImportedEpochFees,
 	)
 	return i, err
 }
@@ -4351,24 +4353,27 @@ func (q *Queries) SaveRewardAccountOutput(ctx context.Context, arg SaveRewardAcc
 
 const saveRewardAdaPots = `-- name: SaveRewardAdaPots :one
 INSERT INTO reward_ada_pots (
-    epoch, treasury, reserves, fees, rewards, captured_slot
-) VALUES (?, ?, ?, ?, ?, ?)
+    epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch) DO UPDATE SET
     treasury = excluded.treasury,
     reserves = excluded.reserves,
     fees = excluded.fees,
     rewards = excluded.rewards,
-    captured_slot = excluded.captured_slot
+    captured_slot = excluded.captured_slot,
+    imported_epoch_fees = excluded.imported_epoch_fees
 RETURNING id
 `
 
 type SaveRewardAdaPotsParams struct {
-	Epoch        int64
-	Treasury     string
-	Reserves     string
-	Fees         string
-	Rewards      string
-	CapturedSlot int64
+	Epoch             int64
+	Treasury          string
+	Reserves          string
+	Fees              string
+	Rewards           string
+	CapturedSlot      int64
+	ImportedEpochFees sql.NullString
 }
 
 func (q *Queries) SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsParams) (int64, error) {
@@ -4379,6 +4384,7 @@ func (q *Queries) SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsPa
 		arg.Fees,
 		arg.Rewards,
 		arg.CapturedSlot,
+		arg.ImportedEpochFees,
 	)
 	var id int64
 	err := row.Scan(&id)

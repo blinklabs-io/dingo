@@ -27,13 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 27)
-	require.Equal(t, 27, registry[26].Version)
-	require.Equal(
-		t,
-		"leios-snapshot-registration-epoch-backfill",
-		registry[26].Name,
-	)
+	require.Len(t, registry, 29)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -155,7 +149,11 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Empty(t, registry[14].SQL["sqlite"].Expand)
 	require.NotNil(t, registry[14].Backfill)
 	require.Equal(t, 16, registry[15].Version)
-	require.Equal(t, governanceProposalOptionalAnchorSchemaRelease, registry[15].Name)
+	require.Equal(
+		t,
+		governanceProposalOptionalAnchorSchemaRelease,
+		registry[15].Name,
+	)
 	require.Len(t, registry[15].SQL["sqlite"].Expand, 21)
 	require.Empty(t, registry[15].Backfill)
 	require.Equal(t, 17, registry[16].Version)
@@ -180,36 +178,52 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Empty(t, registry[19].SQL["sqlite"].Expand)
 	require.NotNil(t, registry[19].Backfill)
 	require.Equal(t, "1", registry[19].BackfillRevision)
-	require.Equal(t, 21, registry[20].Version)
-	require.Equal(t, assetAmountFingerprintIndexDropSchemaRelease, registry[20].Name)
 	require.Equal(t, 22, registry[21].Version)
 	require.Equal(t, governanceVoteHistorySchemaRelease, registry[21].Name)
-	require.Contains(t, registry[21].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `governance_vote_history`")
+	require.Contains(
+		t,
+		strings.Join(registry[21].SQL["sqlite"].Expand, "\n"),
+		"CREATE TABLE IF NOT EXISTS `governance_vote_history`",
+	)
 	require.Equal(t, 23, registry[22].Version)
 	require.Equal(t, committeeZeroQuorumSchemaRelease, registry[22].Name)
+	require.Contains(
+		t,
+		strings.Join(registry[22].SQL["sqlite"].Expand, "\n"),
+		"UPDATE committee_quorum SET quorum = NULL WHERE quorum = '0'",
+	)
 	require.Equal(t, 24, registry[23].Version)
-	require.Equal(t, leiosKeyAgeSchemaRelease, registry[23].Name)
+	require.Equal(t, rewardAdaPotsImportedFeesSchemaRelease, registry[23].Name)
+	require.Contains(
+		t,
+		registry[23].SQL["sqlite"].Expand,
+		"ALTER TABLE `reward_ada_pots` ADD COLUMN `imported_epoch_fees` text",
+	)
+	require.NotNil(t, registry[23].Backfill)
+	require.Equal(t, 25, registry[24].Version)
+	require.Equal(t, mithrilRewardRepairCoverageSchemaRelease, registry[24].Name)
+	require.NotNil(t, registry[24].Backfill)
+	require.Equal(t, 26, registry[25].Version)
+	require.Equal(t, leiosKeyAgeSchemaRelease, registry[25].Name)
 	require.Equal(t, []string{
 		"ALTER TABLE `pool_stake_snapshot`\n" +
 			"    ADD COLUMN `leios_key_registration_epoch` INTEGER",
-	}, registry[23].SQL["sqlite"].Expand)
-	require.Equal(t, 25, registry[24].Version)
-	require.Equal(t, leiosImportedKeyAgeSchemaRelease, registry[24].Name)
-	require.Equal(t, []string{
-		"ALTER TABLE `pool_registration`\n" +
-			"    ADD COLUMN `leios_key_registration_age_unknown` BOOLEAN NOT NULL DEFAULT FALSE",
-		"UPDATE `pool_registration`\n" +
-			"SET `leios_key_registration_age_unknown` = TRUE\n" +
-			"WHERE (`certificate_id` IS NULL OR `certificate_id` = 0)\n" +
-			"  AND `added_slot` > 0\n" +
-			"  AND (`leios_key_public` IS NOT NULL OR `leios_key_possession_proof` IS NOT NULL)",
-	}, registry[24].SQL["sqlite"].Expand)
-	require.Equal(t, 26, registry[25].Version)
-	require.Equal(t, leiosKeyRegistrationEpochSchemaRelease, registry[25].Name)
+	}, registry[25].SQL["sqlite"].Expand)
+	require.Equal(t, 27, registry[26].Version)
+	require.Equal(t, leiosImportedKeyAgeSchemaRelease, registry[26].Name)
+	require.Len(t, registry[26].SQL["sqlite"].Expand, 2)
+	require.Contains(t, registry[26].SQL["sqlite"].Expand[0], "leios_key_registration_age_unknown")
+	require.Contains(t, registry[26].SQL["sqlite"].Expand[1], "SET `leios_key_registration_age_unknown` = TRUE")
+	require.Equal(t, 28, registry[27].Version)
+	require.Equal(t, leiosKeyRegistrationEpochSchemaRelease, registry[27].Name)
 	require.Equal(t, []string{
 		"ALTER TABLE `pool_registration`\n" +
 			"    ADD COLUMN `leios_key_registration_epoch` INTEGER",
-	}, registry[25].SQL["sqlite"].Expand)
+	}, registry[27].SQL["sqlite"].Expand)
+	require.Equal(t, 29, registry[28].Version)
+	require.Equal(t, leiosSnapshotRegistrationEpochBackfillSchemaRelease, registry[28].Name)
+	require.Len(t, registry[28].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[28].SQL["sqlite"].Expand[0], "UPDATE `pool_stake_snapshot`")
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -335,7 +349,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 27)
+	require.Len(t, registry, 29)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

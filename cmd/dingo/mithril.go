@@ -435,6 +435,28 @@ func runMithrilSync(
 	network string,
 	healthProbe *boundHealthProbe,
 ) (err error) {
+	return runMithrilSyncWithRepair(
+		ctx, cfg, logger, network, healthProbe, false,
+	)
+}
+
+func runMithrilSyncForRewardRepair(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	network string,
+) error {
+	return runMithrilSyncWithRepair(ctx, cfg, logger, network, nil, true)
+}
+
+func runMithrilSyncWithRepair(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	network string,
+	healthProbe *boundHealthProbe,
+	repairRewardState bool,
+) (err error) {
 	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
 	metricsServer, err := startPrometheusMetricsServerWithHandler(
 		logger,
@@ -616,19 +638,20 @@ func runMithrilSync(
 	}
 
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
-		Network:                network,
-		DataDir:                cfg.DatabasePath,
-		StorageMode:            cfg.StorageMode,
-		CardanoConfigPath:      cfg.CardanoConfig,
-		Backend:                backend,
-		AggregatorURL:          cfg.Mithril.AggregatorURL,
-		AllowInsecureHTTP:      cfg.Mithril.AllowInsecureHTTP,
-		DownloadDir:            cfg.Mithril.DownloadDir,
-		PinnedDigest:           cfg.Mithril.PinnedDigest,
-		DownloadIdleTimeout:    cfg.Mithril.DownloadIdleTimeout,
-		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
-		VerifyCertChain:        cfg.Mithril.VerifyCertificates,
-		CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
+		Network:                 network,
+		DataDir:                 cfg.DatabasePath,
+		StorageMode:             cfg.StorageMode,
+		CardanoConfigPath:       cfg.CardanoConfig,
+		Backend:                 backend,
+		AggregatorURL:           cfg.Mithril.AggregatorURL,
+		AllowInsecureHTTP:       cfg.Mithril.AllowInsecureHTTP,
+		DownloadDir:             cfg.Mithril.DownloadDir,
+		PinnedDigest:            cfg.Mithril.PinnedDigest,
+		DownloadIdleTimeout:     cfg.Mithril.DownloadIdleTimeout,
+		DownloadMaxIdleRetries:  cfg.Mithril.DownloadMaxIdleRetries,
+		VerifyCertChain:         cfg.Mithril.VerifyCertificates,
+		CleanupAfterLoad:        cfg.Mithril.CleanupAfterLoad,
+		RepairLegacyRewardState: repairRewardState,
 		StoragePlugins: mithril.StoragePlugins{
 			Blob:     cfg.Plugins.Storage.Blob,
 			Metadata: cfg.Plugins.Storage.Metadata,
