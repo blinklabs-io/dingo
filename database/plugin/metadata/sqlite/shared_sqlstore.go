@@ -121,7 +121,7 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 const checkpointInterval = 2 * time.Minute
 
 // checkpointBusyTimeout bounds how long a single checkpoint attempt waits for
-// a reader's old snapshot to close before giving up for this tick.
+// any SQLite lock before giving up and retrying on the next tick.
 //
 // The attempt is deliberately never issued against writeDB. PRAGMA
 // wal_checkpoint(TRUNCATE) invokes the driver's busy handler synchronously
@@ -135,15 +135,15 @@ const checkpointInterval = 2 * time.Minute
 // measured, a checkpoint attempt against writeDB with one open readDB
 // snapshot took 30.04s, blocked a concurrent writeDB insert for 29.99s of
 // that, and still finished with busy=1 (no truncation). A dedicated
-// connection with a short busy_timeout hits the same busy=1 outcome, but
-// fast: measured 271ms to return. checkpointWAL below uses that dedicated
-// connection instead, so a blocked checkpoint tick costs at most this bound,
-// not up to 30 seconds, and never contends with writeDB at all.
-const checkpointBusyTimeout = 250 * time.Millisecond
+// connection with busy_timeout(0) returns the busy=1 outcome immediately.
+// checkpointWAL below uses that dedicated connection instead, so a blocked
+// checkpoint tick never waits while a reader or writer holds a SQLite lock.
+const checkpointBusyTimeout = 0 * time.Millisecond
 
 // checkpointWAL returns a Store.Checkpoint callback that attempts
-// PRAGMA wal_checkpoint(TRUNCATE) on checkpointInterval's ticker (see
-// openSQLStore), against a dedicated connection opened fresh for each
+// PRAGMA wal_checkpoint on checkpointInterval's ticker (see openSQLStore) --
+// PASSIVE first and TRUNCATE only once PASSIVE reports the WAL fully drained,
+// see checkpointWALWith -- against a dedicated connection opened fresh for each
 // attempt and closed immediately after -- never against writeDB or readDB.
 // See checkpointBusyTimeout's doc comment for why: writeDB's sole connection
 // has to stay free for real writes, and the whole point of this design is to
@@ -182,22 +182,62 @@ func checkpointWAL(
 		}()
 		db.SetMaxOpenConns(1)
 
-		var busy, walLog, checkpointed int
-		row := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-		if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
-			return fmt.Errorf("WAL checkpoint: %w", err)
-		}
-		if busy != 0 {
-			logger.Warn(
-				"WAL checkpoint(TRUNCATE) could not fully complete "+
-					"(a reader is still holding an old snapshot); "+
-					"will retry next tick",
-				"wal_frames", walLog,
-				"checkpointed_frames", checkpointed,
-			)
-		}
+		return checkpointWALWith(
+			ctx,
+			logger,
+			func(ctx context.Context, mode string) (int, int, int, error) {
+				var busy, walLog, checkpointed int
+				row := db.QueryRowContext(
+					ctx,
+					fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode),
+				)
+				if err := row.Scan(&busy, &walLog, &checkpointed); err != nil {
+					return 0, 0, 0, err
+				}
+				return busy, walLog, checkpointed, nil
+			},
+		)
+	}
+}
+
+// checkpointWALWith drains the WAL without asking SQLite to truncate it while
+// a reader still holds an old snapshot. A direct TRUNCATE checkpoint can hold
+// SQLite's writer lock while it copies a large WAL, starving import writers.
+// PASSIVE does not wait for readers; TRUNCATE is only attempted after PASSIVE
+// reports that every WAL frame has already been checkpointed.
+func checkpointWALWith(
+	ctx context.Context,
+	logger *slog.Logger,
+	checkpoint func(context.Context, string) (int, int, int, error),
+) error {
+	busy, walLog, checkpointed, err := checkpoint(ctx, "PASSIVE")
+	if err != nil {
+		return fmt.Errorf("WAL checkpoint: %w", err)
+	}
+	if busy != 0 || walLog != checkpointed {
+		logger.Warn(
+			"WAL checkpoint could not fully complete "+
+				"(a reader is still holding an old snapshot); "+
+				"will retry next tick",
+			"wal_frames", walLog,
+			"checkpointed_frames", checkpointed,
+		)
 		return nil
 	}
+
+	busy, walLog, checkpointed, err = checkpoint(ctx, "TRUNCATE")
+	if err != nil {
+		return fmt.Errorf("WAL truncate: %w", err)
+	}
+	if busy != 0 {
+		logger.Warn(
+			"WAL checkpoint(TRUNCATE) could not fully complete; "+
+				"will retry next tick",
+			"wal_frames", walLog,
+			"checkpointed_frames", checkpointed,
+		)
+	}
+	return nil
 }
 
 // walConversionTimeout bounds how long a node waits for another opener to

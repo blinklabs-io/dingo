@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -23,9 +24,46 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCheckpointWALDoesNotTruncateBusyPassiveCheckpoint(t *testing.T) {
+	var modes []string
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	err := checkpointWALWith(
+		context.Background(),
+		logger,
+		func(_ context.Context, mode string) (int, int, int, error) {
+			modes = append(modes, mode)
+			if mode == "PASSIVE" {
+				return 1, 10, 5, nil
+			}
+			t.Fatal("TRUNCATE must not run after an incomplete PASSIVE checkpoint")
+			return 0, 0, 0, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"PASSIVE"}, modes)
+}
+
+func TestCheckpointWALTruncatesOnlyAfterPassiveDrainsWAL(t *testing.T) {
+	var modes []string
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	err := checkpointWALWith(
+		context.Background(),
+		logger,
+		func(_ context.Context, mode string) (int, int, int, error) {
+			modes = append(modes, mode)
+			return 0, 10, 10, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{"PASSIVE", "TRUNCATE"}, modes)
+}
 
 // TestCheckpointWALTruncatesFile proves checkpointWAL's central claim: a
 // PASSIVE checkpoint (what wal_autocheckpoint invokes automatically after
@@ -203,5 +241,199 @@ func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
 	require.Less(
 		t, result.duration, maxUnblocked,
 		"a concurrent write must not be blocked behind the checkpoint attempt",
+	)
+}
+
+func TestCheckpointWALDoesNotWaitForReaderAtWALTip(t *testing.T) {
+	dataDir := t.TempDir()
+	store, writeDB, readDB, err := openSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"CREATE TABLE checkpoint_probe (n INTEGER)",
+	)
+	require.NoError(t, err)
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"INSERT INTO checkpoint_probe (n) VALUES (0)",
+	)
+	require.NoError(t, err)
+
+	// This snapshot starts at the current WAL end, so PASSIVE can report all
+	// frames checkpointed even though TRUNCATE must still wait for the reader.
+	readTx, err := readDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = readTx.Rollback() })
+	var probe int
+	require.NoError(t, readTx.QueryRowContext(
+		t.Context(), "SELECT n FROM checkpoint_probe LIMIT 1",
+	).Scan(&probe))
+
+	var logBuf bytes.Buffer
+	checkpointLogger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
+	started := time.Now()
+	require.NoError(t, checkpointWAL(databaseURI, checkpointLogger)(t.Context()))
+	require.Less(t, time.Since(started), 200*time.Millisecond,
+		"TRUNCATE must give up immediately when a reader holds the WAL tip")
+	require.Contains(t, logBuf.String(), "could not fully complete")
+
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"INSERT INTO checkpoint_probe (n) VALUES (1)",
+	)
+	require.NoError(t, err, "the live reader must not stall the import writer")
+}
+
+// TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot is the
+// regression test for PRAGMA wal_checkpoint(TRUNCATE) being issued directly.
+// TRUNCATE (unlike PASSIVE) acquires SQLite's WAL writer lock before it
+// copies anything and holds it while its busy handler waits out the reader
+// snapshot that prevents backfill, so every write arriving inside that window
+// is stalled for the checkpoint connection's whole busy_timeout. Measured
+// against the direct-TRUNCATE code with the WAL holding frames a reader
+// snapshot pins: the checkpoint call ran 298-519ms and a write issued inside
+// that window blocked 229-429ms; with the PASSIVE gate the same write
+// completes in well under a millisecond because TRUNCATE is never reached.
+//
+// A writer started alongside the checkpoint does not reproduce this: it wins
+// the race against opening the checkpoint connection and completes before the
+// writer lock is taken, which is why TestCheckpointWALDoesNotBlockWriteBehind
+// ReaderSnapshot passes either way. The probe below instead samples the writer
+// lock continuously for the whole checkpoint call.
+func TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot(t *testing.T) {
+	t.Parallel()
+	assertCheckpointWALDoesNotHoldWriterLock(t, true)
+}
+
+func TestCheckpointWALDoesNotHoldWriterLockBehindReaderAtTip(t *testing.T) {
+	t.Parallel()
+	assertCheckpointWALDoesNotHoldWriterLock(t, false)
+}
+
+func assertCheckpointWALDoesNotHoldWriterLock(
+	t *testing.T,
+	pinFrames bool,
+) {
+	t.Helper()
+	dataDir := t.TempDir()
+	store, writeDB, readDB, err := openSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	_, err = writeDB.ExecContext(
+		t.Context(),
+		"CREATE TABLE checkpoint_probe (n INTEGER, payload BLOB)",
+	)
+	require.NoError(t, err)
+	payload := make([]byte, 4096)
+	writeRows := func(from, count int) {
+		for i := range count {
+			_, execErr := writeDB.ExecContext(
+				t.Context(),
+				"INSERT INTO checkpoint_probe (n, payload) VALUES (?, ?)",
+				from+i,
+				payload,
+			)
+			require.NoError(t, execErr)
+		}
+	}
+	// Enough frames that a checkpoint has real work to do while it holds the
+	// writer lock; below wal_autocheckpoint's own 10000-page threshold.
+	writeRows(0, 4000)
+
+	// A reader opened after the initial writes is either at the WAL tip or,
+	// below, made stale by additional frames. Both shapes must avoid holding
+	// SQLite's writer lock while TRUNCATE waits for the reader.
+	readTx, err := readDB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = readTx.Rollback()
+	})
+	var pinned int
+	require.NoError(
+		t,
+		readTx.QueryRowContext(
+			t.Context(),
+			"SELECT n FROM checkpoint_probe LIMIT 1",
+		).Scan(&pinned),
+	)
+	if pinFrames {
+		writeRows(100_000, 2000)
+	}
+
+	// Probe the writer lock from a dedicated connection that never waits, so
+	// a single observation of SQLITE_BUSY means the checkpoint was holding
+	// it at that moment rather than that the probe was impatient.
+	probeDB, err := sqlstore.OpenDB(
+		"sqlite",
+		sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))+
+			"?_pragma=busy_timeout(0)&_pragma=synchronous(OFF)",
+		"sqlite",
+		false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, probeDB.Close())
+	})
+	probeDB.SetMaxOpenConns(1)
+
+	done := make(chan struct{})
+	blockedCh := make(chan int, 1)
+	go func() {
+		blocked := 0
+		for {
+			select {
+			case <-done:
+				blockedCh <- blocked
+				return
+			default:
+			}
+			tx, beginErr := probeDB.BeginTx(context.Background(), nil)
+			if beginErr != nil {
+				blocked++
+				continue
+			}
+			if _, execErr := tx.ExecContext(
+				context.Background(),
+				"INSERT INTO checkpoint_probe (n, payload) VALUES (?, ?)",
+				-1,
+				nil,
+			); execErr != nil {
+				blocked++
+			}
+			_ = tx.Rollback()
+		}
+	}()
+
+	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
+	require.NoError(
+		t,
+		checkpointWAL(databaseURI, slog.New(
+			slog.NewTextHandler(&bytes.Buffer{}, nil),
+		))(t.Context()),
+	)
+	close(done)
+
+	blocked := testutil.RequireReceive(
+		t, blockedCh, 10*time.Second,
+		"writer-lock probe must finish once the checkpoint returns",
+	)
+	require.Zero(
+		t, blocked,
+		"checkpointWAL must not hold SQLite's writer lock while a reader "+
+			"snapshot prevents the WAL from draining",
 	)
 }
