@@ -1156,6 +1156,12 @@ snapshot holds it. Any other replayed proposal was settled before the anchor
 so it is stored as expired and dropped at its own epoch and slot and no later
 boundary selects it for ratification, expiry, or refund.
 
+Backfill derives protocol parameters from genesis and hard forks for the epochs
+it replays, and adopts the row already recorded for an epoch instead of
+writing one. The import records its epoch's parameters, which carry
+governance-enacted changes derivation cannot reproduce, and `GetPParams`
+prefers the newest row for an epoch, so a derived row would replace them.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |

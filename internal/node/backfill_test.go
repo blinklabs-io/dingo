@@ -26,11 +26,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -1141,6 +1143,94 @@ func TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t *testing.T) {
 		stored, err := db.GetGovernanceProposal(txHash, 0, nil)
 		require.NoError(t, err)
 		assert.NotNil(t, stored, "replayed proposal history was dropped")
+	}
+}
+
+// TestRun_KeepsImportedProtocolParameters covers resolvePParams, which derives
+// parameters from genesis and hard forks and writes them per epoch. The
+// snapshot's parameters for its epoch include governance-enacted changes that
+// derivation cannot reproduce, and GetPParams prefers the newest row for an
+// epoch, so a derived row written for an epoch the import already recorded
+// replaces the snapshot's. Two shapes reach that write: an import whose era
+// bounds could not be extracted records only the anchor epoch (the first-epoch
+// write), and an anchor in an era's first epoch (the hard-fork write).
+func TestRun_KeepsImportedProtocolParameters(t *testing.T) {
+	t.Parallel()
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cardano.EmbeddedConfigPath("preview"),
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	decodeConway := eras.ConwayEraDesc.DecodePParamsFunc
+	for _, tc := range []struct {
+		name        string
+		priorEpoch  bool
+		priorEraID  uint
+		anchorEpoch uint64
+	}{
+		{name: "single imported epoch", anchorEpoch: 901},
+		{
+			name:        "anchor in era first epoch",
+			priorEpoch:  true,
+			priorEraID:  eras.BabbageEraDesc.Id,
+			anchorEpoch: 901,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			if tc.priorEpoch {
+				require.NoError(t, db.SetEpoch(
+					0, tc.anchorEpoch-1, nil, nil, nil, nil,
+					tc.priorEraID, 1000, 10, nil,
+				))
+			}
+			require.NoError(t, db.SetEpoch(
+				10, tc.anchorEpoch, nil, nil, nil, nil,
+				eras.ConwayEraDesc.Id, 1000, 10, nil,
+			))
+			imported := mockledger.NewMockConwayProtocolParams()
+			imported.MinFeeA = 12345
+			importedCbor, err := cbor.Encode(&imported)
+			require.NoError(t, err)
+			require.NoError(t, db.SetPParams(
+				importedCbor, 10, tc.anchorEpoch, eras.ConwayEraDesc.Id, nil,
+			))
+			addValidBackfillBlocksFrom(t, db, 10, 3)
+			require.NoError(t, db.SetSyncState("mithril_ledger_slot", "12", nil))
+
+			bf := NewBackfill(
+				db,
+				nodeCfg,
+				slog.New(slog.NewTextHandler(io.Discard, nil)),
+			)
+			bf.DisableNonceComputation()
+			require.NoError(t, bf.Run(context.Background()))
+
+			pp, err := db.GetPParams(
+				tc.anchorEpoch,
+				eras.ConwayEraDesc.Id,
+				decodeConway,
+				nil,
+			)
+			require.NoError(t, err)
+			conwayPP, ok := pp.(*conway.ConwayProtocolParameters)
+			require.True(t, ok, "anchor epoch parameters are %T", pp)
+			assert.Equal(t, uint(12345), conwayPP.MinFeeA,
+				"imported anchor-epoch parameters were replaced")
+			if tc.priorEpoch {
+				rows, err := db.Metadata().GetPParams(
+					tc.anchorEpoch-1,
+					tc.priorEraID,
+					nil,
+				)
+				require.NoError(t, err)
+				require.Len(t, rows, 1, "derived parameters were not written")
+				assert.Equal(t, tc.anchorEpoch-1, rows[0].Epoch)
+			}
+		})
 	}
 }
 

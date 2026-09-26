@@ -375,6 +375,25 @@ func (b *Backfill) resolvePParams(
 		if ep.EpochId > targetEpoch {
 			break
 		}
+		// An epoch that already has parameters keeps them. A Mithril import
+		// records its epoch's parameters, which include governance-enacted
+		// changes derivation cannot reproduce, and GetPParams prefers the
+		// newest row for an epoch, so writing a derived row would replace it.
+		stored, hasStored, err := b.storedEpochPParams(ep.EpochId, ep.EraId)
+		if err != nil {
+			return fmt.Errorf(
+				"reading stored pparams for epoch %d: %w",
+				ep.EpochId, err,
+			)
+		}
+		if hasStored {
+			b.currentPParams = stored
+			prevEraId = ep.EraId
+			b.currentEraId = ep.EraId
+			b.pparamsCache[ep.EpochId] = b.currentPParams
+			b.lastEpochId = ep.EpochId
+			continue
+		}
 		// Era transition: hard fork produces new pparams
 		if ep.EraId != prevEraId {
 			era := eras.GetEraById(ep.EraId)
@@ -468,6 +487,30 @@ func (b *Backfill) resolvePParams(
 // cached pparams for this epoch, use them directly. Only
 // falls back to computing when no cache entry exists
 // (e.g. nodeCfg was nil during resolve).
+// storedEpochPParams returns the protocol parameters recorded for exactly
+// epochID, if any.
+func (b *Backfill) storedEpochPParams(
+	epochID uint64,
+	eraID uint,
+) (lcommon.ProtocolParameters, bool, error) {
+	rows, err := b.db.Metadata().GetPParams(epochID, eraID, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) == 0 || rows[0].Epoch != epochID {
+		return nil, false, nil
+	}
+	era := eras.GetEraById(eraID)
+	if era == nil || era.DecodePParamsFunc == nil {
+		return nil, false, fmt.Errorf("no pparams decoder for era %d", eraID)
+	}
+	pp, err := era.DecodePParamsFunc(rows[0].Cbor)
+	if err != nil {
+		return nil, false, fmt.Errorf("decoding stored pparams: %w", err)
+	}
+	return pp, true, nil
+}
+
 func (b *Backfill) processEpochBoundary(
 	epochId uint64, eraId uint,
 ) {
