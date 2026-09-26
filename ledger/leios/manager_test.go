@@ -581,6 +581,59 @@ func TestVoteManagerBoundsSignatureVerificationPerPeer(t *testing.T) {
 	require.True(t, reserved, "one peer's budget does not consume another peer's quota")
 }
 
+func TestVoteManagerBoundsPrototypeSignatureVerificationPerPeer(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	ebHash := lcommon.NewBlake2b256([]byte("prototype-budget-eb"))
+	var verifyCalls atomic.Int64
+	fixture.mgr.verifyVoteSignature = func(
+		_ *bls12381.G2Affine,
+		_, _ []byte,
+	) error {
+		verifyCalls.Add(1)
+		return nil
+	}
+
+	for idx := range voteVerificationMaxPerPeer {
+		slot := uint64(500 + idx)
+		rbHash := lcommon.NewBlake2b256(fmt.Appendf(nil, "prototype-rb-%d", idx))
+		fixture.mgr.ObserveAnnouncement(slot, rbHash, ebHash)
+		require.NoError(t, fixture.mgr.HandlePrototypeVote(
+			"conn-a",
+			fixture.makePrototypeVote(t, 3, rbHash),
+		))
+	}
+
+	lastSlot := uint64(500 + voteVerificationMaxPerPeer)
+	lastRbHash := lcommon.NewBlake2b256([]byte("prototype-rb-over-budget"))
+	fixture.mgr.ObserveAnnouncement(lastSlot, lastRbHash, ebHash)
+	lastVote := fixture.makePrototypeVote(t, 3, lastRbHash)
+	for range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", lastVote))
+	}
+	require.ErrorIs(
+		t,
+		fixture.mgr.HandlePrototypeVote("conn-a", lastVote),
+		ErrPeerMisbehavior,
+	)
+	assert.EqualValues(t, voteVerificationMaxPerPeer, verifyCalls.Load())
+
+	otherSlot := lastSlot + 1
+	otherRbHash := lcommon.NewBlake2b256([]byte("prototype-rb-other-peer"))
+	fixture.mgr.ObserveAnnouncement(otherSlot, otherRbHash, ebHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"conn-b",
+		fixture.makePrototypeVote(t, 3, otherRbHash),
+	))
+	assert.EqualValues(
+		t,
+		voteVerificationMaxPerPeer+1,
+		verifyCalls.Load(),
+		"one peer's budget must not prevent another peer's signature verification",
+	)
+}
+
 func TestVoteManagerDisconnectsPeerAfterRepeatedInvalidVotes(t *testing.T) {
 	t.Parallel()
 	fixture := newManagerFixture(t)

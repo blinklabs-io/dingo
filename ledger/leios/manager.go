@@ -1714,8 +1714,8 @@ func (m *VoteManager) releaseIncomingVoteVerification(
 }
 
 // HandleVote validates and stores a vote received from a peer connection.
-// Invalid votes are logged and dropped without error so a single bad vote
-// does not tear down the peer connection.
+// Isolated invalid votes are logged and dropped; repeated invalid votes can
+// identify a misbehaving connection.
 func (m *VoteManager) HandleVote(
 	connKey string,
 	vote lcommon.LeiosVote,
@@ -1809,10 +1809,12 @@ func (m *VoteManager) HandlePrototypeVote(
 		m.metrics.votesReceivedTotal.Inc()
 	}
 	if err := vote.Validate(); err != nil {
-		if m.metrics != nil {
-			m.metrics.votesRejectedTotal.WithLabelValues("structural").Inc()
-		}
-		return nil
+		return m.rejectIncomingVote(
+			connKey,
+			"structural",
+			lcommon.LeiosVote{VoterId: vote.VoterId},
+			err,
+		)
 	}
 	m.mu.Lock()
 	record, ok := m.announcements[vote.AnnouncingRbHash]
@@ -1836,14 +1838,28 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	vote lcommon.LeiosPrototypeVote,
 	record announcementRecord,
 ) error {
+	resolved := lcommon.LeiosVote{
+		SlotNo:            record.slot,
+		EndorserBlockHash: record.ebHash,
+		VoterId:           vote.VoterId,
+		VoteSignature:     vote.VoteSignature,
+	}
 	if err := m.slotWindowCheck(record.slot); err != nil {
-		m.rejectVote(
+		return m.rejectIncomingVote(
+			connKey,
 			"slot_window",
-			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			resolved,
 			err,
 		)
+	}
+	reserved, err := m.reserveIncomingVoteVerification(connKey, resolved)
+	if err != nil {
+		return m.rejectIncomingVote(connKey, "admission", resolved, err)
+	}
+	if !reserved {
 		return nil
 	}
+	defer m.releaseIncomingVoteVerification(resolved)
 	entry, err := m.committeeAndParamsForEpoch(record.epoch)
 	if err != nil {
 		m.rejectVote(
@@ -1856,12 +1872,12 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	committee := entry.committee
 	member, ok := committee.Member(vote.VoterId)
 	if !ok {
-		m.rejectVote(
+		return m.rejectIncomingVote(
+			connKey,
 			"membership",
-			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			resolved,
 			errors.New("voter id outside committee"),
 		)
-		return nil
 	}
 	verified := false
 	// A member resolving to no key here is a keyless committee seat: its
@@ -1869,21 +1885,14 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	// verified or aggregated into a certificate.
 	pub, _ := m.resolveVoterKey(entry, member.PoolKeyHash)
 	if pub != nil {
-		if err := VerifyVoteSignature(pub, PrototypeVoteMessageBytes(vote.AnnouncingRbHash), vote.VoteSignature); err != nil {
-			m.rejectVote(
-				"signature",
-				lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
-				err,
-			)
-			return nil
+		if err := m.verifyVoteSignature(
+			pub,
+			PrototypeVoteMessageBytes(vote.AnnouncingRbHash),
+			vote.VoteSignature,
+		); err != nil {
+			return m.rejectIncomingVote(connKey, "signature", resolved, err)
 		}
 		verified = true
-	}
-	resolved := lcommon.LeiosVote{
-		SlotNo:            record.slot,
-		EndorserBlockHash: record.ebHash,
-		VoterId:           vote.VoterId,
-		VoteSignature:     vote.VoteSignature,
 	}
 	inserted := m.insertVote(
 		connKey,
