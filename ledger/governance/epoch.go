@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"sort"
 	"time"
 
@@ -922,10 +923,13 @@ func ProcessEpoch(
 	return out, nil
 }
 
-// orderParameterChangeChains preserves the existing candidate order while
-// ensuring an active parameter-change parent is considered before its child.
-// SQL's deterministic tie-breaker is not a ledger ancestry rule, and imported
-// proposals may share an AddedSlot.
+// orderParameterChangeChains keeps the candidate order, except that a
+// parameter change listed before its own parent is moved to immediately after
+// that parent. SQL breaks same-slot ties by transaction hash, which is not a
+// ledger rule, and imported proposals share their epoch's anchor slot. A child
+// is always submitted after its parent and before anything from a later slot,
+// so it must not be pushed behind later-slot proposals either: that would let
+// a later competing sibling take the purpose root first.
 func orderParameterChangeChains(
 	proposals []*models.GovernanceProposal,
 ) []*models.GovernanceProposal {
@@ -941,26 +945,38 @@ func orderParameterChangeChains(
 	}
 
 	ordered := make([]*models.GovernanceProposal, 0, len(proposals))
-	remaining := append([]*models.GovernanceProposal(nil), proposals...)
-	for len(remaining) > 0 {
-		progress := false
-		next := make([]*models.GovernanceProposal, 0, len(remaining))
-		for _, proposal := range remaining {
-			parentKey := proposalParentKey(proposal)
-			if parameterChanges[proposalIdentityKey(proposal)] &&
-				parameterChanges[parentKey] {
-				next = append(next, proposal)
-				continue
+	emitted := make(map[string]bool, len(proposals))
+	waiting := make(map[string][]*models.GovernanceProposal)
+	emit := func(proposal *models.GovernanceProposal) {
+		stack := []*models.GovernanceProposal{proposal}
+		for len(stack) > 0 {
+			next := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			ordered = append(ordered, next)
+			key := proposalIdentityKey(next)
+			emitted[key] = true
+			children := waiting[key]
+			delete(waiting, key)
+			for _, child := range slices.Backward(children) {
+				stack = append(stack, child)
 			}
+		}
+	}
+	for _, proposal := range proposals {
+		parentKey := proposalParentKey(proposal)
+		if parameterChanges[proposalIdentityKey(proposal)] &&
+			parameterChanges[parentKey] && !emitted[parentKey] {
+			waiting[parentKey] = append(waiting[parentKey], proposal)
+			continue
+		}
+		emit(proposal)
+	}
+	// Only an ancestry cycle, which the chain cannot produce, leaves a
+	// proposal waiting here.
+	for _, proposal := range proposals {
+		if !emitted[proposalIdentityKey(proposal)] {
 			ordered = append(ordered, proposal)
-			delete(parameterChanges, proposalIdentityKey(proposal))
-			progress = true
 		}
-		if !progress {
-			ordered = append(ordered, next...)
-			break
-		}
-		remaining = next
 	}
 	return ordered
 }
