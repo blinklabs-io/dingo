@@ -79,8 +79,15 @@ type GovernanceProposal struct {
 	// collapse that delay, so the drop is tracked separately (dingo#4411).
 	DroppedEpoch *uint64
 	DroppedSlot  *uint64
-	AddedSlot    uint64
-	DeletedSlot  *uint64
+	// TxIndex is the proposal's position in the proposal submission order
+	// within AddedSlot: the transaction's index in its block, or for a
+	// proposal imported from a ledger-state snapshot, its position in the
+	// snapshot's proposal sequence. Conway RATIFY breaks equal-priority ties
+	// by this order. Nil for a row stored before the position was recorded;
+	// such rows keep the transaction-hash tie-break.
+	TxIndex     *uint32
+	AddedSlot   uint64
+	DeletedSlot *uint64
 }
 
 // GovernanceVote represents a vote cast by a Constitutional Committee member,

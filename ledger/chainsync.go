@@ -6964,27 +6964,38 @@ func (ls *LedgerState) processEpochRollover(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
+	// applyEpochDonations credits these after governance; RATIFY still
+	// counts them, as Conway's EPOCH rule does before seeding RATIFY.
+	pendingDonations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
+		currentEpoch.EpochId, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"sum donations for epoch %d: %w", currentEpoch.EpochId, err,
+		)
+	}
 	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
-		DB:                      ls.db,
-		Txn:                     txn,
-		Logger:                  ls.config.Logger,
-		PrevEpoch:               currentEpoch.EpochId,
-		NewEpoch:                currentEpoch.EpochId + 1,
-		BoundarySlot:            epochStartSlot,
-		PParams:                 newPParams,
-		UpdateFn:                currentEra.PParamsUpdateFunc,
-		ConwayGenesis:           conwayGenesis,
-		DelegatorInactivityOn:   ls.config.DelegatorInactivityEnabled,
-		CurrentBoundarySPOState: currentBoundarySPOState,
+		DB:                       ls.db,
+		Txn:                      txn,
+		Logger:                   ls.config.Logger,
+		PrevEpoch:                currentEpoch.EpochId,
+		NewEpoch:                 currentEpoch.EpochId + 1,
+		BoundarySlot:             epochStartSlot,
+		PParams:                  newPParams,
+		UpdateFn:                 currentEra.PParamsUpdateFunc,
+		ConwayGenesis:            conwayGenesis,
+		DelegatorInactivityOn:    ls.config.DelegatorInactivityEnabled,
+		CurrentBoundarySPOState:  currentBoundarySPOState,
+		PendingTreasuryDonations: pendingDonations,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("process governance epoch: %w", err)
 	}
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
-	// treasury withdrawals (handled in governance.ProcessEpoch above), so a
-	// withdrawal is checked against the pre-donation treasury and the donation
-	// is reflected for subsequent epochs' accounting.
+	// treasury withdrawals (handled in governance.ProcessEpoch above), so an
+	// enacted withdrawal is checked against the pre-donation treasury, while
+	// the RATIFY pass already counted them through PendingTreasuryDonations.
 	if err := ls.applyEpochDonations(
 		txn, currentEpoch.EpochId, epochStartSlot,
 	); err != nil {

@@ -130,6 +130,7 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 		return backfill.processBlockGovernance(
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			0,
 			100,
 			&pparams,
 			txn,
@@ -181,6 +182,7 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 		return backfill.processBlockGovernance(
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			0,
 			100,
 			pparams,
 			txn,

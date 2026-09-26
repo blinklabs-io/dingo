@@ -60,6 +60,7 @@ const (
 	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 	rewardAdaPotsImportedFeesSchemaRelease        = "reward-ada-pots-imported-epoch-fees"
 	mithrilRewardRepairCoverageSchemaRelease      = "mithril-reward-repair-coverage"
+	governanceProposalOrderSchemaRelease          = "governance-proposal-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -152,6 +153,11 @@ var schemaVersions = []struct {
 		Version: 25,
 		Name:    mithrilRewardRepairCoverageSchemaRelease,
 		Dir:     "v25",
+	},
+	{
+		Version: 26,
+		Name:    governanceProposalOrderSchemaRelease,
+		Dir:     "v26",
 	},
 }
 

@@ -12877,19 +12877,53 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    parameters through `eras.CloneGovernanceProtocolParameters`, preserving
    Dijkstra's extension fields; unsupported future parameter types fail closed.
 
-   The subsequent RATIFY pass carries the post-ENACT treasury as a running
-   budget. Each accepted treasury withdrawal consumes that budget; an
+   When a boundary enacts a parent and child ParameterChange together, ENACT
+   applies the parent first and the child second, including when replaying
+   proposals already marked enacted at that boundary. This uses proposal
+   ancestry rather than insertion order or the SQL/hash tie-break, so the
+   child's update is applied over the parent's result.
+
+   An enacted TreasuryWithdrawal whose deposit return account is also one of
+   its withdrawal destinations credits that account twice, as the reference's
+   `applyEnactedWithdrawals` and `returnProposalDeposits` do: once for the
+   withdrawal and once for the deposit. The two credits journal under
+   different `account_reward_delta` discriminators, so neither is dropped as a
+   replay of the other.
+
+   The subsequent RATIFY pass carries a running treasury budget seeded as
+   Conway's EPOCH rule seeds it: from the treasury this boundary leaves, read
+   after ENACT, DROP and removal refunds, plus the ended epoch's donations,
+   which `processEpochRollover` passes as `EpochInput.PendingTreasuryDonations`
+   and step 8 credits afterwards. An enacted withdrawal to an unregistered
+   account, and a deposit refund to an unregistered account, stay in or return
+   to the treasury and so count toward it. This boundary's ENACT keeps its own
+   pre-credit budget. Each accepted treasury withdrawal consumes that budget; an
    over-budget withdrawal or a withdrawal whose `uint64` amount sum overflows
    remains pending, and evaluation continues with later proposals. This is the
    treasury-capacity portion of Conway RATIFY's running enactment state, not a
    claim that this preflight implements every formal ENACT predicate. In
    particular it does not add committee-term validation; committee membership
    and term state remain part of the actual enactment path. A parameter update
-   is tested against a clone during preflight and that result is discarded;
-   only a successful actual enactment advances `UpdatedPParams`. RATIFY does
-   not thread a prospective parameter-update result into the parameter view of
-   later candidates in the same pass. This is another reason the behavior
-   described here is specifically the running-treasury subset, not the full
+   is tested against a clone during preflight and that result is discarded.
+   Before priority sorting, RATIFY moves an active ParameterChange that the
+   SQL order lists ahead of its parent to immediately after that parent, and
+   leaves every other candidate in place. A child is submitted after its
+   parent and before any later-slot proposal, so it is not moved behind a
+   later competing sibling. A stable priority sort then keeps that order
+   within the ParameterChange priority, ahead of later action categories.
+   Within one slot the SQL order is Conway's submission order: the
+   transaction's position in its block (`governance_proposal_order.tx_index`),
+   then the action index. A proposal imported from a ledger-state snapshot
+   records its position in the snapshot's proposal sequence instead, since all
+   proposals of one epoch share that epoch's anchor slot. Rows stored before
+   positions were recorded, and not backfilled from a stored transaction, keep
+   the transaction-hash tie-break.
+   During RATIFY, accepted parameter changes are applied to a local staged
+   parameter value and advance the parameter-purpose root, allowing later
+   candidates in the same pass to validate against their accepted parent's
+   state. Only a successful actual ENACT advances `UpdatedPParams`; RATIFY's
+   staged value is not published as active ledger parameters. This behavior is
+   specifically the running-treasury and staged-parameter subset, not the full
    formal ENACT-state transition.
 
    The proposal-independent voting denominators — DRep voting power
@@ -12961,7 +12995,8 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    treats every silent pool as implicit No for HardForkInitiation; during
    Conway bootstrap, silent pools on other actions are Abstain. Only
    post-bootstrap non-voters reach the reward-account default-vote rules.
-8. Treasury donations (`applyEpochDonations`), added after withdrawals.
+8. Treasury donations (`applyEpochDonations`), added after withdrawals. Step
+   7's RATIFY already counted them (see above).
 9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
    above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal
