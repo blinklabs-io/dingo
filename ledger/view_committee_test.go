@@ -1002,7 +1002,11 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 func TestLedgerViewCommitteeVotingState(t *testing.T) {
 	t.Parallel()
 
-	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 11},
+	}
+	lv, db := committeeTestView(t, pparams)
+	lv.pinCommitteeState(0, pparams)
 	cold := committeeTestCredential(0x92)
 	hot := committeeTestCredential(0x93)
 	coldScript := cold
@@ -1038,6 +1042,7 @@ func TestLedgerViewCommitteeVotingState(t *testing.T) {
 	elected, err = state.CommitteeCredentialIsElected(coldScript)
 	require.NoError(t, err)
 	require.True(t, elected)
+	storeCommitteeUpdateProposal(t, db, 0x94, cold, 100)
 	action := lcommon.GovActionId{TransactionId: lcommon.Blake2b256{0x94}}
 	tx := &conway.ConwayTransaction{
 		TxIsValid: true,
@@ -1054,15 +1059,17 @@ func TestLedgerViewCommitteeVotingState(t *testing.T) {
 			},
 		},
 	}
-	pparams := &conway.ConwayProtocolParameters{
-		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 11},
-	}
 	require.NoError(t, conway.UtxoValidateUnelectedCommitteeVoters(
 		tx,
 		0,
 		lv,
 		pparams,
 	))
+	validationErr := eras.ValidateTxConway(tx, 0, lv, pparams)
+	var unknown conway.UnknownVoterError
+	require.False(t, errors.As(validationErr, &unknown), "%v", validationErr)
+	var electedUnelected conway.UnelectedCommitteeVoterError
+	require.False(t, errors.As(validationErr, &electedUnelected), "%v", validationErr)
 
 	unelectedHot := committeeTestCredential(0x95)
 	unelectedCold := committeeTestCredential(0x96)
@@ -1079,16 +1086,8 @@ func TestLedgerViewCommitteeVotingState(t *testing.T) {
 		},
 	}
 	var unelected conway.UnelectedCommitteeVoterError
-	require.ErrorAs(
-		t,
-		conway.UtxoValidateUnelectedCommitteeVoters(
-			unelectedTx,
-			0,
-			lv,
-			pparams,
-		),
-		&unelected,
-	)
+	err = eras.ValidateTxConway(unelectedTx, 0, lv, pparams)
+	require.ErrorAs(t, err, &unelected)
 }
 
 // enactTestUpdateCommittee drives a real UpdateCommittee enactment through
