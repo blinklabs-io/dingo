@@ -730,12 +730,12 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 	}
 
 	t.Run("matching batch", func(t *testing.T) {
-		validated, err := validateTxsubmissionReply(requested, returned)
+		validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, len(returned))
 	})
 	t.Run("ordered subset", func(t *testing.T) {
-		validated, err := validateTxsubmissionReply(requested, returned[1:])
+		validated, err := validateTxsubmissionReply(requested, returned[1:], gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 1)
 		require.Equal(t, returned[1], validated[0].body)
@@ -765,7 +765,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 					TxId: fixtures[0].txId,
 					Size: uint32(testCase.advertised), // #nosec G115 -- bounded fixture
 				}}
-				validated, err := validateTxsubmissionReply(want, returned[:1])
+				validated, err := validateTxsubmissionReply(want, returned[:1], gledger.NewTransactionFromCbor)
 				if testCase.shouldPass {
 					require.NoError(t, err)
 					require.Len(t, validated, 1)
@@ -784,11 +784,11 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 				Size: uint32(len(fixture.body) - 32), // #nosec G115 -- real fixtures
 			}
 		}
-		validated, err := validateTxsubmissionReply(want, returned)
+		validated, err := validateTxsubmissionReply(want, returned, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, len(returned))
 
-		validated, err = validateTxsubmissionReply(want, returned[:1])
+		validated, err = validateTxsubmissionReply(want, returned[:1], gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 1)
 	})
@@ -799,13 +799,13 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			{TxId: fixtures[0].txId, Size: uint32(len(fixtures[0].body) - 60)}, // #nosec G115 -- real fixture
 			{TxId: fixtures[1].txId, Size: uint32(len(fixtures[1].body) - 4)},  // #nosec G115 -- real fixture
 		}
-		validated, err := validateTxsubmissionReply(want, returned)
+		validated, err := validateTxsubmissionReply(want, returned, gledger.NewTransactionFromCbor)
 		require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
 		require.Nil(t, validated)
 	})
 	t.Run("reordered reply preserves admission order", func(t *testing.T) {
 		got := []txsubmission.TxBody{returned[1], returned[0]}
-		validated, err := validateTxsubmissionReply(requested, got)
+		validated, err := validateTxsubmissionReply(requested, got, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 2)
 		require.Equal(t, returned[0], validated[0].body)
@@ -866,7 +866,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(want, got)
 			}
-			validated, err := validateTxsubmissionReply(want, got)
+			validated, err := validateTxsubmissionReply(want, got, gledger.NewTransactionFromCbor)
 			require.ErrorContains(t, err, tt.match)
 			require.Nil(t, validated)
 			if tt.name == "hash" {
@@ -928,7 +928,7 @@ func TestValidateTxsubmissionReplyChecksByteBudgetBeforeDecode(t *testing.T) {
 					TxBody: testCase.bodies[index],
 				}
 			}
-			validated, err := validateTxsubmissionReply(requested, returned)
+			validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 			require.Nil(t, validated)
 			if testCase.overLimit {
 				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)

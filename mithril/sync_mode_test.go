@@ -91,3 +91,25 @@ func TestDetermineSyncMode(t *testing.T) {
 		require.Equal(t, syncModeCatchUp, mode)
 	})
 }
+
+func TestRepairCatchUpDecisionForcesReconciliation(t *testing.T) {
+	t.Parallel()
+
+	decision := repairCatchUpDecision(
+		catchUpDecision{upToDate: true}, true, 1234, true,
+	)
+	require.True(t, decision.engage)
+	require.False(t, decision.upToDate)
+	require.EqualValues(t, 1234, decision.start)
+
+	unchanged := catchUpDecision{upToDate: true}
+	require.Equal(
+		t, unchanged,
+		repairCatchUpDecision(unchanged, false, 1234, true),
+	)
+	active := catchUpDecision{engage: true, start: 20}
+	require.Equal(
+		t, active,
+		repairCatchUpDecision(active, true, 1234, true),
+	)
+}

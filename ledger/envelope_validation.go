@@ -183,41 +183,53 @@ func isNilBlockHeader(header lcommon.BlockHeader) bool {
 }
 
 // validateBlockOrder checks that a block follows its parent by block number
-// and slot, including the Byron EBB exception for shared number/slot.
+// and slot. Byron's envelope rules are asymmetric around epoch boundary blocks
+// (the expectedNextBlockNo and minimumNextSlotNo tables of the Byron
+// consensus envelope):
+//
+//	parent   block    block number   slot
+//	regular  regular  parent + 1     later
+//	regular  EBB      parent         later
+//	EBB      regular  parent + 1     same or later
+//	EBB      EBB      parent + 1     later
+//
+// A regular block may share an EBB parent's slot only within Byron.
 func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
 	if parent.origin {
 		return nil
 	}
 	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
-	if isEbb {
-		if block.BlockNumber() != parent.blockNumber {
-			return fmt.Errorf(
-				"byron EBB block number %d does not match parent block number %d",
-				block.BlockNumber(),
-				parent.blockNumber,
-			)
-		}
-		if block.SlotNumber() < parent.slot {
-			return fmt.Errorf(
-				"byron EBB slot %d precedes parent slot %d",
-				block.SlotNumber(),
-				parent.slot,
-			)
-		}
-		return nil
+	expectedBlockNumber := parent.blockNumber + 1
+	if isEbb && !parent.byronEbb {
+		expectedBlockNumber = parent.blockNumber
 	}
-	if block.BlockNumber() != parent.blockNumber+1 {
+	if block.BlockNumber() != expectedBlockNumber {
+		if isEbb {
+			return fmt.Errorf(
+				"byron EBB block number %d does not match expected block number %d",
+				block.BlockNumber(),
+				expectedBlockNumber,
+			)
+		}
 		return fmt.Errorf(
 			"block number %d does not follow parent block number %d",
 			block.BlockNumber(),
 			parent.blockNumber,
 		)
 	}
-	if block.SlotNumber() == parent.slot &&
-		(parent.byronEbb && block.Era().Id == byron.EraIdByron) {
+	if !isEbb && parent.byronEbb &&
+		block.Era().Id == byron.EraIdByron &&
+		block.SlotNumber() == parent.slot {
 		return nil
 	}
 	if block.SlotNumber() <= parent.slot {
+		if isEbb {
+			return fmt.Errorf(
+				"byron EBB slot %d does not follow parent slot %d",
+				block.SlotNumber(),
+				parent.slot,
+			)
+		}
 		return fmt.Errorf(
 			"block slot %d does not follow parent slot %d",
 			block.SlotNumber(),

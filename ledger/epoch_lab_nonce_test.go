@@ -133,6 +133,7 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 			epochEnd,
 			eras.ConwayEraDesc,
 			prevEpoch,
+			nil,
 		)
 		rNonce = n
 		rCandidate = c
