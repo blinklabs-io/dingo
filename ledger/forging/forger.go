@@ -1872,7 +1872,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		&leiosState,
 		generation,
 		gates,
-		altBlockContext,
+		&altBlockContext,
 	)
 	// A retry or the empty fallback may have re-resolved the payload
 	// against a new parent; the embedded-endorser-block bookkeeping below
@@ -2549,11 +2549,11 @@ func isTipGateRefusal(err error) bool {
 }
 
 // tipGatesRefuseSlot re-reads the two tips and decides slot with the same
-// function the entry gates used. It returns nil while every gate admits the
-// slot, which is the condition every build for slot depends on, and one of
-// the errors above otherwise. entry supplies the cycle's network evidence --
-// the endorser-block watermark and the upstream sync reading -- which is not
-// re-read; see forgeTipReading.
+// function the entry gates used. For an equal-slot contest it refreshes the
+// alternative context when available; other admitted readings return nil and
+// refusals return one of the errors above. entry supplies the cycle's network
+// evidence -- the endorser-block watermark and upstream sync reading -- which
+// is not re-read; see forgeTipReading.
 //
 // The decisions are taken in the entry gates' order, so a reading that trips
 // more than one is counted the way entry would have counted it. That order is
@@ -2573,20 +2573,22 @@ func isTipGateRefusal(err error) bool {
 // at the slot exist to recognise this node's OWN block already at the tip; a
 // build attempt runs before this slot's block exists, under a fence this
 // attempt itself reserved, so an applied tip at the slot can only be a
-// rival's. The entry gate has already resolved an alternative context if
-// this forge cycle began contested; retain it through this re-check, and
-// otherwise count the battle and decline. Likewise the unapplied-block case cannot be
-// this node's own block for the same reason, and leadership has already been
-// proven, so unapplied_rival_at_leader_slot is counted outright rather than
-// from the schedule.
+// rival's. The retry re-resolves the explicit alternative context when the
+// required chain and builder capabilities are available, and declines only
+// when they are not. Likewise the unapplied-block case cannot be this node's
+// own block for the same reason, and leadership has already been proven, so
+// unapplied_rival_at_leader_slot is counted outright rather than from the
+// schedule.
 func (f *BlockForger) tipGatesRefuseSlot(
 	slot uint64,
 	entry forgeTipGates,
-	blockCtx *BlockContext,
+	blockCtx **BlockContext,
+	slotBattleCounted *bool,
 ) error {
 	if f.slotClock == nil {
 		return nil
 	}
+	*blockCtx = nil
 	reading := f.readTipEvidence(slot)
 	reading.ebSlot = entry.ebSlot
 	reading.upstreamTarget = entry.upstreamTarget
@@ -2649,20 +2651,26 @@ func (f *BlockForger) tipGatesRefuseSlot(
 			gates.staleSource(),
 		)
 	case gates.appliedTipAtSlot():
-		// Preserve the context resolved by the entry gate while the
-		// original rival still occupies the slot. The builder validates
-		// that context against the live tip immediately before signing.
-		if blockCtx != nil {
-			return nil
+		// Re-resolve the explicit context for the rival currently at the
+		// tip. The entry gate may have seen a different tip, or this may be
+		// the first contest during this forge cycle.
+		context, ok := f.alternativeBlockContext(slot)
+		if !ok {
+			if !*slotBattleCounted && f.metrics != nil {
+				f.metrics.slotBattlesTotal.Inc()
+			}
+			*slotBattleCounted = true
+			return fmt.Errorf(
+				"%w: tip slot %d and no alternative context is available",
+				errChainTipAtSlot,
+				gates.tipSlot,
+			)
 		}
-		if f.metrics != nil {
+		if !*slotBattleCounted && f.metrics != nil {
 			f.metrics.slotBattlesTotal.Inc()
 		}
-		return fmt.Errorf(
-			"%w: tip slot %d",
-			errChainTipAtSlot,
-			gates.tipSlot,
-		)
+		*slotBattleCounted = true
+		*blockCtx = &context
 	}
 	return nil
 }
@@ -2842,9 +2850,37 @@ func (f *BlockForger) buildBlockForSlot(
 	leiosState *forgeLeiosState,
 	generation *credentialGeneration,
 	entry forgeTipGates,
-	blockCtx *BlockContext,
+	blockCtx **BlockContext,
 ) (ledger.Block, []byte, forgeBuildStats, error) {
 	var stats forgeBuildStats
+	slotBattleCounted := *blockCtx != nil
+	leiosOmittedForAlternative := slotBattleCounted
+	refreshLeiosForBuild := func() {
+		if *blockCtx != nil {
+			*leiosState = forgeLeiosState{}
+			leiosOmittedForAlternative = true
+			return
+		}
+		if leiosOmittedForAlternative {
+			// A retry can move from an alternative back to the live tip.
+			// Resolve certificates for that parent, but do not forge a
+			// second endorser block for this slot.
+			parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(slot)
+			*leiosState = f.leiosBlockDataForSlot(
+				slot,
+				parentRbHash,
+				parentEbHash,
+				parentKnown,
+			)
+			leiosOmittedForAlternative = false
+			return
+		}
+		if stats.attempts > 0 ||
+			leiosState.data.Certificate != nil ||
+			leiosState.data.Announcement != nil {
+			f.refreshLeiosForParent(slot, leiosState)
+		}
+	}
 	// Two budgets, deliberately separate. The retry deadline decides
 	// whether another attempt is worth starting; the selection deadline
 	// truncates a pass and is off unless configured, because that one
@@ -2877,7 +2913,12 @@ func (f *BlockForger) buildBlockForSlot(
 		// aborted by the primary chain tip moving, which makes this the
 		// one reading guaranteed to have gone stale; building anyway
 		// would sign a block the entry gates would have refused.
-		if tipErr := f.tipGatesRefuseSlot(slot, entry, blockCtx); tipErr != nil {
+		if tipErr := f.tipGatesRefuseSlot(
+			slot,
+			entry,
+			blockCtx,
+			&slotBattleCounted,
+		); tipErr != nil {
 			f.logger.Warn(
 				"leader slot lost: the chain moved under the slot before the transaction-free fallback",
 				"slot",
@@ -2899,14 +2940,14 @@ func (f *BlockForger) buildBlockForSlot(
 		// The fallback is a fresh build against whatever the chain tip
 		// is now, so its Leios payload has to be resolved against that
 		// parent too.
-		f.refreshLeiosForParent(slot, leiosState)
+		refreshLeiosForBuild()
 		block, blockCbor, emptyErr := f.buildBlock(
 			slot,
 			kesPeriod,
 			leiosState.data,
 			generation,
 			blockSelectionConstraints{emptyBody: true},
-			blockCtx,
+			*blockCtx,
 		)
 		if emptyErr != nil {
 			f.observeSelectionFallback(forgeSelectionResultLost)
@@ -2952,19 +2993,21 @@ func (f *BlockForger) buildBlockForSlot(
 	// Leios payload was resolved before this slot's endorser-block production
 	// and the KES step, and the chain tip can move across that work, so the
 	// first build is no more entitled to reuse it than a retry is.
-	if leiosState.data.Certificate != nil ||
-		leiosState.data.Announcement != nil {
-		f.refreshLeiosForParent(slot, leiosState)
-	}
 	for {
 		// Re-apply the entry tip gates before every attempt, including
 		// the first: the reading that cleared them happened before leader
 		// selection, and Leios production, the KES step and each
 		// preceding selection pass all run inside the window a peer block
 		// can land in -- on either tip.
-		if tipErr := f.tipGatesRefuseSlot(slot, entry, blockCtx); tipErr != nil {
+		if tipErr := f.tipGatesRefuseSlot(
+			slot,
+			entry,
+			blockCtx,
+			&slotBattleCounted,
+		); tipErr != nil {
 			return nil, nil, stats, tipErr
 		}
+		refreshLeiosForBuild()
 		stats.attempts++
 		block, blockCbor, err := f.buildBlock(
 			slot,
@@ -2972,7 +3015,7 @@ func (f *BlockForger) buildBlockForSlot(
 			leiosState.data,
 			generation,
 			selectionConstraints(),
-			blockCtx,
+			*blockCtx,
 		)
 		if err == nil {
 			if stats.aborted {
@@ -3031,9 +3074,9 @@ func (f *BlockForger) buildBlockForSlot(
 			"error",
 			err,
 		)
-		// The next attempt re-reads the chain tip, so anything resolved
-		// against the previous parent has to be resolved again.
-		f.refreshLeiosForParent(slot, leiosState)
+		// The next iteration re-reads the tip gates, refreshes an
+		// alternative context if needed, and then resolves Leios data for
+		// the parent that will actually be used.
 	}
 }
 

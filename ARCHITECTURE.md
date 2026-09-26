@@ -6058,6 +6058,13 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
    changing the queued headers.
 8. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
+When the applied tip already holds a rival block at the leader slot, the
+forger can build an equal-slot alternative only with a persisted forge fence,
+the rival's predecessor from chain context, an `AlternativeBlockBuilder`, and
+a sibling adopter.
+The default builder omits mempool transactions and Leios data from that
+alternative; the sibling adopter lets chain selection decide whether it wins.
+
 Step 5's transaction selection runs inside `LedgerState.WithTxValidationSession`
 (the same mechanism the mempool backend rebuilds use above): one pinned ledger
 generation, one validation reference slot, and one repeatable-read transaction
@@ -6085,10 +6092,11 @@ state the publication produced, until the slot's remaining time falls below
 `ForgeSelectionRetryMargin` or `ForgeSelectionMaxRetries` attempts have been
 made. When no attempt can complete, the forger builds a transaction-free block
 for the slot rather than abandoning it: a pool's reward for a slot does not
-depend on what its block carries, so an empty block is worth the whole slot,
-and it still carries the slot's Leios payload. The fallback needs a
-`BlockBuilder` that accepts the empty-body constraint; an embedder's builder
-that does not simply loses the slot as before.
+depend on what its block carries, so an empty block is worth the whole slot.
+An ordinary extension carries Leios data only after resolving it against the
+parent that will be used; an equal-slot alternative omits Leios data. The
+fallback needs a `BlockBuilder` that accepts the empty-body constraint; an
+embedder's builder that does not simply loses the slot as before.
 
 Every build attempt for a slot -- the first, each retry, and the fallback --
 re-reads both tips and decides the slot again with the same function the
@@ -6108,12 +6116,13 @@ an applied tip that has fallen more than `forgeSyncToleranceSlots` behind the
 network refuses on `dingo_forge_sync_skip_total`; `primary_tip_behind_applied`,
 `primary_tip_hash_diverged`, `slot_gap` and the opt-in staleness bounds refuse
 as they do at entry, counted on `dingo_forge_stale_tip_skip_total`; and last,
-an applied tip at the slot is the same slot battle the entry gate declines,
-counted in `dingo_metrics_slotBattlesTotal_int` wherever it is detected. The
-order is what makes the counters agree: entry acts on a stale tip after the
-leader check and only then on the slot battle, so a reading that trips both --
-an applied tip at the forged slot with a diverged or behind primary chain tip
--- must count as a stale tip here too.
+an applied tip at the slot is counted once as a slot battle. When the chain
+context, durable forge fence and builder support it, the re-check refreshes
+the rival's predecessor context and builds an alternative; otherwise it
+declines the slot. The order is what makes the counters agree: entry acts on a
+stale tip after the leader check and only then on the slot battle, so a reading
+that trips both -- an applied tip at the forged slot with a diverged or behind
+primary chain tip -- must count as a stale tip here too.
 
 The upstream-sync gate is re-applied for the same reason the others are, and
 its input is the one that can move BACKWARDS: the applied tip. A rollback

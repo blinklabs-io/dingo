@@ -254,7 +254,7 @@ func TestBuildBlockForSlotReportsBothTheAbortAndTheSupersededSlot(
 		leiosState,
 		nil,
 		forgeTipGates{},
-		nil,
+		new(*BlockContext),
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errTxValidationSnapshotChanged)
