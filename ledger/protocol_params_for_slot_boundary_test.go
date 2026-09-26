@@ -331,6 +331,10 @@ func TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary(
 	pparams := &shelley.ShelleyProtocolParameters{
 		ProtocolMajor:    2,
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
 	}
 
 	ls := &LedgerState{
