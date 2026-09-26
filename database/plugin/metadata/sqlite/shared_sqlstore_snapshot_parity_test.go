@@ -61,7 +61,14 @@ type snapshotState struct {
 func TestSharedSQLStoreSnapshotParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseSnapshotStore(t, store)
+	state := exerciseSnapshotStore(t, store)
+	require.NotNil(t, state.pool)
+	require.NotEmpty(t, state.pools)
+	require.Equal(t, uint64(50), state.totalBeforeReady)
+	require.Equal(t, uint64(888), state.totalAfterReady)
+	require.NotNil(t, state.summary)
+	require.NotNil(t, state.latest)
+	require.NotEmpty(t, state.remaining)
 }
 
 func exerciseSnapshotStore(t *testing.T, store snapshotStore) snapshotState {

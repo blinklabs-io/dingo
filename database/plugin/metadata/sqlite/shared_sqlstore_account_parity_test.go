@@ -101,7 +101,23 @@ type accountState struct {
 func TestSharedSQLStoreAccountParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseAccountStore(t, store)
+	state := exerciseAccountStore(t, store)
+	require.NotNil(t, state.active)
+	require.Nil(t, state.inactiveHidden)
+	require.NotNil(t, state.inactive)
+	require.Len(t, state.activeBatch, 1)
+	require.Len(t, state.allBatch, 2)
+	require.NotNil(t, state.renewed)
+	require.NotEmpty(t, state.activeRefs)
+	require.Equal(t, int64(1), state.stamped)
+	require.NotNil(t, state.afterCredit)
+	require.Equal(t, uint64(60), uint64(state.afterCredit.Reward))
+	require.NotNil(t, state.afterWithdrawal)
+	require.Zero(t, state.afterWithdrawal.Reward)
+	require.NotNil(t, state.afterCreditRollback)
+	require.Equal(t, uint64(50), uint64(state.afterCreditRollback.Reward))
+	require.NotNil(t, state.deactivated)
+	require.False(t, state.deactivated.Active)
 }
 
 func exerciseAccountStore(t *testing.T, store accountStore) accountState {

@@ -104,7 +104,19 @@ func TestSharedSQLStoreTransactionWriteParity(t *testing.T) {
 		).Scan(&witnesses))
 		return deltas, witnesses
 	}
-	_ = exerciseTransactionWriteStore(t, store, false, counts)
+	state := exerciseTransactionWriteStore(t, store, false, counts)
+	require.Equal(t, uint64(10), state.Slot)
+	require.Equal(t, uint32(3), state.BlockIndex)
+	require.True(t, state.Valid)
+	require.Equal(t, uint64(10), state.InputDeletedSlot)
+	require.Len(t, state.InputSpentBy, 32)
+	require.Equal(t, byte(0xa2), state.InputSpentBy[0])
+	require.Equal(t, uint64(600), state.OutputAmount)
+	require.Zero(t, state.AccountReward)
+	require.Equal(t, 1, state.WithdrawalDeltas)
+	require.Equal(t, 1, state.WithdrawalProofs)
+	require.Equal(t, 1, state.Inputs)
+	require.Equal(t, 1, state.Outputs)
 }
 
 func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
@@ -648,7 +660,27 @@ type certificateWriteState struct {
 func TestSharedSQLStoreCertificateWriteParity(t *testing.T) {
 	t.Parallel()
 	store, raw := newSharedSQLStore(t)
-	_ = exerciseCertificateWriteStore(t, store, raw)
+	state := exerciseCertificateWriteStore(t, store, raw)
+	require.Equal(t, 9, state.CertificateCount)
+	require.True(t, state.AccountActive)
+	require.Equal(t, uint64(81), state.AccountAddedSlot)
+	require.Equal(t, uint64(81), state.AccountCreated)
+	require.True(t, state.DrepActive)
+	require.Equal(t, uint64(81), state.DrepAddedSlot)
+	for _, table := range []string{
+		"pool_registration",
+		"pool_registration_owner",
+		"stake_registration",
+		"stake_delegation",
+		"vote_delegation",
+		"registration_drep",
+		"update_drep",
+		"auth_committee_hot",
+		"resign_committee_cold",
+		"genesis_delegation",
+	} {
+		require.Equal(t, 1, state.TableCounts[table], table)
+	}
 }
 
 func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
@@ -702,7 +734,13 @@ func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
 				}
 				return ret
 			}
-			_ = exercise(store, raw)
+			counts := exercise(store, raw)
+			require.Equal(t, 1, counts["transaction"])
+			wantWitnesses := 0
+			if mode == types.StorageModeAPI {
+				wantWitnesses = 1
+			}
+			require.Equal(t, wantWitnesses, counts["key_witness"])
 		})
 	}
 }

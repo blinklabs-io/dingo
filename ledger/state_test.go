@@ -507,9 +507,15 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-		_ = cfg.LoadShelleyGenesisFromReader(
-			strings.NewReader(shelleyGenesisJSON),
+		require.NoError(
+			t,
+			loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+		)
+		require.NoError(
+			t,
+			cfg.LoadShelleyGenesisFromReader(
+				strings.NewReader(shelleyGenesisJSON),
+			),
 		)
 
 		ls := &LedgerState{
@@ -546,9 +552,15 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-		_ = cfg.LoadShelleyGenesisFromReader(
-			strings.NewReader(shelleyGenesisJSON),
+		require.NoError(
+			t,
+			loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+		)
+		require.NoError(
+			t,
+			cfg.LoadShelleyGenesisFromReader(
+				strings.NewReader(shelleyGenesisJSON),
+			),
 		)
 
 		ls := &LedgerState{
@@ -1502,7 +1514,7 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 		t.Fatal("timeout waiting for operation result")
 	}
 
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 }
 
 // TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError proves
@@ -1555,7 +1567,7 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 		t.Fatal("timeout waiting for post-panic operation result")
 	}
 
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 }
 
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
@@ -1569,43 +1581,53 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 
 	var completedCount atomic.Int32
-	var wg sync.WaitGroup
+	started := make(chan struct{}, 5)
+	unblock := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(unblock) })
+	}
+	defer release()
 
-	// Submit multiple operations
-	for range 5 {
-		wg.Add(1)
+	results := make([]chan DatabaseResult, 5)
+	for i := range results {
 		resultChan := make(chan DatabaseResult, 1)
+		results[i] = resultChan
 
 		pool.Submit(DatabaseOperation{
 			OpFunc: func(db *database.Database) error {
-				// Simulate work with short delay
-				time.Sleep(10 * time.Millisecond)
+				started <- struct{}{}
+				<-unblock
 				completedCount.Add(1)
 				return nil
 			},
 			ResultChan: resultChan,
 		})
-
-		// Drain result in goroutine
-		go func(ch chan DatabaseResult) {
-			defer wg.Done()
-			result := <-ch
-			// Error is expected if shutdown occurred before operation completed
-			// But we should receive the error in the channel
-			_ = result.Error
-		}(resultChan)
 	}
 
-	// Wait for at least one operation to start processing
-	require.Eventually(t, func() bool {
-		return completedCount.Load() > 0
-	}, testutil.AsyncWait, 5*time.Millisecond, "at least one operation should start")
-
-	// Shutdown the pool - this should wait for all operations to complete
-	pool.Shutdown(5 * time.Second)
-
-	// Wait for all result handlers
-	wg.Wait()
+	for range config.WorkerPoolSize {
+		testutil.RequireReceive(
+			t,
+			started,
+			testutil.AsyncWait,
+			"worker should start an operation",
+		)
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- pool.Shutdown(5 * time.Second) }()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown returned before in-flight operations completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	release()
+	require.NoError(t, <-shutdownDone)
+	for _, resultChan := range results {
+		result := testutil.RequireReceive(
+			t, resultChan, testutil.AsyncWait, "operation result should be sent",
+		)
+		require.NoError(t, result.Error)
+	}
 
 	// Verify all operations completed
 	assert.Equal(
@@ -1628,14 +1650,15 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 
 	var completedCount atomic.Int32
 
-	// Submit operations, some will error
+	// Submit operations, some will error.
+	results := make([]chan DatabaseResult, 3)
 	for i := range 3 {
 		resultChan := make(chan DatabaseResult, 1)
+		results[i] = resultChan
 		operationIndex := i
 
 		pool.Submit(DatabaseOperation{
 			OpFunc: func(db *database.Database) error {
-				time.Sleep(20 * time.Millisecond)
 				completedCount.Add(1)
 				if operationIndex == 1 {
 					return fmt.Errorf("operation %d failed", operationIndex)
@@ -1644,18 +1667,10 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 			},
 			ResultChan: resultChan,
 		})
-
-		// Drain results
-		go func() {
-			select {
-			case <-resultChan:
-			case <-time.After(10 * time.Second):
-			}
-		}()
 	}
 
 	// Shutdown should wait for all operations to complete
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 
 	// Verify all operations completed even with errors
 	assert.Equal(
@@ -1664,6 +1679,16 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 		completedCount.Load(),
 		"not all operations completed",
 	)
+	for i, resultChan := range results {
+		result := testutil.RequireReceive(
+			t, resultChan, testutil.AsyncWait, "operation result should be sent",
+		)
+		if i == 1 {
+			require.ErrorContains(t, result.Error, "operation 1 failed")
+		} else {
+			require.NoError(t, result.Error)
+		}
+	}
 }
 
 // TestDatabaseWorkerPoolQueueFull tests behavior when queue is full
@@ -1675,25 +1700,63 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	config.TaskQueueSize = 1 // Very small queue
 
 	pool := NewDatabaseWorkerPool(nil, config)
-
-	// Submit some operations
-	for range 3 {
-		resultChan := make(chan DatabaseResult, 1)
-		pool.Submit(DatabaseOperation{
-			OpFunc: func(db *database.Database) error {
-				return nil
-			},
-			ResultChan: resultChan,
-		})
-
-		// Drain result
-		go func(ch chan DatabaseResult) {
-			<-ch
-		}(resultChan)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorker := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(func() {
+		releaseWorker()
+		require.NoError(t, pool.Shutdown(5*time.Second))
+	})
+	firstResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			close(started)
+			<-release
+			return nil
+		},
+		ResultChan: firstResult,
+	})
+	select {
+	case <-started:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("first operation did not start")
 	}
 
-	// Shutdown should complete successfully
-	pool.Shutdown(5 * time.Second)
+	queuedResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc:     func(db *database.Database) error { return nil },
+		ResultChan: queuedResult,
+	})
+
+	fullResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc:     func(db *database.Database) error { return nil },
+		ResultChan: fullResult,
+	})
+	select {
+	case result := <-fullResult:
+		require.EqualError(t, result.Error, "database worker pool queue full")
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("full queue did not reject the operation")
+	}
+
+	releaseWorker()
+	require.NoError(t, pool.Shutdown(5*time.Second))
+	select {
+	case result := <-firstResult:
+		require.NoError(t, result.Error)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("first operation did not complete")
+	}
+	select {
+	case result := <-queuedResult:
+		require.NoError(t, result.Error)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("queued operation did not complete")
+	}
 }
 
 // TestDatabaseWorkerPoolSubmitAfterShutdown tests that submitting after shutdown fails
@@ -1916,8 +1979,8 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 // The current implementation tracks in-flight operations with a
 // mutex-guarded counter and a drained channel Shutdown selects directly, so
 // no goroutine is ever spawned by the timeout path.
-// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
-// concurrent tests perturb.
+// Not t.Parallel: a concurrent worker-pool shutdown could look like this
+// test's shutdown waiter in the process-wide goroutine profile.
 func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	t *testing.T,
 ) {
@@ -1930,8 +1993,25 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	started := make(chan struct{})
 	blockUntil := make(chan struct{})
 	resultChan := make(chan DatabaseResult, 1)
+	workerDone := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWorker := func() {
+		releaseOnce.Do(func() { close(blockUntil) })
+	}
+	t.Cleanup(func() {
+		releaseWorker()
+		if err := pool.Shutdown(testutil.AsyncWait); err != nil {
+			t.Errorf("shutdown database worker pool during cleanup: %v", err)
+		}
+		select {
+		case <-workerDone:
+		case <-time.After(testutil.AsyncWait):
+			t.Error("timeout waiting for database worker to stop")
+		}
+	})
 	pool.Submit(DatabaseOperation{
 		OpFunc: func(db *database.Database) error {
+			defer close(workerDone)
 			close(started)
 			<-blockUntil
 			return nil
@@ -1945,41 +2025,31 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 		t.Fatal("timeout waiting for operation to start")
 	}
 
-	// The stuck worker goroutine is already running at this point, so it's
-	// part of the baseline count -- only a goroutine spawned by Shutdown
-	// itself would show up as growth below. GC first so a transient
-	// runtime/GC goroutine isn't baked into the baseline.
-	runtime.GC()
-	baseline := runtime.NumGoroutine()
-
 	err := pool.Shutdown(50 * time.Millisecond)
 	require.Error(t, err)
 
-	// A single immediate snapshot is flaky: a short-lived runtime/GC
-	// goroutine can transiently push the count above baseline with no
-	// relation to Shutdown. Poll briefly instead, matching
-	// storagetest.AssertNoGoroutineLeak's pattern -- since a leaked waiter
-	// goroutine would persist for the stuck operation's full duration, it
-	// would still be caught well within this deadline.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		after := runtime.NumGoroutine()
-		if after <= baseline {
-			break
+	stack := make([]byte, 1<<20)
+	stackSize := runtime.Stack(stack, true)
+	shutdownWaiters := 0
+	for _, goroutine := range strings.Split(
+		string(stack[:stackSize]),
+		"\n\n",
+	) {
+		if strings.Contains(
+			goroutine,
+			"DatabaseWorkerPool).Shutdown",
+		) && strings.Contains(goroutine, "sync.(*WaitGroup).Wait") {
+			shutdownWaiters++
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"Shutdown's timeout path must not leave behind a goroutine "+
-					"of its own: baseline %d, now %d",
-				baseline,
-				after,
-			)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
+	assert.Zero(
+		t,
+		shutdownWaiters,
+		"Shutdown should not leave behind a goroutine blocked on WaitGroup.Wait",
+	)
 
 	// Unblock the stuck operation so it doesn't leak past the test.
-	close(blockUntil)
+	releaseWorker()
 	select {
 	case <-resultChan:
 	case <-time.After(testutil.AsyncWait):
@@ -2640,6 +2710,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	var wg sync.WaitGroup
 	readCount := atomic.Int32{}
 	txnStarted := make(chan struct{})
+	readersFinished := make(chan struct{}, 5)
 	txnDone := make(chan struct{})
 	rolloverErr := make(chan error, 1)
 
@@ -2652,15 +2723,16 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		snapshotPParams := ls.currentPParams
 		ls.RUnlock()
 
-		// Signal that transaction is starting
-		close(txnStarted)
-
 		// Execute transaction (simulates DB work)
 		var result *EpochRolloverResult
 		txn := db.Transaction(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			// Add a small delay to give readers time to run
-			time.Sleep(50 * time.Millisecond)
+			close(txnStarted)
+			// Hold the transaction open until each reader has observed the
+			// current ledger state, making the concurrency assertion deterministic.
+			for range 5 {
+				<-readersFinished
+			}
 			var err error
 			result, err = ls.processEpochRollover(
 				txn,
@@ -2688,26 +2760,17 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		close(txnDone)
 	})
 
-	// Start multiple reader goroutines that try to read during the transaction
+	// Start multiple reader goroutines that read while the transaction is open.
 	for range 5 {
 		wg.Go(func() {
 			// Wait for transaction to start
 			<-txnStarted
-
-			// Try to read multiple times during the transaction
-			for range 10 {
-				select {
-				case <-txnDone:
-					return
-				default:
-					ls.RLock()
-					_ = ls.currentEra   // Read era
-					_ = ls.currentEpoch // Read epoch
-					readCount.Add(1)
-					ls.RUnlock()
-					time.Sleep(5 * time.Millisecond)
-				}
-			}
+			ls.RLock()
+			_ = ls.currentEra   // Read era
+			_ = ls.currentEpoch // Read epoch
+			readCount.Add(1)
+			ls.RUnlock()
+			readersFinished <- struct{}{}
 		})
 	}
 

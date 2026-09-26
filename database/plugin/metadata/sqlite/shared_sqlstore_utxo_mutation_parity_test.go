@@ -57,7 +57,16 @@ type utxoMutationState struct {
 func TestSharedSQLStoreUtxoMutationParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseUtxoMutationStore(t, store)
+	state := exerciseUtxoMutationStore(t, store)
+	require.NotNil(t, state.Marked)
+	require.Equal(t, uint64(20), uint64(state.Marked.DeletedSlot))
+	require.NotNil(t, state.Restored)
+	require.Zero(t, state.Restored.DeletedSlot)
+	require.Nil(t, state.DeletedOne)
+	require.Nil(t, state.DeletedBatch)
+	require.Nil(t, state.DeletedAfterSlot)
+	require.NotEmpty(t, state.LiveStake)
+	require.Nil(t, state.Imported)
 }
 
 func exerciseUtxoMutationStore(

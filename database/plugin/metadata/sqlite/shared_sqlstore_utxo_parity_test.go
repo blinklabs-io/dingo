@@ -70,7 +70,18 @@ type utxoReadState struct {
 func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseUtxoReadStore(t, store)
+	state := exerciseUtxoReadStore(t, store)
+	require.NotNil(t, state.live)
+	require.Nil(t, state.spentLiveLookup)
+	require.NotNil(t, state.spent)
+	require.NotEmpty(t, state.added)
+	require.NotEmpty(t, state.liveAtSlot)
+	require.NotEmpty(t, state.allAtSlot)
+	require.NotEmpty(t, state.deleted)
+	require.NotEmpty(t, state.byAddress)
+	require.NotZero(t, state.controlled)
+	require.NotEmpty(t, state.byAsset)
+	require.NotEmpty(t, state.iterated)
 }
 
 // TestGetUtxosByAddressEmptyPatterns proves an empty patterns slice returns

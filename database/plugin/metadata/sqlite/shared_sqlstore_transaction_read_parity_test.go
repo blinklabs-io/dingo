@@ -133,7 +133,28 @@ INSERT INTO transaction_metadata_label (
 		return err
 	})
 
-	_ = exerciseTransactionReadStore(t, store)
+	state := exerciseTransactionReadStore(t, store)
+	require.NotNil(t, state.ByHash)
+	require.Equal(t, []byte("tx-a"), state.ByHash.Hash)
+	require.Nil(t, state.Missing)
+	require.Equal(t, uint64(11), state.Slot)
+	require.True(t, state.SlotFound)
+	require.Equal(t, uint(3), state.ID)
+	require.True(t, state.IDFound)
+	require.Equal(t, []byte("meta-a"), state.Metadata)
+	require.Equal(t, uint64(16), state.FeeSum)
+	require.Len(t, state.ByBlock, 2)
+	require.Len(t, state.ByHashes, 2)
+	require.Len(t, state.HashesAfter, 2)
+	require.Len(t, state.ByAddress, 1)
+	require.Equal(t, 2, state.AddressCount)
+	require.Equal(t, 2, state.PaymentCount)
+	require.Len(t, state.ByLabel, 2)
+	require.Equal(t, 2, state.LabelCount)
+	require.Len(t, state.Addresses, 1)
+	require.Equal(t, 1, state.AddressesCount)
+	require.Equal(t, 1, state.AddressCountAfter)
+	require.Equal(t, 1, state.LabelCountAfter)
 }
 
 func exerciseTransactionReadStore(

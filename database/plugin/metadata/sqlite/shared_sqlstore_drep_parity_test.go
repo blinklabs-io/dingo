@@ -113,7 +113,17 @@ type drepState struct {
 func TestSharedSQLStoreDrepParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseDrepStore(t, store)
+	state := exerciseDrepStore(t, store)
+	require.NotNil(t, state.Created)
+	require.NotNil(t, state.Imported)
+	require.Nil(t, state.InactiveHidden)
+	require.NotNil(t, state.Inactive)
+	require.NotEmpty(t, state.Active)
+	require.NotEmpty(t, state.Delegators)
+	require.NotEmpty(t, state.Dreps)
+	require.NotEmpty(t, state.Deposits)
+	require.NotEmpty(t, state.LiveStake)
+	require.NotEmpty(t, state.LiveStakeAfterRebuild)
 }
 
 func exerciseDrepStore(t *testing.T, store drepStore) drepState {
