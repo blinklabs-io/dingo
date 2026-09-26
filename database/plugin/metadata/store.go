@@ -178,8 +178,8 @@ type SlotRangeStore interface {
 // stay on MetadataStore despite sitting among the governance sections
 // there: they are ledger economics read by reward calculation, not
 // governance state. ImportDrep likewise stays with the snapshot bulk-import
-// cluster, and ClearDanglingDRepDelegations mutates the account table
-// rather than the drep table.
+// cluster, and ClearDanglingDRepDelegations is a hardfork transition that
+// updates both account state and the reverse delegator index.
 type GovernanceStore interface {
 	// Proposal and vote methods
 
@@ -2663,28 +2663,12 @@ type MetadataStore interface {
 	// before the slot.
 	RestorePoolStateAtSlot(uint64, types.Txn) error
 
-	// ClearDanglingDRepDelegations implements the cardano-ledger Conway
-	// HARDFORK STS rule for protocol major version 10 (Plomin, mainnet
-	// January 2025, Cardano/Conway/Rules/HardFork.hs updateDRepDelegations).
-	// For each account with a credential-backed DRep delegation
-	// (DrepType 0 or 1), if the target DRep credential is not currently
-	// registered as an active DRep, clear the delegation. Pseudo-DRep
-	// delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
-	// Updates Account.AddedSlot to atSlot on every row it modifies so the
-	// rewritten row is excluded from a subsequent rollback restore
-	// targeting any slot before atSlot (the restore filters on
-	// `added_slot <= targetSlot` and falls back to prior certificate
-	// history). Returns the number of accounts updated.
+	// ClearDanglingDRepDelegations applies the Conway PV10 HARDFORK transition.
+	// It clears credential-backed delegations to unregistered DReps, then
+	// rebuilds the reverse delegator index from active account state. Both
+	// writes use atSlot history so rollback restores the pre-transition links.
+	// Pseudo-DRep delegations are preserved. Returns the cleared account count.
 	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
-
-	// ClearDRepDelegationForCredential clears stake-account delegations to
-	// exactly one tagged DRep and stamps the rows for rollback restoration.
-	ClearDRepDelegationForCredential(
-		uint8,
-		[]byte,
-		uint64,
-		types.Txn,
-	) (int, error)
 
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.

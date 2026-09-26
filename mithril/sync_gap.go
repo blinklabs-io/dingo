@@ -648,8 +648,18 @@ func processGapBlockTransactions(
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
 		protocolMajor := uint64(0)
-		if conwayPParams != nil {
-			protocolMajor = uint64(conwayPParams.ProtocolVersion.Major)
+		if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
+			protocolMajor = uint64(versioned.ProtocolMajorVersion())
+		}
+		if tx.IsValid() {
+			if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+				tx,
+				point,
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+			}
 		}
 		if err := db.SetGapBlockTransaction(
 			tx,

@@ -57,6 +57,28 @@ type certificateAccountState struct {
 	drepType uint64
 }
 
+func validateDRepDelegationProtocolMajor(
+	certificates []lcommon.Certificate,
+	protocolMajor []uint64,
+) error {
+	for _, certificate := range certificates {
+		switch certificate.(type) {
+		case *lcommon.StakeDeregistrationCertificate,
+			*lcommon.DeregistrationCertificate,
+			*lcommon.StakeVoteDelegationCertificate,
+			*lcommon.StakeVoteRegistrationDelegationCertificate,
+			*lcommon.VoteRegistrationDelegationCertificate,
+			*lcommon.VoteDelegationCertificate:
+			if len(protocolMajor) != 1 || protocolMajor[0] == 0 {
+				return errors.New(
+					"protocol major is required for certificates that change DRep delegations",
+				)
+			}
+		}
+	}
+	return nil
+}
+
 // depositPolicy decides what applyTransactionCertificates does with a
 // deposit-bearing certificate when the caller supplied no deposit map at all.
 // It is a distinct non-boolean type so a call site cannot pass the polarity as
@@ -87,6 +109,9 @@ func (s *Store) applyTransactionCertificates(
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
+	}
+	if err := validateDRepDelegationProtocolMajor(certificates, protocolMajor); err != nil {
+		return nil, err
 	}
 	if err := deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
 		return nil, err
@@ -641,7 +666,7 @@ WHERE credential_tag = ? AND staking_key = ?`, tag, key).Scan(
 	if changesDrepDelegation {
 		removeOld := len(oldDrepCredential) > 0 &&
 			(oldDrepType <= models.DrepTypeScriptHash &&
-				(protocolMajor == 0 || protocolMajor >= 10 ||
+				(protocolMajor >= 10 ||
 					newDrepType > models.DrepTypeScriptHash ||
 					len(newDrepCredential) == 0))
 		if removeOld {

@@ -28,6 +28,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -42,6 +43,94 @@ type mockGapGovernanceTransaction struct {
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
 	isValid            bool
+}
+
+func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	drepOne := testGapHash28("pv9-drep-one")
+	drepTwo := testGapHash28("pv9-drep-two")
+	stakeCredential := testGapHash28("pv9-stake")
+	for _, credential := range [][]byte{drepOne, drepTwo} {
+		require.NoError(t, db.CreateDrep(nil, &models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     1,
+			Active:        true,
+		}))
+	}
+
+	delegation := func(label string, drep []byte) *mockGapGovernanceTransaction {
+		return &mockGapGovernanceTransaction{
+			hash: lcommon.Blake2b256Hash(testGapHash32(label)),
+			certificates: []lcommon.Certificate{&lcommon.VoteDelegationCertificate{
+				CertType: uint(lcommon.CertificateTypeVoteDelegation),
+				StakeCredential: lcommon.Credential{
+					CredType:   lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.NewBlake2b224(stakeCredential),
+				},
+				Drep: lcommon.Drep{
+					Type:       lcommon.DrepTypeAddrKeyHash,
+					Credential: drep,
+				},
+			}},
+			isValid: true,
+		}
+	}
+	first := delegation("pv9-drep-first", drepOne)
+	move := delegation("pv9-drep-move", drepTwo)
+	deregistration := &mockGapGovernanceTransaction{
+		hash: lcommon.Blake2b256Hash(testGapHash32("pv9-drep-deregistration")),
+		certificates: []lcommon.Certificate{&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(drepOne),
+			},
+			Amount: 500,
+		}},
+		isValid: true,
+	}
+	txns := []lcommon.Transaction{first, move, deregistration}
+	point := ocommon.Point{Slot: 1000, Hash: testGapHash32("pv9-gap-block")}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	txOffsets := make(map[[32]byte]database.CborOffset, len(txns))
+	for i, tx := range txns {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		txOffsets[txHash] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: uint32(i),
+			ByteLength: 1,
+		}
+	}
+	pparams := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	require.NoError(t, processGapBlockTransactions(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point,
+		txns,
+		&database.BlockIngestionResult{
+			TxOffsets:   txOffsets,
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		},
+		100,
+		babbage.EraIdBabbage,
+		pparams,
+		nil,
+	))
+	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
 }
 
 func (m *mockGapGovernanceTransaction) Hash() lcommon.Blake2b256 {

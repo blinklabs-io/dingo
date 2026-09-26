@@ -949,15 +949,15 @@ func (s *Store) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn types.Txn,
 ) (int, error) {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return 0, err
-	}
 	slot, err := checkedInt64(atSlot)
 	if err != nil {
 		return 0, err
 	}
-	result, err := db.ExecContext(ctx, `
+	var affected int64
+	err = s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			result, err := db.ExecContext(ctx, `
 UPDATE account
 SET drep = NULL, drep_type = 0, added_slot = ?
 WHERE drep IS NOT NULL
@@ -968,40 +968,41 @@ WHERE drep IS NOT NULL
         AND drep.credential = account.drep
         AND drep.active = TRUE
   )`, slot)
-	if err != nil {
-		return 0, err
-	}
-	affected, err := result.RowsAffected()
-	return int(affected), err
-}
-
-func (s *Store) ClearDRepDelegationForCredential(
-	credentialTag uint8,
-	credential []byte,
-	atSlot uint64,
-	txn types.Txn,
-) (int, error) {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return 0, err
-	}
-	slot, err := checkedInt64(atSlot)
-	if err != nil {
-		return 0, err
-	}
-	result, err := db.ExecContext(ctx, `
-UPDATE account
-SET drep = NULL, drep_type = 0, added_slot = ?
-WHERE drep = ? AND drep_type = ?`,
-		slot,
-		credential,
-		credentialTag,
+			if err != nil {
+				return err
+			}
+			affected, err = result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+UPDATE drep_delegator SET removed_slot = ?
+WHERE removed_slot IS NULL`, slot); err != nil {
+				return fmt.Errorf("close existing DRep delegator links: %w", err)
+			}
+			if _, err := db.ExecContext(ctx, `
+INSERT INTO drep_delegator (
+    drep_credential_tag, drep_credential, stake_credential_tag,
+    stake_credential, added_slot
+)
+SELECT d.credential_tag, d.credential, a.credential_tag, a.staking_key, ?
+FROM account a
+JOIN drep d
+  ON d.credential_tag = a.drep_type
+ AND d.credential = a.drep
+WHERE a.active = TRUE
+  AND a.drep IS NOT NULL
+  AND a.drep_type IN (0, 1)
+  AND d.active = TRUE`, slot); err != nil {
+				return fmt.Errorf("rebuild DRep delegator links from accounts: %w", err)
+			}
+			return nil
+		},
 	)
 	if err != nil {
 		return 0, err
 	}
-	rows, err := result.RowsAffected()
-	return int(rows), err
+	return int(affected), nil
 }
 
 func expandDrepCollectionQuery(query string, count int) string {

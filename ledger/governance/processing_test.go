@@ -273,7 +273,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	assert.Empty(t, expired)
 }
 
-func TestProcessPV9DRepActivityBeforeProposalDormancyReset(t *testing.T) {
+func TestPV9DRepReregistrationUsesProposalDormancyReset(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -292,29 +292,9 @@ func TestProcessPV9DRepActivityBeforeProposalDormancyReset(t *testing.T) {
 		AddedSlot:         1,
 		LastActivityEpoch: 1,
 		ExpiryEpoch:       21,
-		Active:            true,
+		Active:            false,
 	}))
 	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
-
-	proposalTxHash := testHash32("existing-proposal")
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        proposalTxHash,
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeInfo),
-		ProposedEpoch: 90,
-		ExpiresEpoch:  120,
-		AnchorURL:     "https://example.com/existing",
-		AnchorHash:    testHash32("existing-anchor"),
-		Deposit:       1,
-		ReturnAddress: append([]byte{0xE1}, testHash28("existing-return")...),
-		AddedSlot:     1,
-	}, nil))
-	var actionTxHash [32]byte
-	copy(actionTxHash[:], proposalTxHash)
-	var voterHash [28]byte
-	copy(voterHash[:], drepCredential)
-	voter := &lcommon.Voter{Type: lcommon.VoterTypeDRepKeyHash, Hash: voterHash}
-	actionID := &lcommon.GovActionId{TransactionId: actionTxHash, GovActionIdx: 0}
 
 	rewardAddress, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xE1}, testHash28("new-proposal-return")...),
@@ -343,15 +323,17 @@ func TestProcessPV9DRepActivityBeforeProposalDormancyReset(t *testing.T) {
 	tx.WithId(testHash32("drep-ordering-tx"))
 	tx.WithCertificates(registration)
 	tx.WithProposalProcedures(proposal)
-	tx.WithVotingProcedures(lcommon.VotingProcedures{
-		voter: {actionID: {Vote: models.VoteYes}},
-	})
 	point := ocommon.Point{Slot: 100, Hash: testHash32("drep-ordering-block")}
 
 	txn := db.Transaction(true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := ProcessVotes(tx, point, 100, 20, db, txn); err != nil {
+		if err := ResetDormantDRepExpiryBeforeCertificates(
+			tx,
+			point,
+			db,
+			txn,
+		); err != nil {
 			return err
 		}
 		if err := ProcessDRepActivityCertificates(tx, point, 100, 20, 9, db, txn); err != nil {
@@ -362,7 +344,7 @@ func TestProcessPV9DRepActivityBeforeProposalDormancyReset(t *testing.T) {
 
 	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(123), drep.ExpiryEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
 	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)
 	assert.Zero(t, dormantEpochs)

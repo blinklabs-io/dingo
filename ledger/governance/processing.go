@@ -204,6 +204,24 @@ func ProcessProposals(
 	)
 }
 
+// ResetDormantDRepExpiryBeforeCertificates applies the proposal-induced
+// dormancy reset at the Conway CERTS boundary, before transaction
+// certificates can calculate DRep expiry epochs.
+func ResetDormantDRepExpiryBeforeCertificates(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	if len(tx.ProposalProcedures()) == 0 {
+		return nil
+	}
+	if err := db.ResetDormantDRepEpochs(point.Slot, txn); err != nil {
+		return fmt.Errorf("reset dormant DRep epochs before certificate processing: %w", err)
+	}
+	return nil
+}
+
 func persistGovernanceProposals(
 	tx proposalSource,
 	point ocommon.Point,

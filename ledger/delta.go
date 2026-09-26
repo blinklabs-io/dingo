@@ -160,8 +160,8 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	currentPParams := ls.currentPParams
 	ls.RUnlock()
 	protocolMajor := uint64(0)
-	if conwayPParams := conwayProtocolParameters(currentPParams); conwayPParams != nil {
-		protocolMajor = uint64(conwayPParams.ProtocolVersion.Major)
+	if version, err := GetProtocolVersion(currentPParams); err == nil {
+		protocolMajor = uint64(version.Major)
 	}
 	appliedTxs := make([]bool, len(d.Transactions))
 	for i, tr := range d.Transactions {
@@ -171,6 +171,16 @@ func (d *LedgerDelta) applyWithDonationRecording(
 
 		// Extract protocol parameter updates
 		updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates()
+		if tr.Tx.IsValid() {
+			if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+				tr.Tx,
+				d.Point,
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+			}
+		}
 
 		// Calculate certificate deposits
 		certs := tr.Tx.Certificates()

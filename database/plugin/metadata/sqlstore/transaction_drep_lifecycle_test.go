@@ -76,12 +76,35 @@ func TestDrepDeregistrationKeepsLaterSameTransactionDelegation(t *testing.T) {
 		map[int]uint64{0: 500, 1: 500},
 		false,
 		nil,
+		10,
 	))
 
 	account, err := store.GetAccountByCredential(0, stakeCredential, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Equal(t, drepCredential, account.Drep)
+}
+
+func TestDRepDelegationRequiresProtocolMajor(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	drepCredential := bytes.Repeat([]byte{0x56}, 28)
+	stakeCredential := bytes.Repeat([]byte{0x57}, 28)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.VoteDelegationCertificate{
+			CertType:        uint(common.CertificateTypeVoteDelegation),
+			StakeCredential: common.Credential{CredType: 0, Credential: common.NewBlake2b224(stakeCredential)},
+			Drep:            common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: drepCredential},
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x58}, 32))
+	tx.WithValid(true)
+	point := ocommon.Point{Slot: 20, Hash: tx.Hash().Bytes()}
+
+	err := store.SetTransaction(tx, point, 0, nil, false, nil)
+	require.ErrorContains(t, err, "protocol major is required")
+	require.NoError(t, store.SetTransaction(tx, point, 0, nil, false, nil, 9))
 }
 
 func TestDrepDeregistrationUsesProtocolVersionedReverseDelegators(t *testing.T) {
@@ -205,6 +228,121 @@ WHERE drep_credential = ? AND removed_slot IS NULL`, drepOne).Scan(&drepOneMembe
 			}
 		})
 	}
+}
+
+func TestPV10DRepTransitionRebuildsReverseDelegatorsFromAccounts(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	drepOne := bytes.Repeat([]byte{0x71}, 28)
+	drepTwo := bytes.Repeat([]byte{0x72}, 28)
+	drepThree := bytes.Repeat([]byte{0x73}, 28)
+	stakeOne := bytes.Repeat([]byte{0x74}, 28)
+	stakeTwo := bytes.Repeat([]byte{0x75}, 28)
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepOne,
+			AddedSlot:     1,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: 0,
+				Key: stakeOne,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepOne,
+			AddedSlot:      1,
+			DepositAmount:  types.Uint64(500),
+		},
+		nil,
+	))
+	for _, credential := range [][]byte{drepTwo, drepThree} {
+		require.NoError(t, store.CreateDrep(nil, &models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     1,
+			Active:        true,
+		}))
+	}
+	for _, account := range []*models.Account{
+		{
+			StakingKey:    stakeOne,
+			CredentialTag: 0,
+			Drep:          drepTwo,
+			DrepType:      models.DrepTypeAddrKeyHash,
+			AddedSlot:     1,
+			CreatedSlot:   1,
+			Active:        true,
+		},
+		{
+			StakingKey:    stakeTwo,
+			CredentialTag: 0,
+			Drep:          drepThree,
+			DrepType:      models.DrepTypeAddrKeyHash,
+			AddedSlot:     1,
+			CreatedSlot:   1,
+			Active:        true,
+		},
+	} {
+		require.NoError(t, store.ImportAccount(account, nil))
+	}
+
+	cleared, err := store.ClearDanglingDRepDelegations(30, nil)
+	require.NoError(t, err)
+	require.Zero(t, cleared)
+	db, ctx, err := store.dbFromTxn(nil)
+	require.NoError(t, err)
+	activeDelegators := func(credential []byte) int {
+		var count int
+		require.NoError(t, db.QueryRowContext(ctx, `
+SELECT count(*) FROM drep_delegator
+WHERE drep_credential = ? AND removed_slot IS NULL`, credential).Scan(&count))
+		return count
+	}
+	require.Zero(t, activeDelegators(drepOne), "PV10 transition removes the stale PV9 reverse membership")
+	require.Equal(t, 1, activeDelegators(drepTwo))
+	require.Equal(t, 1, activeDelegators(drepThree), "delegation-before-registration must be backfilled")
+
+	deregister := func(slot uint64, id byte, credential []byte) {
+		hash := common.NewBlake2b224(credential)
+		tx := mockledger.NewTransactionBuilder().WithCertificates(
+			&common.DeregistrationDrepCertificate{
+				CertType:       uint(common.CertificateTypeDeregistrationDrep),
+				DrepCredential: common.Credential{CredType: 0, Credential: hash},
+				Amount:         500,
+			},
+		)
+		tx.WithId(bytes.Repeat([]byte{id}, 32))
+		tx.WithValid(true)
+		require.NoError(t, store.SetTransaction(
+			tx,
+			ocommon.Point{Slot: slot, Hash: tx.Hash().Bytes()},
+			0,
+			nil,
+			false,
+			nil,
+			10,
+		))
+	}
+	deregister(31, 0x76, drepOne)
+	deregister(32, 0x77, drepThree)
+	account, err := store.GetAccountByCredential(0, stakeOne, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drepTwo, account.Drep, "deregistering stale D1 state must preserve the PV10 D2 delegation")
+	account, err = store.GetAccountByCredential(0, stakeTwo, true, nil)
+	require.NoError(t, err)
+	require.Nil(t, account.Drep, "deregistering D3 must clear the rebuilt reverse membership")
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(29, nil))
+	require.NoError(t, store.RestoreDrepStateAtSlot(29, nil))
+	account, err = store.GetAccountByCredential(0, stakeOne, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drepTwo, account.Drep)
+	require.Equal(t, 1, activeDelegators(drepOne), "rollback restores the pre-PV10 D1 membership")
+	require.Zero(t, activeDelegators(drepTwo), "rollback removes the rebuilt PV10 membership")
+	require.Zero(t, activeDelegators(drepThree), "rollback removes the repaired reverse membership")
 }
 
 func TestDrepUpdateRequiresActiveRegistration(t *testing.T) {
@@ -479,6 +617,25 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 			Active:        true,
 		},
 	}
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     9,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{
+				{Tag: 0, Key: accounts[0].StakingKey},
+				{Tag: 0, Key: accounts[1].StakingKey},
+			},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: credential,
+			AddedSlot:      9,
+			DepositAmount:  types.Uint64(500),
+		},
+		nil,
+	))
 	for _, account := range accounts {
 		require.NoError(t, store.ImportAccount(account, nil))
 	}
@@ -525,9 +682,25 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 		VoteUpdatedSlot:    &updatedSlot,
 	}, nil))
 
-	cleared, err := store.ClearDRepDelegationForCredential(0, credential, 30, nil)
-	require.NoError(t, err)
-	require.Equal(t, 2, cleared)
+	drepHash := common.NewBlake2b224(credential)
+	deregistration := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.DeregistrationDrepCertificate{
+			CertType:       uint(common.CertificateTypeDeregistrationDrep),
+			DrepCredential: common.Credential{CredType: 0, Credential: drepHash},
+			Amount:         500,
+		},
+	)
+	deregistration.WithId(bytes.Repeat([]byte{0x78}, 32))
+	deregistration.WithValid(true)
+	require.NoError(t, store.SetTransaction(
+		deregistration,
+		ocommon.Point{Slot: 30, Hash: deregistration.Hash().Bytes()},
+		0,
+		nil,
+		false,
+		nil,
+		10,
+	))
 	deleted, err := store.DeleteGovernanceVotesForDrep(0, credential, 10, 30, nil)
 	require.NoError(t, err)
 	require.Equal(t, 3, deleted)
@@ -565,6 +738,7 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	}
 
 	require.NoError(t, store.RestoreAccountStateAtSlot(29, nil))
+	require.NoError(t, store.RestoreDrepStateAtSlot(29, nil))
 	require.NoError(t, store.DeleteGovernanceVotesAfterSlot(29, nil))
 	for index, account := range accounts[:2] {
 		got, err := store.GetAccountByCredential(0, account.StakingKey, true, nil)

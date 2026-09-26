@@ -336,33 +336,41 @@ SQLite `expand.sql` and backfills one history row per pre-existing vote from
 its current value, guarded by a `LEFT JOIN ... WHERE history.id IS NULL` so a
 replayed migration does not duplicate the backfilled row.
 
-Migration `v24` (`drep-expiry-history`, integer version 24) adds
-`drep_expiry_history` and `drep_expiry_epoch_event`. The history stores the
-pre-write expiry and activity epoch once per DRep and slot, allowing activity
-updates and dormant-epoch expiry extensions to roll back together. The event
-table makes each empty-governance boundary idempotent when the boundary is
-replayed after a restart.
-
-Migration `v25` (`drep-dormancy-state`) adds the singleton
-`drep_dormancy_state` counter and `drep_dormancy_history`. The counter preserves
-the consecutive no-proposal epoch count needed by PV9 DRep registration; each
-boundary increment and proposal-driven reset is journaled so rollback restores
-the prior count. Snapshot import initializes it from the parsed ledger state.
-
-Migration `v26` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
-reverse index of stake credentials recorded in each active DRep's ledger
-delegator set. The `added_slot`/`removed_slot` pair preserves membership
-history across rollback. Its initial backfill uses current account vote
-delegations only when the target DRep is registered; later certificate replay
-maintains the reverse set using the active protocol version's ledger rules.
-DRep deregistration clears the stake accounts named by that reverse set, even
-when PV9 redelegation left their forward account assignment pointing elsewhere.
-The schema also preserves reverse delegators imported from cert-state snapshots.
-
 Migration `v23` (`committee-zero-quorum`, integer version 23) converts legacy
 committee quorum rows whose value is `0` into SQL NULL. Those rows were written
 as NoConfidence clear markers; new clear markers use NULL, leaving numeric zero
 available as a valid enacted UnitInterval threshold.
+
+Migrations `v24` (`reward-ada-pots-imported-epoch-fees`) and `v25`
+(`mithril-reward-repair-coverage`) add the imported Mithril epoch-fee basis and
+mark older imports that need reward repair. The `reward_ada_pots` table entry
+above describes the imported value and startup repair behavior.
+
+Migration `v26` (`drep-expiry-history`) adds `drep_expiry_history` and
+`drep_expiry_epoch_event`. The history stores the pre-write expiry and activity
+epoch once per DRep and slot, allowing activity updates and dormant-epoch
+expiry extensions to roll back together. The event table makes each
+empty-governance boundary idempotent when the boundary is replayed after a
+restart.
+
+Migration `v27` (`drep-dormancy-state`) adds the singleton
+`drep_dormancy_state` counter and `drep_dormancy_history`. The counter preserves
+the consecutive no-proposal epoch count needed by PV9 DRep registration; each
+boundary increment and proposal-driven reset is journaled so rollback restores
+the prior count. Proposal-driven resets run before certificate processing, and
+snapshot import initializes the counter from parsed ledger state.
+
+Migration `v28` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
+reverse index of stake credentials recorded in each active DRep's ledger
+delegator set. The `added_slot`/`removed_slot` pair preserves membership
+history across rollback. Its initial backfill uses current account vote
+delegations only when the target DRep is registered; at the PV10 transition,
+Dingo clears delegations to inactive DReps and rebuilds this reverse index from
+active account state. Later certificate replay maintains the reverse set using
+the active protocol version's ledger rules. DRep deregistration clears the
+stake accounts named by that reverse set, even when PV9 redelegation left their
+forward account assignment pointing elsewhere. The schema also preserves
+reverse delegators imported from cert-state snapshots.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,

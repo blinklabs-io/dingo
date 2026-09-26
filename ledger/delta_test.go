@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -103,6 +104,117 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
 	require.Equal(t, uint64(32), got.ExpiresEpoch)
+}
+
+func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	drepOne := bytes.Repeat([]byte{0x31}, lcommon.Blake2b224Size)
+	drepTwo := bytes.Repeat([]byte{0x32}, lcommon.Blake2b224Size)
+	stakeCredential := bytes.Repeat([]byte{0x33}, lcommon.Blake2b224Size)
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepOne,
+			AddedSlot:     1,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: 0,
+				Key: stakeCredential,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepOne,
+			AddedSlot:      1,
+		},
+		nil,
+	))
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drepTwo,
+		AddedSlot:     1,
+		Active:        true,
+	}))
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: 0,
+		Drep:          drepOne,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     1,
+		CreatedSlot:   1,
+		Active:        true,
+	}, nil))
+
+	ls := &LedgerState{
+		db:             db,
+		currentPParams: &babbage.BabbageProtocolParameters{ProtocolMajor: 9},
+	}
+	ls.publishSnapshotsLocked()
+	apply := func(tx lcommon.Transaction, slot uint64, marker byte) {
+		t.Helper()
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{marker}, lcommon.Blake2b256Size),
+		}
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		delta := NewLedgerDelta(point, uint(babbage.EraIdBabbage), slot)
+		t.Cleanup(delta.Release)
+		delta.addTransaction(tx, 0)
+		delta.Offsets = &database.BlockIngestionResult{
+			TxOffsets:   map[[32]byte]database.CborOffset{txHash: {}},
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		}
+		txn := db.Transaction(true)
+		defer txn.Release()
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			return delta.apply(ls, txn)
+		}))
+	}
+	delegate := func(id byte, drep []byte) lcommon.Transaction {
+		credentialHash := lcommon.NewBlake2b224(stakeCredential)
+		tx := mockledger.NewTransactionBuilder().WithCertificates(
+			&lcommon.VoteDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeVoteDelegation),
+				StakeCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+				Drep:            lcommon.Drep{Type: lcommon.DrepTypeAddrKeyHash, Credential: drep},
+			},
+		)
+		tx.WithId(bytes.Repeat([]byte{id}, lcommon.Blake2b256Size))
+		tx.WithValid(true)
+		return tx
+	}
+	apply(delegate(0x41, drepTwo), 2, 0x42)
+	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, drepTwo, account.Drep,
+		"PV9 redelegation updates the account's forward delegation")
+
+	ls.Lock()
+	ls.currentPParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 9},
+	}
+	ls.Unlock()
+	drepHash := lcommon.NewBlake2b224(drepOne)
+	unregister := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.DeregistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: drepHash},
+			Amount:         500,
+		},
+	)
+	unregister.WithId(bytes.Repeat([]byte{0x43}, lcommon.Blake2b256Size))
+	unregister.WithValid(true)
+	apply(unregister, 3, 0x44)
+	account, err = db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
 }
 
 func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(

@@ -32,6 +32,7 @@ import (
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -311,6 +312,97 @@ func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Nil(t, account.Drep, "backfill must clear deregistered DRep delegations")
+}
+
+func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepOne := bytes.Repeat([]byte{0x71}, lcommon.Blake2b224Size)
+	drepTwo := bytes.Repeat([]byte{0x72}, lcommon.Blake2b224Size)
+	stakeCredential := bytes.Repeat([]byte{0x73}, lcommon.Blake2b224Size)
+	for _, credential := range [][]byte{drepOne, drepTwo} {
+		require.NoError(t, db.CreateDrep(nil, &models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     1,
+			Active:        true,
+		}))
+	}
+	delegation := func(id byte, drep []byte) lcommon.Transaction {
+		credentialHash := lcommon.NewBlake2b224(stakeCredential)
+		tx := mockledger.NewTransactionBuilder().WithCertificates(
+			&lcommon.VoteDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeVoteDelegation),
+				StakeCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+				Drep:            lcommon.Drep{Type: lcommon.DrepTypeAddrKeyHash, Credential: drep},
+			},
+		)
+		tx.WithId(bytes.Repeat([]byte{id}, lcommon.Blake2b256Size))
+		tx.WithValid(true)
+		return tx
+	}
+	first := delegation(0x74, drepOne)
+	move := delegation(0x75, drepTwo)
+	credentialHash := lcommon.NewBlake2b224(drepOne)
+	deregistration := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.DeregistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	deregistration.WithId(bytes.Repeat([]byte{0x76}, lcommon.Blake2b256Size))
+	deregistration.WithValid(true)
+	txs := []lcommon.Transaction{first, move, deregistration}
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: bytes.Repeat([]byte{0x77}, lcommon.Blake2b256Size),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	txOffsets := make(map[[32]byte]database.CborOffset, len(txs))
+	for i, tx := range txs {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		txOffsets[txHash] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: uint32(i),
+			ByteLength: 1,
+		}
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	pparams := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(
+			txs,
+			point,
+			100,
+			babbage.EraIdBabbage,
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets:   txOffsets,
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
 }
 
 func closeTestDB(db *database.Database) error {
