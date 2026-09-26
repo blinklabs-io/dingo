@@ -59,26 +59,26 @@ func newMetrics(promRegistry prometheus.Registerer) *metrics {
 			prometheus.NewCounterVec(
 				prometheus.CounterOpts{
 					Name: "dingo_koiosparity_epoch_result_total",
-					Help: "koios-parity epoch validation results, by network, queue and status (pass/fail/error)",
+					Help: "koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error)",
 				},
-				[]string{"network", "queue", "status"},
+				[]string{"queue", "status"},
 			),
 		),
 		mismatchTotal: registerCollector(promRegistry, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_koiosparity_mismatch_total",
-				Help: "koios-parity mismatch rows recorded, by network, queue, category and severity (fail/error/informational)",
+				Help: "koios-parity mismatch rows recorded, by network (a constant label from the node's shared registry), queue, category and severity (fail/error/informational)",
 			},
-			[]string{"network", "queue", "category", "severity"},
+			[]string{"queue", "category", "severity"},
 		)),
 		lastCheckedEpoch: registerCollector(
 			promRegistry,
 			prometheus.NewGaugeVec(
 				prometheus.GaugeOpts{
 					Name: "dingo_koiosparity_last_checked_epoch",
-					Help: "most recent epoch the koios-parity observer has completed a check for, by network and queue",
+					Help: "most recent epoch the koios-parity observer has completed a check for, by network (a constant label from the node's shared registry) and queue",
 				},
-				[]string{"network", "queue"},
+				[]string{"queue"},
 			),
 		),
 		epochMismatchCount: registerCollector(
@@ -86,24 +86,24 @@ func newMetrics(promRegistry prometheus.Registerer) *metrics {
 			prometheus.NewGaugeVec(
 				prometheus.GaugeOpts{
 					Name: "dingo_koiosparity_epoch_mismatch_count",
-					Help: "mismatch row count for the most recently checked epoch, by network and queue (mirrors check_epoch_status.mismatch_count)",
+					Help: "mismatch row count for the most recently checked epoch, by network (a constant label from the node's shared registry) and queue (mirrors check_epoch_status.mismatch_count)",
 				},
-				[]string{"network", "queue"},
+				[]string{"queue"},
 			),
 		),
 		lastFailEpoch: registerCollector(promRegistry, prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "dingo_koiosparity_last_fail_epoch",
-				Help: "epoch number of the last koios-parity result with status FAIL, by network and queue; does not reset on a later PASS",
+				Help: "epoch number of the last koios-parity result with status FAIL, by network (a constant label from the node's shared registry) and queue; does not reset on a later PASS",
 			},
-			[]string{"network", "queue"},
+			[]string{"queue"},
 		)),
 		lastErrorEpoch: registerCollector(promRegistry, prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "dingo_koiosparity_last_error_epoch",
-				Help: "epoch number of the last koios-parity result with status ERROR, by network and queue; does not reset on a later PASS",
+				Help: "epoch number of the last koios-parity result with status ERROR, by network (a constant label from the node's shared registry) and queue; does not reset on a later PASS",
 			},
-			[]string{"network", "queue"},
+			[]string{"queue"},
 		)),
 	}
 }
@@ -146,17 +146,15 @@ func (m *metrics) recordResult(result *EpochCompareResult) {
 	}
 	queue := resultQueue(result)
 	m.epochResultTotal.WithLabelValues(
-		result.Network,
 		queue,
 		strings.ToLower(result.Status),
 	).Inc()
-	m.lastCheckedEpoch.WithLabelValues(result.Network, queue).
+	m.lastCheckedEpoch.WithLabelValues(queue).
 		Set(float64(result.Epoch))
-	m.epochMismatchCount.WithLabelValues(result.Network, queue).
+	m.epochMismatchCount.WithLabelValues(queue).
 		Set(float64(len(result.Mismatches)))
 	for _, mm := range result.Mismatches {
 		m.mismatchTotal.WithLabelValues(
-			result.Network,
 			queue,
 			mm.Category,
 			severityLabel(severityOf(mm.Category)),
@@ -164,10 +162,10 @@ func (m *metrics) recordResult(result *EpochCompareResult) {
 	}
 	switch result.Status {
 	case StatusFail:
-		m.lastFailEpoch.WithLabelValues(result.Network, queue).
+		m.lastFailEpoch.WithLabelValues(queue).
 			Set(float64(result.Epoch))
 	case StatusError:
-		m.lastErrorEpoch.WithLabelValues(result.Network, queue).
+		m.lastErrorEpoch.WithLabelValues(queue).
 			Set(float64(result.Epoch))
 	}
 }
