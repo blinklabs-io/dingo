@@ -1377,8 +1377,12 @@ func optimalPoolRewardChecked(
 	// CIP-50: when pledgeLeverage (L) is set, a pool's reward-eligible stake is
 	// additionally capped at L*p (the pledge fraction times L), so sigma' =
 	// min(sigma, z0, L*p). A zero-pledge pool then has sigma' = 0 and earns no
-	// rewards. Subunit L can make sigma' lower than p', so the pledge-influence
-	// term can be negative; floorRatChecked clamps a non-positive reward to zero.
+	// rewards. L never caps p', so a subunit L can push sigma' below p' and make
+	// the pledge-influence term negative; with a0 > 0 and L = 0 (or any L below
+	// about a0*p'/z0) the whole product is negative. cardano-ledger's maxPool'
+	// floors that to a negative Coin, which compactCoinOrError rejects when the
+	// reward is applied to a registered account; floorRatChecked clamps it to
+	// zero instead.
 	if pledgeLeverage != nil {
 		leverageCap := new(big.Rat).Mul(pledgeLeverage, pledgeRatio)
 		s = minRat(s, leverageCap)

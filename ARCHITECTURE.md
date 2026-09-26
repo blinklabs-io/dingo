@@ -13034,7 +13034,9 @@ calculation epoch's Dijkstra parameters while all other reward inputs remain
 from the Conway performance epoch. A nil value (including the Dijkstra genesis
 default) leaves the original formula unchanged; otherwise
 `optimalPoolRewardChecked` computes
-`sigma' = min(sigma, z0, L*p)`. A zero-pledge pool then earns nothing. This
+`sigma' = min(sigma, z0, L*p)`. A zero-pledge pool then earns nothing. With a
+positive `a0`, `L = 0` or a very small `L` makes cardano-ledger's `maxPool'`
+negative; Dingo clamps that pool's optimal reward to zero. This
 single parameter path feeds both boundary application and asynchronous reward
 precomputation. The operator setting remains an experimental override only for
 pre-Dijkstra local networks, where the protocol parameter does not exist.
