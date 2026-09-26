@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
 )
 
@@ -86,9 +87,11 @@ func FuzzExtractHeaderCbor(f *testing.F) {
 	})
 }
 
-func FuzzExtractInvalidTxIndices(f *testing.F) {
+func FuzzRawBlockTransactionValidity(f *testing.F) {
 	addInvalidTxSeed(f, []uint{})
 	addInvalidTxSeed(f, []uint{0, 1, 42})
+	addInvalidTxSeedWithBodies(f, 2, []uint{1, 0})
+	addInvalidTxSeedWithBodies(f, 3, []uint{0, 0, 2})
 	f.Add([]byte(nil))
 	f.Add([]byte{0x80})
 
@@ -97,13 +100,39 @@ func FuzzExtractInvalidTxIndices(f *testing.F) {
 			t.Skip("block CBOR input is too large for fast fuzzing")
 		}
 
-		indices, err := extractInvalidTxIndices(blockCbor)
+		offsets, err := lcommon.ExtractTransactionOffsets(blockCbor)
+		if err != nil || offsets == nil {
+			return
+		}
+		validity, err := rawBlockTransactionValidity(offsets)
 		if err != nil {
 			return
 		}
-		for idx := range indices {
-			if idx < 0 {
-				t.Fatalf("invalid transaction index is negative: %d", idx)
+		if len(validity) != len(offsets.Transactions) {
+			t.Fatalf(
+				"validity flags = %d, want one per transaction (%d)",
+				len(validity),
+				len(offsets.Transactions),
+			)
+		}
+		// Only a strictly ascending list reads as a plain set of indexes.
+		ascending := true
+		for i := 1; i < len(offsets.InvalidTransactions); i++ {
+			if offsets.InvalidTransactions[i] <= offsets.InvalidTransactions[i-1] {
+				ascending = false
+				break
+			}
+		}
+		if !ascending {
+			return
+		}
+		listed := make(map[int]bool, len(offsets.InvalidTransactions))
+		for _, index := range offsets.InvalidTransactions {
+			listed[int(index)] = true // #nosec G115 -- bounded by the check above
+		}
+		for i, valid := range validity {
+			if valid == listed[i] {
+				t.Fatalf("transaction %d valid=%t, listed=%t", i, valid, listed[i])
 			}
 		}
 	})
@@ -169,6 +198,30 @@ func addInvalidTxSeed(f *testing.F, invalidTxs []uint) {
 		uint64(0),
 		[]any{},
 		[]any{},
+		map[uint64]any{},
+		invalidTxs,
+	})
+	if err != nil {
+		f.Fatalf("marshal invalid tx seed: %v", err)
+	}
+	f.Add(blockCbor)
+}
+
+func addInvalidTxSeedWithBodies(f *testing.F, count int, invalidTxs []uint) {
+	bodies := make([]any, count)
+	witnesses := make([]any, count)
+	for i := range bodies {
+		bodies[i] = map[uint64]any{
+			0: []any{},
+			1: []any{[]any{[]byte{0x60, byte(i)}, uint64(1)}},
+			2: uint64(i),
+		}
+		witnesses[i] = map[uint64]any{}
+	}
+	blockCbor, err := gcbor.Encode([]any{
+		uint64(0),
+		bodies,
+		witnesses,
 		map[uint64]any{},
 		invalidTxs,
 	})
