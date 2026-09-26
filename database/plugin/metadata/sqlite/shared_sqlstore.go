@@ -217,7 +217,7 @@ func checkpointWALWith(
 	if busy != 0 || walLog != checkpointed {
 		logger.Warn(
 			"WAL checkpoint could not fully complete "+
-				"(a reader is still holding an old snapshot); "+
+				"(a database lock prevented draining the WAL); "+
 				"will retry next tick",
 			"wal_frames", walLog,
 			"checkpointed_frames", checkpointed,

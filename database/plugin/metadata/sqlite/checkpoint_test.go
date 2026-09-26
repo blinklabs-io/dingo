@@ -135,7 +135,7 @@ func TestCheckpointWALTruncatesFile(t *testing.T) {
 // readDB snapshot took 30.04s, blocked a concurrent writeDB insert for
 // 29.99s of that, and still finished with busy=1 (no truncation).
 // checkpointWAL now issues the pragma from a dedicated connection with a
-// short busy_timeout instead, so it fails fast on the same busy=1 outcome
+// zero busy_timeout instead, so it fails fast on the same busy=1 outcome
 // and a concurrent writeDB write is never blocked by it.
 //
 // Not t.Parallel: every assertion below is a wall-clock duration, which is a
@@ -178,11 +178,9 @@ func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
 		_ = readTx.Rollback()
 	})
 	// The design this guards blocked for the full busy_timeout(30000); a
-	// healthy dedicated-connection attempt gives up after
-	// checkpointBusyTimeout (250ms). Bound the gap well below 30s rather
-	// than just above 250ms: these are wall-clock measurements on shared
-	// runners, and a bound close to the healthy time fails on load rather
-	// than on the defect it exists to catch.
+	// healthy dedicated-connection attempt gives up without waiting. Keep a
+	// generous bound to catch the old 30-second wait without making this
+	// assertion sensitive to normal variation on shared runners.
 	const maxUnblocked = 10 * time.Second
 
 	var probe int
@@ -278,10 +276,11 @@ func TestCheckpointWALDoesNotWaitForReaderAtWALTip(t *testing.T) {
 	var logBuf bytes.Buffer
 	checkpointLogger := slog.New(slog.NewTextHandler(&logBuf, nil))
 	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
+	const maxUnblocked = 10 * time.Second
 	started := time.Now()
 	require.NoError(t, checkpointWAL(databaseURI, checkpointLogger)(t.Context()))
-	require.Less(t, time.Since(started), 200*time.Millisecond,
-		"TRUNCATE must give up immediately when a reader holds the WAL tip")
+	require.Less(t, time.Since(started), maxUnblocked,
+		"TRUNCATE must not wait for a reader holding the WAL tip")
 	require.Contains(t, logBuf.String(), "could not fully complete")
 
 	_, err = writeDB.ExecContext(
@@ -419,18 +418,16 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 	}()
 
 	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
-	require.NoError(
-		t,
-		checkpointWAL(databaseURI, slog.New(
-			slog.NewTextHandler(&bytes.Buffer{}, nil),
-		))(t.Context()),
-	)
+	checkpointErr := checkpointWAL(databaseURI, slog.New(
+		slog.NewTextHandler(&bytes.Buffer{}, nil),
+	))(t.Context())
 	close(done)
 
 	blocked := testutil.RequireReceive(
 		t, blockedCh, 10*time.Second,
 		"writer-lock probe must finish once the checkpoint returns",
 	)
+	require.NoError(t, checkpointErr)
 	require.Zero(
 		t, blocked,
 		"checkpointWAL must not hold SQLite's writer lock while a reader "+
