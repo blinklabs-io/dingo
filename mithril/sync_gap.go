@@ -683,11 +683,12 @@ func processGapBlockTransactions(
 				err,
 			)
 		}
-		if err := governance.ProcessVotes(
+		// Gap blocks end at the imported ledger state, whose DRep expiry
+		// already reflects these votes and the dormant epochs after them.
+		if err := governance.ProcessHistoricalVotes(
 			tx,
 			point,
 			epochId,
-			conwayPParams.DRepInactivityPeriod,
 			db,
 			txn,
 		); err != nil {

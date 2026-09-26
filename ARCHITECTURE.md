@@ -7610,7 +7610,9 @@ suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
 resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
 without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
 snapshot-imported account's registration and delegation from its import
-baseline before rebuilding the live-stake aggregate.
+baseline before rebuilding the live-stake aggregate. Replayed DRep activity
+(backfill and gap blocks) records only the activity epoch and keeps the
+snapshot's DRep expiry.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay

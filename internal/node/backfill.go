@@ -667,9 +667,8 @@ func (b *Backfill) processBlockGovernance(
 		}
 	}
 	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
+		if err := governance.ProcessHistoricalVotes(
 			tx, point, epochId,
-			conwayPP.DRepInactivityPeriod,
 			b.db, txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -678,10 +677,9 @@ func (b *Backfill) processBlockGovernance(
 		}
 	}
 	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
+		if err := governance.ProcessHistoricalDRepActivityCertificates(
 			tx,
 			epochId,
-			conwayPP.DRepInactivityPeriod,
 			b.db,
 			txn,
 		); err != nil {

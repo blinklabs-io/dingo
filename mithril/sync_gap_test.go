@@ -503,6 +503,105 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 	assert.Equal(t, point.Slot, votes[0].AddedSlot)
 }
 
+// TestProcessGapBlockVoteKeepsSnapshotDRepExpiry covers gap blocks, which lie
+// at or below the imported ledger state's slot. The snapshot's DRep expiry
+// already counts the dormant epochs and proposal bumps after the vote (a vote
+// at epoch 510 with drepActivity 20 gives 530, and three dormant epochs added
+// by a later proposal give 533), so replaying the vote must record the
+// activity epoch and leave that expiry alone.
+func TestProcessGapBlockVoteKeepsSnapshotDRepExpiry(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	drepCred := testGapHash28("gap-drep")
+	importTxn := db.MetadataTxn(true)
+	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
+		return db.Metadata().ImportDrep(
+			&models.Drep{
+				Credential:  drepCred,
+				AddedSlot:   1000,
+				ExpiryEpoch: 533,
+				Active:      true,
+			},
+			&models.RegistrationDrep{
+				DrepCredential: drepCred,
+				AddedSlot:      1000,
+				DepositAmount:  500_000_000,
+			},
+			txn.Metadata(),
+		)
+	}))
+	proposalTxHash := testGapHash32("gap-proposal")
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        proposalTxHash,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 509,
+		ExpiresEpoch:  515,
+		AnchorHash:    testGapHash32("gap-proposal-anchor"),
+		Deposit:       1,
+		ReturnAddress: append([]byte{0xE1}, testGapHash28("gap-reward")...),
+		AddedSlot:     900,
+	}, nil))
+
+	var voterHash [28]byte
+	copy(voterHash[:], drepCred)
+	var actionTxHash [32]byte
+	copy(actionTxHash[:], proposalTxHash)
+	var voteTxHash lcommon.Blake2b256
+	copy(voteTxHash[:], testGapHash32("gap-vote-tx"))
+	voteTx := &mockGapGovernanceTransaction{
+		hash:    voteTxHash,
+		isValid: true,
+		votingProcedures: lcommon.VotingProcedures{
+			&lcommon.Voter{
+				Type: lcommon.VoterTypeDRepKeyHash,
+				Hash: voterHash,
+			}: {
+				&lcommon.GovActionId{TransactionId: actionTxHash}: {
+					Vote: models.VoteYes,
+				},
+			},
+		},
+	}
+	point := ocommon.Point{Slot: 950, Hash: testGapHash32("gap-vote-block")}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			[32]byte(voteTxHash): {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
+		},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	conwayPParams := testGapConwayProtocolParameters()
+	require.NoError(t, processGapBlockTransactions(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point,
+		[]lcommon.Transaction{voteTx},
+		offsets,
+		510,
+		conway.EraIdConway,
+		conwayPParams,
+		conwayPParams,
+	))
+
+	drep, err := db.GetDrep(drepCred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(533), drep.ExpiryEpoch)
+	assert.Equal(t, uint64(510), drep.LastActivityEpoch)
+}
+
 func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 	t.Parallel()
 

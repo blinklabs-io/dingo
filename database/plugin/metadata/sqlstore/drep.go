@@ -676,6 +676,45 @@ func (s *Store) UpdateDRepActivity(
 	return nil
 }
 
+// RecordDRepActivityEpoch sets a DRep's last activity epoch and leaves its
+// expiry alone. Historical replay stops at a snapshot anchor whose DRepState
+// expiry already includes dormant-epoch bumps the replay never sees, so only
+// the activity epoch, which the snapshot does not carry, is taken from it.
+// A missing DRep returns models.ErrDrepActivityNotUpdated, as
+// UpdateDRepActivity does.
+func (s *Store) RecordDRepActivityEpoch(
+	credentialTag uint8,
+	credential []byte,
+	activityEpoch uint64,
+	txn types.Txn,
+) error {
+	existing, err := s.GetDrepByCredential(credentialTag, credential, true, txn)
+	if err != nil {
+		return fmt.Errorf("check drep exists before activity record: %w", err)
+	}
+	if existing == nil {
+		return models.ErrDrepActivityNotUpdated
+	}
+	activity, err := checkedInt64(activityEpoch)
+	if err != nil {
+		return err
+	}
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+UPDATE drep SET last_activity_epoch = ?
+WHERE credential_tag = ? AND credential = ?`),
+		activity,
+		credentialTag,
+		credential,
+	); err != nil {
+		return fmt.Errorf("record drep activity epoch: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetExpiredDReps(
 	epoch uint64,
 	txn types.Txn,

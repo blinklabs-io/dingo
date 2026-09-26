@@ -481,6 +481,16 @@ type GovernanceStore interface {
 		types.Txn,
 	) error
 
+	// RecordDRepActivityEpoch updates only the DRep's last activity epoch,
+	// for historical replay below a snapshot anchor whose recorded expiry
+	// must stand.
+	RecordDRepActivityEpoch(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // activityEpoch
+		types.Txn,
+	) error
+
 	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
 	// or before the given epoch.
 	GetExpiredDReps(

@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -94,7 +95,7 @@ func addValidBackfillBlocksFrom(
 	}
 }
 
-func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
+func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -141,7 +142,11 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
-	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	// Backfill replays blocks below a Mithril anchor, whose DRepState expiry
+	// already counts the dormant epochs replay never sees, so the activity
+	// epoch is recorded and the stored expiry is kept rather than renewed to
+	// 100 + 20 as the live ledger would.
+	assert.Equal(t, uint64(25), drep.ExpiryEpoch)
 }
 
 func TestBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
@@ -272,7 +277,7 @@ func TestBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 	assert.Equal(t, 1, count)
 }
 
-func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
+func TestBackfillProcessBlockGovernanceRecordsDRepActivityInDijkstra(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -320,7 +325,11 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
-	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	// Backfill replays blocks below a Mithril anchor, whose DRepState expiry
+	// already counts the dormant epochs replay never sees, so the activity
+	// epoch is recorded and the stored expiry is kept rather than renewed to
+	// 100 + 20 as the live ledger would.
+	assert.Equal(t, uint64(25), drep.ExpiryEpoch)
 }
 
 func closeTestDB(db *database.Database) error {
@@ -777,6 +786,199 @@ func TestRun_RestoresSnapshotAccountDelegationAtAnchor(t *testing.T) {
 	assert.Empty(t, account.Drep, "unregistered-DRep delegation survived backfill")
 	assert.Equal(t, models.DrepTypeAddrKeyHash, account.DrepType)
 	assert.Equal(t, uint64(5_000), uint64(account.Reward))
+}
+
+// TestRun_KeepsSnapshotDRepExpiryAtAnchor covers DRep expiry, which the
+// snapshot records after rules backfill does not replay. In Conway a
+// registration (PV10+), an update, or a vote sets expiry to
+// epoch + drepActivity - numDormantEpochs; a transaction with proposals then
+// adds the accumulated dormant epochs to every DRep's expiry, and EPOCH counts
+// an epoch dormant when no proposal is active (Conway/Rules/GovCert.hs,
+// Certs.hs updateDormantDRepExpiry, Epoch.hs updateNumDormantEpochs).
+//
+// DRep A registers at epoch 500 with drepActivity 20 and no dormant epochs
+// (520); epochs 501-503 are dormant and a proposal at 504 adds 3, so the
+// snapshot records 523. DRep B votes at epoch 510 (530); epochs 517-519 are
+// dormant and a proposal at 520 adds 3, so the snapshot records 533. Replay
+// sees only the registration and the vote, so rewriting expiry from them
+// leaves 520 and 530.
+func TestRun_KeepsSnapshotDRepExpiryAtAnchor(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	const anchor = uint64(2)
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+
+	drepA := bytes.Repeat([]byte{0x81}, lcommon.AddressHashSize)
+	drepB := bytes.Repeat([]byte{0x82}, lcommon.AddressHashSize)
+	importTxn := db.MetadataTxn(true)
+	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
+		for _, imported := range []struct {
+			credential []byte
+			expiry     uint64
+		}{{drepA, 523}, {drepB, 533}} {
+			if err := db.Metadata().ImportDrep(
+				&models.Drep{
+					Credential:  imported.credential,
+					AddedSlot:   anchor,
+					ExpiryEpoch: imported.expiry,
+					Active:      true,
+				},
+				&models.RegistrationDrep{
+					DrepCredential: imported.credential,
+					AddedSlot:      anchor,
+					DepositAmount:  500_000_000,
+				},
+				txn.Metadata(),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	proposalTxHash := bytes.Repeat([]byte{0x83}, 32)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        proposalTxHash,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 509,
+		ExpiresEpoch:  515,
+		AnchorHash:    bytes.Repeat([]byte{0x84}, 32),
+		Deposit:       1,
+		ReturnAddress: append([]byte{0xE0}, bytes.Repeat([]byte{0x85}, 28)...),
+		AddedSlot:     1,
+	}, nil))
+
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x86}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion:      lcommon.ProtocolParametersProtocolVersion{Major: 10},
+		DRepDeposit:          500_000_000,
+		DRepInactivityPeriod: 20,
+	}
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.DisableNonceComputation()
+	replay := func(
+		id byte,
+		epoch uint64,
+		configure func(*mockledger.MockTransaction),
+	) {
+		t.Helper()
+		input, err := mockledger.NewTransactionInputBuilder().
+			WithTxId(bytes.Repeat([]byte{id + 1}, 32)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		builder := mockledger.NewTransactionBuilder()
+		configure(builder)
+		builder.WithId(bytes.Repeat([]byte{id}, 32))
+		builder.WithInputs(input)
+		builder.WithOutputs(output)
+		builder.WithValid(true)
+		tx, err := builder.Build()
+		require.NoError(t, err)
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		offsets := &database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				txHash: {BlockSlot: 1, ByteLength: 1},
+			},
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		}
+		for _, produced := range tx.Produced() {
+			var producedTxID [32]byte
+			copy(producedTxID[:], produced.Id.Id().Bytes())
+			offsets.UtxoOffsets[database.UtxoRef{
+				TxId:      producedTxID,
+				OutputIdx: produced.Id.Index(),
+			}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
+		}
+		acc := db.NewBatchAccumulator()
+		txn := db.Transaction(true)
+		defer txn.Release()
+		require.NoError(t, bf.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{id + 2}, 32)},
+			epoch,
+			eras.ConwayEraDesc.Id,
+			pp,
+			offsets,
+			acc,
+			txn,
+			nil,
+			false,
+		))
+		require.NoError(t, db.FlushBatch(acc, txn))
+		require.NoError(t, txn.Commit())
+	}
+	replay(0x90, 500, func(builder *mockledger.MockTransaction) {
+		builder.WithCertificates(&lcommon.RegistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(drepA),
+			},
+			Amount: 500_000_000,
+		})
+	})
+	var voterHash [28]byte
+	copy(voterHash[:], drepB)
+	var actionTxHash [32]byte
+	copy(actionTxHash[:], proposalTxHash)
+	replay(0xa0, 510, func(builder *mockledger.MockTransaction) {
+		builder.WithVotingProcedures(lcommon.VotingProcedures{
+			&lcommon.Voter{
+				Type: lcommon.VoterTypeDRepKeyHash,
+				Hash: voterHash,
+			}: {
+				&lcommon.GovActionId{TransactionId: actionTxHash}: {
+					Vote: models.VoteYes,
+				},
+			},
+		})
+	})
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			LastSlot:  1,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+	require.NoError(t, bf.Run(context.Background()))
+
+	for _, want := range []struct {
+		credential   []byte
+		expiry       uint64
+		lastActivity uint64
+	}{{drepA, 523, 500}, {drepB, 533, 510}} {
+		drep, err := db.GetDrep(want.credential, true, nil)
+		require.NoError(t, err)
+		require.NotNil(t, drep)
+		assert.True(t, drep.Active)
+		assert.Equal(t, want.expiry, drep.ExpiryEpoch,
+			"DRep %x expiry was rewritten by historical replay",
+			want.credential[:1],
+		)
+		assert.Equal(t, want.lastActivity, drep.LastActivityEpoch)
+	}
 }
 
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are

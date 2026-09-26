@@ -49,6 +49,44 @@ func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
 	return false
 }
 
+// drepActivityWriter records that a DRep was active in an epoch.
+type drepActivityWriter func(
+	credentialTag uint8,
+	credential []byte,
+	epoch uint64,
+	txn *database.Txn,
+) error
+
+// renewDRepExpiry is the live-ledger writer: activity also resets expiry.
+func renewDRepExpiry(
+	db *database.Database,
+	drepInactivityPeriod uint64,
+) drepActivityWriter {
+	return func(
+		credentialTag uint8,
+		credential []byte,
+		epoch uint64,
+		txn *database.Txn,
+	) error {
+		return db.UpdateDRepActivity(
+			credentialTag,
+			credential,
+			epoch,
+			drepInactivityPeriod,
+			txn,
+		)
+	}
+}
+
+// recordDRepActivityEpoch is the historical-replay writer. Replay below a
+// Mithril anchor does not run the dormant-epoch rules (Conway EPOCH
+// updateNumDormantEpochs, CERTS updateDormantDRepExpiry), so an expiry
+// recomputed from a historical vote or certificate would replace the correct
+// expiry the snapshot recorded with a stale one.
+func recordDRepActivityEpoch(db *database.Database) drepActivityWriter {
+	return db.RecordDRepActivityEpoch
+}
+
 // ProcessDRepActivityCertificates renews DRep activity for registration and
 // update certificates. Certificate persistence creates or updates the DRep row
 // before this function runs, and both writes participate in the same database
@@ -58,6 +96,37 @@ func ProcessDRepActivityCertificates(
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
 	db *database.Database,
+	txn *database.Txn,
+) error {
+	return processDRepActivityCertificates(
+		tx,
+		currentEpoch,
+		renewDRepExpiry(db, drepInactivityPeriod),
+		txn,
+	)
+}
+
+// ProcessHistoricalDRepActivityCertificates is ProcessDRepActivityCertificates
+// for replay of blocks at or below a Mithril snapshot anchor: it records each
+// DRep's activity epoch and keeps the expiry the snapshot recorded.
+func ProcessHistoricalDRepActivityCertificates(
+	tx lcommon.Transaction,
+	currentEpoch uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	return processDRepActivityCertificates(
+		tx,
+		currentEpoch,
+		recordDRepActivityEpoch(db),
+		txn,
+	)
+}
+
+func processDRepActivityCertificates(
+	tx lcommon.Transaction,
+	currentEpoch uint64,
+	recordActivity drepActivityWriter,
 	txn *database.Txn,
 ) error {
 	updated := make(map[string]struct{})
@@ -92,11 +161,10 @@ func ProcessDRepActivityCertificates(
 		if _, ok := updated[key]; ok {
 			continue
 		}
-		if err := db.UpdateDRepActivity(
+		if err := recordActivity(
 			credentialTag,
 			credential.Credential[:],
 			currentEpoch,
-			drepInactivityPeriod,
 			txn,
 		); err != nil {
 			return fmt.Errorf(
@@ -255,6 +323,44 @@ func ProcessVotes(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	return processVotes(
+		tx,
+		point,
+		currentEpoch,
+		renewDRepExpiry(db, drepInactivityPeriod),
+		db,
+		txn,
+	)
+}
+
+// ProcessHistoricalVotes is ProcessVotes for replay of blocks at or below a
+// Mithril snapshot anchor: it records votes and each voting DRep's activity
+// epoch, and keeps the expiry the snapshot recorded.
+func ProcessHistoricalVotes(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	return processVotes(
+		tx,
+		point,
+		currentEpoch,
+		recordDRepActivityEpoch(db),
+		db,
+		txn,
+	)
+}
+
+func processVotes(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	recordActivity drepActivityWriter,
+	db *database.Database,
+	txn *database.Txn,
+) error {
 	votingProcedures := tx.VotingProcedures()
 	if len(votingProcedures) == 0 {
 		return nil
@@ -301,11 +407,10 @@ func ProcessVotes(
 			}
 			credKey := string([]byte{drepCredTag}) + string(voter.Hash[:])
 			if !drepActivityUpdated[credKey] {
-				err := db.UpdateDRepActivity(
+				err := recordActivity(
 					drepCredTag,
 					voter.Hash[:],
 					currentEpoch,
-					drepInactivityPeriod,
 					txn,
 				)
 				if errors.Is(err, models.ErrDrepActivityNotUpdated) {
@@ -340,11 +445,10 @@ func ProcessVotes(
 							"component", "governance",
 						)
 					}
-					err = db.UpdateDRepActivity(
+					err = recordActivity(
 						drepCredTag,
 						voter.Hash[:],
 						currentEpoch,
-						drepInactivityPeriod,
 						txn,
 					)
 				}
