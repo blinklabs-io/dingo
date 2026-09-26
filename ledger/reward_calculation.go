@@ -2895,6 +2895,14 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	poolInputByKey := make(map[string]*models.RewardPoolInput, len(poolInputs))
 	poolKeys := make([]string, 0, len(poolInputs))
 	for _, poolInput := range poolInputs {
+		if poolInput == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward stake inputs contain a nil retained pool",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+			)
+			return nil
+		}
 		key := string(poolInput.PoolKeyHash)
 		if _, ok := poolInputByKey[key]; !ok {
 			poolKeys = append(poolKeys, key)
@@ -2920,7 +2928,11 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		}
 	}
 	for _, key := range poolKeys {
-		expected := uint64(poolInputByKey[key].DelegatedStake)
+		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
+		expected := uint64(poolInput.DelegatedStake)
 		actual := actualByPool[key]
 		if actual == expected {
 			continue
@@ -2999,7 +3011,11 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		}
 	}
 	for _, key := range poolKeys {
-		expected := uint64(poolInputByKey[key].OwnerStake)
+		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
+		expected := uint64(poolInput.OwnerStake)
 		actual := actualOwnerByPool[key]
 		if actual == expected {
 			continue
@@ -3021,6 +3037,15 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		// an intolerable gap.
 		largestOwner := largestOwnerInputByPool[key]
 		counterparty := largestNonOwnerInputByPool[key]
+		if largestOwner == nil || counterparty == nil {
+			ls.config.Logger.Warn(
+				"reconstructed reward owner stake inputs cannot be reconciled without owner and non-owner credentials",
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
+			)
+			return nil
+		}
 		// The donor is whichever row this transfer subtracts diff from:
 		// counterparty when the owner subset reconstructed too little
 		// (expected > actual, so largestOwner gains and counterparty pays),
@@ -3093,6 +3118,9 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	pruned := make([]*models.RewardStakeInput, 0, len(rebuilt))
 	for _, key := range poolKeys {
 		poolInput := poolInputByKey[key]
+		if poolInput == nil {
+			return nil
+		}
 		rows := rowsByPool[key]
 		expectedCount := poolInput.DelegatorCount
 		if uint64(len(rows)) == expectedCount {
@@ -4439,6 +4467,25 @@ func rewardParametersFromPParams(
 	return params, nil
 }
 
+// rewardEpochFees sums the fees an ended epoch collected, for the
+// RewardAdaPots row of the epoch that follows it.
+//
+// A node running through the whole epoch has every one of its transactions
+// stored locally, so summing the epoch's full slot range is exact. A node
+// bootstrapped from a Mithril snapshot mid-epoch does not: seedImportedRewardBasis
+// seeds that epoch's own pots row with ImportedEpochFees, the fees the
+// snapshot's anchor already accounts for (UTxOState.utxosFees minus
+// SnapShots.ssFee), and CapturedSlot at the anchor. When that row exists,
+// sum stored fees only after the anchor and add the imported amount instead
+// of summing from the epoch start -- summing the whole range would either
+// miss the pre-anchor fees entirely (dingo #3975) or double-count them once
+// the historical backfill (#4061) has stored pre-anchor transactions locally.
+// The two ranges are disjoint by construction, the same way
+// mergeImportedBlockCounts's imported and observed block counts are.
+//
+// A row with no ImportedEpochFees -- every row a live boundary writes, and
+// every imported row written before the field existed -- keeps the
+// whole-epoch local sum.
 func rewardEpochFees(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -4449,6 +4496,33 @@ func rewardEpochFees(
 	}
 	startSlot := epoch.StartSlot
 	endSlot := startSlot + uint64(epoch.LengthInSlots) - 1
+	imported, err := meta.GetRewardAdaPots(epoch.EpochId, metaTxn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get imported ADA pots for epoch %d: %w",
+			epoch.EpochId,
+			err,
+		)
+	}
+	if imported != nil && imported.ImportedEpochFees != nil &&
+		imported.CapturedSlot >= startSlot && imported.CapturedSlot <= endSlot {
+		postAnchorFees, err := meta.SumTransactionFeesInSlotRange(
+			imported.CapturedSlot+1, endSlot, metaTxn,
+		)
+		if err != nil {
+			return 0, err
+		}
+		total, overflow := addRewardUint64(
+			postAnchorFees, uint64(*imported.ImportedEpochFees),
+		)
+		if overflow {
+			return 0, fmt.Errorf(
+				"imported epoch fee total overflow for epoch %d",
+				epoch.EpochId,
+			)
+		}
+		return total, nil
+	}
 	return meta.SumTransactionFeesInSlotRange(startSlot, endSlot, metaTxn)
 }
 

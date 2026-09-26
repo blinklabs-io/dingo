@@ -348,21 +348,16 @@ func smallSecurityParamCardanoConfig(
 	k int,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	byronGenesisJSON := fmt.Sprintf(
-		`{"protocolConsts": {"k": %d, "protocolMagic": 2}}`,
-		k,
-	)
 	shelleyGenesisJSON := fmt.Sprintf(
 		`{"activeSlotsCoeff": 0.05, "securityParam": %d, "systemStart": "2022-10-25T00:00:00Z"}`,
 		k,
 	)
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	}
-	require.NoError(
-		t,
-		cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)),
+	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
 	)
+	require.NoError(t, err)
+	cfg.ByronGenesis().ProtocolConsts.K = k
 	require.NoError(
 		t,
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),

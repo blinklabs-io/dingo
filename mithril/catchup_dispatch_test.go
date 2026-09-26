@@ -20,10 +20,13 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,27 +89,347 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.Nil(t, res.Snapshot, "up-to-date catch-up should not sync")
 	})
 
-	t.Run("api mode is rejected", func(t *testing.T) {
+	t.Run("api mode rejects a divergent chain before mutation", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		_, anchorHash := validImmutableFiles(t, 1000)
+		wrongHash := bytes.Clone(anchorHash)
+		wrongHash[0] ^= 0xff
 		dataDir := t.TempDir()
-		seedCompleteDB(t, dataDir, "api", 1, true)
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "api",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1000,
+			Hash:     wrongHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
 
-		_, err := Sync(context.Background(), SyncConfig{
-			Network:         "preview",
-			DataDir:         dataDir,
-			StorageMode:     "api",
-			Backend:         BackendV2,
-			StoragePlugins:  testStoragePlugins(),
-			DatabaseWorkers: 1,
-			Logger:          discard,
+		_, err = Sync(context.Background(), SyncConfig{
+			Network:           "preprod",
+			DataDir:           dataDir,
+			StorageMode:       "api",
+			Backend:           BackendV2,
+			AggregatorURL:     fixture.server.URL,
+			AllowInsecureHTTP: true,
+			StoragePlugins:    testStoragePlugins(),
+			DatabaseWorkers:   1,
+			Logger:            discard,
 		})
 		require.Error(t, err)
-		require.ErrorContains(t, err, "core storage mode only")
+		require.ErrorContains(t, err, "diverg")
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "api",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		block, err := database.BlockByHash(db, wrongHash)
+		require.NoError(t, err)
+		require.EqualValues(t, 1000, block.Slot)
+		status, err := db.GetSyncState("sync_status", nil)
+		require.NoError(t, err)
+		require.Empty(t, status)
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	t.Run("legacy reward repair reconciles an existing database in place", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		_, anchorHash := validImmutableFiles(t, 1000)
+		dataDir := t.TempDir()
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1000,
+			Hash:     anchorHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, setImmutableImportMarker(db, 0))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		result, err := Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			AggregatorURL:           fixture.server.URL,
+			AllowInsecureHTTP:       true,
+			StoragePlugins:          testStoragePlugins(),
+			DatabaseWorkers:         1,
+			Logger:                  discard,
+			RepairLegacyRewardState: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.Snapshot)
+
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		pending, err := RewardStateRepairPending(db)
+		require.NoError(t, err)
+		require.False(t, pending)
+		block, err := database.BlockByHash(db, anchorHash)
+		require.NoError(t, err)
+		require.EqualValues(t, 1000, block.Slot,
+			"repair must retain the existing chain anchor")
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	t.Run("legacy reward repair resumes its durable artifact pin", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		_, anchorHash := validImmutableFiles(t, 1000)
+		dataDir := t.TempDir()
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1000,
+			Hash:     anchorHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, setImmutableImportMarker(db, 0))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairActiveKey, "1", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			"sync_status", syncStatusInProgress, nil,
+		))
+		require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
+			Backend:             BackendV2,
+			Network:             "preprod",
+			Digest:              fixture.artifact.Hash,
+			Epoch:               fixture.artifact.Beacon.Epoch,
+			ImmutableFileNumber: fixture.artifact.Beacon.ImmutableFileNumber,
+			CertificateHash:     fixture.artifact.CertificateHash,
+		}))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		result, err := Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			AggregatorURL:           fixture.server.URL,
+			AllowInsecureHTTP:       true,
+			StoragePlugins:          testStoragePlugins(),
+			DatabaseWorkers:         1,
+			Logger:                  discard,
+			RepairLegacyRewardState: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.Snapshot)
+
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		pending, err := RewardStateRepairPending(db)
+		require.NoError(t, err)
+		require.False(t, pending)
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	t.Run("legacy reward repair rebuilds api metadata in place", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		files, _ := validImmutableFiles(t, 1000)
+		firstHash := bytes.Clone(files["immutable/00000.secondary"][16:48])
+		headerCBOR, err := cbor.Encode(shelley.ShelleyBlockHeader{
+			Body: shelley.ShelleyBlockHeaderBody{
+				BlockNumber:       1,
+				Slot:              999,
+				BlockBodySize:     0,
+				ProtoMajorVersion: 1,
+			},
+		})
+		require.NoError(t, err)
+		blockBodyCBOR, err := cbor.Encode([]any{
+			cbor.RawMessage(headerCBOR), []any{}, []any{}, map[uint]any{},
+		})
+		require.NoError(t, err)
+		dataDir := t.TempDir()
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "api",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     999,
+			Hash:     firstHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     blockBodyCBOR,
+			Number:   1,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, setImmutableImportMarker(db, 0))
+		require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+			&models.BackfillCheckpoint{
+				Phase:     "metadata",
+				LastSlot:  999,
+				StartedAt: time.Now().Add(-time.Hour),
+				UpdatedAt: time.Now().Add(-time.Minute),
+				Completed: true,
+			},
+			nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		firstBackfilledSlot := ^uint64(0)
+		_, err = Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "api",
+			Backend:                 BackendV2,
+			AggregatorURL:           fixture.server.URL,
+			AllowInsecureHTTP:       true,
+			StoragePlugins:          testStoragePlugins(),
+			DatabaseWorkers:         1,
+			BackfillBatchSize:       100,
+			Logger:                  discard,
+			RepairLegacyRewardState: true,
+			OnProgress: func(progress SyncProgress) {
+				if progress.Phase == PhaseBackfill &&
+					progress.Active && progress.CurrentSlot > 0 &&
+					progress.CurrentSlot < firstBackfilledSlot {
+					firstBackfilledSlot = progress.CurrentSlot
+				}
+			},
+		})
+		require.NoError(t, err)
+		require.EqualValues(t, 1000, firstBackfilledSlot,
+			"API repair must run historical metadata backfill")
+
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "api",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		pending, err := RewardStateRepairPending(db)
+		require.NoError(t, err)
+		require.False(t, pending)
+		block, err := database.BlockByHash(db, firstHash)
+		require.NoError(t, err)
+		require.EqualValues(t, 999, block.Slot)
+		checkpoint, err := db.Metadata().GetBackfillCheckpoint("metadata", nil)
+		require.NoError(t, err)
+		require.NotNil(t, checkpoint)
+		require.True(t, checkpoint.Completed)
+		require.GreaterOrEqual(t, checkpoint.LastSlot, uint64(1000))
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+}
+
+func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
+	t.Parallel()
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("complete database has no repair marker", func(t *testing.T) {
+		dataDir := t.TempDir()
+		seedCompleteDB(t, dataDir, "core", 0, false)
+		_, err := Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			RepairLegacyRewardState: true,
+			Logger:                  discard,
+		})
+		require.ErrorContains(t, err, "pending repair marker")
+	})
+
+	t.Run("interrupted sync is not an active repair", func(t *testing.T) {
+		dataDir := t.TempDir()
+		seedCompleteDB(t, dataDir, "core", 0, false)
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			"sync_status", syncStatusInProgress, nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		_, err = Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			RepairLegacyRewardState: true,
+			Logger:                  discard,
+		})
+		require.ErrorContains(t, err, "without its in-progress marker")
 	})
 }
 
 // TestDecideCatchUp pins the dispatch decision that selects catch-up semantics
 // (divergence check before mutation + reconcile of stale live rows) for every
-// v2 core import into a previously-complete database — including interrupted
+// v2 import into a previously-complete database — including interrupted
 // catch-ups and databases without an import marker — so no path can re-import
 // a snapshot over live state without reconciliation.
 //
@@ -140,6 +463,9 @@ func TestDecideCatchUp(t *testing.T) {
 		} else {
 			require.NoError(t, db.DeleteSyncState(syncKeyImmutableMax, nil))
 		}
+		require.NoError(t, db.DeleteSyncState(
+			RewardStateRepairPendingKey, nil,
+		))
 		require.NoError(t, db.DeleteSyncState(syncKeyCatchUpActive, nil))
 	}
 	modeOf := func(t *testing.T) syncMode {
@@ -185,7 +511,7 @@ func TestDecideCatchUp(t *testing.T) {
 				"no marker means the full artifact range")
 		})
 
-	t.Run("markerless complete api database keeps the full sync path",
+	t.Run("markerless complete api database keeps the ordinary sync path",
 		func(t *testing.T) {
 			setState(t, "", 0, false)
 			dec, err := decideCatchUp(
@@ -202,6 +528,14 @@ func TestDecideCatchUp(t *testing.T) {
 			require.False(t, dec.engage)
 			require.False(t, dec.upToDate)
 		})
+
+	t.Run("api catch-up with marker is rejected without reward repair", func(t *testing.T) {
+		setState(t, "", 1, true)
+		_, err := decideCatchUp(
+			ctx, db, modeOf(t), BackendV2, "api", noAggregator, true, discard,
+		)
+		require.ErrorContains(t, err, "API-mode metadata replacement")
+	})
 
 	t.Run("v1 backend never engages", func(t *testing.T) {
 		setState(t, "", 2, true)
@@ -244,14 +578,18 @@ func TestDecideCatchUp(t *testing.T) {
 		require.True(t, dec.upToDate)
 	})
 
-	t.Run("api mode with a newer target is rejected", func(t *testing.T) {
+	t.Run("api mode with a newer target engages catch-up", func(t *testing.T) {
 		fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
 		setState(t, "", 1, true)
-		_, err := decideCatchUp(
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		dec, err := decideCatchUp(
 			ctx, db, modeOf(t), BackendV2, "api", fix.server.URL, true, discard,
 		)
-		require.Error(t, err)
-		require.ErrorContains(t, err, "core storage mode only")
+		require.NoError(t, err)
+		require.True(t, dec.engage)
+		require.EqualValues(t, 1, dec.start)
 	})
 
 	t.Run("interrupted sync with marker re-runs as catch-up",
@@ -268,9 +606,12 @@ func TestDecideCatchUp(t *testing.T) {
 			require.EqualValues(t, 7, dec.start)
 		})
 
-	t.Run("interrupted api sync with marker resumes normally",
+	t.Run("interrupted api sync with marker resumes repair from marker",
 		func(t *testing.T) {
 			setState(t, syncStatusInProgress, 7, true)
+			require.NoError(t, db.SetSyncState(
+				RewardStateRepairPendingKey, "1", nil,
+			))
 			dec, err := decideCatchUp(
 				ctx,
 				db,
@@ -282,7 +623,8 @@ func TestDecideCatchUp(t *testing.T) {
 				discard,
 			)
 			require.NoError(t, err)
-			require.False(t, dec.engage)
+			require.True(t, dec.engage)
+			require.EqualValues(t, 7, dec.start)
 			require.False(t, dec.upToDate)
 		})
 

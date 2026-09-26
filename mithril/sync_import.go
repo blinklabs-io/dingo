@@ -93,6 +93,28 @@ func ensureMithrilBackfillCheckpoint(db *database.Database) error {
 	return nil
 }
 
+func resetMithrilBackfillCheckpoint(db *database.Database) error {
+	cp, err := db.Metadata().GetBackfillCheckpoint(
+		node.BackfillPhase, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("reading backfill checkpoint for repair: %w", err)
+	}
+	now := time.Now()
+	if cp == nil {
+		cp = &models.BackfillCheckpoint{Phase: node.BackfillPhase}
+	}
+	cp.LastSlot = 0
+	cp.TotalSlots = 0
+	cp.Completed = false
+	cp.StartedAt = now
+	cp.UpdatedAt = now
+	if err := db.Metadata().SetBackfillCheckpoint(cp, nil); err != nil {
+		return fmt.Errorf("resetting backfill checkpoint for repair: %w", err)
+	}
+	return nil
+}
+
 func updateMithrilReadyState(
 	db *database.Database,
 	logger *slog.Logger,

@@ -102,6 +102,7 @@ func newTestTxCbor(
 		0: []any{
 			[]any{inputHash, uint64(0)},
 		},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
 		2: uint64(200_000),
 		3: ttl,
 	}
@@ -294,6 +295,7 @@ func TestEvaluateTxConwaySkipsScriptContextWithoutRedeemers(t *testing.T) {
 				[]any{inputHash, uint64(0)},
 			},
 		},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
 		2: uint64(200_000),
 		3: uint64(testPastHorizonSlot),
 	}

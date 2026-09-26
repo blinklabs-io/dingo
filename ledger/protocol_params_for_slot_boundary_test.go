@@ -264,7 +264,7 @@ func newMultiEraForecastCfg(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 1 }
 	}`)))
@@ -315,8 +315,8 @@ func TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary(
 	// (shelley genesis updateQuorum = 1). Per the Shelley update system a
 	// proposal carries its submission epoch (0) and is enacted as epoch 1's
 	// parameters at the epoch 0->1 boundary.
-	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
-		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 2)},
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		12: cbor.Rat{Rat: big.NewRat(1, 2)},
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
@@ -403,7 +403,7 @@ func newShelleyUpdateQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
@@ -430,7 +430,7 @@ func newAllegraAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
@@ -513,7 +513,7 @@ func newAlonzoBabbageAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42
