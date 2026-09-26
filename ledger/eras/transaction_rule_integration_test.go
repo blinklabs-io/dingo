@@ -33,7 +33,8 @@ import (
 
 // validateBabbageWithRule keeps the test at Dingo's era entry point while
 // isolating one upstream UTxO predicate, so unrelated rules cannot mask its
-// result.
+// result. It and its siblings below swap a package-level rule list, so their
+// callers must not call t.Parallel.
 func validateBabbageWithRule(
 	t *testing.T,
 	ruleID lcommon.UtxoValidationRuleId,
@@ -1880,6 +1881,187 @@ func TestValidateTxAlonzoAndBabbageDatumSetRules(t *testing.T) {
 				},
 			},
 		))
+	})
+}
+
+// The reference runs the output predicates over every output a transaction
+// can create, whatever its declared validity. A phase-2-invalid transaction
+// creates only its collateral return, so that is the output the predicates
+// must still reach.
+func TestValidateTxCollateralReturnOutputPredicatesIgnoreValidityFlag(t *testing.T) {
+	byronAddress, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		make([]byte, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{Payload: make([]byte, 100)},
+	)
+	require.NoError(t, err)
+	keyAddress := newTestKeyAddress(t)
+	wellFormed := babbage.BabbageTransactionOutput{
+		OutputAddress: keyAddress,
+		OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+	}
+	type limits struct {
+		adaPerUtxoByte uint64
+		maxValueSize   uint
+		network        uint
+	}
+	permissive := limits{
+		adaPerUtxoByte: 1,
+		maxValueSize:   5_000,
+		network:        uint(lcommon.AddressNetworkTestnet),
+	}
+	predicates := []struct {
+		name      string
+		ruleID    lcommon.UtxoValidationRuleId
+		malformed babbage.BabbageTransactionOutput
+		limits    limits
+	}{
+		{
+			name:      "minimum ada",
+			ruleID:    lcommon.UtxoValidationRuleOutputTooSmall,
+			malformed: babbage.BabbageTransactionOutput{OutputAddress: keyAddress},
+			limits:    permissive,
+		},
+		{
+			name:      "maximum value size",
+			ruleID:    lcommon.UtxoValidationRuleOutputTooBig,
+			malformed: wellFormed,
+			limits:    limits{adaPerUtxoByte: 1, network: permissive.network},
+		},
+		{
+			name:   "byron address attributes",
+			ruleID: lcommon.UtxoValidationRuleOutputBootAddrAttrsTooBig,
+			malformed: babbage.BabbageTransactionOutput{
+				OutputAddress: byronAddress,
+				OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+			},
+			limits: permissive,
+		},
+		{
+			name:      "network identifier",
+			ruleID:    lcommon.UtxoValidationRuleWrongNetwork,
+			malformed: wellFormed,
+			limits: limits{
+				adaPerUtxoByte: 1,
+				maxValueSize:   5_000,
+				network:        uint(lcommon.AddressNetworkMainnet),
+			},
+		},
+	}
+	newState := func(l limits) *mockLedgerState {
+		state := newMockLedgerState()
+		state.skipPhase2Validation = true
+		state.networkId = l.network
+		return state
+	}
+	eras := []struct {
+		name     string
+		validate func(*testing.T, lcommon.UtxoValidationRuleId, babbage.BabbageTransactionOutput, bool, limits) error
+	}{
+		{
+			name: "Babbage",
+			validate: func(t *testing.T, ruleID lcommon.UtxoValidationRuleId, output babbage.BabbageTransactionOutput, valid bool, l limits) error {
+				tx := &babbage.BabbageTransaction{
+					Body:      babbage.BabbageTransactionBody{TxCollateralReturn: &output},
+					TxIsValid: valid,
+				}
+				return validateBabbageWithRule(t, ruleID, tx, newState(l), &babbage.BabbageProtocolParameters{
+					AdaPerUtxoByte: l.adaPerUtxoByte,
+					MaxValueSize:   l.maxValueSize,
+				})
+			},
+		},
+		{
+			name: "Conway",
+			validate: func(t *testing.T, ruleID lcommon.UtxoValidationRuleId, output babbage.BabbageTransactionOutput, valid bool, l limits) error {
+				tx := &conway.ConwayTransaction{
+					Body:      conway.ConwayTransactionBody{TxCollateralReturn: &output},
+					TxIsValid: valid,
+				}
+				return validateConwayWithRule(t, ruleID, tx, newState(l), &conway.ConwayProtocolParameters{
+					AdaPerUtxoByte: l.adaPerUtxoByte,
+					MaxValueSize:   l.maxValueSize,
+				})
+			},
+		},
+	}
+	for _, era := range eras {
+		for _, predicate := range predicates {
+			for _, valid := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s %s isValid=%t", era.name, predicate.name, valid), func(t *testing.T) {
+					require.Error(t, era.validate(t, predicate.ruleID, predicate.malformed, valid, predicate.limits))
+					require.NoError(t, era.validate(t, predicate.ruleID, wellFormed, valid, permissive))
+				})
+			}
+		}
+	}
+}
+
+// A witness datum whose hash only an ordinary output declares is an allowed
+// supplemental datum in Alonzo and Babbage; the same datum is not allowed
+// once no output declares it.
+func TestValidateTxAlonzoAndBabbageOutputDatumHashJustifiesSupplementalDatum(t *testing.T) {
+	datum, datumHash := testDatum(t)
+	keyAddress := newTestKeyAddress(t)
+	newState := func() *mockLedgerState {
+		state := newMockLedgerState()
+		state.skipPhase2Validation = true
+		return state
+	}
+	var notAllowed lcommon.NotAllowedSupplementalDatumsError
+
+	t.Run("Alonzo", func(t *testing.T) {
+		tx := &alonzo.AlonzoTransaction{
+			Body: alonzo.AlonzoTransactionBody{
+				TxOutputs: []alonzo.AlonzoTransactionOutput{{
+					OutputAddress:   keyAddress,
+					OutputAmount:    mary.MaryTransactionOutputValue{Amount: 1_000_000},
+					OutputDatumHash: &datumHash,
+				}},
+			},
+			WitnessSet: alonzo.AlonzoTransactionWitnessSet{
+				WsPlutusData: alonzo.PlutusDataList{Items: []lcommon.Datum{datum}},
+			},
+			TxIsValid: true,
+		}
+		validate := func() error {
+			return validateAlonzoWithRule(
+				t,
+				lcommon.UtxoValidationRuleSupplementalDatums,
+				tx,
+				newState(),
+				&alonzo.AlonzoProtocolParameters{},
+			)
+		}
+		require.NoError(t, validate())
+		tx.Body.TxOutputs = nil
+		require.ErrorAs(t, validate(), &notAllowed)
+	})
+
+	t.Run("Babbage", func(t *testing.T) {
+		tx := &babbage.BabbageTransaction{
+			Body: babbage.BabbageTransactionBody{
+				TxOutputs: []babbage.BabbageTransactionOutput{
+					babbageOutputWithDatumHash(t, keyAddress, 1_000_000, datumHash),
+				},
+			},
+			WitnessSet: babbage.BabbageTransactionWitnessSet{
+				WsPlutusData: alonzo.PlutusDataList{Items: []lcommon.Datum{datum}},
+			},
+			TxIsValid: true,
+		}
+		validate := func() error {
+			return validateBabbageWithRule(
+				t,
+				lcommon.UtxoValidationRuleSupplementalDatums,
+				tx,
+				newState(),
+				&babbage.BabbageProtocolParameters{},
+			)
+		}
+		require.NoError(t, validate())
+		tx.Body.TxOutputs = nil
+		require.ErrorAs(t, validate(), &notAllowed)
 	})
 }
 
