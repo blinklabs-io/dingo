@@ -231,3 +231,37 @@ func TestProcessEpochImportedParameterChangeChain(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessEpochPublishesStagedParametersOnlyAtEnact pins when a ratified
+// ParameterChange takes effect: RATIFY stages it for later candidates but
+// reports no parameter change and leaves the caller's parameters untouched;
+// the next boundary's ENACT publishes it.
+func TestProcessEpochPublishesStagedParametersOnlyAtEnact(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+	proposal := chainTestProposal(
+		lcommon.GovActionTypeParameterChange, testBytes(32, 0xA1), nil,
+		400, 0, testBytes(29, 0), chainTestParameterChange(t, 61),
+	)
+	stored := chainTestStore(t, db, proposal)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, stored...)
+
+	pparams := chainTestPParams()
+	out := chainTestRunEpoch(t, db, stabilityTestEpoch, pparams)
+	require.Equal(t, 1, out.RatifiedCount)
+	assert.False(t, out.PParamsChanged)
+	assert.Same(t, pparams, out.UpdatedPParams)
+	assert.Equal(t, newRat(0, 1), chainTestMotionNoConfidence(t, pparams))
+
+	enactOut := chainTestRunEpoch(t, db, stabilityTestEpoch+1, pparams)
+	require.Equal(t, 1, enactOut.EnactedCount)
+	assert.True(t, enactOut.PParamsChanged)
+	assert.Equal(
+		t,
+		newRat(61, 100),
+		chainTestMotionNoConfidence(t, enactOut.UpdatedPParams),
+	)
+	assert.Equal(t, newRat(0, 1), chainTestMotionNoConfidence(t, pparams))
+}
