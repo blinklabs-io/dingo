@@ -41,7 +41,11 @@ func TestBuildDingoConfigCarriesTokenRegistry(t *testing.T) {
 			RequestTimeout:        9 * time.Minute,
 			UserAgent:             "custom-agent/9",
 			MaxBytes:              123,
+			MaxDecompressedBytes:  456,
 			MaxEntryBytes:         45,
+			MaxArchiveEntries:     67,
+			MaxAcceptedEntries:    34,
+			MaxBatchBytes:         89,
 			StoreLogos:            true,
 			AllowPrivateAddresses: true,
 		},
@@ -66,7 +70,11 @@ func TestBuildDingoConfigCarriesTokenRegistry(t *testing.T) {
 	require.Equal(t, 9*time.Minute, got.RequestTimeout)
 	require.Equal(t, "custom-agent/9", got.UserAgent)
 	require.Equal(t, int64(123), got.MaxBytes)
+	require.Equal(t, int64(456), got.MaxDecompressedBytes)
 	require.Equal(t, int64(45), got.MaxEntryBytes)
+	require.Equal(t, 67, got.MaxArchiveEntries)
+	require.Equal(t, 34, got.MaxAcceptedEntries)
+	require.Equal(t, int64(89), got.MaxBatchBytes)
 	require.True(t, got.StoreLogos)
 	require.True(t, got.AllowPrivateAddresses)
 }

@@ -695,8 +695,16 @@ func buildDingoConfig(
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
+				MaxDecompressedBytes: cfg.TokenRegistry.
+					MaxDecompressedBytes,
 				MaxEntryBytes: cfg.TokenRegistry.
 					MaxEntryBytes,
+				MaxArchiveEntries: cfg.TokenRegistry.
+					MaxArchiveEntries,
+				MaxAcceptedEntries: cfg.TokenRegistry.
+					MaxAcceptedEntries,
+				MaxBatchBytes: cfg.TokenRegistry.
+					MaxBatchBytes,
 				StoreLogos: cfg.TokenRegistry.StoreLogos,
 				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,

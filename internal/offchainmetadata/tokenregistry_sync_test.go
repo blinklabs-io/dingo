@@ -21,11 +21,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +57,18 @@ type fakeTokenRegistryStore struct {
 	upsertHook      func()
 	ops             []string
 	syncStateErr    map[string]error
+	commitErr       error
+	maxBatchBytes   int64
+	transactionHook func()
+}
+
+type fakeTokenRegistryTxn struct {
+	store     *fakeTokenRegistryStore
+	entries   map[string]models.TokenRegistryEntry
+	syncState map[string]string
+	prunes    int
+	cutoff    time.Time
+	closed    bool
 }
 
 func newFakeTokenRegistryStore() *fakeTokenRegistryStore {
@@ -66,7 +82,7 @@ func (f *fakeTokenRegistryStore) UpsertTokenRegistryEntries(
 	_ context.Context,
 	entries []models.TokenRegistryEntry,
 	syncedAt time.Time,
-	_ types.Txn,
+	txn types.Txn,
 ) (int, error) {
 	f.mu.Lock()
 	hook := f.upsertHook
@@ -81,12 +97,23 @@ func (f *fakeTokenRegistryStore) UpsertTokenRegistryEntries(
 	}
 	f.upserts++
 	f.ops = append(f.ops, "upsert")
+	var batchBytes int64
+	for idx := range entries {
+		batchBytes += tokenRegistryEntryRetainedBytes(&entries[idx])
+	}
+	if batchBytes > f.maxBatchBytes {
+		f.maxBatchBytes = batchBytes
+	}
 	if f.upsertFailFrom > 0 && f.upserts >= f.upsertFailFrom {
 		return 0, errors.New("simulated store failure mid-snapshot")
 	}
+	target := f.entries
+	if fakeTxn, ok := txn.(*fakeTokenRegistryTxn); ok {
+		target = fakeTxn.entries
+	}
 	for _, entry := range entries {
 		entry.UpdatedAt = syncedAt
-		f.entries[entry.Subject] = entry
+		target[entry.Subject] = entry
 	}
 	return len(entries), nil
 }
@@ -94,16 +121,23 @@ func (f *fakeTokenRegistryStore) UpsertTokenRegistryEntries(
 func (f *fakeTokenRegistryStore) PruneTokenRegistryEntriesBefore(
 	_ context.Context,
 	cutoff time.Time,
-	_ types.Txn,
+	txn types.Txn,
 ) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.prunes++
-	f.lastPruneCutoff = cutoff
+	target := f.entries
+	if fakeTxn, ok := txn.(*fakeTokenRegistryTxn); ok {
+		target = fakeTxn.entries
+		fakeTxn.prunes++
+		fakeTxn.cutoff = cutoff
+	} else {
+		f.prunes++
+		f.lastPruneCutoff = cutoff
+	}
 	removed := 0
-	for subject, entry := range f.entries {
+	for subject, entry := range target {
 		if entry.UpdatedAt.Before(cutoff) {
-			delete(f.entries, subject)
+			delete(target, subject)
 			removed++
 		}
 	}
@@ -120,8 +154,7 @@ func (f *fakeTokenRegistryStore) GetSyncState(
 }
 
 func (f *fakeTokenRegistryStore) SetSyncState(
-	key, value string,
-	_ types.Txn,
+	key, value string, txn types.Txn,
 ) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -129,7 +162,73 @@ func (f *fakeTokenRegistryStore) SetSyncState(
 	if err, ok := f.syncStateErr[key]; ok && err != nil {
 		return err
 	}
-	f.syncState[key] = value
+	if fakeTxn, ok := txn.(*fakeTokenRegistryTxn); ok {
+		fakeTxn.syncState[key] = value
+	} else {
+		f.syncState[key] = value
+	}
+	return nil
+}
+
+func (f *fakeTokenRegistryStore) Transaction(_ context.Context) types.Txn {
+	f.mu.Lock()
+	hook := f.transactionHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entries := make(map[string]models.TokenRegistryEntry, len(f.entries))
+	maps.Copy(entries, f.entries)
+	syncState := make(map[string]string, len(f.syncState))
+	maps.Copy(syncState, f.syncState)
+	return &fakeTokenRegistryTxn{
+		store: f, entries: entries, syncState: syncState,
+	}
+}
+
+type completionReadCloser struct {
+	reader   *bytes.Reader
+	consumed atomic.Bool
+}
+
+func (r *completionReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if r.reader.Len() == 0 {
+		r.consumed.Store(true)
+	}
+	return n, err
+}
+
+func (r *completionReadCloser) Close() error { return nil }
+
+func (t *fakeTokenRegistryTxn) Commit() error {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	if t.closed {
+		return errors.New("transaction already closed")
+	}
+	t.closed = true
+	if t.store.commitErr != nil {
+		return t.store.commitErr
+	}
+	t.store.entries = t.entries
+	t.store.syncState = t.syncState
+	t.store.prunes += t.prunes
+	if !t.cutoff.IsZero() {
+		t.store.lastPruneCutoff = t.cutoff
+	}
+	return nil
+}
+
+func (t *fakeTokenRegistryTxn) Rollback() error {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	t.closed = true
 	return nil
 }
 
@@ -480,6 +579,239 @@ func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, store.state(TokenRegistrySyncStateKey),
 		"a failed sync must not record the ETag")
+}
+
+func TestTokenRegistrySyncRejectsExcessiveDecompressedContent(t *testing.T) {
+	var body bytes.Buffer
+	gz := gzip.NewWriter(&body)
+	tw := tar.NewWriter(gz)
+	content := make([]byte, 4<<20)
+	_, err := rand.New(rand.NewSource(1)).Read(content)
+	require.NoError(t, err)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Name: "cardano-token-registry-master/README.md", Typeflag: tar.TypeReg,
+		Mode: 0o644, Size: int64(len(content)),
+	}))
+	_, err = tw.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+
+	tracked := &countingTestReader{reader: bytes.NewReader(body.Bytes())}
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, "https://registry.invalid", func(c *TokenRegistryConfig) {
+		c.MaxDecompressedBytes = 4 << 10
+	})
+
+	_, err = sync.stageSnapshot(t.Context(), tracked)
+
+	require.ErrorContains(t, err, "decompressed")
+	require.Less(t, tracked.read, int64(body.Len()), "reader must stop before consuming the full archive")
+	require.Empty(t, store.snapshot())
+}
+
+type countingTestReader struct {
+	reader io.Reader
+	read   int64
+}
+
+func (r *countingTestReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.read += int64(n)
+	return n, err
+}
+
+func TestTokenRegistrySyncRejectsExcessiveArchiveEntries(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"README.md": "one",
+		"LICENSE":   "two",
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "", "",
+		),
+	})
+	server := newRegistryServer(t, body)
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.MaxArchiveEntries = 2
+	})
+
+	_, err := sync.SyncOnce(t.Context())
+
+	require.ErrorContains(t, err, "archive entries")
+	require.Empty(t, store.snapshot())
+	require.Empty(t, store.state(tokenRegistryStampKey))
+}
+
+func TestTokenRegistrySyncRejectsExcessiveAcceptedMappings(t *testing.T) {
+	subjects := manySubjects(3)
+	files := make(map[string]string, len(subjects))
+	for idx, subject := range subjects {
+		files["mappings/"+subject+".json"] = mappingJSON(
+			subject, fmt.Sprintf("token %d", idx), "", "",
+		)
+	}
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "established", "", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.MaxAcceptedEntries = 2
+		c.MaxBatchBytes = 100
+	})
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	entriesBefore := store.snapshot()
+	stampBefore := store.state(tokenRegistryStampKey)
+	etagBefore := store.state(TokenRegistrySyncStateKey)
+	identityBefore := store.state(tokenRegistrySnapshotIDKey)
+	server.setBody(tarballOf(t, files), `"too-many"`)
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.ErrorContains(t, err, "accepted mappings")
+	require.Equal(t, entriesBefore, store.snapshot())
+	require.Equal(t, stampBefore, store.state(tokenRegistryStampKey))
+	require.Equal(t, etagBefore, store.state(TokenRegistrySyncStateKey))
+	require.Equal(t, identityBefore, store.state(tokenRegistrySnapshotIDKey))
+}
+
+func TestTokenRegistrySyncBoundsRetainedBatchBytes(t *testing.T) {
+	subjects := manySubjects(4)
+	files := make(map[string]string, len(subjects))
+	for _, subject := range subjects {
+		files["mappings/"+subject+".json"] = mappingJSON(
+			subject, strings.Repeat("N", 150), "", "",
+		)
+	}
+	server := newRegistryServer(t, tarballOf(t, files))
+	store := newFakeTokenRegistryStore()
+	const maxBatchBytes int64 = 400
+	sync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.MaxBatchBytes = maxBatchBytes
+	})
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, len(subjects), written)
+	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
+}
+
+// TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit exercises the
+// syncer's per-entry guard with a direct library configuration whose batch
+// cap is below its entry cap; node config validation normally rejects that
+// combination.
+func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
+	t.Parallel()
+
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"stored before oversized mapping",
+			"DJED",
+			"",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync, logs := captureSync(t, store, server.URL)
+
+	written, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+	prunesBefore := store.prunes
+
+	const (
+		maxEntryBytes int64 = 1024
+		maxBatchBytes int64 = 128
+	)
+	oversized := mappingJSON(
+		syncSubjectDjed,
+		strings.Repeat("X", 256),
+		"DJED",
+		"",
+	)
+	require.Less(t, int64(len(oversized)), maxEntryBytes)
+	oversizedEntry, err := ParseTokenRegistryEntry([]byte(oversized))
+	require.NoError(t, err)
+	require.Greater(
+		t,
+		tokenRegistryEntryRetainedBytes(oversizedEntry),
+		maxBatchBytes,
+	)
+	sync.maxEntryBytes = maxEntryBytes
+	sync.maxBatchBytes = maxBatchBytes
+	store.mu.Lock()
+	store.maxBatchBytes = 0
+	store.mu.Unlock()
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectDjed + ".json": oversized,
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"small accepted mapping",
+			"NUT",
+			"",
+		),
+	}), `"etag2"`)
+
+	written, err = sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+	require.Contains(t, logs.String(), "skipped=1")
+	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
+	require.Equal(t, prunesBefore, store.prunes,
+		"a skipped entry must defer reconciliation")
+	entries := store.snapshot()
+	require.Equal(
+		t,
+		"stored before oversized mapping",
+		entries[syncSubjectDjed].Name,
+		"the previous usable mapping must remain stored",
+	)
+	require.Equal(t, "small accepted mapping", entries[syncSubjectNut].Name)
+}
+
+func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	tracked := &completionReadCloser{reader: bytes.NewReader(body)}
+	client := &http.Client{Transport: roundTripFunc(func(
+		_ *http.Request,
+	) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"ETag": []string{`"etag"`}},
+			Body:       tracked,
+		}, nil
+	})}
+	store := newFakeTokenRegistryStore()
+	transactionStarted := false
+	store.transactionHook = func() {
+		transactionStarted = true
+		require.True(
+			t,
+			tracked.consumed.Load(),
+			"metadata transaction began before artifact ingestion completed",
+		)
+	}
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:                 store,
+		SourceURL:             "https://registry.example.test/archive.tar.gz",
+		HTTPClient:            client,
+		AllowPrivateAddresses: true,
+	})
+	require.NoError(t, err)
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+	require.True(t, transactionStarted)
 }
 
 func TestTokenRegistrySyncSkipsOversizedMapping(t *testing.T) {
@@ -904,16 +1236,10 @@ func manySubjects(n int) []string {
 	return out
 }
 
-// TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries covers a
-// snapshot that fails *after* at least one batch has already been written,
-// which the HTTP-error test does not reach.
-//
-// Snapshot application is deliberately not atomic -- see the syncer's
-// applySnapshot doc comment -- so earlier batches do persist. What must hold
-// is that the failure costs nothing already being served: no entry is lost,
-// no properties are cleared, nothing is pruned, and the ETag is not advanced,
-// so the next run re-applies the snapshot in full.
-func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
+// TestTokenRegistrySyncFailureAfterBatchFlushRollsBackSnapshot covers a store
+// failure after one batch has executed in the transaction. No row or snapshot
+// state from the rejected artifact may become visible.
+func TestTokenRegistrySyncFailureAfterBatchFlushRollsBackSnapshot(
 	t *testing.T,
 ) {
 	// A subject already served from an earlier, successful snapshot.
@@ -963,6 +1289,7 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 		entries[syncSubjectDjed].Ticker,
 		"an already-served subject must keep its properties",
 	)
+	require.Len(t, entries, 1, "rejected snapshot rows must roll back")
 	require.Equal(
 		t,
 		prunesBefore,
@@ -977,10 +1304,10 @@ func TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries(
 	)
 }
 
-// TestTokenRegistrySyncRecoversAfterPartialSnapshot completes the story: the
-// run following a partial snapshot applies the whole thing and reconciles, so
-// the partial state is transient rather than sticky.
-func TestTokenRegistrySyncRecoversAfterPartialSnapshot(t *testing.T) {
+// TestTokenRegistrySyncRetriesAfterRolledBackSnapshot completes the story: a
+// failed attempt leaves no partial rows, and the next pass applies the whole
+// snapshot.
+func TestTokenRegistrySyncRetriesAfterRolledBackSnapshot(t *testing.T) {
 	subjects := manySubjects(tokenRegistryBatchSize + 50)
 	files := map[string]string{}
 	for i, subject := range subjects {
@@ -998,7 +1325,9 @@ func TestTokenRegistrySyncRecoversAfterPartialSnapshot(t *testing.T) {
 
 	_, err := sync.SyncOnce(t.Context())
 	require.Error(t, err)
-	require.Len(t, store.snapshot(), tokenRegistryBatchSize)
+	require.Empty(t, store.snapshot())
+	require.Empty(t, store.state(tokenRegistryStampKey))
+	require.Empty(t, store.state(TokenRegistrySyncStateKey))
 
 	// Clear the fault; the retry sees the same registry.
 	store.mu.Lock()
@@ -1010,6 +1339,69 @@ func TestTokenRegistrySyncRecoversAfterPartialSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(subjects), written)
 	require.Len(t, store.snapshot(), len(subjects))
+}
+
+func TestTokenRegistrySyncReportsStagingCleanupFailure(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	cleanupErr := errors.New("simulated staging cleanup failure")
+	var stagePath string
+	sync.removeStageFile = func(path string) error {
+		stagePath = path
+		require.NoError(t, os.Remove(path))
+		return cleanupErr
+	}
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.Zero(t, written)
+	require.ErrorIs(t, err, cleanupErr)
+	require.Len(
+		t,
+		store.snapshot(),
+		1,
+		"the snapshot commits before its staging file is removed",
+	)
+	require.NotEmpty(t, store.state(TokenRegistrySyncStateKey))
+	_, statErr := os.Stat(stagePath)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestTokenRegistrySyncPreservesPrimaryErrorWhenCleanupFails(
+	t *testing.T,
+) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	primaryErr := errors.New("simulated upsert failure")
+	store.upsertErr = primaryErr
+	sync, logs := captureSync(t, store, server.URL)
+	cleanupErr := errors.New("simulated staging cleanup failure")
+	sync.removeStageFile = func(path string) error {
+		require.NoError(t, os.Remove(path))
+		return cleanupErr
+	}
+
+	written, err := sync.SyncOnce(t.Context())
+
+	require.Zero(t, written)
+	require.ErrorIs(t, err, primaryErr)
+	require.NotErrorIs(t, err, cleanupErr)
+	require.Empty(t, store.snapshot())
+	require.Contains(
+		t,
+		logs.String(),
+		"cleaning token registry staging file failed after sync error",
+	)
+	require.Contains(t, logs.String(), cleanupErr.Error())
 }
 
 // TestTokenRegistrySyncDoesNotPruneEmptySnapshot guards the worst failure
@@ -1710,11 +2102,10 @@ func TestTokenRegistrySyncPersistsETagBeforeIdentity(t *testing.T) {
 	)
 }
 
-// TestTokenRegistrySyncCrashAfterApplyStillRetires is the behavioral end of
-// the same property. A crash that loses the tag and identity writes must not
-// also cost the stamp, or a restart inside the same second would reuse it and
-// spare the subjects the interrupted snapshot dropped.
-func TestTokenRegistrySyncCrashAfterApplyStillRetires(t *testing.T) {
+// TestTokenRegistrySyncStateWriteFailureRollsBackApply proves validator state
+// cannot diverge from the rows it describes. A failure writing the ETag rolls
+// back the new rows, prune, stamp, and identity together.
+func TestTokenRegistrySyncStateWriteFailureRollsBackApply(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1737,10 +2128,13 @@ func TestTokenRegistrySyncCrashAfterApplyStillRetires(t *testing.T) {
 	_, err := first.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.Len(t, store.snapshot(), 2)
+	stampBefore := store.state(tokenRegistryStampKey)
+	etagBefore := store.state(TokenRegistrySyncStateKey)
+	identityBefore := store.state(tokenRegistrySnapshotIDKey)
 
-	// The tag and identity writes fail, as a crash between them would look.
+	// The tag write fails after rows and pruning have executed in the same
+	// transaction.
 	store.failSyncState(TokenRegistrySyncStateKey, errors.New("crash"))
-	store.failSyncState(tokenRegistrySnapshotIDKey, errors.New("crash"))
 	server.setBody(tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1754,11 +2148,43 @@ func TestTokenRegistrySyncCrashAfterApplyStillRetires(t *testing.T) {
 	restarted.now = func() time.Time { return frozen }
 	_, err = restarted.SyncOnce(t.Context())
 
+	require.ErrorContains(t, err, "entity tag")
+	require.Len(t, store.snapshot(), 2)
+	require.Contains(t, store.snapshot(), syncSubjectDjed)
+	require.Equal(t, stampBefore, store.state(tokenRegistryStampKey))
+	require.Equal(t, etagBefore, store.state(TokenRegistrySyncStateKey))
+	require.Equal(t, identityBefore, store.state(tokenRegistrySnapshotIDKey))
+}
+
+func TestTokenRegistrySyncCommitFailureDoesNotAdvanceSnapshot(t *testing.T) {
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "old name", "NUT", "",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync := newTestSync(t, store, server.URL, nil)
+	_, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
-	require.NotContains(
-		t,
-		store.snapshot(),
-		syncSubjectDjed,
-		"a snapshot whose state writes failed must still have retired the dropped subject",
-	)
+	entriesBefore := store.snapshot()
+	stampBefore := store.state(tokenRegistryStampKey)
+	etagBefore := store.state(TokenRegistrySyncStateKey)
+	identityBefore := store.state(tokenRegistrySnapshotIDKey)
+
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "new name", "NEW", "",
+		),
+	}), `"etag2"`)
+	store.mu.Lock()
+	store.commitErr = errors.New("simulated commit failure")
+	store.mu.Unlock()
+
+	_, err = sync.SyncOnce(t.Context())
+
+	require.ErrorContains(t, err, "commit token registry snapshot")
+	require.Equal(t, entriesBefore, store.snapshot())
+	require.Equal(t, stampBefore, store.state(tokenRegistryStampKey))
+	require.Equal(t, etagBefore, store.state(TokenRegistrySyncStateKey))
+	require.Equal(t, identityBefore, store.state(tokenRegistrySnapshotIDKey))
 }
