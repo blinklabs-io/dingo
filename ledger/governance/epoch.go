@@ -135,11 +135,10 @@ type EpochOutput struct {
 }
 
 // ProcessEpoch runs the ordered governance tick at an epoch
-// boundary: enact proposals ratified in the previous epoch, expire
-// overdue proposals, then ratify currently active proposals whose
-// tallies meet threshold. The order matches the Cardano spec:
-// ENACT first (so the current root reflects the new state), then
-// RATIFY (which uses the updated root).
+// boundary: enact proposals ratified in the previous epoch, drop proposals
+// whose expiry was applied at an earlier boundary, ratify proposals from the
+// preceding epoch, then mark failed overdue proposals expired. ENACT precedes
+// RATIFY so it uses the updated purpose roots and protocol parameters.
 func ProcessEpoch(
 	in *EpochInput,
 ) (*EpochOutput, error) {
@@ -405,69 +404,18 @@ func ProcessEpoch(
 			return nil, err
 		}
 	}
-
-	// --- EXPIRY -------------------------------------------------------
-	// Fetch proposals whose expiry epoch is in the past but which have
-	// not yet been enacted, expired, or deleted. The active-proposals
-	// query used below excludes these by construction (it filters
-	// `expires_epoch >= NewEpoch`), so we need a dedicated read to mark
-	// them expired. Marking expired does not return the deposit -- see the
-	// DROP step above, which does so exactly one epoch later.
-	expired, err := in.DB.GetExpiringGovernanceProposals(
-		in.NewEpoch, in.Txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get expiring proposals: %w", err)
-	}
-	// Replay window for the "mark expired" write itself (idempotent, but
-	// kept symmetric with the enact/drop replay reads above).
-	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
-		in.NewEpoch,
-		in.BoundarySlot,
-		in.Txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get boundary-expired proposals: %w", err)
-	}
-	expireProposal := func(p *models.GovernanceProposal, replay bool) error {
-		if replay {
-			return nil
-		}
-		expiredEpoch := in.NewEpoch
-		expiredSlot := in.BoundarySlot
-		p.ExpiredEpoch = &expiredEpoch
-		p.ExpiredSlot = &expiredSlot
-		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
-			return fmt.Errorf("mark expired: %w", err)
-		}
-		out.ExpiredCount++
-		return nil
-	}
-	for _, p := range replayedExpired {
-		if err := expireProposal(p, true); err != nil {
-			return nil, err
-		}
-	}
-	for _, p := range expired {
-		if err := expireProposal(p, false); err != nil {
-			return nil, err
-		}
-	}
-
-	// --- COMPETING SUBTREE REMOVAL ---------------------------------------
+	// --- ENACTMENT-DRIVEN SUBTREE REMOVAL ---------------------------------
 	// Enactment advances a purpose chain: descendants of the enacted action
 	// remain valid, while competing siblings and their descendants are
-	// removed. Natural expiry removes descendants of the expired action.
-	expiredSeeds := append(
-		append(make([]*models.GovernanceProposal, 0,
-			len(replayedExpired)+len(expired)), replayedExpired...),
-		expired...,
-	)
+	// removed before RATIFY considers the remaining proposals. Expiry-driven
+	// removal is deferred until the proposal's deposit is returned one epoch
+	// later.
 	orphanCount, err := removeOrphanedProposals(
 		in.DB,
 		in.Txn,
 		successfullyEnacted,
-		expiredSeeds,
+		nil,
+		in.PrevEpoch,
 		in.NewEpoch,
 		in.BoundarySlot,
 		in.Logger,
@@ -477,15 +425,15 @@ func ProcessEpoch(
 	}
 	out.OrphanedCount = orphanCount
 
-	// Active proposals still in play: not expired past the new epoch,
-	// not enacted, not marked expired, not soft-deleted.
+	// RATIFY uses the preceding epoch's pulser state, which includes actions
+	// expiring at this boundary. Querying at PrevEpoch preserves the database's
+	// canonical proposal order for both current and final-boundary candidates.
 	stillActive, err := in.DB.GetActiveGovernanceProposals(
-		in.NewEpoch, in.Txn,
+		in.PrevEpoch, in.Txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get active proposals: %w", err)
 	}
-
 	// --- RATIFICATION -------------------------------------------------
 	//
 	// The inputs assembled below (TallyContext, activeDRepCount,
@@ -852,6 +800,56 @@ func ProcessEpoch(
 		}
 	}
 
+	// --- EXPIRY -------------------------------------------------------
+	// RATIFY has now had its final chance to accept each expiring action.
+	// Mark only proposals that remain unratified; accepted actions move to
+	// ENACT on the next boundary.
+	expired, err := in.DB.GetExpiringGovernanceProposals(
+		in.NewEpoch, in.Txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get expiring proposals: %w", err)
+	}
+	for _, p := range expired {
+		expiredEpoch := in.NewEpoch
+		expiredSlot := in.BoundarySlot
+		p.ExpiredEpoch = &expiredEpoch
+		p.ExpiredSlot = &expiredSlot
+		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
+			return nil, fmt.Errorf("mark expired: %w", err)
+		}
+		out.ExpiredCount++
+	}
+	// Remove descendants only for actions that failed RATIFY. Accepted
+	// actions remain pending enactment and retain their successor tree.
+	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get boundary-expired proposals: %w", err)
+	}
+	expiredSeeds := append(
+		append(make([]*models.GovernanceProposal, 0,
+			len(replayedExpired)+len(expired)), replayedExpired...),
+		expired...,
+	)
+	expiredOrphanCount, err := removeOrphanedProposals(
+		in.DB,
+		in.Txn,
+		nil,
+		expiredSeeds,
+		in.NewEpoch,
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("remove expired proposal descendants: %w", err)
+	}
+	out.OrphanedCount += expiredOrphanCount
+
 	if in.Logger != nil && len(stillActive) > 0 {
 		elapsed := time.Since(tallyStart)
 		if elapsed >= slowGovernanceTallyThreshold {
@@ -1095,7 +1093,7 @@ func countActiveDReps(
 
 func drepActiveAtEpoch(drep *models.Drep, currentEpoch uint64) bool {
 	return drep != nil &&
-		(drep.ExpiryEpoch == 0 || drep.ExpiryEpoch > currentEpoch)
+		(drep.ExpiryEpoch == 0 || drep.ExpiryEpoch >= currentEpoch)
 }
 
 func committeeNoConfidenceState(
@@ -1217,11 +1215,12 @@ func removeOrphanedProposals(
 	txn *database.Txn,
 	enacted []*models.GovernanceProposal,
 	expired []*models.GovernanceProposal,
+	activeEpoch uint64,
 	epoch uint64,
 	slot uint64,
 	logger *slog.Logger,
 ) (int, error) {
-	active, err := db.GetActiveGovernanceProposals(epoch, txn)
+	active, err := db.GetActiveGovernanceProposals(activeEpoch, txn)
 	if err != nil {
 		return 0, fmt.Errorf("get active governance proposals: %w", err)
 	}
@@ -1260,11 +1259,10 @@ func removeOrphanedProposals(
 	// action's own deposit before calling returnProposalDeposits (Conway
 	// Rules/Epoch.hs `allRemovedGovActions`), so an enactment-driven removal
 	// refunds now, exactly like the winner's deposit did in EnactProposal.
-	// Only the expiry-driven sweep defers, because dingo marks a proposal
-	// expired one boundary before cardano-ledger removes it; that half is
-	// left for the next tick's DROP step. The enactment sweep runs first so
-	// a proposal reachable both ways takes the enacting epoch, which is when
-	// cardano-ledger would have removed it.
+	// Only the expiry-driven sweep defers deposit return, because the proposal
+	// is removed from the tree one boundary after expiry is recorded. The
+	// enactment sweep runs first so a proposal reachable both ways follows
+	// enactment timing.
 	removed := make(map[string]struct{})
 	count := 0
 	sweep := func(

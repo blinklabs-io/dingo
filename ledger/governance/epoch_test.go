@@ -479,7 +479,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 		nil, nil, &ratifiedEpoch, &ratifiedSlot,
 	), nil))
 	require.NoError(t, db.SetGovernanceProposal(buildNoConfidenceProposal(
-		t, siblingHash, 0, 12, 25, siblingAddr, 101,
+		t, siblingHash, 0, 4, 25, siblingAddr, 101,
 		nil, nil, nil, nil,
 	), nil))
 
@@ -507,6 +507,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	}
 
 	out := runEpoch(5, 500)
+	assert.Equal(t, 1, out.EnactedCount)
 	assert.Equal(t, 1, out.OrphanedCount)
 
 	winner, err := store.GetAccountByCredential(0, winnerCred, false, nil)
@@ -807,7 +808,7 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 					ActionIndex:   0,
 					ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
 					ProposedEpoch: 4,
-					ExpiresEpoch:  10,
+					ExpiresEpoch:  4,
 					AnchorURL:     "https://example.invalid/no-confidence",
 					AnchorHash:    testBytes(32, 0xA2),
 					ReturnAddress: testBytes(29, 0xA3),
@@ -846,6 +847,11 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, proposal.RatifiedEpoch)
 			assert.Equal(t, uint64(5), *proposal.RatifiedEpoch)
+			assert.Nil(
+				t,
+				proposal.ExpiredEpoch,
+				"a proposal ratified at its final boundary must not also expire",
+			)
 		})
 	}
 }
@@ -1420,21 +1426,45 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 		},
 		{
 			Credential:  testBytes(28, 2),
-			ExpiryEpoch: 10,
+			ExpiryEpoch: 99,
 			Active:      true,
 		},
 		{
 			Credential:  testBytes(28, 3),
-			ExpiryEpoch: 11,
+			ExpiryEpoch: 100,
+			Active:      true,
+		},
+		{
+			Credential:  testBytes(28, 4),
+			ExpiryEpoch: 101,
 			Active:      true,
 		},
 	} {
 		require.NoError(t, store.CreateDrep(nil, &drep))
 	}
 
-	count, err := countActiveDReps(db, nil, 10)
-	require.NoError(t, err)
-	assert.Equal(t, 2, count)
+	for _, test := range []struct {
+		epoch uint64
+		count int
+	}{
+		{epoch: 99, count: 4},
+		{epoch: 100, count: 3},
+		{epoch: 101, count: 2},
+	} {
+		count, err := countActiveDReps(db, nil, test.epoch)
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			test.count,
+			count,
+			"active DRep count at epoch %d",
+			test.epoch,
+		)
+		state, err := LoadDRepVotingState(db, nil, test.epoch, false)
+		require.NoError(t, err)
+		assert.Len(t, state.Dreps, test.count,
+			"voting DRep set at epoch %d", test.epoch)
+	}
 }
 
 func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
