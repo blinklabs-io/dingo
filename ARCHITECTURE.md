@@ -4119,7 +4119,7 @@ chain/manager lock cycle used by chain creation. Iterator and reconciliation
 paths already hold the manager lock, so they call the locked index helper
 directly rather than re-entering the manager lock.
 
-#### Retained block cache and the rollback-target invariant
+### Retained block cache and the rollback-target invariant
 
 `ChainManager.removeBlockByIndex` deletes a rolled-back block's row but first
 puts the block into the manager's LRU block cache, because ephemeral fork

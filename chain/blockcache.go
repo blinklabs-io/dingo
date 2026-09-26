@@ -23,7 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // DefaultBlockCacheCapacity is the default maximum number of
@@ -65,7 +64,7 @@ func blockCacheKey(hash []byte) ([32]byte, error) {
 func newBlockCache(
 	capacity int,
 	promRegistry prometheus.Registerer,
-) *blockCache {
+) (*blockCache, error) {
 	if capacity <= 0 {
 		capacity = DefaultBlockCacheCapacity
 	}
@@ -76,21 +75,26 @@ func newBlockCache(
 		logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
 	if promRegistry != nil {
-		c.initMetrics(promRegistry)
+		if err := c.initMetrics(promRegistry); err != nil {
+			return nil, err
+		}
 	}
-	return c
+	return c, nil
 }
 
 func (c *blockCache) initMetrics(
 	promRegistry prometheus.Registerer,
-) {
-	promautoFactory := promauto.With(promRegistry)
-	c.cachedBlocks = promautoFactory.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "dingo_chain_manager_cached_blocks",
-			Help: "current number of cached blocks in the chain manager LRU cache",
-		},
-	)
+) error {
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: blockCacheMetricName,
+		Help: "current number of cached blocks in the chain manager LRU cache",
+	})
+	registered, err := registerPrometheusMetric(promRegistry, gauge)
+	if err != nil {
+		return fmt.Errorf("register block cache metric: %w", err)
+	}
+	c.cachedBlocks = registered
+	return nil
 }
 
 func (c *blockCache) updateMetrics() {
