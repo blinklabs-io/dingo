@@ -342,33 +342,37 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		if rewindPrimaryChain && !primaryChainAlreadyHeld {
-			if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
+		return ls.withDestructiveDatabaseTransition(func() error {
+			if rewindPrimaryChain && !primaryChainAlreadyHeld {
+				if err := ls.rewindPrimaryChainForRecovery(
+					rewindPoint,
+				); err != nil {
+					return fmt.Errorf(
+						"rewind primary chain for replay recovery: %w",
+						err,
+					)
+				}
+				primaryChainRewound = true
+			}
+			// The chain moves first while the rollback anchor is guaranteed to
+			// remain available. If metadata synchronization fails, the primary
+			// chain is still at a retained point and reconciliation can finish.
+			// The cycle that first starts holding at an unchanged tip repairs the
+			// metadata the failed block left above it; the cycles that keep
+			// holding at that same tip reuse what it restored.
+			if err := ls.rollbackWithBlocks(
+				rewindPoint,
+				nil,
+				replayHolding && !wasReplayHolding &&
+					pointMatches(rewindPoint, ledgerTip.Point),
+			); err != nil {
 				return fmt.Errorf(
-					"rewind primary chain for replay recovery: %w",
+					"rollback ledger state for replay recovery: %w",
 					err,
 				)
 			}
-			primaryChainRewound = true
-		}
-		// The chain moves first while the rollback anchor is guaranteed to
-		// remain available. If metadata synchronization fails, the primary
-		// chain is still at a retained point and reconciliation can finish.
-		// The cycle that first starts holding at an unchanged tip repairs the
-		// metadata the failed block left above it; the cycles that keep
-		// holding at that same tip reuse what it restored.
-		if err := ls.rollbackWithBlocks(
-			rewindPoint,
-			nil,
-			replayHolding && !wasReplayHolding &&
-				pointMatches(rewindPoint, ledgerTip.Point),
-		); err != nil {
-			return fmt.Errorf(
-				"rollback ledger state for replay recovery: %w",
-				err,
-			)
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
@@ -817,30 +821,32 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
-			if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
-				yielded = true
-				return nil
+		return ls.withDestructiveDatabaseTransition(func() error {
+			if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
+				if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+					yielded = true
+					return nil
+				}
+				return fmt.Errorf(
+					"rewind primary chain after deterministic transaction validation failure: %w",
+					err,
+				)
 			}
-			return fmt.Errorf(
-				"rewind primary chain after deterministic transaction validation failure: %w",
-				err,
-			)
-		}
-		// The first rejection of this block at this tip repairs the metadata
-		// the failed apply left above it; the redelivery that the resync
-		// latch already records reuses what that repair restored.
-		if err := ls.rollbackWithBlocks(
-			rewindPoint,
-			nil,
-			!resyncSpent && pointMatches(rewindPoint, ledgerTip.Point),
-		); err != nil {
-			return fmt.Errorf(
-				"rollback ledger state after deterministic transaction validation failure: %w",
-				err,
-			)
-		}
-		return nil
+			// The first rejection of this block at this tip repairs the metadata
+			// the failed apply left above it; the redelivery that the resync
+			// latch already records reuses what that repair restored.
+			if err := ls.rollbackWithBlocks(
+				rewindPoint,
+				nil,
+				!resyncSpent && pointMatches(rewindPoint, ledgerTip.Point),
+			); err != nil {
+				return fmt.Errorf(
+					"rollback ledger state after deterministic transaction validation failure: %w",
+					err,
+				)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return false, err
@@ -1679,49 +1685,51 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		if err := ls.rewindPrimaryChainForRecovery(
-			rewindPoint,
-		); err != nil {
-			return fmt.Errorf(
-				"rewind primary chain after validation failure: %w",
-				err,
-			)
-		}
-		// Roll back the ledger metadata state to the rewind point. Without
-		// this, the chain is pruned to rewindPoint but the UTxO database
-		// still reflects the failing block's post-apply state — consumed
-		// inputs stay consumed, created outputs stay created. When peers
-		// re-deliver the block we just rewound past, ledger validation
-		// looks up its inputs, finds them already marked consumed, and
-		// fails UtxoValidateBadInputsUtxo and
-		// UtxoValidateValueNotConservedUtxo ("bad input(s)" and "value not
-		// conserved (consumed 0)") again, looping the recovery indefinitely
-		// until process restart. Primary-chain rollback only touches the
-		// chain store — the matching ledger rollback must be explicit.
-		//
-		// Match on the rule names above, not on the number the wrapped error
-		// prints. That number is this era's index into the upstream
-		// gouroboros validation-rule slice, so it shifts whenever upstream
-		// inserts or reorders a rule -- twice in recent memory: v0.202.5
-		// inserted UtxoValidateRequiredRedeemers (22/24 became 29/32) and
-		// v0.202.6 inserted UtxoValidateCurrentTreasuryValue at index 0,
-		// shifting everything by one again (29/32 became 30/33). On the
-		// currently pinned v0.202.6 they print as rule 30 and rule 33, but
-		// treat that as a fact about the pin rather than about the rules, and
-		// re-measure after any gouroboros bump instead of trusting this line.
-		// Stale numbers here have twice pointed diagnosis at the wrong root
-		// cause (#3165, #3678).
-		if err := ls.rollbackWithBlocks(
-			rewindPoint,
-			nil,
-			repairSameTip,
-		); err != nil {
-			return fmt.Errorf(
-				"rollback ledger state after validation failure: %w",
-				err,
-			)
-		}
-		return nil
+		return ls.withDestructiveDatabaseTransition(func() error {
+			if err := ls.rewindPrimaryChainForRecovery(
+				rewindPoint,
+			); err != nil {
+				return fmt.Errorf(
+					"rewind primary chain after validation failure: %w",
+					err,
+				)
+			}
+			// Roll back the ledger metadata state to the rewind point. Without
+			// this, the chain is pruned to rewindPoint but the UTxO database
+			// still reflects the failing block's post-apply state — consumed
+			// inputs stay consumed, created outputs stay created. When peers
+			// re-deliver the block we just rewound past, ledger validation
+			// looks up its inputs, finds them already marked consumed, and
+			// fails UtxoValidateBadInputsUtxo and
+			// UtxoValidateValueNotConservedUtxo ("bad input(s)" and "value not
+			// conserved (consumed 0)") again, looping the recovery indefinitely
+			// until process restart. Primary-chain rollback only touches the
+			// chain store — the matching ledger rollback must be explicit.
+			//
+			// Match on the rule names above, not on the number the wrapped error
+			// prints. That number is this era's index into the upstream
+			// gouroboros validation-rule slice, so it shifts whenever upstream
+			// inserts or reorders a rule -- twice in recent memory: v0.202.5
+			// inserted UtxoValidateRequiredRedeemers (22/24 became 29/32) and
+			// v0.202.6 inserted UtxoValidateCurrentTreasuryValue at index 0,
+			// shifting everything by one again (29/32 became 30/33). On the
+			// currently pinned v0.202.6 they print as rule 30 and rule 33, but
+			// treat that as a fact about the pin rather than about the rules, and
+			// re-measure after any gouroboros bump instead of trusting this line.
+			// Stale numbers here have twice pointed diagnosis at the wrong root
+			// cause (#3165, #3678).
+			if err := ls.rollbackWithBlocks(
+				rewindPoint,
+				nil,
+				repairSameTip,
+			); err != nil {
+				return fmt.Errorf(
+					"rollback ledger state after validation failure: %w",
+					err,
+				)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return false, err

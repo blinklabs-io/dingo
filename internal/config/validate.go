@@ -300,7 +300,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//     that port for the hours the bootstrap takes and a refused probe
 	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
-	//   - UTxORPC, Blockfrost, Mesh, Midnight: serving modes under API
+	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
 	//     storage. Dev mode forces API storage on at startup, and node.Run
 	//     keys that off the *configured* runMode — `dingo serve` with
 	//     runMode "dev" still runs dev — so the configured mode is
@@ -315,6 +315,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
+	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
@@ -344,6 +345,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"plugins.api.blockfrost.config.port",
 			c.BindAddr,
 			blockfrostPort,
+			apiListeners,
+			false,
+		},
+		{
+			"plugins.api.kupo.config.port",
+			c.BindAddr,
+			kupoPort,
 			apiListeners,
 			false,
 		},
@@ -416,7 +424,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 
 	// The shared api.tls mode enum is checked here so a typo is
 	// caught once, with a single clear message, rather than surfacing
-	// identically from every one of the three API providers that inherit
+	// identically from every one of the four API providers that inherit
 	// it. Certificate/key presence is deliberately NOT
 	// checked here: a provider legitimately may supply only its own
 	// certFilePath/keyFilePath while inheriting just `mode: server` from

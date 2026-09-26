@@ -344,7 +344,8 @@ Configuration Precedence (highest to lowest):
 
 Plugins:
   Provider selectors use --blob, --metadata, --mempool,
-  --blockfrost-provider, --mesh-provider, and --utxorpc-provider.
+  --blockfrost-provider, --kupo-provider, --mesh-provider, and
+  --utxorpc-provider.
   Provider configuration uses the plugins YAML tree or generic
   DINGO_PLUGINS_* environment variables. Run 'dingo list' to see providers.
 

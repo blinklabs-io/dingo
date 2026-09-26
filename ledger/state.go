@@ -3502,6 +3502,22 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	}
 }
 
+// withDestructiveDatabaseTransition keeps coordinated API and lifecycle
+// snapshots from opening while a logical rollback deletes primary-chain blobs
+// in one transaction and truncates the metadata they back in a later one.
+// Ordinary writes keep using the commit barrier independently; this scope is
+// only for the cross-transaction destructive boundary.
+func (ls *LedgerState) withDestructiveDatabaseTransition(
+	op func() error,
+) error {
+	if ls.db == nil {
+		return op()
+	}
+	finish := ls.db.BeginDestructiveTransition()
+	defer finish()
+	return op()
+}
+
 // utxoPruningDeferredForCatchup reports whether cleanupConsumedUtxos would
 // defer a run at tipSlot/stabilityWindow right now, mirroring its own two
 // defer conditions above (unknown upstream target, or known but not yet
@@ -4355,6 +4371,12 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 			resolved.Slot,
 			pruneFloor,
 		)
+	}
+	// The prune-floor and Mithril refusals above are reads taken before the
+	// destructive boundary opens, so a refused rollback never blocks a
+	// coordinated snapshot.
+	if ls.db != nil {
+		defer ls.db.BeginDestructiveTransition()()
 	}
 	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
 	// entire remainder of this function -- see blockPipelineGatherMutex's
@@ -9954,11 +9976,17 @@ func (ls *LedgerState) loadTip() error {
 }
 
 func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.withDestructiveDatabaseTransition(
+			ls.reconcilePrimaryChainTipWithLedgerTipLocked,
+		)
+	})
+}
+
+func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()

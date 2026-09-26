@@ -182,38 +182,44 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		if err := ls.rewindPrimaryChainForRecovery(
-			rewindPoint,
-		); err != nil {
-			if ls.yieldedToChainSelection(
-				err, validationErr, rewindPoint, "rewind",
-			) {
-				yielded = true
-				return nil
+		// The destructive boundary nests inside the prune boundary here and
+		// at every other rollback entry point, so the two locks are always
+		// taken in the same order. The floor check above stays outside it:
+		// it is a read, and a refused recovery must not hold coordinated
+		// snapshots off.
+		return ls.withDestructiveDatabaseTransition(func() error {
+			if err := ls.rewindPrimaryChainForRecovery(
+				rewindPoint,
+			); err != nil {
+				if ls.yieldedToChainSelection(
+					err, validationErr, rewindPoint, "rewind",
+				) {
+					yielded = true
+					return nil
+				}
+				return fmt.Errorf(
+					"rewind primary chain after header validation failure: %w",
+					err,
+				)
 			}
-			return fmt.Errorf(
-				"rewind primary chain after header validation failure: %w",
-				err,
-			)
-		}
-		// The chain prune alone leaves the ledger reflecting the rejected
-		// block's post-apply state; the matching ledger rollback has to be
-		// explicit, for the same reason it is on the transaction-validation
-		// path.
-		// The first recovery at this tip may still need to repair metadata
-		// the rejected block left above it; a repeat of the same failure at
-		// the same tip reuses what that repair restored.
-		if err := ls.rollbackWithBlocks(
-			rewindPoint,
-			nil,
-			!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
-		); err != nil {
-			return fmt.Errorf(
-				"rollback ledger state after header validation failure: %w",
-				err,
-			)
-		}
-		return nil
+			// The chain prune alone leaves the ledger reflecting the rejected
+			// block's post-apply state; the matching ledger rollback has to be
+			// explicit, for the same reason it is on the transaction-validation
+			// path. The first recovery at this tip may still need to repair
+			// metadata the rejected block left above it; a repeat of the same
+			// failure at the same tip reuses what that repair restored.
+			if err := ls.rollbackWithBlocks(
+				rewindPoint,
+				nil,
+				!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
+			); err != nil {
+				return fmt.Errorf(
+					"rollback ledger state after header validation failure: %w",
+					err,
+				)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return false, err

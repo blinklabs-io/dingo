@@ -15,8 +15,6 @@
 package chain_test
 
 import (
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -40,18 +38,10 @@ const semaphoreFrame = "sync.runtime_Semacquire"
 // this reads the condition off the runtime's own goroutine dump.
 func waitUntilParkedIn(t *testing.T, symbol string) {
 	t.Helper()
-	buf := make([]byte, 1<<20)
 	testutil.WaitForConditionWithInterval(
 		t,
 		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
-			for g := range strings.SplitSeq(dump, "\n\ngoroutine ") {
-				if strings.Contains(g, semaphoreFrame) &&
-					strings.Contains(g, symbol) {
-					return true
-				}
-			}
-			return false
+			return testutil.GoroutineParkedIn(semaphoreFrame, symbol)
 		},
 		5*time.Second,
 		time.Millisecond,
@@ -60,15 +50,16 @@ func waitUntilParkedIn(t *testing.T, symbol string) {
 }
 
 // waitUntilGoroutineIn waits until a goroutine has reached symbol, including
-// waits on channels rather than only sync locks.
+// waits on channels rather than only sync locks. It goes through
+// testutil.GoroutineParkedIn for the same reason waitUntilParkedIn does: a
+// fixed buffer handed to runtime.Stack truncates the dump silently, and a
+// goroutine past the cut reads as absent.
 func waitUntilGoroutineIn(t *testing.T, symbol string) {
 	t.Helper()
-	buf := make([]byte, 1<<20)
 	testutil.WaitForConditionWithInterval(
 		t,
 		func() bool {
-			dump := string(buf[:runtime.Stack(buf, true)])
-			return strings.Contains(dump, symbol)
+			return testutil.GoroutineParkedIn(symbol)
 		},
 		5*time.Second,
 		time.Millisecond,
