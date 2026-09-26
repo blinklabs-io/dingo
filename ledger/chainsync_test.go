@@ -172,6 +172,7 @@ func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -227,6 +228,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -301,6 +303,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error for invalid genesis hash, got nil")
@@ -331,6 +334,7 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 		86400,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error for missing Shelley genesis, got nil")
@@ -415,6 +419,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 				0,
 				ls.currentEra,
 				ls.currentEpoch,
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("%s: unexpected error: %v", tc.description, err)
@@ -550,6 +555,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 					0,
 					ls.currentEra,
 					ls.currentEpoch,
+					nil,
 				)
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -569,6 +575,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 				0,
 				ls.currentEra,
 				ls.currentEpoch,
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -627,6 +634,7 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error with fractional coefficient: %v", err)
@@ -784,6 +792,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 				0,
 				ls.currentEra,
 				ls.currentEpoch,
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("%s: unexpected error: %v", tc.description, err)
@@ -842,6 +851,7 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 		86400,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error for Byron era: %v", err)

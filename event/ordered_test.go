@@ -204,6 +204,72 @@ func TestPublishOrderedReturnsFalseWhenStopped(t *testing.T) {
 	}
 }
 
+func TestFlushOrderedContextWaitsForDelivery(t *testing.T) {
+	t.Parallel()
+
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	_, delivered := eb.SubscribeWithBufferPolicy(
+		"ordered.flush",
+		1,
+		SubscriberBackpressureBlock,
+	)
+	if !eb.PublishOrdered(
+		"ordered.flush",
+		NewEvent("ordered.flush", 1),
+	) {
+		t.Fatal("PublishOrdered returned false")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(delivered) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(delivered) != 1 {
+		t.Fatal("first event did not fill subscriber buffer")
+	}
+	if !eb.PublishOrdered(
+		"ordered.flush",
+		NewEvent("ordered.flush", 2),
+	) {
+		t.Fatal("second PublishOrdered returned false")
+	}
+
+	flushed := make(chan bool, 1)
+	go func() {
+		flushed <- eb.FlushOrderedContext(t.Context(), "ordered.flush")
+	}()
+	select {
+	case <-flushed:
+		t.Fatal("flush returned before subscriber delivery")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case evt := <-delivered:
+		if evt.Data != 1 {
+			t.Fatalf("first payload: got %v, want 1", evt.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not receive first ordered event")
+	}
+	select {
+	case ok := <-flushed:
+		if !ok {
+			t.Fatal("flush failed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush did not complete after delivery")
+	}
+	select {
+	case evt := <-delivered:
+		if evt.Data != 2 {
+			t.Fatalf("second payload: got %v, want 2", evt.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not receive second ordered event")
+	}
+}
+
 // TestPublishOrderedPreservesOrderAfterStopRestart covers the reusable-bus
 // path: Stop tears the lanes down, and the next publish must rebuild them
 // bound to the new stop channel rather than to the torn-down one.

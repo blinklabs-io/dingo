@@ -76,8 +76,12 @@ package ledgerstate
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
+	"sort"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
 // mempackReader is a cursor over a byte slice for reading MemPack
@@ -208,12 +212,13 @@ const (
 // decodedMempackTxOut holds the decoded fields from a MemPack-encoded
 // Babbage/Conway TxOut.
 type decodedMempackTxOut struct {
-	Address   []byte // raw address bytes
-	Lovelace  uint64 // ADA amount in lovelace
-	Assets    []ParsedAsset
-	DatumHash []byte // 32 bytes, optional
-	Datum     []byte // inline datum bytes, optional
-	ScriptRef []byte // reference script bytes, optional
+	Address       []byte // raw address bytes
+	Lovelace      uint64 // ADA amount in lovelace
+	Assets        []ParsedAsset
+	DatumHash     []byte // 32 bytes, optional
+	Datum         []byte // inline datum bytes, optional
+	ScriptRef     []byte // reference script bytes, optional
+	ScriptRefType uint8  // 0=native, 1=Plutus V1, 2=Plutus V2, 3=Plutus V3
 }
 
 // decodeMempackTxOut decodes a MemPack-encoded BabbageTxOut (also
@@ -258,6 +263,166 @@ func decodeMempackTxOut(data []byte) (*decodedMempackTxOut, error) {
 		)
 	}
 	return result, nil
+}
+
+func encodeMempackTxOut(out *decodedMempackTxOut) ([]byte, error) {
+	value, err := encodeMempackValue(out.Lovelace, out.Assets)
+	if err != nil {
+		return nil, fmt.Errorf("encoding MemPack value: %w", err)
+	}
+	address, err := cbor.Encode(out.Address)
+	if err != nil {
+		return nil, fmt.Errorf("encoding address: %w", err)
+	}
+	fields := map[uint64]cbor.RawMessage{
+		0: cbor.RawMessage(address),
+		1: cbor.RawMessage(value),
+	}
+	if len(out.DatumHash) > 0 {
+		dat, err := cbor.Encode([]any{uint64(0), out.DatumHash})
+		if err != nil {
+			return nil, fmt.Errorf("encoding datum hash: %w", err)
+		}
+		fields[2] = cbor.RawMessage(dat)
+	} else if len(out.Datum) > 0 {
+		dat, err := cbor.Encode([]any{
+			uint64(1),
+			cbor.Tag{Number: 24, Content: out.Datum},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("encoding inline datum: %w", err)
+		}
+		fields[2] = cbor.RawMessage(dat)
+	}
+	if len(out.ScriptRef) > 0 {
+		ref, err := encodeMempackScriptRef(
+			out.ScriptRefType, out.ScriptRef,
+		)
+		if err != nil {
+			return nil, err
+		}
+		fields[3] = cbor.RawMessage(ref)
+	}
+	encoded, err := cbor.Encode(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encoding TxOut map: %w", err)
+	}
+	return encoded, nil
+}
+
+func encodeMempackValue(
+	coin uint64,
+	assets []ParsedAsset,
+) ([]byte, error) {
+	if len(assets) == 0 {
+		return cbor.Encode(coin)
+	}
+	byPolicy := make(map[string][]ParsedAsset)
+	for _, asset := range assets {
+		byPolicy[string(asset.PolicyId)] = append(
+			byPolicy[string(asset.PolicyId)], asset,
+		)
+	}
+	policies := make([]string, 0, len(byPolicy))
+	for policy := range byPolicy {
+		policies = append(policies, policy)
+	}
+	sort.Strings(policies)
+	assetEntries := make([]cborByteMapEntry, 0, len(policies))
+	for _, policy := range policies {
+		policyAssets := byPolicy[policy]
+		sort.Slice(policyAssets, func(i, j int) bool {
+			return string(policyAssets[i].Name) < string(policyAssets[j].Name)
+		})
+		entries := make([]cborByteMapEntry, 0, len(policyAssets))
+		for _, asset := range policyAssets {
+			amount, err := cbor.Encode(asset.Amount)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, cborByteMapEntry{
+				key:   asset.Name,
+				value: amount,
+			})
+		}
+		assetsMap, err := encodeCBORByteMap(entries)
+		if err != nil {
+			return nil, err
+		}
+		assetEntries = append(assetEntries, cborByteMapEntry{
+			key:   []byte(policy),
+			value: assetsMap,
+		})
+	}
+	assetsMap, err := encodeCBORByteMap(assetEntries)
+	if err != nil {
+		return nil, err
+	}
+	return cbor.Encode([]any{coin, cbor.RawMessage(assetsMap)})
+}
+
+type cborByteMapEntry struct {
+	key   []byte
+	value []byte
+}
+
+func encodeCBORByteMap(entries []cborByteMapEntry) ([]byte, error) {
+	result := appendCBORHead(nil, 5, uint64(len(entries)))
+	for _, entry := range entries {
+		key, err := cbor.Encode(entry.key)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, key...)
+		result = append(result, entry.value...)
+	}
+	return result, nil
+}
+
+func encodeMempackScriptRef(scriptType uint8, script []byte) ([]byte, error) {
+	if len(script) == 0 {
+		return nil, errors.New("empty MemPack reference script")
+	}
+	var scriptValue any
+	if scriptType == alonzoScriptNative {
+		scriptValue = cbor.RawMessage(script)
+	} else {
+		if scriptType > 3 {
+			return nil, fmt.Errorf("unsupported MemPack script type %d", scriptType)
+		}
+		scriptValue = script
+	}
+	inner, err := cbor.Encode([]any{uint64(scriptType), scriptValue})
+	if err != nil {
+		return nil, fmt.Errorf("encoding reference script: %w", err)
+	}
+	encoded, err := cbor.Encode(cbor.Tag{Number: 24, Content: inner})
+	if err != nil {
+		return nil, fmt.Errorf("encoding reference script wrapper: %w", err)
+	}
+	return encoded, nil
+}
+
+func appendCBORHead(dst []byte, major byte, value uint64) []byte {
+	switch {
+	case value < 24:
+		return append(dst, major<<5|byte(value))
+	case value <= math.MaxUint8:
+		return append(dst, major<<5|24, byte(value))
+	case value <= math.MaxUint16:
+		return append(dst, major<<5|25,
+			byte(value>>8&math.MaxUint8), byte(value&math.MaxUint8))
+	case value <= math.MaxUint32:
+		return append(dst, major<<5|26,
+			byte(value>>24&math.MaxUint8), byte(value>>16&math.MaxUint8),
+			byte(value>>8&math.MaxUint8), byte(value&math.MaxUint8))
+	default:
+		return append(dst, major<<5|27,
+			byte(value>>56&math.MaxUint8), byte(value>>48&math.MaxUint8),
+			byte(value>>40&math.MaxUint8), byte(value>>32&math.MaxUint8),
+			byte(value>>24&math.MaxUint8), byte(value>>16&math.MaxUint8),
+			byte(value>>8&math.MaxUint8), byte(value&math.MaxUint8))
+	}
 }
 
 // decodeTxOutCompact: tag 0 = CompactAddr + CompactForm Value
@@ -461,17 +626,18 @@ func decodeTxOutCompactRefScript(
 		return nil, fmt.Errorf("reading Datum: %w", err)
 	}
 	// Script (era) = AlonzoScript: tag + payload
-	script, err := decodeMempackScript(r)
+	scriptType, script, err := decodeMempackScript(r)
 	if err != nil {
 		return nil, fmt.Errorf("reading Script: %w", err)
 	}
 	return &decodedMempackTxOut{
-		Address:   addr,
-		Lovelace:  lovelace,
-		Assets:    assets,
-		DatumHash: datumHash,
-		Datum:     datum,
-		ScriptRef: script,
+		Address:       addr,
+		Lovelace:      lovelace,
+		Assets:        assets,
+		DatumHash:     datumHash,
+		Datum:         datum,
+		ScriptRef:     script,
+		ScriptRefType: scriptType,
 	}, nil
 }
 
@@ -823,10 +989,10 @@ const (
 // over PlutusBinary over ShortByteString), also length-prefixed.
 func decodeMempackScript(
 	r *mempackReader,
-) ([]byte, error) {
+) (uint8, []byte, error) {
 	scriptTag, err := r.readTag()
 	if err != nil {
-		return nil, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"reading AlonzoScript tag: %w", err,
 		)
 	}
@@ -836,38 +1002,36 @@ func decodeMempackScript(
 		// (length-prefixed CBOR bytes)
 		script, err := r.readLengthPrefixedBytes()
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"reading NativeScript: %w", err,
 			)
 		}
-		return script, nil
+		return alonzoScriptNative, script, nil
 	case alonzoScriptPlutus:
 		// PlutusScript: version tag + length-prefixed bytes
 		versionTag, err := r.readTag()
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"reading PlutusScript version tag: %w",
 				err,
 			)
 		}
 		if versionTag > 2 {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"unknown PlutusScript version tag: %d",
 				versionTag,
 			)
 		}
 		script, err := r.readLengthPrefixedBytes()
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"reading PlutusScript V%d: %w",
 				versionTag+1, err,
 			)
 		}
-		return append(
-			[]byte{byte(versionTag)}, script...,
-		), nil
+		return versionTag + 1, script, nil
 	default:
-		return nil, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"unknown AlonzoScript tag: %d", scriptTag,
 		)
 	}
