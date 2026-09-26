@@ -324,7 +324,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		)
 	}
 
-	if updateEpoch > 0 && tx.IsValid() {
+	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(
 				genesisHash.Bytes(),

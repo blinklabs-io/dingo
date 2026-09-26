@@ -409,7 +409,7 @@ func (d *Database) SetTransactionWithOpts(
 		)
 	}
 
-	if updateEpoch > 0 && tx.IsValid() {
+	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(genesisHash.Bytes(), update.Cbor(), point.Slot, updateEpoch, txn); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
