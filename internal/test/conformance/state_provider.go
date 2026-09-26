@@ -874,9 +874,13 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	return nil, nil
 }
 
-// CommitteeHotCredentialColdCredentials returns every seated cold credential
-// whose current term authorizes this exact tagged hot credential, matching
-// LedgerView.CommitteeHotCredentialColdCredentials.
+// CommitteeHotCredentialColdCredentials returns every cold credential that
+// currently authorizes this exact tagged hot credential, seated or not,
+// omitting resigned members, as LedgerView.CommitteeHotCredentialColdCredentials
+// does. Unlike LedgerView it does not limit an unseated member's
+// authorization to one epoch, because conformance slots do not locate an
+// epoch boundary; that cannot change the PV11 elected-voter rule, which keeps
+// only elected cold credentials.
 func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
 	hotCredential common.Credential,
 ) ([]common.Credential, error) {
@@ -929,6 +933,66 @@ func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
 		}
 		seen[key] = struct{}{}
 		coldCredentials = append(coldCredentials, cold)
+	}
+	seated, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
+		return p.manager.db.GetCommitteeMembers(nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee members: %w", err)
+	}
+	seatedColds := make(map[coldKey]struct{}, len(seated))
+	for _, member := range seated {
+		if member != nil {
+			seatedColds[coldKey{
+				tag:  member.ColdCredentialTag,
+				hash: common.NewBlake2b224(member.ColdCredHash),
+			}] = struct{}{}
+		}
+	}
+	latest, err := withBadConnRetry(
+		func() ([]*models.AuthCommitteeHot, error) {
+			return p.manager.db.GetCommitteeHotAuthorizationsSince(0, nil)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee hot credentials: %w", err)
+	}
+	for _, authorization := range latest {
+		if authorization == nil ||
+			authorization.HotCredentialTag != hotTag ||
+			common.NewBlake2b224(authorization.HotCredential) !=
+				hotCredential.Credential {
+			continue
+		}
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: common.NewBlake2b224(authorization.ColdCredential),
+		}
+		if _, ok := seatedColds[key]; ok {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		resigned, err := withBadConnRetry(func() (bool, error) {
+			return p.manager.db.IsCommitteeMemberResigned(
+				authorization.ColdCredentialTag,
+				authorization.ColdCredential,
+				authorization.AddedSlot,
+				nil,
+			)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("lookup committee resignation: %w", err)
+		}
+		if resigned {
+			continue
+		}
+		seen[key] = struct{}{}
+		coldCredentials = append(coldCredentials, common.Credential{
+			CredType:   uint(key.tag),
+			Credential: key.hash,
+		})
 	}
 	return coldCredentials, nil
 }

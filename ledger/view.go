@@ -1421,31 +1421,23 @@ func (lv *LedgerView) committeeSnapshot() (
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
-	authorizations, err := lv.committeeHotAuthorizations(
-		hotCredential,
-		true,
-		true,
-	)
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, true)
 	if err != nil || len(authorizations) == 0 {
 		return nil, err
 	}
 	return authorizations[0].member, nil
 }
 
-// CommitteeHotCredentialColdCredentials returns every seated cold credential
-// whose current term authorizes this exact tagged hot credential. It
-// implements the lookup half of gouroboros common.CommitteeVotingState, which
-// the PV11 elected-voter rule intersects with CommitteeCredentialIsElected.
-// Cold credentials that are not seated are omitted: they are never elected,
-// so returning them cannot change that rule's result.
+// CommitteeHotCredentialColdCredentials returns every cold credential whose
+// committee state currently authorizes this exact tagged hot credential,
+// seated or not and regardless of expiry, omitting resigned members. It
+// implements the lookup half of gouroboros common.CommitteeVotingState; the
+// PV11 elected-voter rule applies the enacted-committee filter through
+// CommitteeCredentialIsElected.
 func (lv *LedgerView) CommitteeHotCredentialColdCredentials(
 	hotCredential lcommon.Credential,
 ) ([]lcommon.Credential, error) {
-	authorizations, err := lv.committeeHotAuthorizations(
-		hotCredential,
-		false,
-		false,
-	)
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1475,7 +1467,6 @@ type committeeHotAuthorization struct {
 func (lv *LedgerView) committeeHotAuthorizations(
 	hotCredential lcommon.Credential,
 	firstOnly bool,
-	includeUnseated bool,
 ) ([]committeeHotAuthorization, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
@@ -1542,9 +1533,6 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		if firstOnly {
 			return ret, nil
 		}
-	}
-	if !includeUnseated {
-		return ret, nil
 	}
 	seated, err := lv.ls.db.GetCommitteeMembers(lv.txn)
 	if err != nil {

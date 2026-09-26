@@ -3760,10 +3760,10 @@ The `LedgerView` interface provides query access to ledger state:
   hot voter must be authorized by a cold credential of the enacted committee.
   Earlier protocol versions still accept an authorized member who is not
   elected. `LedgerView` supplies `common.CommitteeVotingState` for the PV11
-  rule: `CommitteeHotCredentialColdCredentials` returns every seated cold
-  credential whose current term authorizes the exact tagged hot credential, and
-  `CommitteeCredentialIsElected` reports seated membership, which includes
-  expired members and excludes pending proposals.
+  rule: `CommitteeHotCredentialColdCredentials` returns every cold credential
+  currently authorizing the exact tagged hot credential, seated or not and
+  omitting resigned members, and `CommitteeCredentialIsElected` reports seated
+  membership, which includes expired members and excludes pending proposals.
 - `CommitteeHotCredentialMember` prefers a seated member. A cold credential
   that is not seated authorizes a hot credential only when its latest
   authorization was recorded in the view's pinned epoch and no resignation
