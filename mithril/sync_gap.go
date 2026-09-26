@@ -670,7 +670,7 @@ func processGapBlockTransactions(
 				"missing Conway protocol parameters for governance gap block processing",
 			)
 		}
-		if err := governance.ProcessProposals(
+		if err := governance.ProcessHistoricalProposals(
 			tx,
 			point,
 			epochId,

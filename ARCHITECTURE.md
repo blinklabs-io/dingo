@@ -7612,7 +7612,8 @@ without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
 snapshot-imported account's registration and delegation from its import
 baseline before rebuilding the live-stake aggregate. Replayed DRep activity
 (backfill and gap blocks) records only the activity epoch and keeps the
-snapshot's DRep expiry.
+snapshot's DRep expiry, and a replayed governance proposal the snapshot does
+not hold is stored as already expired and dropped.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay

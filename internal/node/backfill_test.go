@@ -981,6 +981,169 @@ func TestRun_KeepsSnapshotDRepExpiryAtAnchor(t *testing.T) {
 	}
 }
 
+// TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold covers governance
+// proposals replayed below the anchor. The snapshot holds every proposal live
+// at the anchor; any other replayed proposal was already enacted, expired or
+// dropped on chain, with its deposit refunded or its action paid, and those
+// effects are in the snapshot. Left unmarked, such a row reads as live: the
+// next boundaries expire it and refund its deposit again, and one still
+// inside its lifetime stays eligible for ratification.
+func TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	const anchor = uint64(2)
+	const anchorEpoch = uint64(510)
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+
+	rewardAccount, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE0}, bytes.Repeat([]byte{0x91}, 28)...),
+	)
+	require.NoError(t, err)
+	rewardAccountBytes, err := rewardAccount.Bytes()
+	require.NoError(t, err)
+	liveTxHash := bytes.Repeat([]byte{0xb0}, 32)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        liveTxHash,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 508,
+		ExpiresEpoch:  514,
+		AnchorHash:    bytes.Repeat([]byte{0x92}, 32),
+		Deposit:       100_000,
+		ReturnAddress: rewardAccountBytes,
+		AddedSlot:     anchor,
+	}, nil))
+
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x93}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         lcommon.ProtocolParametersProtocolVersion{Major: 10},
+		GovActionValidityPeriod: 6,
+		DRepInactivityPeriod:    20,
+	}
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.DisableNonceComputation()
+	replayProposal := func(txHash []byte, epoch uint64) {
+		t.Helper()
+		input, err := mockledger.NewTransactionInputBuilder().
+			WithTxId(append([]byte{0x01}, txHash[1:]...)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address.String()).
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		builder := mockledger.NewTransactionBuilder().WithProposalProcedures(
+			&conway.ConwayProposalProcedure{
+				PPDeposit:       100_000,
+				PPRewardAccount: rewardAccount,
+				PPGovAction: conway.ConwayGovAction{
+					Type: uint(lcommon.GovActionTypeInfo),
+					Action: &lcommon.InfoGovAction{
+						Type: uint(lcommon.GovActionTypeInfo),
+					},
+				},
+				PPAnchor: lcommon.GovAnchor{
+					DataHash: [32]byte(bytes.Repeat([]byte{0x92}, 32)),
+				},
+			},
+		)
+		builder.WithId(txHash)
+		builder.WithInputs(input)
+		builder.WithOutputs(output)
+		builder.WithValid(true)
+		tx, err := builder.Build()
+		require.NoError(t, err)
+		var hash [32]byte
+		copy(hash[:], tx.Hash().Bytes())
+		offsets := &database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				hash: {BlockSlot: 1, ByteLength: 1},
+			},
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		}
+		for _, produced := range tx.Produced() {
+			var producedTxID [32]byte
+			copy(producedTxID[:], produced.Id.Id().Bytes())
+			offsets.UtxoOffsets[database.UtxoRef{
+				TxId:      producedTxID,
+				OutputIdx: produced.Id.Index(),
+			}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
+		}
+		acc := db.NewBatchAccumulator()
+		txn := db.Transaction(true)
+		defer txn.Release()
+		require.NoError(t, bf.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			ocommon.Point{Slot: 1, Hash: append([]byte{0x02}, txHash[1:]...)},
+			epoch,
+			eras.ConwayEraDesc.Id,
+			pp,
+			offsets,
+			acc,
+			txn,
+			nil,
+			false,
+		))
+		require.NoError(t, db.FlushBatch(acc, txn))
+		require.NoError(t, txn.Commit())
+	}
+	expiredTxHash := bytes.Repeat([]byte{0xb1}, 32)
+	settledTxHash := bytes.Repeat([]byte{0xb2}, 32)
+	replayProposal(expiredTxHash, 500)
+	replayProposal(settledTxHash, 508)
+	replayProposal(liveTxHash, 508)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			LastSlot:  1,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+	require.NoError(t, bf.Run(context.Background()))
+
+	txHashes := func(proposals []*models.GovernanceProposal) [][]byte {
+		ret := make([][]byte, 0, len(proposals))
+		for _, proposal := range proposals {
+			ret = append(ret, proposal.TxHash)
+		}
+		return ret
+	}
+	active, err := db.GetActiveGovernanceProposals(anchorEpoch, nil)
+	require.NoError(t, err)
+	assert.Equal(t, [][]byte{liveTxHash}, txHashes(active))
+	expiring, err := db.GetExpiringGovernanceProposals(anchorEpoch+1, nil)
+	require.NoError(t, err)
+	assert.Empty(t, txHashes(expiring), "replayed proposal would expire again")
+	awaitingDrop, err := db.GetExpiredAwaitingDropGovernanceProposals(
+		anchorEpoch+2,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, txHashes(awaitingDrop), "replayed proposal would be refunded again")
+	for _, txHash := range [][]byte{expiredTxHash, settledTxHash} {
+		stored, err := db.GetGovernanceProposal(txHash, 0, nil)
+		require.NoError(t, err)
+		assert.NotNil(t, stored, "replayed proposal history was dropped")
+	}
+}
+
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
 // published even when the run finishes before the normal 10s progress tick.
 func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {

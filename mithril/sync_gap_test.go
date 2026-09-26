@@ -602,6 +602,108 @@ func TestProcessGapBlockVoteKeepsSnapshotDRepExpiry(t *testing.T) {
 	assert.Equal(t, uint64(510), drep.LastActivityEpoch)
 }
 
+// TestProcessGapBlockProposalsSettleWhatTheSnapshotDoesNotHold covers gap
+// blocks at or below the imported ledger state. A gap proposal the snapshot
+// imported is live and stays eligible; one it does not hold was already
+// settled on chain and must not expire or refund again.
+func TestProcessGapBlockProposalsSettleWhatTheSnapshotDoesNotHold(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, testGapHash28("gap-settle-reward")...),
+	)
+	require.NoError(t, err)
+	rewardBytes, err := rewardAddress.Bytes()
+	require.NoError(t, err)
+	proposalTx := func(name string) *mockGapGovernanceTransaction {
+		var hash lcommon.Blake2b256
+		copy(hash[:], testGapHash32(name))
+		return &mockGapGovernanceTransaction{
+			hash:    hash,
+			isValid: true,
+			proposalProcedures: []lcommon.ProposalProcedure{
+				conway.ConwayProposalProcedure{
+					PPDeposit:       42,
+					PPRewardAccount: rewardAddress,
+					PPGovAction: conway.ConwayGovAction{
+						Type: uint(lcommon.GovActionTypeInfo),
+						Action: &lcommon.InfoGovAction{
+							Type: uint(lcommon.GovActionTypeInfo),
+						},
+					},
+					PPAnchor: lcommon.GovAnchor{
+						DataHash: [32]byte(testGapHash32("gap-settle-anchor")),
+					},
+				},
+			},
+		}
+	}
+	liveTx := proposalTx("gap-live-proposal")
+	settledTx := proposalTx("gap-settled-proposal")
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        liveTx.hash.Bytes(),
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 100,
+		ExpiresEpoch:  120,
+		AnchorHash:    testGapHash32("gap-settle-anchor"),
+		Deposit:       42,
+		ReturnAddress: rewardBytes,
+		AddedSlot:     1000,
+	}, nil))
+
+	point := ocommon.Point{Slot: 1000, Hash: testGapHash32("gap-settle-block")}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			[32]byte(liveTx.hash): {
+				BlockSlot: point.Slot, BlockHash: blockHash, ByteLength: 1,
+			},
+			[32]byte(settledTx.hash): {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteOffset: 1,
+				ByteLength: 1,
+			},
+		},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	conwayPParams := testGapConwayProtocolParameters()
+	require.NoError(t, processGapBlockTransactions(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point,
+		[]lcommon.Transaction{liveTx, settledTx},
+		offsets,
+		100,
+		conway.EraIdConway,
+		conwayPParams,
+		conwayPParams,
+	))
+
+	active, err := db.GetActiveGovernanceProposals(101, nil)
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+	assert.Equal(t, liveTx.hash.Bytes(), active[0].TxHash)
+	expiring, err := db.GetExpiringGovernanceProposals(121, nil)
+	require.NoError(t, err)
+	require.Len(t, expiring, 1)
+	assert.Equal(t, liveTx.hash.Bytes(), expiring[0].TxHash)
+	settled, err := db.GetGovernanceProposal(settledTx.hash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, settled.ExpiredEpoch)
+	require.NotNil(t, settled.DroppedEpoch)
+}
+
 func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 	t.Parallel()
 

@@ -656,7 +656,7 @@ func (b *Backfill) processBlockGovernance(
 		return nil
 	}
 	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
+		if err := governance.ProcessHistoricalProposals(
 			tx, point, epochId,
 			conwayPP.GovActionValidityPeriod,
 			b.db, txn,
