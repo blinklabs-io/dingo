@@ -3669,6 +3669,17 @@ The `LedgerView` interface provides query access to ledger state:
   pre-block restricted-map rule, while storage/decode errors and normal
   per-transaction validation remain fail-closed.
 - Protocol parameter queries
+- Classic Shelley-family protocol parameter update (PPUP) and
+  move-instantaneous-rewards validation use two explicit `LedgerView`
+  capabilities. `GenesisDelegationState` resolves each Shelley genesis key to
+  its active delegate at the transaction slot, and supplies the genesis
+  update quorum used to count distinct MIR signers. `ClassicProtocolParameterUpdateWindowState`
+  supplies the current epoch and the first slot whose proposals target the
+  next epoch; the boundary is derived from the epoch schedule and Shelley
+  genesis security parameters. Delegation reads use the validation view's
+  metadata transaction, so certificates already applied in that transaction
+  are visible. The compile-time interface assertions in `ledger/view.go` keep
+  these required gouroboros capabilities wired to the validation view.
 - Stake distribution queries
 - Account registration checks. `IsStakeCredentialRegistered`,
   `IsPoolRegistered`, `IsRewardAccountRegistered`, and `GovActionExists`
@@ -6704,6 +6715,15 @@ the same signal to the active child, waits for it, and exits with its status.
 Successful bootstrap clears the tracked PID before the entrypoint hands off to
 `serve`, so the same lifecycle contract applies on both sides of startup.
 
+When a legacy imported database is marked for reward-state repair, `serve`
+blocks node startup until Mithril v2 reconciles the database against a
+certificate-backed artifact. The repair preserves configured artifact pins and
+resolves an omitted network name from the configured network magic. Its active
+marker is written before repair writes begin, so restart accepts only an
+interrupted sync that is positively identified as this repair. API-mode resumes
+continue from their immutable import marker only while the pending repair marker
+remains; ordinary API-mode metadata replacement is rejected.
+
 Two artifact backends are supported, selected by `mithril.backend`
 (`--mithril-backend`, `DINGO_MITHRIL_BACKEND`):
 
@@ -7420,6 +7440,14 @@ The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
+
+When serving a database marked for legacy Mithril reward-state repair, startup
+runs a v2 certified catch-up before exposing the node. The catch-up verifies
+the existing chain against the selected artifact before mutating ledger rows;
+API storage also resets and reruns historical metadata backfill through the
+certified ledger anchor. The repair marker remains until import and deferred
+index rebuilding complete, so an interrupted repair resumes with startup
+blocked instead of serving partially reconciled state.
 
 During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
 snapshot manager to ensure the initial stake snapshot state before starting the
@@ -11861,7 +11889,55 @@ pot from `UTxOState` -- so the round at the first boundary after import is not
 skipped for want of pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
-it. The per-credential reward basis is seeded from the same import: mark, set and
+it.
+
+That fee pot -- `SnapShots.ssFee` -- is exact for the imported epoch's own
+row and the boundary that reads it, but was not enough for the boundary after
+that one (issue #3975). `LedgerState.rewardEpochFees` computes the *following*
+epoch's fee pot by summing stored transaction fees over the whole epoch that
+just ended, reading only this node's local transactions. A node bootstrapped
+mid-epoch stores no transactions at or before its anchor, so that sum silently
+dropped every pre-anchor fee -- correct for the round the import itself seeded,
+wrong one boundary later, and permanently: the shortfall folds into reserves
+and both are then carried forward, so the same error recurs every following
+boundary a live node computes from a still-off basis, which is why a fresh
+re-bootstrap only ever bought one correct boundary. `seedImportedRewardBasis`
+also writes `RewardAdaPots.ImportedEpochFees`: `UTxOState.utxosFees` minus
+`SnapShots.ssFee`, the fees this epoch already collected up to and including
+the anchor. cardano-ledger's NEWEPOCH rule leaves `utxosFees` equal to the new
+`ssFee` after every boundary and only transactions add to it within an epoch,
+so a snapshot whose `utxosFees` is below its `ssFee` was not decoded as a
+consistent ledger state, and the import refuses it. Leaving the field `NULL`
+instead would be indistinguishable from a live-computed row and would credit
+the next round short with no record of why.
+`rewardEpochFees` reads the ended epoch's own pots row, and when its anchor
+(`CapturedSlot`) lies within that epoch -- its first and last slots included
+-- and `ImportedEpochFees` is set, sums local fees only over
+`(CapturedSlot, epochEnd]` and adds the imported amount instead of summing
+from the epoch start. The two ranges are
+disjoint by construction the same way the block-count import's observed and
+imported counts are (see below): a bootstrap applies no block, and files no
+transaction, at or below its anchor. Summing from the epoch start regardless
+of the anchor would then double-count once the historical backfill (issue
+#4061) has stored pre-anchor transactions locally. `ImportedEpochFees` is
+additive schema (migration `v24`). Migrations `v24` and `v25` mark legacy
+Mithril databases for repair when the anchor has no fee basis, including
+older imports that left no anchor reward-pot row. Before
+`dingo serve` starts, core- and API-mode databases with that marker automatically
+run a Mithril v2 catch-up against the latest certified state. Catch-up verifies
+the existing chain intersection before reconciling ledger rows, retains the local
+block history, and clears the marker only on completion. During reconciliation,
+the certified live UTxO set and each output's CBOR are restored together, so
+outputs live at the anchor remain available when replaying post-anchor blocks
+that spent them; UTxO-HD MemPack outputs are converted back to ledger TxOut
+CBOR for this purpose. API mode also rebuilds
+its historical metadata through the certified ledger anchor. If the selected
+artifact does not cover the local tip, startup remains blocked and the database
+is left intact while Dingo retries the repair every five minutes; it is never
+treated as a clean bootstrap. Cancelling startup stops the retry without
+changing the pending repair marker.
+
+The per-credential reward basis is seeded from the same import: mark, set and
 go each carry one epoch's per-credential stake and its credential-to-pool
 delegations, and the three of them line up with the three epochs a freshly
 bootstrapped node cannot otherwise compute. The seeding is the last step of `importSnapShots`, after every stage
@@ -12832,7 +12908,45 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    manager and stake-aggregation chokepoint use), excluding delegated stake
    whose reward account expired before `NewEpoch` from the DRep tally exactly
    as the stake-aggregation chokepoint excludes it from Mark stake, the reward
-   basis, and SPO vote power. `TallyContext.DelegatorInactivityOn` mirrors the
+   basis, and SPO vote power. `LoadDRepVotingState` also folds each active
+   governance proposal's own deposit into its return account's delegated DRep
+   voting power (`ActiveProposalDepositDRepPower`, `ledger/governance/
+   proposal_deposits.go`): per CIP-1694 a proposal's deposit is escrowed but
+   still counts as part of the depositor's active voting stake for as long as
+   the proposal remains active, which `GetDRepVotingPowerBatch`/
+   `GetDRepVotingPowerByType`'s plain `account`⋈`utxo` aggregation does not
+   express on its own (blinklabs-io/dingo#4355). It reads
+   `GetActiveGovernanceProposals(currentEpoch)`, resolves each deposit-bearing
+   proposal's `ReturnAddress` to a stake credential, batches those credentials
+   through `GetAccountsByCredential` to find each one's DRep delegation, and
+   adds the deposit onto that DRep's (or `AlwaysNoConfidence`'s) power;
+   `AlwaysAbstain` delegators are excluded, matching `tallyDRepVotes`'
+   treatment of Abstain stake as outside every bucket. It applies the same
+   `active` and CIP-0163 expiry gates to the return account that
+   `GetDRepVotingPowerBatch` applies to ordinary stake, so a return account
+   already excluded from the ordinary tally by those gates does not have its
+   deposit counted either. This is the production counterpart of the
+   conformance harness's local `activeProposalDeposits`/
+   `credentialVotingStake` (`internal/test/conformance/state_manager.go`),
+   which implemented the same rule scoped to `NoConfidence`/`UpdateCommittee`
+   ratification before this landed; the production version applies to the
+   DRep tally for every DRep-gated action type. `ActiveProposalDepositDRepPower`
+   is exported specifically so every other DRep voting-power reporting path
+   calls it too: the Blockfrost adapter's `predefinedDRep`, `drepByCredentialTag`,
+   and the `DReps` list handler's `fillAmounts` (all in
+   `api/blockfrost/adapter.go`), and `LedgerView.GetDRepVotingPower`
+   (`ledger/view.go` -- the local-state-query `GetDRepState` path, currently
+   unwired to any caller). Each merges its result into
+   `GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`'s (or, for the two
+   single-credential reads, `GetDRepVotingPower`'s) plain figure the same way
+   `LoadDRepVotingState` does; without that, a DRep's reported voting power
+   would silently disagree with the value ratification actually used for it.
+   Those call sites pass `expiryEpoch = 0` (matching `GetDRepVotingPower`'s
+   existing point-in-time, ungated convention noted above), not
+   `LoadDRepVotingState`'s epoch-boundary CIP-0163 value, so a return
+   account's deposit is counted there even if the CIP-0163 gate would exclude
+   it from the epoch-boundary tally.
+   `TallyContext.DelegatorInactivityOn` mirrors the
    same flag into the lazy (non-precomputed) `tallyDRepVotes` fallback path
    used by standalone/test callers. The mid-epoch HardForkInitiation stability
    check snapshots and threads this gate through `StabilityCheckInputs` as well,
