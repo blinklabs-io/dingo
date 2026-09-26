@@ -2271,6 +2271,23 @@ func (lv *LedgerView) GetDRepVotingPower(
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
+	// Fold in any active governance proposal's deposit escrowed to a return
+	// account delegating to this DRep, matching the deposit-inclusive tally
+	// governance.LoadDRepVotingState uses for ratification and the
+	// Blockfrost adapter's DRep voting-power reads (CIP-1694;
+	// blinklabs-io/dingo#4355).
+	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
+		lv.ls.db, lv.txn, lv.ls.CurrentEpoch(), 0,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get active proposal deposit voting power: %w", err,
+		)
+	}
+	power += drepDepositPower[models.StakeCredentialRef{
+		Tag: credentialTag,
+		Key: drepCredential,
+	}.MapKey()]
 	return power, nil
 }
 
