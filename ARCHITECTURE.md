@@ -12579,6 +12579,12 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    parameters through `eras.CloneGovernanceProtocolParameters`, preserving
    Dijkstra's extension fields; unsupported future parameter types fail closed.
 
+   When a boundary enacts a parent and child ParameterChange together, ENACT
+   applies the parent first and the child second, including when replaying
+   proposals already marked enacted at that boundary. This uses proposal
+   ancestry rather than insertion order or the SQL/hash tie-break, so the
+   child's update is applied over the parent's result.
+
    The subsequent RATIFY pass carries the post-ENACT treasury as a running
    budget. Each accepted treasury withdrawal consumes that budget; an
    over-budget withdrawal or a withdrawal whose `uint64` amount sum overflows

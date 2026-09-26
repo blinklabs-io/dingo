@@ -3938,6 +3938,34 @@ ORDER BY ratified_epoch ASC, ratified_slot ASC,
   proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
 ```
 
+The per-purpose enacted root lookup returns the newest enacted proposal with
+no enacted child of the requested action types at the same epoch boundary.
+This makes a same-boundary parent/child chain resolve to its terminal action,
+regardless of proposal insertion order:
+
+```sql
+SELECT gp.*
+FROM governance_proposal AS gp
+WHERE gp.action_type IN (<action-type placeholders>)
+  AND gp.enacted_epoch IS NOT NULL
+  AND gp.deleted_slot IS NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM governance_proposal AS child
+    WHERE child.parent_tx_hash = gp.tx_hash
+      AND child.parent_action_idx = gp.action_index
+      AND child.action_type IN (<same action-type placeholders>)
+      AND child.enacted_epoch = gp.enacted_epoch
+      AND child.enacted_slot = gp.enacted_slot
+      AND child.deleted_slot IS NULL
+  )
+ORDER BY gp.enacted_epoch DESC, gp.enacted_slot DESC, gp.id DESC
+LIMIT 1;
+```
+
+The action-type list is bound for both the candidate and child predicates, so
+actions from another governance purpose cannot advance this root.
+
 ```sql
 -- GetExpiredGovernanceProposalsAt(epoch, slot)
 SELECT *
