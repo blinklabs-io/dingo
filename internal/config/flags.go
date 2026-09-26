@@ -215,6 +215,12 @@ var flagSpecs = []flagSpec{
 		"",
 		"Mesh API provider",
 	),
+	stringFlag(
+		"Plugins.API.Mcp.Provider",
+		"mcp-provider",
+		"",
+		"MCP API provider",
+	),
 	stringSliceFlag(
 		"CORSAllowedOrigins",
 		"cors-allowed-origins",

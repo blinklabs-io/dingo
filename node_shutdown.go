@@ -292,6 +292,7 @@ func (n *Node) shutdown() error {
 	// API providers are stopped before consumers and stateful dependencies.
 	if n.pluginHost != nil {
 		for _, capability := range []plugin.Capability{
+			plugin.CapabilityAPIMcp,
 			plugin.CapabilityAPIUtxorpc,
 			plugin.CapabilityAPIMesh,
 			plugin.CapabilityAPIBlockfrost,
