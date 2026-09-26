@@ -934,6 +934,7 @@ func TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline(
 		err := fixture.ls.processChainIteratorRollback(
 			t.Context(),
 			fixture.ancestorTip.Point,
+			nil,
 		)
 		dbTip, dbErr := fixture.ls.db.GetTip(nil)
 		require.NoError(t, dbErr)

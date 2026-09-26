@@ -49,15 +49,23 @@ func (s *Store) SaveRewardAdaPots(
 	if err != nil {
 		return err
 	}
+	var importedEpochFees sql.NullString
+	if pots.ImportedEpochFees != nil {
+		importedEpochFees = sql.NullString{
+			String: decimalUint64(*pots.ImportedEpochFees),
+			Valid:  true,
+		}
+	}
 	id, err := queries.SaveRewardAdaPots(
 		ctx,
 		sqlitequery.SaveRewardAdaPotsParams{
-			Epoch:        epoch,
-			Treasury:     decimalUint64(pots.Treasury),
-			Reserves:     decimalUint64(pots.Reserves),
-			Fees:         decimalUint64(pots.Fees),
-			Rewards:      decimalUint64(pots.Rewards),
-			CapturedSlot: capturedSlot,
+			Epoch:             epoch,
+			Treasury:          decimalUint64(pots.Treasury),
+			Reserves:          decimalUint64(pots.Reserves),
+			Fees:              decimalUint64(pots.Fees),
+			Rewards:           decimalUint64(pots.Rewards),
+			CapturedSlot:      capturedSlot,
+			ImportedEpochFees: importedEpochFees,
 		},
 	)
 	if err != nil {
@@ -103,14 +111,26 @@ func (s *Store) GetRewardAdaPots(
 	if err != nil {
 		return nil, err
 	}
+	var importedEpochFees *types.Uint64
+	if row.ImportedEpochFees.Valid {
+		imported, err := parseUint64(
+			"imported_epoch_fees",
+			row.ImportedEpochFees.String,
+		)
+		if err != nil {
+			return nil, err
+		}
+		importedEpochFees = (*types.Uint64)(&imported)
+	}
 	return &models.RewardAdaPots{
-		ID:           uint(row.ID),
-		Epoch:        uint64(row.Epoch),
-		Treasury:     types.Uint64(treasury),
-		Reserves:     types.Uint64(reserves),
-		Fees:         types.Uint64(fees),
-		Rewards:      types.Uint64(rewards),
-		CapturedSlot: uint64(row.CapturedSlot),
+		ID:                uint(row.ID),
+		Epoch:             uint64(row.Epoch),
+		Treasury:          types.Uint64(treasury),
+		Reserves:          types.Uint64(reserves),
+		Fees:              types.Uint64(fees),
+		Rewards:           types.Uint64(rewards),
+		ImportedEpochFees: importedEpochFees,
+		CapturedSlot:      uint64(row.CapturedSlot),
 	}, nil
 }
 

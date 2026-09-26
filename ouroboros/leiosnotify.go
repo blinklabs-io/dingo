@@ -1587,7 +1587,12 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"cannot accept leios announcement without announcement ledger",
 		)
 	}
-	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+	// raw is the header bytes a LeiosNotify peer put on the wire, decoded on
+	// the connection's own goroutine with no recover above it. This is also
+	// the first statement to touch peer data here -- no lock is held and
+	// nothing shared has been mutated -- so a contained decode panic leaves
+	// no half-updated state behind and simply drops the announcement.
+	header, err := decodeLeiosAnnouncementHeader(raw)
 	if err != nil {
 		return fmt.Errorf("decode ranking-block header: %w", err)
 	}
