@@ -236,6 +236,25 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 		Active:            false,
 	}))
 	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+	existingProposalHash := bytes.Repeat([]byte{0x56}, lcommon.Blake2b256Size)
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        existingProposalHash,
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeInfo),
+			ProposedEpoch: 99,
+			ExpiresEpoch:  120,
+			AnchorURL:     "https://example.com/existing-proposal",
+			AnchorHash:    bytes.Repeat([]byte{0x57}, lcommon.Blake2b256Size),
+			Deposit:       1,
+			ReturnAddress: append(
+				[]byte{0xE1},
+				bytes.Repeat([]byte{0x58}, lcommon.Blake2b224Size)...,
+			),
+			AddedSlot: 90,
+		},
+		nil,
+	))
 
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.ProtocolVersion.Major = 9
@@ -282,6 +301,21 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 		Amount: 500,
 	})
 	tx.WithProposalProcedures(proposal)
+	var voterHash [lcommon.Blake2b224Size]byte
+	copy(voterHash[:], drepCredential)
+	var actionTxHash [lcommon.Blake2b256Size]byte
+	copy(actionTxHash[:], existingProposalHash)
+	tx.WithVotingProcedures(lcommon.VotingProcedures{
+		&lcommon.Voter{
+			Type: lcommon.VoterTypeDRepKeyHash,
+			Hash: voterHash,
+		}: {
+			&lcommon.GovActionId{
+				TransactionId: actionTxHash,
+				GovActionIdx:  0,
+			}: {Vote: models.VoteYes},
+		},
+	})
 	txHash := tx.Hash()
 	var txHashArray [32]byte
 	copy(txHashArray[:], txHash.Bytes())
@@ -307,9 +341,130 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
 	require.Equal(t, uint64(120), drep.ExpiryEpoch)
+	existingProposal, err := db.GetGovernanceProposal(
+		existingProposalHash,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	existingVotes, err := db.GetGovernanceVotes(existingProposal.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, existingVotes, 1)
+	require.Equal(t, uint8(models.VoteYes), existingVotes[0].Vote)
 	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)
 	require.Zero(t, dormantEpochs)
+}
+
+func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+
+	drepCredential := bytes.Repeat([]byte{0x61}, lcommon.Blake2b224Size)
+	proposalHash := bytes.Repeat([]byte{0x62}, lcommon.Blake2b256Size)
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        proposalHash,
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeInfo),
+			ProposedEpoch: 99,
+			ExpiresEpoch:  120,
+			AnchorURL:     "https://example.com/activity-order",
+			AnchorHash:    bytes.Repeat([]byte{0x63}, lcommon.Blake2b256Size),
+			Deposit:       1,
+			ReturnAddress: append(
+				[]byte{0xE1},
+				bytes.Repeat([]byte{0x64}, lcommon.Blake2b224Size)...,
+			),
+			AddedSlot: 90,
+		},
+		nil,
+	))
+
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.ProtocolVersion.Major = 9
+	pparams.DRepDeposit = 500
+	pparams.DRepInactivityPeriod = 20
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId: 100,
+		},
+		currentPParams: &pparams,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	var actionTxHash [lcommon.Blake2b256Size]byte
+	copy(actionTxHash[:], proposalHash)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(bytes.Repeat([]byte{0x65}, lcommon.Blake2b256Size))
+	tx.WithValid(true)
+	tx.WithCertificates(&lcommon.RegistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+		Amount: 500,
+	})
+	var voterHash [lcommon.Blake2b224Size]byte
+	copy(voterHash[:], drepCredential)
+	tx.WithVotingProcedures(lcommon.VotingProcedures{
+		&lcommon.Voter{
+			Type: lcommon.VoterTypeDRepKeyHash,
+			Hash: voterHash,
+		}: {
+			&lcommon.GovActionId{
+				TransactionId: actionTxHash,
+				GovActionIdx:  0,
+			}: {Vote: models.VoteYes},
+		},
+	})
+	txHash := tx.Hash()
+	var txHashArray [lcommon.Blake2b256Size]byte
+	copy(txHashArray[:], txHash.Bytes())
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0x66}, lcommon.Blake2b256Size),
+	}
+	delta := NewLedgerDelta(point, uint(conway.EraIdConway), point.Slot)
+	defer delta.Release()
+	delta.addTransaction(tx, 0)
+	delta.Offsets = &database.BlockIngestionResult{
+		TxOffsets:   map[[32]byte]database.CborOffset{txHashArray: {}},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return delta.apply(ls, txn)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	require.Equal(t, uint64(100), drep.LastActivityEpoch)
+	require.Equal(t, uint64(123), drep.ExpiryEpoch,
+		"PV9 registration must include the imported dormant epochs after same-transaction vote activity")
+	proposal, err := db.GetGovernanceProposal(proposalHash, 0, nil)
+	require.NoError(t, err)
+	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, votes, 1)
+	require.Equal(t, uint8(models.VoteYes), votes[0].Vote)
+	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormantEpochs)
 }
 
 func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(

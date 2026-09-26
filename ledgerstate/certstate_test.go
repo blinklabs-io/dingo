@@ -801,6 +801,49 @@ func TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry(t *testing.T) {
 	require.Equal(t, uint64(13), result.DReps[0].ExpiryEpoch)
 }
 
+func TestParseCertStateConwayRejectsMalformedDRepDelegators(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x46}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{
+		uint64(10), nil, uint64(500), "malformed delegator list",
+	})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	dstate := []byte{0xa4}
+	for i := range 4 {
+		accountMapEntry := encodeCredentialMapEntry(
+			t,
+			[]any{
+				uint64(CredentialTypeKey),
+				bytes.Repeat([]byte{byte(0x50 + i)}, 28),
+			},
+			[]any{},
+		)
+		dstate = append(dstate, accountMapEntry[1:]...)
+	}
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	certStateCBOR, err := cbor.Encode([]any{
+		cbor.RawMessage(drepMap),
+		cbor.RawMessage([]byte{0xa0}),
+		uint64(3),
+		cbor.RawMessage(poolState),
+		cbor.RawMessage(dstate),
+		uint64(0),
+	})
+	require.NoError(t, err)
+
+	result, err := ParseCertState(certStateCBOR)
+	require.ErrorContains(t, err, "decoding DRep delegators")
+	require.Nil(t, result, "a malformed selected DRep map must not yield partial imported state")
+}
+
 func TestParseCertStateConwayIgnoresUnrelatedIntegerAfterDRepMap(t *testing.T) {
 	t.Parallel()
 

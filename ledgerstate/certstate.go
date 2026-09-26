@@ -206,7 +206,9 @@ func parseCertStateConway(
 			looksLikeCredentialMap(elem) {
 			dreps, vErr := parseDRepMap(elem)
 			if vErr != nil {
-				warnings = append(warnings, vErr)
+				// A partial DRep map must not reach the non-reconcile import path,
+				// which can otherwise checkpoint CertState with missing DReps.
+				return nil, fmt.Errorf("parsing DRep state: %w", vErr)
 			}
 			result.DReps = dreps
 			drepFound = true
