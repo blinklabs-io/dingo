@@ -92,6 +92,7 @@ func EnactProposal(
 		return nil, fmt.Errorf("decode gov action: %w", err)
 	}
 
+	refundSource := proposalRewardSourceHash(proposal)
 	switch a := action.(type) {
 	case *conway.ConwayParameterChangeGovAction:
 		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
@@ -130,6 +131,17 @@ func EnactProposal(
 	case *lcommon.TreasuryWithdrawalGovAction:
 		if err := applyTreasuryWithdrawal(ctx, a, proposal); err != nil {
 			return nil, fmt.Errorf("treasury withdrawal: %w", err)
+		}
+		// The withdrawal credits above are journaled under the proposal's
+		// source hash. A refund to one of those destinations under the same
+		// hash would hit the journal's replay key and be dropped, losing the
+		// deposit, so that refund gets its own discriminator.
+		collides, err := returnAccountReceivesWithdrawal(proposal, a)
+		if err != nil {
+			return nil, fmt.Errorf("treasury withdrawal: %w", err)
+		}
+		if collides {
+			refundSource = proposalDepositRefundSourceHash(proposal)
 		}
 
 	case *lcommon.NoConfidenceGovAction:
@@ -179,8 +191,8 @@ func EnactProposal(
 	// Per CIP-1694, the deposit is returned to the proposer's reward
 	// account when the proposal is finalized (enactment here, or
 	// expiry in the EpochInput expiry path).
-	if err := refundProposalDeposit(
-		ctx.DB, ctx.Txn, proposal, ctx.Slot,
+	if err := refundProposalDepositFromSource(
+		ctx.DB, ctx.Txn, proposal, ctx.Slot, refundSource,
 	); err != nil {
 		return nil, fmt.Errorf("refund proposal deposit: %w", err)
 	}
@@ -319,6 +331,47 @@ func applyTreasuryWithdrawal(
 		ctx.Slot,
 		metaTxn,
 	)
+}
+
+// returnAccountReceivesWithdrawal reports whether the proposal's deposit
+// return account is also credited a non-zero amount by the withdrawal, which
+// is when the two credits would share a journal key.
+func returnAccountReceivesWithdrawal(
+	proposal *models.GovernanceProposal,
+	a *lcommon.TreasuryWithdrawalGovAction,
+) (bool, error) {
+	if proposal == nil || a == nil || proposal.Deposit == 0 {
+		return false, nil
+	}
+	returnTag, returnCredential, err := rewardAccountStakeCredential(
+		proposal.ReturnAddress,
+	)
+	if err != nil {
+		return false, fmt.Errorf("proposal deposit return account: %w", err)
+	}
+	for rewardAddr, amount := range a.Withdrawals {
+		if amount == 0 || rewardAddr == nil {
+			continue
+		}
+		rewardAddrBytes, err := rewardAddr.Bytes()
+		if err != nil {
+			return false, fmt.Errorf(
+				"encode treasury withdrawal reward address: %w",
+				err,
+			)
+		}
+		tag, credential, err := rewardAccountStakeCredential(rewardAddrBytes)
+		if err != nil {
+			return false, fmt.Errorf(
+				"treasury withdrawal reward account: %w",
+				err,
+			)
+		}
+		if tag == returnTag && bytes.Equal(credential, returnCredential) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // treasuryWithdrawalTotal returns the amount an ENACT transition would remove

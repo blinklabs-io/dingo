@@ -12883,6 +12883,13 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    ancestry rather than insertion order or the SQL/hash tie-break, so the
    child's update is applied over the parent's result.
 
+   An enacted TreasuryWithdrawal whose deposit return account is also one of
+   its withdrawal destinations credits that account twice, as the reference's
+   `applyEnactedWithdrawals` and `returnProposalDeposits` do: once for the
+   withdrawal and once for the deposit. The two credits journal under
+   different `account_reward_delta` discriminators, so neither is dropped as a
+   replay of the other.
+
    The subsequent RATIFY pass carries the post-ENACT treasury as a running
    budget. Each accepted treasury withdrawal consumes that budget; an
    over-budget withdrawal or a withdrawal whose `uint64` amount sum overflows

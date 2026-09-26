@@ -1285,6 +1285,18 @@ func refundProposalDeposit(
 	proposal *models.GovernanceProposal,
 	slot uint64,
 ) error {
+	return refundProposalDepositFromSource(
+		db, txn, proposal, slot, proposalRewardSourceHash(proposal),
+	)
+}
+
+func refundProposalDepositFromSource(
+	db *database.Database,
+	txn *database.Txn,
+	proposal *models.GovernanceProposal,
+	slot uint64,
+	sourceHash []byte,
+) error {
 	if proposal == nil || proposal.Deposit == 0 {
 		return nil
 	}
@@ -1308,7 +1320,7 @@ func refundProposalDeposit(
 		// discriminator: it keeps two refunds to the same return account in
 		// one epoch as distinct journal rows and makes a crash-replayed
 		// boundary refund idempotent.
-		proposalRewardSourceHash(proposal),
+		sourceHash,
 	)
 	if err != nil {
 		return err
