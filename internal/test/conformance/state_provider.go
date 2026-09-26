@@ -825,6 +825,10 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 	return members, nil
 }
 
+// CommitteeHotCredentialMember resolves only seated authorizations. Unlike
+// LedgerView, the harness cannot honor an unseated member's authorization for
+// the rest of its epoch: conformance transaction slots are synthetic markers
+// and do not locate an epoch boundary.
 func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	hotCredential common.Credential,
 ) (*common.CommitteeMember, error) {
@@ -870,35 +874,65 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	return nil, nil
 }
 
+// CommitteeHotCredentialColdCredentials returns every seated cold credential
+// whose current term authorizes this exact tagged hot credential, matching
+// LedgerView.CommitteeHotCredentialColdCredentials.
 func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
 	hotCredential common.Credential,
 ) ([]common.Credential, error) {
-	member, err := p.CommitteeHotCredentialMember(hotCredential)
+	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
 	}
-	if member == nil || member.Resigned || member.HotKey == nil ||
-		*member.HotKey != hotCredential.Credential {
-		return nil, nil
+	authorizations, err := withBadConnRetry(
+		func() ([]*models.AuthCommitteeHot, error) {
+			return p.manager.db.GetActiveCommitteeMembers(nil)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"lookup active committee hot credentials: %w",
+			err,
+		)
 	}
+	type coldKey struct {
+		tag  uint8
+		hash common.Blake2b224
+	}
+	seen := make(map[coldKey]struct{}, len(authorizations))
 	var coldCredentials []common.Credential
-	for _, coldType := range []uint{
-		common.CredentialTypeAddrKeyHash,
-		common.CredentialTypeScriptHash,
-	} {
-		cold := common.Credential{CredType: coldType, Credential: member.ColdKey}
-		candidate, err := p.CommitteeCredentialMember(cold)
+	for _, authorization := range authorizations {
+		if authorization == nil ||
+			authorization.HotCredentialTag != hotTag ||
+			common.NewBlake2b224(authorization.HotCredential) !=
+				hotCredential.Credential {
+			continue
+		}
+		cold := common.Credential{
+			CredType:   uint(authorization.ColdCredentialTag),
+			Credential: common.NewBlake2b224(authorization.ColdCredential),
+		}
+		key := coldKey{tag: authorization.ColdCredentialTag, hash: cold.Credential}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		member, err := p.CommitteeCredentialMember(cold)
 		if err != nil {
 			return nil, err
 		}
-		if candidate != nil && !candidate.Resigned && candidate.HotKey != nil &&
-			*candidate.HotKey == hotCredential.Credential {
-			coldCredentials = append(coldCredentials, cold)
+		if member == nil || member.Resigned || member.HotKey == nil ||
+			*member.HotKey != hotCredential.Credential {
+			continue
 		}
+		seen[key] = struct{}{}
+		coldCredentials = append(coldCredentials, cold)
 	}
 	return coldCredentials, nil
 }
 
+// CommitteeCredentialIsElected reports whether an exact tagged cold credential
+// is seated in the enacted committee, matching
+// LedgerView.CommitteeCredentialIsElected.
 func (p *DingoStateProvider) CommitteeCredentialIsElected(
 	coldCredential common.Credential,
 ) (bool, error) {

@@ -841,7 +841,12 @@ LIMIT 1`,
 	return &member, err
 }
 
-func (s *Store) GetCommitteeHotAuthorizations(
+// GetCommitteeHotAuthorizationsSince filters before ranking: a cold
+// credential's latest authorization is at or after minSlot exactly when its
+// latest authorization among rows at or after minSlot is, so the added_slot
+// index bounds the scan to the window without changing the answer.
+func (s *Store) GetCommitteeHotAuthorizationsSince(
+	minSlot uint64,
 	txn types.Txn,
 ) ([]*models.AuthCommitteeHot, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
@@ -859,8 +864,9 @@ FROM (
                ORDER BY added_slot DESC, certificate_id DESC
            ) rn
     FROM auth_committee_hot
+    WHERE added_slot >= ?
 ) auth
-WHERE auth.rn = 1`)
+WHERE auth.rn = 1`, minSlot)
 	if err != nil {
 		return nil, err
 	}
