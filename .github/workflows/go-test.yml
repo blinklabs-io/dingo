@@ -188,6 +188,8 @@ jobs:
         # compiles with dingo_extra_plugins breaks the released binary. Cheap
         # enough to belong in the gate rather than below it.
         run: go build ./cmd/dingo
+      - name: go-vet-386
+        run: GOARCH=386 go vet -tags dingo_extra_plugins ./...
       - name: sqlc-generation-drift
         # Checked-in sqlc output going stale is a one-line failure; there is no
         # reason to find it after the expensive stage.
