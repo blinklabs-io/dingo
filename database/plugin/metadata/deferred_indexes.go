@@ -14,6 +14,11 @@
 
 package metadata
 
+import (
+	"context"
+	"time"
+)
+
 // DeferredIndexManager is an optional interface that metadata stores
 // implement to participate in bulk-load index deferral. The Mithril
 // sync orchestrator probes the store with a type assertion and skips
@@ -57,12 +62,50 @@ type DeferredIndexManager interface {
 // on a multi-million-row table takes long enough that an operator watching
 // startup sees nothing at all until it finishes. A caller that can name the
 // missing entries first can attribute that wait while it is happening.
-//
 // Stores that do not implement this report nothing and fall back to logging
 // after the fact.
 type MissingCriticalDeferredIndexLister interface {
-	// MissingCriticalDeferredIndexes returns the names of the
-	// Critical=true manifest entries missing from the schema, in
-	// manifest order. It performs no DDL.
+	// MissingCriticalDeferredIndexes returns the names of missing
+	// Critical=true manifest entries, in manifest order. It performs no DDL.
 	MissingCriticalDeferredIndexes() ([]string, error)
+}
+
+// MissingDeferredIndexLister lists missing entries in the complete deferred
+// index manifest, for restore paths that rebuild the full manifest.
+type MissingDeferredIndexLister interface {
+	// MissingDeferredIndexes returns the names of the manifest entries
+	// missing from the schema, in manifest order. It performs no DDL.
+	MissingDeferredIndexes() ([]string, error)
+}
+
+// ContextMissingDeferredIndexLister is an optional companion to
+// MissingDeferredIndexLister for cancellable operations such as restore.
+type ContextMissingDeferredIndexLister interface {
+	MissingDeferredIndexesContext(ctx context.Context) ([]string, error)
+}
+
+// ContextDeferredIndexBuilder is an optional companion to
+// DeferredIndexManager for callers that own a cancellable context.
+//
+// BuildDeferredIndexes runs its DDL on a context the store creates, so a
+// caller whose own context is cancelled still waits for the build to finish.
+// Restore stages a full rebuild inside a cancellable operation and uses this
+// instead; stores that do not implement it fall back to the uninterruptible
+// call.
+type ContextDeferredIndexBuilder interface {
+	// BuildDeferredIndexesContext is BuildDeferredIndexes bound to ctx.
+	BuildDeferredIndexesContext(ctx context.Context) error
+}
+
+// DeferredIndexProgressBuilder is an optional companion used by restore
+// paths that need progress while a large index build is running.
+type DeferredIndexProgressBuilder interface {
+	// BuildDeferredIndexesContextWithProgress rebuilds missing full-manifest
+	// indexes with ctx. before runs immediately before each DDL statement;
+	// after runs after a successful build with its elapsed duration.
+	BuildDeferredIndexesContextWithProgress(
+		ctx context.Context,
+		before func(string),
+		after func(string, time.Duration),
+	) error
 }
