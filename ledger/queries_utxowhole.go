@@ -138,8 +138,12 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// review).
 	var live []database.UtxoRef
 	collect := func(u *models.Utxo) error {
+		txID, err := blake2b256FromBytes(u.TxId)
+		if err != nil {
+			return fmt.Errorf("utxo ref tx id: %w", err)
+		}
 		var ref database.UtxoRef
-		copy(ref.TxId[:], u.TxId)
+		copy(ref.TxId[:], txID[:])
 		ref.OutputIdx = u.OutputIdx
 		live = append(live, ref)
 		return nil

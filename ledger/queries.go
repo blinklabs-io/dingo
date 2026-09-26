@@ -1686,7 +1686,9 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 // the Haskell ledger's "empty set means all" semantics). cardano-cli issues
 // this while balancing a transaction, so leaving it unhandled tears down the
 // connection. The result is a bare CBOR map of stake credential -> {expiry
-// epoch, optional anchor, deposit}.
+// epoch, optional anchor, deposit}. A malformed stored credential fails the
+// whole query: returning a map that silently omits one active DRep would
+// claim to be the complete state for this point.
 func (ls *LedgerState) queryShelleyDRepState(
 	creds []lcommon.Credential,
 ) (any, error) {
@@ -1982,15 +1984,14 @@ func drepAnchor(drep *models.Drep) (*lcommon.GovAnchor, error) {
 	if drep.AnchorURL == "" && len(drep.AnchorHash) == 0 {
 		return nil, nil
 	}
-	if len(drep.AnchorHash) != lcommon.Blake2b256Size {
-		return nil, fmt.Errorf(
-			"drep anchor: invalid blake2b-256 hash: expected %d bytes, got %d",
-			lcommon.Blake2b256Size,
-			len(drep.AnchorHash),
-		)
+	dataHash, err := blake2b256FromBytes(drep.AnchorHash)
+	if err != nil {
+		return nil, fmt.Errorf("drep anchor: %w", err)
 	}
-	anchor := &lcommon.GovAnchor{Url: drep.AnchorURL}
-	copy(anchor.DataHash[:], drep.AnchorHash)
+	anchor := &lcommon.GovAnchor{
+		Url:      drep.AnchorURL,
+		DataHash: dataHash,
+	}
 	return anchor, nil
 }
 
@@ -2301,15 +2302,17 @@ func (ls *LedgerState) governanceProposalState(
 			err,
 		)
 	}
-	anchor := lcommon.GovAnchor{Url: proposal.AnchorURL}
-	if len(proposal.AnchorHash) != lcommon.Blake2b256Size {
+	dataHash, err := blake2b256FromBytes(proposal.AnchorHash)
+	if err != nil {
 		return olocalstatequery.GovActionState{}, fmt.Errorf(
-			"governance proposal anchor: invalid blake2b-256 hash: expected %d bytes, got %d",
-			lcommon.Blake2b256Size,
-			len(proposal.AnchorHash),
+			"governance proposal anchor: %w",
+			err,
 		)
 	}
-	copy(anchor.DataHash[:], proposal.AnchorHash)
+	anchor := lcommon.GovAnchor{
+		Url:      proposal.AnchorURL,
+		DataHash: dataHash,
+	}
 	procedure, err := cbor.Encode([]any{
 		proposal.Deposit,
 		rewardAccount,

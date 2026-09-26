@@ -136,6 +136,41 @@ func TestQueryDRepStateAcceptsExactLengthCredential(t *testing.T) {
 	require.True(t, found, "DRep missing from GetDRepState result")
 }
 
+func TestQueryDRepStateRejectsPartialResultWhenOneCredentialIsCorrupt(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	valid := drepRefundTestCredential(0xc2)
+	seedImportedDrep(t, db, valid, 400_000_000, 100, true)
+	invalid := drepRefundTestCredential(0xb2)
+	invalidBytes := append([]byte(nil), shortHash(0xb2)...)
+	tag, err := models.CredentialTagFromUint(uint(invalid.CredType))
+	require.NoError(t, err)
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: tag,
+			Credential:    invalidBytes,
+			AddedSlot:     101,
+			Active:        true,
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  tag,
+			DrepCredential: invalidBytes,
+			AddedSlot:      101,
+			DepositAmount:  types.Uint64(400_000_000),
+		},
+		nil,
+	))
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryShelleyDRepState(nil)
+	require.Error(t, err)
+	require.Nil(t, result, "a corrupt row must not produce a partial DRep state")
+	require.Contains(t, err.Error(), "blake2b-224")
+}
+
 // TestStakePoolsResultRejectsWrongLengthKeyHash covers GetStakePools, whose
 // pool ids come from an unbounded key-hash column. A padded hash is a
 // well-formed pool id on the wire and names a pool that does not exist.
@@ -169,6 +204,22 @@ func TestDRepAnchorAbsentIsNotAnError(t *testing.T) {
 	anchor, err := drepAnchor(&models.Drep{})
 	require.NoError(t, err)
 	require.Nil(t, anchor)
+}
+
+func TestGovernanceProposalStateRejectsWrongLengthAnchorHash(t *testing.T) {
+	t.Parallel()
+	proposal := &models.GovernanceProposal{
+		AnchorURL:     "https://example.invalid/proposal.json",
+		AnchorHash:    make([]byte, lcommon.Blake2b256Size-1),
+		ReturnAddress: append([]byte{0xe0}, make([]byte, 28)...),
+		GovActionCbor: []byte{0x80},
+	}
+	ls := &LedgerState{db: newTestDB(t)}
+	state, err := ls.governanceProposalState(proposal, lcommon.GovActionId{})
+	require.Error(t, err)
+	require.Equal(t, olocalstatequery.GovActionState{}, state)
+	require.Contains(t, err.Error(), "governance proposal anchor")
+	require.Contains(t, err.Error(), "blake2b-256")
 }
 
 // TestStakeCredentialFromVoteRejectsWrongLengthCredential covers the

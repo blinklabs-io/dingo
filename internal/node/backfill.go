@@ -1021,28 +1021,27 @@ func (b *Backfill) Run(ctx context.Context) error {
 				// Track CBOR offset discovery for txs and produced UTxOs.
 				intervalStats.OffsetComputation += time.Since(offsetStart)
 				if oErr != nil {
-					b.logger.Warn(
-						"skipping block with offset error",
-						"component", "backfill",
-						"slot", blk.Slot,
-						"error", oErr,
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"computing block offsets at slot %d: %w",
+						blk.Slot,
+						oErr,
 					)
-				} else {
-					// Store transaction metadata into the shared batch
-					// instead of committing once per block.
-					if pErr := b.processBlockTxsBatched(
-						txs, point, epochId, eraId,
-						pp, offsets, acc, batchTxn,
-						&intervalStats, isFreshStart,
-					); pErr != nil {
-						saveCommittedCheckpoint()
-						return fmt.Errorf(
-							"processing block at slot %d: %w",
-							blk.Slot, pErr,
-						)
-					}
-					blockTxCount = len(txs)
 				}
+				// Store transaction metadata into the shared batch
+				// instead of committing once per block.
+				if pErr := b.processBlockTxsBatched(
+					txs, point, epochId, eraId,
+					pp, offsets, acc, batchTxn,
+					&intervalStats, isFreshStart,
+				); pErr != nil {
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"processing block at slot %d: %w",
+						blk.Slot, pErr,
+					)
+				}
+				blockTxCount = len(txs)
 			}
 		}
 
