@@ -29,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -1345,7 +1346,7 @@ func (m *Mempool) revalidateAppliedTx(
 		candidate.reject(at, tx)
 		return
 	}
-	tmpTx, err := gledger.NewTransactionFromCbor(at.txType, at.cbor)
+	tmpTx, err := safedecode.Transaction(at.txType, at.cbor)
 	if err != nil {
 		candidate.reject(at, tx)
 		m.logger.Error(
@@ -1505,7 +1506,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		return fmt.Errorf("%w in AddTransaction", ErrNilValidator)
 	}
 	// Decode transaction outside the lock (CPU-bound, no shared state)
-	tmpTx, err := gledger.NewTransactionFromCbor(txType, txBytes)
+	tmpTx, err := safedecode.Transaction(txType, txBytes)
 	if err != nil {
 		return fmt.Errorf("decode transaction: %w", err)
 	}

@@ -33,11 +33,16 @@ const OrderedQueueSize = 10000
 // other into Publish, so two events enqueued in order can be delivered to a
 // subscriber in either order (blinklabs-io/dingo#2287).
 type orderedLane struct {
-	queue chan Event
+	queue chan orderedItem
 	// stopCh is the bus stop channel captured when the lane was created.
 	// e.stopCh is swapped by a Stop/restart cycle, so the worker must watch
 	// the generation it was started under rather than re-reading the field.
 	stopCh chan struct{}
+}
+
+type orderedItem struct {
+	event Event
+	done  chan struct{}
 }
 
 // PublishOrdered enqueues an event for asynchronous delivery that preserves
@@ -122,7 +127,7 @@ func (e *EventBus) PublishOrderedContext(
 	e.stopMu.RUnlock()
 
 	select {
-	case lane.queue <- evt:
+	case lane.queue <- orderedItem{event: evt}:
 	default:
 		// Lane is full: wait for space rather than losing the event.
 		if e.metrics != nil {
@@ -130,7 +135,7 @@ func (e *EventBus) PublishOrderedContext(
 				Inc()
 		}
 		select {
-		case lane.queue <- evt:
+		case lane.queue <- orderedItem{event: evt}:
 		case <-stopCh:
 			return false
 		case <-ctx.Done():
@@ -149,6 +154,44 @@ func (e *EventBus) PublishOrderedContext(
 	return true
 }
 
+// FlushOrderedContext waits until every event already accepted by the
+// event-type's ordered lane has been handed to its subscribers. It does not
+// publish an event of its own.
+func (e *EventBus) FlushOrderedContext(
+	ctx context.Context,
+	eventType EventType,
+) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	e.stopMu.RLock()
+	if e.stopped || e.closed {
+		e.stopMu.RUnlock()
+		return false
+	}
+	lane := e.orderedLane(eventType)
+	stopCh := lane.stopCh
+	e.stopMu.RUnlock()
+	done := make(chan struct{})
+	select {
+	case lane.queue <- orderedItem{done: done}:
+	case <-stopCh:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-stopCh:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // orderedLane returns the lane for an event type, creating it and starting its
 // worker on first use. The caller must hold stopMu for read and must have
 // observed the bus as neither stopped nor closed: that is what makes the
@@ -164,7 +207,7 @@ func (e *EventBus) orderedLane(eventType EventType) *orderedLane {
 		e.orderedLanes = make(map[EventType]*orderedLane)
 	}
 	lane := &orderedLane{
-		queue:  make(chan Event, OrderedQueueSize),
+		queue:  make(chan orderedItem, OrderedQueueSize),
 		stopCh: e.stopCh,
 	}
 	e.orderedLanes[eventType] = lane
@@ -189,7 +232,7 @@ func (e *EventBus) orderedWorker(lane *orderedLane, eventType EventType) {
 		select {
 		case <-lane.stopCh:
 			return
-		case evt := <-lane.queue:
+		case item := <-lane.queue:
 			// Drop queued work if shutdown began after the dequeue but
 			// before Publish ran, so Stop/Close do not deliver buffered
 			// events. This matches asyncWorker.
@@ -202,7 +245,11 @@ func (e *EventBus) orderedWorker(lane *orderedLane, eventType EventType) {
 			// drains, which is the backpressure that keeps events from
 			// being dropped; shutdown closes stopCh first, releasing any
 			// parked delivery.
-			e.Publish(eventType, evt)
+			if item.done != nil {
+				close(item.done)
+				continue
+			}
+			e.Publish(eventType, item.event)
 		}
 	}
 }

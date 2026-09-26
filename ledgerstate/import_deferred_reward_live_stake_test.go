@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -125,4 +126,20 @@ func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
 		t, "3000000", utxoStake,
 		"the post-import rebuild must aggregate every deferred batch",
 	)
+
+	blobTxn := db.BlobTxn(false)
+	defer blobTxn.Release()
+	for i, amount := range []uint64{1_000_000, 2_000_000} {
+		txHash := bytes.Repeat([]byte{byte(0x40 + i)}, 32)
+		utxoCbor, err := db.Blob().GetUtxo(
+			blobTxn.Blob(), txHash, 0,
+		)
+		require.NoError(t, err,
+			"imported live UTxO %x#0 must remain replayable after repair",
+			txHash,
+		)
+		output, err := ledger.NewTransactionOutputFromCbor(utxoCbor)
+		require.NoError(t, err)
+		require.Equal(t, amount, output.Amount().Uint64())
+	}
 }

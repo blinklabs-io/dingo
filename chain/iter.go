@@ -28,6 +28,7 @@ type ChainIterator struct {
 	startPoint     ocommon.Point
 	lastPoint      ocommon.Point
 	rollbackPoint  ocommon.Point
+	rollbackBlocks []models.Block
 	nextBlockIndex uint64
 	needsRollback  bool
 	reverse        bool
@@ -40,6 +41,11 @@ type ChainIteratorResult struct {
 	Point    ocommon.Point
 	Block    models.Block
 	Rollback bool
+	// RollbackBlocks contains the blocks removed while reaching Point, in
+	// newest-first order. The payload is carried because persistent chain
+	// rollback removes block bodies before a lagging ledger iterator handles
+	// the rollback signal.
+	RollbackBlocks []models.Block
 }
 
 func newChainIteratorWithContext(

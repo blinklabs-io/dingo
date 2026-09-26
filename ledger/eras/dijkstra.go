@@ -397,6 +397,10 @@ func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 	)
 	ret = append(ret,
 		indexedUtxoValidationRule{
+			index:          indexes[0],
+			validationFunc: validateDijkstraPlutusV3ReferenceInputs,
+		},
+		indexedUtxoValidationRule{
 			index:          indexes[1],
 			validationFunc: validateCommitteeCertificates,
 		},

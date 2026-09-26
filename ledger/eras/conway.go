@@ -341,8 +341,14 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	tx lcommon.Transaction,
 	_ uint64,
 	ls lcommon.LedgerState,
-	_ lcommon.ProtocolParameters,
+	pp lcommon.ProtocolParameters,
 ) error {
+	if err := script.ValidatePlutusV3ReferenceInputs(
+		tx,
+		protocolMajorVersion(pp),
+	); err != nil {
+		return conway.ScriptContextConstructionError{Err: err}
+	}
 	view, err := script.NewTxScriptView(tx, ls)
 	if err != nil {
 		if isInputResolutionError(err) {
@@ -586,6 +592,7 @@ func validateTxPlutusConwayWithContext(
 		ls,
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
+		protocolMajorVersion(pp),
 	)
 	synthetic := syntheticV2CostModelInEffect(ls)
 	for redeemerKey, redeemerValue := range plutusCtx.redeemers.Iter() {
@@ -599,6 +606,7 @@ func validateTxPlutusConwayWithContext(
 			tx.VotingProcedures(),
 			tx.ProposalProcedures(),
 			plutusCtx.witnessDatums,
+			protocolMajorVersion(pp),
 		)
 		if !ok {
 			return conway.ExtraRedeemerError{RedeemerKey: redeemerKey}
@@ -1084,6 +1092,7 @@ type txInfoCache struct {
 	ls             lcommon.LedgerState
 	tx             lcommon.Transaction
 	resolvedInputs []lcommon.Utxo
+	protocolMajor  uint
 	txInfoV1       script.TxInfoV1
 	txInfoV2       script.TxInfoV2
 	txInfoV3       script.TxInfoV3
@@ -1099,20 +1108,17 @@ type txInfoCache struct {
 // outputs, certificates, mint, and withdrawals, and translates the validity
 // interval through SlotToTime, so it must happen at most once per (tx,
 // language version) regardless of how many redeemers share that version.
-//
-// The cache takes no protocol version. gouroboros v0.192.0 renders the
-// PlutusV1/V2 txInfoMint the same way at every protocol version, matching
-// cardano-ledger's ungated transMintValue, so there is nothing left for a
-// version to select.
 func newTxInfoCache(
 	ls lcommon.LedgerState,
 	tx lcommon.Transaction,
 	resolvedInputs []lcommon.Utxo,
+	protocolMajor uint,
 ) *txInfoCache {
 	return &txInfoCache{
 		ls:             ls,
 		tx:             tx,
 		resolvedInputs: resolvedInputs,
+		protocolMajor:  protocolMajor,
 	}
 }
 
@@ -1123,6 +1129,7 @@ func (c *txInfoCache) v1() (script.TxInfoV1, error) {
 			c.tx,
 			c.resolvedInputs,
 			script.StrictValidityUpperBoundForTransaction(c.tx),
+			c.protocolMajor,
 		)
 		if err != nil {
 			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
@@ -1142,6 +1149,7 @@ func (c *txInfoCache) v2() (script.TxInfoV2, error) {
 			c.tx,
 			c.resolvedInputs,
 			script.StrictValidityUpperBoundForTransaction(c.tx),
+			c.protocolMajor,
 		)
 		if err != nil {
 			return script.TxInfoV2{}, conway.ScriptContextConstructionError{
@@ -1160,6 +1168,7 @@ func (c *txInfoCache) v3() (script.TxInfoV3, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			c.protocolMajor,
 		)
 		if err != nil {
 			return script.TxInfoV3{}, conway.ScriptContextConstructionError{
@@ -1212,7 +1221,7 @@ func evaluateConwayPlutusScript(
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV3,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
@@ -1258,7 +1267,7 @@ func evaluateConwayPlutusScript(
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV2,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
@@ -1296,7 +1305,7 @@ func evaluateConwayPlutusScript(
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV1,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
@@ -1339,6 +1348,7 @@ func buildConwayScriptPurpose(
 	votes lcommon.VotingProcedures,
 	proposalProcedures []lcommon.ProposalProcedure,
 	witnessDatums map[lcommon.Blake2b256]*lcommon.Datum,
+	protocolMajor uint,
 ) (purpose script.ScriptPurpose, ok bool) {
 	defer func() {
 		if recover() != nil {
@@ -1356,6 +1366,7 @@ func buildConwayScriptPurpose(
 		votes,
 		proposalProcedures,
 		witnessDatums,
+		protocolMajor,
 	)
 	return purpose, purpose != nil
 }
@@ -1437,6 +1448,7 @@ func EvaluateTxConway(
 		ls,
 		tx,
 		scriptInputs.resolvedAllInputs,
+		protocolMajorVersion(tmpPparams),
 	)
 	synthetic := syntheticV2CostModelInEffect(ls)
 	var txInfoV3 script.TxInfoV3

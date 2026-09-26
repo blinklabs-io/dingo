@@ -290,6 +290,7 @@ func ValidateTxBabbage(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()
@@ -527,6 +528,7 @@ func EvaluateTxBabbage(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()
