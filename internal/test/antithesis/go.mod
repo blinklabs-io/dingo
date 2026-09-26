@@ -6,7 +6,7 @@ toolchain go1.26.7
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.0
-	github.com/blinklabs-io/gouroboros v0.206.2
+	github.com/blinklabs-io/gouroboros v0.207.5
 	github.com/blinklabs-io/plutigo v0.7.1
 	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1

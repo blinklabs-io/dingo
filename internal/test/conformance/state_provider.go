@@ -525,22 +525,16 @@ func (p *DingoStateProvider) CommitteeMember(
 // CommitteeStateAvailable reports that the harness can answer committee
 // queries authoritatively whenever its backend is reachable.
 //
-// This deliberately differs from LedgerView.CommitteeStateAvailable, which
-// derives authority from the seated member set. The two providers have
-// different knowledge. A conformance vector declares its complete initial
-// committee, and seedGovernanceState writes exactly that set, so zero rows
+// A conformance vector declares its complete initial committee, and
+// seedGovernanceState writes exactly that set, so zero rows
 // here means the vector declared an empty committee -- authoritatively empty,
 // which must still reject a non-member's certificate. Deriving availability
 // from row count would instead report unavailable and decline to reject,
 // failing any vector that expects NotCommitteeMemberError against an empty
 // committee.
 //
-// Production instead derives authority from the include-deleted member set,
-// which distinguishes a committee emptied by NoConfidence (soft-deleted rows,
-// authoritative) from one never populated (no rows, ambiguous because Dingo
-// never persists the Conway genesis committee, blinklabs-io/dingo#3785). The
-// harness needs no such inference: it has no genesis-sync path, so reachable
-// already implies complete. Once #3785 lands the two answers converge.
+// Production needs persisted history or an explicit empty genesis declaration
+// to establish authority. The harness has the vector's complete initial state.
 func (p *DingoStateProvider) CommitteeStateAvailable() (bool, error) {
 	return p != nil && p.manager != nil && p.manager.db != nil, nil
 }

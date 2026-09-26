@@ -423,18 +423,21 @@ WHERE epoch > ?;
 
 -- name: SaveRewardAdaPots :one
 INSERT INTO reward_ada_pots (
-    epoch, treasury, reserves, fees, rewards, captured_slot
-) VALUES (?, ?, ?, ?, ?, ?)
+    epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch) DO UPDATE SET
     treasury = excluded.treasury,
     reserves = excluded.reserves,
     fees = excluded.fees,
     rewards = excluded.rewards,
-    captured_slot = excluded.captured_slot
+    captured_slot = excluded.captured_slot,
+    imported_epoch_fees = excluded.imported_epoch_fees
 RETURNING id;
 
 -- name: GetRewardAdaPots :one
-SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot
+SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
 FROM reward_ada_pots
 WHERE epoch = ?;
 

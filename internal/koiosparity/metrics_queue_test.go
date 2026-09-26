@@ -55,14 +55,14 @@ func TestRecordResultQueuesDoNotClobberEachOther(t *testing.T) {
 	})
 
 	expected := `
-# HELP dingo_koiosparity_epoch_mismatch_count mismatch row count for the most recently checked epoch, by network and queue (mirrors check_epoch_status.mismatch_count)
+# HELP dingo_koiosparity_epoch_mismatch_count mismatch row count for the most recently checked epoch, by network (a constant label from the node's shared registry) and queue (mirrors check_epoch_status.mismatch_count)
 # TYPE dingo_koiosparity_epoch_mismatch_count gauge
-dingo_koiosparity_epoch_mismatch_count{network="preview",queue="account"} 0
-dingo_koiosparity_epoch_mismatch_count{network="preview",queue="aggregate"} 3
-# HELP dingo_koiosparity_last_checked_epoch most recent epoch the koios-parity observer has completed a check for, by network and queue
+dingo_koiosparity_epoch_mismatch_count{queue="account"} 0
+dingo_koiosparity_epoch_mismatch_count{queue="aggregate"} 3
+# HELP dingo_koiosparity_last_checked_epoch most recent epoch the koios-parity observer has completed a check for, by network (a constant label from the node's shared registry) and queue
 # TYPE dingo_koiosparity_last_checked_epoch gauge
-dingo_koiosparity_last_checked_epoch{network="preview",queue="account"} 300
-dingo_koiosparity_last_checked_epoch{network="preview",queue="aggregate"} 500
+dingo_koiosparity_last_checked_epoch{queue="account"} 300
+dingo_koiosparity_last_checked_epoch{queue="aggregate"} 500
 `
 	assert.NoError(t, testutil.GatherAndCompare(
 		reg,
@@ -97,9 +97,9 @@ func TestNewMetricsReusesCollectorsOnReregistration(t *testing.T) {
 	})
 
 	expected := `
-# HELP dingo_koiosparity_epoch_result_total koios-parity epoch validation results, by network, queue and status (pass/fail/error)
+# HELP dingo_koiosparity_epoch_result_total koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error)
 # TYPE dingo_koiosparity_epoch_result_total counter
-dingo_koiosparity_epoch_result_total{network="preview",queue="aggregate",status="pass"} 2
+dingo_koiosparity_epoch_result_total{queue="aggregate",status="pass"} 2
 `
 	assert.NoError(t, testutil.GatherAndCompare(
 		reg,

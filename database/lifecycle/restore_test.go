@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
@@ -75,6 +76,49 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	block2, err := restored.BlockByIndex(2, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), block2.ID)
+}
+
+func TestRestoreRebuildsDeferredIndexes(t *testing.T) {
+	t.Parallel()
+
+	src := newTestDB(t)
+	manager, ok := src.Metadata().(metadata.DeferredIndexManager)
+	require.True(t, ok)
+	require.NoError(t, manager.DropDeferredIndexes())
+
+	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+
+	targetDir := filepath.Join(t.TempDir(), "restored")
+	_, err = lifecycle.Restore(
+		context.Background(),
+		newTestStorageHost(t),
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+	)
+	require.NoError(t, err)
+
+	restored, err := dbtest.NewDatabase(t, &database.Config{DataDir: targetDir})
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, restored)
+	require.NoError(t, err)
+	for _, index := range []string{
+		"idx_utxo_transaction_id",
+		dbtest.LazyManifestIndex(t),
+	} {
+		require.True(t, dbtest.MetadataIndexExists(t, raw, index), index)
+	}
 }
 
 // TestRestoreRefusesNonEmptyTargetDirectory verifies that Restore errors

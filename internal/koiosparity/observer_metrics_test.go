@@ -65,7 +65,6 @@ func TestNewObserverWiresPromRegistryIntoMetrics(t *testing.T) {
 		1.0,
 		promtestutil.ToFloat64(
 			o.metrics.epochResultTotal.WithLabelValues(
-				"preview",
 				ScopeAggregate,
 				"fail",
 			),
@@ -76,7 +75,7 @@ func TestNewObserverWiresPromRegistryIntoMetrics(t *testing.T) {
 		t,
 		42.0,
 		promtestutil.ToFloat64(
-			o.metrics.lastFailEpoch.WithLabelValues("preview", ScopeAggregate),
+			o.metrics.lastFailEpoch.WithLabelValues(ScopeAggregate),
 		),
 	)
 }
