@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"math"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,21 +27,24 @@ import (
 )
 
 type stateMetrics struct {
-	blockNum            prometheus.Gauge
-	density             prometheus.Gauge
-	epochNum            prometheus.Gauge
-	slotInEpoch         prometheus.Gauge
-	slotNum             prometheus.Gauge
-	forks               prometheus.Gauge
-	slotClockFallbacks  prometheus.Counter
-	blocksForgedTotal   prometheus.Counter
-	blockForgingLatency prometheus.Histogram
-	forgingEnabled      prometheus.Gauge
-	nodeStartTime       prometheus.Gauge
-	tipGapSlots         prometheus.Gauge
-	shelleyStartTime    prometheus.Gauge
-	epochLengthSlots    prometheus.Gauge
-	shadowGateDecisions *prometheus.CounterVec
+	blockfetchEventMu    sync.Mutex
+	blockfetchEventStart time.Time
+	blockfetchEventCount uint64
+	blockNum             prometheus.Gauge
+	density              prometheus.Gauge
+	epochNum             prometheus.Gauge
+	slotInEpoch          prometheus.Gauge
+	slotNum              prometheus.Gauge
+	forks                prometheus.Gauge
+	slotClockFallbacks   prometheus.Counter
+	blocksForgedTotal    prometheus.Counter
+	blockForgingLatency  prometheus.Histogram
+	forgingEnabled       prometheus.Gauge
+	nodeStartTime        prometheus.Gauge
+	tipGapSlots          prometheus.Gauge
+	shelleyStartTime     prometheus.Gauge
+	epochLengthSlots     prometheus.Gauge
+	shadowGateDecisions  *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
 	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
 	// "unavailable"). It covers both waits the apply path can take: the
@@ -435,6 +439,41 @@ func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	updateMaxDuration(record, seconds)
 }
 
+func (m *stateMetrics) beginBlockfetchEvent() {
+	if m == nil {
+		return
+	}
+	m.blockfetchEventMu.Lock()
+	if m.blockfetchEventCount == 0 {
+		m.blockfetchEventStart = time.Now()
+	}
+	m.blockfetchEventCount++
+	m.blockfetchEventMu.Unlock()
+}
+
+func (m *stateMetrics) endBlockfetchEvent() {
+	if m == nil {
+		return
+	}
+	m.blockfetchEventMu.Lock()
+	if m.blockfetchEventCount > 0 {
+		m.blockfetchEventCount--
+	}
+	if m.blockfetchEventCount == 0 {
+		m.blockfetchEventStart = time.Time{}
+	}
+	m.blockfetchEventMu.Unlock()
+}
+
+func (m *stateMetrics) blockfetchEventInProgressSeconds() float64 {
+	m.blockfetchEventMu.Lock()
+	defer m.blockfetchEventMu.Unlock()
+	if m.blockfetchEventCount == 0 {
+		return 0
+	}
+	return time.Since(m.blockfetchEventStart).Seconds()
+}
+
 // updateMaxDuration performs a lock-free "keep the maximum ever observed"
 // update: it compares observed against the current value of record (an
 // atomic.Uint64 holding math.Float64bits of the running maximum) and
@@ -774,6 +813,13 @@ func (m *stateMetrics) updateBlockPipelineStats(stats pipeline.PipelineStats) {
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	promautoFactory := promauto.With(promRegistry)
+	promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_blockfetch_event_in_progress_seconds",
+			Help: "wall-clock time since the current blockfetch event handler began, or zero when no blockfetch event is being handled",
+		},
+		m.blockfetchEventInProgressSeconds,
+	)
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",
 		Help: "current block number",

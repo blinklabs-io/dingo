@@ -37,6 +37,23 @@ import (
 
 var sharedMemoryDBSequence atomic.Uint64
 
+const maxVacuumIntervalSeconds uint64 = uint64(
+	(1<<63 - 1) / int64(time.Second),
+)
+
+func sqliteVacuum(
+	writeDB *sql.DB,
+	intervalSeconds uint64,
+) (func(context.Context) error, time.Duration) {
+	if intervalSeconds == 0 {
+		return nil, 0
+	}
+	return func(ctx context.Context) error {
+		_, err := writeDB.ExecContext(ctx, "VACUUM")
+		return err
+	}, time.Duration(intervalSeconds) * time.Second
+}
+
 // sqliteCommonPragmas is the DSN fragment applied to both the write and read
 // pools. busy_timeout leads defensively -- modernc.org/sqlite always hoists
 // it ahead of the rest of the _pragma list regardless of DSN order, but
@@ -304,6 +321,12 @@ func openSQLStore(
 			"SQLite maxConnections must not be negative",
 		)
 	}
+	if config.VacuumIntervalSeconds > maxVacuumIntervalSeconds {
+		return nil, nil, nil, fmt.Errorf(
+			"SQLite vacuumIntervalSeconds exceeds maximum %d",
+			maxVacuumIntervalSeconds,
+		)
+	}
 	dataDir := dependencies.DataDir
 	if config.DataDir != "" {
 		dataDir = config.DataDir
@@ -321,16 +344,18 @@ func openSQLStore(
 	}
 
 	var (
-		writeDB      *sql.DB
-		readDB       *sql.DB
-		locker       migrations.Locker
-		prepare      func(context.Context) error
-		diskSizeFunc func() (int64, error)
-		maintenance  func(context.Context) error
-		checkpoint   func(context.Context) error
-		backupTo     func(context.Context, string) error
-		restoreFrom  func(context.Context, string) error
-		databasePath string
+		writeDB        *sql.DB
+		readDB         *sql.DB
+		locker         migrations.Locker
+		prepare        func(context.Context) error
+		diskSizeFunc   func() (int64, error)
+		maintenance    func(context.Context) error
+		vacuum         func(context.Context) error
+		vacuumInterval time.Duration
+		checkpoint     func(context.Context) error
+		backupTo       func(context.Context, string) error
+		restoreFrom    func(context.Context, string) error
+		databasePath   string
 	)
 	if dataDir == "" {
 		dsn := fmt.Sprintf(
@@ -396,10 +421,10 @@ func openSQLStore(
 		}
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
 		diskSizeFunc = sqliteDiskSize(databaseURI, databasePath)
-		maintenance = func(ctx context.Context) error {
-			_, err := writeDB.ExecContext(ctx, "VACUUM")
-			return err
-		}
+		vacuum, vacuumInterval = sqliteVacuum(
+			writeDB,
+			config.VacuumIntervalSeconds,
+		)
 		checkpointLogger := dependencies.Logger
 		if checkpointLogger == nil {
 			checkpointLogger = slog.Default()
@@ -425,6 +450,8 @@ func openSQLStore(
 		DiskSize:            diskSizeFunc,
 		Maintenance:         maintenance,
 		MaintenanceInterval: 24 * time.Hour,
+		Vacuum:              vacuum,
+		VacuumInterval:      vacuumInterval,
 		Checkpoint:          checkpoint,
 		CheckpointInterval:  checkpointInterval,
 		BackupTo:            backupTo,

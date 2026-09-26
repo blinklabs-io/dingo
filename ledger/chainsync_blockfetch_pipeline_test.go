@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // deepCatchupRequest records one BlockfetchRequestRangeFunc call for the
@@ -67,6 +68,54 @@ func buildDeepCatchupChain(
 	}
 	require.Equal(t, headerCount, testChain.HeaderCount())
 	return testChain, hashes
+}
+
+func TestBlockfetchMetadataWriteReleasesBlockfetchMutex(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{}
+	ls.chainsyncBlockfetchMutex.Lock()
+	writeStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		err := ls.withBlockfetchMutexReleased(func() error {
+			close(writeStarted)
+			<-releaseWrite
+			return nil
+		})
+		ls.chainsyncBlockfetchMutex.Unlock()
+		done <- err
+	}()
+	defer func() {
+		select {
+		case <-releaseWrite:
+		default:
+			close(releaseWrite)
+		}
+	}()
+	select {
+	case <-writeStarted:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("metadata operation did not start")
+	}
+	lockAcquired := make(chan struct{})
+	go func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		close(lockAcquired)
+		ls.chainsyncBlockfetchMutex.Unlock()
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("chainsync handler remained blocked by metadata write")
+	}
+	close(releaseWrite)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("blockfetch handler did not reacquire its mutex")
+	}
 }
 
 // TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup is the

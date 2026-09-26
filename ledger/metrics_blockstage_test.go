@@ -42,6 +42,52 @@ func blockStageSampleCount(
 		GetSampleSum()
 }
 
+func namedMetricGaugeValue(
+	t *testing.T,
+	registry *prometheus.Registry,
+	name string,
+) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() == name {
+			require.Len(t, family.Metric, 1)
+			return family.Metric[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("metric %q was not registered", name)
+	return 0
+}
+
+func TestBlockfetchEventInProgressGaugeReportsStalls(t *testing.T) {
+	t.Parallel()
+	registry := prometheus.NewRegistry()
+	var m stateMetrics
+	m.init(registry)
+	const metric = "dingo_ledger_blockfetch_event_in_progress_seconds"
+	require.Zero(t, namedMetricGaugeValue(t, registry, metric))
+
+	m.beginBlockfetchEvent()
+	m.blockfetchEventMu.Lock()
+	m.blockfetchEventStart = time.Now().Add(-14 * time.Minute)
+	m.blockfetchEventMu.Unlock()
+	require.GreaterOrEqual(
+		t,
+		namedMetricGaugeValue(t, registry, metric),
+		14*60.0,
+	)
+	m.beginBlockfetchEvent()
+	m.endBlockfetchEvent()
+	require.GreaterOrEqual(
+		t,
+		namedMetricGaugeValue(t, registry, metric),
+		14*60.0,
+	)
+	m.endBlockfetchEvent()
+	require.Zero(t, namedMetricGaugeValue(t, registry, metric))
+}
+
 // TestObserveBlockStageRecordsUnderEachLabel is the regression test for the
 // per-block stage histogram wiring: each of the four known stages must
 // record its own duration sample under its own label, so a dashboard can
