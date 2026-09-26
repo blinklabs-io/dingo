@@ -155,8 +155,14 @@ func TestBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
 	t *testing.T,
 ) {
 	t.Parallel()
+	testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(t, newTestDB)
+}
 
-	db := newTestDB(t)
+func testBackfillReplaysRegistrationBeforeHistoricalWithdrawal(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
 	backfill := NewBackfill(db, nil, slog.Default())
 	backfill.SetDelegatorInactivityEnabled(false)
 	acc := db.NewBatchAccumulator()
@@ -595,8 +601,14 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 // replay then finds the journal row and skips the debit as well.
 func TestRun_ResumeStopsAtRecordedMithrilAnchor(t *testing.T) {
 	t.Parallel()
+	testRun_ResumeStopsAtRecordedMithrilAnchor(t, newTestDB)
+}
 
-	db := newTestDB(t)
+func testRun_ResumeStopsAtRecordedMithrilAnchor(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
 	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
 	require.NoError(t, err)
 	require.Len(t, blocks, 2)
@@ -665,8 +677,14 @@ func TestRun_ResumeStopsAtRecordedMithrilAnchor(t *testing.T) {
 // validate that cardano-node rejects.
 func TestRun_RestoresSnapshotAccountDelegationAtAnchor(t *testing.T) {
 	t.Parallel()
+	testRun_RestoresSnapshotAccountDelegationAtAnchor(t, newTestDB)
+}
 
-	db := newTestDB(t)
+func testRun_RestoresSnapshotAccountDelegationAtAnchor(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
 	addValidBackfillBlocks(t, db, 3)
 	const anchor = uint64(2)
 	require.NoError(t, db.SetSyncState(
@@ -806,8 +824,14 @@ func TestRun_RestoresSnapshotAccountDelegationAtAnchor(t *testing.T) {
 // leaves 520 and 530.
 func TestRun_KeepsSnapshotDRepExpiryAtAnchor(t *testing.T) {
 	t.Parallel()
+	testRun_KeepsSnapshotDRepExpiryAtAnchor(t, newTestDB)
+}
 
-	db := newTestDB(t)
+func testRun_KeepsSnapshotDRepExpiryAtAnchor(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
 	addValidBackfillBlocks(t, db, 3)
 	const anchor = uint64(2)
 	require.NoError(t, db.SetSyncState(
@@ -992,8 +1016,14 @@ func TestRun_KeepsSnapshotDRepExpiryAtAnchor(t *testing.T) {
 // inside its lifetime stays eligible for ratification.
 func TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t *testing.T) {
 	t.Parallel()
+	testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t, newTestDB)
+}
 
-	db := newTestDB(t)
+func testRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
+	db := newDB(t)
 	addValidBackfillBlocks(t, db, 3)
 	const anchor = uint64(2)
 	const anchorEpoch = uint64(510)
@@ -1156,7 +1186,13 @@ func TestRun_SettlesReplayedProposalsTheSnapshotDoesNotHold(t *testing.T) {
 // write), and an anchor in an era's first epoch (the hard-fork write).
 func TestRun_KeepsImportedProtocolParameters(t *testing.T) {
 	t.Parallel()
+	testRun_KeepsImportedProtocolParameters(t, newTestDB)
+}
 
+func testRun_KeepsImportedProtocolParameters(
+	t *testing.T,
+	newDB func(*testing.T) *database.Database,
+) {
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardano.EmbeddedConfigPath("preview"),
 		"preview",
@@ -1180,7 +1216,7 @@ func TestRun_KeepsImportedProtocolParameters(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
+			db := newDB(t)
 			if tc.priorEpoch {
 				require.NoError(t, db.SetEpoch(
 					0, tc.anchorEpoch-1, nil, nil, nil, nil,
