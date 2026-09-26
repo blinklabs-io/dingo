@@ -669,7 +669,7 @@ Performance (preview network, ~4M blocks):
 ### Observed Mithril Bootstrap Timings
 
 The following timings were measured during profiled `core`-mode validation
-runs on 2026-08-26 and 2026-08-28, from bootstrap start through completion:
+runs, from bootstrap start through completion:
 
 | Network | Snapshot ready | Bootstrap complete |
 |---------|-----------------|--------------------|
@@ -694,12 +694,13 @@ The finalization phase is approximate; the total is the end-to-end
 measurement and should not be reconstructed by summing the rounded phase
 durations.
 
-The API-mode measurement was taken on 2026-08-30/31 against approximately
-4.6M Preview blocks. The backfill processed 6.86M transactions at roughly
-64 blocks per second.
+The API-mode measurement at ref `034c12e6` covered approximately 4.6M Preview
+blocks. The backfill processed 6.86M transactions at roughly 64 blocks per
+second.
 
-The Preview API path was also measured in a profiled run on 2026-08-31/09-01
-using the SQLite bulk-load pragmas and a temporary Mithril artifact cache. It
+The optimized Preview API run recorded in
+[PR #3739](https://github.com/blinklabs-io/dingo/pull/3739) used the SQLite
+bulk-load pragmas and a temporary Mithril artifact cache. It
 completed in **7h 36m 07s** end-to-end, including the historical metadata
 backfill (24,547s) and deferred index rebuild (16m). The earlier Preview API
 baseline was approximately 20h 53m, so this run used 63.6% less elapsed time.
@@ -708,6 +709,16 @@ the snapshot is imported. Peak bootstrap space was approximately 76 GB while
 the cache was present (46 GB database plus 30 GB cache); after cleanup, the
 database requires approximately 46 GB and a fresh bootstrap needs approximately
 61 GB for the database plus the 15 GB snapshot.
+
+An additional Preview API run on Dingo ref `6d8eb0b4`, with batch size 100,
+took 6m45s from process start through ledger-state import and 30h46m29s for
+historical metadata replay to reach 100% (4,686,805 blocks and 6,916,875
+transactions), averaging about 42 blocks per second. Total process-start-to-
+replay-complete time was 31h07m12s. The final database was about 40 GB (13 GB
+blob and 27.7 GB SQLite) with a 15 GB Mithril cache; peak disk usage was not
+measured. This is a replay measurement, not a confirmed usable API bootstrap:
+the log continued with SQLite WAL checkpoint warnings and API readiness was
+not verified after backfill.
 
 ### Disk Space Requirements
 
