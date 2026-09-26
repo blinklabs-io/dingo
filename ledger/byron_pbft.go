@@ -51,9 +51,33 @@ func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 		lsConfig.CardanoNodeConfig.ByronGenesis() == nil {
 		return byronPBFTCache{}, nil
 	}
-	config, err := byronconsensus.NewByronConfigFromGenesis(
-		lsConfig.CardanoNodeConfig.ByronGenesis(),
-	)
+	genesis := lsConfig.CardanoNodeConfig.ByronGenesis()
+	// A Byron genesis with no boot stakeholders has no possible PBFT
+	// signer: Byron's OBFT round-robin schedule assigns every slot leader
+	// from this set (byronconsensus.ByronConfig.SlotLeader), so this chain
+	// can never produce a single valid Byron main block. Real cardano-node
+	// tolerates exactly this genesis shape -- internal/test/devnet's
+	// testnet-generation-tool configurator deliberately zeroes both
+	// bootStakeholders and heavyDelegation for a network that hard-forks
+	// away from Byron at genesis, and the same cardano-node binary runs as
+	// the conformance harness's reference producer against it. Treat the
+	// cache as absent instead of failing ledger-state construction; if a
+	// Byron block nonetheless appears on such a chain,
+	// byronconsensus.ValidatePBFTHeaderCrypto still fails closed on the
+	// same empty issuer set. A real Byron chain (mainnet, preprod,
+	// preview) always has at least one boot stakeholder, so this never
+	// relaxes validation for one.
+	keyHashes, err := genesis.GenesisDelegateKeyHashes()
+	if err != nil {
+		return byronPBFTCache{}, fmt.Errorf(
+			"build Byron PBFT config from genesis: %w",
+			err,
+		)
+	}
+	if len(keyHashes) == 0 {
+		return byronPBFTCache{}, nil
+	}
+	config, err := byronconsensus.NewByronConfigFromGenesis(genesis)
 	if err != nil {
 		return byronPBFTCache{}, fmt.Errorf(
 			"build Byron PBFT config from genesis: %w",

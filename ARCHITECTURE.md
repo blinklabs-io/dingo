@@ -3344,6 +3344,19 @@ main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
 
+`newByronPBFTCache` (`ledger/byron_pbft.go`) tolerates a Byron genesis that
+declares no boot stakeholders: it caches no PBFT config instead of failing
+ledger-state construction, because Byron's OBFT round-robin schedule then has
+no signer to assign any slot to, so the chain can never produce a valid Byron
+main block regardless of Byron's nominal slot range. `internal/test/devnet`'s
+testnet generator produces exactly this genesis shape for a network that
+hard-forks away from Byron at genesis (every `TestXHardForkAtEpoch` set to 0),
+matching real cardano-node's own tolerant genesis loading. A real Byron chain
+(mainnet, preprod, preview) always declares at least one boot stakeholder, so
+this does not relax validation there; if a Byron main block nonetheless
+reaches a chain with no cached PBFT config, `byronPBFTConfig` still fails
+closed with "byron PBFT validation requires Byron genesis configuration".
+
 Cached epochs resolve without forecast configuration, but still require a
 published nonce. Before forecasting an uncached epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
