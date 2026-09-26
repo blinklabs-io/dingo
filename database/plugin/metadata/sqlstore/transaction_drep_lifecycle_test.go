@@ -258,19 +258,17 @@ func TestPV10DRepTransitionRebuildsReverseDelegatorsFromAccounts(t *testing.T) {
 		},
 		nil,
 	))
-	for _, credential := range [][]byte{drepTwo, drepThree} {
-		require.NoError(t, store.CreateDrep(nil, &models.Drep{
-			CredentialTag: 0,
-			Credential:    credential,
-			AddedSlot:     1,
-			Active:        true,
-		}))
-	}
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drepTwo,
+		AddedSlot:     1,
+		Active:        true,
+	}))
 	for _, account := range []*models.Account{
 		{
 			StakingKey:    stakeOne,
 			CredentialTag: 0,
-			Drep:          drepTwo,
+			Drep:          drepOne,
 			DrepType:      models.DrepTypeAddrKeyHash,
 			AddedSlot:     1,
 			CreatedSlot:   1,
@@ -279,8 +277,6 @@ func TestPV10DRepTransitionRebuildsReverseDelegatorsFromAccounts(t *testing.T) {
 		{
 			StakingKey:    stakeTwo,
 			CredentialTag: 0,
-			Drep:          drepThree,
-			DrepType:      models.DrepTypeAddrKeyHash,
 			AddedSlot:     1,
 			CreatedSlot:   1,
 			Active:        true,
@@ -289,9 +285,6 @@ func TestPV10DRepTransitionRebuildsReverseDelegatorsFromAccounts(t *testing.T) {
 		require.NoError(t, store.ImportAccount(account, nil))
 	}
 
-	cleared, err := store.ClearDanglingDRepDelegations(30, nil)
-	require.NoError(t, err)
-	require.Zero(t, cleared)
 	db, ctx, err := store.dbFromTxn(nil)
 	require.NoError(t, err)
 	activeDelegators := func(credential []byte) int {
@@ -301,6 +294,61 @@ SELECT count(*) FROM drep_delegator
 WHERE drep_credential = ? AND removed_slot IS NULL`, credential).Scan(&count))
 		return count
 	}
+	setDelegation := func(slot uint64, id byte, stake, drep []byte) {
+		tx := mockledger.NewTransactionBuilder().WithCertificates(
+			&common.VoteDelegationCertificate{
+				CertType: uint(common.CertificateTypeVoteDelegation),
+				StakeCredential: common.Credential{
+					CredType:   common.CredentialTypeAddrKeyHash,
+					Credential: common.NewBlake2b224(stake),
+				},
+				Drep: common.Drep{
+					Type:       common.DrepTypeAddrKeyHash,
+					Credential: drep,
+				},
+			},
+		)
+		tx.WithId(bytes.Repeat([]byte{id}, 32))
+		tx.WithValid(true)
+		require.NoError(t, store.SetTransaction(
+			tx,
+			ocommon.Point{Slot: slot, Hash: tx.Hash().Bytes()},
+			0,
+			nil,
+			false,
+			nil,
+			9,
+		))
+	}
+	setDelegation(20, 0x76, stakeOne, drepTwo)
+	setDelegation(21, 0x77, stakeTwo, drepThree)
+	require.Zero(t, activeDelegators(drepThree),
+		"a PV9 delegation before D3 registration has no reverse membership")
+	drepThreeHash := common.NewBlake2b224(drepThree)
+	registerD3 := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.RegistrationDrepCertificate{
+			CertType:       uint(common.CertificateTypeRegistrationDrep),
+			DrepCredential: common.Credential{CredType: 0, Credential: drepThreeHash},
+			Amount:         500,
+		},
+	)
+	registerD3.WithId(bytes.Repeat([]byte{0x78}, 32))
+	registerD3.WithValid(true)
+	require.NoError(t, store.SetTransaction(
+		registerD3,
+		ocommon.Point{Slot: 22, Hash: registerD3.Hash().Bytes()},
+		0,
+		map[int]uint64{0: 500},
+		false,
+		nil,
+		9,
+	))
+	require.Zero(t, activeDelegators(drepThree),
+		"PV9 D3 registration does not backfill prior delegations")
+
+	cleared, err := store.ClearDanglingDRepDelegations(30, nil)
+	require.NoError(t, err)
+	require.Zero(t, cleared)
 	require.Zero(t, activeDelegators(drepOne), "PV10 transition removes the stale PV9 reverse membership")
 	require.Equal(t, 1, activeDelegators(drepTwo))
 	require.Equal(t, 1, activeDelegators(drepThree), "delegation-before-registration must be backfilled")
@@ -326,8 +374,8 @@ WHERE drep_credential = ? AND removed_slot IS NULL`, credential).Scan(&count))
 			10,
 		))
 	}
-	deregister(31, 0x76, drepOne)
-	deregister(32, 0x77, drepThree)
+	deregister(31, 0x79, drepOne)
+	deregister(32, 0x7a, drepThree)
 	account, err := store.GetAccountByCredential(0, stakeOne, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, drepTwo, account.Drep, "deregistering stale D1 state must preserve the PV10 D2 delegation")
@@ -340,8 +388,13 @@ WHERE drep_credential = ? AND removed_slot IS NULL`, credential).Scan(&count))
 	account, err = store.GetAccountByCredential(0, stakeOne, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, drepTwo, account.Drep)
+	account, err = store.GetAccountByCredential(0, stakeTwo, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drepThree, account.Drep,
+		"rollback restores the pre-transition forward delegation to D3")
 	require.Equal(t, 1, activeDelegators(drepOne), "rollback restores the pre-PV10 D1 membership")
-	require.Zero(t, activeDelegators(drepTwo), "rollback removes the rebuilt PV10 membership")
+	require.Equal(t, 1, activeDelegators(drepTwo),
+		"rollback restores the PV9 D2 reverse membership")
 	require.Zero(t, activeDelegators(drepThree), "rollback removes the repaired reverse membership")
 }
 

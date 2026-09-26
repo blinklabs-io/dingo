@@ -913,6 +913,14 @@ func (m *DingoStateManager) ApplyTransaction(
 	if versioned, ok := m.protocolParams.(common.PoolRuleProtocolParameters); ok {
 		protocolMajor = uint64(versioned.ProtocolMajorVersion())
 	}
+	if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+		tx,
+		point,
+		m.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+	}
 	if err := m.db.SetTransactionMetadataOnly(
 		tx, point, idx, certDeposits, txn, protocolMajor,
 	); err != nil {

@@ -217,6 +217,101 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
 }
 
+func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	drepCredential := bytes.Repeat([]byte{0x51}, lcommon.Blake2b224Size)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        drepCredential,
+		AddedSlot:         1,
+		LastActivityEpoch: 1,
+		ExpiryEpoch:       21,
+		Active:            false,
+	}))
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.ProtocolVersion.Major = 9
+	pparams.DRepDeposit = 500
+	pparams.DRepInactivityPeriod = 20
+	pparams.GovActionValidityPeriod = 20
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId: 100,
+		},
+		currentPParams: &pparams,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	rewardHash := bytes.Repeat([]byte{0x52}, lcommon.Blake2b224Size)
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, rewardHash...),
+	)
+	require.NoError(t, err)
+	var anchorHash [32]byte
+	copy(anchorHash[:], bytes.Repeat([]byte{0x53}, lcommon.Blake2b256Size))
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{Url: "https://example.com/proposal", DataHash: anchorHash},
+	}
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(bytes.Repeat([]byte{0x54}, lcommon.Blake2b256Size))
+	tx.WithValid(true)
+	tx.WithCertificates(&lcommon.RegistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+		Amount: 500,
+	})
+	tx.WithProposalProcedures(proposal)
+	txHash := tx.Hash()
+	var txHashArray [32]byte
+	copy(txHashArray[:], txHash.Bytes())
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0x55}, lcommon.Blake2b256Size),
+	}
+	delta := NewLedgerDelta(point, uint(conway.EraIdConway), point.Slot)
+	defer delta.Release()
+	delta.addTransaction(tx, 0)
+	delta.Offsets = &database.BlockIngestionResult{
+		TxOffsets:   map[[32]byte]database.CborOffset{txHashArray: {}},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return delta.apply(ls, txn)
+	}))
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	require.Equal(t, uint64(100), drep.LastActivityEpoch)
+	require.Equal(t, uint64(120), drep.ExpiryEpoch)
+	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Zero(t, dormantEpochs)
+}
+
 func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 	t *testing.T,
 ) {

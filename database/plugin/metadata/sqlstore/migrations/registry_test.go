@@ -457,7 +457,7 @@ func TestMySQLRegistryPrefixesDRepExpiryHistoryCredentialPrimaryKey(t *testing.T
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	expand := registry[23].SQL["mysql"].Expand
+	expand := registry[25].SQL["mysql"].Expand
 	require.Len(t, expand, 3)
 	require.Contains(
 		t,

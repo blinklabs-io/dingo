@@ -821,6 +821,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	require.NoError(t, store.SetTransaction(
 		transaction,
@@ -829,6 +830,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	state := certificateWriteState{TableCounts: map[string]int{}}
 	require.NoError(t, db.QueryRow(`

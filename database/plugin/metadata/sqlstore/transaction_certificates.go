@@ -63,9 +63,7 @@ func validateDRepDelegationProtocolMajor(
 ) error {
 	for _, certificate := range certificates {
 		switch certificate.(type) {
-		case *lcommon.StakeDeregistrationCertificate,
-			*lcommon.DeregistrationCertificate,
-			*lcommon.StakeVoteDelegationCertificate,
+		case *lcommon.StakeVoteDelegationCertificate,
 			*lcommon.StakeVoteRegistrationDelegationCertificate,
 			*lcommon.VoteRegistrationDelegationCertificate,
 			*lcommon.VoteDelegationCertificate:
