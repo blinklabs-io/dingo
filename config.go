@@ -1573,10 +1573,10 @@ func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgeAppliedTipStalenessSlots sets the wall-clock staleness bound. With
-// no usable upstream target, it overrides ForgeSyncToleranceSlots for the
-// applied-tip backstop. With a usable target, 0 disables the optional bound on
-// newestKnown.
+// WithForgeAppliedTipStalenessSlots sets the optional wall-clock age bound
+// for newestKnown when a corroborated upstream target is available. The bound
+// is ignored when the target is unavailable, because tip age alone does not
+// show that the network advanced. Zero disables the bound.
 func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeAppliedTipStalenessSlots = slots
@@ -2371,9 +2371,9 @@ func (c *Config) ForgeUpstreamStalenessSlots() uint64 {
 	return c.cfg.ForgeUpstreamStalenessSlots
 }
 
-// ForgeAppliedTipStalenessSlots returns the configured wall-clock staleness
-// bound. Zero uses ForgeSyncToleranceSlots when no usable upstream target
-// exists and disables the optional bound on newestKnown when one does.
+// ForgeAppliedTipStalenessSlots returns the optional wall-clock age bound for
+// newestKnown when a corroborated upstream target is available. Zero disables
+// the bound; an unavailable target is not evidence of network progress.
 func (c *Config) ForgeAppliedTipStalenessSlots() uint64 {
 	return c.cfg.ForgeAppliedTipStalenessSlots
 }

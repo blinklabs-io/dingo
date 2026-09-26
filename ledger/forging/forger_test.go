@@ -233,10 +233,10 @@ func (c forgerTestSlotClock) SecurityParam() int {
 	return 5
 }
 
-// TestCheckAndForgeProductionSkipsStaleTipWhenUpstreamTargetIsUnknown verifies
-// that an active upstream with no admitted target uses the local stale-tip
-// backstop instead of allowing continued forging on an old branch.
-func TestCheckAndForgeProductionSkipsStaleTipWhenUpstreamTargetIsUnknown(
+// TestCheckAndForgeProductionAllowsUnknownUpstreamTarget verifies that an
+// active upstream with no admitted target is not treated as evidence that this
+// node is behind the network.
+func TestCheckAndForgeProductionAllowsUnknownUpstreamTarget(
 	t *testing.T,
 ) {
 	creds := setupTestCredentials(t)
@@ -251,8 +251,9 @@ func TestCheckAndForgeProductionSkipsStaleTipWhenUpstreamTargetIsUnknown(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			// The tip lags the current slot by 991 slots, well past the
-			// tolerance below, so this node is behind on its own reckoning.
+			// The wall clock is far ahead of the tip, but an unknown
+			// upstream target cannot establish that the canonical chain
+			// advanced during this quiet stretch.
 			currentSlot:       1000,
 			chainTipSlot:      9,
 			upstreamActive:    true,
@@ -264,8 +265,8 @@ func TestCheckAndForgeProductionSkipsStaleTipWhenUpstreamTargetIsUnknown(
 	require.NoError(t, err)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Zero(t, builder.calls)
-	assert.Zero(t, broadcaster.calls)
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
 }
 
 func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {

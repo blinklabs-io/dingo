@@ -106,10 +106,9 @@ const (
 	// so the two legitimately differ by the inter-block gap and a small
 	// always-on bound refuses leader slots during ordinary operation.
 	DefaultForgeUpstreamStalenessSlots = 0
-	// DefaultForgeAppliedTipStalenessSlots is 0. With a usable upstream target,
-	// that disables the optional wall-clock staleness bound. Without a usable
-	// target, the forger uses ForgeSyncToleranceSlots as a local stale-tip
-	// backstop.
+	// DefaultForgeAppliedTipStalenessSlots is 0, which disables the optional
+	// wall-clock age bound. The bound is ignored when no corroborated upstream
+	// target is available because tip age alone does not show network progress.
 	DefaultForgeAppliedTipStalenessSlots = 0
 	// DefaultForgeEndorserBlockStalenessSlots is 0, which disables the
 	// endorser-block staleness bound. It is opt-in because the corroborated
@@ -800,10 +799,10 @@ type Config struct {
 	// a HEADER is admitted, so the two differ by the inter-block gap during
 	// ordinary operation. Set it well above the expected gap for the network.
 	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots"      envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
-	// ForgeAppliedTipStalenessSlots sets the wall-clock staleness bound. When no
-	// usable upstream target exists, it overrides ForgeSyncToleranceSlots for
-	// the applied-tip backstop. With a usable target, a nonzero value adds an
-	// optional bound on newestKnown; 0 disables only that additional bound.
+	// ForgeAppliedTipStalenessSlots optionally bounds the wall-clock age of
+	// newestKnown when a corroborated upstream target is available. A missing
+	// target is not evidence that the network is ahead, so the bound is ignored
+	// in that state. Zero disables the bound.
 	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots"    envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
 	// ForgeEndorserBlockStalenessSlots bounds how far a corroborated Leios
 	// endorser block may lead the ledger-applied tip before forging is

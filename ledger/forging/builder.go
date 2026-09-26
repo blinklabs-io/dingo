@@ -1228,7 +1228,7 @@ func (b *DefaultBlockBuilder) checkAppliedTipRelation(
 	if !hasAppliedTip || !hasRelation {
 		return errors.New("forge parent ancestry providers are incomplete")
 	}
-	appliedTip, securityParam := appliedProvider.ForgeTipSnapshot()
+	appliedTip, _ := appliedProvider.ForgeTipSnapshot()
 	tip, depth, ancestor, err := relationProvider.TipRelation(
 		appliedTip.Point,
 	)
@@ -1241,23 +1241,19 @@ func (b *DefaultBlockBuilder) checkAppliedTipRelation(
 			errParentChangedDuringBuild,
 		)
 	}
-	if securityParam <= 0 {
-		return errors.New("security parameter K must be positive for forging")
-	}
-	if !ancestor || depth > uint64(securityParam) {
+	if !ancestor || depth > forgeMaxUnappliedBlocks {
 		return fmt.Errorf(
-			"forge parent is not within security parameter K of the applied tip: ancestor=%t depth=%d K=%d",
+			"forge parent exceeds the maximum unapplied block depth: ancestor=%t depth=%d max=%d",
 			ancestor,
 			depth,
-			securityParam,
+			forgeMaxUnappliedBlocks,
 		)
 	}
 	if pointsEqual(parentPoint, currentTip.Point) {
 		return nil
 	}
 	if allowAlternativeParent {
-		parentTip, parentDepth, parentAncestor, err :=
-			relationProvider.TipRelation(parentPoint)
+		parentTip, parentDepth, parentAncestor, err := relationProvider.TipRelation(parentPoint)
 		if err != nil {
 			return fmt.Errorf("check alternative forge parent ancestry: %w", err)
 		}

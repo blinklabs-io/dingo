@@ -333,10 +333,10 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	}
 }
 
-// TestForgeSkipsUnknownUpstreamTargetWhenTheAppliedTipIsStale verifies that
-// the local backstop refuses forging when the active peer has not published a
-// target and the applied tip is already behind the slot clock.
-func TestForgeSkipsUnknownUpstreamTargetWhenTheAppliedTipIsStale(
+// TestForgeAllowsUnknownUpstreamTargetAfterQuietStretch verifies that a long
+// gap between blocks does not become evidence of network progress when the
+// active peer has not published a target.
+func TestForgeAllowsUnknownUpstreamTargetAfterQuietStretch(
 	t *testing.T,
 ) {
 	leader := &forgerCountingLeader{}
@@ -351,8 +351,8 @@ func TestForgeSkipsUnknownUpstreamTargetWhenTheAppliedTipIsStale(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			// The tip lags the current slot by more than the tolerance,
-			// which is direct evidence this node is behind.
+			// The current slot is far beyond the previous block, but the
+			// peer has no corroborated target and may also be at that tip.
 			currentSlot:       1000,
 			chainTipSlot:      9,
 			upstreamTipSlot:   0,
@@ -367,8 +367,8 @@ func TestForgeSkipsUnknownUpstreamTargetWhenTheAppliedTipIsStale(
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
 	assert.Equal(t, 1, leader.callCount())
-	assert.Zero(t, builder.calls)
-	assert.Zero(t, broadcaster.calls)
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
 	assert.Equal(
 		t,
 		float64(0),
@@ -376,7 +376,7 @@ func TestForgeSkipsUnknownUpstreamTargetWhenTheAppliedTipIsStale(
 	)
 	assert.Equal(
 		t,
-		float64(1),
+		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
 	)
 	// #4013 asserted 991 here, the local tip's lag behind the wall clock,

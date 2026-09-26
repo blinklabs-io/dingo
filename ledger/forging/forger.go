@@ -58,8 +58,10 @@ const (
 	// behind the upstream peer tip before the forger skips block production.
 	// This accommodates block processing latency and VRF schedule computation
 	// time on fast-slot networks (e.g. 100ms devnet slots) while still
-	// catching bulk sync.
+	// catching bulk sync. It is also the coarse slot prefilter for local tip
+	// lag; the block-count bound below is the density-independent local limit.
 	forgeSyncToleranceSlots = 100
+	forgeMaxUnappliedBlocks = 2
 
 	// forgeStaleGapThresholdSlots is the slot gap between the chain tip
 	// and the slot clock above which the forger logs an error suggesting
@@ -106,7 +108,7 @@ func forgeStaleTipMessage(reason string) string {
 	case forgeStaleTipReasonPrimaryNotAncestor:
 		return "forge skip: applied tip is not an ancestor of the primary chain tip"
 	case forgeStaleTipReasonBlockGap:
-		return "forge skip: applied tip is more than K blocks behind the primary chain tip"
+		return "forge skip: applied tip exceeds the primary-chain lag limit"
 	case forgeStaleTipReasonPeerHeightGap:
 		return "forge skip: applied tip is more than K blocks behind the corroborated peer tip"
 	case forgeStaleTipReasonAppliedStale:
@@ -545,11 +547,10 @@ type ForgerConfig struct {
 	// leave it off until the admitted header frontier is folded into the
 	// comparison.
 	ForgeUpstreamStalenessSlots uint64
-	// ForgeAppliedTipStalenessSlots overrides the wall-clock bound when there is
-	// no usable upstream target. Zero uses ForgeSyncToleranceSlots in that
-	// state. With a usable target, a nonzero value adds a wall-clock bound on
-	// newestKnown; zero disables that additional bound so a quiet corroborated
-	// chain does not suppress leader slots.
+	// ForgeAppliedTipStalenessSlots optionally bounds the wall-clock age of
+	// newestKnown when a corroborated upstream target is available. A missing
+	// target is not evidence that the network is ahead, so this bound is ignored
+	// in that state. Zero disables the bound.
 	ForgeAppliedTipStalenessSlots uint64
 	// ForgeEndorserBlockStalenessSlots controls how far a corroborated Leios
 	// endorser block may lead the ledger-applied tip before forging is
@@ -1029,7 +1030,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	if securityParam <= 0 {
 		return errors.New("security parameter K must be positive for forging")
 	}
-	maxUnappliedBlocks := uint64(securityParam) //nolint:gosec // positive int
+	maxUnappliedBlocks := uint64(forgeMaxUnappliedBlocks)
+	maxPeerHeightGapBlocks := uint64(securityParam) //nolint:gosec // positive int
 	// Opt-in only. newestKnown counts BLOCKS this node holds, while
 	// upstreamTarget is published at HEADER admission, so between a header's
 	// admission at slot S and its body being applied the two legitimately
@@ -1042,24 +1044,15 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	upstreamStale := f.forgeUpstreamStalenessSlots > 0 &&
 		upstreamLive && upstreamTarget > newestKnown &&
 		upstreamTarget-newestKnown > f.forgeUpstreamStalenessSlots
-	// Without a usable corroborated target there is no fresh peer tip to bound
-	// local divergence against. Use the existing sync tolerance as a wall-clock
-	// backstop in that state, measuring from the applied tip itself. With a
-	// usable target, keep the optional wall-clock bound against newestKnown so
-	// a quiet but corroborated chain does not suppress leader slots.
+	// Wall-clock age does not say whether the network has advanced: a quiet
+	// canonical chain can leave the tip unchanged for an arbitrary number of
+	// slots. Apply this optional bound only when a corroborated upstream target
+	// exists; an unknown target carries no evidence either way.
 	appliedStalenessBound := f.forgeAppliedStalenessSlots
-	appliedStale := false
 	upstreamReferenceUsable := upstreamLive && upstreamTarget > 0
-	if !upstreamReferenceUsable {
-		if appliedStalenessBound == 0 {
-			appliedStalenessBound = f.forgeSyncToleranceSlots
-		}
-		appliedStale = currentSlot > tipSlot &&
-			currentSlot-tipSlot > appliedStalenessBound
-	} else if appliedStalenessBound > 0 {
-		appliedStale = currentSlot > newestKnown &&
-			currentSlot-newestKnown > appliedStalenessBound
-	}
+	appliedStale := upstreamReferenceUsable &&
+		appliedStalenessBound > 0 && currentSlot > newestKnown &&
+		currentSlot-newestKnown > appliedStalenessBound
 	// How far the corroborated endorser block leads the APPLIED tip. Measured
 	// against ebSlot alone rather than effectiveGap so this refusal can only
 	// ever be caused by endorser-block evidence: effectiveGap also carries the
@@ -1087,10 +1080,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		staleTipReason = forgeStaleTipReasonHashDiverged
 	case primaryTipNotAncestor:
 		staleTipReason = forgeStaleTipReasonPrimaryNotAncestor
-	case unappliedBlocks > maxUnappliedBlocks:
+	case applyGap > f.forgeSyncToleranceSlots || unappliedBlocks > maxUnappliedBlocks:
 		staleTipReason = forgeStaleTipReasonBlockGap
 	case upstreamLive && upstreamTip.BlockNumber > appliedTipInfo.BlockNumber &&
-		upstreamTip.BlockNumber-appliedTipInfo.BlockNumber > maxUnappliedBlocks:
+		upstreamTip.BlockNumber-appliedTipInfo.BlockNumber > maxPeerHeightGapBlocks:
 		staleTipReason = forgeStaleTipReasonPeerHeightGap
 	case ebStale:
 		// Only the endorser-block evidence refuses here: the headers alone
@@ -1554,6 +1547,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"gap_slots", applyGap,
 			"unapplied_blocks", unappliedBlocks,
 			"max_unapplied_blocks", maxUnappliedBlocks,
+			"max_peer_height_gap_blocks", maxPeerHeightGapBlocks,
 			"security_param_k", securityParam,
 			"applied_block_number", appliedTipInfo.BlockNumber,
 			"upstream_block_number", upstreamTip.BlockNumber,
@@ -2315,37 +2309,11 @@ func (f *BlockForger) checkOpCertSequence(
 }
 
 // upstreamSyncSkipsForge reports whether the upstream-sync gate declines
-// currentSlot. Two states reach it and they carry different evidence.
-//
-// A known target is direct evidence. The peer has told us, through a header we
-// authenticated and admitted, where its chain ends, so we are behind exactly
-// when that target leads our tip by more than the tolerance.
-//
-// A target of zero is not evidence of anything. LedgerState publishes it for
-// the whole window between an active-connection switch and the newly selected
-// peer's first admitted trusted header (publishActiveUpstream stores the new
-// connection key with targetSlot zero; only publishAdmittedUpstreamTarget
-// lifts it), so it means "we have not heard from this peer yet", not "this
-// peer is ahead of us".
-//
-// Declining unconditionally on it is what wedged an all-producer network: no
-// node forges because each is inside that window, so no new header is produced
-// anywhere, so none is admitted, so nothing lifts the target off zero, so no
-// node forges. Forging is the only source of new headers there, so the state
-// that suppressed forging prevented its own exit, and every node reported
-// healthy and connected throughout. That is issue #4010.
-//
-// The only evidence available in that window is our own tip's lag behind the
-// wall clock, so the same tolerance is applied to it. A node whose tip is
-// stale still waits, which is the protection this gate exists for -- a node
-// that has just switched peers does not forge on a stale view. A node at tip
-// forges, and the header it produces is what ends the window.
-//
-// tipSlot is the LEDGER-APPLIED tip, not the primary chain tip, on both
-// branches. That is the conservative reading of "our view": it is the state
-// this node would validate and choose transactions against, and it is the
-// lower of the two, so a node whose pipeline is behind is measured as behind
-// rather than credited with headers it has admitted but not applied.
+// currentSlot. A corroborated target is direct evidence: the peer has told us,
+// through a header we authenticated and admitted, where its chain ends. An
+// unknown target is not evidence that the peer is ahead. Comparing it with the
+// wall clock would confuse a quiet network with a lagging node and can prevent
+// a producer from making the header that ends the target-free interval.
 func (f *BlockForger) upstreamSyncSkipsForge(
 	_, tipSlot, upstreamTip uint64,
 ) bool {

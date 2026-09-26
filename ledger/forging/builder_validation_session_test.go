@@ -293,7 +293,7 @@ func (c ancestryTestChainTip) TipRelation(
 	return c.tip, c.depth, c.ancestor, nil
 }
 
-func TestBuilderRequiresAppliedAncestorWithinKOfActualParent(t *testing.T) {
+func TestBuilderRequiresAppliedAncestorWithinLocalBlockLimit(t *testing.T) {
 	applied := ochainsync.Tip{
 		Point:       ocommon.NewPoint(10, []byte("applied")),
 		BlockNumber: 10,
@@ -308,7 +308,7 @@ func TestBuilderRequiresAppliedAncestorWithinKOfActualParent(t *testing.T) {
 	}
 
 	err := builder.checkAppliedTipRelation(primary, primary.Point, false)
-	require.ErrorContains(t, err, "not within security parameter K")
+	require.ErrorContains(t, err, "exceeds the maximum unapplied block depth")
 
 	builder.chainTip = ancestryTestChainTip{
 		tip: primary, depth: 2, ancestor: true,
@@ -320,6 +320,6 @@ func TestBuilderRequiresAppliedAncestorWithinKOfActualParent(t *testing.T) {
 	}
 	require.ErrorContains(t,
 		builder.checkAppliedTipRelation(primary, primary.Point, false),
-		"not within security parameter K",
+		"exceeds the maximum unapplied block depth",
 	)
 }
