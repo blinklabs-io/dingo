@@ -9047,11 +9047,16 @@ second sync:
     through (`processEpoch`'s and `processAccountEpoch`'s success paths, and
     `reportError`'s synthesized `ERROR` path) — also calls
     `metrics.recordResult`, so all three are covered from one call site:
-    `dingo_koiosparity_epoch_result_total` (by network/queue/status),
-    `dingo_koiosparity_mismatch_total` (by network/queue/category/severity, mirroring
+    `dingo_koiosparity_epoch_result_total` (by queue/status),
+    `dingo_koiosparity_mismatch_total` (by queue/category/severity, mirroring
     `check_mismatches.category`), `dingo_koiosparity_last_checked_epoch`, and
     `dingo_koiosparity_epoch_mismatch_count` (mirroring
-    `check_epoch_status.mismatch_count`). Every series carries a `queue`
+    `check_epoch_status.mismatch_count`). None of these collectors declares
+    its own `network` variable label: `configWrapPromRegistry` (`config.go`)
+    already wraps every registry the node hands to a component with a
+    constant `network` label, and a collector that also declared `network` as
+    a variable label would conflict with that constant label and fail to
+    register (dingo#4723). Every series still carries a `queue`
     label (`aggregate`/`account`, from the result's `CheckedScopes`): both
     queues emit a result for the same epoch and the account queue can lag
     arbitrarily, so a shared gauge would let a late account-queue PASS

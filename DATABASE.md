@@ -3714,18 +3714,21 @@ in two tiers, checked in order:
    first-ever registration, submitted mid-epoch, still reserves its key
    against every other pool immediately rather than only from the next
    boundary.
-2. **Same-epoch claimant.** Any pool with *any* registration this epoch
-   (`added_slot >= epochStartSlot`) naming this key, even one since
-   superseded by a later same-epoch re-registration. Consulted only when (1)
-   finds nothing. This tier exists because `psVRFKeyHashes` retains every key
-   a pool ever placed in `psFutureStakePoolParams` during the epoch, not only
-   the current pending one: a pool cycling `A -> B -> C` within one epoch must
-   still be refused a later same-epoch reuse of `B`. `IsVrfKeyInUse`'s caller
-   (gouroboros's `validatePoolRegistration`) special-cases
-   `owningPool == cert.Operator` by comparing against `PoolCurrentState`
-   (the pool's latest registration, `C` here) rather than its effective one;
-   reporting `B` as claimed by that same pool, not free, is what lets that
-   comparison catch the reuse.
+2. **Same-epoch claimant.** The pool whose *latest* registration this epoch
+   (`added_slot >= epochStartSlot`) names this key (`latest_same_epoch_registration`,
+   ranked the same way as `pre_boundary`). Consulted only when (1) finds
+   nothing. Only the current pending value in `psFutureStakePoolParams`
+   reserves a key this way; a key a pool cycled through and then superseded
+   within the same epoch (`A -> B -> C`) is freed the moment the later
+   registration supersedes it, since it was never placed in `psStakePools`
+   and is no longer pending (`B` here becomes free once `C` supersedes it;
+   dingo#4466 -- an earlier version of this method treated every same-epoch
+   registration as still-claimed, refusing a legitimate reuse of `B`).
+   `IsVrfKeyInUse`'s caller (gouroboros's `validatePoolRegistration`)
+   special-cases `owningPool == cert.Operator` by comparing against
+   `PoolCurrentState` (the pool's latest registration); this tier's
+   latest-only ranking is what keeps that comparison and this lookup
+   agreeing on which key is actually still pending.
 
 Both candidate sets are pre-filtered to pool IDs with *any* historical
 `pool_registration` row naming the queried key, so the query only walks a
