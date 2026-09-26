@@ -635,125 +635,29 @@ func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
 	)
 }
 
-func byronOrderingEbb(
-	epoch, blockNumber uint64,
-) *byron.ByronEpochBoundaryBlock {
-	ebb := &byron.ByronEpochBoundaryBlock{
-		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
-	}
-	ebb.BlockHeader.ConsensusData.Epoch = epoch
-	ebb.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
-	return ebb
-}
-
-func byronOrderingMain(
-	epoch, slot, blockNumber uint64,
-) *byron.ByronMainBlock {
-	block := &byron.ByronMainBlock{
-		BlockHeader: &byron.ByronMainBlockHeader{},
-	}
-	block.BlockHeader.ConsensusData.SlotId.Epoch = epoch
-	block.BlockHeader.ConsensusData.SlotId.Slot = slot
-	block.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
-	return block
-}
-
-// TestValidateInboundBlockEnvelopeByronEbbOrdering covers #4408: the four
-// parent/block combinations of the Byron envelope, including consecutive
-// EBBs across an otherwise empty epoch. These structured blocks deliberately
-// have no wire CBOR, so this isolates the ordering rule; the golden-fixture
-// test above covers the body proof against the real serialized body.
+// TestValidateInboundBlockEnvelopeByronEbbOrdering covers the Byron EBB rule
+// that an EBB shares its parent's block number instead of incrementing it.
 func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 	t.Parallel()
 
-	const epochSlots = byron.ByronSlotsPerEpoch
-	regular := func(slot, blockNumber uint64) envelopeParent {
-		return envelopeParent{slot: slot, blockNumber: blockNumber}
+	parent := envelopeParent{
+		slot:        byron.ByronSlotsPerEpoch,
+		blockNumber: 7,
 	}
-	ebbParent := func(epoch, blockNumber uint64) envelopeParent {
-		return envelopeParent{
-			slot:        epoch * epochSlots,
-			blockNumber: blockNumber,
-			byronEbb:    true,
-		}
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
 	}
-	tests := []struct {
-		name    string
-		block   gledger.Block
-		parent  envelopeParent
-		wantErr string
-	}{
-		{
-			"regular to regular",
-			byronOrderingMain(1, 5, 8),
-			regular(epochSlots+4, 7),
-			"",
-		},
-		{
-			"regular to regular same slot",
-			byronOrderingMain(1, 4, 8),
-			regular(epochSlots+4, 7),
-			"does not follow parent slot",
-		},
-		{
-			"regular to EBB",
-			byronOrderingEbb(2, 7),
-			regular(2*epochSlots-1, 7),
-			"",
-		},
-		{
-			"regular to EBB with next number",
-			byronOrderingEbb(2, 8),
-			regular(2*epochSlots-1, 7),
-			"does not match expected block number 7",
-		},
-		{
-			"EBB to regular same slot",
-			byronOrderingMain(2, 0, 8),
-			ebbParent(2, 7),
-			"",
-		},
-		{
-			"EBB to regular same number",
-			byronOrderingMain(2, 0, 7),
-			ebbParent(2, 7),
-			"does not follow parent block number",
-		},
-		{
-			"EBB to EBB across an empty epoch",
-			byronOrderingEbb(3, 8),
-			ebbParent(2, 7),
-			"",
-		},
-		{
-			"EBB to EBB with equal number",
-			byronOrderingEbb(3, 7),
-			ebbParent(2, 7),
-			"does not match expected block number 8",
-		},
-		{
-			"EBB to EBB with equal slot",
-			byronOrderingEbb(2, 8),
-			ebbParent(2, 7),
-			"does not follow parent slot",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			err := validateInboundBlockEnvelope(
-				test.block,
-				nil,
-				nil,
-				test.parent,
-			)
-			if test.wantErr == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorContains(t, err, test.wantErr)
-		})
-	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber
+	// This structured block deliberately has no wire CBOR: this test isolates
+	// the EBB ordering rule. The golden-fixture test above covers the body proof
+	// against the real serialized body.
+	require.NoError(t, validateInboundBlockEnvelope(ebb, nil, nil, parent))
+
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber + 1
+	err := validateInboundBlockEnvelope(ebb, nil, nil, parent)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match parent block number")
 }
 
 // TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs

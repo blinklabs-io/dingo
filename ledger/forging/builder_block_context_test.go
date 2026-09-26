@@ -60,6 +60,56 @@ func newBlockContextTestBuilder(
 	return builder
 }
 
+type alternativeRelationChainTip struct {
+	tip         ochainsync.Tip
+	predecessor ocommon.Point
+}
+
+func (m *alternativeRelationChainTip) Tip() ochainsync.Tip {
+	return m.tip
+}
+
+func (m *alternativeRelationChainTip) TipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	switch {
+	case pointsEqual(point, m.tip.Point):
+		return m.tip, 0, true, nil
+	case pointsEqual(point, m.predecessor):
+		return m.tip, 1, true, nil
+	default:
+		return m.tip, 0, false, nil
+	}
+}
+
+type alternativeAppliedTipValidator struct {
+	mockTxValidator
+	tip           ochainsync.Tip
+	securityParam int
+}
+
+func (v *alternativeAppliedTipValidator) ForgeTipSnapshot() (
+	ochainsync.Tip,
+	int,
+) {
+	return v.tip, v.securityParam
+}
+
+func configureAlternativeTipRelation(
+	builder *DefaultBlockBuilder,
+	rival ochainsync.Tip,
+	parent ocommon.Point,
+) {
+	builder.chainTip = &alternativeRelationChainTip{
+		tip:         rival,
+		predecessor: parent,
+	}
+	builder.txValidator = &alternativeAppliedTipValidator{
+		tip:           rival,
+		securityParam: 2,
+	}
+}
+
 // TestBuildBlockOnContextForgesAnAlternativeToTheTip is the builder half of the
 // equal-slot alternative. The live tip is a rival block at the slot being
 // forged; the explicit context names the rival's predecessor as parent and the
@@ -79,16 +129,15 @@ func TestBuildBlockOnContextForgesAnAlternativeToTheTip(t *testing.T) {
 		BlockNumber: rivalBlockNumbr,
 	}
 	builder := newBlockContextTestBuilder(t, rival)
+	parent := ocommon.Point{Slot: parentSlot, Hash: parentHash}
+	configureAlternativeTipRelation(builder, rival, parent)
 
 	block, blockCbor, err := builder.BuildBlockOnContext(
 		contestedSlot,
 		0,
 		LeiosBlockData{},
 		BlockContext{
-			Parent: ocommon.Point{
-				Slot: parentSlot,
-				Hash: parentHash,
-			},
+			Parent:      parent,
 			BlockNumber: rivalBlockNumbr,
 			Rival:       rival,
 		},
@@ -113,6 +162,38 @@ func TestBuildBlockOnContextForgesAnAlternativeToTheTip(t *testing.T) {
 		block.PrevHash().Bytes(),
 		"alternative must not name the rival itself as parent",
 	)
+}
+
+func TestBuildBlockOnContextRejectsNonPredecessorParent(t *testing.T) {
+	const (
+		contestedSlot   = uint64(1000)
+		rivalBlockNumbr = uint64(100)
+	)
+	rival := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: contestedSlot, Hash: testHash32(0xAA)},
+		BlockNumber: rivalBlockNumbr,
+	}
+	predecessor := ocommon.Point{Slot: 999, Hash: testHash32(0xBB)}
+	builder := newBlockContextTestBuilder(t, rival)
+	configureAlternativeTipRelation(builder, rival, predecessor)
+
+	block, blockCbor, err := builder.BuildBlockOnContext(
+		contestedSlot,
+		0,
+		LeiosBlockData{},
+		BlockContext{
+			Parent:      ocommon.Point{Slot: 998, Hash: testHash32(0xCC)},
+			BlockNumber: rivalBlockNumbr,
+			Rival:       rival,
+		},
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"alternative forge parent is not the direct chain-tip predecessor",
+	)
+	assert.Nil(t, block)
+	assert.Nil(t, blockCbor)
 }
 
 // TestBuildBlockRefusesAParentAtItsOwnSlot is the negative half: the default

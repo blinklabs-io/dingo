@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"golang.org/x/crypto/blake2b"
 )
@@ -71,6 +72,18 @@ type ChainTipProvider interface {
 // the best-effort final tip check for compatibility with embedders.
 type ChainTipSigningProvider interface {
 	WithTip(func(ochainsync.Tip) error) error
+}
+
+// ChainTipRelationProvider evaluates ancestry against one primary-chain
+// snapshot. Production forging uses it to bind the parent to the ledger tip.
+type ChainTipRelationProvider interface {
+	TipRelation(ocommon.Point) (ochainsync.Tip, uint64, bool, error)
+}
+
+// AppliedTipProvider exposes the exact ledger tip and security parameter used
+// to bound the primary-chain ancestry check during block assembly.
+type AppliedTipProvider interface {
+	ForgeTipSnapshot() (ochainsync.Tip, int)
 }
 
 // EpochNonceProvider provides the epoch nonce for VRF proof generation.
@@ -293,6 +306,10 @@ func tipsEqual(a, b ochainsync.Tip) bool {
 		bytes.Equal(a.Point.Hash, b.Point.Hash)
 }
 
+func pointsEqual(a, b ocommon.Point) bool {
+	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
+}
+
 func (b *DefaultBlockBuilder) buildBlock(
 	slot uint64,
 	kesPeriod uint64,
@@ -385,6 +402,13 @@ func (b *DefaultBlockBuilder) buildBlock(
 		parentPoint = blockCtx.Parent
 		nextBlockNumber = blockCtx.BlockNumber
 		isGenesis = false
+	}
+	if err := b.checkAppliedTipRelation(
+		currentTip,
+		parentPoint,
+		blockCtx != nil,
+	); err != nil {
+		return nil, nil, err
 	}
 
 	// Whichever way the parent was resolved, it must sit strictly below the
@@ -794,6 +818,13 @@ func (b *DefaultBlockBuilder) buildBlock(
 			selectErr,
 		)
 	}
+	if err := b.checkAppliedTipRelation(
+		currentTip,
+		parentPoint,
+		blockCtx != nil,
+	); err != nil {
+		return nil, nil, err
+	}
 
 	// The chain tip captured above is what nextBlockNumber and prevHash were
 	// resolved from -- directly on the live-tip path, and as the contested
@@ -1182,6 +1213,59 @@ func (b *DefaultBlockBuilder) buildBlock(
 	}
 
 	return ledgerBlock, blockCbor, nil
+}
+
+func (b *DefaultBlockBuilder) checkAppliedTipRelation(
+	currentTip ochainsync.Tip,
+	parentPoint ocommon.Point,
+	allowAlternativeParent bool,
+) error {
+	appliedProvider, hasAppliedTip := b.txValidator.(AppliedTipProvider)
+	relationProvider, hasRelation := b.chainTip.(ChainTipRelationProvider)
+	if !hasAppliedTip && !hasRelation {
+		return nil
+	}
+	if !hasAppliedTip || !hasRelation {
+		return errors.New("forge parent ancestry providers are incomplete")
+	}
+	appliedTip, _ := appliedProvider.ForgeTipSnapshot()
+	tip, depth, ancestor, err := relationProvider.TipRelation(
+		appliedTip.Point,
+	)
+	if err != nil {
+		return fmt.Errorf("check forge parent ancestry: %w", err)
+	}
+	if !tipsEqual(tip, currentTip) {
+		return fmt.Errorf(
+			"%w: parent changed while checking ledger ancestry",
+			errParentChangedDuringBuild,
+		)
+	}
+	if !ancestor || depth > forgeMaxUnappliedBlocks {
+		return fmt.Errorf(
+			"forge parent exceeds the maximum unapplied block depth: ancestor=%t depth=%d max=%d",
+			ancestor,
+			depth,
+			forgeMaxUnappliedBlocks,
+		)
+	}
+	if pointsEqual(parentPoint, currentTip.Point) {
+		return nil
+	}
+	if allowAlternativeParent {
+		parentTip, parentDepth, parentAncestor, err := relationProvider.TipRelation(parentPoint)
+		if err != nil {
+			return fmt.Errorf("check alternative forge parent ancestry: %w", err)
+		}
+		if !tipsEqual(parentTip, currentTip) || !parentAncestor || parentDepth != 1 {
+			return errors.New("alternative forge parent is not the direct chain-tip predecessor")
+		}
+		return nil
+	}
+	if !pointsEqual(parentPoint, appliedTip.Point) {
+		return errors.New("alternative forge parent does not match the applied ledger tip")
+	}
+	return nil
 }
 
 // computeBlockBodyHash computes the block body hash as per Cardano spec.

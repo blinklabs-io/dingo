@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -332,11 +333,10 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	}
 }
 
-// TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale verifies that a
-// quiet network is not mistaken for an upstream peer being ahead. The target
-// is unknown, so the forge gate has no peer-relative evidence that this node
-// is behind (issue #4201).
-func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
+// TestForgeAllowsUnknownUpstreamTargetAfterQuietStretch verifies that a long
+// gap between blocks does not become evidence of network progress when the
+// active peer has not published a target.
+func TestForgeAllowsUnknownUpstreamTargetAfterQuietStretch(
 	t *testing.T,
 ) {
 	leader := &forgerCountingLeader{}
@@ -351,8 +351,8 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			// The tip lags the current slot by more than the tolerance,
-			// which is direct evidence this node is behind.
+			// The current slot is far beyond the previous block, but the
+			// peer has no corroborated target and may also be at that tip.
 			currentSlot:       1000,
 			chainTipSlot:      9,
 			upstreamTipSlot:   0,
@@ -374,6 +374,11 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
 	// #4013 asserted 991 here, the local tip's lag behind the wall clock,
 	// because the sync-skip path was then the only writer that could make
 	// dingo_forge_tip_gap_slots non-zero on this branch. This PR gives that
@@ -386,9 +391,9 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 	// dingo_tip_gap_slots ("slots between wall-clock slot and chain tip",
 	// ledger/state.go), on every slot tick rather than only on a leader-slot
 	// skip, and the gate's own log line carries current_slot and tip_slot.
-	// The lag itself is not a forge-sync signal when the upstream target is
-	// unknown; see TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip for
-	// the at-tip case as well.
+	// The wall-clock refusal is reported separately from the peer-sync counter;
+	// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip covers the near-tip
+	// case that remains eligible.
 	assert.Equal(
 		t,
 		float64(0),
@@ -862,6 +867,14 @@ func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 	return ocommon.Point{Slot: slot, Hash: c.chainTipHash}
 }
 
+func (c *forgerMovingTipSlotClock) ChainTipSnapshot() ochainsync.Tip {
+	return ochainsync.Tip{Point: c.ChainTip()}
+}
+
+func (c *forgerMovingTipSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return c.ChainTipSnapshot(), 5
+}
+
 // PrimaryChainTip is pinned to the ORIGINAL tip and never moves. This double
 // exists to model the applied tip shifting between the two reads
 // tipBlockOwnership makes; letting the primary tip follow it would put the
@@ -871,6 +884,14 @@ func (c *forgerMovingTipSlotClock) PrimaryChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+}
+
+func (c *forgerMovingTipSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	return ochainsync.Tip{Point: primary}, 0,
+		primary.Slot == point.Slot && bytes.Equal(primary.Hash, point.Hash), nil
 }
 
 func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
@@ -891,6 +912,12 @@ func (*forgerMovingTipSlotClock) UpstreamTipSlot() uint64 {
 func (*forgerMovingTipSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return 0, false
 }
+
+func (*forgerMovingTipSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{}, false
+}
+
+func (*forgerMovingTipSlotClock) SecurityParam() int { return 5 }
 
 func (c *forgerMovingTipSlotClock) reads() (int, int) {
 	c.mu.Lock()

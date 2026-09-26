@@ -1785,6 +1785,51 @@ func TestPointAtDepthNoDatabase(t *testing.T) {
 	}
 }
 
+func TestTipRelationUsesTheActivePrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	primary := cm.PrimaryChain()
+	for _, block := range testBlocks[:4] {
+		if err := primary.AddBlock(block, nil); err != nil {
+			t.Fatalf("unexpected error adding primary block: %s", err)
+		}
+	}
+
+	tip, depth, ancestor, err := primary.TipRelation(blockPoint(testBlocks[1]))
+	if err != nil {
+		t.Fatalf("unexpected tip relation error: %s", err)
+	}
+	if !ancestor || depth != 2 || !reflect.DeepEqual(tip.Point, blockPoint(testBlocks[3])) {
+		t.Fatalf("unexpected ancestor relation: tip=%v depth=%d ancestor=%t", tip, depth, ancestor)
+	}
+
+	fork, err := cm.NewChain(blockPoint(testBlocks[1]))
+	if err != nil {
+		t.Fatalf("unexpected error creating fork: %s", err)
+	}
+	forkBlock := &MockBlock{
+		MockBlockNumber: 3,
+		MockSlot:        31,
+		MockHash:        testHashPrefix + "00aa",
+		MockPrevHash:    testBlocks[1].MockHash,
+	}
+	if err := fork.AddBlock(forkBlock, nil); err != nil {
+		t.Fatalf("unexpected error adding fork block: %s", err)
+	}
+
+	_, _, ancestor, err = primary.TipRelation(blockPoint(forkBlock))
+	if err != nil {
+		t.Fatalf("unexpected fork relation error: %s", err)
+	}
+	if ancestor {
+		t.Fatal("a retained competing-fork block must not be reported as an ancestor")
+	}
+}
+
 func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
 	t.Parallel()
 

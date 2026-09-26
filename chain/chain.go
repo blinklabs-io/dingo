@@ -162,6 +162,54 @@ func (c *Chain) Tip() ochainsync.Tip {
 	return c.currentTip
 }
 
+// TipRelation returns the current tip, the number of blocks between point and
+// that tip, and whether point is on the chain ending at the returned tip.
+// The tip and relation are read under the same chain lock. Origin is an
+// ancestor of every chain; points retained only in the block store after a
+// rollback are not ancestors.
+func (c *Chain) TipRelation(
+	point ocommon.Point,
+) (tip ochainsync.Tip, depth uint64, ancestor bool, err error) {
+	if c == nil {
+		return ochainsync.Tip{}, 0, false, errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if err := c.reconcile(); err != nil {
+		return ochainsync.Tip{}, 0, false, err
+	}
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
+	tip = c.currentTip
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		if c.tipBlockIndex >= initialBlockIndex {
+			return tip, c.tipBlockIndex, true, nil
+		}
+		return tip, 0, true, nil
+	}
+	block, err := c.manager.blockByPoint(point, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return tip, 0, false, nil
+		}
+		return tip, 0, false, err
+	}
+	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
+		return tip, 0, false, nil
+	}
+	activeBlock, err := c.blockByIndexLocked(block.ID)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return tip, 0, false, nil
+		}
+		return tip, 0, false, err
+	}
+	if activeBlock.Slot != point.Slot || !bytes.Equal(activeBlock.Hash, point.Hash) {
+		return tip, 0, false, nil
+	}
+	return tip, c.tipBlockIndex - block.ID, true, nil
+}
+
 // WithTip runs fn while holding the chain mutex. It is intended for operations
 // that must bind a result to the exact tip snapshot they observed, such as
 // signing a block header. fn must not call back into c or block on a chain
