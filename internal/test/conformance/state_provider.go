@@ -1184,7 +1184,7 @@ var _ conformance.StateProvider = (*DingoStateProvider)(nil)
 // capability as the production LedgerView.
 var (
 	_ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
-	_ eras.CommitteeVotingState     = (*DingoStateProvider)(nil)
+	_ common.CommitteeVotingState   = (*DingoStateProvider)(nil)
 )
 
 // conformance.StateProvider does not include DRepDelegationState: the Conway

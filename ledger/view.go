@@ -304,7 +304,7 @@ var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 // gouroboros pin exports it.
 var (
 	_ eras.CommitteeCredentialState = (*LedgerView)(nil)
-	_ eras.CommitteeVotingState     = (*LedgerView)(nil)
+	_ lcommon.CommitteeVotingState  = (*LedgerView)(nil)
 )
 
 // Keep the optional Conway governance capability wired to the concrete view

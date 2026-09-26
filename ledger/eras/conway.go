@@ -219,9 +219,6 @@ func ValidateTxConway(
 			)
 		}
 	}
-	if err := validateCommitteeVotingRules(tx, slot, ls, tmpPparams); err != nil {
-		errs = append(errs, fmt.Errorf("conway committee voting: %w", err))
-	}
 	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
 		errs = append(
 			errs,
