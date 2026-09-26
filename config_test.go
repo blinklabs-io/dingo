@@ -180,19 +180,14 @@ func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 	assert.Empty(t, selection.Config)
 }
 
-// TestNewConfigDefaultsValidateForgedBlock is a regression test for issue
-// #3528: NewConfig builds its own internalconfig.Config literal rather than
-// starting from internalconfig's own package-level default (globalConfig,
-// built by its unexported newDefaultConfig), so the fail-closed
-// ValidateForgedBlock=true default had to be set in both places. A caller
-// using the programmatic/library API (NewConfig) rather than the
-// YAML/env-loaded path must still get self-validation of forged blocks
-// enabled by default -- checked on both cfg.cfg.ValidateForgedBlock (the
-// loaded internal config) and cfg.validateForgedBlock (the compat mirror
-// syncCompatFields populates from it, which node_forging.go actually
-// reads); a human reviewer found this test only checked the former.
-func TestNewConfigDefaultsValidateForgedBlock(t *testing.T) {
+// TestNewConfigDefaultsValidationFlags ensures programmatic configuration
+// preserves the fail-closed validation defaults of the standard config loader.
+func TestNewConfigDefaultsValidationFlags(t *testing.T) {
 	cfg := NewConfig()
+	assert.True(t, cfg.cfg.ValidateHistorical)
+	assert.True(t, cfg.validateHistorical)
+	assert.True(t, cfg.cfg.StrictUtxoValidation)
+	assert.True(t, cfg.strictUtxoValidation)
 	assert.True(t, cfg.cfg.ValidateForgedBlock)
 	assert.True(t, cfg.validateForgedBlock)
 }
@@ -670,12 +665,16 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	WithInactivityTimeout(-5 * time.Minute)(cfg)
 	WithMaxConnectionsPerIP(-2)(cfg)
 	WithMaxInboundConns(0)(cfg)
+	WithMaxNtCConns(-3)(cfg)
+	WithMaxNtCConnectionsPerIP(0)(cfg)
 
 	assert.Zero(t, cfg.cfg.MinHotPeers)
 	assert.Zero(t, cfg.cfg.ReconcileInterval)
 	assert.Zero(t, cfg.cfg.InactivityTimeout)
 	assert.Zero(t, cfg.cfg.MaxConnectionsPerIP)
 	assert.Zero(t, cfg.cfg.MaxInboundConns)
+	assert.Zero(t, cfg.cfg.MaxNtCConns)
+	assert.Zero(t, cfg.cfg.MaxNtCConnectionsPerIP)
 }
 
 func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
@@ -688,12 +687,20 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	WithInactivityTimeout(2 * time.Minute)(cfg)
 	WithMaxConnectionsPerIP(4)(cfg)
 	WithMaxInboundConns(25)(cfg)
+	WithMaxNtCConns(30)(cfg)
+	WithMaxNtCConnectionsPerIP(6)(cfg)
 
 	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
 	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
 	assert.Equal(t, 2*time.Minute, cfg.cfg.InactivityTimeout)
 	assert.Equal(t, 4, cfg.cfg.MaxConnectionsPerIP)
 	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
+	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
+	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
+
+	cfg.syncCompatFields()
+	assert.Equal(t, 30, cfg.maxNtCConns)
+	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
 }
 
 // TestWithGenesisCorroborationPeers covers the public programmatic API path for

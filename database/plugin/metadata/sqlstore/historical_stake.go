@@ -885,6 +885,24 @@ func byteSliceArgs(values [][]byte) []any {
 	return ret
 }
 
+// activeDelegationSQL resolves, for each credential, which pool its most
+// recent surviving delegation certificate names as of slot.
+//
+// A delegation certificate is not the last word on the delegation: POOLREAP
+// removes the delegations pointing at a pool reaped at an epoch boundary
+// (ClearDelegationsToRetiredPool) and writes no certificate of its own, so a
+// certificate predating a reap that still stands at slot must not put the
+// credential back on that pool if the pool later re-registered and the
+// credential never re-delegated. The active_delegation CTE's NOT EXISTS
+// clause below ports poolReapedAfterDelegation's rollback-path guard
+// (account.go) into this historical-reconstruction path, which had no
+// equivalent guard: live incident, Preview epoch 646/647, pools
+// 2bf19282e11384ccf60c9a3b0f5b6e00e74aed2cbd8bc9837ccc0966 and
+// 881f9bc5415bb7381dc4b6571ab662eff5277d78d778d05614cdf0d4 each retired and
+// later re-registered, and one-time delegators from before the reap who never
+// re-delegated had their stake wrongly resurrected onto the pool by this
+// query, producing a stake-distribution mismatch against Koios of exactly
+// the reaped credentials' stake (dingo node-parity issue, epoch 647).
 func activeDelegationSQL(slot uint64) (string, []any) {
 	args := make(
 		[]any,
@@ -998,7 +1016,52 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
      OR (delegation.added_slot = registration.added_slot
        AND delegation.block_index = registration.block_index
        AND delegation.cert_index >= registration.cert_index))
-)`, args
+   AND NOT EXISTS (
+       SELECT 1
+       FROM pool_retirement rt
+       JOIN pool p ON p.id = rt.pool_id
+       JOIN epoch e ON e.epoch_id = rt.epoch
+       LEFT JOIN certs c ON c.id = rt.certificate_id
+       LEFT JOIN "transaction" t ON t.id = c.transaction_id
+       WHERE p.pool_key_hash = delegation.pool_key_hash
+         AND rt.added_slot <= ?
+         AND e.start_slot > delegation.added_slot
+         AND e.start_slot <= ?
+         AND NOT EXISTS (
+             SELECT 1
+             FROM pool_registration pr
+             LEFT JOIN certs c2 ON c2.id = pr.certificate_id
+             LEFT JOIN "transaction" t2 ON t2.id = c2.transaction_id
+             WHERE pr.pool_id = rt.pool_id
+               AND pr.added_slot < e.start_slot
+               AND (
+                   pr.added_slot > rt.added_slot
+                   OR (pr.added_slot = rt.added_slot
+                       AND COALESCE(t2.block_index, 0) > COALESCE(t.block_index, 0))
+                   OR (pr.added_slot = rt.added_slot
+                       AND COALESCE(t2.block_index, 0) = COALESCE(t.block_index, 0)
+                       AND COALESCE(c2.cert_index, 0) > COALESCE(c.cert_index, 0))
+               )
+         )
+         AND NOT EXISTS (
+             SELECT 1
+             FROM pool_retirement rt2
+             LEFT JOIN certs c3 ON c3.id = rt2.certificate_id
+             LEFT JOIN "transaction" t3 ON t3.id = c3.transaction_id
+             WHERE rt2.pool_id = rt.pool_id
+               AND rt2.id <> rt.id
+               AND rt2.added_slot < e.start_slot
+               AND (
+                   rt2.added_slot > rt.added_slot
+                   OR (rt2.added_slot = rt.added_slot
+                       AND COALESCE(t3.block_index, 0) > COALESCE(t.block_index, 0))
+                   OR (rt2.added_slot = rt.added_slot
+                       AND COALESCE(t3.block_index, 0) = COALESCE(t.block_index, 0)
+                       AND COALESCE(c3.cert_index, 0) > COALESCE(c.cert_index, 0))
+               )
+         )
+   )
+)`, append(args, slot, slot)
 }
 
 // historicalExpirationSQL reconstructs each active-delegation credential's
@@ -1162,4 +1225,66 @@ func noHistorySQL(alias string, tables []string) string {
  )`, table, alias, alias)
 	}
 	return ret.String()
+}
+
+// GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
+// boundary reconstruction attributes stake to at snapshotSlot, whether or not
+// that pool is still registered. It is the historical-path counterpart of
+// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator (dingo
+// #4660); see that function for why the denominator must not be enumerated
+// from the active pool set.
+//
+// It reconstructs from the same CTE the stake fetch uses, with the pool
+// predicate relaxed to "has a delegation at all", and applies neither the
+// expiry nor the inactivity gate: the result only widens the set of pools the
+// stake fetch is asked about, and that fetch applies both.
+func (s *Store) GetEpochBoundaryDelegatedPoolKeyHashes(
+	snapshotSlot uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	if boundarySlot <= snapshotSlot {
+		boundarySlot = 0
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: resolve db: %w",
+			err,
+		)
+	}
+	query, args, err := s.historicalStakeCTE(
+		ctx,
+		db,
+		snapshotSlot,
+		boundarySlot,
+		0,
+		0,
+		"active_delegation.pool_key_hash IS NOT NULL",
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, query+`
+SELECT DISTINCT pool_key_hash FROM active_delegator_stake`, args...)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		if len(hash) == 0 {
+			continue
+		}
+		ret = append(ret, hash)
+	}
+	return ret, rows.Err()
 }

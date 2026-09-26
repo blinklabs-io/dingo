@@ -47,20 +47,31 @@ const (
 )
 
 type Chain struct {
-	eventBus             *event.EventBus
-	manager              *ChainManager
-	waitingChan          chan struct{}
-	headers              []queuedHeader
-	blocks               []ocommon.Point
-	iterators            []*ChainIterator
-	currentTip           ochainsync.Tip
-	tipBlockIndex        uint64
-	mutationGeneration   uint64
-	lastCommonBlockIndex uint64
-	id                   ChainId
-	mutex                sync.RWMutex
-	waitingChanMutex     sync.Mutex
-	persistent           bool
+	eventBus      *event.EventBus
+	manager       *ChainManager
+	waitingChan   chan struct{}
+	headers       []queuedHeader
+	blocks        []ocommon.Point
+	iterators     []*ChainIterator
+	currentTip    ochainsync.Tip
+	tipBlockIndex uint64
+	// mutationGeneration counts mutations of the in-memory block state:
+	// currentTip, tipBlockIndex, and the ephemeral block buffer.
+	// headerMutationGeneration independently counts queued-header mutations.
+	// Keeping the counters separate lets atOriginAfterMutation distinguish a
+	// fresh chain that has only queued headers while still preventing either
+	// restore path from overwriting a concurrent header mutation.
+	//
+	// A mutation is one bump, not one per field. addBlockLocked deletes the
+	// matched header and advances the tip under a single increment. Guarded by
+	// c.mutex.
+	mutationGeneration       uint64
+	headerMutationGeneration uint64
+	lastCommonBlockIndex     uint64
+	id                       ChainId
+	mutex                    sync.RWMutex
+	waitingChanMutex         sync.Mutex
+	persistent               bool
 
 	// pendingUpdates is the chain-level sequencer for deferred chain.update
 	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
@@ -85,7 +96,7 @@ type Chain struct {
 	// pop (FIFO) order rather than interleaving. Neither is a ledger mutex, so
 	// draining -- which only ever runs after the caller has released its outer
 	// ledger mutex -- cannot reintroduce the drain deadlock.
-	pendingUpdates      []event.Event
+	pendingUpdates      []pendingChainUpdate
 	pendingUpdatesMutex sync.Mutex
 	publishMutex        sync.Mutex
 
@@ -114,8 +125,16 @@ type Chain struct {
 	//
 	// It covers only the transactions the chain itself owns. addBlockInternal
 	// takes a caller-supplied transaction whose commit the chain neither
-	// performs nor observes, so the same window remains open there.
+	// performs nor observes; pendingAdds closes the same window there, using
+	// this mutex's read side to exclude a record from appearing under a
+	// removal path that already holds it for write.
 	batchCommitMutex sync.RWMutex
+
+	// pendingAdds keeps a removal path from resolving a block index whose
+	// store write is still held in an uncommitted caller-supplied
+	// transaction. Only adds that carry such a transaction record with it.
+	// See pendingAddBarrier.
+	pendingAdds pendingAddBarrier
 
 	// headerSeq is the fallback chain-mutation counter used only by a Chain
 	// built without a ChainManager, which nothing outside this package's
@@ -163,6 +182,74 @@ func (c *Chain) HeaderTip() ochainsync.Tip {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.headerTip()
+}
+
+// TipPredecessor reports the block context an alternative to the current chain
+// tip must be built on: the tip itself (the block that would be competed with)
+// and the point of the tip's immediate predecessor, which becomes the
+// alternative block's parent.
+//
+// This is the data ouroboros-consensus' mkCurrentBlockContext returns for its
+// EQ case, where a leader whose slot is already occupied forges an alternative
+// with the same block number as the occupant and the occupant's predecessor as
+// parent (Ouroboros/Consensus/NodeKernel/Forge.hs).
+//
+// ok is false whenever that context cannot be established: an empty chain, a
+// tip that is the first block on the chain (its parent is genesis, which is not
+// a rollback target here), or a predecessor the chain can no longer resolve.
+// Callers must treat that as "no alternative can be built" and must not fall
+// back to the live tip: binding the tip itself as parent produces a block whose
+// parent slot equals its own, which envelope validation and every Praos peer
+// reject.
+func (c *Chain) TipPredecessor() (
+	parent ocommon.Point,
+	tip ochainsync.Tip,
+	ok bool,
+) {
+	if c == nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	// Both lookups below go through blockByIndexLocked, which resolves a
+	// common-prefix index against the primary chain when this chain is an
+	// in-memory fork. That read needs the primary-chain lock as well as the
+	// manager lock, in the chain -> primary -> manager order this helper
+	// establishes; taking manager.mutex directly would let a concurrent
+	// primary-chain mutation move the common prefix between the two lookups
+	// and yield a tip and a parent that never sat next to each other.
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
+	// initialBlockIndex is the first block; it has no predecessor on this
+	// chain, and neither does an empty chain.
+	if c.tipBlockIndex <= initialBlockIndex {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	tipBlock, err := c.blockByIndexLocked(c.tipBlockIndex)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	parentBlock, err := c.blockByIndexLocked(c.tipBlockIndex - 1)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	// Cross-check the two records against each other and against the tip this
+	// chain advertises. The chain maintains all three invariants, but a caller
+	// of this function is about to sign a block against the answer, so a
+	// disagreement is reported as "no context" rather than resolved.
+	//
+	// The parent must also sit strictly below the tip's slot. That is the
+	// ordering contract this function's doc comment states, and the caller
+	// signs against the answer: a parent whose slot is at or above the
+	// contested slot produces a block Praos and envelope validation reject.
+	if !bytes.Equal(tipBlock.Hash, c.currentTip.Point.Hash) ||
+		!bytes.Equal(tipBlock.PrevHash, parentBlock.Hash) ||
+		parentBlock.Slot >= tipBlock.Slot {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	return ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash),
+		c.currentTip,
+		true
 }
 
 // blockNumberContiguous reports whether a block number legitimately follows its
@@ -365,6 +452,7 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
+	c.headerMutationGeneration++
 	// Surface a Leios endorser-block announcement the moment its ranking
 	// block's header enters the queue. The apply-driven ChainUpdateEventType
 	// cannot serve this: applying an EB-announcing ranking block waits on
@@ -504,7 +592,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -524,7 +612,7 @@ func (c *Chain) AddBlock(
 	// instead, which returns the event for the ledger to publish after it
 	// releases chainsyncBlockfetchMutex. See ledger.pendingPublishes and the
 	// blinklabs-io/dingo drain deadlock.
-	if c.eventBus != nil && evt.Type != "" {
+	if txn == nil && c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
 	return nil
@@ -540,6 +628,7 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 		nil,
 		false,
 		false,
+		nil,
 	)
 	if err != nil {
 		return err
@@ -556,6 +645,29 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 	return nil
 }
 
+// AddLocalBlockDeferred adds a locally forged block exactly like AddLocalBlock
+// but, instead of publishing the resulting chain.update inline, enqueues it on
+// the chain-level sequencer under c.mutex and returns it. This is the entry
+// point for a forged block adopted from a path that holds a ledger mutex --
+// specifically the equal-slot alternative, which rolls the chain back to the
+// contested block's parent under chainsyncMutex and then adopts the local
+// sibling. Publishing inline from there is the drain deadlock described on
+// AddBlockWithPointDeferred; enqueuing under c.mutex also keeps this add
+// ordered behind the rollback that preceded it. A returned event with an empty
+// Type means there is nothing to publish.
+func (c *Chain) AddLocalBlockDeferred(
+	block ledger.Block,
+) (event.Event, error) {
+	return c.addBlockInternal(
+		block,
+		ocommon.Point{},
+		nil,
+		false,
+		true,
+		nil,
+	)
+}
+
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
 // recomputing the block hash when the caller already has the canonical slot/hash
 // pair from a validated upstream source such as blockfetch.
@@ -564,7 +676,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true, false)
+	evt, err := c.addBlockInternal(block, point, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -572,7 +684,7 @@ func (c *Chain) AddBlockWithPoint(
 	// before publishing the block. Callers that hold a ledger mutex must use
 	// AddBlockWithPointDeferred, which is what the blockfetch drain does.
 	c.PublishPendingChainUpdates()
-	if c.eventBus != nil && evt.Type != "" {
+	if txn == nil && c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
 	return nil
@@ -598,7 +710,40 @@ func (c *Chain) AddBlockWithPointDeferred(
 	point ocommon.Point,
 	txn *database.Txn,
 ) (event.Event, error) {
-	return c.addBlockInternal(block, point, txn, true, true)
+	return c.addBlockInternal(block, point, txn, true, true, nil)
+}
+
+// AddBlockWithPointDeferredIf is AddBlockWithPointDeferred with a caller
+// supplied admission predicate, evaluated while the chain mutex is held and
+// before any chain state is read or written. When admit reports false the add
+// is abandoned and ErrBlockAddNotAdmitted is returned; nothing is mutated and
+// no event is queued.
+//
+// It exists because a precondition checked by the caller before calling is
+// not a precondition of the mutation. The blockfetch drain holds
+// chainsyncBlockfetchMutex, not the chainsyncMutex the equal-slot alternative
+// adoption holds, so a rollback can publish a new generation and truncate the
+// chain in the window between the drain testing its batch and this add taking
+// the chain mutex. Passing the test as a predicate closes that window: the
+// generation comparison and the tip mutation it guards become one atomic step
+// under the same lock every other chain mutation takes.
+//
+// admit must not acquire the chain or manager mutex, and must not block: it
+// runs on the chain's own write path.
+func (c *Chain) AddBlockWithPointDeferredIf(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+	admit func() bool,
+) (event.Event, error) {
+	return c.addBlockInternal(block, point, txn, true, true, admit)
+}
+
+// pendingChainUpdate holds an event at its mutation-order position. A non-nil
+// txn keeps the head unpublished until that transaction finishes.
+type pendingChainUpdate struct {
+	event event.Event
+	txn   *database.Txn
 }
 
 // queueDeferredEventLocked appends evt to the chain-level sequencer. The caller
@@ -607,11 +752,44 @@ func (c *Chain) AddBlockWithPointDeferred(
 // recording its event, which is what makes enqueue order equal mutation order.
 // See the pendingUpdates field.
 func (c *Chain) queueDeferredEventLocked(evt event.Event) {
+	c.queueDeferredTxnEventLocked(evt, nil)
+}
+
+// queueDeferredTxnEventLocked keeps an event owned by a caller transaction at
+// its mutation-order position without making it publishable before commit.
+// The transaction's OnFinish callback either clears txn or removes the event.
+func (c *Chain) queueDeferredTxnEventLocked(
+	evt event.Event,
+	txn *database.Txn,
+) {
 	if c == nil || c.eventBus == nil || evt.Type == "" {
 		return
 	}
 	c.pendingUpdatesMutex.Lock()
-	c.pendingUpdates = append(c.pendingUpdates, evt)
+	c.pendingUpdates = append(c.pendingUpdates, pendingChainUpdate{
+		event: evt,
+		txn:   txn,
+	})
+	c.pendingUpdatesMutex.Unlock()
+}
+
+// finishPendingTxnEvents makes a committed transaction's events publishable,
+// or removes an aborted transaction's events. Events behind an unfinished
+// transaction stay queued, so later mutations cannot overtake it.
+func (c *Chain) finishPendingTxnEvents(txn *database.Txn, committed bool) {
+	c.pendingUpdatesMutex.Lock()
+	updates := c.pendingUpdates[:0]
+	for _, update := range c.pendingUpdates {
+		if update.txn != txn {
+			updates = append(updates, update)
+			continue
+		}
+		if committed {
+			update.txn = nil
+			updates = append(updates, update)
+		}
+	}
+	c.pendingUpdates = updates
 	c.pendingUpdatesMutex.Unlock()
 }
 
@@ -638,10 +816,14 @@ func (c *Chain) PublishPendingChainUpdates() {
 			c.pendingUpdatesMutex.Unlock()
 			return
 		}
-		evt := c.pendingUpdates[0]
+		update := c.pendingUpdates[0]
+		if update.txn != nil {
+			c.pendingUpdatesMutex.Unlock()
+			return
+		}
 		c.pendingUpdates = c.pendingUpdates[1:]
 		c.pendingUpdatesMutex.Unlock()
-		c.eventBus.Publish(evt.Type, evt)
+		c.eventBus.Publish(update.event.Type, update.event)
 	}
 }
 
@@ -655,19 +837,48 @@ func (c *Chain) addBlockInternal(
 	txn *database.Txn,
 	matchPendingHeader bool,
 	deferred bool,
+	admit func() bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
 	}
+	if txn == nil && c.persistent {
+		endStandalone, err := c.beginStandaloneAdd()
+		if err != nil {
+			return event.Event{}, fmt.Errorf(
+				"wait for caller transaction adds: %w", err,
+			)
+		}
+		defer endStandalone()
+	}
+	// A caller-supplied transaction carries the block's store write out of the
+	// chain's sight: addBlockLocked advances the tip under c.mutex, and the
+	// caller commits at a moment the chain neither performs nor observes.
+	// Record it before the tip moves and release the record when that
+	// transaction concludes -- on commit and on rollback alike -- so a removal
+	// path in between cannot ask the store for the index it left behind. A nil
+	// transaction needs none of this: the chain's own write commits before the
+	// tip advances. See pendingAddBarrier.
+	endAdd := c.beginCallerTxnAdd(txn)
+	defer endAdd()
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
+	// Ask the caller, under the same lock that serializes every chain
+	// mutation, whether this add is still wanted. Evaluating it here is the
+	// point: a caller that checks its own precondition before calling has
+	// already released whatever it inspected, so a rollback landing in
+	// between would leave that check stale. See AddBlockWithPointDeferredIf.
+	if admit != nil && !admit() {
+		return event.Event{}, ErrBlockAddNotAdmitted
+	}
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
+	c.recordCallerTxnAdd(txn)
 	evt, err := c.addBlockLocked(
 		block,
 		point,
@@ -676,6 +887,7 @@ func (c *Chain) addBlockInternal(
 		matchPendingHeader,
 	)
 	if err != nil {
+		c.pendingAdds.discardLast(txn)
 		return event.Event{}, err
 	}
 	// Deferred callers (the mutex-holding blockfetch drain) publish through the
@@ -683,8 +895,8 @@ func (c *Chain) addBlockInternal(
 	// held so this add is sequenced ahead of any mutation that acquires the
 	// lock after it; the caller drains after releasing its outer ledger mutex.
 	// See the pendingUpdates field and PublishPendingChainUpdates.
-	if deferred {
-		c.queueDeferredEventLocked(evt)
+	if deferred || txn != nil {
+		c.queueDeferredTxnEventLocked(evt, txn)
 	}
 	return evt, nil
 }
@@ -784,6 +996,7 @@ func (c *Chain) addBlockLocked(
 	}
 	c.tipBlockIndex = newBlockIndex
 	c.mutationGeneration++
+	c.headerMutationGeneration++
 	// A locally forged block discards the queued peer headers without
 	// rolling anything back, so nothing else voids the Leios announcements
 	// they carried: the chain.update this produces is a block add, not a
@@ -792,12 +1005,12 @@ func (c *Chain) addBlockLocked(
 	// c.mutex like every other header-lifecycle event, so it stays ordered
 	// against the announcements addBlockHeader queues.
 	if len(discardedHeaders) > 0 {
-		c.queueDeferredEventLocked(headerInvalidationEvent(
+		c.queueDeferredTxnEventLocked(headerInvalidationEvent(
 			c.currentTip.Point,
 			HeaderInvalidationLocalBlock,
 			c.nextHeaderSeqLocked(),
 			discardedHeaders,
-		))
+		), txn)
 	}
 	// A locally forged block never passes through addBlockHeader, so its own
 	// announcement would otherwise be armed only from ChainUpdateEventType,
@@ -815,7 +1028,7 @@ func (c *Chain) addBlockLocked(
 			lcommon.NewBlake2b256(blockHashBytes),
 			c.nextHeaderSeqLocked(),
 		); ok {
-			c.queueDeferredEventLocked(evt)
+			c.queueDeferredTxnEventLocked(evt, txn)
 		}
 	}
 	if notifyWaiters {
@@ -863,15 +1076,17 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 			defer c.batchCommitMutex.RUnlock()
 			txn := c.manager.db.BlobTxn(true)
 			var (
-				savedTip             ochainsync.Tip
-				savedTipBlockIndex   uint64
-				savedGeneration      uint64
-				savedHeaders         []queuedHeader
-				savedBlocks          []ocommon.Point
-				batchApplied         bool
-				appliedTip           ochainsync.Tip
-				appliedTipBlockIndex uint64
-				appliedGeneration    uint64
+				savedTip                ochainsync.Tip
+				savedTipBlockIndex      uint64
+				savedGeneration         uint64
+				savedHeaderGeneration   uint64
+				savedHeaders            []queuedHeader
+				savedBlocks             []ocommon.Point
+				batchApplied            bool
+				appliedTip              ochainsync.Tip
+				appliedTipBlockIndex    uint64
+				appliedGeneration       uint64
+				appliedHeaderGeneration uint64
 			)
 			err := txn.Do(func(txn *database.Txn) error {
 				c.mutex.Lock()
@@ -884,6 +1099,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 				savedTip = c.currentTip
 				savedTipBlockIndex = c.tipBlockIndex
 				savedGeneration = c.mutationGeneration
+				savedHeaderGeneration = c.headerMutationGeneration
 				savedHeaders = slices.Clone(c.headers)
 				if !c.persistent {
 					savedBlocks = slices.Clone(c.blocks)
@@ -900,6 +1116,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 						c.currentTip = savedTip
 						c.tipBlockIndex = savedTipBlockIndex
 						c.mutationGeneration = savedGeneration
+						c.headerMutationGeneration = savedHeaderGeneration
 						c.headers = savedHeaders
 						if !c.persistent {
 							c.blocks = savedBlocks
@@ -914,6 +1131,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 				appliedTip = c.currentTip
 				appliedTipBlockIndex = c.tipBlockIndex
 				appliedGeneration = c.mutationGeneration
+				appliedHeaderGeneration = c.headerMutationGeneration
 				return nil
 			})
 			if err != nil && batchApplied {
@@ -927,7 +1145,10 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 					c.currentTip = savedTip
 					c.tipBlockIndex = savedTipBlockIndex
 					c.mutationGeneration = savedGeneration
-					c.headers = savedHeaders
+					if c.headerMutationGeneration == appliedHeaderGeneration {
+						c.headerMutationGeneration = savedHeaderGeneration
+						c.headers = savedHeaders
+					}
 					if !c.persistent {
 						c.blocks = savedBlocks
 					}
@@ -1061,6 +1282,7 @@ func (c *Chain) addRawBlockLocked(
 	}
 	c.tipBlockIndex = newBlockIndex
 	c.mutationGeneration++
+	c.headerMutationGeneration++
 	// Build event for deferred publication (same pattern as
 	// addBlockLocked — publish after the transaction commits).
 	if c.eventBus != nil {
@@ -1165,15 +1387,17 @@ func (c *Chain) addRawBlocks(
 			// leaving the in-memory chain advanced. Capture the
 			// snapshot here so we can also restore on Commit failure.
 			var (
-				savedTip             ochainsync.Tip
-				savedTipBlockIndex   uint64
-				savedGeneration      uint64
-				savedHeaders         []queuedHeader
-				savedBlocks          []ocommon.Point
-				batchApplied         bool
-				appliedTip           ochainsync.Tip
-				appliedTipBlockIndex uint64
-				appliedGeneration    uint64
+				savedTip                ochainsync.Tip
+				savedTipBlockIndex      uint64
+				savedGeneration         uint64
+				savedHeaderGeneration   uint64
+				savedHeaders            []queuedHeader
+				savedBlocks             []ocommon.Point
+				batchApplied            bool
+				appliedTip              ochainsync.Tip
+				appliedTipBlockIndex    uint64
+				appliedGeneration       uint64
+				appliedHeaderGeneration uint64
 			)
 			err := txn.Do(func(txn *database.Txn) error {
 				batch := blocks[batchOffset : batchOffset+batchSize]
@@ -1187,6 +1411,7 @@ func (c *Chain) addRawBlocks(
 				savedTip = c.currentTip
 				savedTipBlockIndex = c.tipBlockIndex
 				savedGeneration = c.mutationGeneration
+				savedHeaderGeneration = c.headerMutationGeneration
 				savedHeaders = slices.Clone(c.headers)
 				if !c.persistent {
 					savedBlocks = slices.Clone(c.blocks)
@@ -1201,6 +1426,7 @@ func (c *Chain) addRawBlocks(
 						c.currentTip = savedTip
 						c.tipBlockIndex = savedTipBlockIndex
 						c.mutationGeneration = savedGeneration
+						c.headerMutationGeneration = savedHeaderGeneration
 						c.headers = savedHeaders
 						if !c.persistent {
 							c.blocks = savedBlocks
@@ -1219,6 +1445,7 @@ func (c *Chain) addRawBlocks(
 				appliedTip = c.currentTip
 				appliedTipBlockIndex = c.tipBlockIndex
 				appliedGeneration = c.mutationGeneration
+				appliedHeaderGeneration = c.headerMutationGeneration
 				return nil
 			})
 			if err != nil {
@@ -1245,7 +1472,10 @@ func (c *Chain) addRawBlocks(
 						c.currentTip = savedTip
 						c.tipBlockIndex = savedTipBlockIndex
 						c.mutationGeneration = savedGeneration
-						c.headers = savedHeaders
+						if c.headerMutationGeneration == appliedHeaderGeneration {
+							c.headerMutationGeneration = savedHeaderGeneration
+							c.headers = savedHeaders
+						}
 						if !c.persistent {
 							c.blocks = savedBlocks
 						}
@@ -1605,6 +1835,69 @@ func (c *Chain) rollbackLocked(
 	// batchCommitMutex field.
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
+	// A queued-header rollback does not remove persistent blocks and therefore
+	// must not wait for unrelated caller transactions. Check that case before
+	// waiting; the full check is repeated below after the wait because headers
+	// can change while a caller transaction concludes.
+	//
+	// Removing no persistent block is not the same as mutating nothing: this
+	// path trims the queued-header list, which is exactly the state
+	// finishCallerTxnAdd restores when a caller-supplied transaction rolls
+	// back. Taking it underneath an outstanding caller add would let that
+	// restore write the pre-add queue back over the trim, resurrecting
+	// headers this path has already published a HeaderInvalidationRollback
+	// for. So it is taken only while no such add is in flight; otherwise the
+	// rollback falls through to awaitPendingCallerAdds and re-checks the
+	// header queue afterwards. Every in-tree add passes a nil transaction and
+	// records no hold, so the fast path is taken exactly as often as before.
+	c.mutex.Lock()
+	if len(c.headers) > 0 && c.pendingAdds.heldCount() == 0 {
+		c.manager.mutex.Lock()
+		if err := c.reconcile(); err != nil {
+			c.manager.mutex.Unlock()
+			c.mutex.Unlock()
+			return nil, fmt.Errorf("reconcile chain: %w", err)
+		}
+		if c.persistent && c.manager.securityParam <= 0 && !unbounded {
+			c.manager.mutex.Unlock()
+			c.mutex.Unlock()
+			return nil, ErrSecurityParamNotConfigured
+		}
+		c.manager.mutex.Unlock()
+		idx, err := c.findQueuedHeader(point)
+		if err != nil {
+			c.mutex.Unlock()
+			return nil, err
+		}
+		if idx >= 0 {
+			// Same invalidation the post-wait header path publishes
+			// below. Those headers never become blocks, and this path
+			// returns no chain.update event, so without it any
+			// announcement they carried stays armed with nothing left
+			// to void it.
+			discarded := c.queuedHeaderHashes()[idx+1:]
+			dropped := len(discarded)
+			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			if dropped > 0 {
+				c.headerMutationGeneration++
+				c.queueDeferredEventLocked(headerInvalidationEvent(
+					point,
+					HeaderInvalidationRollback,
+					c.nextHeaderSeqLocked(),
+					discarded,
+				))
+			}
+			c.mutex.Unlock()
+			return nil, nil
+		}
+	}
+	c.mutex.Unlock()
+	// The write hold above excludes further caller-transaction adds; this waits
+	// for the ones already recorded, so no index the removal loop reaches is
+	// one the store has yet to be given. See pendingAddBarrier.
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf("wait for pending caller transactions: %w", err)
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions
@@ -1638,6 +1931,7 @@ func (c *Chain) rollbackLocked(
 			// the announcements would stay armed with nothing left to
 			// void them.
 			if dropped > 0 {
+				c.headerMutationGeneration++
 				c.queueDeferredEventLocked(headerInvalidationEvent(
 					point,
 					HeaderInvalidationRollback,
@@ -1690,8 +1984,24 @@ func (c *Chain) rollbackLocked(
 	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
-	// Collect and delete rolled-back blocks in a single pass
 	var rolledBackBlocks []models.Block
+	// An ephemeral rollback mutates an in-memory slice one block at a time.
+	// Resolve the complete undo payload first so a corrupt lookup cannot leave
+	// the chain shortened with an incomplete rollback event.
+	if !c.persistent {
+		for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
+			block, err := c.blockByIndexLocked(i)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"preflight rollback block at index %d: %w",
+					i,
+					err,
+				)
+			}
+			rolledBackBlocks = append(rolledBackBlocks, block)
+		}
+	}
+	// Delete only after every fallible ephemeral lookup has succeeded.
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
 			// Remove block from persistent store, returns the removed block
@@ -1701,23 +2011,8 @@ func (c *Chain) rollbackLocked(
 					"remove block at index %d: %w", i, err,
 				)
 			}
-			if c.eventBus != nil {
-				rolledBackBlocks = append(rolledBackBlocks, block)
-			}
+			rolledBackBlocks = append(rolledBackBlocks, block)
 		} else {
-			// Collect block for event emission before deletion
-			if c.eventBus != nil {
-				block, err := c.blockByIndexLocked(i)
-				if err != nil {
-					slog.Default().Warn(
-						"failed to get block for rollback event",
-						"index", i,
-						"error", err,
-					)
-				} else {
-					rolledBackBlocks = append(rolledBackBlocks, block)
-				}
-			}
 			// Blocks at or below the fork point belong to the
 			// common prefix held by the primary chain, not to this
 			// fork's in-memory buffer, so there is nothing to delete
@@ -1753,6 +2048,7 @@ func (c *Chain) rollbackLocked(
 	}
 	c.tipBlockIndex = rollbackBlockIndex
 	c.mutationGeneration++
+	c.headerMutationGeneration++
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
 		// Reverse iterators never deliver rollback markers, but if a
@@ -1781,6 +2077,20 @@ func (c *Chain) rollbackLocked(
 			// Don't update rollback point if the iterator already has an older one pending
 			if iter.needsRollback && point.Slot > iter.rollbackPoint.Slot {
 				continue
+			}
+			// The iterator cannot deliver blocks while a rollback marker is
+			// pending. A later rollback may remove regrown blocks above the
+			// first marker that were never delivered, but it can also remove
+			// blocks below that marker that were delivered before it. Retain
+			// the former payload and append only the latter.
+			if !iter.needsRollback {
+				iter.rollbackBlocks = slices.Clone(rolledBackBlocks)
+			} else if point.Slot < iter.rollbackPoint.Slot {
+				for _, block := range rolledBackBlocks {
+					if block.Slot <= iter.rollbackPoint.Slot {
+						iter.rollbackBlocks = append(iter.rollbackBlocks, block)
+					}
+				}
 			}
 			iter.rollbackPoint = point
 			iter.needsRollback = true
@@ -1875,6 +2185,7 @@ func (c *Chain) ClearHeaders() {
 	// block was ever added. Everything at or below the block tip survives;
 	// the queue held only what was above it.
 	if hadHeaders {
+		c.headerMutationGeneration++
 		c.queueDeferredEventLocked(headerInvalidationEvent(
 			c.currentTip.Point,
 			HeaderInvalidationQueueCleared,
@@ -2122,6 +2433,38 @@ func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
 		endPoint = lastHeader.point
 	}
 	return startPoint, endPoint
+}
+
+// HeaderRangeAfter returns the range of up to count queued headers starting
+// skip entries after the head of the queue, and how many headers actually lie
+// in that window.
+//
+// HeaderRange always starts at c.headers[0], because headers only pop once
+// their block is applied -- not when a batch is dispatched for them -- so
+// calling it again before an in-flight batch's blocks are applied returns the
+// identical range. A caller that wants to describe a second, not-yet-fetched
+// batch beyond one already claimed (skip is the header count that batch
+// already covers) needs a windowed read instead.
+//
+// available is 0 when skip is at or past the end of the queue and less than
+// count when the queue is shorter than skip+count; callers must check it
+// rather than treating a zero-value start/end pair as a valid single-header
+// range, since skip==0, count==0 is also a legitimate call shape.
+func (c *Chain) HeaderRangeAfter(
+	skip, count int,
+) (start, end ocommon.Point, available int) {
+	if c == nil || count <= 0 || skip < 0 {
+		return ocommon.Point{}, ocommon.Point{}, 0
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if skip >= len(c.headers) {
+		return ocommon.Point{}, ocommon.Point{}, 0
+	}
+	available = min(count, len(c.headers)-skip)
+	start = c.headers[skip].point
+	end = c.headers[skip+available-1].point
+	return start, end, available
 }
 
 // FromPoint returns a ChainIterator starting at the specified point. If inclusive is true, the iterator
@@ -2441,8 +2784,10 @@ func (c *Chain) iterNext(
 			ret := &ChainIteratorResult{}
 			ret.Point = iter.rollbackPoint
 			ret.Rollback = true
+			ret.RollbackBlocks = iter.rollbackBlocks
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
+			iter.rollbackBlocks = nil
 			if iter.rollbackPoint.Slot > 0 ||
 				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point

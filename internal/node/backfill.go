@@ -66,12 +66,18 @@ type BackfillProgress struct {
 // It is triggered automatically during Mithril sync when
 // storageMode is "api".
 type Backfill struct {
-	db           *database.Database
-	nodeCfg      *cardano.CardanoNodeConfig
-	logger       *slog.Logger
-	epochs       []models.Epoch
-	pparamsCache map[uint64]lcommon.ProtocolParameters
-	batchSize    int
+	db             *database.Database
+	nodeCfg        *cardano.CardanoNodeConfig
+	logger         *slog.Logger
+	epochs         []models.Epoch
+	pparamsCache   map[uint64]lcommon.ProtocolParameters
+	batchSize      int
+	computeOffsets func(
+		uint64,
+		[]byte,
+		[]byte,
+		gledger.Block,
+	) (*database.BlockIngestionResult, error)
 
 	// Running state tracked across blocks.
 	currentPParams lcommon.ProtocolParameters
@@ -98,6 +104,11 @@ type Backfill struct {
 	// volatile suffix are left for the normal validating ledger pipeline.
 	endSlot    uint64
 	endSlotSet bool
+	// useRunningTotalsFinalization is enabled only by the Mithril API import
+	// path, whose preceding ledger-state import established a complete live
+	// UTxO running total. Ordinary API backfill may start from a database that
+	// never had that invariant, so it retains the authoritative rebuild.
+	useRunningTotalsFinalization bool
 
 	// Counters surfaced in the completion log to make the optimisation
 	// observable.
@@ -194,6 +205,13 @@ func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
 func (b *Backfill) SetEndSlot(slot uint64) {
 	b.endSlot = slot
 	b.endSlotSet = true
+}
+
+// SetUseRunningTotalsFinalization enables the Mithril-only final aggregate
+// merge. Callers must have populated reward_live_stake from a complete trusted
+// ledger-state UTxO import before running historical backfill.
+func (b *Backfill) SetUseRunningTotalsFinalization(enabled bool) {
+	b.useRunningTotalsFinalization = enabled
 }
 
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
@@ -961,8 +979,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		pp := b.getPParams(epochId)
 
-		// Process block. Nesting avoids early-continue so
-		// every path reaches the common tail below.
 		var blockTxCount int
 
 		parsedBlock, parseErr := gledger.NewBlockFromCbor(
@@ -974,11 +990,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		intervalStats.BlockReadDecode += time.Since(readDecodeStart)
 		intervalStats.Blocks++
 		if parseErr != nil {
-			b.logger.Warn(
-				"skipping unparseable block",
-				"component", "backfill",
-				"slot", blk.Slot,
-				"error", parseErr,
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"parsing block at slot %d: %w",
+				blk.Slot, parseErr,
 			)
 		} else {
 			point := ocommon.NewPoint(
@@ -999,21 +1014,17 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 			txs := parsedBlock.Transactions()
 			if len(txs) > 0 {
-				indexer := database.NewBlockIndexer(
-					blk.Slot, blk.Hash,
-				)
 				offsetStart := time.Now()
-				offsets, oErr := indexer.ComputeOffsets(
-					blk.Cbor, parsedBlock,
+				offsets, oErr := b.computeBlockOffsets(
+					blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
 				)
 				// Track CBOR offset discovery for txs and produced UTxOs.
 				intervalStats.OffsetComputation += time.Since(offsetStart)
 				if oErr != nil {
-					b.logger.Warn(
-						"skipping block with offset error",
-						"component", "backfill",
-						"slot", blk.Slot,
-						"error", oErr,
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"computing offsets for block at slot %d: %w",
+						blk.Slot, oErr,
 					)
 				} else {
 					// Store transaction metadata into the shared batch
@@ -1092,12 +1103,18 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return err
 	}
-	// Historical replay intentionally leaves the imported snapshot reward
-	// balances untouched and skips per-transaction live-stake refreshes. The
-	// derived aggregate is rebuilt once from canonical account and live-UTxO
-	// metadata after all historical rows are present, avoiding millions of
-	// repeated indexed UTxO sums during API backfill.
-	if err := b.db.RebuildRewardLiveStake(tipSlot, nil); err != nil {
+	var rebuildErr error
+	if b.useRunningTotalsFinalization {
+		// Historical replay intentionally leaves the imported snapshot live UTxO
+		// set untouched and skips per-transaction live-stake refreshes. The
+		// ledger-state importer already maintained one running total per live
+		// credential, so merge the final account/delegation state into those
+		// totals instead of scanning every live UTxO again.
+		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(tipSlot, nil)
+	} else {
+		rebuildErr = b.db.RebuildRewardLiveStake(tipSlot, nil)
+	}
+	if err := rebuildErr; err != nil {
 		saveCommittedCheckpoint()
 		return fmt.Errorf(
 			"rebuilding reward live stake after backfill: %w",
@@ -1137,6 +1154,20 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)
 	return nil
+}
+
+func (b *Backfill) computeBlockOffsets(
+	slot uint64,
+	hash, blockCbor []byte,
+	block gledger.Block,
+) (*database.BlockIngestionResult, error) {
+	if b.computeOffsets != nil {
+		return b.computeOffsets(slot, hash, blockCbor, block)
+	}
+	return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
 }
 
 // processBlockTxsBatched stores transactions into an existing database

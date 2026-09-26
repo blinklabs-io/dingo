@@ -27,33 +27,28 @@ func (d *Database) DeleteCertificatesAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.certificateStore().DeleteCertificatesAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete certificates after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.certificateStore().DeleteCertificatesAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete certificates after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
+}
+
+// SetCommitteeAuthImmutableSlot records the live rollback-safe immutable
+// slot that committee hot-key authorization pruning uses to bound its
+// retention window. known false means no live value is available. This is
+// an in-memory cache update, not a durable write, so it takes no
+// transaction. See metadata.CertificateStore.SetCommitteeAuthImmutableSlot.
+func (d *Database) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
+	d.certificateStore().SetCommitteeAuthImmutableSlot(slot, known)
 }
 
 // GetPoolRegistrations returns a list of pool registration certificates

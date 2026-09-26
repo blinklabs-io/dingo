@@ -1825,9 +1825,7 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		defer txn.Rollback() //nolint:errcheck
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
 		if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
 			slot,
 			txn.Metadata(),
@@ -1838,19 +1836,8 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 				err,
 			)
 		}
-		return txn.Commit()
-	}
-	if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"delete transaction metadata labels after slot %d: %w",
-			slot,
-			err,
-		)
-	}
-	return nil
+		return nil
+	})
 }
 
 // deleteTxBlobs deletes blob data for the given transaction hashes. Metadata
@@ -1870,6 +1857,9 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	// succeeding because the batch loop never ran.
 	if d.Blob() == nil {
 		return types.ErrBlobStoreUnavailable
+	}
+	if len(txHashes) == 0 {
+		return nil
 	}
 
 	var deleteErrors int
@@ -1901,7 +1891,32 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		if blob == nil {
 			return types.ErrBlobStoreUnavailable
 		}
-		deleteBatch(blob, txn.Blob(), txHashes)
+		// Stage only what this transaction can still hold. Past its budget
+		// the store rejects every further staged write, including the
+		// commit timestamp Txn.Commit puts into this same transaction, so
+		// an unbounded stage costs the caller its whole commit rather than
+		// just the tail of this set (blinklabs-io/dingo#4657). What is left
+		// unstaged is counted with the deletes that failed and reported
+		// through ErrBlobDeleteIncomplete below: the metadata naming these
+		// objects goes away either way, so both are orphans rather than
+		// silently dropped work.
+		staged := len(txHashes)
+		staged = stagedBlobDeleteLimit(
+			blob,
+			txn.Blob(),
+			len(types.TxBlobKey(txHashes[0])),
+			staged,
+		)
+		deleteBatch(blob, txn.Blob(), txHashes[:staged])
+		if skipped := len(txHashes) - staged; skipped > 0 {
+			deleteErrors += skipped
+			d.logger.Warn(
+				"TX blob deletes left unstaged to keep the transaction committable",
+				"skipped", skipped,
+				"staged", staged,
+				"total", len(txHashes),
+			)
+		}
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
 			end := min(start+batchSize, len(txHashes))

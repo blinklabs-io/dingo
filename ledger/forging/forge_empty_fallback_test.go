@@ -55,6 +55,7 @@ func (b *fallbackTestBuilder) buildBlockWithCredentialGeneration(
 	_ LeiosBlockData,
 	_ *credentialGeneration,
 	constraints blockSelectionConstraints,
+	_ *BlockContext,
 ) (ledger.Block, []byte, error) {
 	b.calls++
 	if constraints.emptyBody {
@@ -208,6 +209,7 @@ func TestBuildBlockEmptyBodyConstraintDropsAllTransactions(t *testing.T) {
 		LeiosBlockData{},
 		generation,
 		blockSelectionConstraints{emptyBody: true},
+		nil,
 	)
 	require.NoError(t, err)
 	require.Empty(t, block.Transactions())
@@ -260,6 +262,7 @@ func TestBuildBlockEmptyBodySkipsMempoolSnapshot(t *testing.T) {
 		LeiosBlockData{},
 		generation,
 		blockSelectionConstraints{emptyBody: true},
+		nil,
 	)
 	require.NoError(t, err)
 	require.Empty(t, block.Transactions())

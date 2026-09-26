@@ -159,6 +159,8 @@ type TrackedClient struct {
 	// response. Zero means no samples recorded yet.
 	BlockfetchLatencyEWMA time.Duration
 	blockfetchSampleCount uint64
+	// Patience is the client's Genesis Limit on Patience bucket.
+	Patience PatienceState
 }
 
 // Config holds configuration for the chainsync State.
@@ -182,6 +184,15 @@ type Config struct {
 	// PromRegistry, when non-nil, is used to register chainsync metrics
 	// such as the current header deduplication cache size.
 	PromRegistry prometheus.Registerer
+	// Patience configures the Genesis Limit on Patience.
+	Patience PatienceConfig
+	// PatienceActiveFunc reports whether Genesis selection is syncing, the
+	// only state in which the Limit on Patience applies. When nil the Limit
+	// on Patience never applies.
+	PatienceActiveFunc func() bool
+	// Now is the clock for activity, stall, and patience tracking. When nil
+	// it is time.Now.
+	Now func() time.Time
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -189,6 +200,7 @@ func DefaultConfig() Config {
 	return Config{
 		MaxClients:   DefaultMaxClients,
 		StallTimeout: DefaultStallTimeout,
+		Patience:     DefaultPatienceConfig(),
 	}
 }
 
@@ -226,7 +238,8 @@ type State struct {
 	config        Config
 
 	// Server-side clients (node-to-client connections)
-	clients map[ouroboros.ConnectionId]*ChainsyncClientState
+	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
+	clientOwners map[ouroboros.ConnectionId]*ochainsync.Server
 
 	// Tracked outbound clients (node-to-node connections)
 	trackedClients     map[ouroboros.ConnectionId]*TrackedClient
@@ -257,6 +270,9 @@ type State struct {
 	// deleted on disconnect in RemoveClientConnId so cardinality stays
 	// bounded by live connections.
 	blockfetchLatencyGauge *prometheus.GaugeVec
+	// patienceExhaustedCounter counts clients that exhausted their Genesis
+	// Limit on Patience. Never nil; unregistered when PromRegistry is nil.
+	patienceExhaustedCounter prometheus.Counter
 
 	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
 	observedHeadersMutex sync.RWMutex
@@ -305,11 +321,16 @@ func NewStateWithConfig(
 	if cfg.StallTimeout <= 0 {
 		cfg.StallTimeout = DefaultStallTimeout
 	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	cfg.Patience = cfg.Patience.withDefaults()
 	s := &State{
 		eventBus:       eventBus,
 		chainProvider:  chainProvider,
 		config:         cfg,
 		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
+		clientOwners:   make(map[ouroboros.ConnectionId]*ochainsync.Server),
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
 		seenHeaders:    make(map[uint64][]headerRecord),
 		observedHeaders: make(
@@ -331,18 +352,36 @@ func NewStateWithConfig(
 		},
 		[]string{"peer", "connection_id"},
 	)
+	s.patienceExhaustedCounter = promauto.With(cfg.PromRegistry).NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_patience_exhausted_total",
+			Help: "chainsync clients disconnected for exhausting the Genesis Limit on Patience",
+		},
+	)
 	return s
+}
+
+func (s *State) now() time.Time {
+	return s.config.Now()
 }
 
 // AddClient registers a server-side (N2C) chainsync client.
 func (s *State) AddClient(
 	connId connection.ConnectionId,
 	intersectPoint ocommon.Point,
+	owners ...*ochainsync.Server,
 ) (*ChainsyncClientState, error) {
 	s.Lock()
 	defer s.Unlock()
+	var owner *ochainsync.Server
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	// Return existing client state if already registered
 	if existing, ok := s.clients[connId]; ok {
+		if owner != nil {
+			s.clientOwners[connId] = owner
+		}
 		return existing, nil
 	}
 	// Create initial chainsync state for connection
@@ -362,6 +401,9 @@ func (s *State) AddClient(
 		Cursor:               intersectPoint,
 		ChainIter:            chainIter,
 		NeedsInitialRollback: true,
+	}
+	if owner != nil {
+		s.clientOwners[connId] = owner
 	}
 	return s.clients[connId], nil
 }
@@ -409,6 +451,28 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 	}
 	// Remove client state entry
 	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
+}
+
+// RemoveClientOwner removes a client only when the close belongs to its
+// currently registered server instance. An entry created without an owner is
+// still removable, closing the AddClient-to-owner registration race for legacy
+// and test callers.
+func (s *State) RemoveClientOwner(
+	connId connection.ConnectionId,
+	owner *ochainsync.Server,
+) {
+	s.Lock()
+	defer s.Unlock()
+	if current, ok := s.clientOwners[connId]; ok && current != owner {
+		return
+	}
+	if clientState := s.clients[connId]; clientState != nil &&
+		clientState.ChainIter != nil {
+		clientState.ChainIter.Cancel()
+	}
+	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
 }
 
 // GetClientConnId returns the active chainsync client
@@ -520,7 +584,11 @@ func (s *State) addTrackedClientLocked(
 		Status:            ClientStatusSyncing,
 		ObservabilityOnly: observabilityOnly,
 		StartedAsOutbound: startedAsOutbound,
-		LastActivity:      time.Now(),
+		LastActivity:      s.now(),
+		Patience: newPatienceState(
+			s.config.Patience.Capacity,
+			s.now(),
+		),
 	}
 	// Emit client added event
 	if !observabilityOnly && s.eventBus != nil {
@@ -807,6 +875,7 @@ func (s *State) UpdateClientRollback(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) bool {
+	active := s.patienceActive()
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	tc, exists := s.trackedClients[connId]
@@ -817,8 +886,9 @@ func (s *State) UpdateClientRollback(
 	tip.Point.Hash = cloneBytes(tip.Point.Hash)
 	tc.Cursor = point
 	tc.Tip = tip
-	tc.LastActivity = time.Now()
+	tc.LastActivity = s.now()
 	tc.Status = ClientStatusSyncing
+	s.resumePatienceAfterRollbackLocked(tc, point, tip, active)
 	return true
 }
 
@@ -867,7 +937,7 @@ func (s *State) RewindTrackedClientsTo(
 			Hash: cloneBytes(point.Hash),
 		}
 		tc.Status = ClientStatusSyncing
-		tc.LastActivity = time.Now()
+		tc.LastActivity = s.now()
 		ret = append(ret, connId)
 	}
 	return ret
@@ -988,7 +1058,7 @@ func (s *State) updateTrackedClientTip(
 	}
 	tc.Cursor = point
 	tc.Tip = tip
-	tc.LastActivity = time.Now()
+	tc.LastActivity = s.now()
 	tc.HeadersRecv++
 	if tc.Status == ClientStatusStalled {
 		tc.Status = ClientStatusSyncing
@@ -1114,7 +1184,7 @@ func (s *State) MarkClientSynced(
 	var changed bool
 	if exists && tc.Status != ClientStatusSynced {
 		tc.Status = ClientStatusSynced
-		tc.LastActivity = time.Now()
+		tc.LastActivity = s.now()
 		changed = true
 	}
 	var slot uint64
@@ -1145,7 +1215,7 @@ func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 
-	now := time.Now()
+	now := s.now()
 	var stalled []ouroboros.ConnectionId
 	for id, tc := range s.trackedClients {
 		if tc.ObservabilityOnly ||

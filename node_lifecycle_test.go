@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/binary"
@@ -34,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -50,6 +52,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -138,7 +141,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 		cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}),
 	)
 
-	points := loadLiveLifecycleTestBlocks(t, cm.PrimaryChain(), numBlocks)
+	points := loadLiveLifecycleTestBlocks(t, db, cm.PrimaryChain(), numBlocks)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       points[len(points)-1],
 		BlockNumber: uint64(len(points)),
@@ -256,10 +259,28 @@ func newLiveLifecycleTestNodeWithGenesis(
 	return n, points
 }
 
-// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c.
+// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c and
+// records a checkpoint block_nonce row for the first one.
 // The lifecycle tests configure the Babbage hard-fork override where needed.
+//
+// These blocks are added directly to the chain index rather than run
+// through LedgerState's normal block-application path (ledgerProcessBlocks),
+// so no block_nonce row would otherwise exist for any of them -- unlike a
+// really-synced chain, which writes one for every applied block including a
+// per-epoch checkpoint (see ledgerProcessBlocks's "First block we persist in
+// the current epoch becomes the checkpoint"). Without at least one
+// checkpoint here, any test that truncates or rolls back into this range
+// hits database.TruncateAfterSlot's checkpoint check with nothing to
+// satisfy it -- correctly refused, but for a test-harness gap rather than a
+// genuine unreconstructable truncate. The nonce value itself is a fixed
+// placeholder, not folded from real VRF output: these tests assert
+// lifecycle/selection behavior, not nonce correctness, and Genesis header
+// verification here derives its epoch nonce independently for epoch 0
+// (Shelley-genesis-derived, not block-nonce-folded), so a placeholder
+// doesn't feed into anything crypto-verified.
 func loadLiveLifecycleTestBlocks(
 	t *testing.T,
+	db *database.Database,
 	c *chain.Chain,
 	numBlocks int,
 ) []ocommon.Point {
@@ -268,12 +289,21 @@ func loadLiveLifecycleTestBlocks(
 	require.NoError(t, err)
 
 	var points []ocommon.Point
-	for _, block := range blocks {
+	for i, block := range blocks {
 		require.NoError(t, c.AddBlock(block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
 			Hash: block.Hash().Bytes(),
 		})
+		if i == 0 {
+			require.NoError(t, db.SetBlockNonce(
+				block.Hash().Bytes(),
+				block.SlotNumber(),
+				bytes.Repeat([]byte{0x5c}, 32),
+				true, // isCheckpoint
+				nil,
+			))
+		}
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
 	require.Len(t, points, numBlocks)
@@ -354,7 +384,15 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 	require.NoError(t, n.ouroboros().SetLeiosPipeline(pipeline))
 
 	before := n.ouroboros()
-	require.NoError(t, n.reinitializeNetworkingCore(context.Background()))
+	// Held for the same reason Restore and Truncate hold it around this
+	// call: the node is live here, and its ledger read-chain loop reads
+	// n.chainsyncState under this lock once per gather pass (see
+	// reinitializeNetworkingCore's doc comment). Reassigning it unlocked
+	// races that reader.
+	n.liveLifecycleMu.Lock()
+	rebuildErr := n.reinitializeNetworkingCore(context.Background())
+	n.liveLifecycleMu.Unlock()
+	require.NoError(t, rebuildErr)
 
 	require.NotSame(t, before, n.ouroboros())
 	require.NotNil(
@@ -1282,6 +1320,42 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 	tip, tipErr := n.db.GetTip(nil)
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
+}
+
+// A live restore/truncate reinitialization follows its own commit-timestamp
+// recovery path. It must run the same deferred settings checks as ordinary
+// startup before resuming any component, including the Alonzo pparams
+// provenance gate added for gouroboros v0.205.7.
+func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
+	t.Parallel()
+
+	n, points := newLiveLifecycleTestNode(t, 10)
+	require.NoError(t, n.db.SetPParams(
+		[]byte{0x80},
+		0,
+		0,
+		alonzo.EraIdAlonzo,
+		nil,
+	))
+	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
+		nodesettings.Values{
+			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		},
+		0,
+		0,
+	))
+	metaTxn := n.db.Metadata().Transaction(t.Context())
+	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
+	require.NoError(t, metaTxn.Commit())
+
+	targetSlot := points[len(points)/2].Slot
+	_, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "resume also failed")
+	require.ErrorContains(t, err, "legacy byte units")
 }
 
 // TestLiveRestoreRebuildsStorageAndKeepsNodeUsable verifies the Restore

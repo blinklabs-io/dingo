@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
@@ -50,7 +51,24 @@ const (
 	collateralAssociationSchemaRelease            = "collateral-transaction-associations"
 	rewardStakeVersionRestampSchemaRelease        = "reward-stake-calculation-version-restamp"
 	governanceProposalOptionalAnchorSchemaRelease = "governance-proposal-optional-anchor"
+	governanceProposalDroppedSchemaRelease        = "governance-proposal-dropped-epoch"
+	rewardSnapshotExcludedStakeSchemaRelease      = "reward-snapshot-excluded-active-stake"
+	committeeZeroQuorumSchemaRelease              = "committee-zero-quorum"
+	assetNameHexColumnDropSchemaRelease           = "asset-name-hex-column-drop"
+	alonzoPParamsUnitSchemaRelease                = "alonzo-pparams-unit-provenance"
+	assetAmountFingerprintIndexDropSchemaRelease  = "asset-amount-fingerprint-index-drop"
+	governanceVoteHistorySchemaRelease            = "governance-vote-history"
+	rewardAdaPotsImportedFeesSchemaRelease        = "reward-ada-pots-imported-epoch-fees"
+	mithrilRewardRepairCoverageSchemaRelease      = "mithril-reward-repair-coverage"
 )
+
+const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
+
+// alonzoEraID is the pparams.era_id value Alonzo rows carry. A migration is a
+// frozen historical artifact, so it holds its own copy rather than importing
+// gouroboros' alonzo.EraIdAlonzo: the two must agree, and a future upstream
+// renumbering must not silently reclassify rows this backfill already read.
+const alonzoEraID = 4
 
 // schemaVersions names every migration in ascending version order.
 var schemaVersions = []struct {
@@ -89,6 +107,51 @@ var schemaVersions = []struct {
 		Version: 16,
 		Name:    governanceProposalOptionalAnchorSchemaRelease,
 		Dir:     "v16",
+	},
+	{
+		Version: 17,
+		Name:    governanceProposalDroppedSchemaRelease,
+		Dir:     "v17",
+	},
+	{
+		Version: 18,
+		Name:    rewardSnapshotExcludedStakeSchemaRelease,
+		Dir:     "v18",
+	},
+	{
+		Version: 19,
+		Name:    assetNameHexColumnDropSchemaRelease,
+		Dir:     "v19",
+	},
+	{
+		Version: 20,
+		Name:    alonzoPParamsUnitSchemaRelease,
+		Dir:     "v20",
+	},
+	{
+		Version: 21,
+		Name:    assetAmountFingerprintIndexDropSchemaRelease,
+		Dir:     "v21",
+	},
+	{
+		Version: 22,
+		Name:    governanceVoteHistorySchemaRelease,
+		Dir:     "v22",
+	},
+	{
+		Version: 23,
+		Name:    committeeZeroQuorumSchemaRelease,
+		Dir:     "v23",
+	},
+	{
+		Version: 24,
+		Name:    rewardAdaPotsImportedFeesSchemaRelease,
+		Dir:     "v24",
+	},
+	{
+		Version: 25,
+		Name:    mithrilRewardRepairCoverageSchemaRelease,
+		Dir:     "v25",
 	},
 }
 
@@ -194,9 +257,321 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = rewardStakeVersionRestampBackfill
 		}
+		if version.Name == governanceProposalDroppedSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = governanceProposalDroppedBackfill
+		}
+		if version.Name == alonzoPParamsUnitSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = alonzoPParamsUnitBackfill
+		}
+		if version.Name == rewardAdaPotsImportedFeesSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = importedRewardRepairBackfill
+		}
+		if version.Name == mithrilRewardRepairCoverageSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = mithrilRewardRepairCoverageBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+// importedRewardRepairBackfill marks legacy Mithril databases whose imported
+// reward-pot row predates the anchor fee basis. The original anchor ledger
+// state is no longer present in metadata, so serving those databases before
+// reconciling from a newer certified snapshot would preserve incorrect reward
+// balances. The marker is consumed only after a successful in-place Mithril
+// catch-up; no database files or chain history are discarded.
+func importedRewardRepairBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var rawSlot string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot",
+	).Scan(&rawSlot)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && rawSlot == "") {
+		return BatchResult{Done: true}, nil
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril ledger anchor for reward repair: %w", err,
+		)
+	}
+	anchorSlot, err := strconv.ParseUint(rawSlot, 10, 64)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"parse Mithril ledger anchor %q for reward repair: %w",
+			rawSlot, err,
+		)
+	}
+	var needsRepair bool
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT EXISTS (
+    SELECT 1 FROM reward_ada_pots
+    WHERE captured_slot = ? AND imported_epoch_fees IS NULL
+)`),
+		anchorSlot,
+	).Scan(&needsRepair); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"check imported reward-pot repair eligibility: %w", err,
+		)
+	}
+	if !needsRepair {
+		return BatchResult{Done: true}, nil
+	}
+	var existing string
+	err = batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		mithrilRewardRepairPendingKey,
+	).Scan(&existing)
+	if err == nil {
+		if existing != "1" {
+			if _, err := batch.Tx.ExecContext(
+				ctx,
+				batch.Rebind(`UPDATE sync_state SET value = ? WHERE sync_key = ?`),
+				"1", mithrilRewardRepairPendingKey,
+			); err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"update Mithril reward repair marker: %w", err,
+				)
+			}
+		}
+		return BatchResult{Rows: 1, Done: true}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril reward repair marker: %w", err,
+		)
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`),
+		mithrilRewardRepairPendingKey,
+		"1",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"set Mithril reward repair marker: %w", err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
+}
+
+// mithrilRewardRepairCoverageBackfill catches legacy Mithril databases whose
+// anchor reward-pot row was not written by older import paths. Version 24 can
+// identify the common case by its row, but a missing row must not make an
+// already-imported database look repaired: the anchor itself is durable proof
+// that its reward state came from Mithril and needs reconciliation unless the
+// imported epoch now carries the fee basis added in version 24.
+func mithrilRewardRepairCoverageBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var rawSlot string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		"mithril_ledger_slot",
+	).Scan(&rawSlot)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && rawSlot == "") {
+		return BatchResult{Done: true}, nil
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril ledger anchor for reward repair coverage: %w", err,
+		)
+	}
+	anchorSlot, err := strconv.ParseUint(rawSlot, 10, 64)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"parse Mithril ledger anchor %q for reward repair coverage: %w",
+			rawSlot, err,
+		)
+	}
+	var hasFeeBasis bool
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT EXISTS (
+    SELECT 1 FROM reward_ada_pots
+    WHERE captured_slot = ? AND imported_epoch_fees IS NOT NULL
+)`),
+		anchorSlot,
+	).Scan(&hasFeeBasis); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"check Mithril imported fee basis for reward repair: %w", err,
+		)
+	}
+	if hasFeeBasis {
+		return BatchResult{Done: true}, nil
+	}
+	var existing string
+	err = batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		mithrilRewardRepairPendingKey,
+	).Scan(&existing)
+	if err == nil {
+		if existing != "1" {
+			if _, err := batch.Tx.ExecContext(
+				ctx,
+				batch.Rebind(`UPDATE sync_state SET value = ? WHERE sync_key = ?`),
+				"1", mithrilRewardRepairPendingKey,
+			); err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"update Mithril reward repair marker: %w", err,
+				)
+			}
+		}
+		return BatchResult{Rows: 1, Done: true}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf(
+			"read Mithril reward repair marker: %w", err,
+		)
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)`),
+		mithrilRewardRepairPendingKey,
+		"1",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"set Mithril reward repair marker: %w", err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
+}
+
+func alonzoPParamsUnitBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var existing string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM node_settings_gate WHERE name = ?`),
+		nodesettings.AlonzoPParamsUnitGateName,
+	).Scan(&existing)
+	switch {
+	case err == nil:
+		return BatchResult{Done: true}, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return BatchResult{}, fmt.Errorf(
+			"read Alonzo protocol-parameter unit marker: %w",
+			err,
+		)
+	}
+
+	var alonzoRows int64
+	if err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT COUNT(*) FROM pparams WHERE era_id = ?`),
+		alonzoEraID,
+	).Scan(&alonzoRows); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"classify persisted Alonzo protocol parameters: %w",
+			err,
+		)
+	}
+	unit := nodesettings.AlonzoPParamsUnitWordV1
+	if alonzoRows > 0 {
+		unit = nodesettings.AlonzoPParamsUnitLegacyByteV0
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		batch.Rebind(`INSERT INTO node_settings_gate (
+    name, value, recorded_epoch, recorded_slot
+) VALUES (?, ?, 0, 0)`),
+		nodesettings.AlonzoPParamsUnitGateName,
+		unit,
+	); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"record Alonzo protocol-parameter unit marker: %w",
+			err,
+		)
+	}
+	return BatchResult{Rows: 1, Done: true}, nil
+}
+
+// governanceProposalDroppedBackfill records every proposal this database
+// already expired as also already dropped, stamping the drop at the expiry it
+// was refunded at.
+//
+// Before v17 the epoch tick refunded an expired proposal's deposit in the
+// same tick that marked it expired, so on an upgraded database every
+// `expired_epoch` row has had its deposit returned. The new drop step selects
+// on `dropped_epoch IS NULL`, which without this backfill matches all of
+// them and refunds each a second time at the first boundary after the
+// upgrade. Stamping dropped_epoch/dropped_slot from expired_epoch/
+// expired_slot also keeps rollback consistent, since
+// DeleteGovernanceProposalsAfterSlot clears both by the same slot bound.
+//
+// The proposal ID cursor makes each batch independently resumable, and the
+// NOT EXISTS predicate makes replay non-destructive.
+func governanceProposalDroppedBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse governance proposal drop backfill cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT id, expired_epoch, expired_slot FROM governance_proposal
+WHERE id > ? AND expired_epoch IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM governance_proposal_drop
+    WHERE governance_proposal_drop.proposal_id = governance_proposal.id
+  )
+ORDER BY id LIMIT ?`), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	defer rows.Close()
+	type droppedRow struct {
+		id    int64
+		epoch sql.NullInt64
+		slot  sql.NullInt64
+	}
+	var pending []droppedRow
+	for rows.Next() {
+		var row droppedRow
+		if err := rows.Scan(&row.id, &row.epoch, &row.slot); err != nil {
+			return BatchResult{}, err
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(pending) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, row := range pending {
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+INSERT INTO governance_proposal_drop (
+    proposal_id, dropped_epoch, dropped_slot
+) VALUES (?, ?, ?)`), row.id, row.epoch, row.slot); err != nil {
+			return BatchResult{}, err
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(pending[len(pending)-1].id, 10),
+		Rows:   int64(len(pending)),
+	}, nil
 }
 
 type poolDepositPosition struct {
@@ -906,6 +1281,21 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_committee_member_cold_cred_hash`",
 				"DROP INDEX `idx_committee_member_cold_cred_hash` ON `committee_member`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_name_hex`",
+				"DROP INDEX `idx_asset_name_hex` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_amount`",
+				"DROP INDEX `idx_asset_amount` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_asset_fingerprint`",
+				"DROP INDEX `idx_asset_fingerprint` ON `asset`",
 			)
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {

@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -450,14 +451,30 @@ func (ls *LedgerState) headerVerificationEpoch(
 ) (models.Epoch, error) {
 	// The epoch cache can be forecast forward for near-future headers, but it
 	// must never be advanced past the HFC safe zone or a known era boundary.
-	// Check the immutable summary first so ErrPastHorizon is surfaced before
-	// ensureEpochForSlot mutates any forecasted nonce state.
-	if snapshot := ls.loadConsensusSnapshot(); snapshot != nil &&
-		len(snapshot.epochCache) > 0 {
+	// Resolve known epochs without requiring forecast configuration. Only
+	// future slots need the immutable summary before cache mutation, and
+	// checking it first surfaces ErrPastHorizon before ensureEpochForSlot
+	// mutates any forecasted nonce state.
+	_, cachedEpochErr := ls.epochForSlot(blockSlot)
+	if snapshot := ls.loadConsensusSnapshot(); cachedEpochErr != nil &&
+		snapshot != nil && len(snapshot.epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
+			// A summary that cannot be BUILT says nothing about the header:
+			// the era shape, the genesis it is derived from, or the epoch
+			// cache is unavailable, all of which are local faults. Byron
+			// genesis alone is enough to reach here, because
+			// eras.BuildShapeForEras builds Byron era params for every
+			// config while ByronGenesisFile is optional. Since
+			// ouroboros/chainsync.go routes every non-deferred header error
+			// to ConnectionRecycleRequestedEvent, returning this unwrapped
+			// recycles the honest peer that served the header and stalls
+			// catch-up at each epoch boundary. Classify it as deferred so
+			// the block stays queued for in-order re-verification instead.
 			return models.Epoch{}, fmt.Errorf(
-				"block header verification rejected: build forecast for slot %d: %w",
+				"%w: block header verification deferred: "+
+					"build forecast for slot %d: %w",
+				errHeaderVerificationDeferred,
 				blockSlot,
 				err,
 			)
@@ -746,10 +763,29 @@ func (ls *LedgerState) genesisOverlayDelegationForBlock(
 	block ledger.Block,
 	shelleyGenesis *shelley.ShelleyGenesis,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	if pparams == nil {
+		// Unresolvable overlay parameters are a local state gap, not a peer
+		// fault: the snapshot's current pparams, the persisted pparams row
+		// for the block's epoch, and the era forecast behind
+		// ProtocolParamsForSlot can each be unavailable while the applied
+		// ledger catches up. ouroboros/chainsync.go routes every
+		// non-deferred header error to ConnectionRecycleRequestedEvent, so
+		// rejecting here drops the honest peer that served the header.
+		// Classify it as deferred, the same way this file already classifies
+		// an unbuildable forecast and an unresolvable consensus mode, so the
+		// header is re-verified in order once the parameters resolve.
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"%w: block header verification deferred at slot %d: "+
+				"protocol parameters unavailable for genesis overlay",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+		)
+	}
 	return ls.genesisOverlayDelegationForSlotWithParams(
 		block.SlotNumber(),
 		shelleyGenesis,
-		ls.genesisOverlayProtocolParamsForBlock(block),
+		pparams,
 	)
 }
 
@@ -853,10 +889,23 @@ func (ls *LedgerState) activeGenesisDelegationForSlot(
 	initial genesisDelegation,
 	slot uint64,
 ) (genesisDelegation, error) {
+	return ls.activeGenesisDelegationForSlotWithTxn(initial, slot, nil)
+}
+
+func (ls *LedgerState) activeGenesisDelegationForSlotWithTxn(
+	initial genesisDelegation,
+	slot uint64,
+	txn types.Txn,
+) (genesisDelegation, error) {
+	if ls.db == nil {
+		return genesisDelegation{}, errors.New(
+			"genesis delegation state has no metadata database",
+		)
+	}
 	row, err := ls.db.Metadata().GetGenesisDelegationForSlot(
 		initial.genesisHash,
 		slot,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return genesisDelegation{}, fmt.Errorf(
@@ -883,6 +932,143 @@ func (ls *LedgerState) activeGenesisDelegationForSlot(
 		delegateHash: append([]byte(nil), row.GenesisDelegateHash...),
 		vrfHash:      append([]byte(nil), row.VrfKeyHash...),
 	}, nil
+}
+
+// GenesisDelegateKeyHashes returns the active Shelley genesis delegate keys
+// used by the classic PPUP and MIR rules at slot.
+func (ls *LedgerState) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return ls.genesisDelegateKeyHashes(slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateKeyHashes(
+	slot uint64,
+	txn types.Txn,
+) ([]lcommon.Blake2b224, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, errors.New("unable to get cardano node config")
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	delegates := make(map[lcommon.Blake2b224]struct{}, len(genesis))
+	for _, initial := range genesis {
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		delegates[delegate] = struct{}{}
+	}
+	ret := make([]lcommon.Blake2b224, 0, len(delegates))
+	for delegate := range delegates {
+		ret = append(ret, delegate)
+	}
+	slices.SortFunc(ret, func(a, b lcommon.Blake2b224) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return ret, nil
+}
+
+// GenesisDelegateForGenesisKey resolves the active delegate for a Shelley
+// genesis key at slot.
+func (ls *LedgerState) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return ls.genesisDelegateForGenesisKey(genesisKeyHash, slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+	txn types.Txn,
+) (lcommon.Blake2b224, bool, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return lcommon.Blake2b224{}, false, errors.New(
+			"unable to get cardano node config",
+		)
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return lcommon.Blake2b224{}, false, err
+	}
+	for _, initial := range genesis {
+		if !bytes.Equal(initial.genesisHash, genesisKeyHash[:]) {
+			continue
+		}
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return lcommon.Blake2b224{}, false, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		return delegate, true, nil
+	}
+	return lcommon.Blake2b224{}, false, nil
+}
+
+// GenesisUpdateQuorum returns the quorum configured by Shelley genesis.
+func (ls *LedgerState) GenesisUpdateQuorum() (uint, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("unable to get cardano node config")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return 0, errors.New("unable to get shelley genesis")
+	}
+	return uint(genesis.UpdateQuorum), nil
+}
+
+// ProtocolParameterUpdateWindow returns the current epoch and the first slot
+// where proposals target the following epoch.
+func (ls *LedgerState) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, 0, errors.New("unable to get cardano node config")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.ActiveSlotsCoeff.Rat == nil ||
+		genesis.ActiveSlotsCoeff.Sign() <= 0 || genesis.SecurityParam <= 0 {
+		return 0, 0, errors.New("invalid Shelley genesis PPUP parameters")
+	}
+	epochLength := uint64(epoch.LengthInSlots)
+	if epoch.StartSlot > ^uint64(0)-epochLength {
+		return 0, 0, errors.New("epoch end slot overflows")
+	}
+	// Shelley stops accepting proposals for the current epoch 6k/f slots
+	// before its end, where k is the security parameter and f the active-slot
+	// coefficient. Use the same integer slot boundary as the reference rule.
+	votingWindow := new(big.Rat).SetFrac(
+		new(big.Int).Mul(big.NewInt(6), big.NewInt(int64(genesis.SecurityParam))),
+		big.NewInt(1),
+	)
+	votingWindow.Quo(votingWindow, genesis.ActiveSlotsCoeff.Rat)
+	windowSlots := new(big.Int).Quo(votingWindow.Num(), votingWindow.Denom())
+	if !windowSlots.IsUint64() || windowSlots.Uint64() >= epochLength {
+		return epoch.EpochId, epoch.StartSlot, nil
+	}
+	return epoch.EpochId, epoch.StartSlot + epochLength - windowSlots.Uint64(), nil
 }
 
 func classifyGenesisOverlaySlot(
@@ -1155,7 +1341,20 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
-	mode := ls.ConsensusModeForEpoch(epochId)
+	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	if modeErr != nil {
+		// The mode selects both the leader-value derivation and the
+		// threshold, so without it eligibility cannot be evaluated. The era
+		// shape it is resolved from comes from the local node configuration,
+		// so an unresolvable mode is not the peer's fault: defer instead of
+		// recycling the connection that served the header.
+		return fmt.Errorf(
+			"%w: block header verification deferred at slot %d: %w",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+			modeErr,
+		)
+	}
 
 	// Extract the VRF output from the header body CBOR.
 	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())
@@ -1273,17 +1472,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	return nil
-}
-
-//nolint:unused // retained as a test helper
-func (ls *LedgerState) leaderEligibilityStake(
-	block ledger.Block,
-	epochId uint64,
-	poolKeyHash lcommon.PoolKeyHash,
-) (uint64, uint64, uint64, string, bool, error) {
-	return ls.leaderEligibilityStakeWithCache(
-		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
-	)
 }
 
 func (ls *LedgerState) leaderEligibilityStakeWithCache(
@@ -1540,16 +1728,6 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
 		return snapshot.CapturedSlot >= ep.StartSlot
 	}
 	return false
-}
-
-//nolint:unused // retained as a test helper
-func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
-	block ledger.Block,
-	epochId uint64,
-) (bool, error) {
-	return ls.shouldUseImportedActivePoolDistributionWithCache(
-		block, epochId, ls.epochCacheSnapshot(),
-	)
 }
 
 // shouldUseImportedActivePoolDistributionWithCache resolves the Mithril trust
@@ -2635,7 +2813,21 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return nil, nil, nil, nil, err
 	}
 
-	if len(labForEta) == 0 {
+	// The extraEntropy protocol parameter is the third term of the TICKN
+	// assembly. This path runs before the rollover enacts the new epoch's
+	// parameters, so the value is forecast the way cardano-ledger's TICKF
+	// supplies it to TICKN. Mainnet set a non-neutral value for exactly one
+	// epoch (259); everywhere else this resolves to NeutralNonce and leaves
+	// the result unchanged.
+	extraEntropy, err := ls.forecastExtraEntropyForEpoch(
+		prevEpoch.EpochId+1,
+		prevEpoch.EraId,
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	if len(labForEta) == 0 && len(extraEntropy) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		ls.config.Logger.Debug(
@@ -2652,10 +2844,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	result, err := lcommon.CalculateEpochNonce(
+	result, err := assembleEpochNonce(
 		candidateNonce,
 		labForEta,
-		nil,
+		extraEntropy,
 	)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf(
@@ -2673,9 +2865,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		hex.EncodeToString(labNonceToSave),
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
 		"evolving_nonce", hex.EncodeToString(evolvingNonce),
-		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"epoch_nonce", hex.EncodeToString(result),
+		"extra_entropy", hex.EncodeToString(extraEntropy),
 		"component", "ledger",
 	)
 
-	return result.Bytes(), evolvingNonce, candidateNonce, labNonceToSave, nil
+	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
 }

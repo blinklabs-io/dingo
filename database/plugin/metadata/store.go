@@ -216,16 +216,44 @@ type GovernanceStore interface {
 	// GetExpiringGovernanceProposals returns proposals whose
 	// `expires_epoch` is strictly less than the given epoch and that
 	// have not yet been enacted, expired, or soft-deleted. Used at
-	// epoch boundaries to mark expired proposals and return deposits.
+	// epoch boundaries to mark proposals expired (ineligible for further
+	// ratification). Their deposit is not returned yet -- see
+	// GetExpiredAwaitingDropGovernanceProposals.
 	GetExpiringGovernanceProposals(
 		epoch uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
-	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
-	// the given epoch-boundary slot. Used to replay deposit-return side effects
-	// when stake reward pot reset is reapplied after a boundary commit crash.
+	// GetExpiredGovernanceProposalsAt returns proposals that were marked
+	// expired at the given epoch-boundary slot. Used to replay the "mark
+	// expired" side effect when a boundary commit crash requires
+	// reprocessing the same boundary.
 	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredAwaitingDropGovernanceProposals returns proposals that were
+	// marked expired in a prior epoch but whose deposit has not yet been
+	// returned. cardano-ledger does not refund an expired proposal's deposit
+	// in the same epoch it is marked expired -- that happens one full epoch
+	// later, the same one-epoch delay ratification has before enactment.
+	// Used at epoch start, before marking any new proposals expired, to
+	// return the deposit and finalize ("drop") proposals expired as of a
+	// prior boundary (dingo#4411). Only proposals whose expired_epoch is
+	// strictly below the given epoch are returned, so a reprocessed
+	// boundary cannot drop a proposal in the epoch that expired it.
+	GetExpiredAwaitingDropGovernanceProposals(
+		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetDroppedGovernanceProposalsAt returns proposals that were dropped
+	// (deposit returned, finalized) at the given epoch-boundary slot. Used to
+	// replay the deposit-return side effect when stake reward pot reset is
+	// reapplied after a boundary commit crash.
+	GetDroppedGovernanceProposalsAt(
 		epoch uint64,
 		slot uint64,
 		txn types.Txn,
@@ -330,14 +358,15 @@ type GovernanceStore interface {
 
 	// ClearCommitteeQuorum records that the committee has no
 	// enacted quorum as of the given slot. Used by NoConfidence
-	// enactment so GetCommitteeQuorum falls back to Conway
-	// genesis until a subsequent UpdateCommittee sets a new
-	// quorum.
+	// enactment so GetCommitteeQuorum falls back to Conway genesis
+	// until a subsequent UpdateCommittee sets a new quorum. A zero
+	// quorum is a valid threshold and is distinct from this clear.
 	ClearCommitteeQuorum(uint64, types.Txn) error
 
 	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
 	// Returns (nil, nil) when no quorum has been enacted or when the
-	// most recent record is a ClearCommitteeQuorum marker.
+	// most recent record is a ClearCommitteeQuorum marker. A zero
+	// threshold is returned as a non-nil rational.
 	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
 
 	// GetCommitteeMembers retrieves all active (non-deleted)
@@ -1188,6 +1217,18 @@ type StakeSnapshotStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
+	// boundary reconstruction attributes stake to at the snapshot slot,
+	// including pools that are no longer registered. It is the historical-path
+	// counterpart of GetDelegatedPoolKeyHashes, and exists for the same reason:
+	// the sigma_a denominator must be enumerated from delegations, not from the
+	// stake-pool set (dingo #4660).
+	GetEpochBoundaryDelegatedPoolKeyHashes(
+		uint64, // snapshotSlot
+		uint64, // boundarySlot
+		types.Txn,
+	) ([][]byte, error)
+
 	// GetPointerStakeInputsForPools returns the per-credential stake held at a
 	// pointer address for pools in poolKeyHashes, resolved and delegated as of
 	// slot. It is additive: the caller adds it to what
@@ -1379,6 +1420,16 @@ type CertificateStore interface {
 	// the given slot. This is used during chain rollbacks to undo certificate
 	// state changes.
 	DeleteCertificatesAfterSlot(uint64, types.Txn) error
+
+	// SetCommitteeAuthImmutableSlot records the live rollback-safe immutable
+	// slot -- the slot of the block securityParam blocks behind the current
+	// tip -- that committee hot-key authorization pruning uses to bound its
+	// retention window. known false means no live value is available and
+	// pruning falls back to its slot-window assumption alone. The
+	// certificate store cannot resolve this itself (sqlstore cannot import
+	// chain), so a periodic caller outside the database package pushes it in;
+	// see committee_prune.go for the retention rule this feeds.
+	SetCommitteeAuthImmutableSlot(slot uint64, known bool)
 }
 
 // MetadataStore composes every capability for callers that predate the
@@ -1834,11 +1885,27 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
-	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
-	// Returns nil if no active pool uses this VRF key.
+	// GetPoolByVrfKeyHash retrieves the pool that currently claims the
+	// given VRF key hash, as of the given epoch's start slot. Returns nil
+	// if no active pool claims it.
+	//
+	// A pool re-registering with a new VRF key mid-epoch does not free its
+	// old key until epochStartSlot advances past that re-registration
+	// (cardano-ledger defers a re-registration through
+	// psFutureStakePoolParams until the next epoch boundary; only a pool's
+	// first-ever registration is immediate). Callers must pass the current
+	// epoch's start slot, not an arbitrary point in the past.
+	//
+	// A key a pool proposed earlier in the same epoch and then superseded
+	// with a later re-registration (A -> B -> C) also still counts as
+	// claimed by that pool for the rest of the epoch, even though it is
+	// no longer that pool's pending value either: psVRFKeyHashes retains
+	// every key placed in psFutureStakePoolParams during the epoch, not
+	// only the current one.
 	GetPoolByVrfKeyHash(
-		[]byte, // vrfKeyHash
-		types.Txn,
+		vrfKeyHash []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
 	) (*models.Pool, error)
 
 	// GetActivePoolRelays retrieves all relays from currently active pools.
@@ -1970,6 +2037,14 @@ type MetadataStore interface {
 		uint64, // expiryEpoch (0 = gate off)
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
+
+	// GetDelegatedPoolKeyHashes returns every pool key hash the live reward
+	// stake aggregate attributes stake to, including pools that are no longer
+	// registered. cardano-ledger's ssTotalActiveStake sums registered
+	// credentials holding a delegation without consulting the stake-pool set,
+	// so the snapshot's sigma_a denominator must cover these pools too or every
+	// reward on the node is under-credited by their share (dingo #4660).
+	GetDelegatedPoolKeyHashes(types.Txn) ([][]byte, error)
 
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 	// canonical account and live UTxO metadata. Node startup uses it as an

@@ -274,6 +274,151 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	require.Equal(t, 1, deltas)
 }
 
+// TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount covers issue
+// #3788: a canonical withdrawal replayed during API-mode Mithril historical
+// backfill can find an inactive account after deregistration. That row is
+// still the historical account and its reward must be preserved. A credential
+// with no account row is an invariant failure and must abort the backfill.
+//
+// An inactive row can arise from backfill's own certificate replay
+// (applyTransactionCertificates runs whether or not historicalBackfill is
+// set) between a historical deregistration and a later re-registration for
+// the same credential. Deregistration's account upsert never clears
+// `reward`, so such a row still holds the credential's real balance: it must
+// be journaled rather than discarded as 0, and the row itself neither
+// mutated nor reactivated.
+//
+// Live ingestion must still require an active account (`SetTransaction`,
+// historicalBackfill=false) in both cases.
+func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		createInactive bool
+		inactiveReward uint64
+	}{
+		{
+			name: "no account row at all",
+		},
+		{
+			name:           "account row present but inactive with a real balance",
+			createInactive: true,
+			inactiveReward: 777,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, raw := newSharedSQLStore(t)
+			stakeKey := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
+			if tc.createInactive {
+				require.NoError(t, store.CreateAccount(nil, &models.Account{
+					StakingKey: stakeKey,
+					Reward:     types.Uint64(tc.inactiveReward),
+					Active:     false,
+				}))
+			}
+			address, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeNoneKey,
+				lcommon.AddressNetworkTestnet,
+				nil,
+				stakeKey,
+			)
+			require.NoError(t, err)
+
+			// Live ingestion of the same withdrawal must still fail: an
+			// active account is required outside historical backfill.
+			liveHash := lcommon.Blake2b256{0xa2}
+			liveTx := &mockTransaction{
+				hash:        liveHash,
+				isValid:     true,
+				withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(500)},
+			}
+			err = store.SetTransaction(
+				liveTx,
+				ocommon.Point{Slot: 50, Hash: bytes.Repeat([]byte{0xa3}, 32)},
+				0,
+				nil,
+				true,
+				nil,
+			)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "account not found")
+
+			// Historical backfill of the same shape must succeed, record the
+			// withdrawal, and neither create nor reactivate an account row.
+			backfillHash := lcommon.Blake2b256{0xa4}
+			backfillTx := &mockTransaction{
+				hash:        backfillHash,
+				isValid:     true,
+				withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(500)},
+			}
+			backfillErr := store.SetTransactionBatchedHistorical(
+				backfillTx,
+				ocommon.Point{Slot: 51, Hash: bytes.Repeat([]byte{0xa5}, 32)},
+				0,
+				nil,
+				true,
+				true,
+				store.NewBatchAccumulator(),
+				nil,
+			)
+			if !tc.createInactive {
+				// A credential with no account row at all is an invariant
+				// failure: the run must abort, and must leave behind
+				// neither a journal row nor an invented account.
+				require.ErrorContains(t, backfillErr, "account not found")
+				var journaled int
+				require.NoError(t, raw.QueryRow(
+					"SELECT COUNT(*) FROM account_reward_delta "+
+						"WHERE tx_hash = ?",
+					backfillHash.Bytes(),
+				).Scan(&journaled))
+				require.Zero(t, journaled)
+				missing, err := store.GetAccountByCredential(
+					0, stakeKey, true, nil,
+				)
+				require.NoError(t, err)
+				require.Nil(t, missing)
+				return
+			}
+			require.NoError(t, backfillErr)
+
+			account, err := store.GetAccountByCredential(0, stakeKey, true, nil)
+			require.NoError(t, err)
+			require.NotNil(t, account)
+			require.False(t, account.Active)
+			require.Equal(t, tc.inactiveReward, uint64(account.Reward))
+
+			var deltas int
+			var previousReward string
+			require.NoError(t, raw.QueryRow(
+				"SELECT COUNT(*), previous_reward FROM account_reward_delta WHERE tx_hash = ?",
+				backfillHash.Bytes(),
+			).Scan(&deltas, &previousReward))
+			require.Equal(t, 1, deltas)
+			require.Equal(t, "777", previousReward)
+
+			// Replaying the same backfill transaction must not duplicate the
+			// journal row.
+			require.NoError(t, store.SetTransactionBatchedHistorical(
+				backfillTx,
+				ocommon.Point{Slot: 51, Hash: bytes.Repeat([]byte{0xa5}, 32)},
+				0,
+				nil,
+				true,
+				true,
+				store.NewBatchAccumulator(),
+				nil,
+			))
+			require.NoError(t, raw.QueryRow(
+				"SELECT COUNT(*) FROM account_reward_delta WHERE tx_hash = ?",
+				backfillHash.Bytes(),
+			).Scan(&deltas))
+			require.Equal(t, 1, deltas)
+		})
+	}
+}
+
 func TestSharedSQLStoreWithdrawalCredentialTagsRemainDistinct(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)

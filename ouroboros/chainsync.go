@@ -487,6 +487,7 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
 		event.ChainsyncResyncReasonRollbackLoop:
 		return true
@@ -719,6 +720,10 @@ func (o *Ouroboros) resyncChainsyncClientWithPointsAfterStop(
 			connId.String(),
 		)
 	}
+	if o.chainsyncState != nil {
+		// The peer is not responsible for the restart round trip.
+		o.chainsyncState.PatiencePause(connId)
+	}
 	if err := cs.Client.Stop(); err != nil {
 		return fmt.Errorf(
 			"stop chainsync client for conn %s: %w",
@@ -821,6 +826,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 	_, err = o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		*intersectPoint,
+		ctx.Server,
 	)
 	if err != nil {
 		return retPoint, tip, fmt.Errorf(
@@ -856,6 +862,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	clientState, err := o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		tip.Point,
+		ctx.Server,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -1260,6 +1267,27 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
 		point := ocommon.NewPoint(blockSlot, blockHash)
+		// Genesis Limit on Patience: the peer is charged up to the header's
+		// network arrival, not for this node's decoding, admission waits,
+		// verification, or ledger backpressure below. A header that clears
+		// verification resumes the leak when the callback returns.
+		patienceGrant := false
+		if o.chainsyncState != nil {
+			o.chainsyncState.PatienceMessageArrived(
+				ctx.ConnectionId,
+				arrivalTime,
+			)
+			defer func() {
+				if patienceGrant {
+					o.chainsyncState.PatienceHeaderAccepted(
+						ctx.ConnectionId,
+						v.BlockNumber(),
+						point.Slot == tip.Point.Slot &&
+							bytes.Equal(point.Hash, tip.Point.Hash),
+					)
+				}
+			}()
+		}
 		// Extract VRF output from block header once for chain
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
@@ -1395,6 +1423,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
+		patienceGrant = ingressEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered

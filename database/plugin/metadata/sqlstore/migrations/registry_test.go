@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 16)
+	require.Len(t, registry, 25)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -149,9 +149,60 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Empty(t, registry[14].SQL["sqlite"].Expand)
 	require.NotNil(t, registry[14].Backfill)
 	require.Equal(t, 16, registry[15].Version)
-	require.Equal(t, governanceProposalOptionalAnchorSchemaRelease, registry[15].Name)
+	require.Equal(
+		t,
+		governanceProposalOptionalAnchorSchemaRelease,
+		registry[15].Name,
+	)
 	require.Len(t, registry[15].SQL["sqlite"].Expand, 21)
 	require.Empty(t, registry[15].Backfill)
+	require.Equal(t, 17, registry[16].Version)
+	require.Equal(t, governanceProposalDroppedSchemaRelease, registry[16].Name)
+	require.Contains(
+		t,
+		registry[16].SQL["sqlite"].Expand,
+		"CREATE TABLE IF NOT EXISTS `governance_proposal_drop` (\n"+
+			"    `proposal_id` integer PRIMARY KEY,\n"+
+			"    `dropped_epoch` integer,\n"+
+			"    `dropped_slot` integer,\n"+
+			"    FOREIGN KEY (`proposal_id`) REFERENCES `governance_proposal`(`id`) ON DELETE CASCADE\n"+
+			")",
+	)
+	// An upgraded database already refunded every proposal it marked
+	// expired, so v17 must stamp those as dropped rather than let the new
+	// drop step refund them again.
+	require.NotNil(t, registry[16].Backfill)
+	require.Equal(t, "1", registry[16].BackfillRevision)
+	require.Equal(t, 20, registry[19].Version)
+	require.Equal(t, alonzoPParamsUnitSchemaRelease, registry[19].Name)
+	require.Empty(t, registry[19].SQL["sqlite"].Expand)
+	require.NotNil(t, registry[19].Backfill)
+	require.Equal(t, "1", registry[19].BackfillRevision)
+	require.Equal(t, 22, registry[21].Version)
+	require.Equal(t, governanceVoteHistorySchemaRelease, registry[21].Name)
+	require.Contains(
+		t,
+		strings.Join(registry[21].SQL["sqlite"].Expand, "\n"),
+		"CREATE TABLE IF NOT EXISTS `governance_vote_history`",
+	)
+	require.Equal(t, 23, registry[22].Version)
+	require.Equal(t, committeeZeroQuorumSchemaRelease, registry[22].Name)
+	require.Contains(
+		t,
+		strings.Join(registry[22].SQL["sqlite"].Expand, "\n"),
+		"UPDATE committee_quorum SET quorum = NULL WHERE quorum = '0'",
+	)
+	require.Equal(t, 24, registry[23].Version)
+	require.Equal(t, rewardAdaPotsImportedFeesSchemaRelease, registry[23].Name)
+	require.Contains(
+		t,
+		registry[23].SQL["sqlite"].Expand,
+		"ALTER TABLE `reward_ada_pots` ADD COLUMN `imported_epoch_fees` text",
+	)
+	require.NotNil(t, registry[23].Backfill)
+	require.Equal(t, 25, registry[24].Version)
+	require.Equal(t, mithrilRewardRepairCoverageSchemaRelease, registry[24].Name)
+	require.NotNil(t, registry[24].Backfill)
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -277,7 +328,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 16)
+	require.Len(t, registry, 25)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

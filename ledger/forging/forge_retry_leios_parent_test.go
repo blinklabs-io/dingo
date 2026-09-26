@@ -63,6 +63,7 @@ func (b *parentSwapBuilder) buildBlockWithCredentialGeneration(
 	leios LeiosBlockData,
 	_ *credentialGeneration,
 	constraints blockSelectionConstraints,
+	_ *BlockContext,
 ) (ledger.Block, []byte, error) {
 	b.calls++
 	b.seen = append(b.seen, leios)

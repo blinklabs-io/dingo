@@ -85,6 +85,12 @@ func PParamsUpdateDijkstra(
 			pparamsUpdate,
 		)
 	}
+	// ParameterChange must never change protocol version; only
+	// HardForkInitiation may (dingo#4439). Transaction validation already
+	// rejects a ParameterChange carrying key 14 before it can be persisted,
+	// so this only guards an already-stored malformed proposal that reaches
+	// enactment some other way (e.g. replay of pre-fix data).
+	dijkstraPParamsUpdate.ProtocolVersion = nil
 	if err := dijkstraPParams.ApplyUpdate(&dijkstraPParamsUpdate); err != nil {
 		return nil, err
 	}
@@ -203,7 +209,11 @@ func CertDepositDijkstra(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
+	// The nil check is part of the guard, not redundant with it: a typed-nil
+	// *DijkstraProtocolParameters satisfies the assertion, so testing only ok
+	// lets every case below dereference nil. CertDepositConway has always
+	// spelled it this way; this one had not.
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
@@ -266,6 +276,12 @@ func ValidateTxDijkstra(
 		minPoolMarginFromLedgerState(ls),
 	); err != nil {
 		errs = append(errs, err)
+	}
+	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
+		errs = append(
+			errs,
+			fmt.Errorf("dijkstra parameter-change validation: %w", err),
+		)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
@@ -372,6 +388,10 @@ func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 		skipRuleIds,
 	)
 	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[0],
+			validationFunc: validateDijkstraPlutusV3ReferenceInputs,
+		},
 		indexedUtxoValidationRule{
 			index:          indexes[1],
 			validationFunc: validateCommitteeCertificates,

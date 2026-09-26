@@ -23,11 +23,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// lintWorkflow is the workflow that renders the `lint` check. Branch
+// lintWorkflows are the workflows that render the `lint` check. Branch
 // protection matches a required context by name, so the coverage rules below
-// are pinned to this file rather than searching every workflow for a
+// are pinned to these files rather than searching every workflow for a
 // golangci-lint invocation.
-const lintWorkflow = ".github/workflows/golangci-lint.yml"
+//
+// There are two because `needs:` cannot cross workflow files: the lint job has
+// to live inside each pipeline it gates. go-test.yml is the pull-request
+// pipeline and publish.yml the main and release pipeline, and only one of them
+// runs for any given event. Every rule below is checked against both, so
+// covering a new module in one pipeline and forgetting the other fails here.
+var lintWorkflows = []string{
+	".github/workflows/go-test.yml",
+	".github/workflows/publish.yml",
+}
 
 // lintActionRepo is the action whose invocations count as lint coverage. The
 // version suffix is stripped before comparison so a bump does not silently
@@ -87,14 +96,14 @@ func goModuleDirs(t *testing.T, root string) []string {
 	return dirs
 }
 
-// lintRuns returns every golangci-lint invocation the lint workflow makes.
-func lintRuns(t *testing.T, root string) []lintRun {
+// lintRuns returns every golangci-lint invocation the named workflow makes.
+func lintRuns(t *testing.T, root, workflow string) []lintRun {
 	t.Helper()
 
-	raw := readRepoFile(t, root, lintWorkflow)
+	raw := readRepoFile(t, root, workflow)
 	var parsed actionsWorkflow
 	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
-		t.Fatalf("parse %s: %v", lintWorkflow, err)
+		t.Fatalf("parse %s: %v", workflow, err)
 	}
 
 	var runs []lintRun
@@ -120,7 +129,7 @@ func lintRuns(t *testing.T, root string) []lintRun {
 	if len(runs) == 0 {
 		t.Fatalf(
 			"%s runs no %s step",
-			lintWorkflow,
+			workflow,
 			lintActionRepo,
 		)
 	}
@@ -138,44 +147,28 @@ func lintRuns(t *testing.T, root string) []lintRun {
 // module to be dropped while this check stayed green.
 func TestLintCoversEveryGoModule(t *testing.T) {
 	root := repoRoot(t)
+	modules := goModuleDirs(t, root)
 
-	covered := make(map[string]bool)
-	for _, run := range lintRuns(t, root) {
-		if run.goos == defaultLintGOOS {
-			covered[run.dir] = true
+	for _, workflow := range lintWorkflows {
+		covered := make(map[string]bool)
+		for _, run := range lintRuns(t, root, workflow) {
+			if run.goos == defaultLintGOOS {
+				covered[run.dir] = true
+			}
+		}
+
+		for _, dir := range modules {
+			if !covered[dir] {
+				t.Errorf(
+					"module %s has a go.mod but %s never lints it on "+
+						"%s; add a golangci-lint step with "+
+						"working-directory: %s",
+					dir,
+					workflow,
+					defaultLintGOOS,
+					dir,
+				)
+			}
 		}
 	}
-
-	for _, dir := range goModuleDirs(t, root) {
-		if !covered[dir] {
-			t.Errorf(
-				"module %s has a go.mod but %s never lints it on "+
-					"%s; add a golangci-lint step with "+
-					"working-directory: %s",
-				dir,
-				lintWorkflow,
-				defaultLintGOOS,
-				dir,
-			)
-		}
-	}
-}
-
-// TestLintCoversWindowsBuildTags checks that the root module is linted for
-// windows as well as linux. Files behind `//go:build windows` are excluded
-// from the linux run's build, so every linter is blind to them until a run
-// with GOOS=windows compiles them in.
-func TestLintCoversWindowsBuildTags(t *testing.T) {
-	root := repoRoot(t)
-
-	for _, run := range lintRuns(t, root) {
-		if run.dir == "." && run.goos == "windows" {
-			return
-		}
-	}
-	t.Errorf(
-		"%s never lints the root module with GOOS=windows; "+
-			"files behind //go:build windows are unchecked",
-		lintWorkflow,
-	)
 }

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // collectOrdered drains n events from ch and returns their int payloads in
@@ -156,11 +158,18 @@ func TestPublishOrderedWaitsForCapacityRatherThanDropping(t *testing.T) {
 		}
 	}()
 
-	// The publisher must still be parked: nothing is draining yet.
+	// The publisher must still be parked: nothing is draining yet. Wait for
+	// the lane's queue to actually fill rather than assuming it will within
+	// an arbitrary window -- that is what proves the publisher is blocked on
+	// capacity, not merely slow.
+	lane := eb.orderedLane("ordered.full")
+	testutil.WaitForCondition(t, func() bool {
+		return len(lane.queue) == cap(lane.queue)
+	}, testutil.AsyncWait, "the ordered lane never filled up while nothing drained it")
 	select {
 	case <-published:
 		t.Fatal("publisher completed without backpressure from a full lane")
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 
 	close(release)
@@ -192,6 +201,72 @@ func TestPublishOrderedReturnsFalseWhenStopped(t *testing.T) {
 	eb.Close()
 	if eb.PublishOrdered("ordered.stopped", NewEvent("ordered.stopped", 0)) {
 		t.Fatal("PublishOrdered returned true on a closed bus")
+	}
+}
+
+func TestFlushOrderedContextWaitsForDelivery(t *testing.T) {
+	t.Parallel()
+
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	_, delivered := eb.SubscribeWithBufferPolicy(
+		"ordered.flush",
+		1,
+		SubscriberBackpressureBlock,
+	)
+	if !eb.PublishOrdered(
+		"ordered.flush",
+		NewEvent("ordered.flush", 1),
+	) {
+		t.Fatal("PublishOrdered returned false")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(delivered) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(delivered) != 1 {
+		t.Fatal("first event did not fill subscriber buffer")
+	}
+	if !eb.PublishOrdered(
+		"ordered.flush",
+		NewEvent("ordered.flush", 2),
+	) {
+		t.Fatal("second PublishOrdered returned false")
+	}
+
+	flushed := make(chan bool, 1)
+	go func() {
+		flushed <- eb.FlushOrderedContext(t.Context(), "ordered.flush")
+	}()
+	select {
+	case <-flushed:
+		t.Fatal("flush returned before subscriber delivery")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case evt := <-delivered:
+		if evt.Data != 1 {
+			t.Fatalf("first payload: got %v, want 1", evt.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not receive first ordered event")
+	}
+	select {
+	case ok := <-flushed:
+		if !ok {
+			t.Fatal("flush failed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush did not complete after delivery")
+	}
+	select {
+	case evt := <-delivered:
+		if evt.Data != 2 {
+			t.Fatalf("second payload: got %v, want 2", evt.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not receive second ordered event")
 	}
 }
 
@@ -297,6 +372,9 @@ func TestPublishOrderedContextRejectsCancelledContextWithRoomInLane(
 	select {
 	case evt := <-ch:
 		t.Fatalf("cancelled publish was delivered: %v", evt.Data)
-	case <-time.After(200 * time.Millisecond):
+	default:
+		// PublishOrderedContext already returned false synchronously above,
+		// so nothing further can deliver to ch; no window needs to be waited
+		// out.
 	}
 }

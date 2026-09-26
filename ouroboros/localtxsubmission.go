@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
@@ -84,7 +86,7 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			"role", "server",
 			"connection_id", ctx.ConnectionId.String(),
 		)
-		return newLocalTxSubmissionRejectReason(tx.EraId, err)
+		return localTxSubmissionRejectReason(tx.EraId, err)
 	}
 	return nil
 }
@@ -95,24 +97,70 @@ type cborRejectReason interface {
 }
 
 type hardForkApplyTxError struct {
-	era uint16
+	era           uint16
+	err           error
+	inputSetEmpty bool
+}
+
+type unrepresentableTxSubmissionError struct {
 	err error
+}
+
+func localTxSubmissionRejectReason(eraId uint16, err error) error {
+	if isLocalTxSubmissionInfrastructureError(err) {
+		return errors.New("local transaction submission unavailable")
+	}
+	return newLocalTxSubmissionRejectReason(eraId, err)
 }
 
 func newLocalTxSubmissionRejectReason(
 	eraId uint16,
 	err error,
 ) error {
+	if err == nil {
+		return errors.New("transaction rejection has no cause")
+	}
 	if _, ok := errors.AsType[cborRejectReason](err); ok {
 		return err
 	}
-	return &hardForkApplyTxError{
-		era: eraId,
-		err: err,
+	var inputSetEmpty shelley.InputSetEmptyUtxoError
+	var inputSetEmptyPtr *shelley.InputSetEmptyUtxoError
+	isInputSetEmpty := errors.As(err, &inputSetEmpty) ||
+		errors.As(err, &inputSetEmptyPtr)
+	switch eraId {
+	case gledger.EraIdConway, gledger.EraIdDijkstra:
+		return &hardForkApplyTxError{
+			era:           eraId,
+			err:           err,
+			inputSetEmpty: isInputSetEmpty,
+		}
+	default:
+		if isInputSetEmpty {
+			switch eraId {
+			case gledger.EraIdShelley, gledger.EraIdAllegra, gledger.EraIdMary,
+				gledger.EraIdAlonzo, gledger.EraIdBabbage:
+				return &hardForkApplyTxError{
+					era:           eraId,
+					err:           err,
+					inputSetEmpty: true,
+				}
+			}
+		}
 	}
+	return &unrepresentableTxSubmissionError{err: err}
+}
+
+func isLocalTxSubmissionInfrastructureError(err error) bool {
+	var fullErr *mempool.MempoolFullError
+	return errors.Is(err, mempool.ErrNilValidator) ||
+		errors.Is(err, mempool.ErrMempoolStopped) ||
+		errors.As(err, &fullErr)
 }
 
 func (e *hardForkApplyTxError) Error() string {
+	if e.err == nil {
+		return "transaction rejection has no cause"
+	}
 	return e.err.Error()
 }
 
@@ -121,42 +169,69 @@ func (e *hardForkApplyTxError) Unwrap() error {
 }
 
 func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
-	utxowFailureType := gledger.ApplyTxErrorUtxowFailure
-	if e.era == gledger.EraIdConway {
-		utxowFailureType = gledger.ConwayLedgerUtxowFailure
+	var failure []any
+	switch {
+	case e.inputSetEmpty && e.era == gledger.EraIdDijkstra:
+		failure = []any{
+			dijkstraMempoolLedgerFailure,
+			[]any{dijkstraLedgerUtxowFailure, e.utxowFailure()},
+		}
+	case e.inputSetEmpty && e.era == gledger.EraIdConway:
+		failure = []any{gledger.ConwayLedgerUtxowFailure, e.utxowFailure()}
+	case e.inputSetEmpty:
+		failure = []any{gledger.ApplyTxErrorUtxowFailure, e.utxowFailure()}
+	case e.era == gledger.EraIdDijkstra:
+		failure = []any{dijkstraMempoolFailure, e.err.Error()}
+	case e.era == gledger.EraIdConway:
+		// ConwayApplyTxError contains ledger predicate failures directly. The
+		// ConwayMempoolFailure constructor is tag 7; it is not a UTXOW failure.
+		failure = []any{conwayLedgerMempoolFailure, e.err.Error()}
+	default:
+		return nil, errors.New(
+			"transaction rejection cause is not representable as a ledger UTXOW failure",
+		)
 	}
-	return cbor.Encode([]any{
-		[]any{
-			e.era,
-			[]any{
-				[]any{
-					utxowFailureType,
-					e.utxowFailure(),
-				},
-			},
-		},
-	})
+	return cbor.Encode([]any{[]any{e.era, []any{failure}}})
 }
 
+func (e *unrepresentableTxSubmissionError) Error() string {
+	if e.err == nil {
+		return "transaction rejection has no cause"
+	}
+	return e.err.Error()
+}
+
+func (e *unrepresentableTxSubmissionError) Unwrap() error {
+	return e.err
+}
+
+func (e *unrepresentableTxSubmissionError) MarshalCBOR() ([]byte, error) {
+	return nil, fmt.Errorf(
+		"transaction rejection is not representable in the local-tx-submission protocol: %w",
+		e.err,
+	)
+}
+
+const (
+	conwayLedgerMempoolFailure   = 7
+	dijkstraMempoolFailure       = 2
+	dijkstraMempoolLedgerFailure = 1
+	dijkstraLedgerUtxowFailure   = 1
+)
+
 func (e *hardForkApplyTxError) utxowFailure() []any {
-	// The Shelley/Allegra/Mary/Alonzo/Babbage UTXOW constructors below
-	// decode their payload as the bare UTXO predicate failure (no era
-	// wrapper): gouroboros's UtxoFailure.unmarshalPayload takes the era
-	// from its parent rather than from this payload. Only the Conway
-	// leaf below decodes through UtxoFailure's own UnmarshalCBOR, which
-	// does expect the [era, err] form.
 	switch e.era {
 	case gledger.EraIdShelley, gledger.EraIdAllegra, gledger.EraIdMary:
 		return []any{
 			gledger.ShelleyUtxowUtxoFailure,
-			e.inputSetEmptyFailure(),
+			[]any{gledger.UtxoFailureInputSetEmpty},
 		}
 	case gledger.EraIdAlonzo:
 		return []any{
 			gledger.AlonzoUtxowShelleyInAlonzo,
 			[]any{
 				gledger.ShelleyUtxowUtxoFailure,
-				e.inputSetEmptyFailure(),
+				[]any{gledger.UtxoFailureInputSetEmpty},
 			},
 		}
 	case gledger.EraIdBabbage:
@@ -164,30 +239,20 @@ func (e *hardForkApplyTxError) utxowFailure() []any {
 			gledger.BabbageUtxowUtxoFailure,
 			[]any{
 				gledger.BabbageUtxoAlonzoInBabbage,
-				e.inputSetEmptyFailure(),
+				[]any{gledger.UtxoFailureInputSetEmpty},
 			},
 		}
 	case gledger.EraIdConway:
 		return []any{
 			gledger.ConwayUtxowUtxoFailure,
-			e.inputSetEmptyFailure(),
+			[]any{gledger.ConwayUtxoInputSetEmptyUTxO},
 		}
-	default:
+	case gledger.EraIdDijkstra:
 		return []any{
 			gledger.ConwayUtxowUtxoFailure,
-			[]any{
-				gledger.EraIdConway,
-				[]any{gledger.ConwayUtxoInputSetEmptyUTxO},
-			},
+			[]any{gledger.ConwayUtxoInputSetEmptyUTxO},
 		}
-	}
-}
-
-func (e *hardForkApplyTxError) inputSetEmptyFailure() []any {
-	switch e.era {
-	case gledger.EraIdConway:
-		return []any{gledger.ConwayUtxoInputSetEmptyUTxO}
 	default:
-		return []any{gledger.UtxoFailureInputSetEmpty}
+		return nil
 	}
 }

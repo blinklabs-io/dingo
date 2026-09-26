@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/prometheus/client_golang/prometheus"
@@ -251,6 +252,13 @@ type BlockForger struct {
 	opCertLedgerView LedgerView
 	eraParams        ProtocolParamsProvider
 
+	// Equal-slot alternative forging. Both are optional and both must be
+	// present, alongside a BlockBuilder that implements
+	// AlternativeBlockBuilder, for a contested slot to be contested rather
+	// than conceded.
+	chainContext   AlternativeChainContextProvider
+	siblingAdopter SiblingBlockAdopter
+
 	// Slot battle detection
 	slotTracker *SlotTracker
 
@@ -332,6 +340,43 @@ type BlockBuilder interface {
 	BuildBlock(slot uint64, kesPeriod uint64) (ledger.Block, []byte, error)
 }
 
+// BlockContext names the parent a forged block is built on. It mirrors
+// ouroboros-consensus' BlockContext (NodeKernel/Forge.hs): a block number and
+// the point the block extends.
+//
+// A nil *BlockContext means "extend the live chain tip", which is what every
+// uncontested slot uses and what BuildBlock does. An explicit context exists
+// for the equal-slot case, where the tip already holds a rival block at the
+// slot being forged: there the alternative carries the rival's block number
+// and names the rival's predecessor as parent, so the two blocks are siblings
+// that chain selection arbitrates between.
+type BlockContext struct {
+	// Parent is the point the forged block names as its parent. It must sit
+	// strictly below the forged slot.
+	Parent ocommon.Point
+	// BlockNumber is the block number the forged block carries. For an
+	// equal-slot alternative this is the rival's own block number, not the
+	// rival's plus one.
+	BlockNumber uint64
+	// Rival is the chain tip this block is an alternative to. The builder
+	// re-checks it against the live tip and abandons the candidate if the
+	// chain has moved, so a contest that is already over costs nothing.
+	Rival ochainsync.Tip
+}
+
+// AlternativeBlockBuilder constructs a block on an explicitly named parent
+// rather than on the live chain tip. A BlockBuilder that does not implement it
+// cannot forge the equal-slot alternative, and the forger declines contested
+// slots for such a builder exactly as it did before this capability existed.
+type AlternativeBlockBuilder interface {
+	BuildBlockOnContext(
+		slot uint64,
+		kesPeriod uint64,
+		leios LeiosBlockData,
+		blockCtx BlockContext,
+	) (ledger.Block, []byte, error)
+}
+
 // LeiosBlockBuilder constructs Dijkstra blocks with Leios prototype header/body
 // extensions. Builders that do not implement it cannot safely announce or
 // certify Leios endorser blocks.
@@ -354,6 +399,7 @@ type credentialGenerationBlockBuilder interface {
 		leios LeiosBlockData,
 		generation *credentialGeneration,
 		constraints blockSelectionConstraints,
+		blockCtx *BlockContext,
 	) (ledger.Block, []byte, error)
 }
 
@@ -361,6 +407,29 @@ type credentialGenerationBlockBuilder interface {
 type BlockBroadcaster interface {
 	// AddBlock adds a block to the local chain and propagates to peers.
 	AddBlock(block ledger.Block, cbor []byte) error
+}
+
+// AlternativeChainContextProvider reports the context needed to forge an
+// alternative to the block already at the chain tip: the tip itself and the
+// point of its immediate predecessor, which becomes the alternative's parent.
+// chain.Chain implements it directly.
+//
+// ok must be false whenever the context cannot be established. The forger then
+// declines the contested slot rather than falling back to the live tip, which
+// would produce a block whose parent slot equals its own.
+type AlternativeChainContextProvider interface {
+	TipPredecessor() (parent ocommon.Point, tip ochainsync.Tip, ok bool)
+}
+
+// SiblingBlockAdopter offers a locally forged block that competes with the
+// current chain tip -- rather than extending it -- to chain selection, and
+// reports whether it was adopted. ledger.LedgerState implements it as
+// AdoptLocalForgedSibling.
+//
+// Losing is a normal outcome, not an error: the block at the tip keeps the
+// slot and the forged block is discarded without being diffused.
+type SiblingBlockAdopter interface {
+	AdoptLocalForgedSibling(block ledger.Block) (adopted bool, err error)
 }
 
 // ConfirmedTxRemover removes transactions after the block containing them has
@@ -538,6 +607,14 @@ type ForgerConfig struct {
 	// rejects one that skips ahead of the last-seen value by more than
 	// one. Required whenever OpCertLedgerView is set.
 	EraParams ProtocolParamsProvider
+	// ChainContext and SiblingAdopter enable forging an alternative when the
+	// chain tip already holds a rival block at the slot this node leads --
+	// ouroboros-consensus mkCurrentBlockContext's EQ case. Both are
+	// optional; with either unset, or with a BlockBuilder that does not
+	// implement AlternativeBlockBuilder, a contested slot is declined and
+	// counted exactly as it was before this capability existed.
+	ChainContext   AlternativeChainContextProvider
+	SiblingAdopter SiblingBlockAdopter
 
 	// ForgeFence persists the last-forged-slot fence so a restart cannot
 	// sign a second block for a slot this node already used. Nil
@@ -704,6 +781,8 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		fenceStore:       cfg.ForgeFence,
 		opCertLedgerView: cfg.OpCertLedgerView,
 		eraParams:        cfg.EraParams,
+		chainContext:     cfg.ChainContext,
+		siblingAdopter:   cfg.SiblingAdopter,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -1558,17 +1637,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	// A rival block already occupies this leader slot. This is a slot
 	// battle, not a reason to treat the slot as spent: the reference
-	// implementation forges an alternative here (same block number, the
-	// tip's predecessor as parent) and lets the leader VRF and chain
-	// selection arbitrate.
+	// implementation forges an alternative here -- same block number as the
+	// rival, the rival's predecessor as parent -- and lets the leader VRF
+	// and chain selection arbitrate (mkCurrentBlockContext's EQ branch).
 	//
-	// Dingo cannot build that alternative yet. BlockBuilder binds the
-	// parent to the live chain tip, so a block forged now would name a
-	// parent whose slot equals its own and be rejected by
-	// ledger.validateBlockOrder; binding the tip's predecessor instead
-	// needs a block that does not extend the local tip, which
-	// chain.addBlockLocked refuses. Until that path exists, record the
-	// battle we are declining rather than dropping the slot silently.
+	// altBlockContext is nil for every uncontested slot, which leaves the
+	// build and adoption below on their original live-tip paths.
 	//
 	// Unlike the rival-under-fence case in the equal-slot gate above,
 	// counting the battle here does not double up with
@@ -1580,19 +1654,31 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// exist without a fence. checkSlotBattle returns early when
 	// WasForgedByUs says we never forged the slot, so this is the only
 	// place the battle is counted.
+	var altBlockContext *BlockContext
 	if gates.appliedTipAtSlot() {
 		if f.metrics != nil {
 			f.metrics.slotBattlesTotal.Inc()
 		}
-		f.incCouldNotForge()
-		f.logger.Warn(
-			"forge skip: leader slot already holds another block; forging an alternative is not supported",
-			"current_slot",
-			currentSlot,
-			"tip_slot",
-			tipSlot,
+		blockCtx, ok := f.alternativeBlockContext(currentSlot)
+		if !ok {
+			// Nothing to build the alternative on. Record the battle
+			// being declined rather than dropping the slot silently.
+			f.incCouldNotForge()
+			f.logger.Warn(
+				"forge skip: leader slot already holds another block and no alternative can be built",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+			)
+			return nil
+		}
+		altBlockContext = &blockCtx
+		f.logger.Info(
+			"leader slot already holds another block; forging an alternative",
+			"current_slot", currentSlot,
+			"rival_hash", hex.EncodeToString(blockCtx.Rival.Point.Hash),
+			"fork_point_slot", blockCtx.Parent.Slot,
+			"block_number", blockCtx.BlockNumber,
 		)
-		return nil
 	}
 
 	// Commit to this slot before any signing happens for it, including
@@ -1608,10 +1694,26 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	leiosState := f.leiosBlockDataForSlot(currentSlot)
+	leiosState := forgeLeiosState{}
+	if altBlockContext == nil {
+		parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(
+			currentSlot,
+		)
+		leiosState = f.leiosBlockDataForSlot(
+			currentSlot,
+			parentRbHash,
+			parentEbHash,
+			parentKnown,
+		)
+	} else {
+		f.logger.Debug(
+			"leios data omitted from an equal-slot alternative",
+			"slot", currentSlot,
+		)
+	}
 	leiosBlockData := leiosState.data
 	embeddedEb, embeddedEbSlot := leiosState.embeddedEb, leiosState.embeddedEbSlot
-	if f.leiosChecker != nil {
+	if altBlockContext == nil && f.leiosChecker != nil {
 		var excludedTxHashes map[string]struct{}
 		canAnnounce := true
 		if embeddedEb != nil {
@@ -1770,6 +1872,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		&leiosState,
 		generation,
 		gates,
+		altBlockContext,
 	)
 	// A retry or the empty fallback may have re-resolved the payload
 	// against a new parent; the embedded-endorser-block bookkeeping below
@@ -1873,7 +1976,34 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// Attempt local adoption immediately after building and validation. Keep
 	// observability callbacks out of this critical path: subscribers may be
 	// slow, while the block's parent must still be the active chain tip.
-	if addErr := f.addBlockSafe(block, blockCbor); addErr != nil {
+	//
+	// An alternative does not extend the tip, so it goes to chain selection
+	// instead: it is adopted only if it beats the block already there, by
+	// the same comparison a peer's competing block goes through. Losing is
+	// an outcome, not a failure -- the rival keeps the slot and this block
+	// is never diffused, so the observer, mempool cleanup and adoption
+	// counters below must not run for it.
+	if altBlockContext != nil {
+		adopted, addErr := f.adoptSiblingBlockSafe(block, blockCbor)
+		if addErr != nil {
+			f.incCouldNotForge()
+			return fmt.Errorf(
+				"failed to adopt alternative block: %w",
+				addErr,
+			)
+		}
+		if !adopted {
+			f.logger.Info(
+				"forged alternative lost the slot battle; the block at the tip stands",
+				"slot", currentSlot,
+				"hash", hex.EncodeToString(block.Hash().Bytes()),
+				"rival_hash", hex.EncodeToString(
+					altBlockContext.Rival.Point.Hash,
+				),
+			)
+			return nil
+		}
+	} else if addErr := f.addBlockSafe(block, blockCbor); addErr != nil {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to add block: %w", addErr)
 	}
@@ -1933,11 +2063,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	return nil
 }
 
-func (f *BlockForger) leiosBlockDataForSlot(
-	slot uint64,
-) forgeLeiosState {
-	if f.leiosCerts == nil || f.leiosParent == nil {
-		return forgeLeiosState{}
+// leiosParentAnnouncement resolves the parent ranking block and the endorser
+// block it announced. Every parent-dependent Leios selection is made against
+// this answer, and the pre-build guard re-reads it to detect a chain tip that
+// moved underneath that selection.
+func (f *BlockForger) leiosParentAnnouncement(slot uint64) (
+	parentRbHash lcommon.Blake2b256,
+	parentHash lcommon.Blake2b256,
+	ok bool,
+) {
+	if f.leiosParent == nil {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false
 	}
 	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
 	if err != nil {
@@ -1948,7 +2084,7 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"error",
 			err,
 		)
-		return forgeLeiosState{}
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false
 	}
 	if !ok {
 		f.logger.Debug(
@@ -1956,9 +2092,25 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"slot",
 			slot,
 		)
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false
+	}
+	return parentRbHash, parentHash, true
+}
+
+func (f *BlockForger) leiosBlockDataForSlot(
+	slot uint64,
+	parentRbHash lcommon.Blake2b256,
+	parentHash lcommon.Blake2b256,
+	parentKnown bool,
+) forgeLeiosState {
+	if f.leiosCerts == nil || !parentKnown {
 		return forgeLeiosState{}
 	}
-	state := forgeLeiosState{parentRb: parentRbHash, parentKnown: true}
+	state := forgeLeiosState{
+		parentRb:    parentRbHash,
+		parentEb:    parentHash,
+		parentKnown: true,
+	}
 	eligible := f.leiosCerts.EligibleCertifiedEndorserBlocks()
 	for _, eb := range eligible {
 		if eb.Certificate == nil {
@@ -2108,9 +2260,9 @@ func (g forgeTipGates) tipAheadOfSlot() bool {
 }
 
 // appliedTipAtSlot reports that the applied tip already holds a block at the
-// slot: the contested case. ouroboros-consensus mkCurrentBlockContext declines
-// only for GT and treats EQ as a slot battle, and so does the forge: it does
-// not build an alternative, it counts the battle and declines.
+// slot: the contested case. The entry gate can prepare an alternative when
+// its explicit predecessor context is available; build retries preserve that
+// context only while its rival remains at the tip.
 func (g forgeTipGates) appliedTipAtSlot() bool {
 	return g.currentSlot == g.tipSlot
 }
@@ -2421,14 +2573,16 @@ func isTipGateRefusal(err error) bool {
 // at the slot exist to recognise this node's OWN block already at the tip; a
 // build attempt runs before this slot's block exists, under a fence this
 // attempt itself reserved, so an applied tip at the slot can only be a
-// rival's, and the decision re-applied is the post-leader-check one: count
-// the slot battle and decline. Likewise the unapplied-block case cannot be
+// rival's. The entry gate has already resolved an alternative context if
+// this forge cycle began contested; retain it through this re-check, and
+// otherwise count the battle and decline. Likewise the unapplied-block case cannot be
 // this node's own block for the same reason, and leadership has already been
 // proven, so unapplied_rival_at_leader_slot is counted outright rather than
 // from the schedule.
 func (f *BlockForger) tipGatesRefuseSlot(
 	slot uint64,
 	entry forgeTipGates,
+	blockCtx *BlockContext,
 ) error {
 	if f.slotClock == nil {
 		return nil
@@ -2495,11 +2649,12 @@ func (f *BlockForger) tipGatesRefuseSlot(
 			gates.staleSource(),
 		)
 	case gates.appliedTipAtSlot():
-		// A rival block occupying our leader slot is the same battle
-		// whether it arrived before the forge started or during it, and
-		// only counting the first would under-report battles precisely on
-		// the producers that lose them late. Last, because entry takes its
-		// slot-battle decision after the stale-tip refusal above.
+		// Preserve the context resolved by the entry gate while the
+		// original rival still occupies the slot. The builder validates
+		// that context against the live tip immediately before signing.
+		if blockCtx != nil {
+			return nil
+		}
 		if f.metrics != nil {
 			f.metrics.slotBattlesTotal.Inc()
 		}
@@ -2526,10 +2681,10 @@ type forgeLeiosState struct {
 	data           LeiosBlockData
 	embeddedEb     *lcommon.Blake2b256
 	embeddedEbSlot uint64
-	// parentRb is the parent ranking-block hash data was resolved
-	// against; parentKnown is false when no parent announcement could be
-	// read, in which case there is nothing to invalidate.
+	// parentRb and parentEb are the announcement identity that data was
+	// resolved against; parentKnown is false when it could not be read.
 	parentRb    lcommon.Blake2b256
+	parentEb    lcommon.Blake2b256
 	parentKnown bool
 }
 
@@ -2548,9 +2703,16 @@ func (f *BlockForger) refreshLeiosForParent(
 	slot uint64,
 	state *forgeLeiosState,
 ) {
-	refreshed := f.leiosBlockDataForSlot(slot)
+	parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(slot)
+	refreshed := f.leiosBlockDataForSlot(
+		slot,
+		parentRbHash,
+		parentEbHash,
+		parentKnown,
+	)
 	if refreshed.parentKnown == state.parentKnown &&
-		refreshed.parentRb == state.parentRb {
+		refreshed.parentRb == state.parentRb &&
+		refreshed.parentEb == state.parentEb {
 		// Same parent: everything already resolved still belongs to this
 		// block, including an announcement this slot forged.
 		return
@@ -2680,6 +2842,7 @@ func (f *BlockForger) buildBlockForSlot(
 	leiosState *forgeLeiosState,
 	generation *credentialGeneration,
 	entry forgeTipGates,
+	blockCtx *BlockContext,
 ) (ledger.Block, []byte, forgeBuildStats, error) {
 	var stats forgeBuildStats
 	// Two budgets, deliberately separate. The retry deadline decides
@@ -2714,7 +2877,7 @@ func (f *BlockForger) buildBlockForSlot(
 		// aborted by the primary chain tip moving, which makes this the
 		// one reading guaranteed to have gone stale; building anyway
 		// would sign a block the entry gates would have refused.
-		if tipErr := f.tipGatesRefuseSlot(slot, entry); tipErr != nil {
+		if tipErr := f.tipGatesRefuseSlot(slot, entry, blockCtx); tipErr != nil {
 			f.logger.Warn(
 				"leader slot lost: the chain moved under the slot before the transaction-free fallback",
 				"slot",
@@ -2743,6 +2906,7 @@ func (f *BlockForger) buildBlockForSlot(
 			leiosState.data,
 			generation,
 			blockSelectionConstraints{emptyBody: true},
+			blockCtx,
 		)
 		if emptyErr != nil {
 			f.observeSelectionFallback(forgeSelectionResultLost)
@@ -2787,22 +2951,7 @@ func (f *BlockForger) buildBlockForSlot(
 	// The first attempt needs the same guarantee the retries below get. The
 	// Leios payload was resolved before this slot's endorser-block production
 	// and the KES step, and the chain tip can move across that work, so the
-	// first build is no more entitled to reuse it than a retry is: the
-	// builder reads the tip when it starts, and a tip that moved before the
-	// build began produces no parent-change error to catch -- it just builds
-	// on the new parent while carrying the previous parent's certificate and
-	// announcement.
-	//
-	// Gated on there being something parent-bound to protect, because the
-	// re-resolve is not free: ParentLeiosAnnouncement fetches and decodes the
-	// parent block, and this runs inside the leader slot. A block with
-	// neither a certificate nor an announcement carries nothing a parent
-	// change could invalidate, so the check is skipped -- which is every slot
-	// on a chain with no Leios traffic. When there is something to protect,
-	// one extra parent resolution is the price of not committing the block to
-	// a certificate that belongs to a different parent. Re-resolving is a
-	// no-op when the parent is unchanged, so an announcement forged for this
-	// slot survives the ordinary case.
+	// first build is no more entitled to reuse it than a retry is.
 	if leiosState.data.Certificate != nil ||
 		leiosState.data.Announcement != nil {
 		f.refreshLeiosForParent(slot, leiosState)
@@ -2813,7 +2962,7 @@ func (f *BlockForger) buildBlockForSlot(
 		// selection, and Leios production, the KES step and each
 		// preceding selection pass all run inside the window a peer block
 		// can land in -- on either tip.
-		if tipErr := f.tipGatesRefuseSlot(slot, entry); tipErr != nil {
+		if tipErr := f.tipGatesRefuseSlot(slot, entry, blockCtx); tipErr != nil {
 			return nil, nil, stats, tipErr
 		}
 		stats.attempts++
@@ -2823,6 +2972,7 @@ func (f *BlockForger) buildBlockForSlot(
 			leiosState.data,
 			generation,
 			selectionConstraints(),
+			blockCtx,
 		)
 		if err == nil {
 			if stats.aborted {
@@ -2882,10 +3032,7 @@ func (f *BlockForger) buildBlockForSlot(
 			err,
 		)
 		// The next attempt re-reads the chain tip, so anything resolved
-		// against the previous parent has to be resolved again. This
-		// covers the snapshot-changed path as well as an explicit parent
-		// change: an applied block bumps the ledger generation and moves
-		// the tip together, and the generation check fires first.
+		// against the previous parent has to be resolved again.
 		f.refreshLeiosForParent(slot, leiosState)
 	}
 }
@@ -2896,6 +3043,7 @@ func (f *BlockForger) buildBlock(
 	leiosData LeiosBlockData,
 	generation *credentialGeneration,
 	constraints blockSelectionConstraints,
+	blockCtx *BlockContext,
 ) (ledger.Block, []byte, error) {
 	var (
 		block     ledger.Block
@@ -2909,6 +3057,23 @@ func (f *BlockForger) buildBlock(
 			leiosData,
 			generation,
 			constraints,
+			blockCtx,
+		)
+	} else if blockCtx != nil {
+		// Only reachable for a custom builder, and only when the forger has
+		// already confirmed it implements AlternativeBlockBuilder before
+		// committing to the contested slot.
+		altBuilder, ok := f.blockBuilder.(AlternativeBlockBuilder)
+		if !ok {
+			return nil, nil, errors.New(
+				"an explicit block context requires an AlternativeBlockBuilder",
+			)
+		}
+		block, blockCbor, err = altBuilder.BuildBlockOnContext(
+			slot,
+			kesPeriod,
+			leiosData,
+			*blockCtx,
 		)
 	} else if constraints.emptyBody {
 		// Only the package-private builder path carries per-attempt
@@ -3300,6 +3465,81 @@ func (f *BlockForger) validateForgedBlockSafe(
 		}
 	}()
 	return f.blockValidator.ValidateForgedBlock(block, blockCbor)
+}
+
+// alternativeBlockContext resolves the context for forging an alternative to
+// the block already at the tip: the tip's block number, and the tip's
+// predecessor as parent. This is what ouroboros-consensus'
+// mkCurrentBlockContext returns for EQ.
+//
+// It reports false -- and the caller declines the contested slot -- whenever
+// any part of the capability is missing: no durable forge fence, an unwired
+// chain context or sibling adopter, a BlockBuilder that cannot take an
+// explicit context, a tip with no resolvable predecessor, a tip that is no
+// longer at the contested slot, or a predecessor that does not sit strictly
+// below it. Declining costs one block; guessing a parent here costs a
+// signature over a block no peer will accept.
+func (f *BlockForger) alternativeBlockContext(
+	slot uint64,
+) (BlockContext, bool) {
+	// A durable fence is a precondition for contesting a slot at all,
+	// because this path cannot tell a rival's block from our own.
+	//
+	// The caller's "slot already has our own block" gate reads fenceLoaded,
+	// and lastForgedSlot is in-memory only when no store is wired. Restart a
+	// producer inside a slot it has already forged for and that gate cannot
+	// fire: the tip is our own block, the slot equals the tip's, and this
+	// function would hand back a context naming our own block as the rival.
+	// Forging that alternative signs a second, different block for a slot
+	// whose first block may already have reached peers -- equivocation, and
+	// the adoption would roll our own good block off the tip to do it.
+	//
+	// A wired store makes the situation unreachable: the fence is loaded at
+	// construction, so the gate refuses the slot before this is called and
+	// reserveForgeSlot would refuse it again. Conceding a genuinely
+	// contested slot is one block; equivocating is a slashable-class
+	// protocol violation, so decline rather than guess.
+	if f.fenceStore == nil {
+		return BlockContext{}, false
+	}
+	if f.chainContext == nil || f.siblingAdopter == nil {
+		return BlockContext{}, false
+	}
+	if _, ok := f.blockBuilder.(AlternativeBlockBuilder); !ok {
+		return BlockContext{}, false
+	}
+	parent, tip, ok := f.chainContext.TipPredecessor()
+	if !ok {
+		return BlockContext{}, false
+	}
+	// Read from the chain rather than trusting the slot-clock snapshot the
+	// gate above used: the tip must still be a block at the contested slot,
+	// and its parent must sit strictly below that slot.
+	if tip.Point.Slot != slot || parent.Slot >= slot {
+		return BlockContext{}, false
+	}
+	return BlockContext{
+		Parent:      parent,
+		BlockNumber: tip.BlockNumber,
+		Rival:       tip,
+	}, true
+}
+
+// adoptSiblingBlockSafe offers a forged alternative to chain selection,
+// recovering any panic from the pluggable adopter for the same reason
+// addBlockSafe does. A recovered panic is treated as an adoption failure.
+func (f *BlockForger) adoptSiblingBlockSafe(
+	block ledger.Block,
+	_ []byte,
+) (adopted bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			adopted = false
+			err = fmt.Errorf("sibling block adopter panic: %v", r)
+			f.reportForgeCallbackPanic("publication", r)
+		}
+	}()
+	return f.siblingAdopter.AdoptLocalForgedSibling(block)
 }
 
 // addBlockSafe calls the pluggable BlockBroadcaster, recovering any

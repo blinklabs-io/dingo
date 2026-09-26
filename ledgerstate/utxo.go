@@ -469,10 +469,15 @@ func parseMempackTxOut(
 	if err != nil {
 		return nil, fmt.Errorf("decoding MemPack TxOut: %w", err)
 	}
+	outputCbor, err := encodeMempackTxOut(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("encoding MemPack TxOut as CBOR: %w", err)
+	}
 
 	result := &ParsedUTxO{
 		TxHash:      txHash,
 		OutputIndex: outputIndex,
+		Cbor:        outputCbor,
 		Address:     decoded.Address,
 		Amount:      decoded.Lovelace,
 		Assets:      decoded.Assets,
@@ -603,6 +608,7 @@ func parseCborTxOut(
 	result := &ParsedUTxO{
 		TxHash:      txHash,
 		OutputIndex: outputIndex,
+		Cbor:        append([]byte(nil), txOutData...),
 		Address:     addrBytes,
 		Amount:      txOut.Amount().Uint64(),
 	}
@@ -908,6 +914,7 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 	utxo := models.Utxo{
 		TxId:          u.TxHash,
 		OutputIdx:     u.OutputIndex,
+		Cbor:          u.Cbor,
 		PaymentKey:    u.PaymentKey,
 		StakingKey:    u.StakingKey,
 		CredentialTag: u.CredentialTag,
@@ -932,7 +939,6 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 		utxo.Assets = append(utxo.Assets, models.Asset{
 			PolicyId:    a.PolicyId,
 			Name:        a.Name,
-			NameHex:     []byte(hex.EncodeToString(a.Name)),
 			Amount:      types.Uint64(a.Amount),
 			Fingerprint: []byte(fingerprint.String()),
 		})

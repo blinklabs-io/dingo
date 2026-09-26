@@ -46,8 +46,14 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 	// key 3 (invalid-hereafter) so this regression is independent of the
 	// separately owned upstream upper-bound implementation.
 	txCbor, err := cbor.Encode([]any{
-		map[uint]any{2: uint64(0), 8: invalidBefore},
+		map[uint]any{
+			0: cbor.Tag{Number: 258, Content: []any{}},
+			1: []any{},
+			2: uint64(0),
+			8: invalidBefore,
+		},
 		map[uint]any{},
+		true,
 		nil,
 	})
 	require.NoError(t, err)
@@ -118,6 +124,7 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			eras.DijkstraEraDesc,
 			pparams,
 			nil,
+			0,
 			0,
 			false,
 		)

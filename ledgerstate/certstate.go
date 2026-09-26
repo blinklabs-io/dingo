@@ -70,7 +70,7 @@ func parseCertState3(
 	result.CommitteeHotKeys = hotKeys
 	result.CommitteeResignations = resignations
 
-	pools, err := parsePState(certState[1])
+	pools, retirements, err := parsePStateWithRetirements(certState[1])
 	if err != nil {
 		if pools == nil {
 			return nil, fmt.Errorf(
@@ -80,6 +80,7 @@ func parseCertState3(
 		warnings = append(warnings, err)
 	}
 	result.Pools = pools
+	result.PendingPoolRetirements = retirements
 
 	accounts, err := parseDState(certState[2])
 	if err != nil {
@@ -222,7 +223,28 @@ func parseCertStateConway(
 		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
 			continue
 		}
-		hotKeys, resignations := parseCommitteeVState(certState[i:])
+		// Only a credential-to-authorization map can be the committee map.
+		// Testing that first keeps a wrong-candidate element from reaching a
+		// parser that now fails closed, which would abort the whole import
+		// over an element that was never the committee state.
+		if !looksLikeCommitteeCredentialMap(
+			committeeMapElement(certState[i:]),
+		) {
+			continue
+		}
+		hotKeys, resignations, committeeErr := parseCommitteeVState(
+			certState[i:],
+		)
+		if committeeErr != nil {
+			// An element that decodes as a committee map but whose
+			// entries cannot be read is a real decode failure, not a
+			// wrong-candidate miss. Surface it rather than moving on
+			// and silently importing an empty committee.
+			return nil, fmt.Errorf(
+				"parsing committee state: %w",
+				committeeErr,
+			)
+		}
 		if len(hotKeys) == 0 && len(resignations) == 0 {
 			continue
 		}
@@ -233,7 +255,7 @@ func parseCertStateConway(
 
 	// Parse PState if found
 	if pIdx >= 0 {
-		pools, err := parsePStateConway(certState[pIdx])
+		pools, retirements, err := parsePStateConwayWithRetirements(certState[pIdx])
 		if err != nil {
 			if pools == nil {
 				return nil, fmt.Errorf(
@@ -243,6 +265,7 @@ func parseCertStateConway(
 			warnings = append(warnings, err)
 		}
 		result.Pools = pools
+		result.PendingPoolRetirements = retirements
 	} else {
 		warnings = append(warnings, fmt.Errorf(
 			"could not identify PState in Conway "+
@@ -280,10 +303,12 @@ func parseCertStateConway(
 // PState is encoded as an array of 7 elements rather than the
 // traditional {poolParams, futurePoolParams, retiring, deposits}
 // map.
-func parsePStateConway(data []byte) ([]ParsedPool, error) {
+func parsePStateConwayWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 
 	return parsePStateMaps(ps)
@@ -629,21 +654,21 @@ func parsePoolDelegation(data []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// parsePState decodes the pool state.
-// PState = [poolParams, futurePoolParams, retiring, poolDeposits]
-func parsePState(data []byte) ([]ParsedPool, error) {
+func parsePStateWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawElements(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 	if len(ps) < 1 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	return parsePStateMaps(ps)
 }
 
-func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
+func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	type mapEntry struct {
 		idx  int
 		size int
@@ -659,7 +684,7 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 		}
 	}
 	if len(maps) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	slices.SortFunc(
@@ -680,12 +705,31 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 			bestIdx = m.idx
 		}
 	}
-	if len(bestPools) == 0 {
-		return bestPools, bestWarning
+	if len(bestPools) > 0 {
+		mergePoolDeposits(bestPools, ps, bestIdx)
 	}
-
-	mergePoolDeposits(bestPools, ps, bestIdx)
-	return bestPools, bestWarning
+	retirementIndices := make([]int, 0, len(ps))
+	if len(ps) == 4 && bestIdx == 0 {
+		// Shelley PState is [poolParams, futurePoolParams,
+		// retiring, poolDeposits]. The field position is the only
+		// reliable discriminator when a malformed deposit map contains
+		// small values.
+		retirementIndices = append(retirementIndices, 2)
+	} else {
+		for i, elem := range ps {
+			if i == bestIdx || len(elem) == 0 {
+				continue
+			}
+			major := elem[0] >> 5
+			if major == 5 || elem[0] == 0xbf {
+				retirementIndices = append(retirementIndices, i)
+			}
+		}
+	}
+	retirements := mergePoolRetirements(
+		bestPools, ps, retirementIndices,
+	)
+	return bestPools, retirements, bestWarning
 }
 
 func mergePoolDeposits(
@@ -697,7 +741,7 @@ func mergePoolDeposits(
 		if i == poolParamsIdx {
 			continue
 		}
-		deposits := parsePoolDeposits(elem)
+		deposits := parsePoolUint64Map(elem)
 		if deposits == nil || !looksLikeDeposits(deposits) {
 			continue
 		}
@@ -712,16 +756,20 @@ func mergePoolDeposits(
 	}
 }
 
-// parsePoolDeposits decodes the pool deposits map.
-// Returns nil on decode failure. Skipped entries are counted
-// but not reported since deposits are supplementary data.
-func parsePoolDeposits(data []byte) map[string]uint64 {
+// parsePoolUint64Map decodes a CBOR map of pool key hash -> unsigned
+// integer, keyed by hex-encoded pool key hash. Both PState maps that
+// carry scalar values have this shape: poolDeposits (lovelace) and
+// retiring (epoch numbers). Returns nil when the input is not a map;
+// entries whose key or value fails to decode are skipped, which is how
+// maps of a different value shape (futurePoolParams, whose values are
+// arrays) decode to an empty result rather than an error.
+func parsePoolUint64Map(data []byte) map[string]uint64 {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
 		return nil
 	}
 
-	deposits := make(map[string]uint64, len(entries))
+	values := make(map[string]uint64, len(entries))
 	for _, entry := range entries {
 		var keyHash []byte
 		if _, err := cbor.Decode(
@@ -737,10 +785,10 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 			continue
 		}
 
-		deposits[hex.EncodeToString(keyHash)] = amount
+		values[hex.EncodeToString(keyHash)] = amount
 	}
 
-	return deposits
+	return values
 }
 
 // looksLikeDeposits returns true if the map values are plausibly
@@ -749,7 +797,6 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 // numbers are small (currently < 1,000). We check whether the
 // majority of values exceed this threshold.
 func looksLikeDeposits(m map[string]uint64) bool {
-	const minDepositLovelace = 1_000_000 // 1 ADA
 	if len(m) == 0 {
 		return false
 	}
@@ -762,6 +809,92 @@ func looksLikeDeposits(m map[string]uint64) bool {
 	// Require at least half the values to look like deposits.
 	// Use multiplication to avoid integer division rounding.
 	return large*2 >= len(m)
+}
+
+// minDepositLovelace separates a pool deposit from a retirement epoch.
+// Pool deposits are at least 1 ADA on every network, while epoch numbers
+// are small (currently < 1,000), so the two PState maps that share the
+// pool-key-hash -> uint64 shape are told apart by magnitude.
+const minDepositLovelace = 1_000_000 // 1 ADA
+
+// poolKeyHashLen is the length in bytes of a pool key hash, whose
+// hex encoding is twice that.
+const poolKeyHashLen = 28
+
+// mergePoolRetirements decodes the selected PState retirement maps -- pool key
+// hash -> the epoch the pool is scheduled to retire at -- and records the
+// epoch on matching parsed pools. Unknown keys are retained so the importer
+// can report a partial pool-parameter decode instead of silently dropping a
+// scheduled retirement.
+func mergePoolRetirements(
+	pools []ParsedPool,
+	ps [][]byte,
+	retirementIndices []int,
+) map[uint64][][]byte {
+	known := make(map[string]struct{}, len(pools))
+	for i := range pools {
+		known[hex.EncodeToString(pools[i].PoolKeyHash)] = struct{}{}
+	}
+	for _, i := range retirementIndices {
+		elem := ps[i]
+		retiring := parsePoolUint64Map(elem)
+		if !looksLikeRetiringEpochs(retiring, known) {
+			continue
+		}
+		result := make(map[uint64][][]byte)
+		for j := range pools {
+			epoch, ok := retiring[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]
+			if !ok {
+				continue
+			}
+			pools[j].RetiringEpoch = &epoch
+			result[epoch] = append(result[epoch], slices.Clone(pools[j].PoolKeyHash))
+		}
+		for keyHash, epoch := range retiring {
+			if _, ok := known[keyHash]; !ok {
+				decoded, err := hex.DecodeString(keyHash)
+				if err == nil {
+					result[epoch] = append(result[epoch], decoded)
+				}
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+// looksLikeRetiringEpochs reports whether m is plausibly the PState
+// `retiring` map: non-empty, keyed by pool key hashes, every value small
+// enough to be an epoch number rather than a lovelace deposit, and mostly
+// naming pools that poolParams also registered.
+//
+// The poolParams check is a majority rather than a requirement on every key.
+// A retiring pool whose params entry failed to parse is absent from pools,
+// and rejecting the whole map over one such key would drop every other pool's
+// retirement too. Unknown keys are retained for import-time validation.
+func looksLikeRetiringEpochs(
+	m map[string]uint64,
+	known map[string]struct{},
+) bool {
+	if len(m) == 0 {
+		return false
+	}
+	var recognized int
+	for keyHash, epoch := range m {
+		if len(keyHash) != 2*poolKeyHashLen {
+			return false
+		}
+		if epoch >= minDepositLovelace {
+			return false
+		}
+		if _, ok := known[keyHash]; ok {
+			recognized++
+		}
+	}
+	// Use multiplication to avoid integer division rounding.
+	return recognized*2 >= len(m)
 }
 
 // ErrNotPoolParams signals that the input CBOR is not shaped like a full
@@ -1544,7 +1677,13 @@ func parseVState(data []byte) (
 	// hot-key authorizations and resignations alongside the DRep map; retain
 	// the credential tags so imported state cannot alias key and script hashes.
 	dreps, warning := parseDRepMap(vs[0])
-	hotKeys, resignations := parseCommitteeVState(vs[1:])
+	hotKeys, resignations, committeeErr := parseCommitteeVState(vs[1:])
+	if committeeErr != nil {
+		return nil, nil, nil, fmt.Errorf(
+			"parsing committee state: %w",
+			committeeErr,
+		)
+	}
 	return dreps, hotKeys, resignations, warning
 }
 
@@ -1564,7 +1703,8 @@ func looksLikeCommitteeCredentialMap(data []byte) bool {
 	if _, err := parseCredential(entry.KeyRaw); err != nil {
 		return false
 	}
-	_, err := parseCommitteeHotCredential(entry.ValueRaw)
+	// A resignation is still a committee map entry, so accept it here.
+	_, _, err := parseCommitteeAuthorization(entry.ValueRaw)
 	return err == nil
 }
 
@@ -1576,13 +1716,30 @@ func isCborArray(data []byte) bool {
 	return data[0]>>5 == 4 || data[0] == 0x9f
 }
 
+// committeeMapElement resolves the element parseCommitteeVState would read as
+// the committee hot-key map, unwrapping the historical single-array wrapper the
+// parser also accepts. The Conway heuristic scan uses it to test candidacy
+// before committing to a parse that fails closed on a malformed entry.
+func committeeMapElement(fields [][]byte) []byte {
+	if len(fields) == 0 {
+		return nil
+	}
+	if isCborArray(fields[0]) {
+		if nested, err := decodeRawElements(fields[0]); err == nil &&
+			len(nested) >= 2 {
+			return nested[0]
+		}
+	}
+	return fields[0]
+}
+
 func parseCommitteeVState(
 	fields [][]byte,
-) ([]ParsedCommitteeHotKey, []Credential) {
+) ([]ParsedCommitteeHotKey, []Credential, error) {
 	var hotKeys []ParsedCommitteeHotKey
 	var resignations []Credential
 	if len(fields) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders wrap
 	// those two fields in one committee-state array, which may itself be
@@ -1597,11 +1754,33 @@ func parseCommitteeVState(
 		}
 	}
 	entries, err := decodeMapEntries(committeeFields[0])
-	if err == nil {
+	if err == nil && len(entries) > 0 {
 		for _, entry := range entries {
+			// Fail closed on every entry. Dropping one silently leaves that
+			// member's authorization missing, and downstream a missing
+			// authorization is the same Conway unknown-voter rejection this
+			// parser exists to prevent -- a partial committee is as broken as
+			// an empty one, and quieter.
 			cold, coldErr := parseCredential(entry.KeyRaw)
-			hot, hotErr := parseCommitteeHotCredential(entry.ValueRaw)
-			if coldErr != nil || hotErr != nil {
+			if coldErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee cold credential: %w",
+					coldErr,
+				)
+			}
+			hot, resigned, hotErr := parseCommitteeAuthorization(
+				entry.ValueRaw,
+			)
+			if hotErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee authorization for cold "+
+						"credential %x: %w",
+					cold.Hash,
+					hotErr,
+				)
+			}
+			if resigned {
+				resignations = append(resignations, cold)
 				continue
 			}
 			hotKeys = append(
@@ -1611,7 +1790,7 @@ func parseCommitteeVState(
 		}
 	}
 	if len(committeeFields) < 2 {
-		return hotKeys, nil
+		return hotKeys, resignations, nil
 	}
 	resignationEntries, resignationErr := decodeMapEntries(committeeFields[1])
 	if resignationErr == nil {
@@ -1621,7 +1800,7 @@ func parseCommitteeVState(
 				resignations = append(resignations, cold)
 			}
 		}
-		return hotKeys, resignations
+		return hotKeys, resignations, nil
 	}
 	if values, arrayErr := decodeRawArray(committeeFields[1]); arrayErr == nil {
 		for _, value := range values {
@@ -1631,18 +1810,114 @@ func parseCommitteeVState(
 			}
 		}
 	}
-	return hotKeys, resignations
+	return hotKeys, resignations, nil
 }
 
-func parseCommitteeHotCredential(data []byte) (Credential, error) {
+// parseCommitteeAuthorization decodes one value of the committee map. The
+// ledger encodes it as the CommitteeAuthorization sum type:
+//
+//	[0, hot_credential]  CommitteeHotCredential -- the member authorized a hot key
+//	[1, maybe_anchor]    CommitteeMemberResigned
+//
+// Older encoders emitted a bare credential or a single-element wrapper, so both
+// are still accepted. Returning the resigned flag separately keeps a resignation
+// from being mistaken for an authorization, and keeps an unrecognized shape an
+// error rather than a silently dropped entry.
+func parseCommitteeAuthorization(
+	data []byte,
+) (Credential, bool, error) {
 	if credential, err := parseCredential(data); err == nil {
-		return credential, nil
+		return credential, false, nil
 	}
 	wrapped, err := decodeRawArray(data)
-	if err != nil || len(wrapped) != 1 {
-		return Credential{}, errors.New("decoding committee hot credential")
+	if err != nil {
+		return Credential{}, false, errors.New(
+			"decoding committee authorization",
+		)
 	}
-	return parseCredential(wrapped[0])
+	switch len(wrapped) {
+	case 1:
+		credential, credErr := parseCredential(wrapped[0])
+		return credential, false, credErr
+	case 2:
+		var tag uint64
+		if _, tagErr := cbor.Decode(wrapped[0], &tag); tagErr != nil {
+			return Credential{}, false, errors.New(
+				"decoding committee authorization tag",
+			)
+		}
+		switch tag {
+		case committeeAuthHotCredential:
+			credential, credErr := parseCredential(wrapped[1])
+			return credential, false, credErr
+		case committeeAuthResigned:
+			// The payload is StrictMaybe Anchor: absent (null) or an
+			// array. Anything else -- an integer, a bare byte string,
+			// a bool -- is not a resignation, and accepting it would
+			// let an unrelated credential-keyed map pass
+			// looksLikeCommitteeCredentialMap and be misread as the
+			// committee map by the Conway element scan.
+			if !isResignationPayload(wrapped[1]) {
+				return Credential{}, false, errors.New(
+					"decoding committee resignation payload",
+				)
+			}
+			return Credential{}, true, nil
+		}
+	}
+	return Credential{}, false, errors.New(
+		"decoding committee authorization",
+	)
+}
+
+// CommitteeAuthorization constructor tags.
+const (
+	committeeAuthHotCredential uint64 = 0
+	committeeAuthResigned      uint64 = 1
+)
+
+// isValidAnchor reports whether data is an anchor: [url, 32-byte hash]. The
+// shape and the hash length match parseConstitution's anchor handling.
+func isValidAnchor(data []byte) bool {
+	anchor, err := decodeRawArray(data)
+	if err != nil || len(anchor) != 2 {
+		return false
+	}
+	var url string
+	if _, err := cbor.Decode(anchor[0], &url); err != nil {
+		return false
+	}
+	var hash []byte
+	if _, err := cbor.Decode(anchor[1], &hash); err != nil {
+		return false
+	}
+	return len(hash) == 32
+}
+
+// isResignationPayload reports whether data is a StrictMaybe Anchor as the
+// ledger encodes it. encodeStrictMaybe writes an empty array for SNothing and a
+// one-element array wrapping the value for SJust, and decodeStrictMaybe rejects
+// every other shape -- including CBOR null and a bare anchor. Accepting those
+// would import as resignations two encodings the node never writes and its own
+// decoder refuses, so they are rejected here and reach the undecodable-entry
+// error path instead.
+func isResignationPayload(data []byte) bool {
+	// decodeRawArray accepts CBOR null, so check the major type first or the
+	// SNothing case below would let null through.
+	if !isCborArray(data) {
+		return false
+	}
+	items, err := decodeRawArray(data)
+	if err != nil {
+		return false
+	}
+	switch len(items) {
+	case 0: // SNothing
+		return true
+	case 1: // SJust anchor
+		return isValidAnchor(items[0])
+	}
+	return false
 }
 
 // parseDRepMap decodes a DRep credential -> DRepState map.

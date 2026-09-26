@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,4 +72,25 @@ mithril:
 		cfg.Mithril.Backend,
 		"env var should override YAML",
 	)
+}
+
+func TestMithrilPinnedDigestYAMLEnvAndCLI(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_MITHRIL_PINNED_DIGEST", "env-digest")
+	tmpFile := writeMithrilBackendTestConfig(t, `
+network: "preview"
+mithril:
+  pinnedDigest: "yaml-digest"
+`)
+	cfg, err := LoadConfig(tmpFile)
+	require.NoError(t, err)
+	assert.Equal(t, "env-digest", cfg.Mithril.PinnedDigest)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(
+		t, cmd.ParseFlags([]string{"--mithril-pinned-digest=cli-digest"}),
+	)
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	assert.Equal(t, "cli-digest", cfg.Mithril.PinnedDigest)
 }

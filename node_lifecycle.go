@@ -74,6 +74,7 @@ import (
 	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -81,6 +82,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/committeeauth"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -131,6 +133,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 		stops = append(stops, namedStop{
 			name: "block forger",
 			stop: func() error { n.blockForger.Stop(); return nil },
+		})
+	}
+	if n.kesAgentClient != nil {
+		stops = append(stops, namedStop{
+			name: "kes agent client",
+			stop: func() error { n.closeKESAgentClient(); return nil },
 		})
 	}
 	if n.leaderElection != nil {
@@ -328,6 +336,17 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("history expiry shutdown: %w", stopErr),
+			)
+		}
+	}
+	if n.committeeAuthSync != nil {
+		if stopErr := n.committeeAuthSync.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"committee auth immutable slot sync shutdown: %w",
+					stopErr,
+				),
 			)
 		}
 	}
@@ -682,6 +701,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
+		if err := n.enforceRecoveredNodeSettings(); err != nil {
+			return err
+		}
 	}
 
 	if n.config.historyExpiry.Enabled {
@@ -698,6 +720,21 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err := n.historyExpiry.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("failed to restart history expiry: %w", err)
 		}
+	}
+
+	// Unconditional and independent of history expiry: see the matching
+	// comment in node.go's startup path.
+	n.committeeAuthSync = committeeauth.NewSyncer(committeeauth.SyncerConfig{
+		PointAtDepth:     n.ledgerState.Chain().PointAtDepth,
+		SecurityParam:    n.ledgerState.SecurityParam,
+		SetImmutableSlot: n.db.SetCommitteeAuthImmutableSlot,
+		Logger:           n.config.logger,
+	})
+	if err := n.committeeAuthSync.Start(n.ctx); err != nil { //nolint:contextcheck
+		n.config.logger.Warn(
+			"failed to restart committee auth immutable slot sync",
+			"error", err,
+		)
 	}
 
 	if err := n.backfillRewardLiveStake(); err != nil {
@@ -794,6 +831,17 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	// Reinstall governance's same-boundary SPO stake hook too (dingo#4441) --
+	// see node.go's Run() for why a production node must always have this
+	// wired alongside the other two.
+	n.ledgerState.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
+		},
+	)
 
 	// Rebuild the Koios parity observer (if enabled) against the fresh
 	// n.db a live restore/truncate just reinitialized, and resubscribe it to
@@ -860,6 +908,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 // peerGov. Must run after reinitializeBackgroundManagers (mempool/
 // chainsyncState come after the background managers in Run()'s order,
 // though nothing here actually depends on them).
+//
+// Callers must hold n.liveLifecycleMu. Every field reassigned here is read
+// by live background goroutines that take that lock to see a stable set --
+// withLiveChainsyncState for n.chainsyncState, WithLiveComponents for the
+// wider group -- and the ledger's read-chain loop reaches n.chainsyncState
+// that way once per gather pass, through GetActiveConnectionFunc. Restore
+// and Truncate hold it across the whole quiesce-through-reinitialize
+// sequence; a caller that reaches this directly has to take it too.
 func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	mempoolSelection := n.config.pluginSelections[plugin.CapabilityMempool]
 	var err error
@@ -882,19 +938,10 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 
-	chainsyncCfg := chainsync.DefaultConfig()
-	if n.config.chainsyncMaxClients > 0 {
-		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
-	}
-	if n.config.chainsyncStallTimeout > 0 {
-		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
-	}
-	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
-	chainsyncCfg.PromRegistry = n.config.promRegistry
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
-		chainsyncCfg,
+		n.chainsyncConfig(),
 	)
 	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
 		chainsync.ClientRemoveRequestedEventType,
@@ -917,10 +964,12 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:        n.config.promRegistry,
-			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
-			MaxInboundConns:     n.config.maxInboundConns,
-			ConnClosedFunc:      n.handleConnManagerClosed,
+			PromRegistry:           n.config.promRegistry,
+			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
+			MaxInboundConns:        n.config.maxInboundConns,
+			MaxNtCConns:            n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
+			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
 		},
 	)
 	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
@@ -1252,7 +1301,7 @@ func (n *Node) reinitializeAPIServers() error {
 // election, block forger, Leios vote wiring) if block production is
 // enabled, reusing the same helper methods Run() calls
 // (node_forging.go) rather than duplicating their bodies.
-func (n *Node) reinitializeBlockProducer() error {
+func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if !n.config.blockProducer {
 		return nil
 	}
@@ -1260,6 +1309,16 @@ func (n *Node) reinitializeBlockProducer() error {
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
 	}
+	// validateBlockProducerStartup may have dialled a KES agent and started
+	// its serve-key loop. Unlike Run's failure path this one leaves the node
+	// running, so a failure below would otherwise leave that loop installing
+	// key pushes into credentials no forger holds, against an agent
+	// connection nothing reaches until the node shuts down.
+	defer func() {
+		if retErr != nil {
+			n.closeKESAgentClient()
+		}
+	}()
 	if err := n.validateBlockProducerLedger(creds); err != nil {
 		return fmt.Errorf(
 			"block producer credentials failed ledger check: %w",
@@ -1305,6 +1364,9 @@ func (n *Node) databaseConfig() *database.Config {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
 	}
 }
 
@@ -1608,6 +1670,9 @@ func (n *Node) Restore(
 		lifecycle.RestoreStorageConfig{
 			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				n.config.cardanoNodeConfig, "", n.config.network,
+			),
 		},
 	)
 	if err != nil {

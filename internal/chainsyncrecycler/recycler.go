@@ -62,6 +62,7 @@ type LedgerSource interface {
 // ChainsyncState is the chainsync client tracking the recycler drives.
 type ChainsyncState interface {
 	CheckStalledClients() []ouroboros.ConnectionId
+	CheckPatienceExhausted() []ouroboros.ConnectionId
 	AdvanceHeaderSyncRotation()
 	GetTrackedClients() []chainsync.TrackedClient
 	GetClientConnId() *ouroboros.ConnectionId
@@ -347,6 +348,30 @@ func shouldRecycleLocalTipPlateau(
 	return true
 }
 
+// advertisesForOwnConnection reports whether the peer whose advertised tip is
+// about to be trusted is the connection the plateau would recycle: either it is
+// the active chainsync client, or there is no active client and the plateau
+// would fall back to this peer anyway.
+//
+// The comparison is ConnectionId equality, which is the identity relation
+// chainselection.peerTips and chainsync.clients use as their map key, and which
+// gouroboros makes stable by populating Connection.id once per connection. It
+// is deliberately NOT the rendered address string the recycler uses to key its
+// cooldown map: a replacement connection to the same peer (listen-port reuse)
+// renders identically while being a distinct connection, and matching on the
+// rendering would let a stale peer tip authorize recycling the replacement.
+// Collapsing those onto one key is right for a rate limit and wrong for an
+// authorization.
+func advertisesForOwnConnection(
+	targetConn *ouroboros.ConnectionId,
+	bestPeer ouroboros.ConnectionId,
+) bool {
+	if targetConn == nil {
+		return true
+	}
+	return *targetConn == bestPeer
+}
+
 // isLedgerApplicationBacklog reports whether a local-tip plateau is caused by
 // the ledger pipeline replaying a backlog of already-fetched blocks rather than
 // by a stalled chainsync stream.
@@ -408,6 +433,7 @@ func (r *Recycler) tick(
 	effectiveGrace := time.Duration(multiplier) * r.config.Grace
 	effectivePlateau := r.plateauRecovery
 	effectiveCooldown := time.Duration(multiplier) * r.config.Cooldown
+	r.disconnectImpatientClients(live)
 	live.ChainsyncState.CheckStalledClients()
 	// Rotate the round-robin header-ingress driver on the stall-check
 	// cadence. No-op under the primary/parallel strategies.
@@ -483,10 +509,56 @@ func (r *Recycler) checkLocalTipPlateau(
 		return
 	}
 	bestPeerTipSlot := bestPeerTip.SelectionTip().Point.Slot
+	targetConn := live.ChainsyncState.GetClientConnId()
+	// SelectionTip is the peer's DELIVERED frontier, which a peer that has not
+	// delivered a header yet pins at the point its session intersected at.
+	// Immediately after a plateau resync that point is the local tip, so the
+	// comparison below disarms this watchdog exactly when it has just acted,
+	// and it cannot re-arm until some peer delivers a header -- which is the
+	// thing that is not happening. The peer's advertised tip is known and
+	// correct throughout that window, so use it while the peer is still
+	// awaiting its first header.
+	//
+	// "Awaiting its first header" is the flag chain selection sets when it
+	// registers a peer from a rollback, NOT a delivered block number of 0. A
+	// tracked peer that has delivered headers and then rolls back outside its
+	// retained delivered-header history is also left with block number 0, but
+	// it has delivered headers on this connection, so it is judged on its
+	// delivered frontier like any other and its advertisement is not used.
+	//
+	// This only ever runs because chain selection tracks that peer. The
+	// sequence a plateau resync sets off is: the resync closes the connection
+	// (LocalTipPlateau is in chainsyncResyncRequiresFreshConnection,
+	// ouroboros/chainsync.go), the ConnectionClosedEvent subscription in
+	// node.go calls ChainSelector.RemovePeer, which drops the peer tip and
+	// clears bestPeerConn, and the replacement's only chainsync traffic until
+	// the network's next block is its post-FindIntersect MsgRollBackward.
+	// Chain selection registers the peer from that rollback
+	// (registerPeerFromRollbackLocked) and exempts an entry with no delivered
+	// header from the two behind-filters in isPeerSelectableLocked, which is
+	// what makes it selectable with a delivered block number of 0. Without
+	// both of those GetBestPeer() is nil for the whole window and this
+	// function has already returned above -- the watchdog is not disarmed by
+	// the comparison, it has no peer to compare against at all. The two
+	// changes are only useful together, so keep them together.
+	//
+	// The advertised tip is untrusted, so the substitution is confined so that
+	// a peer can only ever spend it on itself: it applies only while the peer
+	// awaits its first header, only when it raises the comparison value, and
+	// only when the advertising peer is the connection this watchdog would
+	// recycle. Without that last condition a peer that fabricates a high tip
+	// and delivers nothing could drive repeated recycles of a different,
+	// honest upstream. With it, the worst it can do is have its own connection
+	// reconnected once per cooldown, while the local tip is standing still --
+	// which is what a peer that advertises a tip it never delivers warrants.
+	if bestPeerTip.AwaitingFirstHeader() &&
+		bestPeerTip.Tip.Point.Slot > bestPeerTipSlot &&
+		advertisesForOwnConnection(targetConn, *bestPeer) {
+		bestPeerTipSlot = bestPeerTip.Tip.Point.Slot
+	}
 	if bestPeerTipSlot <= localTipSlot {
 		return
 	}
-	targetConn := live.ChainsyncState.GetClientConnId()
 	if targetConn == nil {
 		targetCopy := *bestPeer
 		targetConn = &targetCopy
@@ -760,6 +832,27 @@ func (r *Recycler) processDueRecycles(
 		st.lastRecycled[connKey] = now
 	}
 }
+
+// disconnectImpatientClients closes every connection whose Genesis Limit on
+// Patience is exhausted. Unlike a stall, exhaustion is not subject to grace,
+// cooldown, or the only-eligible-peer guard: the peer is still sending, too
+// slowly for the progress it advertises, so keeping it holds a client slot and
+// a misleading candidate chain. The reference node likewise kills the
+// ChainSync client outright.
+func (r *Recycler) disconnectImpatientClients(live LiveComponents) {
+	for _, connId := range live.ChainsyncState.CheckPatienceExhausted() {
+		connKey := connId.String()
+		r.logger.Warn(
+			"chainsync client exhausted the Genesis Limit on Patience, disconnecting",
+			"connection_id", connKey,
+		)
+		r.publishConnectionRecycle(connId, connKey, ReasonPatienceExhausted)
+	}
+}
+
+// ReasonPatienceExhausted is the ConnectionRecycleRequestedEvent reason for a
+// peer disconnected by the Genesis Limit on Patience.
+const ReasonPatienceExhausted = "genesis_patience_exhausted"
 
 func (r *Recycler) publishConnectionRecycle(
 	connId ouroboros.ConnectionId,

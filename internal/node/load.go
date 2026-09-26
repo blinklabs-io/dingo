@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -232,6 +233,9 @@ func ensureDB(
 		StartEra:       string(cfg.StartEra),
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			nil, cfg.CardanoConfig, cfg.Network,
+		),
 	}
 	runtime, err := internalplugins.OpenDatabase(
 		context.Background(),
@@ -568,7 +572,7 @@ func LoadWithDB(
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
@@ -693,6 +697,20 @@ func LoadWithDB(
 	ls.SetEpochBoundarySnapshotStakeHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	)
+	// Governance's same-boundary SPO stake read (dingo#4441): RATIFY tallies
+	// mark[NewEpoch] -- this same boundary's own mark snapshot -- which is not
+	// durably written until the capture hook below runs, later in the same
+	// rollover. Load replays the exact same governance.ProcessEpoch path as
+	// serve mode, so it needs this wired too; without it, every SPO-gated
+	// action would silently see zero stake at every replayed boundary.
+	ls.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return snapshotMgr.CurrentBoundarySPOStakeRows(ctx, txn, evt)
 		},
 	)
 	if err := installEpochBoundarySnapshotHookForLoad(
@@ -1002,6 +1020,11 @@ func copyBlocksDirect(
 				"decoding block CBOR: %w", err,
 			)
 		}
+		if len(blockBatch) == 0 {
+			return blocksCopied, immutableTip.Slot, errors.New(
+				"decoding block CBOR: non-empty batch decoded to no blocks",
+			)
+		}
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
@@ -1050,6 +1073,25 @@ type immutableDecodeJob struct {
 	block immutable.Block
 }
 
+// immutableBlockDecoder is a test seam: production decoding ignores the
+// context and index, while tests can fail a selected job and observe the
+// derived cancellation context. NewBlockFromCbor itself is not cancellable.
+type immutableBlockDecoder func(
+	context.Context,
+	int,
+	immutable.Block,
+	lcommon.VerifyConfig,
+) (gledger.Block, error)
+
+func decodeImmutableBlock(
+	_ context.Context,
+	_ int,
+	block immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+) (gledger.Block, error) {
+	return gledger.NewBlockFromCbor(block.Type, block.Cbor, verifyCfg)
+}
+
 // decodeImmutableBlockBatch decodes a bounded batch with ordered results.
 // Sending jobs through a small buffered channel provides backpressure, while
 // the result index prevents completion order from changing chain order. A
@@ -1060,6 +1102,18 @@ func decodeImmutableBlockBatch(
 	rawBlocks []immutable.Block,
 	verifyCfg lcommon.VerifyConfig,
 	workerCount int,
+) ([]gledger.Block, error) {
+	return decodeImmutableBlockBatchWithDecoder(
+		ctx, rawBlocks, verifyCfg, workerCount, decodeImmutableBlock,
+	)
+}
+
+func decodeImmutableBlockBatchWithDecoder(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+	workerCount int,
+	decoder immutableBlockDecoder,
 ) ([]gledger.Block, error) {
 	if len(rawBlocks) == 0 {
 		return nil, nil
@@ -1091,8 +1145,8 @@ func decodeImmutableBlockBatch(
 					if !ok {
 						return
 					}
-					block, err := gledger.NewBlockFromCbor(
-						job.block.Type, job.block.Cbor, verifyCfg,
+					block, err := decoder(
+						decodeCtx, job.index, job.block, verifyCfg,
 					)
 					select {
 					case results <- immutableDecodeResult{

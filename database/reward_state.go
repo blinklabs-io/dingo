@@ -50,6 +50,55 @@ func (d *Database) RebuildRewardLiveStake(slot uint64, txn *Txn) error {
 	return nil
 }
 
+// RebuildRewardLiveStakeFromRunningTotals finalizes the aggregate after a
+// Mithril API backfill. The snapshot importer has already maintained the
+// reward_live_stake.utxo_stake running totals while loading the live UTxO set;
+// historical replay does not change that set, so rescanning every UTxO here
+// would only repeat work. Providers without this optional fast path fall back
+// to the authoritative rebuild.
+func (d *Database) RebuildRewardLiveStakeFromRunningTotals(
+	slot uint64,
+	txn *Txn,
+) error {
+	finalizer, ok := d.metadata.(interface {
+		RebuildRewardLiveStakeFromRunningTotals(uint64, types.Txn) error
+	})
+	if !ok {
+		return d.RebuildRewardLiveStake(slot, txn)
+	}
+	if txn == nil {
+		return d.MetadataTxn(true).Do(func(t *Txn) error {
+			return finalizer.RebuildRewardLiveStakeFromRunningTotals(
+				slot,
+				t.Metadata(),
+			)
+		})
+	}
+	if txn.db != d || txn.Metadata() == nil {
+		return fmt.Errorf(
+			"rebuild reward live stake from running totals: %w",
+			types.ErrTxnWrongType,
+		)
+	}
+	if !txn.IsReadWrite() {
+		return fmt.Errorf(
+			"rebuild reward live stake from running totals: %w",
+			types.ErrTxnWrongType,
+		)
+	}
+	if err := finalizer.RebuildRewardLiveStakeFromRunningTotals(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"rebuild reward live stake from running totals at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	return nil
+}
+
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from
 // rolled-back blocks.
 func (d *Database) DeleteRewardStateAfterSlot(

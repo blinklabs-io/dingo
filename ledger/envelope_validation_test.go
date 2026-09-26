@@ -96,18 +96,18 @@ func TestValidateInboundBlockExUnitsAggregatesDeclaredBudgets(t *testing.T) {
 	t.Parallel()
 
 	newTx := func(memory, steps int64) lcommon.Transaction {
-		return &mockFeeTx{
-			witnesses: &mockWitnessSet{
-				redeemers: &mockRedeemers{entries: []struct {
-					key lcommon.RedeemerKey
-					val lcommon.RedeemerValue
-				}{
-					{val: lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
-						Memory: memory,
-						Steps:  steps,
-					}}},
-				}},
+		return &dijkstra.DijkstraTransaction{
+			WitnessSet: dijkstra.DijkstraTransactionWitnessSet{
+				WsRedeemers: dijkstra.DijkstraRedeemers{
+					Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+						{}: {ExUnits: lcommon.ExUnits{
+							Memory: memory,
+							Steps:  steps,
+						}},
+					},
+				},
 			},
+			TxIsValid: false,
 		}
 	}
 	pparams := &conway.ConwayProtocolParameters{
@@ -356,7 +356,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	err = validateInboundBlockEnvelope(
@@ -369,7 +369,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
 }
 
-func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
+func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *testing.T) {
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -377,7 +377,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 	)
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	require.NoError(t, validateInboundBlockEnvelope(
@@ -403,8 +403,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 		config,
 		envelopeParent{origin: true},
 	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+	require.NoError(t, err)
 }
 
 func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
@@ -636,29 +635,125 @@ func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
 	)
 }
 
-// TestValidateInboundBlockEnvelopeByronEbbOrdering covers the Byron EBB rule
-// that an EBB shares its parent's block number instead of incrementing it.
-func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
-	t.Parallel()
-
-	parent := envelopeParent{
-		slot:        byron.ByronSlotsPerEpoch,
-		blockNumber: 7,
-	}
+func byronOrderingEbb(
+	epoch, blockNumber uint64,
+) *byron.ByronEpochBoundaryBlock {
 	ebb := &byron.ByronEpochBoundaryBlock{
 		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
 	}
-	ebb.BlockHeader.ConsensusData.Epoch = 1
-	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber
-	// This structured block deliberately has no wire CBOR: this test isolates
-	// the EBB ordering rule. The golden-fixture test above covers the body proof
-	// against the real serialized body.
-	require.NoError(t, validateInboundBlockEnvelope(ebb, nil, nil, parent))
+	ebb.BlockHeader.ConsensusData.Epoch = epoch
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+	return ebb
+}
 
-	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber + 1
-	err := validateInboundBlockEnvelope(ebb, nil, nil, parent)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not match parent block number")
+func byronOrderingMain(
+	epoch, slot, blockNumber uint64,
+) *byron.ByronMainBlock {
+	block := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{},
+	}
+	block.BlockHeader.ConsensusData.SlotId.Epoch = epoch
+	block.BlockHeader.ConsensusData.SlotId.Slot = slot
+	block.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+	return block
+}
+
+// TestValidateInboundBlockEnvelopeByronEbbOrdering covers #4408: the four
+// parent/block combinations of the Byron envelope, including consecutive
+// EBBs across an otherwise empty epoch. These structured blocks deliberately
+// have no wire CBOR, so this isolates the ordering rule; the golden-fixture
+// test above covers the body proof against the real serialized body.
+func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
+	t.Parallel()
+
+	const epochSlots = byron.ByronSlotsPerEpoch
+	regular := func(slot, blockNumber uint64) envelopeParent {
+		return envelopeParent{slot: slot, blockNumber: blockNumber}
+	}
+	ebbParent := func(epoch, blockNumber uint64) envelopeParent {
+		return envelopeParent{
+			slot:        epoch * epochSlots,
+			blockNumber: blockNumber,
+			byronEbb:    true,
+		}
+	}
+	tests := []struct {
+		name    string
+		block   gledger.Block
+		parent  envelopeParent
+		wantErr string
+	}{
+		{
+			"regular to regular",
+			byronOrderingMain(1, 5, 8),
+			regular(epochSlots+4, 7),
+			"",
+		},
+		{
+			"regular to regular same slot",
+			byronOrderingMain(1, 4, 8),
+			regular(epochSlots+4, 7),
+			"does not follow parent slot",
+		},
+		{
+			"regular to EBB",
+			byronOrderingEbb(2, 7),
+			regular(2*epochSlots-1, 7),
+			"",
+		},
+		{
+			"regular to EBB with next number",
+			byronOrderingEbb(2, 8),
+			regular(2*epochSlots-1, 7),
+			"does not match expected block number 7",
+		},
+		{
+			"EBB to regular same slot",
+			byronOrderingMain(2, 0, 8),
+			ebbParent(2, 7),
+			"",
+		},
+		{
+			"EBB to regular same number",
+			byronOrderingMain(2, 0, 7),
+			ebbParent(2, 7),
+			"does not follow parent block number",
+		},
+		{
+			"EBB to EBB across an empty epoch",
+			byronOrderingEbb(3, 8),
+			ebbParent(2, 7),
+			"",
+		},
+		{
+			"EBB to EBB with equal number",
+			byronOrderingEbb(3, 7),
+			ebbParent(2, 7),
+			"does not match expected block number 8",
+		},
+		{
+			"EBB to EBB with equal slot",
+			byronOrderingEbb(2, 8),
+			ebbParent(2, 7),
+			"does not follow parent slot",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateInboundBlockEnvelope(
+				test.block,
+				nil,
+				nil,
+				test.parent,
+			)
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
 }
 
 // TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs
@@ -731,7 +826,7 @@ func newByronEnvelopeNodeConfig(
 	}`, maxBlockSize, maxHeaderSize)
 	require.NoError(
 		t,
-		config.LoadByronGenesisFromReader(strings.NewReader(genesis)),
+		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),
 	)
 	return config
 }
@@ -771,7 +866,7 @@ func substituteByronMainTxPayload(t *testing.T, blockCbor []byte) []byte {
 	_, err = cbor.Decode(block[1], &body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(body), 4)
-	emptyTxPayload, err := cbor.Encode([]any{})
+	emptyTxPayload, err := cbor.Encode(cbor.IndefLengthList{})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(body[0]), emptyTxPayload)
 	body[0] = emptyTxPayload
@@ -788,11 +883,65 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 	_, err := cbor.Decode(blockCbor, &block)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(block), 2)
-	emptyBody, err := cbor.Encode([]any{})
+	emptyBody, err := cbor.Encode(cbor.IndefLengthList{[]byte{0}})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(block[1]), emptyBody)
 	block[1] = emptyBody
 	tampered, err := cbor.Encode(block)
 	require.NoError(t, err)
 	return tampered
+}
+
+// TestValidateBlockOrderPinsTheEqualSlotAlternativeShape pins, from the
+// validator's side, exactly which of the two possible equal-slot blocks may
+// ever be built.
+//
+// When a rival occupies the slot this node is about to forge, there are two
+// candidate shapes. Binding the parent to the live chain tip -- what
+// DefaultBlockBuilder does for an uncontested slot -- names the rival as
+// parent, so the block's parent slot equals its own and this validator rejects
+// it; so does every Praos peer. Binding the rival's predecessor instead (the
+// alternative-block context, mirroring ouroboros-consensus
+// mkCurrentBlockContext) is a well-ordered sibling of the rival and passes.
+//
+// DefaultBlockBuilder refuses to construct the first shape at all
+// (TestBuildBlockRefusesAParentAtItsOwnSlot in ledger/forging); this test
+// documents why it must, and fails if either side of the rule ever moves.
+func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
+	const (
+		predecessorSlot   = uint64(999)
+		predecessorNumber = uint64(99)
+		contestedSlot     = uint64(1000)
+		rivalNumber       = predecessorNumber + 1
+	)
+
+	// The block a live-tip-bound builder would produce at a contested slot:
+	// the rival is the parent, so parent slot == block slot.
+	sameSlotParent := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber + 1,
+			era:    shelley.EraShelley,
+		},
+	}
+	err := validateBlockOrder(sameSlotParent, envelopeParent{
+		slot:        contestedSlot,
+		blockNumber: rivalNumber,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not follow parent slot")
+
+	// The alternative: same block number as the rival, the rival's
+	// predecessor as parent.
+	alternative := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber,
+			era:    shelley.EraShelley,
+		},
+	}
+	require.NoError(t, validateBlockOrder(alternative, envelopeParent{
+		slot:        predecessorSlot,
+		blockNumber: predecessorNumber,
+	}))
 }

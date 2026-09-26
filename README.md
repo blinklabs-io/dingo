@@ -4,7 +4,6 @@
   <img src="./.github/assets/dingo-logo-with-text-horizontal.png" alt="Dingo Logo" width="640">
   <br>
   <img alt="GitHub" src="https://img.shields.io/github/license/blinklabs-io/dingo">
-  <a href="https://goreportcard.com/report/github.com/blinklabs-io/dingo"><img src="https://goreportcard.com/badge/github.com/blinklabs-io/dingo" alt="Go Report Card"></a>
   <a href="https://pkg.go.dev/github.com/blinklabs-io/dingo"><img src="https://pkg.go.dev/badge/github.com/blinklabs-io/dingo.svg" alt="Go Reference"></a>
   <a href="https://discord.gg/5fPRZnX4qW"><img src="https://img.shields.io/badge/Discord-7289DA?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
 </div>
@@ -607,6 +606,12 @@ Or use the subcommand form for more control:
 ./dingo -n preview mithril sync
 ```
 
+For reproducible fresh-bootstrap comparisons, pin an exact artifact with
+`--mithril-pinned-digest <identity>` or `DINGO_MITHRIL_PINNED_DIGEST`. The
+identity is a snapshot digest for the v1 backend and a Cardano database
+artifact hash for v2. The pin is rejected for catch-up runs and cannot override
+the artifact recorded by an interrupted import.
+
 The Docker entrypoint manages both a first-run or resumed Mithril sync and the
 subsequent `serve` process as direct children. It forwards SIGINT and SIGTERM
 to whichever child is active, waits for that child to finish, and returns the
@@ -1057,9 +1062,26 @@ make test                                    # All tests with race detection
 go test -v -race -run TestName ./package/    # Single test
 make bench                                   # Benchmarks
 make bench-mempool                           # Compare FIFO and DAG mempools
-make docs-parity                             # Docs agree with go.mod, Makefile, compose
+make docs-parity                             # Docs agree with go.mod, Makefile, compose, Koios matrix
 make sql-check                               # Generated sqlc output is current
 ```
+
+### Conformance profiles
+
+Dingo reports compatibility in separate layers. The ledger corpus is the
+pinned Cardano Blueprint archive consumed from `ouroboros-mock`; a green ledger
+result is not complete node conformance.
+
+| Profile | Command | Current scope |
+| --- | --- | --- |
+| Ledger rules | `go test ./internal/test/conformance/` | Blueprint ledger vectors, Dingo era validation entry points, and real SQLite/backend behavior; reports counts by era and rule family |
+| Deterministic consensus | `go test ./ouroboros/ -run TestConsensusConformance` | Five shared scenarios covering origin ingestion, within-k and beyond-k forks, rollback/intersection, tie-breaking, and downstream ChainSync observations |
+| Reference node | `./internal/test/devnet/run-tests.sh --conformance` | Explicit Dingo-versus-`cardano-node` live compatibility profile; it is not run by either deterministic profile |
+
+The release and Linux CI gates run the ledger and deterministic profiles as
+part of `./...`; the verbose profile reports contain the exact corpus and
+scenario counts. Reference-node compatibility remains an explicit DevNet
+check and is not represented as passing when that profile was not run.
 
 ### Profiling
 

@@ -262,7 +262,7 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 		t.Fatalf("encoding PState: %v", err)
 	}
 
-	pools, err := parsePState(pstate)
+	pools, _, err := parsePStateWithRetirements(pstate)
 	if err != nil {
 		t.Fatalf("parsePState failed: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 				t.Fatalf("encoding PState: %v", err)
 			}
 
-			pools, err := parsePState(pstate)
+			pools, _, err := parsePStateWithRetirements(pstate)
 			if tc.wantError {
 				if err == nil {
 					t.Fatal("expected malformed Leios key to fail")
@@ -507,9 +507,12 @@ func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
 	hotMap = append(hotMap, hotCredential...)
 	resignMap := append([]byte{0xa1}, scriptCredential...)
 	resignMap = append(resignMap, 0xf5)
-	hotKeys, resignations := parseCommitteeVState(
+	hotKeys, resignations, err := parseCommitteeVState(
 		[][]byte{hotMap, resignMap},
 	)
+	if err != nil {
+		t.Fatalf("parseCommitteeVState returned an error: %v", err)
+	}
 	if len(hotKeys) != 1 || len(resignations) != 1 {
 		t.Fatalf(
 			"unexpected committee state: %d authorizations, %d resignations",
@@ -572,10 +575,13 @@ func TestParseCommitteeVStateUnwrapsNestedStateWithTrailingFields(
 	nested := append([]byte{0x82}, hotMap...)
 	nested = append(nested, resignMap...)
 
-	hotKeys, resignations := parseCommitteeVState(
+	hotKeys, resignations, err := parseCommitteeVState(
 		// [committeeState, dormantEpoch]
 		[][]byte{nested, {0x00}},
 	)
+	if err != nil {
+		t.Fatalf("parseCommitteeVState returned an error: %v", err)
+	}
 	if len(hotKeys) != 1 || len(resignations) != 1 {
 		t.Fatalf(
 			"nested committee state was dropped: %d authorizations, %d resignations",
@@ -724,5 +730,342 @@ func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestParseCommitteeVStateAuthorizationSumType covers the encoding mainnet
+// actually uses. The committee map's values are the CommitteeAuthorization sum
+// type, [0, hot_credential] for an authorization and [1, maybe_anchor] for a
+// resignation. Before the fix, parseCommitteeHotCredential accepted only a bare
+// credential or a one-element wrapper, so every real entry was skipped and
+// auth_committee_hot was imported empty -- which made every constitutional
+// committee vote fail the Conway unknown-voter rule.
+func TestParseCommitteeVStateAuthorizationSumType(t *testing.T) {
+	coldHash := toFixed28(bytes.Repeat([]byte{0x11}, 28))
+	hotHash := toFixed28(bytes.Repeat([]byte{0x22}, 28))
+	resignedCold := toFixed28(bytes.Repeat([]byte{0x33}, 28))
+
+	coldCred, err := cbor.Encode([]any{uint64(1), coldHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resignedCred, err := cbor.Encode([]any{uint64(0), resignedCold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// value = [0, [1, hotHash]]  -- CommitteeHotCredential
+	authValue, err := cbor.Encode(
+		[]any{uint64(0), []any{uint64(1), hotHash}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// value = [1, []]  -- CommitteeMemberResigned with SNothing, which is
+	// how encodeStrictMaybe writes an absent anchor.
+	resignValue, err := cbor.Encode([]any{uint64(1), []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	committeeMap := []byte{0xa2}
+	committeeMap = append(committeeMap, coldCred...)
+	committeeMap = append(committeeMap, authValue...)
+	committeeMap = append(committeeMap, resignedCred...)
+	committeeMap = append(committeeMap, resignValue...)
+
+	hotKeys, resignations, err := parseCommitteeVState(
+		[][]byte{committeeMap, {0x00}},
+	)
+	if err != nil {
+		t.Fatalf("parseCommitteeVState returned an error: %v", err)
+	}
+	if len(hotKeys) != 1 {
+		t.Fatalf("expected 1 authorization, got %d", len(hotKeys))
+	}
+	if len(resignations) != 1 {
+		t.Fatalf("expected 1 resignation, got %d", len(resignations))
+	}
+	if hotKeys[0].Cold.Type != CredentialTypeScript {
+		t.Fatalf("cold credential tag lost: %#v", hotKeys[0].Cold)
+	}
+	if hotKeys[0].Hot.Type != CredentialTypeScript {
+		t.Fatalf("hot credential tag lost: %#v", hotKeys[0].Hot)
+	}
+	if !bytes.Equal(hotKeys[0].Hot.Hash, hotHash[:]) {
+		t.Fatalf("hot credential hash mismatch: %x", hotKeys[0].Hot.Hash)
+	}
+	if resignations[0].Type != CredentialTypeKey {
+		t.Fatalf("resignation tag lost: %#v", resignations[0])
+	}
+}
+
+// TestParseCommitteeVStateFailsLoudOnUndecodableEntries asserts that a
+// committee map with entries none of which can be decoded is an error rather
+// than a silently empty result. Returning empty here is indistinguishable from
+// a genuinely unauthorized committee, which is how the mainnet halt went
+// unnoticed through an entire bootstrap.
+func TestParseCommitteeVStateFailsLoudOnUndecodableEntries(t *testing.T) {
+	coldHash := toFixed28(bytes.Repeat([]byte{0x44}, 28))
+	coldCred, err := cbor.Encode([]any{uint64(1), coldHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A value shape the parser does not recognise: a 3-element array.
+	badValue, err := cbor.Encode([]any{uint64(9), uint64(9), uint64(9)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	committeeMap := []byte{0xa1}
+	committeeMap = append(committeeMap, coldCred...)
+	committeeMap = append(committeeMap, badValue...)
+
+	hotKeys, resignations, err := parseCommitteeVState(
+		[][]byte{committeeMap, {0x00}},
+	)
+	if err == nil {
+		t.Fatalf(
+			"expected an error, got %d hot keys and %d resignations",
+			len(hotKeys),
+			len(resignations),
+		)
+	}
+}
+
+// TestParseCommitteeAuthorizationRejectsNonAnchorResignation is the near miss
+// that matters: [1, <uint>] is a two-element array tagged as a resignation but
+// carries no valid StrictMaybe Anchor. Accepting it would widen
+// looksLikeCommitteeCredentialMap enough for the Conway element scan to
+// misidentify an unrelated credential-keyed map as the committee map.
+func TestParseCommitteeAuthorizationRejectsNonAnchorResignation(t *testing.T) {
+	bad, err := cbor.Encode([]any{uint64(1), uint64(12345)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := parseCommitteeAuthorization(bad); err == nil {
+		t.Fatal("expected [1, uint] to be rejected as a resignation")
+	}
+
+	// SNothing is an empty array, so that is the absent anchor that parses.
+	good, err := cbor.Encode([]any{uint64(1), []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, resigned, err := parseCommitteeAuthorization(good)
+	if err != nil {
+		t.Fatalf("[1, []] should parse as a resignation: %v", err)
+	}
+	if !resigned {
+		t.Fatal("[1, []] should be flagged as resigned")
+	}
+
+	// CBOR null is what the certificate codec writes, not the ledger state's
+	// StrictMaybe, and decodeStrictMaybe refuses it.
+	nullPayload, err := cbor.Encode([]any{uint64(1), nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := parseCommitteeAuthorization(nullPayload); err == nil {
+		t.Fatal("[1, null] is not a StrictMaybe encoding and must be rejected")
+	}
+
+	// And a map whose values are [1, <uint>] must not look like a committee.
+	credential, err := cbor.Encode(
+		[]any{uint64(0), toFixed28(bytes.Repeat([]byte{0x55}, 28))},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := append([]byte{0xa1}, credential...)
+	m = append(m, bad...)
+	if looksLikeCommitteeCredentialMap(m) {
+		t.Fatal("a [1, uint]-valued map must not look like a committee map")
+	}
+}
+
+// anchorCBOR builds an anchor, [url, hash], with a hash of the given length.
+func anchorCBOR(t *testing.T, hashLen int) []byte {
+	t.Helper()
+	anchor, err := cbor.Encode(
+		[]any{"https://example.com", bytes.Repeat([]byte{0x77}, hashLen)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return anchor
+}
+
+// TestParseCommitteeAuthorizationRejectsMalformedAnchor closes the fail-open
+// gap in the resignation branch. [1, [1]] is tagged as a resignation and its
+// payload is an array, but not a well-formed anchor, so it must reach the
+// undecodable-entry error path rather than import as a resignation.
+func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
+	t.Parallel()
+
+	good32 := anchorCBOR(t, 32)
+
+	// [anchor] -- SJust, the one-element StrictMaybe wrapper.
+	wrapped, err := cbor.Encode([]any{cbor.RawMessage(good32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := map[string][]byte{
+		"empty array (SNothing)": {0x80},
+		"wrapped anchor (SJust)": wrapped,
+	}
+
+	for name, payload := range valid {
+		entry, err := cbor.Encode(
+			[]any{uint64(1), cbor.RawMessage(payload)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, resigned, err := parseCommitteeAuthorization(entry)
+		if err != nil {
+			t.Fatalf("%s should parse as a resignation: %v", name, err)
+		}
+		if !resigned {
+			t.Fatalf("%s should be flagged as resigned", name)
+		}
+	}
+
+	shortHash, err := cbor.Encode([]any{uint64(1), cbor.RawMessage(anchorCBOR(t, 31))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedScalar, err := cbor.Encode([]any{uint64(1), []any{uint64(1)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	threeField, err := cbor.Encode(
+		[]any{uint64(1), []any{"https://example.com", bytes.Repeat([]byte{0x77}, 32), uint64(9)}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped, err := cbor.Encode(
+		[]any{uint64(1), []any{bytes.Repeat([]byte{0x77}, 32), "https://example.com"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nullPayload, err := cbor.Encode([]any{uint64(1), nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bareAnchor, err := cbor.Encode(
+		[]any{uint64(1), cbor.RawMessage(good32)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, entry := range map[string][]byte{
+		"array of a scalar":     nestedScalar,
+		"anchor hash too short": shortHash,
+		"three-field anchor":    threeField,
+		"url and hash swapped":  swapped,
+		// Neither is a StrictMaybe encoding; decodeStrictMaybe refuses both.
+		"null payload": nullPayload,
+		"bare anchor":  bareAnchor,
+	} {
+		if _, _, err := parseCommitteeAuthorization(entry); err == nil {
+			t.Fatalf("%s must not decode as a resignation", name)
+		}
+	}
+}
+
+// TestParseCommitteeVStateRejectsMalformedResignationMap is the same gap at the
+// map level: a committee map whose every value is a malformed resignation must
+// fail the import loudly instead of yielding an empty committee, and must not
+// satisfy looksLikeCommitteeCredentialMap for the Conway element scan.
+func TestParseCommitteeVStateRejectsMalformedResignationMap(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode(
+		[]any{uint64(0), toFixed28(bytes.Repeat([]byte{0x66}, 28))},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed, err := cbor.Encode([]any{uint64(1), []any{uint64(1)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := append([]byte{0xa1}, credential...)
+	m = append(m, malformed...)
+
+	if looksLikeCommitteeCredentialMap(m) {
+		t.Fatal("a malformed-resignation map must not look like a committee map")
+	}
+	if _, _, err := parseCommitteeVState([][]byte{m, {0x00}}); err == nil {
+		t.Fatal("a committee map of undecodable entries must fail the import")
+	}
+}
+
+// TestParseCommitteeVStateFailsOnPartiallyUndecodableMap covers the gap the
+// all-or-nothing guard left open: a map holding one good authorization beside
+// one undecodable entry used to return the single hot key and a nil error, so
+// the other member's authorization vanished. Downstream that is the same
+// Conway unknown-voter rejection an empty committee causes, just harder to
+// see, so any undecodable entry must fail the import.
+func TestParseCommitteeVStateFailsOnPartiallyUndecodableMap(t *testing.T) {
+	t.Parallel()
+
+	coldGood := toFixed28(bytes.Repeat([]byte{0xa1}, 28))
+	coldBad := toFixed28(bytes.Repeat([]byte{0xa2}, 28))
+	hot := toFixed28(bytes.Repeat([]byte{0xb1}, 28))
+
+	enc := func(v any) []byte {
+		t.Helper()
+		b, err := cbor.Encode(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	goodKey := enc([]any{uint64(1), coldGood})
+	goodVal := enc([]any{uint64(0), cbor.RawMessage(enc([]any{uint64(1), hot}))})
+	badKey := enc([]any{uint64(1), coldBad})
+
+	for name, badVal := range map[string][]byte{
+		// A resignation whose payload is not a StrictMaybe Anchor.
+		"malformed resignation": enc([]any{uint64(1), []any{uint64(1)}}),
+		// An authorization tag the sum type does not define.
+		"unknown tag": enc([]any{uint64(2), cbor.RawMessage(goodVal)}),
+		// A credential tag outside the defined range.
+		"bad credential tag": enc(
+			[]any{uint64(0), cbor.RawMessage(enc([]any{uint64(5), hot}))},
+		),
+	} {
+		m := []byte{0xa2}
+		m = append(m, goodKey...)
+		m = append(m, goodVal...)
+		m = append(m, badKey...)
+		m = append(m, badVal...)
+
+		hotKeys, resignations, err := parseCommitteeVState(
+			[][]byte{m, {0x00}},
+		)
+		if err == nil {
+			t.Fatalf(
+				"%s: a map with one undecodable entry must fail the "+
+					"import, got %d hot keys and %d resignations",
+				name,
+				len(hotKeys),
+				len(resignations),
+			)
+		}
+		if hotKeys != nil || resignations != nil {
+			t.Fatalf(
+				"%s: a failed committee parse must not return partial "+
+					"results, got %d hot keys and %d resignations",
+				name,
+				len(hotKeys),
+				len(resignations),
+			)
+		}
 	}
 }

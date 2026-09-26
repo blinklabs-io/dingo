@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"iter"
@@ -110,6 +111,21 @@ type mockConwayFeeTx struct {
 	outputs            []lcommon.TransactionOutput
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
+}
+
+type mockCommitteeEpochState struct {
+	*mockLedgerState
+	epoch uint64
+}
+
+func (s *mockCommitteeEpochState) EpochForSlot(uint64) (uint64, error) {
+	return s.epoch, nil
+}
+
+func (s *mockCommitteeEpochState) IsStakeCredentialRegistered(
+	_ lcommon.Credential,
+) bool {
+	return true
 }
 
 func (m *mockConwayFeeTx) Inputs() []lcommon.TransactionInput {
@@ -636,19 +652,33 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		descriptors,
 		gdijkstra.UtxoValidationRules,
 		lcommon.UtxoValidationRuleCommitteeCertificates,
-		"conway.UtxoValidateCommitteeCertificates",
+		"dijkstra.UtxoValidateCommitteeCertificates",
 	)
 	votersIndex := requireRuleIdResolvesToFunc(
 		t,
 		descriptors,
 		gdijkstra.UtxoValidationRules,
 		lcommon.UtxoValidationRuleUnknownVoters,
-		"conway.UtxoValidateUnknownVoters",
+		"dijkstra.UtxoValidateUnknownVoters",
 	)
 	require.Len(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		len(gdijkstra.UtxoValidationRules)-1,
+		len(gdijkstra.UtxoValidationRules),
+	)
+	plutusIndex := requireRuleIdResolvesToFunc(
+		t,
+		descriptors,
+		gdijkstra.UtxoValidationRules,
+		lcommon.UtxoValidationRulePlutusScripts,
+		"dijkstra.UtxoValidatePlutusScripts",
+	)
+	requireIndexedRulesReplaceRuleIndex(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		plutusIndex,
+		validateDijkstraPlutusV3ReferenceInputs,
+		"Dijkstra validation must enforce PV11 Plutus V3 reference-input disjointness",
 	)
 	requireIndexedRulesReplaceRuleIndex(
 		t,
@@ -664,6 +694,120 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		validateUnknownVoters,
 		"Dijkstra validation must preserve committee hot credential tags",
 	)
+}
+
+func TestDijkstraCommitteeValidatorChecksSubtransactionLevels(t *testing.T) {
+	t.Parallel()
+	cold := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224Hash([]byte("nested committee cold")),
+	}
+	hot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224Hash([]byte("nested committee hot")),
+	}
+	resign := &lcommon.ResignCommitteeColdCertificate{ColdCredential: cold}
+	authorize := &lcommon.AuthCommitteeHotCertificate{
+		ColdCredential: cold,
+		HotCredential:  hot,
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		TxIsValid: true,
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType([]gdijkstra.DijkstraSubTransaction{
+				{Body: gdijkstra.DijkstraSubTransactionBody{
+					TxCertificates: []lcommon.CertificateWrapper{{
+						Type:        uint(lcommon.CertificateTypeResignCommitteeCold),
+						Certificate: resign,
+					}},
+				}},
+				{Body: gdijkstra.DijkstraSubTransactionBody{
+					TxCertificates: []lcommon.CertificateWrapper{{
+						Type:        uint(lcommon.CertificateTypeAuthCommitteeHot),
+						Certificate: authorize,
+					}},
+				}},
+			}, true),
+		},
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		cold: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(cold): {ColdKey: cold.Credential},
+		},
+	}
+	pp := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: lcommon.ProtocolVersionDijkstra,
+			},
+		},
+	}
+	err := validateCommitteeCertificates(tx, 0, state, pp)
+	require.ErrorAs(t, err, &conway.ResignedCommitteeMemberHotKeyError{})
+}
+
+type classicPPUPTestLedgerState struct {
+	*mockLedgerState
+	delegate lcommon.Blake2b224
+	epoch    uint64
+	cutoff   uint64
+}
+
+func (s classicPPUPTestLedgerState) GenesisDelegateKeyHashes(
+	uint64,
+) ([]lcommon.Blake2b224, error) {
+	return []lcommon.Blake2b224{s.delegate}, nil
+}
+
+func (s classicPPUPTestLedgerState) GenesisDelegateForGenesisKey(
+	lcommon.Blake2b224,
+	uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return s.delegate, true, nil
+}
+
+func (classicPPUPTestLedgerState) GenesisUpdateQuorum() (uint, error) {
+	return 1, nil
+}
+
+func (s classicPPUPTestLedgerState) ProtocolParameterUpdateWindow(
+	uint64,
+) (uint64, uint64, error) {
+	return s.epoch, s.cutoff, nil
+}
+
+func TestShelleyClassicProtocolParameterUpdateRuleAcceptsValidUpdate(t *testing.T) {
+	t.Parallel()
+	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
+	require.NoError(t, err)
+	tx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	targetEpoch, updates := tx.ProtocolParameterUpdates()
+	require.NotEmpty(t, updates)
+
+	witnesses := tx.Witnesses().Vkey()
+	require.NotEmpty(t, witnesses)
+	state := classicPPUPTestLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		delegate:        lcommon.Blake2b224Hash(witnesses[0].Vkey),
+		epoch:           targetEpoch,
+		cutoff:          100,
+	}
+	pp := &shelley.ShelleyProtocolParameters{
+		ProtocolMajor: 2,
+	}
+
+	var validate lcommon.UtxoValidationRuleFunc
+	for _, descriptor := range shelley.UtxoValidationRuleDescriptors() {
+		if descriptor.Id == lcommon.UtxoValidationRuleProtocolParameterUpdates {
+			validate = descriptor.Validator
+			break
+		}
+	}
+	require.NotNil(t, validate)
+	require.NoError(t, validate(tx, 1, state, pp))
 }
 
 type taggedCommitteeLedgerState struct {
@@ -1433,6 +1577,7 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 		tx,
 		resolved,
 		script.StrictValidityUpperBoundForTransaction(tx),
+		0,
 	)
 
 	require.NoError(t, err)
@@ -1588,22 +1733,6 @@ func requireIndexedRulesReplaceRuleIndex(
 	require.Fail(t, message)
 }
 
-func requireIndexedRulesIncludeFunc(
-	t *testing.T,
-	rules []indexedUtxoValidationRule,
-	want lcommon.UtxoValidationRuleFunc,
-	message string,
-) {
-	t.Helper()
-	wantName := utxoValidationRuleName(want)
-	for _, rule := range rules {
-		if utxoValidationRuleName(rule.validationFunc) == wantName {
-			return
-		}
-	}
-	require.Fail(t, message)
-}
-
 func TestTxSizeForFee(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1715,10 +1844,9 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	assert.Equal(t, big.NewInt(206_245), tx.Fee())
 	assert.NoError(t, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
 
-	// Negative case: the null-expanded encoding of the same body is 1366
-	// bytes, so the declared fee of 206245 is below the minimum. Sizing
-	// pre-Alonzo transactions from anything other than their wire bytes must
-	// not make this variant pass.
+	// The null-expanded encoding preserves the bytes but represents the A0
+	// protocol parameter as an empty map. The classic update decoder now
+	// rejects that out-of-domain value before fee validation.
 	reencodedCbor, err := hex.DecodeString(
 		preprodShelleyUpdateTxReencodedCborHex,
 	)
@@ -1726,21 +1854,22 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	require.Len(t, reencodedCbor, 1_366)
 
 	reencodedTx, err := shelley.NewShelleyTransactionFromCbor(reencodedCbor)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1_366), TxSizeForFee(reencodedTx))
-	assert.Equal(t, uint64(215_485), CalculateMinFee(
-		TxSizeForFee(reencodedTx),
-		lcommon.ExUnits{},
-		minFeeA,
-		minFeeB,
-		nil,
-		nil,
-	))
-	assert.ErrorContains(
+	require.ErrorContains(
 		t,
-		ValidateTxFee(reencodedTx, minFeeA, minFeeB, nil, nil),
-		"transaction fee 206245 is less than the calculated minimum fee 215485",
+		err,
+		"protocol parameter update a0: must be a bounded rational",
 	)
+	assert.Nil(t, reencodedTx)
+
+	// An indefinite transaction array is a distinct, valid wire encoding of
+	// the same classic update. Fee sizing must keep its received envelope byte.
+	indefiniteCbor := append([]byte(nil), txCbor...)
+	require.Equal(t, byte(0x83), indefiniteCbor[0])
+	indefiniteCbor[0] = 0x9f
+	indefiniteCbor = append(indefiniteCbor, 0xff)
+	indefiniteTx, err := shelley.NewShelleyTransactionFromCbor(indefiniteCbor)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(len(indefiniteCbor)), TxSizeForFee(indefiniteTx))
 }
 
 func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(
@@ -2830,6 +2959,295 @@ func TestValidateTxConwayReusesResolvedPlutusContext(t *testing.T) {
 	assert.Equal(t, 2, ls.utxoLookups)
 }
 
+func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionPlomin,
+		},
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224([]byte("committee member")),
+	}
+	validCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.NewBlake2b224([]byte("valid committee member")),
+	}
+	anchor := lcommon.GovAnchor{
+		Url:      "https://example.test/committee",
+		DataHash: [32]byte{0x51},
+	}
+
+	for _, test := range []struct {
+		name        string
+		expiryEpoch uint64
+		wantExpired bool
+	}{
+		{name: "past epoch", expiryEpoch: 499, wantExpired: true},
+		{name: "current epoch", expiryEpoch: 500, wantExpired: true},
+		{name: "next epoch", expiryEpoch: 501},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action, err := lcommon.NewUpdateCommitteeGovAction(
+				nil,
+				nil,
+				map[*lcommon.Credential]uint64{
+					&credential:      test.expiryEpoch,
+					&validCredential: 501,
+				},
+				cbor.Rat{Rat: big.NewRat(2, 3)},
+			)
+			require.NoError(t, err)
+			proposal, err := conway.NewConwayProposalProcedure(
+				0,
+				rewardAccount,
+				action,
+				anchor,
+			)
+			require.NoError(t, err)
+			input := shelley.ShelleyTransactionInput{
+				TxId:        lcommon.Blake2b256{0x51},
+				OutputIndex: 0,
+			}
+			seed := make([]byte, ed25519.SeedSize)
+			seed[0] = 0x51
+			privateKey := ed25519.NewKeyFromSeed(seed)
+			publicKey := privateKey.Public().(ed25519.PublicKey)
+			paymentHash := lcommon.Blake2b224Hash(publicKey)
+			paymentAddress, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyNone,
+				lcommon.AddressNetworkTestnet,
+				paymentHash[:],
+				nil,
+			)
+			require.NoError(t, err)
+			output := babbage.BabbageTransactionOutput{
+				OutputAddress: paymentAddress,
+				OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+			}
+			tx := &conway.ConwayTransaction{
+				Body: conway.ConwayTransactionBody{
+					TxInputs: conway.NewConwayTransactionInputSet(
+						[]shelley.ShelleyTransactionInput{input},
+					),
+					TxOutputs:            []babbage.BabbageTransactionOutput{output},
+					TxProposalProcedures: []conway.ConwayProposalProcedure{*proposal},
+				},
+				TxIsValid: true,
+			}
+			baseState := newMockLedgerState()
+			baseState.skipPhase2Validation = true
+			baseState.addUtxo(input, output)
+			state := &mockCommitteeEpochState{
+				mockLedgerState: baseState,
+				epoch:           500,
+			}
+			bodyCbor, err := cbor.Encode(tx.Body)
+			require.NoError(t, err)
+			tx.Body.SetCbor(bodyCbor)
+			txHash := tx.Hash()
+			tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+				[]lcommon.VkeyWitness{{
+					Vkey:      publicKey,
+					Signature: ed25519.Sign(privateKey, txHash[:]),
+				}},
+				false,
+			)
+
+			err = ValidateTxConway(tx, 1, state, pp)
+			var expired conway.CommitteeMemberAlreadyExpiredError
+			if test.wantExpired {
+				require.ErrorAs(t, err, &expired)
+				require.Equal(t, test.expiryEpoch, expired.ExpiryEpoch)
+				require.Equal(t, uint64(500), expired.CurrentEpoch)
+				return
+			}
+			require.NoError(t, err)
+			require.NotErrorAs(t, err, &expired)
+			require.NoError(
+				t,
+				conway.UtxoValidateProposalProcedures(tx, 1, state, pp),
+			)
+		})
+	}
+}
+
+func TestConwayGovActionWellFormednessRejectsDuplicateCommitteeRemovals(
+	t *testing.T,
+) {
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionPlomin,
+		},
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+	baseCredential := lcommon.NewBlake2b224([]byte("committee removal"))
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: baseCredential,
+	}
+	scriptCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: baseCredential,
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	anchor := lcommon.GovAnchor{
+		Url:      "https://example.test/committee",
+		DataHash: [32]byte{0x52},
+	}
+	for _, test := range []struct {
+		name        string
+		credentials []lcommon.Credential
+		quorum      *big.Rat
+		wantError   bool
+	}{
+		{
+			name:        "duplicate logical credential",
+			credentials: []lcommon.Credential{keyCredential, keyCredential},
+			quorum:      big.NewRat(1, 2),
+			wantError:   true,
+		},
+		{
+			name:        "same hash with distinct credential types",
+			credentials: []lcommon.Credential{keyCredential, scriptCredential},
+			quorum:      big.NewRat(1, 2),
+		},
+		{
+			name:   "zero quorum",
+			quorum: big.NewRat(0, 1),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			action := &lcommon.UpdateCommitteeGovAction{
+				Credentials: test.credentials,
+				Quorum:      cbor.Rat{Rat: test.quorum},
+			}
+			encoded, err := cbor.Encode(action)
+			require.NoError(t, err)
+			var decoded lcommon.UpdateCommitteeGovAction
+			_, decodeErr := cbor.Decode(encoded, &decoded)
+			proposal, err := conway.NewConwayProposalProcedure(
+				0,
+				rewardAccount,
+				action,
+				anchor,
+			)
+			require.NoError(t, err)
+			tx := &conway.ConwayTransaction{
+				Body: conway.ConwayTransactionBody{
+					TxProposalProcedures: []conway.ConwayProposalProcedure{
+						*proposal,
+					},
+				},
+				TxIsValid: true,
+			}
+			ruleErr := conway.UtxoValidateGovActionWellFormedness(
+				tx, 1, newMockLedgerState(), pp,
+			)
+			if test.wantError {
+				require.Error(t, decodeErr)
+				require.Error(t, ruleErr)
+				return
+			}
+			require.NoError(t, decodeErr)
+			require.NoError(t, ruleErr)
+		})
+	}
+}
+
+func TestConwayV3ProposalProcedureCanonicalizesCommitteeCollections(
+	t *testing.T,
+) {
+	key := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224{0x02},
+	}
+	scriptLow := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.Blake2b224{0x01},
+	}
+	scriptHigh := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: lcommon.Blake2b224{0x02},
+	}
+	keyPtr, scriptLowPtr, scriptHighPtr := key, scriptLow, scriptHigh
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+
+	buildProcedure := func(removals []lcommon.Credential) data.PlutusData {
+		action := &lcommon.UpdateCommitteeGovAction{
+			Type:        uint(lcommon.GovActionTypeUpdateCommittee),
+			Credentials: removals,
+			CredEpochs: map[*lcommon.Credential]uint64{
+				&keyPtr:        3,
+				&scriptHighPtr: 2,
+				&scriptLowPtr:  1,
+			},
+			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+		}
+		procedure := conway.ConwayProposalProcedure{
+			PPRewardAccount: rewardAccount,
+			PPGovAction: conway.ConwayGovAction{
+				Type:   uint(lcommon.GovActionTypeUpdateCommittee),
+				Action: action,
+			},
+		}
+		return procedure.ToPlutusData()
+	}
+	first := buildProcedure([]lcommon.Credential{key, scriptHigh, scriptLow})
+	second := buildProcedure([]lcommon.Credential{scriptLow, key, scriptHigh})
+	firstCBOR, err := data.Encode(first)
+	require.NoError(t, err)
+	secondCBOR, err := data.Encode(second)
+	require.NoError(t, err)
+	require.Equal(t, firstCBOR, secondCBOR)
+
+	procedureData := first.(*data.Constr)
+	actionData := procedureData.Fields[2].(*data.Constr)
+	wantOrder := []data.PlutusData{
+		scriptLow.ToPlutusData(),
+		scriptHigh.ToPlutusData(),
+		key.ToPlutusData(),
+	}
+	removals := actionData.Fields[1].(*data.List)
+	require.Equal(t, wantOrder, removals.Items)
+	additions := actionData.Fields[2].(*data.Map)
+	require.Len(t, additions.Pairs, len(wantOrder))
+	for i, pair := range additions.Pairs {
+		require.Equal(t, wantOrder[i], pair[0])
+	}
+	repeatedCBOR, err := data.Encode(buildProcedure(
+		[]lcommon.Credential{key, scriptHigh, scriptLow},
+	))
+	require.NoError(t, err)
+	require.Equal(t, firstCBOR, repeatedCBOR)
+}
+
 func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(
 	t *testing.T,
 ) {
@@ -2842,6 +3260,7 @@ func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(
 				[]any{inputHash, uint64(0)},
 			},
 		},
+		1: []any{},
 		2: uint64(200_000),
 	}
 	txCbor, err := cbor.Encode([]any{bodyMap, map[uint]any{}, true, nil})
@@ -3828,7 +4247,7 @@ func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(
 
 	// A tx that mints nothing still carries the ada entry, so no mint fixture
 	// is needed to observe the rendering.
-	cache := newConwayTxInfoCache(ls, tx, resolved)
+	cache := newTxInfoCache(ls, tx, resolved, 0)
 	v1, err := cache.v1()
 	require.NoError(t, err)
 	v2, err := cache.v2()
@@ -3950,10 +4369,7 @@ func TestPreAlonzoCertDepositRejectsNilPparams(t *testing.T) {
 // TestConwayCommitteeCertificateRuleDoesNotRejectWhenStateUnavailable proves
 // the rule declines to reject on committee grounds it cannot establish.
 //
-// Dingo does not seed the Conway genesis committee
-// (blinklabs-io/dingo#3785), so a genesis-synced node holds no committee rows
-// for the whole Conway era and CommitteeStateAvailable reports false. Rejecting here would reject an authorization from a real
-// genesis committee member that cardano-node accepts. The member is seated in
+// Missing state is not proof of non-membership. The member is seated in
 // the harness while availability is false, so a rejection would prove the
 // authority result was ignored.
 func TestConwayCommitteeCertificateRuleDoesNotRejectWhenStateUnavailable(
@@ -4237,4 +4653,268 @@ func TestConwayCommitteeRulesFailClosedOnLookupError(t *testing.T) {
 		voterRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
 		&lookup,
 	)
+}
+
+// committeeCert builds a single committee certificate: resign when authorize
+// is false, otherwise authorize hot key.
+func committeeCert(
+	credential lcommon.Credential,
+	authorize bool,
+) lcommon.CertificateWrapper {
+	if authorize {
+		return lcommon.CertificateWrapper{
+			Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+			Certificate: &lcommon.AuthCommitteeHotCertificate{
+				CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+				ColdCredential: credential,
+			},
+		}
+	}
+	return lcommon.CertificateWrapper{
+		Type: uint(lcommon.CertificateTypeResignCommitteeCold),
+		Certificate: &lcommon.ResignCommitteeColdCertificate{
+			CertType:       uint(lcommon.CertificateTypeResignCommitteeCold),
+			ColdCredential: credential,
+		},
+	}
+}
+
+// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins
+// dingo#4377: a committee cold credential resignation is rejected both when
+// it was already resigned before the transaction and when an earlier
+// certificate in the same transaction resigned it. Dingo's replacement
+// previously checked member.Resigned only on the authorize path and queried
+// every certificate against the pre-transaction snapshot, so a same-tx
+// resign-then-resign or resign-then-authorize sequence was wrongly accepted.
+func TestConwayCommitteeCertificateRuleRejectsRepeatedResignation(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd6
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	newState := func(resigned bool) *taggedCommitteeLedgerState {
+		return &taggedCommitteeLedgerState{
+			mockLedgerState: newMockLedgerState(),
+			available:       true,
+			cold: map[string]*lcommon.CommitteeMember{
+				taggedCommitteeCredentialKey(credential): {
+					ColdKey:  hash,
+					Resigned: resigned,
+				},
+			},
+		}
+	}
+	newTx := func(certs ...lcommon.CertificateWrapper) *conway.ConwayTransaction {
+		return &conway.ConwayTransaction{
+			TxIsValid: true,
+			Body: conway.ConwayTransactionBody{
+				TxCertificates: certs,
+			},
+		}
+	}
+
+	tests := []struct {
+		name            string
+		alreadyResigned bool
+		certs           []lcommon.CertificateWrapper
+		wantErr         bool
+		wantHotKeyErr   bool
+	}{
+		{
+			name:            "previously resigned then resign",
+			alreadyResigned: true,
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, false),
+			},
+			wantErr: true,
+		},
+		{
+			name:            "previously resigned then authorize hot",
+			alreadyResigned: true,
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, true),
+			},
+			wantErr:       true,
+			wantHotKeyErr: true,
+		},
+		{
+			name: "active then resign then resign",
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, false),
+				committeeCert(credential, false),
+			},
+			wantErr: true,
+		},
+		{
+			name: "active then resign then authorize",
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, false),
+				committeeCert(credential, true),
+			},
+			wantErr:       true,
+			wantHotKeyErr: true,
+		},
+		{
+			name: "active then authorize then resign",
+			certs: []lcommon.CertificateWrapper{
+				committeeCert(credential, true),
+				committeeCert(credential, false),
+			},
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newState(tc.alreadyResigned)
+			err := rule(
+				newTx(tc.certs...),
+				0,
+				state,
+				&conway.ConwayProtocolParameters{},
+			)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			if tc.wantHotKeyErr {
+				var hotKeyErr conway.ResignedCommitteeMemberHotKeyError
+				require.ErrorAs(t, err, &hotKeyErr)
+				return
+			}
+			var resignedErr CommitteeMemberAlreadyResignedError
+			require.ErrorAs(t, err, &resignedErr)
+		})
+	}
+}
+
+// TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity proves
+// the in-transaction resignation overlay keys on full tagged credential
+// identity: resigning a key-hash credential must not make a script-hash
+// credential sharing the same hash bytes appear resigned.
+func TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd7
+	keyCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	scriptCredential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: hash,
+	}
+	state := &taggedCommitteeLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		cold: map[string]*lcommon.CommitteeMember{
+			taggedCommitteeCredentialKey(keyCredential):    {ColdKey: hash},
+			taggedCommitteeCredentialKey(scriptCredential): {ColdKey: hash},
+		},
+	}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{
+				committeeCert(keyCredential, false),
+				committeeCert(scriptCredential, false),
+			},
+		},
+	}
+
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	require.NoError(
+		t,
+		rule(tx, 0, state, &conway.ConwayProtocolParameters{}),
+	)
+}
+
+// TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable
+// covers a CodeRabbit finding on this PR: when CommitteeStateAvailable
+// reports false (e.g. a genesis committee member Dingo does not persist,
+// blinklabs-io/dingo#3785), every certificate for that credential takes the
+// non-authoritative continue branch. That branch must still consult and
+// update resignedInTx, or a resign-then-resign or resign-then-authorize
+// sequence in one transaction passes uninspected because neither
+// certificate ever reaches the ledger-state Resigned check.
+func TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable(
+	t *testing.T,
+) {
+	var hash lcommon.Blake2b224
+	hash[0] = 0xd8
+	credential := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	rule := findIndexedUtxoValidationRule(
+		t,
+		conwayUtxoValidationRules,
+		validateCommitteeCertificates,
+	)
+	newState := func() *taggedCommitteeLedgerState {
+		return &taggedCommitteeLedgerState{
+			mockLedgerState: newMockLedgerState(),
+			available:       false,
+		}
+	}
+	newTx := func(
+		certs ...lcommon.CertificateWrapper,
+	) *conway.ConwayTransaction {
+		return &conway.ConwayTransaction{
+			TxIsValid: true,
+			Body: conway.ConwayTransactionBody{
+				TxCertificates: certs,
+			},
+		}
+	}
+
+	t.Run("resign then resign rejects", func(t *testing.T) {
+		err := rule(
+			newTx(
+				committeeCert(credential, false),
+				committeeCert(credential, false),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		)
+		var resignedErr CommitteeMemberAlreadyResignedError
+		require.ErrorAs(t, err, &resignedErr)
+	})
+	t.Run("resign then authorize rejects", func(t *testing.T) {
+		err := rule(
+			newTx(
+				committeeCert(credential, false),
+				committeeCert(credential, true),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		)
+		var hotKeyErr conway.ResignedCommitteeMemberHotKeyError
+		require.ErrorAs(t, err, &hotKeyErr)
+	})
+	t.Run("authorize then resign passes", func(t *testing.T) {
+		require.NoError(t, rule(
+			newTx(
+				committeeCert(credential, true),
+				committeeCert(credential, false),
+			),
+			0,
+			newState(),
+			&conway.ConwayProtocolParameters{},
+		))
+	})
 }

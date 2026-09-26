@@ -236,12 +236,19 @@ func TestSwitchBackCooldownBoundsStallEscapeOscillation(t *testing.T) {
 		"switch-back debounce must suppress every immediate reversal driven by the stall escape",
 	)
 
-	// A genuinely new peer (never recently active) must still be adopted
-	// immediately even while the stall condition remains engaged throughout.
-	// Unambiguously ahead of BOTH A and B (not merely tied with whichever one
-	// the burst loop last bumped), so selectBestChainLocked's upstream pick
-	// cannot land back on A or B by a map-iteration-order tiebreak among
-	// equal-height peers.
+	// A genuinely new peer (never recently active) is still subject to the
+	// GLOBAL discretionary rate limit (switchBackRateLimitedLocked): the
+	// burst loop above never advanced the clock, so the last discretionary
+	// hand-off (the very first A->B switch) is still inside its cooldown
+	// window, and C's arrival must not be exempted from it merely because C
+	// itself was never the specific connection just abandoned. Exempting
+	// "never seen as active" outright is exactly the gap that let a small
+	// rotating set of real peers evade the per-connection debounce forever
+	// (see TestSwitchBackRateLimitBoundsThreeWayRotation). Unambiguously
+	// ahead of BOTH A and B (not merely tied with whichever one the burst
+	// loop last bumped), so selectBestChainLocked's upstream pick cannot land
+	// back on A or B by a map-iteration-order tiebreak among equal-height
+	// peers.
 	next := max(
 		peerBlockNumber(t, cs, peerA),
 		peerBlockNumber(t, cs, peerB),
@@ -252,11 +259,22 @@ func TestSwitchBackCooldownBoundsStallEscapeOscillation(t *testing.T) {
 		tip(next, 99_999, "c-0"),
 		nil,
 	))
-	assert.Equal(t, peerC, *cs.GetBestPeer(),
-		"a genuinely new candidate must not be debounced under the stall escape")
+	assert.Equal(t, peerB, *cs.GetBestPeer(),
+		"a new candidate arriving inside the global cooldown window must still be rate-limited")
 
-	// The cooldown is a rate limit, not a permanent freeze: once it elapses,
-	// a connection abandoned earlier is reclaimable again.
+	// Once the global cooldown elapses, the new candidate is adopted.
+	clk.Advance(defaultSwitchBackCooldown)
+	require.True(t, cs.updatePeerTipObserved(
+		peerC,
+		tip(next+1, 100_000, "c-1"),
+		tip(next+1, 100_000, "c-1"),
+		nil,
+	))
+	assert.Equal(t, peerC, *cs.GetBestPeer(),
+		"a genuinely new candidate must still be adopted once the global cooldown elapses")
+
+	// The cooldown is a rate limit, not a permanent freeze: once it elapses
+	// again, a connection abandoned earlier is reclaimable too.
 	clk.Advance(defaultSwitchBackCooldown)
 	next = peerBlockNumber(t, cs, peerC) + 1
 	require.True(t, cs.updatePeerTipObserved(
@@ -269,10 +287,17 @@ func TestSwitchBackCooldownBoundsStallEscapeOscillation(t *testing.T) {
 		"a previously abandoned connection must be reclaimable once the cooldown elapses")
 }
 
-// TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger asserts the
-// debounce is keyed per-connection: a third peer that was never the active
-// connection is adopted immediately even while the original incumbent is
-// still within its own cooldown window.
+// TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger asserts that the
+// per-connection debounce (switchBackDebouncedLocked) does not, on its own,
+// single out a third peer that was never the active connection: peerC is not
+// blocked by recentlyLeft, since it has no entry there. It IS still bounded
+// by the global discretionary rate limit (switchBackRateLimitedLocked), which
+// applies regardless of which connection is involved -- exempting a
+// "never-before-active" peer outright is exactly the gap that let a small
+// rotating set of real peers dodge the per-connection debounce forever (see
+// TestSwitchBackRateLimitBoundsThreeWayRotation). So peerC's switch is
+// delayed until the global cooldown elapses, not blocked forever and not
+// adopted mid-cooldown.
 func TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger(t *testing.T) {
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -301,8 +326,11 @@ func TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger(t *testing.T) {
 	require.Equal(t, peerB, *cs.GetBestPeer())
 
 	// C, a peer that has never been active, genuinely outruns B by more than
-	// the margin. It must be adopted immediately: it was never the
-	// abandoned incumbent, so it is never debounced.
+	// the margin. The per-connection debounce alone would not block it (C has
+	// no recentlyLeft entry), but the global discretionary rate limit still
+	// applies: the A->B switch just above was itself a discretionary release,
+	// and no time has passed since, so C's arrival mid-cooldown must still be
+	// rate-limited.
 	require.True(t, cs.updatePeerTipObserved(
 		peerC,
 		tip(5001+2*(catchUpPinHeadMargin+1), 5020, "c-0"),
@@ -310,6 +338,140 @@ func TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger(t *testing.T) {
 		nil,
 	))
 	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, peerB, *cs.GetBestPeer(),
+		"a new candidate arriving inside the global cooldown window must still be rate-limited")
+
+	// Once the global cooldown elapses, C is adopted -- the rate limit delays
+	// a genuinely new candidate, it does not exempt or permanently block it.
+	clk.Advance(defaultSwitchBackCooldown)
+	require.True(t, cs.updatePeerTipObserved(
+		peerC,
+		tip(5001+2*(catchUpPinHeadMargin+1)+1, 5021, "c-1"),
+		tip(5001+2*(catchUpPinHeadMargin+1)+1, 5021, "c-1"),
+		nil,
+	))
+	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, peerC, *cs.GetBestPeer(),
-		"a peer that was never the active connection must not be debounced")
+		"a genuinely new candidate must still be adopted once the global cooldown elapses")
+}
+
+// TestSwitchBackRateLimitBoundsThreeWayRotation reproduces the live incident
+// this global rate limit exists for: not two peers alternating, but three (or
+// more) real peer connections whose delivered frontiers take turns
+// marginally leading each other under ordinary network jitter. Observed live:
+// the active connection flipped among the same three peer connections roughly
+// every ~2 seconds indefinitely, with applied block height completely frozen
+// throughout.
+//
+// switchBackDebouncedLocked alone (per-connection: "was THIS challenger the
+// specific connection just abandoned") does not bound this. With three
+// peers rotating A -> B -> C -> A -> ..., by the time evaluation cycles back
+// to a given connection it is essentially never "the one most recently left"
+// -- some other peer was left more recently -- so the per-connection debounce
+// never engages for it, even under realistic (non-zero) inter-arrival jitter.
+// Driving that rotation with each hop's target advancing the clock by just
+// over half of switchBackCooldown (so a specific peer's own recurrence
+// interval -- two hops later -- safely clears its per-connection cooldown)
+// demonstrates the gap directly: every single hop succeeds, so the number of
+// switches equals the number of hops and the active connection never holds
+// still for as long as switchBackCooldown.
+//
+// switchBackRateLimitedLocked (this fix) bounds the AGGREGATE hand-off rate
+// to at most one per switchBackCooldown regardless of which peer is
+// challenging or how many distinct peers are rotating, so it closes this gap
+// even though every individual hop still looks, pairwise, like a "genuinely
+// new" challenger.
+func TestSwitchBackRateLimitBoundsThreeWayRotation(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	peers := []ouroboros.ConnectionId{
+		newTestConnectionId(1),
+		newTestConnectionId(2),
+		newTestConnectionId(3),
+	}
+
+	cs.SetLocalTip(tip(5000, 5000, "local"))
+	require.True(t, cs.updatePeerTipObserved(
+		peers[0],
+		tip(5001, 5001, "p0-0"),
+		tip(5001, 5001, "p0-0"),
+		nil,
+	))
+	require.Equal(t, peers[0], *cs.GetBestPeer())
+
+	// Hop spacing is chosen so a specific peer's OWN recurrence interval (two
+	// hops later, in a strict 3-way rotation) exceeds switchBackCooldown --
+	// clearing the per-connection debounce on every single hop -- while
+	// consecutive hops themselves remain well inside the cooldown, exactly
+	// the "bursty relative to a single pair, spaced-out relative to any one
+	// peer" cadence real network jitter produces.
+	hopSpacing := defaultSwitchBackCooldown/2 + 100*time.Millisecond
+	require.Less(
+		t,
+		defaultSwitchBackCooldown,
+		2*hopSpacing,
+		"test setup: a peer's own recurrence interval must clear its per-connection cooldown",
+	)
+
+	const rounds = 30
+	switches := 0
+	var lastSwitchAt time.Time
+	activeIdx := 0
+	block := uint64(5001)
+	for i := range rounds {
+		clk.Advance(hopSpacing)
+		challengerIdx := (activeIdx + 1) % len(peers)
+		block += catchUpPinHeadMargin + 1
+		slot := 10_000 + uint64(i)
+		hash := fmt.Sprintf("rotation-%d", i)
+		require.True(t, cs.updatePeerTipObserved(
+			peers[challengerIdx],
+			tip(block, slot, hash),
+			tip(block, slot, hash),
+			nil,
+		))
+		if *cs.GetBestPeer() == peers[challengerIdx] {
+			if !lastSwitchAt.IsZero() {
+				assert.GreaterOrEqual(
+					t,
+					clk.now.Sub(lastSwitchAt),
+					defaultSwitchBackCooldown,
+					"two discretionary switches happened less than a cooldown apart at round %d",
+					i,
+				)
+			}
+			lastSwitchAt = clk.now
+			switches++
+			activeIdx = challengerIdx
+		}
+	}
+
+	// Without the global rate limit, every one of the 30 hops succeeds (each
+	// challenger clears the per-connection debounce by construction), so the
+	// active connection would never hold still. With it, successive switches
+	// are at least a cooldown apart, so over `rounds*hopSpacing` of simulated
+	// time the count is bounded well below the hop count.
+	maxExpectedSwitches := int(
+		time.Duration(rounds)*hopSpacing/defaultSwitchBackCooldown,
+	) + 1
+	assert.Less(
+		t,
+		switches,
+		rounds,
+		"the global rate limit must reject at least some hops in the rotation",
+	)
+	assert.LessOrEqual(
+		t,
+		switches,
+		maxExpectedSwitches,
+		"switch count must stay within the global cooldown's rate bound",
+	)
+	assert.Greater(
+		t,
+		switches,
+		0,
+		"the rate limit must still allow forward progress, not freeze selection entirely",
+	)
 }

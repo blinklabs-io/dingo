@@ -77,6 +77,7 @@ func TestSelectionStopsAtTheSlotDeadline(t *testing.T) {
 		LeiosBlockData{},
 		generation,
 		blockSelectionConstraints{deadline: start.Add(selectionTime)},
+		nil,
 	)
 	require.NoError(t, err)
 	// Six candidates are considered before the clock reaches the
@@ -198,6 +199,7 @@ func (b *constraintRecordingBuilder) buildBlockWithCredentialGeneration(
 	_ LeiosBlockData,
 	_ *credentialGeneration,
 	constraints blockSelectionConstraints,
+	_ *BlockContext,
 ) (ledger.Block, []byte, error) {
 	b.constraints = append(b.constraints, constraints)
 	return b.block, b.cbor, nil

@@ -119,8 +119,25 @@ type Ouroboros struct {
 	blockDecodeCache   *decodeCache[gledger.Block]
 	headerDecodeCache  *decodeCache[gledger.BlockHeader]
 	decodeCacheMetrics *decodeCacheMetrics
-	blockFetchStarts   map[ouroboros.ConnectionId]time.Time
-	blockFetchMutex    sync.Mutex
+	// blockFetchStarts is keyed by (connId, requestId) rather than connId
+	// alone: pipelining allows more than one RequestRange call to be
+	// outstanding on the same connection at once, and a connId-only key would
+	// have one request's start time silently overwrite another's.
+	blockFetchStarts map[blockFetchKey]time.Time
+	// blockFetchDoneEarly holds the keys of requests whose RangeDoneFunc ran
+	// before BlockfetchClientRequestRange recorded their start time.
+	// RequestRange returns once the request is on the wire, so the peer's
+	// terminal reply can reach blockfetchClientRangeDone on the protocol's
+	// receive goroutine while the requester is still between that return and
+	// its blockFetchStarts insert. The insert consumes the marker instead of
+	// adding an entry that nothing would ever delete, since the request's
+	// one and only terminal callback has already run.
+	blockFetchDoneEarly map[blockFetchKey]struct{}
+	blockFetchMutex     sync.Mutex
+	// blockfetchConnClient resolves the live request-range client for a
+	// connection. Defaults to blockfetchConnClientLive; tests override it to
+	// exercise BlockfetchClientRequestRange without a live connection.
+	blockfetchConnClient blockfetchConnClientFunc
 	// localstatequeryAcquiredPoints records the pinned point (zero value =
 	// no pin, answer from live state) an NtC client acquired on this
 	// connection's LocalStateQuery session, keyed by ConnectionId so
@@ -129,6 +146,7 @@ type Ouroboros struct {
 	// (blinklabs-io/dingo#382), read by localstatequeryServerQuery, and
 	// cleared by localstatequeryServerRelease and on connection close.
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
+	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
 	localstatequeryAcquireMutex   sync.Mutex
 	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// ChainSync measurement tracking for peer scoring
@@ -195,10 +213,12 @@ type Ouroboros struct {
 	// The chainsync server callback owns gouroboros's receive loop while it
 	// runs, so Protocol.DoneChan() cannot close underneath it; the release
 	// signal has to come from connmanager's per-connection ErrorChan watcher
-	// instead (see ReleaseLeiosServeWaiters).
-	leiosServeWaiters         map[ouroboros.ConnectionId][]chan struct{}
-	leiosServeWaitersReleased map[ouroboros.ConnectionId]time.Time
-	leiosServeWaitersMu       sync.Mutex
+	// instead. Live close handling uses ReleaseLeiosServeWaitersOwner so a
+	// delayed callback cannot release a replacement connection's waiter.
+	leiosServeWaiters      map[ouroboros.ConnectionId][]leiosServeWaiter
+	leiosServeWaitersMu    sync.Mutex
+	leiosNotifyObservers   map[*oleiosnotify.Server]struct{}
+	leiosNotifyObserversMu sync.Mutex
 	// NtC CertRB closure-resolution metrics.
 	leiosMetrics *leiosMetrics
 
@@ -481,19 +501,22 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
-		config:                    cfg,
-		registerer:                newTrackingRegisterer(cfg.PromRegistry),
-		eventBus:                  cfg.EventBus,
-		connManager:               cfg.ConnManager,
-		ledgerState:               cfg.LedgerState,
-		leiosAnnouncementLedger:   cfg.LeiosAnnouncementLedger,
-		mempool:                   cfg.Mempool,
-		chainsyncState:            cfg.ChainsyncState,
-		peerGov:                   cfg.PeerGov,
-		blockFetchStarts:          make(map[ouroboros.ConnectionId]time.Time),
-		leiosServeWaitersReleased: make(map[ouroboros.ConnectionId]time.Time),
+		config:                  cfg,
+		registerer:              newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                cfg.EventBus,
+		connManager:             cfg.ConnManager,
+		ledgerState:             cfg.LedgerState,
+		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly:     make(map[blockFetchKey]struct{}),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
+		),
+		localstatequeryOwners: make(
+			map[ouroboros.ConnectionId]*olocalstatequery.Server,
 		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
@@ -513,7 +536,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
 		leiosClosureWaiters:      make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
-			map[ouroboros.ConnectionId][]chan struct{},
+			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),
 		leiosEBLog:                 newLeiosForgedEBLog(),
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
@@ -522,6 +545,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
+	o.blockfetchConnClient = o.blockfetchConnClientLive
 	if o.ledgerState != nil {
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
@@ -592,10 +616,11 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 		prometheus.HistogramOpts{
 			Name: "dingo_blockfetch_stage_duration_seconds",
 			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
-			// 100us to ~3.3s, matching
-			// dingo_ledger_block_stage_duration_seconds so the two
-			// histograms are comparable across the same block's stages.
-			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+			// 100us to ~419s, matching
+			// dingo_ledger_block_stage_duration_seconds's bucket range (see
+			// its doc comment for why) so the two histograms stay
+			// comparable across the same block's stages.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
 		},
 		[]string{"stage"},
 	)
@@ -865,25 +890,39 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		o.peerGov.UpdatePeerConnectionStability(connId, 0.0)
 	}
 
-	// Remove any chainsync client state
+	// Remove outbound chainsync selection state. Server-side state is removed
+	// by the connection-owner callback so a delayed close cannot delete a
+	// replacement connection that shares the same ConnectionId.
 	if o.chainsyncState != nil {
-		o.chainsyncState.RemoveClient(connId)
 		o.chainsyncState.RemoveClientConnId(connId)
 	}
 	// Remove mempool consumer
 	if o.mempool != nil {
 		o.mempool.RemoveConsumer(connId)
 	}
-	// Clean up any pending block fetch start times and NoBlocks counters
+	// Clean up any pending block fetch start times and NoBlocks counters.
+	// blockFetchStarts is keyed by (connId, requestId), and pipelining can
+	// leave more than one entry outstanding for this connId, so every
+	// matching key must be removed rather than a single connId-only key.
 	o.blockFetchMutex.Lock()
-	delete(o.blockFetchStarts, connId)
+	for key := range o.blockFetchStarts {
+		if key.connId == connId {
+			delete(o.blockFetchStarts, key)
+		}
+	}
+	// A terminal-before-registration marker is normally consumed by the
+	// dispatching call itself. It survives only when that call ends up
+	// returning an error instead -- gouroboros can fail an already-queued
+	// request during protocol shutdown, so its RangeDoneFunc runs while the
+	// send that queued it is still on its way to failing -- which is a
+	// teardown, and is therefore exactly this path.
+	for key := range o.blockFetchDoneEarly {
+		if key.connId == connId {
+			delete(o.blockFetchDoneEarly, key)
+		}
+	}
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
-	// Clean up any LocalStateQuery acquired point: a client that disconnects
-	// without a clean Release must not leak its map entry.
-	o.localstatequeryAcquireMutex.Lock()
-	delete(o.localstatequeryAcquiredPoints, connId)
-	o.localstatequeryAcquireMutex.Unlock()
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
@@ -898,9 +937,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.leiosVotes != nil {
 		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
-	// Release the EB log cursor for this connection; frees any log
-	// entries that were only being held for this connection.
-	o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
 	o.leiosFetchGuards.Delete(connId)

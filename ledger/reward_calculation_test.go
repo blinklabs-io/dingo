@@ -4182,6 +4182,12 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		require.True(t, ok)
 		require.NotNil(t, app)
 		require.True(t, app.precomputed)
+		require.Equal(
+			t,
+			rewards.Efficiency(app.totalBlocks, app.params),
+			app.rewardEfficiency,
+			"reused reward outputs must retain efficiency attribution",
+		)
 		require.Equal(t, uint64(100), app.snapshotCapturedSlot)
 		require.Equal(t, uint64(100), app.snapshotBoundarySlot)
 		require.NoError(t, txn.Rollback())
@@ -6236,6 +6242,109 @@ func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.False(t, match)
+}
+
+// TestRewardCalculatorInputsExactWithTrackedExcludedStake covers dingo #4025:
+// TestRewardCalculatorInputsAllowExcludedPoolStake's non-exceeding bound
+// tolerates one legitimately excluded pool's stake going missing, but it
+// tolerates just as well a row set proportionally shrunk by some other bug --
+// pool count, delegator count, and the per-pool cross-sums all stay
+// internally consistent, so nothing else catches it. A snapshot with a
+// tracked ExcludedActiveStake (set by snapshot.buildRewardStateInputs at
+// capture) closes that gap: the rows must sum to exactly TotalActiveStake
+// minus the tracked exclusion, not merely no more than TotalActiveStake.
+func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
+	t.Parallel()
+
+	poolKey := rewardCalcHash(0x4c)
+	rewardAccount := rewardCalcHash(0x5c)
+	member := rewardCalcHash(0x6c)
+	snapshot := func(totalActiveStake, excludedActiveStake uint64) *models.RewardSnapshot {
+		excluded := types.Uint64(excludedActiveStake)
+		return &models.RewardSnapshot{
+			TotalActiveStake:    types.Uint64(totalActiveStake),
+			ExcludedActiveStake: &excluded,
+			TotalPoolCount:      1,
+			TotalDelegators:     1,
+			CapturedSlot:        10,
+			BoundarySlot:        20,
+		}
+	}
+	poolInputsWithStake := func(stake uint64) []*models.RewardPoolInput {
+		return []*models.RewardPoolInput{
+			{
+				PoolKeyHash:                poolKey,
+				RewardAccount:              rewardAccount,
+				RewardAccountCredentialTag: 0,
+				Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+				DelegatedStake:             types.Uint64(stake),
+				OwnerStake:                 0,
+				DelegatorCount:             1,
+				CapturedSlot:               10,
+				BoundarySlot:               20,
+			},
+		}
+	}
+	stakeInputsWithStake := func(stake uint64) []*models.RewardStakeInput {
+		return []*models.RewardStakeInput{
+			{
+				PoolKeyHash:  poolKey,
+				StakingKey:   member,
+				Stake:        types.Uint64(stake),
+				CapturedSlot: 10,
+				BoundarySlot: 20,
+			},
+		}
+	}
+
+	// 100 (rows) + 40 (tracked excluded) == 140 (declared total): exact match
+	// passes, matching the one-legitimately-excluded-pool case.
+	require.NoError(t, validateRewardCalculatorInputs(
+		snapshot(140, 40),
+		poolInputsWithStake(100),
+		stakeInputsWithStake(100),
+	))
+	match, err := precomputedRewardPoolInputsMatchSnapshot(
+		snapshot(140, 40),
+		poolInputsWithStake(100),
+	)
+	require.NoError(t, err)
+	require.True(t, match)
+
+	// The same 40 tracked as excluded, but the row set is proportionally
+	// shrunk to 50 instead of 100 -- as if every pool's stake had been halved.
+	// 50+40=90 != 140, so this must now be rejected even though 50 <= 140
+	// would have passed the old non-exceeding bound silently (dingo #4025).
+	err = validateRewardCalculatorInputs(
+		snapshot(140, 40),
+		poolInputsWithStake(50),
+		stakeInputsWithStake(50),
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"reward pool input total delegated stake 50 does not match snapshot active stake 140 minus excluded active stake 40",
+	)
+	match, err = precomputedRewardPoolInputsMatchSnapshot(
+		snapshot(140, 40),
+		poolInputsWithStake(50),
+	)
+	require.NoError(t, err)
+	require.False(t, match)
+
+	// A tracked exclusion of exactly zero still demands an exact match: no
+	// slack remains once the snapshot affirmatively says nothing was
+	// excluded.
+	err = validateRewardCalculatorInputs(
+		snapshot(140, 0),
+		poolInputsWithStake(100),
+		stakeInputsWithStake(100),
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"reward pool input total delegated stake 100 does not match snapshot active stake 140 minus excluded active stake 0",
+	)
 }
 
 // TestRewardCalculatorInputsRejectsDelegatorCountMismatch is the

@@ -61,6 +61,7 @@ func (b *tipMovingBuilder) buildBlockWithCredentialGeneration(
 	_ LeiosBlockData,
 	_ *credentialGeneration,
 	constraints blockSelectionConstraints,
+	_ *BlockContext,
 ) (ledger.Block, []byte, error) {
 	b.calls++
 	if constraints.emptyBody {
@@ -253,6 +254,7 @@ func TestBuildBlockForSlotReportsBothTheAbortAndTheSupersededSlot(
 		leiosState,
 		nil,
 		forgeTipGates{},
+		nil,
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errTxValidationSnapshotChanged)

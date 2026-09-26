@@ -173,7 +173,8 @@ CREATE TABLE reward_ada_pots (
     reserves TEXT NOT NULL,
     fees TEXT NOT NULL,
     rewards TEXT NOT NULL,
-    captured_slot INTEGER NOT NULL
+    captured_slot INTEGER NOT NULL,
+    imported_epoch_fees TEXT
 );
 
 CREATE TABLE reward_snapshot (
@@ -189,6 +190,7 @@ CREATE TABLE reward_snapshot (
     protocol_version INTEGER NOT NULL,
     authoritative BOOLEAN NOT NULL DEFAULT FALSE,
     calculation_version INTEGER NOT NULL DEFAULT 0,
+    excluded_active_stake TEXT,
     UNIQUE (epoch, snapshot_type)
 );
 
@@ -432,7 +434,6 @@ CREATE TABLE utxo (
 
 CREATE TABLE asset (
     name BLOB,
-    name_hex BLOB,
     policy_id BLOB,
     fingerprint BLOB,
     id INTEGER PRIMARY KEY,

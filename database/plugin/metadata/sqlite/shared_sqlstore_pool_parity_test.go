@@ -31,7 +31,7 @@ import (
 type poolStore interface {
 	ImportPool(*models.Pool, *models.PoolRegistration, types.Txn) error
 	GetPool(lcommon.PoolKeyHash, bool, types.Txn) (*models.Pool, error)
-	GetPoolByVrfKeyHash([]byte, types.Txn) (*models.Pool, error)
+	GetPoolByVrfKeyHash([]byte, uint64, types.Txn) (*models.Pool, error)
 	GetPools([]lcommon.PoolKeyHash, types.Txn) ([]models.Pool, error)
 	UpdatePoolOpCertSequence(
 		lcommon.PoolKeyHash,
@@ -175,7 +175,7 @@ func exercisePoolStore(t *testing.T, store poolStore) poolState {
 	var err error
 	ret.Pool, err = store.GetPool(poolKeyHash, true, nil)
 	require.NoError(t, err)
-	ret.ByVRF, err = store.GetPoolByVrfKeyHash(vrf, nil)
+	ret.ByVRF, err = store.GetPoolByVrfKeyHash(vrf, 2, nil)
 	require.NoError(t, err)
 	ret.Pools, err = store.GetPools([]lcommon.PoolKeyHash{poolKeyHash}, nil)
 	require.NoError(t, err)

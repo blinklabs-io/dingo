@@ -30,33 +30,19 @@ func (d *Database) RestorePoolStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.RestorePoolStateAtSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to restore pool state at slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.RestorePoolStateAtSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to restore pool state at slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetPool returns a pool by its key hash
@@ -110,31 +96,17 @@ func (d *Database) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.UpdatePoolOpCertSequence(
-		pkh,
-		sequence,
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return err
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.UpdatePoolOpCertSequence(
+			pkh,
+			sequence,
+			slot,
+			txn.Metadata(),
+		); err != nil {
+			return err
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // LatestPoolOpCertSequence returns the highest observed op-cert sequence for
@@ -216,17 +188,24 @@ func (d *Database) GetPools(
 	return d.metadata.GetPools(pkhs, txn.Metadata())
 }
 
-// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
-// Returns nil if no active pool uses this VRF key.
+// GetPoolByVrfKeyHash retrieves the pool that currently claims the given
+// VRF key hash, as of the given epoch's start slot. Returns nil if no
+// active pool claims it. See metadata.MetadataStore's GetPoolByVrfKeyHash
+// for the epoch-boundary deferral rule this respects.
 func (d *Database) GetPoolByVrfKeyHash(
 	vrfKeyHash []byte,
+	epochStartSlot uint64,
 	txn *Txn,
 ) (*models.Pool, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetPoolByVrfKeyHash(vrfKeyHash, txn.Metadata())
+	return d.metadata.GetPoolByVrfKeyHash(
+		vrfKeyHash,
+		epochStartSlot,
+		txn.Metadata(),
+	)
 }
 
 // GetActivePoolRelays returns all relays from currently active pools.
