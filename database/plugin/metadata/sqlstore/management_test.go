@@ -335,7 +335,10 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 // this same pool as the claimant and PoolCurrentState disagrees with the
 // requested key, so this method must report P as claiming B even though B
 // is neither P's effective (pre-boundary) key nor its current pending one.
-func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
+// TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey pins dingo#4466: only a
+// pool's latest same-epoch registration reserves its key, not every key the
+// pool cycled through during the epoch.
+func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -370,9 +373,9 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 		},
 		nil,
 	))
-	// P: B -> C, same epoch. B is now superseded -- it is neither P's
-	// effective key (still A) nor its current pending key (now C) -- but
-	// it must still be claimed by P for the rest of the epoch.
+	// P: B -> C, same epoch. B is now superseded: it was never P's
+	// effective key (still A) and is no longer P's pending key (now C), so
+	// it must be free for a different pool to claim.
 	require.NoError(t, store.ImportPool(
 		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyC},
 		&models.PoolRegistration{
@@ -385,25 +388,11 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 
 	const epochStartSlot = 30
 
-	// B must be reported as claimed by P, not free, even though it is not
-	// P's effective key (A) or current pending key (C). This is the
-	// signal gouroboros's caller needs: it will compare against
-	// PoolCurrentState (C) and reject a P -> B reuse because C != B.
-	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
-	require.NoError(t, err)
-	require.NotNil(
-		t,
-		got,
-		"a superseded same-epoch future key must still be claimed, "+
-			"not reported free",
-	)
-	require.Equal(t, poolKey, got.PoolKeyHash)
-
 	// Sanity check on the mechanism the caller relies on: P's current
 	// (latest) registration is genuinely C, not B, which is exactly what
-	// makes the reuse of B distinguishable from a legitimate revert to an
-	// unchanged key. This mirrors how ledger.LedgerView.PoolCurrentState
-	// picks the latest registration by AddedSlot.
+	// makes B a superseded, not merely an older, same-epoch key. This
+	// mirrors how ledger.LedgerView.PoolCurrentState picks the latest
+	// registration by AddedSlot.
 	fullPool, err := store.GetPool(
 		lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKey)),
 		true,
@@ -419,6 +408,17 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 	}
 	require.Equal(t, keyC, latest.VrfKeyHash)
 
+	// B must be reported free: it is neither P's effective key (A) nor its
+	// latest pending key (C).
+	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		got,
+		"a superseded same-epoch key must be freed once a later "+
+			"same-epoch registration replaces it",
+	)
+
 	// A and C themselves are unaffected: A remains P's active key, and C
 	// is P's own pending key, so reverting to either must not be treated
 	// as a conflict against a different owner.
@@ -428,6 +428,219 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 	require.Equal(t, poolKey, got.PoolKeyHash)
 
 	got, err = store.GetPoolByVrfKeyHash(keyC, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+}
+
+// TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback covers dingo#4466's
+// "preserve rollback ... behavior" criterion: the fix ranks whatever
+// pool_registration rows currently exist, so rolling back the superseding
+// registration (C) must make the previously-superseded key (B) the pool's
+// latest pending key again, not leave it incorrectly free.
+func TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolKey := make([]byte, 28)
+	poolKey[0] = 3
+	keyA := make([]byte, 32)
+	keyA[0] = 0xA
+	keyB := make([]byte, 32)
+	keyB[0] = 0xB
+	keyC := make([]byte, 32)
+	keyC[0] = 0xC
+
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyA},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyA,
+			AddedSlot:   10,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyB},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyB,
+			AddedSlot:   50,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyC},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyC,
+			AddedSlot:   70,
+		},
+		nil,
+	))
+
+	const epochStartSlot = 30
+
+	// Before rollback: C supersedes B, so B is free (the main fix behavior).
+	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.Nil(t, got, "B must start out free, superseded by C")
+
+	// Roll back everything after slot 60, removing C's registration (slot
+	// 70) but keeping B's (slot 50).
+	require.NoError(t, store.DeleteCertificatesAfterSlot(60, nil))
+
+	// After rollback: B is once again P's latest same-epoch registration,
+	// so it must be reserved again.
+	got, err = store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		got,
+		"B must be reserved again once the rollback removes the "+
+			"registration that superseded it",
+	)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	// A remains P's effective key throughout.
+	got, err = store.GetPoolByVrfKeyHash(keyA, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+}
+
+// TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction covers
+// dingo#4466's "cover one transaction and separate same-epoch transactions"
+// criterion. Every other test in this file writes each of P's re-
+// registrations through its own auto-committed call (mirroring cert-by-cert
+// application as blocks arrive on the live chain). This variant writes all
+// three -- A, then A -> B, then B -> C -- through one shared, explicitly
+// committed transaction instead, mirroring a bulk write such as a Mithril or
+// genesis import batch. The fix must rank by added_slot/block_index/
+// cert_index regardless of how many separate database transactions the rows
+// arrived in.
+func TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolKey := make([]byte, 28)
+	poolKey[0] = 4
+	keyA := make([]byte, 32)
+	keyA[0] = 0xA
+	keyB := make([]byte, 32)
+	keyB[0] = 0xB
+	keyC := make([]byte, 32)
+	keyC[0] = 0xC
+
+	txn := store.Transaction(t.Context())
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyA},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyA,
+			AddedSlot:   10,
+		},
+		txn,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyB},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyB,
+			AddedSlot:   50,
+		},
+		txn,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyC},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyC,
+			AddedSlot:   70,
+		},
+		txn,
+	))
+	require.NoError(t, txn.Commit())
+
+	const epochStartSlot = 30
+
+	// B must be free: superseded by C, even though all three registrations
+	// were written and committed as a single database transaction rather
+	// than three separate ones.
+	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		got,
+		"a superseded same-epoch key must be freed whether its "+
+			"supersession was written in one transaction or many",
+	)
+
+	got, err = store.GetPoolByVrfKeyHash(keyA, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	got, err = store.GetPoolByVrfKeyHash(keyC, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+}
+
+// TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey covers
+// dingo#4466's two-step case: with only one same-epoch re-registration (A ->
+// B, no superseding C yet), B is still the pool's latest pending key and
+// must remain reserved alongside the still-effective A.
+func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolKey := make([]byte, 28)
+	poolKey[0] = 2
+	keyA := make([]byte, 32)
+	keyA[0] = 0xA
+	keyB := make([]byte, 32)
+	keyB[0] = 0xB
+
+	// P registers with A before the current epoch begins.
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyA},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyA,
+			AddedSlot:   10,
+		},
+		nil,
+	))
+	// P: A -> B, mid-epoch, in a separate transaction from A's registration.
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyB},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyB,
+			AddedSlot:   50,
+		},
+		nil,
+	))
+
+	const epochStartSlot = 30
+
+	// A remains claimed: it is still P's effective key until the epoch
+	// boundary promotes B.
+	got, err := store.GetPoolByVrfKeyHash(keyA, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	// B remains claimed: it is P's latest (and only) same-epoch pending
+	// key, not yet superseded by anything.
+	got, err = store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)

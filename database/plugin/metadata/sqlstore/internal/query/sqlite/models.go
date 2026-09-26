@@ -357,13 +357,14 @@ type RewardAccountOutput struct {
 }
 
 type RewardAdaPot struct {
-	ID           int64
-	Epoch        int64
-	Treasury     string
-	Reserves     string
-	Fees         string
-	Rewards      string
-	CapturedSlot int64
+	ID                int64
+	Epoch             int64
+	Treasury          string
+	Reserves          string
+	Fees              string
+	Rewards           string
+	CapturedSlot      int64
+	ImportedEpochFees sql.NullString
 }
 
 type RewardPoolInput struct {

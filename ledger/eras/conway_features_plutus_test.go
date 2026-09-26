@@ -20,6 +20,7 @@ import (
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +58,74 @@ func TestConwayFeaturesRuleAllowsUnneededPlutusV1V2(t *testing.T) {
 				ls,
 				&conway.ConwayProtocolParameters{},
 			))
+		})
+	}
+}
+
+func TestConwayFeaturesRuleEnforcesPV11PlutusV3ReferenceInputDisjointness(
+	t *testing.T,
+) {
+	t.Parallel()
+	input := newTestInput(0x83, 0)
+	tx := newConwayFeaturesTestTx(input)
+	tx.referenceInputs = []lcommon.TransactionInput{input}
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionVanRossem,
+		},
+	}
+	err := conwayFeaturesRule(t)(tx, 0, newMockLedgerState(), pp)
+	require.ErrorContains(t, err, "is also a regular input")
+}
+
+func TestConwayScriptPurposeUsesActiveProtocolMajor(t *testing.T) {
+	t.Parallel()
+	certificate := &lcommon.RegistrationCertificate{
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.Blake2b224{1},
+		},
+		Amount: 2_000_000,
+	}
+	for _, tc := range []struct {
+		name  string
+		major uint
+		want  data.PlutusData
+	}{
+		{
+			name:  "PV9",
+			major: lcommon.ProtocolVersionConway,
+			want:  data.NewConstr(1),
+		},
+		{
+			name:  "PV10",
+			major: lcommon.ProtocolVersionPlomin,
+			want: data.NewConstr(0,
+				data.NewInteger(big.NewInt(2_000_000))),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pp := &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: tc.major,
+				},
+			}
+			purpose, ok := buildConwayScriptPurpose(
+				lcommon.RedeemerKey{Tag: lcommon.RedeemerTagCert},
+				nil,
+				nil,
+				lcommon.MultiAsset[lcommon.MultiAssetTypeMint]{},
+				[]lcommon.Certificate{certificate},
+				nil,
+				nil,
+				nil,
+				nil,
+				protocolMajorVersion(pp),
+			)
+			require.True(t, ok)
+			fields := purpose.ToPlutusData().(*data.Constr).Fields
+			certificateData := fields[1].(*data.Constr).Fields
+			require.Equal(t, tc.want, certificateData[1])
 		})
 	}
 }

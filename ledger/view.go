@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -314,6 +315,13 @@ var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 // (DRepDelegationStateUnavailableError), so signature drift here is a
 // consensus-level break. Make it a compile error instead.
 var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
+
+// PPUP and MIR rules discover these optional capabilities through the
+// transaction-scoped LedgerView passed to ValidateTx.
+var (
+	_ lcommon.GenesisDelegationState                    = (*LedgerView)(nil)
+	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerView)(nil)
+)
 
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
@@ -691,6 +699,40 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 	return epoch.EpochId, nil
 }
 
+func (lv *LedgerView) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
+}
+
+func (lv *LedgerView) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return lv.ls.genesisDelegateForGenesisKey(
+		genesisKeyHash,
+		slot,
+		lv.metadataTxn(),
+	)
+}
+
+func (lv *LedgerView) GenesisUpdateQuorum() (uint, error) {
+	return lv.ls.GenesisUpdateQuorum()
+}
+
+func (lv *LedgerView) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	return lv.ls.ProtocolParameterUpdateWindow(slot)
+}
+
+func (lv *LedgerView) metadataTxn() types.Txn {
+	if lv.txn == nil {
+		return nil
+	}
+	return lv.txn.Metadata()
+}
+
 // IsPoolRegistered checks if a pool is currently registered
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
@@ -757,42 +799,6 @@ func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
 // TimeToSlot returns the slot number for a given time based on known epochs
 func (lv *LedgerView) TimeToSlot(t time.Time) (uint64, error) {
 	return lv.ls.TimeToSlot(t)
-}
-
-// ProtocolParameterUpdateWindow returns the epoch containing slot and the
-// first slot whose classic protocol parameter proposals target the next epoch.
-func (lv *LedgerView) ProtocolParameterUpdateWindow(
-	slot uint64,
-) (uint64, uint64, error) {
-	if lv == nil || lv.ls == nil || lv.ls.slotClock == nil {
-		return 0, 0, errors.New("classic protocol parameter update window unavailable")
-	}
-	epoch, err := lv.ls.slotClock.GetEpochForSlot(slot)
-	if err != nil {
-		return 0, 0, fmt.Errorf("get epoch for classic protocol parameter update: %w", err)
-	}
-	endSlot := epoch.EndSlot()
-	if endSlot < epoch.StartSlot {
-		return 0, 0, errors.New("classic protocol parameter update epoch end overflows")
-	}
-	lv.ls.RLock()
-	eraID := lv.ls.currentEra.Id
-	lv.ls.RUnlock()
-	stabilityWindow, err := eras.StabilityWindowForEra(
-		lv.ls.config.CardanoNodeConfig,
-		eraID,
-	)
-	if err != nil {
-		return 0, 0, fmt.Errorf("get classic protocol parameter update stability window: %w", err)
-	}
-	if stabilityWindow >= uint64(epoch.LengthInSlots) {
-		return 0, 0, fmt.Errorf(
-			"classic protocol parameter update stability window %d is not smaller than epoch length %d",
-			stabilityWindow,
-			epoch.LengthInSlots,
-		)
-	}
-	return epoch.EpochId, endSlot - stabilityWindow, nil
 }
 
 // CalculateRewards calculates rewards for the given stake keys.
@@ -1130,30 +1136,10 @@ func withoutV2CostModelKey(
 // CommitteeStateAvailable reports whether this view can authoritatively answer
 // committee credential queries for its snapshot.
 //
-// Availability is derived from whether a committee was ever seated, not from
-// the store being reachable and not from the currently seated set. Only two
-// paths ever write committee_member: UpdateCommittee enactment
-// (ledger/governance/enact.go) and Mithril snapshot import
-// (ledgerstate/import.go). Dingo does not seed the Conway genesis committee --
-// genesis.Committee.Threshold is read for the CC quorum, but
-// genesis.Committee.Members is never persisted (blinklabs-io/dingo#3785). A
-// node synced from genesis therefore holds no committee rows at all for the
-// whole Conway era until the first UpdateCommittee enacts, while the real
-// chain has the genesis committee seated from the hard fork. Claiming
-// authority there would reject an authorization from a real committee member,
-// because the lookup returns no member.
-//
-// Removal is a soft delete: both SoftDeleteAllCommitteeMembers on NoConfidence
-// and SoftDeleteCommitteeMembers on UpdateCommittee removal set deleted_slot
-// and leave the row. So the include-deleted set separates the two empty
-// states exactly. No rows at all means never populated, which is the
-// genesis-synced ambiguity and reports false. Rows that are all soft-deleted
-// mean the committee was seated and is now authoritatively empty, which
-// reports true so a former member's authorization or resignation fails closed,
-// as the real chain rejects it.
-//
-// Once #3785 lands, the no-rows case becomes unambiguously authoritative too
-// and this can report true unconditionally.
+// Persisted history establishes authority even after every member is removed.
+// An explicitly empty Conway genesis committee is also authoritative, though
+// genesis initialization has no members to persist. Without either source,
+// an empty store alone cannot establish non-membership.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if lv == nil || lv.ls == nil || lv.ls.db == nil {
 		return false, nil
@@ -1167,7 +1153,14 @@ func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("get committee members: %w", err)
 	}
-	return len(members) > 0, nil
+	if len(members) > 0 {
+		return true, nil
+	}
+	if cfg := lv.ls.config.CardanoNodeConfig; cfg != nil {
+		genesis := cfg.ConwayGenesis()
+		return genesis != nil && len(genesis.Committee.Members) == 0, nil
+	}
+	return false, nil
 }
 
 // CommitteeMember preserves the legacy hash-only contract. It returns nil
@@ -2278,6 +2271,23 @@ func (lv *LedgerView) GetDRepVotingPower(
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
+	// Fold in any active governance proposal's deposit escrowed to a return
+	// account delegating to this DRep, matching the deposit-inclusive tally
+	// governance.LoadDRepVotingState uses for ratification and the
+	// Blockfrost adapter's DRep voting-power reads (CIP-1694;
+	// blinklabs-io/dingo#4355).
+	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
+		lv.ls.db, lv.txn, lv.ls.CurrentEpoch(), 0,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get active proposal deposit voting power: %w", err,
+		)
+	}
+	power += drepDepositPower[models.StakeCredentialRef{
+		Tag: credentialTag,
+		Key: drepCredential,
+	}.MapKey()]
 	return power, nil
 }
 
