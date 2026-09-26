@@ -1691,13 +1691,9 @@ func storeRawBlockUtxoOffsets(
 	if offsets == nil || len(offsets.Transactions) == 0 {
 		return 0, nil
 	}
-	invalidTxs, err := extractInvalidTxIndices(block.Cbor)
+	validity, err := rawBlockTransactionValidity(offsets)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"block at slot %d: decode invalid tx indices: %w",
-			block.Slot,
-			err,
-		)
+		return 0, fmt.Errorf("block at slot %d: %w", block.Slot, err)
 	}
 	for txIdx, txLoc := range offsets.Transactions {
 		bodyEnd := txLoc.Body.Offset + txLoc.Body.Length
@@ -1712,8 +1708,7 @@ func storeRawBlockUtxoOffsets(
 		}
 		bodyBytes := block.Cbor[txLoc.Body.Offset:bodyEnd]
 		txHash := lcommon.Blake2b256Hash(bodyBytes)
-		_, txIsInvalid := invalidTxs[txIdx]
-		if !txIsInvalid {
+		if validity[txIdx] {
 			for i, outLoc := range txLoc.Outputs {
 				if outLoc.Length == 0 {
 					continue
@@ -1775,35 +1770,29 @@ func storeRawBlockUtxoOffsets(
 	return totalUtxos, nil
 }
 
-func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
-	decoder, err := gcbor.NewStreamDecoder(blockCbor)
-	if err != nil {
-		return nil, err
-	}
-	blockLen, _, _, err := decoder.DecodeArrayHeader()
-	if err != nil {
-		return nil, err
-	}
-	if blockLen < 5 {
-		return nil, nil
-	}
-	for range 4 {
-		if _, _, err := decoder.Skip(); err != nil {
-			return nil, err
+// rawBlockTransactionValidity reads invalid_transactions the way
+// cardano-ledger's alignedValidFlags does. The list is walked in wire order,
+// not treated as a set: a descending index marks only the later transaction
+// and a repeated index also marks the one after it, so [1, 0] leaves the
+// first transaction valid and [0, 0] invalidates both. The reference block
+// decoder rejects an index outside the transaction list, and so does this.
+func rawBlockTransactionValidity(
+	offsets *lcommon.BlockTransactionOffsets,
+) ([]bool, error) {
+	count := len(offsets.Transactions)
+	for _, index := range offsets.InvalidTransactions {
+		if index >= uint(count) {
+			return nil, fmt.Errorf(
+				"invalid transaction index %d outside transaction list length %d",
+				index,
+				count,
+			)
 		}
 	}
-	var invalidTxs []uint
-	if _, _, err := decoder.Decode(&invalidTxs); err != nil {
-		return nil, err
-	}
-	if len(invalidTxs) == 0 {
-		return nil, nil
-	}
-	set := make(map[int]struct{}, len(invalidTxs))
-	for _, idx := range invalidTxs {
-		set[int(idx)] = struct{}{} // #nosec G115
-	}
-	return set, nil
+	return lcommon.TransactionValidityFlags(
+		count,
+		offsets.InvalidTransactions,
+	), nil
 }
 
 func txBodyMapValueRange(
