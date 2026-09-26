@@ -927,7 +927,7 @@ func (m *DingoStateManager) ApplyTransaction(
 
 	if proposals := tx.ProposalProcedures(); len(proposals) > 0 {
 		if err := governance.ProcessProposals(
-			tx, point, m.currentEpoch, govActionLifetime, m.db, txn,
+			tx, point, idx, m.currentEpoch, govActionLifetime, m.db, txn,
 		); err != nil {
 			return fmt.Errorf("process proposals: %w", err)
 		}

@@ -19,7 +19,9 @@ package sqlstore
 import "testing"
 
 // The root lookup's correlated NOT EXISTS subquery references the outer
-// governance_proposal row by table name; run it on each real backend.
+// governance_proposal row by table name, and the submission order depends on
+// NULL ordering and the companion-table upsert; run both on each real
+// backend.
 func TestPostgresLastEnactedGovernanceRootIntegration(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
 	exerciseLastEnactedGovernanceRoot(
@@ -31,6 +33,22 @@ func TestPostgresLastEnactedGovernanceRootIntegration(t *testing.T) {
 func TestMySQLLastEnactedGovernanceRootIntegration(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	exerciseLastEnactedGovernanceRoot(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+func TestPostgresGovernanceProposalSubmissionOrderIntegration(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	exerciseGovernanceProposalSubmissionOrder(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLGovernanceProposalSubmissionOrderIntegration(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	exerciseGovernanceProposalSubmissionOrder(
 		t,
 		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
 	)

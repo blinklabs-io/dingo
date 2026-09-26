@@ -12905,8 +12905,13 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    parent and before any later-slot proposal, so it is not moved behind a
    later competing sibling. A stable priority sort then keeps that order
    within the ParameterChange priority, ahead of later action categories.
-   Same-slot order between unrelated proposals still follows the SQL
-   transaction-hash tie-break rather than block order.
+   Within one slot the SQL order is Conway's submission order: the
+   transaction's position in its block (`governance_proposal_order.tx_index`),
+   then the action index. A proposal imported from a ledger-state snapshot
+   records its position in the snapshot's proposal sequence instead, since all
+   proposals of one epoch share that epoch's anchor slot. Rows stored before
+   positions were recorded, and not backfilled from a stored transaction, keep
+   the transaction-hash tie-break.
    During RATIFY, accepted parameter changes are applied to a local staged
    parameter value and advance the parameter-purpose root, allowing later
    candidates in the same pass to validate against their accepted parent's

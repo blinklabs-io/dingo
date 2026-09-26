@@ -32,24 +32,37 @@ id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
 parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
 ratified_epoch, ratified_slot, policy_hash, anchor_url, anchor_hash, deposit,
 return_address, gov_action_cbor, expired_epoch, expired_slot, added_slot,
-deleted_slot, dropped_epoch, dropped_slot`
+deleted_slot, dropped_epoch, dropped_slot, tx_index`
 
-// governanceProposalFromSQL joins in the drop-state companion table (see its
-// migration comment for why dropped_epoch/dropped_slot are not columns on
-// governance_proposal itself). Every column name across the two tables is
-// unique, so callers can keep referencing dropped_epoch/dropped_slot and
-// every other governance_proposal column unqualified.
+// governanceProposalFromSQL joins in the drop-state and submission-order
+// companion tables (see their migration comments for why dropped_epoch,
+// dropped_slot and tx_index are not columns on governance_proposal itself).
+// Apart from the two proposal_id join keys, every column name across the
+// three tables is unique, so callers can keep referencing those columns and
+// every governance_proposal column unqualified.
 const governanceProposalFromSQL = `
 FROM governance_proposal
 LEFT JOIN governance_proposal_drop
-  ON governance_proposal_drop.proposal_id = governance_proposal.id`
+  ON governance_proposal_drop.proposal_id = governance_proposal.id
+LEFT JOIN governance_proposal_order
+  ON governance_proposal_order.proposal_id = governance_proposal.id`
+
+// governanceProposalSubmissionOrderSQL orders proposals within one slot the
+// way Conway RATIFY walks them: block transaction position, then action
+// position within the transaction. tx_hash separates two transactions only
+// for rows stored without a position, which keep the hash order they had
+// before positions were recorded; the CASE keeps any such rows first on
+// every backend, whatever its NULL ordering.
+const governanceProposalSubmissionOrderSQL = `
+CASE WHEN governance_proposal_order.tx_index IS NULL THEN 0 ELSE 1 END ASC,
+governance_proposal_order.tx_index ASC, tx_hash ASC, action_index ASC`
 
 const governanceProposalOrderSQL = `
-proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC`
+proposed_epoch ASC, added_slot ASC,` + governanceProposalSubmissionOrderSQL
 
 const ratifiedGovernanceProposalOrderSQL = `
-ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC,
-tx_hash ASC, action_index ASC`
+ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC,` +
+	governanceProposalSubmissionOrderSQL
 
 func (s *Store) GetGovernanceProposal(
 	txHash []byte,
@@ -346,6 +359,21 @@ ON CONFLICT (proposal_id) DO UPDATE SET
 				}
 			}
 
+			// A nil TxIndex means the caller did not supply the position, so
+			// an existing row is left in place rather than cleared.
+			if proposal.TxIndex != nil {
+				if _, err := db.ExecContext(ctx, `
+INSERT INTO governance_proposal_order (proposal_id, tx_index)
+VALUES (?, ?)
+ON CONFLICT (proposal_id) DO UPDATE SET
+    tx_index = excluded.tx_index`,
+					id,
+					*proposal.TxIndex,
+				); err != nil {
+					return err
+				}
+			}
+
 			if proposal.RatifiedEpoch == nil {
 				return nil
 			}
@@ -565,6 +593,15 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 				query string
 				args  []any
 			}{
+				{
+					// Deleted explicitly rather than through the foreign-key
+					// cascade, which SQLite applies only with foreign_keys on.
+					query: `DELETE FROM governance_proposal_order
+				 WHERE proposal_id IN (
+				     SELECT id FROM governance_proposal WHERE added_slot > ?
+				 )`,
+					args: []any{slot},
+				},
 				{
 					query: "DELETE FROM governance_proposal WHERE added_slot > ?",
 					args:  []any{slot},
@@ -787,6 +824,7 @@ func scanGovernanceProposal(
 		&proposal.DeletedSlot,
 		&proposal.DroppedEpoch,
 		&proposal.DroppedSlot,
+		&proposal.TxIndex,
 	)
 	if err != nil {
 		return nil, err

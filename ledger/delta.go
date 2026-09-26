@@ -234,7 +234,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 
 		// Process governance proposals and votes for valid Conway-era transactions
 		if tr.Tx.IsValid() {
-			if err := d.processGovernance(ls, tr.Tx, txn); err != nil {
+			if err := d.processGovernance(
+				ls, tr.Tx, uint32(tr.Index), txn, //nolint:gosec
+			); err != nil {
 				return fmt.Errorf("process governance: %w", err)
 			}
 		}
@@ -410,6 +412,7 @@ func (d *LedgerDelta) recordNetworkDonations(
 func (d *LedgerDelta) processGovernance(
 	ls *LedgerState,
 	tx lcommon.Transaction,
+	txIndex uint32,
 	txn *database.Txn,
 ) error {
 	proposals := tx.ProposalProcedures()
@@ -442,6 +445,7 @@ func (d *LedgerDelta) processGovernance(
 		if err := governance.ProcessProposals(
 			tx,
 			d.Point,
+			txIndex,
 			currentEpoch,
 			conwayPParams.GovActionValidityPeriod,
 			ls.db,

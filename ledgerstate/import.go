@@ -3610,7 +3610,7 @@ func importGovState(
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
 			metaTxn := txn.Metadata()
-			for _, prop := range govState.Proposals {
+			for position, prop := range govState.Proposals {
 				select {
 				case <-ctx.Done():
 					return fmt.Errorf(
@@ -3623,6 +3623,7 @@ func importGovState(
 					cfg,
 					prop.ProposedIn,
 				)
+				orderIndex := uint32(position) //nolint:gosec // bounded by the decoded proposal array
 				var ratifiedEpoch *uint64
 				var ratifiedSlot *uint64
 				_, ratified := ratifiedIds[govActionIdKey(
@@ -3656,7 +3657,12 @@ func importGovState(
 						GovActionCbor:   prop.GovActionCbor,
 						RatifiedEpoch:   ratifiedEpoch,
 						RatifiedSlot:    ratifiedSlot,
-						AddedSlot:       proposedSlot,
+						// The snapshot lists proposals in submission order,
+						// and every proposal of one epoch shares its anchor
+						// slot, so this position stands in for the block
+						// order RATIFY needs.
+						TxIndex:   &orderIndex,
+						AddedSlot: proposedSlot,
 					},
 					metaTxn,
 				); err != nil {

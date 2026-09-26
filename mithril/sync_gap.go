@@ -673,6 +673,7 @@ func processGapBlockTransactions(
 		if err := governance.ProcessProposals(
 			tx,
 			point,
+			uint32(i), // #nosec G115 -- tx index within a block
 			epochId,
 			conwayPParams.GovActionValidityPeriod,
 			db,

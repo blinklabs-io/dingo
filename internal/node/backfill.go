@@ -628,6 +628,7 @@ func (b *Backfill) calculateCertDeposits(
 func (b *Backfill) processBlockGovernance(
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
 	epochId uint64,
 	pp lcommon.ProtocolParameters,
 	txn *database.Txn,
@@ -655,7 +656,7 @@ func (b *Backfill) processBlockGovernance(
 	}
 	if len(proposals) > 0 {
 		if err := governance.ProcessProposals(
-			tx, point, epochId,
+			tx, point, txIndex, epochId,
 			conwayPP.GovActionValidityPeriod,
 			b.db, txn,
 		); err != nil {
@@ -1234,7 +1235,7 @@ func (b *Backfill) processBlockTxsBatched(
 			stats.SetTransactionBatched += time.Since(setTxStart)
 		}
 		if err := b.processBlockGovernance(
-			tx, point, epochId, pp, txn,
+			tx, point, uint32(i), epochId, pp, txn, // #nosec G115
 		); err != nil {
 			return fmt.Errorf(
 				"governance at slot %d tx %d: %w",
