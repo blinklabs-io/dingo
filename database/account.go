@@ -163,6 +163,34 @@ func (d *Database) ResetAccountExpirationActivation(
 	return refs, err
 }
 
+// RestoreImportedAccountStates sets each account whose import baseline was
+// recorded at or after minBaselineSlot back to that baseline's registration
+// and delegation, leaving reward untouched. Historical API backfill calls it
+// once replay reaches the Mithril anchor: replay applies certificates but not
+// POOLREAP or the PV10 HARDFORK rule, both of which clear delegations the
+// snapshot already reflects. Returns the number of accounts changed.
+func (d *Database) RestoreImportedAccountStates(
+	minBaselineSlot uint64,
+	txn *Txn,
+) (int, error) {
+	var n int
+	err := d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		restored, err := d.metadata.RestoreImportedAccountStates(
+			minBaselineSlot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return err
+		}
+		n = restored
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // ClearDanglingDRepDelegations applies the cardano-ledger Conway HARDFORK
 // STS rule for protocol major version 10 (Plomin, mainnet January 2025): any
 // account with a credential-backed DRep delegation (DrepType 0 or 1) whose

@@ -670,7 +670,7 @@ func processGapBlockTransactions(
 				"missing Conway protocol parameters for governance gap block processing",
 			)
 		}
-		if err := governance.ProcessProposals(
+		if err := governance.ProcessHistoricalProposals(
 			tx,
 			point,
 			epochId,
@@ -683,11 +683,12 @@ func processGapBlockTransactions(
 				err,
 			)
 		}
-		if err := governance.ProcessVotes(
+		// Gap blocks end at the imported ledger state, whose DRep expiry
+		// already reflects these votes and the dormant epochs after them.
+		if err := governance.ProcessHistoricalVotes(
 			tx,
 			point,
 			epochId,
-			conwayPParams.DRepInactivityPeriod,
 			db,
 			txn,
 		); err != nil {

@@ -481,6 +481,16 @@ type GovernanceStore interface {
 		types.Txn,
 	) error
 
+	// RecordDRepActivityEpoch updates only the DRep's last activity epoch,
+	// for historical replay below a snapshot anchor whose recorded expiry
+	// must stand.
+	RecordDRepActivityEpoch(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // activityEpoch
+		types.Txn,
+	) error
+
 	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
 	// or before the given epoch.
 	GetExpiredDReps(
@@ -2199,6 +2209,13 @@ type MetadataStore interface {
 	// slot so the clear is rollback-safe. The delegation half of POOLREAP; see
 	// the sqlstore implementation for why the import baseline is left alone.
 	ClearDelegationsToRetiredPool([]byte, uint64, types.Txn) error
+
+	// RestoreImportedAccountStates sets active, pool and DRep delegation back
+	// to each account's import baseline recorded at or after the given slot,
+	// leaving reward untouched, and returns the number of rows changed.
+	// Historical API backfill calls it at the Mithril anchor, because replay
+	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
+	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
 
 	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
 	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
