@@ -7366,6 +7366,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				len(nextBatch),
 				i+batchSize,
 			)
+			// Starts the dingo_ledger_block_apply_batch_latency_seconds
+			// window for this chunk: everything from here through
+			// updateTipMetrics reflecting its new tip below, including the
+			// Leios endorser-block wait this chunk may take next. See
+			// blockApplyBatchLatency's doc comment for why this is a
+			// per-batch, not per-block, measurement.
+			batchApplyStart := time.Now()
 
 			// Leios: gate delivery of this chunk on the availability of the
 			// endorser blocks its Dijkstra ranking blocks reference, so the
@@ -7856,6 +7863,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.reachedTip.Store(true)
 				}
 				ls.updateTipMetrics(tipDensity)
+				// This chunk's new tip is now reflected in
+				// cardano_node_metrics_blockNum_int, closing the window
+				// batchApplyStart opened above.
+				ls.metrics.observeBlockApplyBatch(
+					blocksProcessed,
+					time.Since(batchApplyStart),
+				)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then check whether the stability window reaches or exceeds

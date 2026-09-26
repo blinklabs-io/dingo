@@ -194,6 +194,72 @@
         "defaults": { "unit": "s" },
         "overrides": []
       }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Block apply batch latency: p50 / p99",
+      "description": "histogram_quantile(0.50 or 0.99, sum(rate(dingo_ledger_block_apply_batch_latency_seconds_bucket[$__rate_interval])) by (le)) -- wall-clock time from the start of applying one committed DB-transaction chunk of blocks to the moment its new tip is reflected in cardano_node_metrics_blockNum_int, the same gauge the 'Block apply rate' panel above derives deriv() from. This is a genuine per-batch measurement, not a per-block one: ledger/state.go commits up to 50 blocks per DB transaction and advances blockNum_int once per committed chunk, not once per block (see 'Block apply batch size' below). histogram_quantile is a bucket-boundary-bounded ESTIMATE, not an exact value; see 'Block apply batch latency: max observed' for the exact worst case. There was previously no directly-recorded latency metric consistent with the rate panel at all -- a naive 1/deriv(cardano_node_metrics_blockNum_int) derivation would derive a rate from a gauge's slope rather than record a real per-observation duration, and could not give a true percentile.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(dingo_ledger_block_apply_batch_latency_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(dingo_ledger_block_apply_batch_latency_seconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Block apply batch latency: max observed",
+      "description": "dingo_ledger_block_apply_batch_max_latency_seconds -- the exact maximum wall-clock duration ever observed for dingo_ledger_block_apply_batch_latency_seconds, since process start. Monotonically non-decreasing and never resets. Unlike the p50/p99 panel above, this is not a bucket-bounded estimate: it is the precise worst-ever value, read directly from the same atomic the histogram observation updates, so it cannot drift behind the true maximum the way a separately-pushed gauge could.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_ledger_block_apply_batch_max_latency_seconds",
+          "legendFormat": "max observed",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Block apply batch size",
+      "description": "sum(rate(dingo_ledger_block_apply_batch_size_sum[$__rate_interval])) / sum(rate(dingo_ledger_block_apply_batch_size_count[$__rate_interval])) -- average blocks committed per dingo_ledger_block_apply_batch_latency_seconds observation (ledger/state.go caps this at 50 blocks per DB transaction). Required context for reading the two panels above: 'batch latency / batch size' approximates the same per-block rate the 'Block apply rate' panel derives, but the latency panels themselves are per-batch, not per-block, so this shows how many blocks each observation actually covers -- a value near 1 during live tip-following, higher during bulk historical catch-up.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(dingo_ledger_block_apply_batch_size_sum[$__rate_interval])) / sum(rate(dingo_ledger_block_apply_batch_size_count[$__rate_interval]))",
+          "legendFormat": "avg blocks/batch",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
     }
   ]
 }
