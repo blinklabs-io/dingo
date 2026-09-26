@@ -3664,7 +3664,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	repairSameTip bool,
 	publishResync bool,
 	retainIntent bool,
-) (resultErr error) {
+) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
@@ -3838,10 +3838,16 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			}
 			return
 		}
+		// Close discards queued work and waits for the worker; restoring
+		// after it would re-arm that work and could Add to the wait group
+		// after Close's Wait.
+		if ls.closed.Load() {
+			ls.rewardPrecomputeMu.Unlock()
+			return
+		}
+		startWorker := false
 		if ls.rewardPrecomputePending == nil && snapshot.pending != nil {
-			restored := *snapshot.pending
-			restored.EpochNonce = slices.Clone(restored.EpochNonce)
-			ls.rewardPrecomputePending = &restored
+			startWorker = ls.queueRewardPrecomputeLocked(*snapshot.pending)
 		}
 		if ls.rewardPrecomputeRetry == nil && snapshot.retry != nil {
 			restored := *snapshot.retry
@@ -3850,12 +3856,6 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			)
 			restored.generation = ls.rewardInputGeneration.Load()
 			ls.rewardPrecomputeRetry = &restored
-		}
-		startWorker := !ls.rewardPrecomputeRunning &&
-			ls.rewardPrecomputePending != nil
-		if startWorker {
-			ls.rewardPrecomputeRunning = true
-			ls.rewardPrecomputeWG.Add(1)
 		}
 		hasRetry := ls.rewardPrecomputeRetry != nil
 		hasPending := ls.rewardPrecomputePending != nil

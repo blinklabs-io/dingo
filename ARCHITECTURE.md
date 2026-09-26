@@ -13017,14 +13017,25 @@ no distinct completion sentinel and is re-derived idempotently by the precompute
 and boundary paths instead of being short-circuited; that recomputation is
 deterministic and reproduces the same empty result, so it costs only redundant
 work, never correctness. A rollback or authoritative snapshot replacement
-therefore drops stale work. Successful rollback also clears pending transitions
-and prefilter retries from the abandoned chain and queues the surviving epoch
-again after its tip, epoch state, and reward-input generation are restored.
-The replacement captures the applied tip, so a pre-Babbage round already past
-its prefilter slot does not defer back to the epoch's start. Prefilter retries
-carry their calculation's generation, preventing an old calculation from
-reinstalling a retry after rollback. Failed or no-op rollbacks do not queue a
-replacement; the boundary retains its authoritative fallback.
+therefore drops stale work. Every rollback deletes the in-progress epoch's
+precomputed outputs, whose boundary slot lies ahead of any rollback point, and
+its generation bump discards the in-flight calculation. A rollback whose
+truncation commits clears pending transitions and prefilter retries from the
+abandoned chain and queues the surviving epoch again after its tip, epoch
+state, and reward-input generation are restored. That includes a rollback
+whose durable tip-floor check fails afterwards and escalates to
+`FatalErrorFunc`: its epoch state has already reloaded, so the replacement
+is valid. The replacement captures the applied tip, so a pre-Babbage round
+already past its prefilter slot does not defer back to the epoch's start. A
+committed rollback whose in-memory reload fails queues nothing, because its
+epoch state may be stale; it escalates to `FatalErrorFunc`, and the restart
+queues the epoch from `Start`. A rollback whose transaction fails restores the
+queued transition and prefilter retry, re-stamping the retry with the new
+generation, and queues the current epoch when nothing was queued; after
+`Close` it restores nothing.
+Prefilter retries carry their calculation's generation, preventing an old
+calculation from reinstalling a retry after rollback. A no-op rollback leaves
+queued work untouched. The boundary retains its authoritative fallback.
 Pre-Babbage precomputation is deferred until applied block
 progress reaches the RUPD prefilter slot, which queues a retry using the actual
 captured slot; later eras can precompute immediately.
