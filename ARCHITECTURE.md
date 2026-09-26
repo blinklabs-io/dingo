@@ -12890,8 +12890,14 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    different `account_reward_delta` discriminators, so neither is dropped as a
    replay of the other.
 
-   The subsequent RATIFY pass carries the post-ENACT treasury as a running
-   budget. Each accepted treasury withdrawal consumes that budget; an
+   The subsequent RATIFY pass carries a running treasury budget seeded as
+   Conway's EPOCH rule seeds it: from the treasury this boundary leaves, read
+   after ENACT, DROP and removal refunds, plus the ended epoch's donations,
+   which `processEpochRollover` passes as `EpochInput.PendingTreasuryDonations`
+   and step 8 credits afterwards. An enacted withdrawal to an unregistered
+   account, and a deposit refund to an unregistered account, stay in or return
+   to the treasury and so count toward it. This boundary's ENACT keeps its own
+   pre-credit budget. Each accepted treasury withdrawal consumes that budget; an
    over-budget withdrawal or a withdrawal whose `uint64` amount sum overflows
    remains pending, and evaluation continues with later proposals. This is the
    treasury-capacity portion of Conway RATIFY's running enactment state, not a
@@ -12989,7 +12995,8 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    treats every silent pool as implicit No for HardForkInitiation; during
    Conway bootstrap, silent pools on other actions are Abstain. Only
    post-bootstrap non-voters reach the reward-account default-vote rules.
-8. Treasury donations (`applyEpochDonations`), added after withdrawals.
+8. Treasury donations (`applyEpochDonations`), added after withdrawals. Step
+   7's RATIFY already counted them (see above).
 9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
    above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal

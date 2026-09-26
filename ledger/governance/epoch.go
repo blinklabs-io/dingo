@@ -114,6 +114,12 @@ type EpochInput struct {
 	// snapshot, because the one this field carries does not exist until the
 	// boundary runs. See predictedBoundaryStakeEpochFor.
 	CurrentBoundarySPOState *SPOVotingState
+	// PendingTreasuryDonations is PrevEpoch's treasury donation total, which
+	// the caller moves into the treasury after ProcessEpoch returns. The
+	// RATIFY pass counts it, because Conway's EPOCH rule adds donations to
+	// the treasury before it seeds the next RATIFY state; this boundary's
+	// ENACT does not.
+	PendingTreasuryDonations uint64
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -666,11 +672,30 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("get committee quorum: %w", err)
 	}
 
-	// RATIFY carries the post-ENACT treasury in its enactment state. Accepted
-	// withdrawals consume this budget immediately, even though they are not
-	// enacted until a later boundary and even when an unregistered destination
-	// would leave the corresponding lovelace in Dingo's physical treasury pot.
-	ratificationTreasuryRemaining := enactCtx.TreasuryWithdrawalRemaining
+	// Conway seeds RATIFY from the treasury the whole EPOCH rule leaves
+	// (setFreshDRepPulsingState: `ensTreasuryL .~ epochState ^. treasuryL`).
+	// By then applyEnactedWithdrawals has paid registered destinations only,
+	// and EPOCH has added the epoch's donations and unclaimed deposit refunds
+	// (`casTreasuryL <>~ (utxosDonation <> fold unclaimed)`). The pot row
+	// already reflects this boundary's ENACT, DROP and removal refunds; the
+	// caller adds the donations after ProcessEpoch returns. Accepted
+	// withdrawals then consume this budget immediately, even though they are
+	// not enacted until a later boundary.
+	ratifyState, err := in.DB.Metadata().GetNetworkState(in.Txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get ratification network state: %w", err)
+	}
+	var ratificationTreasuryRemaining uint64
+	if ratifyState != nil {
+		ratificationTreasuryRemaining = uint64(ratifyState.Treasury)
+	}
+	if ratificationTreasuryRemaining >
+		^uint64(0)-in.PendingTreasuryDonations {
+		return nil, errors.New(
+			"ratification treasury with pending donations overflows",
+		)
+	}
+	ratificationTreasuryRemaining += in.PendingTreasuryDonations
 
 	stillActive = orderParameterChangeChains(stillActive)
 	sort.SliceStable(stillActive, func(i, j int) bool {
