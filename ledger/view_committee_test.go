@@ -48,8 +48,12 @@ func committeeTestCredential(seed byte) lcommon.Credential {
 	}
 }
 
-func committeeTestVotingKey(seed byte) (lcommon.Credential, ed25519.PrivateKey) {
-	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+func committeeTestVotingKey(
+	seed byte,
+) (lcommon.Credential, ed25519.PrivateKey) {
+	privateKey := ed25519.NewKeyFromSeed(
+		bytes.Repeat([]byte{seed}, ed25519.SeedSize),
+	)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	return lcommon.Credential{
 		CredType:   lcommon.CredentialTypeAddrKeyHash,
@@ -75,7 +79,10 @@ func committeeTestAddSpend(
 	return input, address
 }
 
-func mustCommitteeTestAddress(t *testing.T, paymentKeyHash []byte) lcommon.Address {
+func mustCommitteeTestAddress(
+	t *testing.T,
+	paymentKeyHash []byte,
+) lcommon.Address {
 	t.Helper()
 	address, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyKey,
@@ -87,7 +94,10 @@ func mustCommitteeTestAddress(t *testing.T, paymentKeyHash []byte) lcommon.Addre
 	return address
 }
 
-func committeeTestVKeyWitness(tx lcommon.Transaction, key ed25519.PrivateKey) lcommon.VkeyWitness {
+func committeeTestVKeyWitness(
+	tx lcommon.Transaction,
+	key ed25519.PrivateKey,
+) lcommon.VkeyWitness {
 	hash := tx.Hash()
 	return lcommon.VkeyWitness{
 		Vkey:      key.Public().(ed25519.PublicKey),
@@ -309,12 +319,18 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 				hot := committeeTestCredential(0x72)
 				voterMember, err := lv.CommitteeHotCredentialMember(hot)
 				require.NoError(t, err)
-				require.NotNil(t, voterMember,
-					"pending committee proposals still contribute authorization state")
+				require.NotNil(
+					t,
+					voterMember,
+					"pending committee proposals still contribute authorization state",
+				)
 				elected, err := lv.CommitteeCredentialIsElected(cold)
 				require.NoError(t, err)
-				require.False(t, elected,
-					"a pending member must remain distinct from an elected member")
+				require.False(
+					t,
+					elected,
+					"a pending member must remain distinct from an elected member",
+				)
 				voter := &lcommon.Voter{
 					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
 					Hash: [28]byte(hot.Credential),
@@ -325,10 +341,19 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 					},
 					TxIsValid: true,
 				}
-				err = eras.ValidateTxConway(tx, 0, lv, &conway.ConwayProtocolParameters{})
+				err = eras.ValidateTxConway(
+					tx,
+					0,
+					lv,
+					&conway.ConwayProtocolParameters{},
+				)
 				var unknownVoter conway.UnknownVoterError
-				require.False(t, errors.As(err, &unknownVoter),
-					"authorized pending voter must pass the unknown-voter rule: %v", err)
+				require.False(
+					t,
+					errors.As(err, &unknownVoter),
+					"authorized pending voter must pass the unknown-voter rule: %v",
+					err,
+				)
 			} else {
 				require.Nil(t, member.HotKey)
 			}
@@ -1248,7 +1273,9 @@ func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
 			TxInputs: conway.NewConwayTransactionInputSet(
 				[]shelley.ShelleyTransactionInput{input},
 			),
-			TxOutputs:          []gdijkstra.DijkstraTransactionOutput{{Output: output}},
+			TxOutputs: []gdijkstra.DijkstraTransactionOutput{
+				{Output: output},
+			},
 			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
 		},
 		TxIsValid: true,
@@ -1290,7 +1317,9 @@ func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
 			),
 			TxOutputs: []babbage.BabbageTransactionOutput{{
 				OutputAddress: output.OutputAddress,
-				OutputAmount:  mary.MaryTransactionOutputValue{Amount: output.OutputAmount},
+				OutputAmount: mary.MaryTransactionOutputValue{
+					Amount: output.OutputAmount,
+				},
 			}},
 			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
 		},
@@ -1339,7 +1368,9 @@ func TestValidateTxConwayAcceptsAuthorizedPendingCommitteeVoterAtPV10(
 			),
 			TxOutputs: []babbage.BabbageTransactionOutput{{
 				OutputAddress: output.OutputAddress,
-				OutputAmount:  mary.MaryTransactionOutputValue{Amount: output.OutputAmount},
+				OutputAmount: mary.MaryTransactionOutputValue{
+					Amount: output.OutputAmount,
+				},
 			}},
 			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
 		},
@@ -1370,7 +1401,9 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 				newHot lcommon.Credential,
 			) lcommon.Certificate {
 				return &lcommon.AuthCommitteeHotCertificate{
-					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					CertType: uint(
+						lcommon.CertificateTypeAuthCommitteeHot,
+					),
 					ColdCredential: cold,
 					HotCredential:  newHot,
 				}
@@ -1382,7 +1415,9 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 				cold, _, _ lcommon.Credential,
 			) lcommon.Certificate {
 				return &lcommon.ResignCommitteeColdCertificate{
-					CertType:       uint(lcommon.CertificateTypeResignCommitteeCold),
+					CertType: uint(
+						lcommon.CertificateTypeResignCommitteeCold,
+					),
 					ColdCredential: cold,
 				}
 			},
@@ -1400,11 +1435,14 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 				oldHot := committeeTestCredential(0xdd)
 				newHot := committeeTestCredential(0xde)
 				seedCommitteeCredentialAuthorization(t, db, cold, oldHot, 1, 1)
-				require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-					ColdCredentialTag: uint8(cold.CredType),
-					ColdCredHash:      cold.Credential[:],
-					ExpiresEpoch:      10,
-				}}, nil))
+				require.NoError(
+					t,
+					db.SetCommitteeMembers([]*models.CommitteeMember{{
+						ColdCredentialTag: uint8(cold.CredType),
+						ColdCredHash:      cold.Credential[:],
+						ExpiresEpoch:      10,
+					}}, nil),
+				)
 				cert := test.certificate(cold, oldHot, newHot)
 				voter := &lcommon.Voter{
 					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
@@ -1417,7 +1455,9 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 							TxCertificates: []lcommon.CertificateWrapper{{
 								Type: cert.Type(), Certificate: cert,
 							}},
-							TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+							TxVotingProcedures: lcommon.VotingProcedures{
+								voter: {},
+							},
 						},
 						TxIsValid: true,
 					}

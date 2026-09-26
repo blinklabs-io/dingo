@@ -82,7 +82,11 @@ INSERT INTO auth_committee_hot (
 		return ret
 	}
 	cold := func(tag uint8, seed byte) string {
-		return fmt.Sprintf("%d:%s", tag, hex.EncodeToString(credentialHash(seed)))
+		return fmt.Sprintf(
+			"%d:%s",
+			tag,
+			hex.EncodeToString(credentialHash(seed)),
+		)
 	}
 
 	require.Equal(t, map[string]string{

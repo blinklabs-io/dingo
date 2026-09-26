@@ -912,7 +912,10 @@ func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
 			CredType:   uint(authorization.ColdCredentialTag),
 			Credential: common.NewBlake2b224(authorization.ColdCredential),
 		}
-		key := coldKey{tag: authorization.ColdCredentialTag, hash: cold.Credential}
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: cold.Credential,
+		}
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -948,7 +951,9 @@ func (p *DingoStateProvider) CommitteeCredentialIsElected(
 	}
 	for _, member := range members {
 		if member != nil && member.ColdCredentialTag == coldTag &&
-			common.NewBlake2b224(member.ColdCredHash) == coldCredential.Credential {
+			common.NewBlake2b224(
+				member.ColdCredHash,
+			) == coldCredential.Credential {
 			return true, nil
 		}
 	}

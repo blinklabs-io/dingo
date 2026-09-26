@@ -1522,7 +1522,10 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		if err != nil {
 			return nil, err
 		}
-		key := coldKey{tag: authorization.ColdCredentialTag, hash: cold.Credential}
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: cold.Credential,
+		}
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -1572,7 +1575,10 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		if err != nil {
 			return nil, err
 		}
-		key := coldKey{tag: authorization.ColdCredentialTag, hash: cold.Credential}
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: cold.Credential,
+		}
 		if _, ok := seatedColds[key]; ok {
 			continue
 		}
