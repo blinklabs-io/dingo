@@ -582,27 +582,40 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		hasReg = true
 		reg := pool.Registration[latestIdx]
+		operator, err := blake2b224FromBytes(pool.PoolKeyHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("pool current state operator: %w", err)
+		}
+		vrfKeyHash, err := blake2b256FromBytes(pool.VrfKeyHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("pool current state VRF key hash: %w", err)
+		}
+		rewardAccount, err := blake2b224FromBytes(pool.RewardAccount)
+		if err != nil {
+			return nil, nil, fmt.Errorf("pool current state reward account: %w", err)
+		}
 		tmp := lcommon.PoolRegistrationCertificate{
-			CertType: uint(lcommon.CertificateTypePoolRegistration),
-			Operator: lcommon.PoolKeyHash(
-				lcommon.NewBlake2b224(pool.PoolKeyHash),
-			),
-			VrfKeyHash: lcommon.VrfKeyHash(
-				lcommon.NewBlake2b256(pool.VrfKeyHash),
-			),
-			Pledge: uint64(pool.Pledge),
-			Cost:   uint64(pool.Cost),
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   lcommon.PoolKeyHash(operator),
+			VrfKeyHash: lcommon.VrfKeyHash(vrfKeyHash),
+			Pledge:     uint64(pool.Pledge),
+			Cost:       uint64(pool.Cost),
 		}
 		if pool.Margin != nil {
 			tmp.Margin = cbor.Rat{Rat: pool.Margin.Rat}
 		}
-		tmp.RewardAccount = lcommon.AddrKeyHash(
-			lcommon.NewBlake2b224(pool.RewardAccount),
-		)
+		tmp.RewardAccount = lcommon.AddrKeyHash(rewardAccount)
 		for _, owner := range reg.Owners {
+			ownerKeyHash, err := blake2b224FromBytes(owner.KeyHash)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"pool current state owner key hash: %w",
+					err,
+				)
+			}
 			tmp.PoolOwners = append(
 				tmp.PoolOwners,
-				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
+				lcommon.AddrKeyHash(ownerKeyHash),
 			)
 		}
 		for _, relay := range reg.Relays {
@@ -1697,6 +1710,10 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		credential, err := blake2b224FromBytes(drep.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("DRep registrations credential: %w", err)
+		}
 		deposit, ok := deposits[models.DrepDepositKey(
 			drep.CredentialTag,
 			drep.Credential,
@@ -1708,10 +1725,10 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.Credential{
 				CredType:   uint(drep.CredentialTag),
-				Credential: lcommon.NewBlake2b224(drep.Credential),
+				Credential: lcommon.Blake2b224(credential),
 			},
 			Deposit: lv.drepRegistrationDeposit(
-				lcommon.NewBlake2b224(drep.Credential),
+				credential,
 				depositPtr,
 			),
 		}

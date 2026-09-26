@@ -98,9 +98,9 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 		)
 	}
 
-	pkhs := make([]lcommon.PoolKeyHash, 0, len(pkhBytes))
-	for _, b := range pkhBytes {
-		pkhs = append(pkhs, lcommon.PoolKeyHash(lcommon.NewBlake2b224(b)))
+	pkhs, err := poolKeyHashesFromActivePoolBytes(pkhBytes)
+	if err != nil {
+		return nil, err
 	}
 	pools, err := ls.db.GetPools(pkhs, txn)
 	if err != nil {
@@ -108,6 +108,20 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	}
 
 	return assembleLedgerPeerSnapshot(slot, stakeByPool, pools, peerKind), nil
+}
+
+func poolKeyHashesFromActivePoolBytes(
+	poolKeyHashBytes [][]byte,
+) ([]lcommon.PoolKeyHash, error) {
+	poolKeyHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashBytes))
+	for _, bytes := range poolKeyHashBytes {
+		poolKeyHash, err := blake2b224FromBytes(bytes)
+		if err != nil {
+			return nil, fmt.Errorf("GetLedgerPeerSnapshot active pool key: %w", err)
+		}
+		poolKeyHashes = append(poolKeyHashes, lcommon.PoolKeyHash(poolKeyHash))
+	}
+	return poolKeyHashes, nil
 }
 
 // emptyLedgerPeerSnapshot builds a well-formed empty (V1) snapshot at the
