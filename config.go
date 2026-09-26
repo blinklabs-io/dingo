@@ -100,6 +100,10 @@ type KoiosParityConfig struct {
 	BaseURL string
 	// AllowInsecureHTTP permits a plain-HTTP BaseURL. Local dev/test only.
 	AllowInsecureHTTP bool
+	// AllowPrivateAddresses permits a private, loopback, or special-use
+	// BaseURL. Leave false unless the operator intentionally runs Koios on
+	// such a network.
+	AllowPrivateAddresses bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or
@@ -795,17 +799,18 @@ func (c *Config) syncCompatFields() {
 	// so the mirror always carries a non-nil pointer.
 	koiosParityAccounts := c.cfg.KoiosParity.Accounts
 	c.koiosParity = KoiosParityConfig{
-		Enabled:              c.cfg.KoiosParity.Enabled,
-		Network:              c.cfg.KoiosParity.Network,
-		CachePath:            c.cfg.KoiosParity.CachePath,
-		APIKey:               c.cfg.KoiosParity.APIKey,
-		BaseURL:              c.cfg.KoiosParity.BaseURL,
-		AllowInsecureHTTP:    c.cfg.KoiosParity.AllowInsecureHTTP,
-		Strict:               c.cfg.KoiosParity.Strict,
-		GraceHours:           c.cfg.KoiosParity.GraceHours,
-		Accounts:             &koiosParityAccounts,
-		AccountChunkSize:     c.cfg.KoiosParity.AccountChunkSize,
-		AccountChunkMaxBytes: c.cfg.KoiosParity.AccountChunkMaxBytes,
+		Enabled:               c.cfg.KoiosParity.Enabled,
+		Network:               c.cfg.KoiosParity.Network,
+		CachePath:             c.cfg.KoiosParity.CachePath,
+		APIKey:                c.cfg.KoiosParity.APIKey,
+		BaseURL:               c.cfg.KoiosParity.BaseURL,
+		AllowInsecureHTTP:     c.cfg.KoiosParity.AllowInsecureHTTP,
+		AllowPrivateAddresses: c.cfg.KoiosParity.AllowPrivateAddresses,
+		Strict:                c.cfg.KoiosParity.Strict,
+		GraceHours:            c.cfg.KoiosParity.GraceHours,
+		Accounts:              &koiosParityAccounts,
+		AccountChunkSize:      c.cfg.KoiosParity.AccountChunkSize,
+		AccountChunkMaxBytes:  c.cfg.KoiosParity.AccountChunkMaxBytes,
 	}
 	// The token registry syncer reads this runtime mirror, so YAML, env, and
 	// CLI values -- which only ever land on c.cfg -- have to be carried
@@ -1735,17 +1740,18 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			accounts = *cfg.Accounts
 		}
 		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
-			Enabled:              cfg.Enabled,
-			Network:              cfg.Network,
-			CachePath:            cfg.CachePath,
-			APIKey:               cfg.APIKey,
-			BaseURL:              cfg.BaseURL,
-			AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
-			Strict:               cfg.Strict,
-			GraceHours:           cfg.GraceHours,
-			Accounts:             accounts,
-			AccountChunkSize:     cfg.AccountChunkSize,
-			AccountChunkMaxBytes: cfg.AccountChunkMaxBytes,
+			Enabled:               cfg.Enabled,
+			Network:               cfg.Network,
+			CachePath:             cfg.CachePath,
+			APIKey:                cfg.APIKey,
+			BaseURL:               cfg.BaseURL,
+			AllowInsecureHTTP:     cfg.AllowInsecureHTTP,
+			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+			Strict:                cfg.Strict,
+			GraceHours:            cfg.GraceHours,
+			Accounts:              accounts,
+			AccountChunkSize:      cfg.AccountChunkSize,
+			AccountChunkMaxBytes:  cfg.AccountChunkMaxBytes,
 		}
 	}
 }

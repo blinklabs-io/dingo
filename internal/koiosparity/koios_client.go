@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/netguard"
 )
 
 const (
@@ -424,7 +426,7 @@ func validateKoiosNetwork(network string) error {
 // host that does rate-limit still backs off correctly on 429.
 func NewKoiosClient(
 	network, apiKey, baseURL string,
-	allowInsecureHTTP bool,
+	allowInsecureHTTP, allowPrivateAddresses bool,
 ) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
@@ -432,7 +434,11 @@ func NewKoiosClient(
 	base := koiosBaseURLs[network]
 	burstLimit := koiosBurstLimitSafe
 	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
-		if err := validateKoiosBaseURL(trimmed, allowInsecureHTTP); err != nil {
+		if err := validateKoiosBaseURL(
+			trimmed,
+			allowInsecureHTTP,
+			allowPrivateAddresses,
+		); err != nil {
 			return nil, err
 		}
 		base = trimmed
@@ -455,6 +461,11 @@ func NewKoiosClient(
 				koiosTLSHandshakeTimeout,
 				koiosResponseHeaderTimeout,
 				koiosExpectContinueTimeout,
+				allowPrivateAddresses,
+			),
+			CheckRedirect: koiosRedirectPolicy(
+				allowInsecureHTTP,
+				allowPrivateAddresses,
 			),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
@@ -472,11 +483,11 @@ func NewKoiosClient(
 // addition to (never instead of) the http.Client-level Timeout set alongside
 // it in NewKoiosClient.
 //
-// It starts from http.DefaultTransport.Clone() rather than a bare
-// &http.Transport{} so this client keeps DefaultTransport's other tuning
-// (HTTP/2 negotiation, proxy-from-environment, idle connection pooling) and
-// only overrides the fields this package cares about giving explicit,
-// shorter-than-the-client-timeout bounds.
+// It uses a fresh transport rather than cloning http.DefaultTransport. The
+// process-global default may have custom TLS verification or alternate
+// protocol handlers installed, either of which would escape this client's
+// security boundary. The inert HTTP/2 and idle-pool tuning from the standard
+// default is copied explicitly below.
 //
 // dialTimeout/dialKeepAlive configure the net.Dialer used for
 // DialContext -- redundant with DefaultTransport's own dial defaults today,
@@ -500,27 +511,37 @@ func NewKoiosClient(
 func newKoiosTransport(
 	dialTimeout, dialKeepAlive time.Duration,
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
+	allowPrivateAddresses bool,
 ) *http.Transport {
-	// http.DefaultTransport is documented as *http.Transport today, but
-	// nothing enforces that at compile time; a comma-ok assertion with a
-	// safe fallback (matching mithril/download.go's newDownloadTransport)
-	// means a future replacement of the package-level default degrades to a
-	// fresh transport with this function's explicit timeouts still applied,
-	// instead of panicking.
 	var transport *http.Transport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = base.Clone()
 	} else {
 		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 	}
-	transport.DialContext = (&net.Dialer{
-		Timeout:   dialTimeout,
-		KeepAlive: dialKeepAlive,
-	}).DialContext
+	transport.ForceAttemptHTTP2 = true
+	transport.MaxIdleConns = 100
+	transport.TLSClientConfig = nil
+	transport.TLSNextProto = nil
 	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.ExpectContinueTimeout = expectContinueTimeout
 	transport.IdleConnTimeout = koiosIdleConnTimeout
+	dialer := &net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}
+	restricted := &koiosRestrictedDialer{
+		dialContext:           dialer.DialContext,
+		lookupIPAddr:          net.DefaultResolver.LookupIPAddr,
+		allowPrivateAddresses: allowPrivateAddresses,
+	}
+	transport.Proxy = nil
+	transport.DialContext = restricted.DialContext
+	// Clear deprecated hooks that could bypass DialContext.
+	transport.Dial = nil    //nolint:staticcheck
+	transport.DialTLS = nil //nolint:staticcheck
+	transport.DialTLSContext = nil
 	return transport
 }
 
@@ -579,7 +600,10 @@ func isPublicKoiosHost(rawURL string) bool {
 // against forged reference data can report a false PASS -- the one outcome a
 // parity checker must never produce. allowInsecureHTTP is the local dev/test
 // escape hatch, mirroring Mithril.AllowInsecureHTTP.
-func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
+func validateKoiosBaseURL(
+	rawURL string,
+	allowInsecureHTTP, allowPrivateAddresses bool,
+) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		// rawURL is never echoed: an operator can put credentials in it as
@@ -591,6 +615,12 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 		return errors.New(
 			"koios base URL has no host; give the full v1 API root, e.g. https://host/api/v1",
 		)
+	}
+	if err := validateKoiosHost(
+		parsed.Hostname(),
+		allowPrivateAddresses,
+	); err != nil {
+		return err
 	}
 	// get and post build an endpoint by appending a path and its own query to
 	// this root. A root that already carries a query or fragment would put the
@@ -625,6 +655,86 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 			parsed.Scheme,
 		)
 	}
+}
+
+func koiosRedirectPolicy(
+	allowInsecureHTTP, allowPrivateAddresses bool,
+) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		if req.URL == nil || req.URL.Host == "" {
+			return errors.New("koios redirect URL has no host")
+		}
+		switch strings.ToLower(req.URL.Scheme) {
+		case "https":
+		case "http":
+			if !allowInsecureHTTP {
+				return errors.New("koios redirect uses plain HTTP")
+			}
+		default:
+			return fmt.Errorf(
+				"koios redirect must use http or https, got scheme %q",
+				req.URL.Scheme,
+			)
+		}
+		return validateKoiosHost(req.URL.Hostname(), allowPrivateAddresses)
+	}
+}
+
+type koiosRestrictedDialer struct {
+	dialContext           func(context.Context, string, string) (net.Conn, error)
+	lookupIPAddr          func(context.Context, string) ([]net.IPAddr, error)
+	allowPrivateAddresses bool
+}
+
+func (d *koiosRestrictedDialer) DialContext(
+	ctx context.Context,
+	network, address string,
+) (net.Conn, error) {
+	if d.allowPrivateAddresses {
+		return d.dialContext(ctx, network, address)
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateKoiosHost(host, false); err != nil {
+		return nil, err
+	}
+	conn, err := netguard.DialContext(
+		ctx,
+		network,
+		address,
+		d.dialContext,
+		d.lookupIPAddr,
+	)
+	if errors.Is(err, netguard.ErrBlockedDestination) {
+		return nil, errors.New(
+			"koios destination resolved to a private or special-use address",
+		)
+	}
+	if errors.Is(err, netguard.ErrNoAddresses) {
+		return nil, errors.New("koios destination resolved to no addresses")
+	}
+	return conn, err
+}
+
+func validateKoiosHost(host string, allowPrivateAddresses bool) error {
+	if host == "" {
+		return errors.New("koios destination has no host")
+	}
+	if allowPrivateAddresses {
+		return nil
+	}
+	if netguard.IsBlockedHost(host) {
+		return errors.New("koios destination is a private or special-use host")
+	}
+	if ip := net.ParseIP(host); ip != nil && netguard.IsBlockedIP(ip) {
+		return errors.New("koios destination is a private or special-use address")
+	}
+	return nil
 }
 
 // redactURLError strips the URL from a *url.Error so a parse failure cannot

@@ -87,11 +87,11 @@ func TestApplyResolvedEra(t *testing.T) {
 }
 
 func TestNewKoiosClientRejectsMainnet(t *testing.T) {
-	if _, err := NewKoiosClient("mainnet", "", "", false); err == nil {
+	if _, err := NewKoiosClient("mainnet", "", "", false, false); err == nil {
 		t.Fatal("expected an error for network \"mainnet\", got nil")
 	}
 	for _, network := range []string{"preview", "preprod"} {
-		if _, err := NewKoiosClient(network, "", "", false); err != nil {
+		if _, err := NewKoiosClient(network, "", "", false, false); err != nil {
 			t.Fatalf("network %q: unexpected error: %v", network, err)
 		}
 	}

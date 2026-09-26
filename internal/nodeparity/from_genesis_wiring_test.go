@@ -507,7 +507,7 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	// a ProtocolParamsErr -- this test only asserts on UTxOErr.
 	koiosSrv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(koiosSrv.Close)
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	results := make(chan EpochResult, 8)
@@ -623,7 +623,7 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 	// /tx_info call, which is the failure this test exists to taint on.
 	koiosSrv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(koiosSrv.Close)
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	results := make(chan EpochResult, 8)
@@ -721,7 +721,7 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	// a ProtocolParamsErr; this test only asserts on UTxOErr.
 	koiosSrv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(koiosSrv.Close)
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	results := make(chan EpochResult, 8)

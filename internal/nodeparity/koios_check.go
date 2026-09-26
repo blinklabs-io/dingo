@@ -133,6 +133,7 @@ var KoiosNetworks = map[string]bool{"preview": true, "preprod": true}
 func NewKoiosClient(
 	network, apiKey, baseURL string,
 	allowInsecureHTTP bool,
+	allowPrivateAddresses bool,
 ) (*koiosparity.KoiosClient, error) {
 	if !KoiosNetworks[network] {
 		return nil, fmt.Errorf(
@@ -140,7 +141,7 @@ func NewKoiosClient(
 			network,
 		)
 	}
-	return koiosparity.NewKoiosClient(network, apiKey, baseURL, allowInsecureHTTP)
+	return koiosparity.NewKoiosClient(network, apiKey, baseURL, allowInsecureHTTP, allowPrivateAddresses)
 }
 
 // CheckProtocolParams compares Dingo's own current protocol parameters

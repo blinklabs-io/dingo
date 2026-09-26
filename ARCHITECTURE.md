@@ -9242,7 +9242,19 @@ never the reverse.
   `--koios-parity-allow-insecure-http` on the node, and
   `--koios-allow-insecure-http` / `KOIOS_ALLOW_INSECURE_HTTP` on the standalone
   CLI, where an explicitly-set flag beats the environment per CLAUDE.md's
-  CLI > env rule. A custom root must also carry no query string or fragment,
+  CLI > env rule. Outbound Koios traffic rejects loopback, private,
+  link-local, multicast, and other special-use destinations at the initial
+  URL, after every redirect, and again after DNS resolution immediately before
+  dialing. The transport dials the validated IP directly and does not inherit
+  environment proxy settings, alternate dial hooks, process-global TLS
+  settings, or alternate protocol handlers, so DNS rebinding, an ambient
+  proxy, or a weakened default transport cannot bypass that policy. An intentional
+  private deployment requires the separate `AllowPrivateAddresses` opt-in
+  (`--koios-parity-allow-private-addresses` /
+  `DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES` on the node and
+  `--koios-allow-private-addresses` / `KOIOS_ALLOW_PRIVATE_ADDRESSES` on the
+  standalone CLI); allowing plain HTTP does not imply permission to reach a
+  private address. A custom root must also carry no query string or fragment,
   since `get` and `post` append an endpoint path and their own query to it and
   would otherwise reach a different endpoint than intended. Validation errors
   never echo the URL, because the value they describe is the one

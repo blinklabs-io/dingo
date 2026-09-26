@@ -427,6 +427,12 @@ var flagSpecs = []flagSpec{
 		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
 	),
 	boolFlag(
+		"KoiosParity.AllowPrivateAddresses",
+		"koios-parity-allow-private-addresses",
+		"allow a private, loopback, or special-use "+
+			"--koios-parity-base-url (intentional private deployments only)",
+	),
+	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
 		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result never stops the node)",

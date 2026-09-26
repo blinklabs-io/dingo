@@ -31,6 +31,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/netguard"
 	cidlib "github.com/ipfs/go-cid"
 	"golang.org/x/crypto/blake2b"
 )
@@ -716,76 +717,19 @@ func (d *restrictedDialer) DialContext(
 	if d.allowPrivate {
 		return d.dialer.DialContext(ctx, network, address)
 	}
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
-	if isBlockedHost(host) {
-		return nil, fmt.Errorf("host %q is not allowed", host)
-	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("no addresses resolved for host %q", host)
-	}
-	for _, addr := range addrs {
-		if isBlockedIP(addr.IP) {
-			return nil, fmt.Errorf("resolved IP %s is not allowed", addr.IP)
-		}
-	}
-	var lastErr error
-	for _, addr := range addrs {
-		target := net.JoinHostPort(addr.IP.String(), port)
-		conn, err := d.dialer.DialContext(ctx, network, target)
-		if err == nil {
-			return conn, nil
-		}
-		lastErr = err
-	}
-	if lastErr == nil {
-		lastErr = errors.New("dial failed")
-	}
-	return nil, lastErr
+	return netguard.DialContext(
+		ctx,
+		network,
+		address,
+		d.dialer.DialContext,
+		net.DefaultResolver.LookupIPAddr,
+	)
 }
 
 func isBlockedHost(host string) bool {
-	h := strings.TrimSuffix(strings.ToLower(host), ".")
-	return h == "localhost" || strings.HasSuffix(h, ".localhost")
+	return netguard.IsBlockedHost(host)
 }
 
 func isBlockedIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	return ip.IsUnspecified() ||
-		ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() ||
-		ip.IsInterfaceLocalMulticast() ||
-		isSpecialUseIPv4(ip)
-}
-
-func isSpecialUseIPv4(ip net.IP) bool {
-	v4 := ip.To4()
-	if v4 == nil {
-		return false
-	}
-	// RFC 6598 carrier-grade NAT and documentation ranges are not routable
-	// public internet targets and should not be fetched from ledger URLs.
-	return v4[0] == 100 && v4[1]&0xc0 == 64 ||
-		v4[0] == 192 && v4[1] == 0 && v4[2] == 0 ||
-		v4[0] == 192 && v4[1] == 0 && v4[2] == 2 ||
-		v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) ||
-		v4[0] == 198 && v4[1] == 51 && v4[2] == 100 ||
-		v4[0] == 203 && v4[1] == 0 && v4[2] == 113 ||
-		v4[0] >= 240 ||
-		v4[0] == 255 && v4[1] == 255 &&
-			v4[2] == 255 && v4[3] == 255
+	return netguard.IsBlockedIP(ip)
 }

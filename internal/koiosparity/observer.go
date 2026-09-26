@@ -66,6 +66,10 @@ type ObserverConfig struct {
 	// NewKoiosClient. Local dev and test only, including the httptest
 	// servers this package's own tests point BaseURL at.
 	AllowInsecureHTTP bool
+	// AllowPrivateAddresses permits a private, loopback, or special-use
+	// BaseURL. Leave false unless the operator intentionally runs Koios on
+	// such a network.
+	AllowPrivateAddresses bool
 	// Source is the narrow, Dingo-supplied reward-parity source the
 	// observer compares against — typically a *DatabaseSource wrapping the
 	// live, in-process *database.Database.
@@ -254,6 +258,7 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		cfg.APIKey,
 		cfg.BaseURL,
 		cfg.AllowInsecureHTTP,
+		cfg.AllowPrivateAddresses,
 	)
 	if err != nil {
 		_ = cache.Close()
