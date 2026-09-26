@@ -1445,6 +1445,64 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 	return nil, nil
 }
 
+var _ lcommon.CommitteeVotingState = (*LedgerView)(nil)
+
+func (lv *LedgerView) CommitteeHotCredentialColdCredentials(
+	hotCredential lcommon.Credential,
+) ([]lcommon.Credential, error) {
+	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
+	}
+	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
+	}
+	ret := make([]lcommon.Credential, 0, len(authorizations))
+	seen := make(map[string]struct{}, len(authorizations))
+	for _, authorization := range authorizations {
+		if authorization.HotCredentialTag != hotTag ||
+			!bytes.Equal(
+				authorization.HotCredential,
+				hotCredential.Credential[:],
+			) {
+			continue
+		}
+		cold := lcommon.Credential{
+			CredType:   uint(authorization.ColdCredentialTag),
+			Credential: lcommon.NewBlake2b224(authorization.ColdCredential),
+		}
+		key := string([]byte{authorization.ColdCredentialTag}) +
+			string(authorization.ColdCredential)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, cold)
+	}
+	return ret, nil
+}
+
+func (lv *LedgerView) CommitteeCredentialIsElected(
+	coldCredential lcommon.Credential,
+) (bool, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return false, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	members, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	if err != nil {
+		return false, fmt.Errorf("get enacted committee members: %w", err)
+	}
+	for _, member := range members {
+		if member.ColdCredentialTag == coldTag &&
+			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // CommitteeMembers returns all seated committee members.
 //
 // Resolution runs off the single GetCommitteeMembers load rather than calling

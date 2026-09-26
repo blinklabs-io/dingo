@@ -999,6 +999,98 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 	)
 }
 
+func TestLedgerViewCommitteeVotingState(t *testing.T) {
+	t.Parallel()
+
+	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	cold := committeeTestCredential(0x92)
+	hot := committeeTestCredential(0x93)
+	coldScript := cold
+	coldScript.CredType = lcommon.CredentialTypeScriptHash
+	hotScript := hot
+	hotScript.CredType = lcommon.CredentialTypeScriptHash
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{
+			ColdCredentialTag: uint8(cold.CredType),
+			ColdCredHash:      cold.Credential[:],
+			ExpiresEpoch:      1,
+		},
+		{
+			ColdCredentialTag: uint8(coldScript.CredType),
+			ColdCredHash:      coldScript.Credential[:],
+			ExpiresEpoch:      1,
+		},
+	}, nil))
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	seedCommitteeCredentialAuthorization(t, db, coldScript, hotScript, 2, 1)
+
+	state, ok := any(lv).(lcommon.CommitteeVotingState)
+	require.True(t, ok, "LedgerView must expose committee voting state")
+	got, err := state.CommitteeHotCredentialColdCredentials(hot)
+	require.NoError(t, err)
+	require.Equal(t, []lcommon.Credential{cold}, got)
+	got, err = state.CommitteeHotCredentialColdCredentials(hotScript)
+	require.NoError(t, err)
+	require.Equal(t, []lcommon.Credential{coldScript}, got)
+	elected, err := state.CommitteeCredentialIsElected(cold)
+	require.NoError(t, err)
+	require.True(t, elected)
+	elected, err = state.CommitteeCredentialIsElected(coldScript)
+	require.NoError(t, err)
+	require.True(t, elected)
+	action := lcommon.GovActionId{TransactionId: lcommon.Blake2b256{0x94}}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{
+				&lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: hot.Credential,
+				}: {&action: lcommon.VotingProcedure{Vote: 1}},
+				&lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotScriptHash,
+					Hash: hotScript.Credential,
+				}: {&action: lcommon.VotingProcedure{Vote: 1}},
+			},
+		},
+	}
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 11},
+	}
+	require.NoError(t, conway.UtxoValidateUnelectedCommitteeVoters(
+		tx,
+		0,
+		lv,
+		pparams,
+	))
+
+	unelectedHot := committeeTestCredential(0x95)
+	unelectedCold := committeeTestCredential(0x96)
+	seedCommitteeCredentialAuthorization(t, db, unelectedCold, unelectedHot, 3, 1)
+	unelectedTx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{
+				&lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: unelectedHot.Credential,
+				}: {&action: lcommon.VotingProcedure{Vote: 1}},
+			},
+		},
+	}
+	var unelected conway.UnelectedCommitteeVoterError
+	require.ErrorAs(
+		t,
+		conway.UtxoValidateUnelectedCommitteeVoters(
+			unelectedTx,
+			0,
+			lv,
+			pparams,
+		),
+		&unelected,
+	)
+}
+
 // enactTestUpdateCommittee drives a real UpdateCommittee enactment through
 // governance.EnactProposal -- the same production entry point epoch-boundary
 // processing calls -- rather than seeding committee_member/auth rows
