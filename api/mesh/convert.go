@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -369,7 +370,7 @@ func decodeTxCbor(
 			fmt.Errorf("hex decode: %w", err),
 		)
 	}
-	txType, err := gledger.DetermineTransactionType(
+	txType, err := safedecode.TransactionType(
 		txBytes,
 	)
 	if err != nil {
@@ -380,7 +381,7 @@ func decodeTxCbor(
 			),
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(
+	tx, err := safedecode.Transaction(
 		txType, txBytes,
 	)
 	if err != nil {

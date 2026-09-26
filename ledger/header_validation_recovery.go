@@ -203,10 +203,10 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		// The first recovery at this tip may still need to repair metadata
 		// the rejected block left above it; a repeat of the same failure at
 		// the same tip reuses what that repair restored.
-		if err := ls.rollbackWithOptions(
+		if err := ls.rollbackWithBlocks(
 			rewindPoint,
+			nil,
 			!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after header validation failure: %w",

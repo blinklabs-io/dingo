@@ -432,9 +432,32 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 	}
 
+	var initialDRepDepositAmount uint64
+	initialDRepDepositResolved := false
+	resolveInitialDRepDeposit := func(
+		credential mockledger.RewardAccountKey,
+	) (uint64, error) {
+		if deposit, ok := state.DRepDeposits[credential]; ok {
+			return deposit, nil
+		}
+		if initialDRepDepositResolved {
+			return initialDRepDepositAmount, nil
+		}
+		deposit, err := initialDRepDeposit(pp)
+		if err != nil {
+			return 0, fmt.Errorf("resolve initial DRep deposit: %w", err)
+		}
+		initialDRepDepositAmount = deposit
+		initialDRepDepositResolved = true
+		return initialDRepDepositAmount, nil
+	}
 	for credential, registered := range state.DRepRegistrationsByCredential {
 		if !registered {
 			continue
+		}
+		depositAmount, err := resolveInitialDRepDeposit(credential)
+		if err != nil {
+			return err
 		}
 		credentialTag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
@@ -445,7 +468,12 @@ func (m *DingoStateManager) LoadInitialState(
 			CredentialTag: credentialTag,
 			Active:        true,
 		}
-		if err := m.db.CreateDrep(txn, drep); err != nil {
+		registration := &models.RegistrationDrep{
+			DrepCredential: drep.Credential,
+			CredentialTag:  drep.CredentialTag,
+			DepositAmount:  types.Uint64(depositAmount),
+		}
+		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
 			return fmt.Errorf("seed drep: %w", err)
 		}
 	}
@@ -453,8 +481,29 @@ func (m *DingoStateManager) LoadInitialState(
 		if hasDRepCredentialHash(state.DRepRegistrationsByCredential, hash) {
 			continue
 		}
-		drep := &models.Drep{Credential: hash[:], Active: true}
-		if err := m.db.CreateDrep(txn, drep); err != nil {
+		credential, err := legacyDRepCredential(state, hash)
+		if err != nil {
+			return fmt.Errorf("resolve legacy DRep credential: %w", err)
+		}
+		depositAmount, err := resolveInitialDRepDeposit(credential)
+		if err != nil {
+			return err
+		}
+		credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+		if err != nil {
+			return fmt.Errorf("seed legacy drep credential tag: %w", err)
+		}
+		drep := &models.Drep{
+			Credential:    hash[:],
+			CredentialTag: credentialTag,
+			Active:        true,
+		}
+		registration := &models.RegistrationDrep{
+			DrepCredential: drep.Credential,
+			CredentialTag:  credentialTag,
+			DepositAmount:  types.Uint64(depositAmount),
+		}
+		if err := m.db.Metadata().ImportDrep(drep, registration, txn.Metadata()); err != nil {
 			return fmt.Errorf("seed legacy drep: %w", err)
 		}
 	}
@@ -529,6 +578,18 @@ func (m *DingoStateManager) LoadInitialState(
 	}
 
 	return txn.Commit()
+}
+
+func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
+	provider, ok := pp.(interface{ DRepDepositAmount() *big.Int })
+	if !ok {
+		return 0, errors.New("protocol parameters do not define a DRep deposit")
+	}
+	deposit := provider.DRepDepositAmount()
+	if deposit == nil || deposit.Sign() < 0 || !deposit.IsUint64() {
+		return 0, errors.New("protocol parameters contain an invalid DRep deposit")
+	}
+	return deposit.Uint64(), nil
 }
 
 // resolveInitialStakeRegistrations mirrors the original
@@ -1073,6 +1134,35 @@ func hasDRepCredentialHash(
 		}
 	}
 	return false
+}
+
+func legacyDRepCredential(
+	state *conformance.ParsedInitialState,
+	hash common.Blake2b224,
+) (mockledger.RewardAccountKey, error) {
+	keyCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: hash,
+	}
+	var match mockledger.RewardAccountKey
+	found := false
+	for credential := range state.DRepDeposits {
+		if credential.Credential != hash {
+			continue
+		}
+		if found && credential != match {
+			return mockledger.RewardAccountKey{}, fmt.Errorf(
+				"legacy DRep %x has ambiguous credential types in initial deposits",
+				hash,
+			)
+		}
+		match = credential
+		found = true
+	}
+	if found {
+		return match, nil
+	}
+	return keyCredential, nil
 }
 
 func (m *DingoStateManager) updateStakeDepositForCertificate(
