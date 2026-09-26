@@ -270,18 +270,20 @@ func (s *Store) SetCommitteeQuorum(
 	if quorum == nil || quorum.Rat == nil {
 		return errors.New("committee quorum cannot be nil")
 	}
-	return s.setCommitteeQuorum(quorum.String(), slot, txn)
+	return s.setCommitteeQuorum(
+		sql.NullString{String: quorum.String(), Valid: true}, slot, txn,
+	)
 }
 
 func (s *Store) ClearCommitteeQuorum(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	return s.setCommitteeQuorum("0", slot, txn)
+	return s.setCommitteeQuorum(sql.NullString{}, slot, txn)
 }
 
 func (s *Store) setCommitteeQuorum(
-	quorum string,
+	quorum sql.NullString,
 	slot uint64,
 	txn types.Txn,
 ) error {
@@ -297,7 +299,7 @@ func (s *Store) setCommitteeQuorum(
 	if err := queries.SetCommitteeQuorum(
 		ctx,
 		sqlitequery.SetCommitteeQuorumParams{
-			Quorum:    sql.NullString{String: quorum, Valid: true},
+			Quorum:    quorum,
 			AddedSlot: sqlSlot,
 		},
 	); err != nil {
@@ -331,8 +333,10 @@ func (s *Store) GetCommitteeQuorum(
 			value.String,
 		)
 	}
-	if rat.Sign() <= 0 {
-		return nil, nil
+	if rat.Sign() < 0 {
+		return nil, fmt.Errorf(
+			"get committee quorum: negative rational %q", value.String,
+		)
 	}
 	return &types.Rat{Rat: rat}, nil
 }

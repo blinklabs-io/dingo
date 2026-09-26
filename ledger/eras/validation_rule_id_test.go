@@ -316,23 +316,25 @@ func eraUtxoValidationRuleCompositions() []eraUtxoValidationRuleComposition {
 			descriptors: gdijkstra.UtxoValidationRuleDescriptors(),
 			upstream:    gdijkstra.UtxoValidationRules,
 			built:       dijkstraPhase1UtxoValidationRules,
-			dropped: map[lcommon.UtxoValidationRuleId]string{
-				lcommon.UtxoValidationRulePlutusScripts: "dijkstra.UtxoValidatePlutusScripts",
-			},
+			dropped:     map[lcommon.UtxoValidationRuleId]string{},
 			replaced: map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement{
+				lcommon.UtxoValidationRulePlutusScripts: {
+					upstreamFuncName: "dijkstra.UtxoValidatePlutusScripts",
+					dingoFunc:        validateDijkstraPlutusV3ReferenceInputs,
+				},
 				lcommon.UtxoValidationRuleCommitteeCertificates: {
-					upstreamFuncName: "conway.UtxoValidateCommitteeCertificates",
+					upstreamFuncName: "dijkstra.UtxoValidateCommitteeCertificates",
 					dingoFunc:        validateCommitteeCertificates,
 				},
 				lcommon.UtxoValidationRuleUnknownVoters: {
-					upstreamFuncName: "conway.UtxoValidateUnknownVoters",
+					upstreamFuncName: "dijkstra.UtxoValidateUnknownVoters",
 					dingoFunc:        validateUnknownVoters,
 				},
 			},
 			retained: map[lcommon.UtxoValidationRuleId]string{
 				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValue",
 				lcommon.UtxoValidationRuleExUnitsTooBig:        "dijkstra.UtxoValidateExUnitsTooBigUtxo",
-				lcommon.UtxoValidationRuleCertificateDeposits:  "conway.UtxoValidateCertificateDeposits",
+				lcommon.UtxoValidationRuleCertificateDeposits:  "dijkstra.UtxoValidateCertificateDeposits",
 			},
 		},
 	}
@@ -491,6 +493,15 @@ func newConwayTreasuryTx(
 	body map[int]any,
 ) *conway.ConwayTransaction {
 	t.Helper()
+	if _, ok := body[0]; !ok {
+		body[0] = cbor.NewSetType([]shelley.ShelleyTransactionInput{}, true)
+	}
+	if _, ok := body[1]; !ok {
+		body[1] = []any{}
+	}
+	if _, ok := body[2]; !ok {
+		body[2] = uint64(0)
+	}
 	cborData, err := cbor.Encode(body)
 	require.NoError(t, err)
 	tx := &conway.ConwayTransaction{TxIsValid: true}

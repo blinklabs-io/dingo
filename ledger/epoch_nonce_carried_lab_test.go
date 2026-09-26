@@ -124,7 +124,9 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 	var rNonce, rCandidate, rLab []byte
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
 		n, _, c, lab, err := ls.calculateEpochNonce(
-			txn, epochEnd, eras.ConwayEraDesc, prevEpoch)
+			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
+			nil,
+		)
 		rNonce, rCandidate, rLab = n, c, lab
 		return err
 	}))
@@ -237,7 +239,9 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 	var rNonce, rEvolving, rCandidate, rLab []byte
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
 		n, ev, c, lab, err := ls.calculateEpochNonce(
-			txn, 500, eras.ConwayEraDesc, initialEpoch)
+			txn, 500, eras.ConwayEraDesc, initialEpoch,
+			nil,
+		)
 		rNonce, rEvolving, rCandidate, rLab = n, ev, c, lab
 		return err
 	}))

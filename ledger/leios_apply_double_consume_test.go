@@ -39,6 +39,7 @@ func leiosApplyTestProducerTx(
 	t.Helper()
 	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
 	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: cbor.Tag{Number: 258, Content: []any{}},
 		1: []any{
 			map[uint]any{0: addr, 1: uint64(1_000_000)},
 			map[uint]any{0: addr, 1: uint64(2_000_000)},
@@ -60,7 +61,7 @@ func leiosApplyTestSpendingTx(
 	t.Helper()
 	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
 	bodyCbor, err := cbor.Encode(map[uint]any{
-		0: []any{[]any{inTxId, inIdx}},
+		0: cbor.Tag{Number: 258, Content: []any{[]any{inTxId, inIdx}}},
 		1: []any{map[uint]any{0: addr, 1: uint64(500_000)}},
 		// A distinct fee per seed keeps the transaction hashes distinct.
 		2: uint64(200_000) + uint64(seed),

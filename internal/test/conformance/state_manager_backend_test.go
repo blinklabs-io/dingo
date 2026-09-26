@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -48,12 +49,16 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	script := mockledger.RewardAccountKey{
 		CredType: common.CredentialTypeScriptHash, Credential: hash,
 	}
+	pp := &conway.ConwayProtocolParameters{DRepDeposit: 500_000_000}
 	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
 		DRepRegistrations: []common.Blake2b224{hash},
+		DRepDeposits: map[mockledger.RewardAccountKey]uint64{
+			key: 400_000_000, script: 500_000_000,
+		},
 		DRepRegistrationsByCredential: map[mockledger.RewardAccountKey]bool{
 			key: true, script: true,
 		},
-	}, &conway.ConwayProtocolParameters{}))
+	}, pp))
 
 	keyDRep, err := m.db.GetDrepByCredential(0, hash[:], false, nil)
 	require.NoError(t, err)
@@ -61,10 +66,73 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 	scriptDRep, err := m.db.GetDrepByCredential(1, hash[:], false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), scriptDRep.CredentialTag)
+	for _, credentialTag := range []uint8{0, 1} {
+		deposit, err := m.db.GetDrepLastRegistrationDeposit(
+			credentialTag,
+			hash[:],
+			nil,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, deposit)
+		want := uint64(500_000_000)
+		if credentialTag == 0 {
+			want = 400_000_000
+		}
+		require.Equal(t, want, *deposit)
+	}
 
 	dreps, err := m.db.GetActiveDreps(nil)
 	require.NoError(t, err)
 	require.Len(t, dreps, 2)
+}
+
+func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
+	t.Parallel()
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	hash := testHash28(0xd4)
+	script := mockledger.RewardAccountKey{
+		CredType: common.CredentialTypeScriptHash, Credential: hash,
+	}
+	const recordedDeposit = uint64(400_000_000)
+	pp := &conway.ConwayProtocolParameters{DRepDeposit: 500_000_000}
+	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
+		DRepRegistrations: []common.Blake2b224{hash},
+		DRepDeposits: map[mockledger.RewardAccountKey]uint64{
+			script: recordedDeposit,
+		},
+	}, pp))
+
+	drep, err := m.db.GetDrepByCredential(1, hash[:], false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	deposit, err := m.db.GetDrepLastRegistrationDeposit(1, hash[:], nil)
+	require.NoError(t, err)
+	require.NotNil(t, deposit)
+	require.Equal(t, recordedDeposit, *deposit)
+}
+
+func TestLoadInitialStateSkipsInactiveDRepsWithoutDeposit(t *testing.T) {
+	t.Parallel()
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	hash := testHash28(0xd3)
+	credential := mockledger.RewardAccountKey{
+		CredType: common.CredentialTypeAddrKeyHash, Credential: hash,
+	}
+	require.NoError(t, m.LoadInitialState(&conformance.ParsedInitialState{
+		DRepRegistrationsByCredential: map[mockledger.RewardAccountKey]bool{
+			credential: false,
+		},
+	}, &babbage.BabbageProtocolParameters{}))
+
+	dreps, err := m.db.GetActiveDreps(nil)
+	require.NoError(t, err)
+	require.Empty(t, dreps)
 }
 
 func TestDRepDeregistrationPreservesOtherCredentialType(t *testing.T) {

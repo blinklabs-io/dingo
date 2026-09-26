@@ -240,7 +240,7 @@ func buildByronRedeemTx(
 	require.NoError(t, err)
 	// The signature covers the body hash, so the assembled body must be the
 	// one the decoded transaction reports.
-	require.Equal(t, bodyHash, tx.Hash())
+	require.Equal(t, bodyHash, tx.WireId())
 	return tx
 }
 

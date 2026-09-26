@@ -127,18 +127,81 @@ func (e OutputNegativeByronError) Error() string {
 	)
 }
 
-// DuplicateInputByronError is returned when a Byron transaction
-// contains duplicate inputs.
-type DuplicateInputByronError struct {
-	TxId  string
-	Index uint32
+// TxTooLargeByronError is returned when a serialized Byron TxAux exceeds the
+// active ppMaxTxSize (TxValidationTxTooLarge).
+type TxTooLargeByronError struct {
+	Size uint64
+	Max  uint64
 }
 
-func (e DuplicateInputByronError) Error() string {
+func (e TxTooLargeByronError) Error() string {
 	return fmt.Sprintf(
-		"duplicate input: %s#%d",
-		e.TxId,
-		e.Index,
+		"transaction size %d exceeds maximum %d",
+		e.Size,
+		e.Max,
+	)
+}
+
+// UnknownAttributesByronError is returned when the unknown transaction
+// attributes reach the 128-byte limit (TxValidationUnknownAttributes).
+type UnknownAttributesByronError struct {
+	Size int
+}
+
+func (e UnknownAttributesByronError) Error() string {
+	return fmt.Sprintf(
+		"unknown transaction attributes are %d bytes, limit is %d",
+		e.Size,
+		byronMaxUnknownAttributesSize-1,
+	)
+}
+
+// UnknownAddressAttributesByronError is returned when the unknown attributes
+// of an output address reach the 128-byte limit
+// (TxValidationUnknownAddressAttributes).
+type UnknownAddressAttributesByronError struct {
+	OutputIndex int
+	Size        int
+}
+
+func (e UnknownAddressAttributesByronError) Error() string {
+	return fmt.Sprintf(
+		"output %d address has %d bytes of unknown attributes, limit is %d",
+		e.OutputIndex,
+		e.Size,
+		byronMaxUnknownAttributesSize-1,
+	)
+}
+
+// LovelaceBoundByronError is returned when a Byron balance or minimum fee
+// leaves the Lovelace domain [0, 45e15] (TxValidationLovelaceError).
+type LovelaceBoundByronError struct {
+	Balance string
+	Value   *big.Int
+}
+
+func (e LovelaceBoundByronError) Error() string {
+	return fmt.Sprintf(
+		"%s %s exceeds the maximum Lovelace value %d",
+		e.Balance,
+		e.Value.String(),
+		byronMaxLovelace,
+	)
+}
+
+// WitnessWrongKeyByronError is returned when the witness at an input's
+// position does not authorize that input's address
+// (TxValidationWitnessWrongKey).
+type WitnessWrongKeyByronError struct {
+	InputIndex int
+	Input      string
+}
+
+func (e WitnessWrongKeyByronError) Error() string {
+	return fmt.Sprintf(
+		"witness %d does not authorize input %s",
+		e.InputIndex,
+		e.Input,
 	)
 }
 
@@ -216,6 +279,22 @@ type ByronFeePolicyProvider interface {
 	ByronFeePolicy() (summand int64, multiplier int64, err error)
 }
 
+// ByronMaxTxSizeProvider supplies the active Byron ppMaxTxSize.
+type ByronMaxTxSizeProvider interface {
+	ByronMaxTxSize() (uint64, error)
+}
+
+const (
+	// byronMaxLovelace is maxLovelaceVal: every Byron Lovelace value,
+	// including an aggregate balance, must stay at or below it.
+	byronMaxLovelace = 45_000_000_000_000_000
+	// byronMaxUnknownAttributesSize is the exclusive bound on
+	// unknownAttributesLength: the reference requires the sum to be < 128.
+	byronMaxUnknownAttributesSize = 128
+	// byronFeePolicyScale is the 10^9 scale of genesis fee coefficients.
+	byronFeePolicyScale = 1_000_000_000
+)
+
 func (e ValueNotConservedByronError) Error() string {
 	return fmt.Sprintf(
 		"value not conserved: consumed %s != produced %s",
@@ -262,7 +341,7 @@ var byronValidationRules = []byronValidationRuleFunc{
 	byronValidateInputsNotEmpty,
 	byronValidateOutputsNotEmpty,
 	byronValidateOutputsNonNegative,
-	byronValidateNoDuplicateInputs,
+	byronValidateUnknownAttributes,
 }
 
 // byronUtxoValidationRules require ledger state and run only
@@ -271,6 +350,7 @@ var byronUtxoValidationRules = []lcommon.UtxoValidationRuleFunc{
 	byronValidateBadInputs,
 	byronValidateValueConserved,
 	byronValidateOutputNetwork,
+	byronValidateMaxTxSize,
 	byronValidateMinFee,
 	byronValidateWitnesses,
 }
@@ -314,21 +394,43 @@ func byronValidateOutputsNonNegative(
 	return nil
 }
 
-// byronValidateNoDuplicateInputs ensures that there are no
-// duplicate inputs in the transaction.
-func byronValidateNoDuplicateInputs(
+// byronValidateUnknownAttributes enforces unknownAttributesLength < 128 for
+// the transaction attributes and, independently, for every output address.
+// The length is the sum of the raw attribute values the decoder does not
+// interpret; recognized address attributes do not count.
+func byronValidateUnknownAttributes(
 	tx lcommon.Transaction,
 ) error {
-	seen := make(map[string]struct{})
-	for _, input := range tx.Inputs() {
-		key := fmt.Sprintf("%s#%d", input.Id(), input.Index())
-		if _, exists := seen[key]; exists {
-			return DuplicateInputByronError{
-				TxId:  input.Id().String(),
-				Index: input.Index(),
+	if byronTx, ok := tx.(*byron.ByronTransaction); ok &&
+		len(byronTx.Body.Attributes) > 0 {
+		// TxAttributes interprets no key, so every value is unknown.
+		var attrs map[uint8][]byte
+		if _, err := cbor.Decode(byronTx.Body.Attributes, &attrs); err != nil {
+			return fmt.Errorf("decode transaction attributes: %w", err)
+		}
+		size := 0
+		for _, value := range attrs {
+			size += len(value)
+		}
+		if size >= byronMaxUnknownAttributesSize {
+			return UnknownAttributesByronError{Size: size}
+		}
+	}
+	for idx, output := range tx.Outputs() {
+		addr := output.Address()
+		if addr.Type() != lcommon.AddressTypeByron {
+			continue
+		}
+		size := 0
+		for _, value := range addr.ByronAttr().Unparsed {
+			size += len(value)
+		}
+		if size >= byronMaxUnknownAttributesSize {
+			return UnknownAddressAttributesByronError{
+				OutputIndex: idx,
+				Size:        size,
 			}
 		}
-		seen[key] = struct{}{}
 	}
 	return nil
 }
@@ -353,39 +455,90 @@ func byronValidateBadInputs(
 	return BadInputsByronError{Inputs: badInputs}
 }
 
-// byronValidateValueConserved ensures that the consumed value
-// (sum of input UTxO amounts) equals the produced value (sum
-// of output amounts). In Byron the fee is implicit: it is the
-// difference between consumed and produced. We verify that
-// consumed >= produced (i.e. the implicit fee is non-negative).
+// byronInputBalance sums the resolved input UTxO once per distinct input.
+// The reference restricts the UTxO to the input set (Set.fromList txInputs
+// <| utxo), so a repeated input contributes once. redeemOnly reports
+// isRedeemUTxO over that restriction; an unresolved input clears it because
+// it is no evidence of a redeem address, and an empty input set is not
+// vacuously redeem-only.
+func byronInputBalance(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+) (balance *big.Int, redeemOnly bool) {
+	balance = new(big.Int)
+	redeemOnly = len(tx.Inputs()) > 0
+	seen := make(map[string]struct{}, len(tx.Inputs()))
+	for _, input := range tx.Inputs() {
+		key := input.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		utxo, err := ls.UtxoById(input)
+		if err != nil || utxo.Output == nil {
+			// Bad inputs are caught by byronValidateBadInputs
+			redeemOnly = false
+			continue
+		}
+		addr := utxo.Output.Address()
+		if addr.Type() != lcommon.AddressTypeByron ||
+			addr.ByronType() != lcommon.ByronAddressTypeRedeem {
+			redeemOnly = false
+		}
+		if amount := utxo.Output.Amount(); amount != nil {
+			balance.Add(balance, amount)
+		}
+	}
+	return balance, redeemOnly
+}
+
+func byronOutputBalance(tx lcommon.Transaction) *big.Int {
+	balance := new(big.Int)
+	for _, output := range tx.Outputs() {
+		if amount := output.Amount(); amount != nil {
+			balance.Add(balance, amount)
+		}
+	}
+	return balance
+}
+
+// byronBalances returns the bounded output and input balances. The reference
+// sums each with sumLovelace, which fails when the total leaves the Lovelace
+// domain, before it subtracts them to find the fee.
+func byronBalances(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+) (in *big.Int, out *big.Int, redeemOnly bool, err error) {
+	out = byronOutputBalance(tx)
+	if err := byronCheckLovelace("output balance", out); err != nil {
+		return nil, nil, false, err
+	}
+	in, redeemOnly = byronInputBalance(tx, ls)
+	if err := byronCheckLovelace("input balance", in); err != nil {
+		return nil, nil, false, err
+	}
+	return in, out, redeemOnly, nil
+}
+
+func byronCheckLovelace(balance string, value *big.Int) error {
+	if value.Sign() < 0 || value.Cmp(big.NewInt(byronMaxLovelace)) > 0 {
+		return LovelaceBoundByronError{Balance: balance, Value: value}
+	}
+	return nil
+}
+
+// byronValidateValueConserved ensures that the consumed value is at least the
+// produced value. In Byron the fee is implicit: it is the difference.
 func byronValidateValueConserved(
 	tx lcommon.Transaction,
 	_ uint64,
 	ls lcommon.LedgerState,
 	_ lcommon.ProtocolParameters,
 ) error {
-	consumed := new(big.Int)
-	for _, input := range tx.Inputs() {
-		utxo, err := ls.UtxoById(input)
-		if err != nil {
-			// Bad inputs are caught by byronValidateBadInputs
-			continue
-		}
-		if utxo.Output == nil {
-			continue
-		}
-		if amount := utxo.Output.Amount(); amount != nil {
-			consumed.Add(consumed, amount)
-		}
+	consumed, produced, _, err := byronBalances(tx, ls)
+	if err != nil {
+		return err
 	}
-	produced := new(big.Int)
-	for _, output := range tx.Outputs() {
-		if amount := output.Amount(); amount != nil {
-			produced.Add(produced, amount)
-		}
-	}
-	// In Byron the fee is implicit (consumed - produced).
-	// Consumed must be >= produced for a valid transaction.
 	if consumed.Cmp(produced) < 0 {
 		return ValueNotConservedByronError{
 			Consumed: consumed,
@@ -459,9 +612,65 @@ func byronNetworkMagicEqual(expected, actual *uint32) bool {
 	return *expected == *actual
 }
 
+// byronValidateMaxTxSize enforces ppMaxTxSize against the serialized TxAux,
+// witnesses included, independently of the enclosing block size.
+func byronValidateMaxTxSize(
+	tx lcommon.Transaction,
+	_ uint64,
+	ls lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	provider, ok := ls.(ByronMaxTxSizeProvider)
+	if !ok {
+		// Lightweight ledger-state implementations used by structural callers
+		// do not necessarily expose chain configuration. The production
+		// LedgerState does, and enforces the limit there.
+		return nil
+	}
+	maxSize, err := provider.ByronMaxTxSize()
+	if err != nil {
+		return fmt.Errorf("get Byron max transaction size: %w", err)
+	}
+	if size := TxSizeForFee(tx); size > maxSize {
+		return TxTooLargeByronError{Size: size, Max: maxSize}
+	}
+	return nil
+}
+
+// byronMinFee returns the minimum fee for a transaction of size bytes under a
+// genesis fee policy. The reference loads the policy as summand div 10^9 and
+// multiplier % 10^9, then charges summand + ceiling(multiplier * size); the
+// two roundings differ from one ceiling over the scaled sum.
+func byronMinFee(summand, multiplier int64, size uint64) (*big.Int, error) {
+	if multiplier < 0 || summand < 0 {
+		return nil, fmt.Errorf(
+			"invalid Byron fee policy: multiplier %d summand %d",
+			multiplier,
+			summand,
+		)
+	}
+	scale := big.NewInt(byronFeePolicyScale)
+	base := new(big.Int).Quo(big.NewInt(summand), scale)
+	if err := byronCheckLovelace("fee policy summand", base); err != nil {
+		return nil, err
+	}
+	perSize := new(big.Int).Mul(
+		big.NewInt(multiplier),
+		new(big.Int).SetUint64(size),
+	)
+	quotient, remainder := new(big.Int).QuoRem(perSize, scale, new(big.Int))
+	if remainder.Sign() > 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	required := base.Add(base, quotient)
+	if err := byronCheckLovelace("minimum fee", required); err != nil {
+		return nil, err
+	}
+	return required, nil
+}
+
 // byronValidateMinFee enforces the Byron genesis fee policy. Byron fees are
-// implicit, so the consumed-minus-produced value computed by the conservation
-// rule is the transaction fee.
+// implicit, so the input balance minus the output balance is the fee.
 func byronValidateMinFee(
 	tx lcommon.Transaction,
 	_ uint64,
@@ -479,59 +688,24 @@ func byronValidateMinFee(
 	if err != nil {
 		return fmt.Errorf("get Byron fee policy: %w", err)
 	}
-	if multiplier < 0 || summand < 0 {
-		return fmt.Errorf(
-			"invalid Byron fee policy: multiplier %d summand %d",
-			multiplier,
-			summand,
-		)
+	consumed, produced, redeemOnly, err := byronBalances(tx, ls)
+	if err != nil {
+		return err
 	}
 	size := TxSizeForFee(tx)
-	required := new(big.Int).Mul(
-		big.NewInt(multiplier),
-		new(big.Int).SetUint64(size),
-	)
-	required.Add(required, big.NewInt(summand))
-	const feeDivisor = int64(1_000_000_000)
-	quotient, remainder := new(big.Int), new(big.Int)
-	quotient.QuoRem(required, big.NewInt(feeDivisor), remainder)
-	if remainder.Sign() > 0 {
-		quotient.Add(quotient, big.NewInt(1))
-	}
-	required = quotient
-
-	actual := new(big.Int)
-	// The Byron reference exempts a transaction from the minimum fee when its
-	// complete input UTxO consists of redeem addresses (isRedeemUTxO). A single
-	// non-redeem input is enough to require the normal fee, and an input that
-	// cannot be resolved is not evidence of a redeem address, so both clear the
-	// exemption. An empty input set is not vacuously redeem-only.
-	redeemOnly := len(tx.Inputs()) > 0
-	for _, input := range tx.Inputs() {
-		utxo, lookupErr := ls.UtxoById(input)
-		if lookupErr != nil || utxo.Output == nil {
-			redeemOnly = false
-			continue
-		}
-		addr := utxo.Output.Address()
-		if addr.Type() != lcommon.AddressTypeByron ||
-			addr.ByronType() != lcommon.ByronAddressTypeRedeem {
-			redeemOnly = false
-		}
-		if amount := utxo.Output.Amount(); amount != nil {
-			actual.Add(actual, amount)
-		}
-	}
-	for _, output := range tx.Outputs() {
-		if amount := output.Amount(); amount != nil {
-			actual.Sub(actual, amount)
-		}
-	}
+	var required *big.Int
 	if redeemOnly {
-		// Redemption still must conserve value, so a negative implicit fee
-		// remains a failure against a zero requirement.
+		// The reference exempts a transaction whose whole input UTxO is
+		// redeem addresses (isRedeemUTxO). Redemption still must conserve
+		// value, so a negative implicit fee fails against zero.
 		required = big.NewInt(0)
+	} else {
+		required, err = byronMinFee(summand, multiplier, size)
+		if err != nil {
+			return err
+		}
 	}
+	actual := new(big.Int).Sub(consumed, produced)
 	if actual.Cmp(required) < 0 {
 		return FeeTooLowByronError{
 			Actual:   actual,
@@ -550,111 +724,77 @@ func byronValidateWitnesses(
 	ls lcommon.LedgerState,
 	_ lcommon.ProtocolParameters,
 ) error {
-	// Verify vkey witness signatures
-	if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
-		return err
-	}
+	// Byron witnesses have constructor-specific signature domains and key
+	// layouts, so they must not pass through the generic witness verifier.
 	// Byron redeem witnesses are constructor 2 values whose fields are
-	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
-	// values but do not expose them through TransactionWitnessSet, and even
-	// a current release's VkeyWitness has no room for the chain-code half
-	// of a constructor-0 witness that byronAddressRootForParts needs, so
-	// this file must still decode Twit itself.
-	var redeemWitnesses []lcommon.VkeyWitness
-	var bootstrapWitnesses []byronBootstrapWitness
-	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
-		var err error
-		bootstrapWitnesses, redeemWitnesses, err = byronDecodeWitnesses(
-			byronTx.Twit,
+	// wrapped in CBOR tag 24, and a VkeyWitness has no room for the
+	// chain-code half of a constructor-0 witness that
+	// byronAddressRootForParts needs, so this file decodes Twit itself.
+	byronTx, ok := tx.(*byron.ByronTransaction)
+	if !ok {
+		if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
+			return err
+		}
+		if err := lcommon.ValidateBootstrapWitnesses(tx); err != nil {
+			return err
+		}
+		return lcommon.ValidateInputVKeyWitnesses(tx, ls)
+	}
+	witnesses, err := byronDecodeWitnesses(byronTx.Twit)
+	if err != nil {
+		return lcommon.NewValidationError(
+			lcommon.ValidationErrorTypeTransaction,
+			"invalid byron transaction witness",
+			map[string]any{"err": err.Error()},
+			err,
 		)
-		if err != nil {
+	}
+	if len(witnesses) == 0 {
+		return nil
+	}
+	protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
+	if !ok {
+		return errors.New(
+			"ledger state does not provide Byron protocol magic",
+		)
+	}
+	protocolMagic, err := protocolMagicProvider.ByronProtocolMagic()
+	if err != nil {
+		return fmt.Errorf("get Byron protocol magic: %w", err)
+	}
+	// Byron witnesses sign the wire-encoded body ID. ByronTransaction.Hash
+	// is the canonical ledger ID, which may differ from those bytes.
+	txHash := byronTx.WireId()
+	messages := make(map[byte][]byte, 2)
+	for _, witness := range witnesses {
+		tag := byte(0x01)
+		failure := "invalid bootstrap signature"
+		if witness.redeem {
+			tag = 0x02
+			failure = "invalid vkey signature"
+		}
+		message, ok := messages[tag]
+		if !ok {
+			message, err = byronSignatureMessage(tag, protocolMagic, txHash)
+			if err != nil {
+				return err
+			}
+			messages[tag] = message
+		}
+		if err := lcommon.VerifyVKeySignature(
+			witness.publicKey,
+			witness.signature,
+			message,
+		); err != nil {
 			return lcommon.NewValidationError(
 				lcommon.ValidationErrorTypeTransaction,
-				"invalid byron transaction witness",
+				failure,
 				map[string]any{"err": err.Error()},
 				err,
 			)
 		}
-		if len(redeemWitnesses) > 0 || len(bootstrapWitnesses) > 0 {
-			txHash := tx.Hash()
-			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
-			if !ok {
-				return errors.New(
-					"ledger state does not provide Byron protocol magic",
-				)
-			}
-			protocolMagic, err := protocolMagicProvider.ByronProtocolMagic()
-			if err != nil {
-				return fmt.Errorf("get Byron protocol magic: %w", err)
-			}
-			var redeemMessage []byte
-			if len(redeemWitnesses) > 0 {
-				redeemMessage, err = byronSignatureMessage(
-					0x02,
-					protocolMagic,
-					txHash,
-				)
-				if err != nil {
-					return err
-				}
-			}
-			var bootstrapMessage []byte
-			if len(bootstrapWitnesses) > 0 {
-				bootstrapMessage, err = byronSignatureMessage(
-					0x01,
-					protocolMagic,
-					txHash,
-				)
-				if err != nil {
-					return err
-				}
-			}
-			for _, witness := range redeemWitnesses {
-				if err := lcommon.VerifyVKeySignature(
-					witness.Vkey,
-					witness.Signature,
-					redeemMessage,
-				); err != nil {
-					return lcommon.NewValidationError(
-						lcommon.ValidationErrorTypeTransaction,
-						"invalid vkey signature",
-						map[string]any{"err": err.Error()},
-						err,
-					)
-				}
-			}
-			for _, witness := range bootstrapWitnesses {
-				if err := lcommon.VerifyVKeySignature(
-					witness.PublicKey,
-					witness.Signature,
-					bootstrapMessage,
-				); err != nil {
-					return lcommon.NewValidationError(
-						lcommon.ValidationErrorTypeTransaction,
-						"invalid bootstrap signature",
-						map[string]any{"err": err.Error()},
-						err,
-					)
-				}
-			}
-		}
 	}
-	// Verify bootstrap witness signatures
-	if len(bootstrapWitnesses) == 0 {
-		if err := lcommon.ValidateBootstrapWitnesses(tx); err != nil {
-			return err
-		}
-	}
-	// Verify each input has a matching witness
-	if len(redeemWitnesses) == 0 && len(bootstrapWitnesses) == 0 {
-		return lcommon.ValidateInputVKeyWitnesses(tx, ls)
-	}
-	return validateByronInputWitnesses(
-		tx,
-		ls,
-		redeemWitnesses,
-		bootstrapWitnesses,
-	)
+	return validateByronInputWitnesses(tx, ls, witnesses)
 }
 
 func byronSignatureMessage(
@@ -673,10 +813,13 @@ func byronSignatureMessage(
 	return append(message, txHash[:]...), nil
 }
 
-type byronBootstrapWitness struct {
-	PublicKey []byte
-	Signature []byte
-	ChainCode []byte
+// byronTxInWitness is one decoded TxInWitness: a VKWitness carrying an
+// extended verification key, or a RedeemWitness carrying a redeem key.
+type byronTxInWitness struct {
+	redeem    bool
+	publicKey []byte
+	chainCode []byte
+	signature []byte
 }
 
 // byronDecodeWitnesses strictly decodes every entry of a Byron transaction's
@@ -690,26 +833,25 @@ type byronBootstrapWitness struct {
 // since the witness proof covers the raw bytes of both.
 func byronDecodeWitnesses(
 	witnesses []cbor.Value,
-) ([]byronBootstrapWitness, []lcommon.VkeyWitness, error) {
-	var bootstrap []byronBootstrapWitness
-	var redeem []lcommon.VkeyWitness
+) ([]byronTxInWitness, error) {
+	ret := make([]byronTxInWitness, 0, len(witnesses))
 	for idx, witness := range witnesses {
 		fields, ok := witness.Value().([]any)
 		if !ok || len(fields) != 2 {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"witness %d: not a 2-element TxInWitness", idx,
 			)
 		}
 		ctor, ok := fields[0].(uint64)
 		if !ok {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"witness %d: constructor tag is not an unsigned integer",
 				idx,
 			)
 		}
 		wrapped, ok := fields[1].(cbor.WrappedCbor)
 		if !ok {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"witness %d: payload is not tag-24-wrapped CBOR", idx,
 			)
 		}
@@ -717,7 +859,7 @@ func byronDecodeWitnesses(
 		wrappedBytes := wrapped.Bytes()
 		consumed, err := cbor.Decode(wrappedBytes, &witnessFields)
 		if err != nil || consumed != len(wrappedBytes) {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"witness %d: failed to decode tag-24 payload", idx,
 			)
 		}
@@ -725,151 +867,131 @@ func byronDecodeWitnesses(
 		case lcommon.ByronAddressTypePubkey:
 			if len(witnessFields) != 2 || len(witnessFields[0]) != 64 ||
 				len(witnessFields[1]) != 64 {
-				return nil, nil, fmt.Errorf(
+				return nil, fmt.Errorf(
 					"witness %d: malformed VKWitness fields", idx,
 				)
 			}
-			bootstrap = append(bootstrap, byronBootstrapWitness{
-				PublicKey: witnessFields[0][:32],
-				ChainCode: witnessFields[0][32:],
-				Signature: witnessFields[1],
+			ret = append(ret, byronTxInWitness{
+				publicKey: witnessFields[0][:32],
+				chainCode: witnessFields[0][32:],
+				signature: witnessFields[1],
 			})
 		case lcommon.ByronAddressTypeRedeem:
 			if len(witnessFields) != 2 || len(witnessFields[0]) != 32 ||
 				len(witnessFields[1]) != 64 {
-				return nil, nil, fmt.Errorf(
+				return nil, fmt.Errorf(
 					"witness %d: malformed RedeemWitness fields", idx,
 				)
 			}
-			redeem = append(redeem, lcommon.VkeyWitness{
-				Vkey:      witnessFields[0],
-				Signature: witnessFields[1],
+			ret = append(ret, byronTxInWitness{
+				redeem:    true,
+				publicKey: witnessFields[0],
+				signature: witnessFields[1],
 			})
 		default:
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"witness %d: unknown TxInWitness constructor %d", idx, ctor,
 			)
 		}
 	}
-	return bootstrap, redeem, nil
+	return ret, nil
 }
 
+// validateByronInputWitnesses pairs witness i with input i, as the reference
+// does with zip addresses witnesses, and requires each witness to authorize
+// its own input's address. zip stops at the shorter list, so inputs beyond the
+// last witness are not checked and witnesses beyond the last input are
+// ignored.
 func validateByronInputWitnesses(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
-	redeemWitnesses []lcommon.VkeyWitness,
-	byronBootstrapWitnesses []byronBootstrapWitness,
+	witnesses []byronTxInWitness,
 ) error {
-	provided := make(map[lcommon.Blake2b224]struct{})
-	if witnesses := tx.Witnesses(); witnesses != nil {
-		for _, witness := range witnesses.Vkey() {
-			provided[lcommon.Blake2b224Hash(witness.Vkey)] = struct{}{}
+	for idx, input := range tx.Inputs() {
+		if idx >= len(witnesses) {
+			break
 		}
-	}
-	for _, witness := range redeemWitnesses {
-		provided[lcommon.Blake2b224Hash(witness.Vkey)] = struct{}{}
-	}
-
-	var bootstrapWitnesses []lcommon.BootstrapWitness
-	if witnesses := tx.Witnesses(); witnesses != nil {
-		bootstrapWitnesses = witnesses.Bootstrap()
-	}
-	for _, input := range tx.Inputs() {
 		utxo, err := ls.UtxoById(input)
 		if err != nil || utxo.Output == nil {
+			// Bad inputs are caught by byronValidateBadInputs
 			continue
 		}
-		addr := utxo.Output.Address()
-		payload, ok := addr.PayloadPayload().(lcommon.AddressPayloadKeyHash)
-		if !ok {
-			continue
+		if !byronWitnessAuthorizes(witnesses[idx], utxo.Output.Address()) {
+			return WitnessWrongKeyByronError{
+				InputIndex: idx,
+				Input:      input.String(),
+			}
 		}
-		if _, ok := provided[payload.Hash]; ok {
-			continue
-		}
-		if addr.Type() == lcommon.AddressTypeByron {
-			if addr.ByronType() == lcommon.ByronAddressTypeRedeem {
-				matched := false
-				for _, witness := range redeemWitnesses {
-					redeemAddr, err := lcommon.NewByronAddressRedeem(
-						witness.Vkey,
-						addr.ByronAttr(),
-					)
-					if err == nil &&
-						redeemAddr.PaymentKeyHash() == payload.Hash {
-						matched = true
-						break
-					}
-				}
-				if matched {
-					continue
-				}
-			}
-			matched := false
-			for _, witness := range bootstrapWitnesses {
-				addrRoot, err := byronAddressRoot(witness)
-				if err == nil && addrRoot == payload.Hash {
-					matched = true
-					break
-				}
-			}
-			if matched {
-				continue
-			}
-			attrs, err := cbor.Encode(addr.ByronAttr())
-			if err != nil {
-				continue
-			}
-			for _, witness := range byronBootstrapWitnesses {
-				addrRoot, err := byronAddressRootForParts(
-					witness.PublicKey,
-					witness.ChainCode,
-					attrs,
-				)
-				if err == nil && addrRoot == payload.Hash {
-					matched = true
-					break
-				}
-			}
-			if matched {
-				continue
-			}
-			addressType := "bootstrap"
-			if addr.ByronType() == lcommon.ByronAddressTypeRedeem {
-				addressType = "redeem"
-			}
-			return lcommon.NewValidationError(
-				lcommon.ValidationErrorTypeTransaction,
-				fmt.Sprintf("missing %s witness for Byron input", addressType),
-				map[string]any{
-					"input":        input.String(),
-					"keyhash":      payload.Hash.String(),
-					"address_type": addressType,
-				},
-				nil,
-			)
-		}
-		return lcommon.NewValidationError(
-			lcommon.ValidationErrorTypeTransaction,
-			"missing vkey witness for input",
-			map[string]any{
-				"input":   input.String(),
-				"keyhash": payload.Hash.String(),
-			},
-			nil,
-		)
 	}
 	return nil
 }
 
-func byronAddressRoot(
-	witness lcommon.BootstrapWitness,
-) (lcommon.Blake2b224, error) {
-	return byronAddressRootForParts(
-		witness.PublicKey,
-		witness.ChainCode,
-		witness.Attributes,
+// byronWitnessAuthorizes implements checkVerKeyAddress and checkRedeemAddress:
+// the address must have the witness's spending-data type, and its root must be
+// the hash of that spending data with the address's attributes.
+func byronWitnessAuthorizes(
+	witness byronTxInWitness,
+	addr lcommon.Address,
+) bool {
+	if addr.Type() != lcommon.AddressTypeByron {
+		return false
+	}
+	payload, ok := addr.PayloadPayload().(lcommon.AddressPayloadKeyHash)
+	if !ok {
+		return false
+	}
+	attrs, err := byronCanonicalAddressAttributes(addr.ByronAttr())
+	if err != nil {
+		return false
+	}
+	if witness.redeem {
+		if addr.ByronType() != lcommon.ByronAddressTypeRedeem {
+			return false
+		}
+		redeemAddr, err := lcommon.NewByronAddressRedeem(
+			witness.publicKey,
+			attrs,
+		)
+		return err == nil && redeemAddr.PaymentKeyHash() == payload.Hash
+	}
+	if addr.ByronType() != lcommon.ByronAddressTypePubkey {
+		return false
+	}
+	attrsCbor, err := cbor.Encode(attrs)
+	if err != nil {
+		return false
+	}
+	root, err := byronAddressRootForParts(
+		witness.publicKey,
+		witness.chainCode,
+		attrsCbor,
 	)
+	return err == nil && root == payload.Hash
+}
+
+// byronCanonicalAddressAttributes rebuilds address attributes from their
+// decoded fields. The reference reconstructs the address from its semantic
+// attributes when it checks a witness, so the root it hashes carries the
+// canonical attribute encoding rather than the bytes the address arrived with.
+// A decoded ByronAddressAttributes re-emits those original bytes, so they are
+// dropped here, and the derivation path value, an encoded byte string, is
+// re-encoded as well.
+func byronCanonicalAddressAttributes(
+	attrs lcommon.ByronAddressAttributes,
+) (lcommon.ByronAddressAttributes, error) {
+	attrs.SetCbor(nil)
+	if len(attrs.Payload) > 0 {
+		var payload []byte
+		consumed, err := cbor.Decode(attrs.Payload, &payload)
+		if err != nil || consumed != len(attrs.Payload) {
+			return attrs, errors.New("invalid Byron address derivation path")
+		}
+		attrs.Payload, err = cbor.Encode(payload)
+		if err != nil {
+			return attrs, err
+		}
+	}
+	return attrs, nil
 }
 
 func byronAddressRootForParts(
