@@ -840,9 +840,8 @@ type UtxoStore interface {
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
-	// row are silently ignored (the SQL filter is deleted_slot == 0,
-	// so already-deleted rows don't get rewritten). Rollback
-	// un-deletion is handled by SetUtxosNotDeletedAfterSlot.
+	// row are silently ignored. Rollback un-deletion is handled by
+	// SetUtxosNotDeletedAfterSlot.
 	MarkUtxosDeletedAtSlot(
 		txn types.Txn,
 		refs []types.UtxoKey,
