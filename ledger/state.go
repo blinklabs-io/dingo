@@ -12051,6 +12051,19 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	return uint32(protocolMagic), nil
 }
 
+// ByronFeePolicy returns the fee policy from the active Byron genesis.
+func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
+	if ls == nil || ls.config.CardanoNodeConfig == nil {
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if genesis == nil {
+		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	}
+	policy := genesis.BlockVersionData.TxFeePolicy
+	return policy.Summand, policy.Multiplier, nil
+}
+
 // ByronMaxTxSize returns ppMaxTxSize from the Byron genesis protocol
 // parameters.
 func (ls *LedgerState) ByronMaxTxSize() (uint64, error) {
@@ -12069,19 +12082,6 @@ func (ls *LedgerState) ByronMaxTxSize() (uint64, error) {
 		)
 	}
 	return uint64(maxTxSize), nil
-}
-
-// ByronFeePolicy returns the fee policy from the active Byron genesis.
-func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
-	if ls == nil || ls.config.CardanoNodeConfig == nil {
-		return 0, 0, errors.New("byron genesis configuration is unavailable")
-	}
-	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
-	if genesis == nil {
-		return 0, 0, errors.New("byron genesis configuration is unavailable")
-	}
-	policy := genesis.BlockVersionData.TxFeePolicy
-	return policy.Summand, policy.Multiplier, nil
 }
 
 // UtxoByRef returns a single UTxO by reference

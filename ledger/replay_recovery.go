@@ -437,9 +437,10 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 // Every Shelley-family era delegates the rule to
 // shelley.UtxoValidateNoDuplicateInputs and therefore reports
 // shelley.DuplicateInputError for a duplicated regular, collateral, or
-// reference input. Byron has its own rule in ledger/eras and reports
-// eras.DuplicateInputByronError, which is the same structural verdict and
-// must not fall through to state-dependent producer resolution.
+// reference input. Byron permits repeated inputs, but its transaction-size
+// and unknown-attribute limits are the same kind of verdict: they read only
+// the transaction and protocol parameters, so they must not fall through to
+// state-dependent producer resolution either.
 //
 // lcommon.MalformedReferenceScriptsError and
 // lcommon.MalformedScriptWitnessesError are the same class: both are raised
@@ -562,7 +563,13 @@ func isDeterministicTxValidationError(err error) bool {
 	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
-	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
+	if _, ok := errors.AsType[eras.TxTooLargeByronError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[eras.UnknownAttributesByronError](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[eras.UnknownAddressAttributesByronError](err)
 	return ok
 }
 
