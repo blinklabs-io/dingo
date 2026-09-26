@@ -271,11 +271,13 @@ func ValidateTxDijkstra(
 	// CIP-23: reject pool registration certificates whose margin is below the
 	// operator-configured minimum pool margin. No-op when disabled (nil floor).
 	// Wired only here, so Conway and earlier eras are unaffected.
-	if err := checkPoolMarginFloor(
-		tx.Certificates(),
-		minPoolMarginFromLedgerState(ls),
-	); err != nil {
-		errs = append(errs, err)
+	if tx.IsValid() {
+		if err := checkPoolMarginFloor(
+			tx.Certificates(),
+			minPoolMarginFromLedgerState(ls),
+		); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
 		errs = append(
