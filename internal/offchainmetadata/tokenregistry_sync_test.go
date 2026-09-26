@@ -699,6 +699,80 @@ func TestTokenRegistrySyncBoundsRetainedBatchBytes(t *testing.T) {
 	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
 }
 
+// TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit exercises the
+// syncer's per-entry guard with a direct library configuration whose batch
+// cap is below its entry cap; node config validation normally rejects that
+// combination.
+func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
+	t.Parallel()
+
+	server := newRegistryServer(t, tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"stored before oversized mapping",
+			"DJED",
+			"",
+		),
+	}))
+	store := newFakeTokenRegistryStore()
+	sync, logs := captureSync(t, store, server.URL)
+
+	written, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+	prunesBefore := store.prunes
+
+	const (
+		maxEntryBytes int64 = 1024
+		maxBatchBytes int64 = 128
+	)
+	oversized := mappingJSON(
+		syncSubjectDjed,
+		strings.Repeat("X", 256),
+		"DJED",
+		"",
+	)
+	require.Less(t, int64(len(oversized)), maxEntryBytes)
+	oversizedEntry, err := ParseTokenRegistryEntry([]byte(oversized))
+	require.NoError(t, err)
+	require.Greater(
+		t,
+		tokenRegistryEntryRetainedBytes(oversizedEntry),
+		maxBatchBytes,
+	)
+	sync.maxEntryBytes = maxEntryBytes
+	sync.maxBatchBytes = maxBatchBytes
+	store.mu.Lock()
+	store.maxBatchBytes = 0
+	store.mu.Unlock()
+	server.setBody(tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectDjed + ".json": oversized,
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"small accepted mapping",
+			"NUT",
+			"",
+		),
+	}), `"etag2"`)
+
+	written, err = sync.SyncOnce(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+	require.Contains(t, logs.String(), "skipped=1")
+	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
+	require.Equal(t, prunesBefore, store.prunes,
+		"a skipped entry must defer reconciliation")
+	entries := store.snapshot()
+	require.Equal(
+		t,
+		"stored before oversized mapping",
+		entries[syncSubjectDjed].Name,
+		"the previous usable mapping must remain stored",
+	)
+	require.Equal(t, "small accepted mapping", entries[syncSubjectNut].Name)
+}
+
 func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
