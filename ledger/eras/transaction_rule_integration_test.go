@@ -1442,7 +1442,7 @@ func TestValidateTxConwaySupplementalDatumSources(t *testing.T) {
 	t.Run("collateral return justifies its datum hash", func(t *testing.T) {
 		tx := &conway.ConwayTransaction{
 			Body: conway.ConwayTransactionBody{
-				TxCollateralReturn: ptrTo(outputWithHash(keyAddress)),
+				TxCollateralReturn: new(outputWithHash(keyAddress)),
 			},
 			WitnessSet: conway.ConwayTransactionWitnessSet{
 				WsPlutusData: cbor.NewSetType([]lcommon.Datum{datum}, true),
@@ -2064,5 +2064,3 @@ func TestValidateTxAlonzoAndBabbageOutputDatumHashJustifiesSupplementalDatum(t *
 		require.ErrorAs(t, validate(), &notAllowed)
 	})
 }
-
-func ptrTo[T any](value T) *T { return &value }
