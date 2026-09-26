@@ -46,11 +46,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 		{0x07, 0x08, 0x09},
 	}
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 
 	for i, gk := range genesisKeys {
@@ -130,11 +126,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 		{0x01}, {0x02}, {0x03}, {0x04}, {0x05},
 	}
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 
 	for i, gk := range genesisKeys {
@@ -229,11 +221,9 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	txn := db.Transaction(true)
 	defer txn.Commit() //nolint:errcheck
 
-	updateCbor, err := cbor.Encode(
-		&alonzo.AlonzoProtocolParameterUpdate{
-			CostModels: map[uint][]int64{1: {205665, 812, 1}},
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{
+		18: map[uint][]int64{1: {205665, 812, 1}},
+	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x01}, updateCbor, 300, 3, txn,
@@ -293,11 +283,7 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 	defer txn.Commit() //nolint:errcheck
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&alonzo.AlonzoProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x01}, updateCbor, 300, 3, txn,
@@ -351,11 +337,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	defer db.Close()
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	for i := range 5 {
 		require.NoError(t, db.SetPParamUpdate(
@@ -422,11 +404,7 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	defer db.Close()
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{
-			MinFeeA: &minFeeA,
-		},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 	for i := range 5 {
 		require.NoError(t, db.SetPParamUpdate(
@@ -514,11 +492,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	}
 	for i := range 5 {
 		innerMinFeeA := uint(100)
-		updateCbor, innerErr := cbor.Encode(
-			&shelley.ShelleyProtocolParameterUpdate{
-				MinFeeA: &innerMinFeeA,
-			},
-		)
+		updateCbor, innerErr := cbor.Encode(map[uint64]any{0: innerMinFeeA})
 		require.NoError(t, innerErr)
 		err := db.SetPParamUpdate(
 			[]byte{byte(10 + i)},
@@ -638,11 +612,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	}
 	for i, gk := range genesisKeys {
 		innerMinFeeA := uint(100)
-		updateCbor, innerErr := cbor.Encode(
-			&shelley.ShelleyProtocolParameterUpdate{
-				MinFeeA: &innerMinFeeA,
-			},
-		)
+		updateCbor, innerErr := cbor.Encode(map[uint64]any{0: innerMinFeeA})
 		require.NoError(t, innerErr)
 		err := db.SetPParamUpdate(
 			gk,
@@ -751,9 +721,7 @@ func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 	defer db.Close()
 
 	newMinFeeA := uint(100)
-	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
-		MinFeeA: &newMinFeeA,
-	})
+	updateCbor, err := cbor.Encode(map[uint64]any{0: newMinFeeA})
 	require.NoError(t, err)
 	// Two unique genesis keys submitted in epoch 3 (enacted for epoch 4).
 	for _, gk := range [][]byte{{0x01}, {0x02}} {
@@ -819,9 +787,7 @@ func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
 	defer db.Close()
 
 	newMinFeeA := uint(100)
-	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
-		MinFeeA: &newMinFeeA,
-	})
+	updateCbor, err := cbor.Encode(map[uint64]any{0: newMinFeeA})
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -862,9 +828,7 @@ func TestPParamEnactmentPendingShortCircuitsTheWriter(t *testing.T) {
 	defer db.Close()
 
 	minFeeA := uint(100)
-	updateCbor, err := cbor.Encode(
-		&shelley.ShelleyProtocolParameterUpdate{MinFeeA: &minFeeA},
-	)
+	updateCbor, err := cbor.Encode(map[uint64]any{0: minFeeA})
 	require.NoError(t, err)
 
 	// Epoch 0 has no submission epoch at all.

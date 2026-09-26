@@ -21,6 +21,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -97,6 +98,12 @@ func txsubmissionWireSize(eraId uint16, bodyLen int) uint64 {
 	return 1 + cborHeadLen(uint64(eraId)) + 2 + cborHeadLen(body) + body
 }
 
+// txsubmissionTxDecoder decodes one MsgReplyTxs body. validateTxsubmissionReply
+// receives it rather than naming the ledger decoder directly, so the panic
+// containment wrapped around the call can be driven by a decoder that really
+// panics; production always supplies ledger.NewTransactionFromCbor.
+type txsubmissionTxDecoder func(txType uint, txCbor []byte) (ledger.Transaction, error)
+
 type validatedTxsubmissionBody struct {
 	body txsubmission.TxBody
 	tx   ledger.Transaction
@@ -113,9 +120,16 @@ type validatedTxsubmissionBody struct {
 // within the reference TxSubmission V2 discrepancy in either direction. The
 // aggregate predecode allowance accounts for the same bounded discrepancy
 // without removing the byte-budget guard.
+//
+// A body whose bytes panic the decoder is contained here and reported as an
+// ordinary decode failure wrapping safedecode.ErrDecodePanic, so it leaves by
+// the route a malformed body already takes -- the whole reply dropped, nothing
+// admitted -- instead of unwinding into the per-peer protocol goroutine, which
+// has no recover above it and would take the process down with it.
 func validateTxsubmissionReply(
 	requested []txsubmission.TxIdAndSize,
 	returned []txsubmission.TxBody,
+	decode txsubmissionTxDecoder,
 ) ([]validatedTxsubmissionBody, error) {
 	if len(returned) > len(requested) {
 		return nil, fmt.Errorf(
@@ -163,10 +177,9 @@ func validateTxsubmissionReply(
 	}
 	validatedByIndex := make(map[int]validatedTxsubmissionBody, len(returned))
 	for i, txBody := range returned {
-		tx, err := ledger.NewTransactionFromCbor(
-			uint(txBody.EraId),
-			txBody.TxBody,
-		)
+		tx, err := safedecode.Guard(func() (ledger.Transaction, error) {
+			return decode(uint(txBody.EraId), txBody.TxBody)
+		})
 		if err != nil {
 			return nil, fmt.Errorf(
 				"txsubmission reply transaction %d decode failed: %w",
@@ -638,6 +651,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 				validatedTxs, err := validateTxsubmissionReply(
 					requestedTxs,
 					txs,
+					ledger.NewTransactionFromCbor,
 				)
 				o.recordTxsubmissionReplyOutcome(
 					validatedTxs,

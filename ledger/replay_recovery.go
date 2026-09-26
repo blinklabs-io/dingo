@@ -357,11 +357,11 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		// The cycle that first starts holding at an unchanged tip repairs the
 		// metadata the failed block left above it; the cycles that keep
 		// holding at that same tip reuse what it restored.
-		if err := ls.rollbackWithOptions(
+		if err := ls.rollbackWithBlocks(
 			rewindPoint,
+			nil,
 			replayHolding && !wasReplayHolding &&
 				pointMatches(rewindPoint, ledgerTip.Point),
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state for replay recovery: %w",
@@ -823,10 +823,10 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		// The first rejection of this block at this tip repairs the metadata
 		// the failed apply left above it; the redelivery that the resync
 		// latch already records reuses what that repair restored.
-		if err := ls.rollbackWithOptions(
+		if err := ls.rollbackWithBlocks(
 			rewindPoint,
+			nil,
 			!resyncSpent && pointMatches(rewindPoint, ledgerTip.Point),
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after deterministic transaction validation failure: %w",
@@ -1700,10 +1700,10 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		// re-measure after any gouroboros bump instead of trusting this line.
 		// Stale numbers here have twice pointed diagnosis at the wrong root
 		// cause (#3165, #3678).
-		if err := ls.rollbackWithOptions(
+		if err := ls.rollbackWithBlocks(
 			rewindPoint,
+			nil,
 			repairSameTip,
-			true,
 		); err != nil {
 			return fmt.Errorf(
 				"rollback ledger state after validation failure: %w",

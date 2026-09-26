@@ -66,12 +66,18 @@ type BackfillProgress struct {
 // It is triggered automatically during Mithril sync when
 // storageMode is "api".
 type Backfill struct {
-	db           *database.Database
-	nodeCfg      *cardano.CardanoNodeConfig
-	logger       *slog.Logger
-	epochs       []models.Epoch
-	pparamsCache map[uint64]lcommon.ProtocolParameters
-	batchSize    int
+	db             *database.Database
+	nodeCfg        *cardano.CardanoNodeConfig
+	logger         *slog.Logger
+	epochs         []models.Epoch
+	pparamsCache   map[uint64]lcommon.ProtocolParameters
+	batchSize      int
+	computeOffsets func(
+		uint64,
+		[]byte,
+		[]byte,
+		gledger.Block,
+	) (*database.BlockIngestionResult, error)
 
 	// Running state tracked across blocks.
 	currentPParams lcommon.ProtocolParameters
@@ -973,8 +979,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		pp := b.getPParams(epochId)
 
-		// Process block. Nesting avoids early-continue so
-		// every path reaches the common tail below.
 		var blockTxCount int
 
 		parsedBlock, parseErr := gledger.NewBlockFromCbor(
@@ -986,11 +990,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		intervalStats.BlockReadDecode += time.Since(readDecodeStart)
 		intervalStats.Blocks++
 		if parseErr != nil {
-			b.logger.Warn(
-				"skipping unparseable block",
-				"component", "backfill",
-				"slot", blk.Slot,
-				"error", parseErr,
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"parsing block at slot %d: %w",
+				blk.Slot, parseErr,
 			)
 		} else {
 			point := ocommon.NewPoint(
@@ -1011,21 +1014,17 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 			txs := parsedBlock.Transactions()
 			if len(txs) > 0 {
-				indexer := database.NewBlockIndexer(
-					blk.Slot, blk.Hash,
-				)
 				offsetStart := time.Now()
-				offsets, oErr := indexer.ComputeOffsets(
-					blk.Cbor, parsedBlock,
+				offsets, oErr := b.computeBlockOffsets(
+					blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
 				)
 				// Track CBOR offset discovery for txs and produced UTxOs.
 				intervalStats.OffsetComputation += time.Since(offsetStart)
 				if oErr != nil {
-					b.logger.Warn(
-						"skipping block with offset error",
-						"component", "backfill",
-						"slot", blk.Slot,
-						"error", oErr,
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"computing offsets for block at slot %d: %w",
+						blk.Slot, oErr,
 					)
 				} else {
 					// Store transaction metadata into the shared batch
@@ -1155,6 +1154,20 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)
 	return nil
+}
+
+func (b *Backfill) computeBlockOffsets(
+	slot uint64,
+	hash, blockCbor []byte,
+	block gledger.Block,
+) (*database.BlockIngestionResult, error) {
+	if b.computeOffsets != nil {
+		return b.computeOffsets(slot, hash, blockCbor, block)
+	}
+	return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
 }
 
 // processBlockTxsBatched stores transactions into an existing database
