@@ -190,6 +190,14 @@ type stakeRewardApplication struct {
 type stakeRewardPrecomputeRetry struct {
 	epochEvent event.EpochTransitionEvent
 	cutoffSlot uint64
+	generation uint64
+}
+
+type rewardPrecomputeRollbackSnapshot struct {
+	pending      *event.EpochTransitionEvent
+	retry        *stakeRewardPrecomputeRetry
+	committed    bool
+	reloadFailed bool
 }
 
 // reportSkips distinguishes the authoritative application from the
@@ -398,7 +406,9 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			"captured_slot", capturedSlot,
 			"prefilter_slot", prefilterSlot,
 		)
-		ls.deferStakeRewardPrecompute(newEpoch, prefilterSlot)
+		ls.deferStakeRewardPrecompute(
+			newEpoch, prefilterSlot, rewardInputGeneration,
+		)
 		return nil, false, nil
 	}
 
@@ -1900,6 +1910,7 @@ func (ls *LedgerState) queueStartupRewardPrecomputeWith(
 ) {
 	ls.RLock()
 	epoch := ls.currentEpoch
+	capturedSlot := max(epoch.StartSlot, ls.currentTip.Point.Slot)
 	ls.RUnlock()
 	// An epoch with no length has not been established yet (fresh database),
 	// and queueRewardPrecompute drops an event without a nonce, so there is
@@ -1909,7 +1920,7 @@ func (ls *LedgerState) queueStartupRewardPrecomputeWith(
 	}
 	evt := event.EpochTransitionEvent{
 		NewEpoch:     epoch.EpochId,
-		BoundarySlot: epoch.StartSlot,
+		BoundarySlot: capturedSlot,
 		EpochNonce:   epoch.Nonce,
 	}
 	if epoch.EpochId > 0 {
@@ -1950,23 +1961,31 @@ func (ls *LedgerState) queueRewardPrecompute(
 	precompute func(event.EpochTransitionEvent) error,
 ) {
 	ls.rewardPrecomputeMu.Lock()
+	start := ls.queueRewardPrecomputeLocked(epochEvent)
+	ls.rewardPrecomputeMu.Unlock()
+	if start {
+		go ls.runRewardPrecompute(precompute)
+	}
+}
+
+// The caller holds rewardPrecomputeMu so releasing a prefilter retry and
+// invalidating it during rollback cannot enqueue events in the wrong order.
+func (ls *LedgerState) queueRewardPrecomputeLocked(
+	epochEvent event.EpochTransitionEvent,
+) bool {
 	if ls.closed.Load() {
-		ls.rewardPrecomputeMu.Unlock()
-		return
+		return false
 	}
 	// Store an independent copy because EventBus callbacks do not own the
 	// publisher's payload after returning.
 	epochEvent.EpochNonce = slices.Clone(epochEvent.EpochNonce)
 	ls.rewardPrecomputePending = &epochEvent
 	if ls.rewardPrecomputeRunning {
-		ls.rewardPrecomputeMu.Unlock()
-		return
+		return false
 	}
 	ls.rewardPrecomputeRunning = true
 	ls.rewardPrecomputeWG.Add(1)
-	ls.rewardPrecomputeMu.Unlock()
-
-	go ls.runRewardPrecompute(precompute)
+	return true
 }
 
 // deferStakeRewardPrecompute records the pre-Babbage RUPD cutoff. The retry is
@@ -1976,6 +1995,7 @@ func (ls *LedgerState) queueRewardPrecompute(
 func (ls *LedgerState) deferStakeRewardPrecompute(
 	newEpoch uint64,
 	cutoffSlot uint64,
+	generation uint64,
 ) {
 	if newEpoch == 0 {
 		return
@@ -1985,8 +2005,14 @@ func (ls *LedgerState) deferStakeRewardPrecompute(
 			NewEpoch: newEpoch - 1,
 		},
 		cutoffSlot: cutoffSlot,
+		generation: generation,
 	}
 	ls.rewardPrecomputeMu.Lock()
+	if ls.rewardInputRollbackActive.Load() != 0 ||
+		ls.rewardInputGeneration.Load() != generation {
+		ls.rewardPrecomputeMu.Unlock()
+		return
+	}
 	if ls.rewardPrecomputeRetry == nil ||
 		ls.rewardPrecomputeRetry.epochEvent.NewEpoch <= retry.epochEvent.NewEpoch {
 		ls.rewardPrecomputeRetry = retry
@@ -2011,13 +2037,22 @@ func (ls *LedgerState) maybeQueueStakeRewardPrecomputeRetry(
 		return
 	}
 	ls.rewardPrecomputeRetry = nil
+	if ls.rewardInputRollbackActive.Load() != 0 ||
+		retry.generation != ls.rewardInputGeneration.Load() {
+		ls.rewardPrecomputeMu.Unlock()
+		return
+	}
 	epochEvent := retry.epochEvent
 	epochEvent.BoundarySlot = capturedSlot
-	ls.rewardPrecomputeMu.Unlock()
-	ls.queueRewardPrecompute(
+	start := ls.queueRewardPrecomputeLocked(
 		epochEvent,
-		ls.precomputeStakeRewardsAfterEpochTransition,
 	)
+	ls.rewardPrecomputeMu.Unlock()
+	if start {
+		go ls.runRewardPrecompute(
+			ls.precomputeStakeRewardsAfterEpochTransition,
+		)
+	}
 }
 
 func (ls *LedgerState) runRewardPrecompute(
@@ -2147,7 +2182,10 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 
 	// Write phase: re-verify the calculation is still valid, then persist.
 	// This holds the single SQLite writer only for a guard check plus a
-	// handful of upserts, not for the calculation above.
+	// handful of upserts, not for the calculation above. The lock spans
+	// guard through commit; see rewardPrecomputeWriteMu.
+	ls.rewardPrecomputeWriteMu.Lock()
+	defer ls.rewardPrecomputeWriteMu.Unlock()
 	writeTxn := ls.db.Transaction(true)
 	return writeTxn.Do(func(txn *database.Txn) error {
 		meta := ls.db.Metadata()
@@ -2190,6 +2228,9 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 				applicationBoundarySlot,
 			)
 			return nil
+		}
+		if ls.rewardPrecomputeBeforeSaveHook != nil {
+			ls.rewardPrecomputeBeforeSaveHook()
 		}
 
 		return ls.saveStakeRewardPrecompute(
