@@ -37,41 +37,6 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// blake2b224FromBytes converts a database-sourced hash column to a
-// Blake2b224, rejecting any length other than Blake2b224Size.
-// ledger.NewBlake2b224 zero-pads a short value and truncates a long one, so
-// using it here would turn a malformed row into a well-formed result key that
-// can collide with an unrelated credential. Replace this with
-// lcommon.NewBlake2b224Checked once a gouroboros release carries it.
-func blake2b224FromBytes(b []byte) (ledger.Blake2b224, error) {
-	var out ledger.Blake2b224
-	if len(b) != lcommon.Blake2b224Size {
-		return out, fmt.Errorf(
-			"invalid blake2b-224 hash: expected %d bytes, got %d",
-			lcommon.Blake2b224Size,
-			len(b),
-		)
-	}
-	copy(out[:], b)
-	return out, nil
-}
-
-// blake2b256FromBytes converts a database-sourced hash column to a
-// Blake2b256, rejecting any length other than Blake2b256Size, for the same
-// reason blake2b224FromBytes exists.
-func blake2b256FromBytes(b []byte) (ledger.Blake2b256, error) {
-	var out ledger.Blake2b256
-	if len(b) != lcommon.Blake2b256Size {
-		return out, fmt.Errorf(
-			"invalid blake2b-256 hash: expected %d bytes, got %d",
-			lcommon.Blake2b256Size,
-			len(b),
-		)
-	}
-	copy(out[:], b)
-	return out, nil
-}
-
 // MaxLocalStateQueryItems bounds caller-controlled credential filters on query
 // paths that perform per-item work or build account maps from batched reads.
 // Explicit over-limit filters are rejected before database access.
@@ -1240,7 +1205,7 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		)
 		for _, byPool := range []map[string]uint64{mark, set, snapshotGo} {
 			for hash := range byPool {
-				key, err := blake2b224FromBytes([]byte(hash))
+				key, err := lcommon.NewBlake2b224Checked([]byte(hash))
 				if err != nil {
 					return nil, fmt.Errorf("pool stake snapshot: %w", err)
 				}
@@ -1599,7 +1564,9 @@ func genesisConfigResult(
 	startPicoseconds := (int64(start.Hour())*3600+
 		int64(start.Minute())*60+int64(start.Second()))*1_000_000_000_000 +
 		int64(start.Nanosecond())*1000
-	slotLength := new(big.Rat).Mul(genesis.SlotLength.Rat, big.NewRat(1_000_000, 1))
+	slotLength := new(
+		big.Rat,
+	).Mul(genesis.SlotLength.Rat, big.NewRat(1_000_000, 1))
 	if !slotLength.IsInt() || !slotLength.Num().IsInt64() {
 		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
 			"genesis slot length is not an int64 number of microseconds: %s",
@@ -1619,23 +1586,50 @@ func genesisConfigResult(
 			Picoseconds: *big.NewInt(startPicoseconds),
 		},
 		NetworkMagic: int(genesis.NetworkMagic), NetworkId: networkID,
-		ActiveSlotsCoeff: []any{genesis.ActiveSlotsCoeff.Num(), genesis.ActiveSlotsCoeff.Denom()},
-		SecurityParam:    genesis.SecurityParam, EpochLength: genesis.EpochLength,
+		ActiveSlotsCoeff: []any{
+			genesis.ActiveSlotsCoeff.Num(),
+			genesis.ActiveSlotsCoeff.Denom(),
+		},
+		SecurityParam: genesis.SecurityParam, EpochLength: genesis.EpochLength,
 		SlotsPerKESPeriod: genesis.SlotsPerKESPeriod, MaxKESEvolutions: genesis.MaxKESEvolutions,
-		SlotLength: int(slotLength.Num().Int64()), UpdateQuorum: genesis.UpdateQuorum,
-		MaxLovelaceSupply: int64(genesis.MaxLovelaceSupply), // #nosec G115 -- checked above
-		GenDelegs:         fields[12],
+		SlotLength: int(
+			slotLength.Num().Int64(),
+		), UpdateQuorum: genesis.UpdateQuorum,
+		MaxLovelaceSupply: int64(
+			genesis.MaxLovelaceSupply,
+		), // #nosec G115 -- checked above
+		GenDelegs: fields[12],
 		ProtocolParams: olocalstatequery.GenesisConfigResultProtocolParameters{
 			MinFeeA: int(pp.MinFeeA), MinFeeB: int(pp.MinFeeB),
-			MaxBlockBodySize: int(pp.MaxBlockBodySize), MaxTxSize: int(pp.MaxTxSize),
-			MaxBlockHeaderSize: int(pp.MaxBlockHeaderSize), KeyDeposit: int(pp.KeyDeposit),
-			PoolDeposit: int(pp.PoolDeposit), EMax: int(pp.MaxEpoch), NOpt: int(pp.NOpt),
-			A0:                    []int{int(pp.A0.Num().Int64()), int(pp.A0.Denom().Int64())},
-			Rho:                   []int{int(pp.Rho.Num().Int64()), int(pp.Rho.Denom().Int64())},
-			Tau:                   []int{int(pp.Tau.Num().Int64()), int(pp.Tau.Denom().Int64())},
-			DecentralizationParam: []int{int(pp.Decentralization.Num().Int64()), int(pp.Decentralization.Denom().Int64())},
-			ExtraEntropy:          pp.ExtraEntropy, ProtocolVersionMajor: int(pp.ProtocolVersion.Major),
-			ProtocolVersionMinor: int(pp.ProtocolVersion.Minor), MinUTxOValue: int(pp.MinUtxoValue),
+			MaxBlockBodySize: int(
+				pp.MaxBlockBodySize,
+			), MaxTxSize: int(pp.MaxTxSize),
+			MaxBlockHeaderSize: int(
+				pp.MaxBlockHeaderSize,
+			), KeyDeposit: int(pp.KeyDeposit),
+			PoolDeposit: int(
+				pp.PoolDeposit,
+			), EMax: int(pp.MaxEpoch), NOpt: int(pp.NOpt),
+			A0: []int{
+				int(pp.A0.Num().Int64()),
+				int(pp.A0.Denom().Int64()),
+			},
+			Rho: []int{
+				int(pp.Rho.Num().Int64()),
+				int(pp.Rho.Denom().Int64()),
+			},
+			Tau: []int{
+				int(pp.Tau.Num().Int64()),
+				int(pp.Tau.Denom().Int64()),
+			},
+			DecentralizationParam: []int{
+				int(pp.Decentralization.Num().Int64()),
+				int(pp.Decentralization.Denom().Int64()),
+			},
+			ExtraEntropy: pp.ExtraEntropy, ProtocolVersionMajor: int(pp.ProtocolVersion.Major),
+			ProtocolVersionMinor: int(
+				pp.ProtocolVersion.Minor,
+			), MinUTxOValue: int(pp.MinUtxoValue),
 			MinPoolCost: int(pp.MinPoolCost),
 		},
 	}
@@ -1770,7 +1764,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 				return nil, err
 			}
 		}
-		credential, err := blake2b224FromBytes(drep.Credential)
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
 		if err != nil {
 			return nil, fmt.Errorf("drep state: %w", err)
 		}
@@ -1871,7 +1865,7 @@ func (ls *LedgerState) allDRepDelegators() (
 				Tag: uint8(account.DrepType),
 				Key: account.Drep,
 			}.MapKey()
-			credential, err := blake2b224FromBytes(ref.Key)
+			credential, err := lcommon.NewBlake2b224Checked(ref.Key)
 			if err != nil {
 				return nil, fmt.Errorf("drep delegator: %w", err)
 			}
@@ -1966,7 +1960,7 @@ func (ls *LedgerState) drepDelegators(
 	}
 	out := make([]olocalstatequery.StakeCredential, len(refs))
 	for i, ref := range refs {
-		credential, err := blake2b224FromBytes(ref.Key)
+		credential, err := lcommon.NewBlake2b224Checked(ref.Key)
 		if err != nil {
 			return nil, fmt.Errorf("drep delegator: %w", err)
 		}
@@ -1984,7 +1978,7 @@ func drepAnchor(drep *models.Drep) (*lcommon.GovAnchor, error) {
 	if drep.AnchorURL == "" && len(drep.AnchorHash) == 0 {
 		return nil, nil
 	}
-	dataHash, err := blake2b256FromBytes(drep.AnchorHash)
+	dataHash, err := lcommon.NewBlake2b256Checked(drep.AnchorHash)
 	if err != nil {
 		return nil, fmt.Errorf("drep anchor: %w", err)
 	}
@@ -2005,7 +1999,7 @@ func stakePoolsResult(keyHashes [][]byte) ([]any, error) {
 	slices.SortFunc(keyHashes, bytes.Compare)
 	poolIds := make(cbor.Set, 0, len(keyHashes))
 	for _, kh := range keyHashes {
-		hash, err := blake2b224FromBytes(kh)
+		hash, err := lcommon.NewBlake2b224Checked(kh)
 		if err != nil {
 			return nil, fmt.Errorf("stake pool id: %w", err)
 		}
@@ -2034,9 +2028,9 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		if err != nil {
 			return nil, err
 		}
-		txId, err := blake2b256FromBytes(utxo.TxId)
+		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
-			return nil, fmt.Errorf("utxo tx id: %w", err)
+			return nil, fmt.Errorf("utxo by address tx id: %w", err)
 		}
 		utxoId := olocalstatequery.UtxoId{
 			Hash: txId,
@@ -2113,7 +2107,7 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		}
 		rewards[cred] = uint64(account.Reward)
 		if len(account.Pool) > 0 {
-			poolId, err := blake2b224FromBytes(account.Pool)
+			poolId, err := lcommon.NewBlake2b224Checked(account.Pool)
 			if err != nil {
 				return nil, fmt.Errorf("delegation pool id: %w", err)
 			}
@@ -2302,7 +2296,7 @@ func (ls *LedgerState) governanceProposalState(
 			err,
 		)
 	}
-	dataHash, err := blake2b256FromBytes(proposal.AnchorHash)
+	dataHash, err := lcommon.NewBlake2b256Checked(proposal.AnchorHash)
 	if err != nil {
 		return olocalstatequery.GovActionState{}, fmt.Errorf(
 			"governance proposal anchor: %w",
@@ -2361,7 +2355,7 @@ func (ls *LedgerState) governanceProposalState(
 			}
 			state.DRepVotes[cred] = choice
 		case models.VoterTypeSPO:
-			spoId, err := blake2b224FromBytes(vote.VoterCredential)
+			spoId, err := lcommon.NewBlake2b224Checked(vote.VoterCredential)
 			if err != nil {
 				return olocalstatequery.GovActionState{}, fmt.Errorf(
 					"governance vote: %w",
@@ -2382,7 +2376,7 @@ func (ls *LedgerState) governanceProposalState(
 func stakeCredentialFromVote(
 	vote *models.GovernanceVote,
 ) (olocalstatequery.StakeCredential, error) {
-	credential, err := blake2b224FromBytes(vote.VoterCredential)
+	credential, err := lcommon.NewBlake2b224Checked(vote.VoterCredential)
 	if err != nil {
 		return olocalstatequery.StakeCredential{}, fmt.Errorf(
 			"governance vote: %w",
@@ -2459,9 +2453,9 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 		if err != nil {
 			return nil, err
 		}
-		txId, err := blake2b256FromBytes(utxo.TxId)
+		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
-			return nil, fmt.Errorf("utxo tx id: %w", err)
+			return nil, fmt.Errorf("utxo by tx in tx id: %w", err)
 		}
 		utxoId := olocalstatequery.UtxoId{
 			Hash: txId,

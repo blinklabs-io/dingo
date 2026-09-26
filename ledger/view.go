@@ -273,9 +273,15 @@ func (lv *LedgerView) MIRDelegState(
 			if reward.Amount == nil {
 				continue
 			}
+			credential, err := lcommon.NewBlake2b224Checked(
+				reward.Credential,
+			)
+			if err != nil {
+				return ret, fmt.Errorf("MIR reward credential: %w", err)
+			}
 			key := eras.MIRCredentialKey{
 				Tag:        reward.CredentialTag,
-				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Credential: credential,
 				Pot:        effect.Pot,
 			}
 			if existing, ok := ret.Pending[key]; ok && additive {
@@ -597,17 +603,23 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		hasReg = true
 		reg := pool.Registration[latestIdx]
-		operator, err := blake2b224FromBytes(pool.PoolKeyHash)
+		operator, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
 		if err != nil {
 			return nil, nil, fmt.Errorf("pool current state operator: %w", err)
 		}
-		vrfKeyHash, err := blake2b256FromBytes(pool.VrfKeyHash)
+		vrfKeyHash, err := lcommon.NewBlake2b256Checked(pool.VrfKeyHash)
 		if err != nil {
-			return nil, nil, fmt.Errorf("pool current state VRF key hash: %w", err)
+			return nil, nil, fmt.Errorf(
+				"pool current state VRF key hash: %w",
+				err,
+			)
 		}
-		rewardAccount, err := blake2b224FromBytes(pool.RewardAccount)
+		rewardAccount, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
 		if err != nil {
-			return nil, nil, fmt.Errorf("pool current state reward account: %w", err)
+			return nil, nil, fmt.Errorf(
+				"pool current state reward account: %w",
+				err,
+			)
 		}
 		tmp := lcommon.PoolRegistrationCertificate{
 			CertType:   uint(lcommon.CertificateTypePoolRegistration),
@@ -621,7 +633,7 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		tmp.RewardAccount = lcommon.AddrKeyHash(rewardAccount)
 		for _, owner := range reg.Owners {
-			ownerKeyHash, err := blake2b224FromBytes(owner.KeyHash)
+			ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
 			if err != nil {
 				return nil, nil, fmt.Errorf(
 					"pool current state owner key hash: %w",
@@ -792,9 +804,14 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	if pool == nil {
 		return false, lcommon.PoolKeyHash{}, nil
 	}
-	return true, lcommon.PoolKeyHash(
-		lcommon.NewBlake2b224(pool.PoolKeyHash),
-	), nil
+	poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, fmt.Errorf(
+			"VRF key owner pool key hash: %w",
+			err,
+		)
+	}
+	return true, lcommon.PoolKeyHash(poolKeyHash), nil
 }
 
 // SlotToTime returns the current time for a given slot based on known epochs.
@@ -1354,7 +1371,12 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 		return fmt.Errorf("get committee hot credential: %w", err)
 	}
 	if authorization != nil {
-		hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
+		hotKey, err := lcommon.NewBlake2b224Checked(
+			authorization.HotCredential,
+		)
+		if err != nil {
+			return fmt.Errorf("committee hot credential: %w", err)
+		}
 		member.HotKey = &hotKey
 	}
 	return nil
@@ -1532,9 +1554,13 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 		if found == nil {
 			continue
 		}
+		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
+		if err != nil {
+			return nil, fmt.Errorf("committee cold credential: %w", err)
+		}
 		coldCredential := lcommon.Credential{
 			CredType:   uint(found.ColdCredentialTag),
-			Credential: lcommon.NewBlake2b224(found.ColdCredHash),
+			Credential: coldHash,
 		}
 		member := &lcommon.CommitteeMember{
 			ColdKey:     coldCredential.Credential,
@@ -1568,7 +1594,12 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			return nil, fmt.Errorf("get committee hot credential: %w", err)
 		}
 		if authorization != nil {
-			hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
+			hotKey, err := lcommon.NewBlake2b224Checked(
+				authorization.HotCredential,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("committee hot credential: %w", err)
+			}
 			member.HotKey = &hotKey
 		}
 		members = append(members, *member)
@@ -1757,7 +1788,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
-		credential, err := blake2b224FromBytes(drep.Credential)
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
 		if err != nil {
 			return nil, fmt.Errorf("DRep registrations credential: %w", err)
 		}

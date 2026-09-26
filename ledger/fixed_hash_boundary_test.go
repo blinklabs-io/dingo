@@ -109,9 +109,12 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 				pool.Registration[0].Owners[0].KeyHash =
 					ownerKeyHash[:lcommon.Blake2b224Size-1]
 			}
-			db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
-				store.pool = pool
-			})
+			db := newFixedHashBoundaryDB(
+				t,
+				func(store *fixedHashMetadataStore) {
+					store.pool = pool
+				},
+			)
 			txn := db.Transaction(false)
 			defer txn.Release()
 			view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
@@ -126,7 +129,9 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 func TestLedgerViewDRepRegistrationsRejectsMalformedCredential(t *testing.T) {
 	t.Parallel()
 	db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
-		store.dreps = []*models.Drep{{Credential: make([]byte, lcommon.Blake2b224Size-1)}}
+		store.dreps = []*models.Drep{
+			{Credential: make([]byte, lcommon.Blake2b224Size-1)},
+		}
 	})
 	txn := db.Transaction(false)
 	defer txn.Release()
@@ -162,7 +167,11 @@ func TestPoolVrfKeyHashesRejectsMalformedReturnedPoolKey(t *testing.T) {
 	})
 	ls := &LedgerState{db: db}
 
-	_, err := ls.poolVrfKeyHashes([]lcommon.PoolKeyHash{lcommon.PoolKeyHash{}}, nil, nil)
+	_, err := ls.poolVrfKeyHashes(
+		[]lcommon.PoolKeyHash{lcommon.PoolKeyHash{}},
+		nil,
+		nil,
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "registered pool key")
 	require.Contains(t, err.Error(), "invalid blake2b-224 hash")
@@ -181,7 +190,9 @@ func TestPoolKeyHashesFromActivePoolBytesRejectsMalformedKey(t *testing.T) {
 func TestQueryLedgerPeerSnapshotRejectsMalformedActivePoolKey(t *testing.T) {
 	t.Parallel()
 	db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
-		store.activePoolKeyHashes = [][]byte{make([]byte, lcommon.Blake2b224Size-1)}
+		store.activePoolKeyHashes = [][]byte{
+			make([]byte, lcommon.Blake2b224Size-1),
+		}
 	})
 	ls := &LedgerState{db: db}
 

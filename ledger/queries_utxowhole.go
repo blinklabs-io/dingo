@@ -138,13 +138,11 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// review).
 	var live []database.UtxoRef
 	collect := func(u *models.Utxo) error {
-		txID, err := blake2b256FromBytes(u.TxId)
+		txID, err := ledger.NewBlake2b256Checked(u.TxId)
 		if err != nil {
 			return fmt.Errorf("utxo ref tx id: %w", err)
 		}
-		var ref database.UtxoRef
-		copy(ref.TxId[:], txID[:])
-		ref.OutputIdx = u.OutputIdx
+		ref := database.UtxoRef{TxId: txID, OutputIdx: u.OutputIdx}
 		live = append(live, ref)
 		return nil
 	}

@@ -114,10 +114,13 @@ func poolKeyHashesFromActivePoolBytes(
 	poolKeyHashBytes [][]byte,
 ) ([]lcommon.PoolKeyHash, error) {
 	poolKeyHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashBytes))
-	for _, bytes := range poolKeyHashBytes {
-		poolKeyHash, err := blake2b224FromBytes(bytes)
+	for _, raw := range poolKeyHashBytes {
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(raw)
 		if err != nil {
-			return nil, fmt.Errorf("GetLedgerPeerSnapshot active pool key: %w", err)
+			return nil, fmt.Errorf(
+				"GetLedgerPeerSnapshot active pool key: %w",
+				err,
+			)
 		}
 		poolKeyHashes = append(poolKeyHashes, lcommon.PoolKeyHash(poolKeyHash))
 	}

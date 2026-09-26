@@ -2283,32 +2283,6 @@ WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 }
 
 // GetPoolRegistrations reconstructs the ledger certificates for a pool.
-func checkedBlake2b224(b []byte) (lcommon.Blake2b224, error) {
-	var hash lcommon.Blake2b224
-	if len(b) != lcommon.Blake2b224Size {
-		return hash, fmt.Errorf(
-			"invalid blake2b-224 hash: expected %d bytes, got %d",
-			lcommon.Blake2b224Size,
-			len(b),
-		)
-	}
-	copy(hash[:], b)
-	return hash, nil
-}
-
-func checkedBlake2b256(b []byte) (lcommon.Blake2b256, error) {
-	var hash lcommon.Blake2b256
-	if len(b) != lcommon.Blake2b256Size {
-		return hash, fmt.Errorf(
-			"invalid blake2b-256 hash: expected %d bytes, got %d",
-			lcommon.Blake2b256Size,
-			len(b),
-		)
-	}
-	copy(hash[:], b)
-	return hash, nil
-}
-
 func (s *Store) GetPoolRegistrations(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn types.Txn,
@@ -2356,7 +2330,7 @@ ORDER BY p.id DESC`,
 				registration.ID,
 			)
 		}
-		operator, err := checkedBlake2b224(registration.PoolKeyHash)
+		operator, err := lcommon.NewBlake2b224Checked(registration.PoolKeyHash)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"get pool registrations operator (id=%d): %w",
@@ -2364,7 +2338,7 @@ ORDER BY p.id DESC`,
 				err,
 			)
 		}
-		vrfKeyHash, err := checkedBlake2b256(registration.VrfKeyHash)
+		vrfKeyHash, err := lcommon.NewBlake2b256Checked(registration.VrfKeyHash)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"get pool registrations VRF key hash (id=%d): %w",
@@ -2372,7 +2346,9 @@ ORDER BY p.id DESC`,
 				err,
 			)
 		}
-		rewardAccount, err := checkedBlake2b224(registration.RewardAccount)
+		rewardAccount, err := lcommon.NewBlake2b224Checked(
+			registration.RewardAccount,
+		)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"get pool registrations reward account (id=%d): %w",
@@ -2396,7 +2372,7 @@ ORDER BY p.id DESC`,
 			}
 		}
 		for _, owner := range registration.Owners {
-			ownerKeyHash, err := checkedBlake2b224(owner.KeyHash)
+			ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
 			if err != nil {
 				return nil, fmt.Errorf(
 					"get pool registrations owner key hash (registration id=%d, owner id=%d): %w",

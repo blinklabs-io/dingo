@@ -27,11 +27,34 @@ import (
 
 func TestGetPoolRegistrationsRejectsMalformedStoredHashes(t *testing.T) {
 	t.Parallel()
+	testGetPoolRegistrationsRejectsMalformedStoredHashes(
+		t,
+		newManagementTestStore,
+	)
+}
 
+func TestGetStakeRegistrationsByCredentialRejectsMalformedStoredKey(
+	t *testing.T,
+) {
+	t.Parallel()
+	testGetStakeRegistrationsByCredentialRejectsMalformedStoredKey(
+		t,
+		newManagementTestStore(t),
+	)
+}
+
+// testGetPoolRegistrationsRejectsMalformedStoredHashes writes a valid pool
+// registration, overwrites one hash column with a value one byte short, and
+// requires the certificate reconstruction to fail rather than zero-pad it.
+func testGetPoolRegistrationsRejectsMalformedStoredHashes(
+	t *testing.T,
+	newStore func(*testing.T) *Store,
+) {
+	t.Helper()
 	for _, field := range []string{"VRF key hash", "reward account", "owner key hash"} {
 		t.Run(field, func(t *testing.T) {
 			t.Parallel()
-			store := newManagementTestStore(t)
+			store := newStore(t)
 			poolKey := make([]byte, lcommon.Blake2b224Size)
 			poolKey[0] = 1
 			vrfKey := make([]byte, lcommon.Blake2b256Size)
@@ -73,10 +96,17 @@ func TestGetPoolRegistrationsRejectsMalformedStoredHashes(t *testing.T) {
 			case "owner key hash":
 				statement = "UPDATE pool_registration_owner SET key_hash = ?"
 			}
-			_, err := store.writeDB.ExecContext(context.Background(), statement, args...)
+			_, err := store.writeDB.ExecContext(
+				context.Background(),
+				store.dialect.Rebind(statement),
+				args...,
+			)
 			require.NoError(t, err)
 
-			_, err = store.GetPoolRegistrations(lcommon.NewBlake2b224(poolKey), nil)
+			_, err = store.GetPoolRegistrations(
+				lcommon.NewBlake2b224(poolKey),
+				nil,
+			)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "get pool registrations")
 			require.Contains(t, err.Error(), "invalid blake2b-")
@@ -84,13 +114,32 @@ func TestGetPoolRegistrationsRejectsMalformedStoredHashes(t *testing.T) {
 	}
 }
 
-func TestGetPoolRegistrationsRejectsMalformedOperatorHash(t *testing.T) {
-	t.Parallel()
-	// GetPoolRegistrations filters on this exact fixed-width column, so a
-	// malformed operator row cannot be selected through its public query.
-	// Pin the operator conversion itself here; the query-level tests above
-	// exercise the other malformed registration fields that can be selected.
-	_, err := checkedBlake2b224(make([]byte, lcommon.Blake2b224Size-1))
-	require.Error(t, err)
-	require.EqualError(t, err, "invalid blake2b-224 hash: expected 28 bytes, got 27")
+// testGetStakeRegistrationsByCredentialRejectsMalformedStoredKey covers a
+// stake registration row whose staking key is one byte short of a
+// credential hash. The array conversion this replaced panicked on it.
+func testGetStakeRegistrationsByCredentialRejectsMalformedStoredKey(
+	t *testing.T,
+	store *Store,
+) {
+	t.Helper()
+	short := make([]byte, lcommon.Blake2b224Size-1)
+	short[0] = 5
+	_, err := store.writeDB.ExecContext(
+		context.Background(),
+		store.dialect.Rebind(
+			"INSERT INTO stake_registration "+
+				"(staking_key, credential_tag, added_slot, deposit_amount) "+
+				"VALUES (?, 0, 1, '0')",
+		),
+		short,
+	)
+	require.NoError(t, err)
+
+	var certs []lcommon.StakeRegistrationCertificate
+	require.NotPanics(t, func() {
+		certs, err = store.GetStakeRegistrationsByCredential(0, short, nil)
+	})
+	require.ErrorContains(t, err, "stake registration credential")
+	require.ErrorContains(t, err, "invalid blake2b-224 hash")
+	require.Nil(t, certs)
 }

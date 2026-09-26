@@ -167,7 +167,11 @@ func TestQueryDRepStateRejectsPartialResultWhenOneCredentialIsCorrupt(
 
 	result, err := ls.queryShelleyDRepState(nil)
 	require.Error(t, err)
-	require.Nil(t, result, "a corrupt row must not produce a partial DRep state")
+	require.Nil(
+		t,
+		result,
+		"a corrupt row must not produce a partial DRep state",
+	)
 	require.Contains(t, err.Error(), "blake2b-224")
 }
 
