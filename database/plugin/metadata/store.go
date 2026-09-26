@@ -2237,6 +2237,14 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PParams, error)
 
+	// ListPParamsForEra returns every stored protocol-parameter row for an era
+	// in insertion order. Callers that need the era's initial parameters use
+	// the first row rather than substituting a later parameter update.
+	ListPParamsForEra(
+		uint, // eraId
+		types.Txn,
+	) ([]models.PParams, error)
+
 	// GetPParamUpdates retrieves protocol parameter updates for a given epoch.
 	GetPParamUpdates(
 		uint64, // epoch

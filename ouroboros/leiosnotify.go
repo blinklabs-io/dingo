@@ -49,6 +49,11 @@ type LeiosAnnouncementLedger interface {
 	ValidateLeiosAnnouncementHeader(
 		gledger.BlockHeader,
 	) (ledger.LeiosAnnouncementOCINStaleness, error)
+	ValidateLeiosEndorserBlockTransactions(
+		context.Context,
+		gledger.BlockHeader,
+		[][]byte,
+	) error
 }
 
 // leiosForgedEBEntry holds one locally-forged endorser block ready to
@@ -1726,7 +1731,10 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 	if !o.config.EnableLeios || o.eventBus == nil {
 		return
 	}
-	retry := func(event.Event) { o.retryDeferredLeiosAnnouncements() }
+	retry := func(event.Event) {
+		o.retryDeferredLeiosAnnouncements()
+		o.retryLeiosEndorserBlockValidations()
+	}
 	o.subscribeTracked(chain.ChainUpdateEventType, retry)
 	o.subscribeTracked(event.EpochTransitionEventType, retry)
 }
@@ -1819,6 +1827,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		publish = o.bindLeiosEndorserBlockSlot(
 			ebHash.Bytes(),
 			header.SlotNumber(),
+			raw,
 		)
 	}
 	o.leiosAnnouncementsMu.Unlock()
@@ -1953,6 +1962,21 @@ func (o *Ouroboros) leiosAnnouncementBindsSlotLocked(
 		}
 	}
 	return true
+}
+
+// leiosAnnouncementHeaderLocked returns the exact announcement header that
+// binds one endorser-block occurrence. The caller holds leiosAnnouncementsMu.
+func (o *Ouroboros) leiosAnnouncementHeaderLocked(
+	ebHash []byte,
+	slot uint64,
+) []byte {
+	for _, announcement := range o.leiosAnnouncements {
+		if announcement.slot == slot &&
+			slices.Equal(announcement.ebHash.Bytes(), ebHash) {
+			return slices.Clone(announcement.raw)
+		}
+	}
+	return nil
 }
 
 // EnqueueLeiosBlockAnnouncement validates and queues a locally forged

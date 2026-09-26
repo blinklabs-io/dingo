@@ -686,6 +686,7 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.NotNil(t, captured.ChainManager)
 	require.NotNil(t, capturedHook)
 	require.True(t, captured.TrustedReplay)
+	require.NotNil(t, captured.ValidateLeiosCertificate)
 	require.True(t, captured.ManualBlockProcessing)
 }
 

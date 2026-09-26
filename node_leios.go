@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -104,89 +105,136 @@ func (a *leiosKeyProviderAdapter) GetLeiosKeys(
 	)
 }
 
-// leiosCommitteeParamsAdapter adapts ledger.LedgerState to
-// leios.CommitteeParamsProvider. It revalidates the tau < sigma_c
-// invariant on every read so an invalid parameter combination disables
-// committee computation rather than silently mis-tallying.
+// leiosCommitteeParamsAdapter adapts the historical Dijkstra parameters in
+// LedgerState's metadata store to leios.CommitteeParamsProvider.
 type leiosCommitteeParamsAdapter struct {
 	ledgerState *ledger.LedgerState
 }
 
-func (a *leiosCommitteeParamsAdapter) LeiosCommitteeParameters() (
-	*big.Rat,
-	*big.Rat,
-	error,
-) {
+func (a *leiosCommitteeParamsAdapter) LeiosCommitteeParameters(
+	snapshotEpoch uint64,
+) (_ uint16, _ *big.Rat, err error) {
 	if a.ledgerState == nil {
-		return nil, nil, errors.New("ledger state unavailable")
+		return 0, nil, errors.New("ledger state unavailable")
 	}
-	pparams := a.ledgerState.GetCurrentPParams()
-	dijkstraPParams, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
-		return nil, nil, fmt.Errorf(
-			"leios committee parameters require the dijkstra era, current pparams are %T",
-			pparams,
-		)
+	db := a.ledgerState.Database()
+	if db == nil {
+		return 0, nil, errors.New("database unavailable")
+	}
+	txn := db.MetadataTxn(false)
+	if txn == nil {
+		return 0, nil, errors.New("metadata transaction unavailable")
+	}
+	defer func() {
+		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"release leios committee parameter transaction: %w",
+					rollbackErr,
+				),
+			)
+		}
+	}()
+	dijkstraPParams, err := leiosDijkstraPParamsForSnapshot(
+		db,
+		snapshotEpoch,
+		txn,
+	)
+	if err != nil {
+		return 0, nil, err
 	}
 	return leiosCommitteeParamsFromPParams(dijkstraPParams)
 }
 
-// CIP-0164 default Leios committee parameters, used when the Dijkstra
-// genesis / protocol parameters do not configure them. The Dijkstra genesis
-// is immutable network configuration and the current cardano-ledger
-// DijkstraGenesis does not carry these fields at all — the musashi/prototype
-// genesis defines only the refScript parameters — so the reference
-// implementation falls back to the CIP-0164 defaults internally rather than
-// reading them from genesis. dingo mirrors that here so committee formation
-// and certification work without modifying the (hash-pinned) genesis file.
-//   - committee stake coverage (sigma_c) = 0.99 (top-stake coverage)
-//   - quorum stake threshold  (tau)     = 0.75 ("75% certification threshold")
-//
-// A genesis that does configure either field overrides the corresponding
-// default. See issue #2836.
-var (
-	defaultLeiosCommitteeStakeCoverage = big.NewRat(99, 100)
-	defaultLeiosQuorumStakeThreshold   = big.NewRat(3, 4)
-)
-
-// leiosCommitteeParamsFromPParams resolves the Leios committee stake coverage
-// (sigma_c) and quorum stake threshold (tau) from Dijkstra protocol
-// parameters, falling back to the CIP-0164 defaults for any field the genesis
-// leaves unset (see defaultLeiosCommitteeStakeCoverage /
-// defaultLeiosQuorumStakeThreshold). It revalidates the configured values via
-// ValidateLeiosCommitteeParameters and re-checks the tau < sigma_c invariant
-// after applying defaults so a partial genesis configuration cannot yield an
-// invalid combination. Both returned values are always non-nil, which is what
-// lets committee formation and certification proceed on the prototype/musashi
-// deployment whose genesis carries only the refScript fields (issue #2836).
-func leiosCommitteeParamsFromPParams(
-	dijkstraPParams *gdijkstra.DijkstraProtocolParameters,
-) (*big.Rat, *big.Rat, error) {
-	if err := dijkstraPParams.ValidateLeiosCommitteeParameters(); err != nil {
-		return nil, nil, err
+func leiosDijkstraPParamsForSnapshot(
+	db *database.Database,
+	snapshotEpoch uint64,
+	txn *database.Txn,
+) (*gdijkstra.DijkstraProtocolParameters, error) {
+	decode := func(raw []byte) (lcommon.ProtocolParameters, error) {
+		var decoded gdijkstra.DijkstraProtocolParameters
+		if err := decoded.UnmarshalCBOR(raw); err != nil {
+			return nil, err
+		}
+		return &decoded, nil
 	}
-	// Return fresh copies so callers cannot mutate the shared defaults.
-	sigmaC := new(big.Rat).Set(defaultLeiosCommitteeStakeCoverage)
-	if cov := dijkstraPParams.CommitteeStakeCoverage; cov != nil &&
-		cov.Rat != nil {
-		sigmaC = cov.Rat
-	}
-	tau := new(big.Rat).Set(defaultLeiosQuorumStakeThreshold)
-	if quorum := dijkstraPParams.QuorumStakeThreshold; quorum != nil &&
-		quorum.Rat != nil {
-		tau = quorum.Rat
-	}
-	// Defaulting a single unset field against a configured counterpart could
-	// break the tau < sigma_c invariant that ValidateLeiosCommitteeParameters
-	// only enforces across configured values; re-check after defaulting.
-	if tau.Cmp(sigmaC) >= 0 {
-		return nil, nil, fmt.Errorf(
-			"leios quorum stake threshold (%s) must be less than committee stake coverage (%s)",
-			tau.RatString(),
-			sigmaC.RatString(),
+	pparams, err := db.GetPParams(
+		snapshotEpoch,
+		uint(gdijkstra.EraIdDijkstra),
+		decode,
+		txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"load Dijkstra parameters for Leios snapshot epoch %d: %w",
+			snapshotEpoch,
+			err,
 		)
 	}
-	return sigmaC, tau, nil
+	if pparams == nil {
+		// Leios committees use Dijkstra parameters with the preceding Mark
+		// stake snapshot. At the transition that snapshot can predate the first
+		// Dijkstra row, so use the era's initial parameter set.
+		rows, listErr := db.Metadata().ListPParamsForEra(
+			uint(gdijkstra.EraIdDijkstra),
+			txn.Metadata(),
+		)
+		if listErr != nil {
+			return nil, fmt.Errorf(
+				"list Dijkstra parameters for Leios snapshot epoch %d: %w",
+				snapshotEpoch,
+				listErr,
+			)
+		}
+		if len(rows) == 0 {
+			return nil, fmt.Errorf(
+				"leios snapshot epoch %d has no Dijkstra parameter rows",
+				snapshotEpoch,
+			)
+		}
+		decoded, decodeErr := decode(rows[0].Cbor)
+		if decodeErr != nil {
+			return nil, fmt.Errorf(
+				"decode initial Dijkstra parameters for Leios snapshot epoch %d: %w",
+				snapshotEpoch,
+				decodeErr,
+			)
+		}
+		pparams = decoded
+	}
+	dijkstraPParams, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
+	if !ok || dijkstraPParams == nil {
+		return nil, fmt.Errorf(
+			"leios snapshot epoch %d has no Dijkstra protocol parameters",
+			snapshotEpoch,
+		)
+	}
+	return dijkstraPParams, nil
+}
+
+// leiosCommitteeParamsFromPParams extracts the Dijkstra committee size and
+// quorum threshold. These consensus values must be present in the historical
+// parameters captured for the committee's mark snapshot.
+func leiosCommitteeParamsFromPParams(
+	dijkstraPParams *gdijkstra.DijkstraProtocolParameters,
+) (uint16, *big.Rat, error) {
+	if dijkstraPParams == nil {
+		return 0, nil, errors.New("nil Dijkstra protocol parameters")
+	}
+	committeeSize := dijkstraPParams.LeiosCommitteeSize
+	if committeeSize == 0 {
+		return 0, nil, errors.New("leios committee size is zero")
+	}
+	if dijkstraPParams.LeiosQuorumStakeThreshold == nil ||
+		dijkstraPParams.LeiosQuorumStakeThreshold.Rat == nil {
+		return 0, nil, errors.New("leios quorum stake threshold is missing")
+	}
+	tau := dijkstraPParams.LeiosQuorumStakeThreshold.Rat
+	if tau.Sign() < 0 || tau.Cmp(big.NewRat(1, 1)) > 0 {
+		return 0, nil, leios.ErrInvalidQuorumStakeThreshold
+	}
+	return committeeSize, new(big.Rat).Set(tau), nil
 }
 
 // initLeiosVoteManager builds and starts the Leios vote manager and wires

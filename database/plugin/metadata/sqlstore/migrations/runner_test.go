@@ -190,6 +190,57 @@ func TestRunnerFreshDatabaseAndIdempotentRerun(t *testing.T) {
 	require.True(t, completed.Valid)
 }
 
+func TestImportedLeiosKeyMigrationKeepsAgeUnknown(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	_, err := db.Exec(`CREATE TABLE pool_registration (
+		id INTEGER PRIMARY KEY,
+		certificate_id INTEGER,
+		added_slot INTEGER,
+		leios_key_public BLOB,
+		leios_key_possession_proof BLOB
+	)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO pool_registration (
+		id, certificate_id, added_slot, leios_key_public,
+		leios_key_possession_proof
+	) VALUES
+		(1, NULL, 100, X'01', X'02'),
+		(2, 7, 100, X'03', X'04'),
+		(3, NULL, 0, X'05', X'06'),
+		(4, NULL, 100, NULL, NULL),
+		(5, 0, 100, X'07', X'08')`)
+	require.NoError(t, err)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	for _, statement := range registry[26].SQL["sqlite"].Expand {
+		_, err := db.Exec(statement)
+		require.NoError(t, err)
+	}
+	rows, err := db.Query(`
+SELECT id, leios_key_registration_age_unknown
+FROM pool_registration ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []struct {
+		id      int
+		unknown bool
+	}
+	for rows.Next() {
+		var row struct {
+			id      int
+			unknown bool
+		}
+		require.NoError(t, rows.Scan(&row.id, &row.unknown))
+		got = append(got, row)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []struct {
+		id      int
+		unknown bool
+	}{{1, true}, {2, false}, {3, false}, {4, false}, {5, true}}, got)
+}
+
 func TestRatificationHistoryMigrationBackfillsExistingMarker(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
@@ -453,9 +504,8 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 two, v7/v8 one each, v17 one more, and v24
-	// one more.
-	const shippedAddColumns = 16
+	// v2 adds four columns, v5 adds two, and later migrations add thirteen.
+	const shippedAddColumns = 19
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after

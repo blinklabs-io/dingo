@@ -70,6 +70,7 @@ func bodyBudgetTransaction(
 		0: []any{[]any{make([]byte, 32), uint(index)}},
 		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 		2: uint(200000),
+		3: uint(200000),
 	}
 	if era == eraShelley || era == eraAllegra || era == eraMary || era == eraAlonzo {
 		body[3] = uint64(1000)

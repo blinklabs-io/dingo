@@ -16,13 +16,16 @@ package dingo
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -124,6 +127,28 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// dingo's forward path applies the current announcement normally
 		// (CIP-conformant).
 		LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
+		ValidateLeiosCertificate: func(
+			epoch uint64,
+			announcingBlockHash []byte,
+			signers []byte,
+			aggregatedSignature []byte,
+		) error {
+			if n.config.prototypeTrustBypassesEnabled() {
+				return nil
+			}
+			if n.leiosVoteManager == nil {
+				return errors.New("leios vote manager is unavailable")
+			}
+			message := leios.PrototypeVoteMessageBytes(
+				lcommon.Blake2b256(announcingBlockHash),
+			)
+			return n.leiosVoteManager.ValidateDijkstraCertificate(
+				epoch,
+				signers,
+				aggregatedSignature,
+				message,
+			)
+		},
 		// The leadership stake includes reward-account balances; see
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check
 		// rejected the dominant pool's eligible blocks on Musashi's

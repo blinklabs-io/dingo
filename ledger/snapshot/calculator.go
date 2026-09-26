@@ -336,6 +336,9 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 		return nil, fmt.Errorf("get delegated pools: %w", err)
 	}
 	poolKeyHashBytes, activePools := stakeFetchPools(pools, delegatedPools)
+	for poolHash := range activePools {
+		dist.PoolStakes[poolHash] = 0
+	}
 	if len(poolKeyHashBytes) == 0 {
 		return dist, nil
 	}
@@ -553,12 +556,12 @@ func (c *Calculator) calculateFromHistoricalStake(
 
 	for _, poolHash := range pools {
 		delegators := delegatorMap[poolHash]
+		stake := stakeMap[poolHash]
+		dist.PoolStakes[poolHash] = stake
 		if delegators > 0 {
-			stake := stakeMap[poolHash]
 			if dist.TotalStake > ^uint64(0)-stake {
 				return errors.New("total active stake overflow")
 			}
-			dist.PoolStakes[poolHash] = stake
 			dist.DelegatorCount[poolHash] = delegators
 			dist.TotalStake += stake
 		}

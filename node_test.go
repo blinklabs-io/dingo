@@ -694,6 +694,30 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 	)
 }
 
+func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Musashi prototype trusts certificate without vote manager", func(t *testing.T) {
+		n := &Node{config: Config{cfg: &internalconfig.Config{
+			Network:      ouroboros.NetworkCardanoMusashi.Name,
+			NetworkMagic: ouroboros.NetworkCardanoMusashi.NetworkMagic,
+		}}}
+		validate := n.ledgerStateConfig().ValidateLeiosCertificate
+		require.NotNil(t, validate)
+		require.NoError(t, validate(0, nil, nil, nil))
+	})
+
+	t.Run("standard network still requires certificate verifier", func(t *testing.T) {
+		n := &Node{config: Config{cfg: &internalconfig.Config{
+			Network:      ouroboros.NetworkCardanoPreview.Name,
+			NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
+		}}}
+		validate := n.ledgerStateConfig().ValidateLeiosCertificate
+		require.NotNil(t, validate)
+		require.ErrorContains(t, validate(0, nil, nil, nil), "vote manager is unavailable")
+	})
+}
+
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	t.Parallel()
 

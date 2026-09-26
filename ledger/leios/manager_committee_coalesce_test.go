@@ -66,8 +66,8 @@ func newGatedParamsProvider() *gatedParamsProvider {
 	}
 }
 
-func (p *gatedParamsProvider) LeiosCommitteeParameters() (
-	*big.Rat,
+func (p *gatedParamsProvider) LeiosCommitteeParameters(uint64) (
+	uint16,
 	*big.Rat,
 	error,
 ) {
@@ -87,7 +87,7 @@ func (p *gatedParamsProvider) LeiosCommitteeParameters() (
 	if n == 1 || blockAll {
 		<-p.release
 	}
-	return big.NewRat(1, 1), big.NewRat(7, 10), nil
+	return 10, big.NewRat(7, 10), nil
 }
 
 func (p *gatedParamsProvider) callCount() int {

@@ -818,12 +818,18 @@ func newByronEnvelopeNodeConfig(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	config := &cardano.CardanoNodeConfig{}
-	genesis := fmt.Sprintf(`{
-		"blockVersionData": {
-			"maxBlockSize": "%d",
-			"maxHeaderSize": "%d"
-		}
-	}`, maxBlockSize, maxHeaderSize)
+	genesis := strings.Replace(
+		testByronGenesisJSON,
+		`"maxBlockSize": "1"`,
+		fmt.Sprintf(`"maxBlockSize": "%d"`, maxBlockSize),
+		1,
+	)
+	genesis = strings.Replace(
+		genesis,
+		`"maxHeaderSize": "1"`,
+		fmt.Sprintf(`"maxHeaderSize": "%d"`, maxHeaderSize),
+		1,
+	)
 	require.NoError(
 		t,
 		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),

@@ -23,11 +23,104 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateDijkstraLeiosCertificateResolvesBatchParent(t *testing.T) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	certifier.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
+		Signers:             []byte{1},
+		AggregatedSignature: make([]byte, 48),
+	}
+	var (
+		gotEpoch  uint64
+		gotParent []byte
+	)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			ValidateLeiosCertificate: func(
+				epoch uint64,
+				parentHash, _, _ []byte,
+			) error {
+				gotEpoch = epoch
+				gotParent = append([]byte(nil), parentHash...)
+				return nil
+			},
+		},
+	}
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{{
+			EpochId:       5,
+			StartSlot:     0,
+			LengthInSlots: 200,
+		}},
+	})
+	err := ls.validateDijkstraLeiosCertificate(certifier, map[string]leiosEbRef{
+		string(parent.Hash().Bytes()): {slot: parent.SlotNumber()},
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), gotEpoch)
+	require.Equal(t, parent.Hash().Bytes(), gotParent)
+}
+
+func TestEnsureReferencedEndorserBlocksRejectsCertificateBeforeFetch(t *testing.T) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	certifier.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
+		Signers:             []byte{1},
+		AggregatedSignature: make([]byte, 48),
+	}
+	probe := &leiosRecoveryProbe{err: errors.New("fetch must not run")}
+	ls := newLeiosRecoveryLedgerState(probe)
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{{
+			EpochId:       5,
+			StartSlot:     0,
+			LengthInSlots: 200,
+		}},
+	})
+	ls.config.ValidateLeiosCertificate = func(
+		uint64,
+		[]byte,
+		[]byte,
+		[]byte,
+	) error {
+		return errors.New("invalid aggregate signature")
+	}
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorContains(t, err, "invalid aggregate signature")
+	require.Zero(t, probe.attemptCount(),
+		"invalid certificates must be rejected before fetching certified data")
+}
+
+func TestEnsureReferencedEndorserBlocksRejectsHeaderOnlyCertificateBeforeFetch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	probe := &leiosRecoveryProbe{err: errors.New("fetch must not run")}
+	ls := newLeiosRecoveryLedgerState(probe)
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorContains(t, err, "certificate body presence is false")
+	require.Zero(t, probe.attemptCount(),
+		"a certification header flag without its body certificate must not trigger a fetch")
+}
 
 // leiosRecoveryProbe is a scripted EndorserBlockFetcher/EndorserBlockProvider
 // pair standing in for the leios-fetch backfill. It records every fetch attempt
@@ -117,6 +210,7 @@ func TestEnsureReferencedEndorserBlocksRetriesUntilCertifiedEbArrives(
 		),
 	}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -145,6 +239,7 @@ func TestEnsureReferencedEndorserBlocksBoundsCertifiedRetry(t *testing.T) {
 		),
 	}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	err := ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -179,6 +274,7 @@ func TestEnsureReferencedEndorserBlocksCertifiedRetryHonoursContext(
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{err: errors.New("no peers")}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -205,6 +301,7 @@ func TestEnsureReferencedEndorserBlocksAvailableEbIsNotFetched(t *testing.T) {
 	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
 	probe := &leiosRecoveryProbe{available: true}
 	ls := newLeiosRecoveryLedgerState(probe)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
 		t.Context(),
