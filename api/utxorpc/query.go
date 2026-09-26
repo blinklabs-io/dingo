@@ -693,6 +693,17 @@ func (s *queryServiceServer) ReadData(
 	resp := &query.ReadDataResponse{}
 
 	for _, key := range keys {
+		if len(key) != lcommon.Blake2b256Size {
+			return nil, connect.NewError(
+				connect.CodeInvalidArgument,
+				fmt.Errorf(
+					"datum key %x is %d bytes, want %d",
+					key,
+					len(key),
+					lcommon.Blake2b256Size,
+				),
+			)
+		}
 		datum, err := s.utxorpc.config.LedgerState.Datum(key)
 		if err != nil {
 			if errors.Is(err, database.ErrDatumNotFound) {

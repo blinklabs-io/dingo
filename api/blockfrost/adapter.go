@@ -1000,7 +1000,10 @@ func (a *NodeAdapter) Asset(
 			err,
 		)
 	}
-	policyHash := lcommon.NewBlake2b224(policyIDBytes)
+	policyHash, err := lcommon.NewBlake2b224Checked(policyIDBytes)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf("asset policy ID %q: %w", policyID, err)
+	}
 	asset, err := a.ledgerState.Database().
 		Metadata().
 		GetAssetByPolicyAndName(policyHash, assetName, nil)
@@ -2024,7 +2027,11 @@ func (a *NodeAdapter) PoolsRetiring(
 
 	ret := make([]PoolRetiringInfo, 0, end-start)
 	for _, row := range rows[start:end] {
-		poolID := lcommon.PoolId(lcommon.NewBlake2b224(row.PoolKeyHash))
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(row.PoolKeyHash)
+		if err != nil {
+			return nil, 0, fmt.Errorf("retiring pool key hash: %w", err)
+		}
+		poolID := lcommon.PoolId(poolKeyHash)
 		ret = append(ret, PoolRetiringInfo{
 			PoolID: poolID.String(),
 			Epoch:  row.Epoch,
@@ -2219,7 +2226,11 @@ func (a *NodeAdapter) PoolsExtended() (
 
 	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
-		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolKeyHash))
+		poolHash, err := lcommon.NewBlake2b224Checked(poolKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf("active pool key hash: %w", err)
+		}
+		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolHash))
 	}
 	pools, err := db.GetPools(poolHashes, txn)
 	if err != nil {
@@ -2280,7 +2291,11 @@ func (a *NodeAdapter) PoolsExtended() (
 				models.ErrPoolNotFound,
 			)
 		}
-		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pool.PoolKeyHash))
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf("pool key hash: %w", err)
+		}
+		poolID := lcommon.PoolId(poolKeyHash)
 		poolHex := hex.EncodeToString(pool.PoolKeyHash)
 
 		marginCost := 0.0
@@ -2393,9 +2408,11 @@ func (a *NodeAdapter) Account(
 
 	var poolID *string
 	if delegating {
-		pool := lcommon.PoolId(
-			lcommon.NewBlake2b224(account.Pool),
-		).String()
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(account.Pool)
+		if err != nil {
+			return AccountInfo{}, fmt.Errorf("delegated pool key hash: %w", err)
+		}
+		pool := lcommon.PoolId(poolKeyHash).String()
 		poolID = &pool
 	}
 
@@ -2618,13 +2635,15 @@ func (a *NodeAdapter) AccountDelegationHistory(
 		if err != nil {
 			return nil, 0, err
 		}
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(row.PoolKeyHash)
+		if err != nil {
+			return nil, 0, fmt.Errorf("delegation pool key hash: %w", err)
+		}
 		ret = append(ret, AccountDelegationHistoryInfo{
 			ActiveEpoch: activeEpoch,
 			TxHash:      hex.EncodeToString(row.TxHash),
 			Amount:      "0",
-			PoolID: lcommon.PoolId(
-				lcommon.NewBlake2b224(row.PoolKeyHash),
-			).String(),
+			PoolID:      lcommon.PoolId(poolKeyHash).String(),
 			TxSlot:      txSlot,
 			BlockTime:   blockTime,
 			BlockHeight: blockHeight,
@@ -2823,13 +2842,15 @@ func (a *NodeAdapter) AccountRewardHistory(
 				credentialTag,
 			)
 		}
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(row.PoolKeyHash)
+		if err != nil {
+			return nil, 0, fmt.Errorf("reward pool key hash: %w", err)
+		}
 		ret = append(ret, AccountRewardHistoryInfo{
 			Epoch:  epoch,
 			Amount: strconv.FormatUint(uint64(row.Amount), 10),
-			PoolID: lcommon.PoolId(
-				lcommon.NewBlake2b224(row.PoolKeyHash),
-			).String(),
-			Type: rewardType,
+			PoolID: lcommon.PoolId(poolKeyHash).String(),
+			Type:   rewardType,
 		})
 	}
 	return ret, total, nil
@@ -3470,7 +3491,11 @@ func (a *NodeAdapter) AddressUTXOs(
 	for _, utxo := range paged {
 		txKey := hex.EncodeToString(utxo.TxId)
 		var inlineDatum, referenceScriptHash *string
-		if cborBytes := utxoCbor[utxoRef(utxo.Utxo)]; len(cborBytes) > 0 {
+		ref, err := utxoRef(utxo.Utxo)
+		if err != nil {
+			return nil, 0, err
+		}
+		if cborBytes := utxoCbor[ref]; len(cborBytes) > 0 {
 			if output, decodeErr := gledger.NewTransactionOutputFromCbor(
 				cborBytes,
 			); decodeErr == nil {
@@ -3515,11 +3540,19 @@ func (a *NodeAdapter) orderedUtxosByRefs(
 	}
 	byRef := make(map[database.UtxoRef]models.Utxo, len(utxos))
 	for _, utxo := range utxos {
-		byRef[utxoRef(utxo)] = utxo
+		ref, err := utxoRef(utxo)
+		if err != nil {
+			return nil, err
+		}
+		byRef[ref] = utxo
 	}
 	ret := make([]models.UtxoWithOrdering, 0, len(refs))
 	for _, ref := range refs {
-		utxo, ok := byRef[utxoIdRef(ref)]
+		key, err := utxoIdRef(ref)
+		if err != nil {
+			return nil, err
+		}
+		utxo, ok := byRef[key]
 		if !ok {
 			continue
 		}
@@ -3530,10 +3563,12 @@ func (a *NodeAdapter) orderedUtxosByRefs(
 
 // utxoIdRef converts a models.UtxoId to the database.UtxoRef key shape
 // utxoRef uses, so results keyed by one can be looked up by the other.
-func utxoIdRef(id models.UtxoId) database.UtxoRef {
-	var txID [32]byte
-	copy(txID[:], id.Hash)
-	return database.UtxoRef{TxId: txID, OutputIdx: id.Idx}
+func utxoIdRef(id models.UtxoId) (database.UtxoRef, error) {
+	txID, err := lcommon.NewBlake2b256Checked(id.Hash)
+	if err != nil {
+		return database.UtxoRef{}, fmt.Errorf("utxo id: %w", err)
+	}
+	return database.UtxoRef{TxId: txID, OutputIdx: id.Idx}, nil
 }
 
 // addressUtxoCbor resolves the raw output CBOR for the given UTxOs in a single
@@ -3548,7 +3583,10 @@ func (a *NodeAdapter) addressUtxoCbor(
 	seen := make(map[database.UtxoRef]struct{}, len(utxos))
 	refs := make([]database.UtxoRef, 0, len(utxos))
 	for _, utxo := range utxos {
-		ref := utxoRef(utxo.Utxo)
+		ref, err := utxoRef(utxo.Utxo)
+		if err != nil {
+			return nil, err
+		}
 		if _, ok := seen[ref]; ok {
 			continue
 		}
@@ -4141,7 +4179,11 @@ func (a *NodeAdapter) TransactionUTXOs(
 		len(txInputs)+len(txCollateral)+len(txReferenceInputs),
 	)
 	for _, input := range txInputs {
-		input.Cbor = inputCbor[utxoRef(input)]
+		ref, err := utxoRef(input)
+		if err != nil {
+			return TransactionUTXOsInfo{}, err
+		}
+		input.Cbor = inputCbor[ref]
 		info, err := a.transactionInputInfoFromUtxo(input, false, nil)
 		if err != nil {
 			return TransactionUTXOsInfo{}, fmt.Errorf(
@@ -4154,7 +4196,11 @@ func (a *NodeAdapter) TransactionUTXOs(
 		inputs = append(inputs, info)
 	}
 	for _, input := range txCollateral {
-		input.Cbor = inputCbor[utxoRef(input)]
+		ref, err := utxoRef(input)
+		if err != nil {
+			return TransactionUTXOsInfo{}, err
+		}
+		input.Cbor = inputCbor[ref]
 		info, err := a.transactionInputInfoFromUtxo(input, true, nil)
 		if err != nil {
 			return TransactionUTXOsInfo{}, fmt.Errorf(
@@ -4168,7 +4214,11 @@ func (a *NodeAdapter) TransactionUTXOs(
 	}
 	referenceInput := true
 	for _, input := range txReferenceInputs {
-		input.Cbor = inputCbor[utxoRef(input)]
+		ref, err := utxoRef(input)
+		if err != nil {
+			return TransactionUTXOsInfo{}, err
+		}
+		input.Cbor = inputCbor[ref]
 		info, err := a.transactionInputInfoFromUtxo(
 			input,
 			false,
@@ -4199,7 +4249,10 @@ func (a *NodeAdapter) transactionInputCbor(
 	refs := []database.UtxoRef{}
 	for _, inputs := range inputGroups {
 		for _, input := range inputs {
-			ref := utxoRef(input)
+			ref, err := utxoRef(input)
+			if err != nil {
+				return nil, err
+			}
 			if _, ok := seen[ref]; ok {
 				continue
 			}
@@ -4213,13 +4266,15 @@ func (a *NodeAdapter) transactionInputCbor(
 	return a.ledgerState.Database().CborCache().ResolveUtxoCborBatch(refs)
 }
 
-func utxoRef(utxo models.Utxo) database.UtxoRef {
-	var txID [32]byte
-	copy(txID[:], utxo.TxId)
+func utxoRef(utxo models.Utxo) (database.UtxoRef, error) {
+	txID, err := lcommon.NewBlake2b256Checked(utxo.TxId)
+	if err != nil {
+		return database.UtxoRef{}, fmt.Errorf("utxo transaction id: %w", err)
+	}
 	return database.UtxoRef{
 		TxId:      txID,
 		OutputIdx: utxo.OutputIdx,
-	}
+	}, nil
 }
 
 func transactionInputRef(input lcommon.TransactionInput) database.UtxoRef {
@@ -4914,7 +4969,11 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 	}
 	inputsByRef := make(map[database.UtxoRef]models.Utxo, len(tx.Inputs))
 	for _, input := range tx.Inputs {
-		inputsByRef[utxoRef(input)] = input
+		ref, err := utxoRef(input)
+		if err != nil {
+			return nil, err
+		}
+		inputsByRef[ref] = input
 	}
 
 	resolvedInputs := make(map[string]lcommon.Utxo, len(decodedTx.Inputs()))

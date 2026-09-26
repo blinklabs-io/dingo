@@ -123,7 +123,11 @@ func (a *NodeAdapter) AccountUTXOs(
 		txKey := hex.EncodeToString(utxo.TxId)
 		address := ""
 		var inlineDatum, referenceScriptHash *string
-		if cborBytes := utxoCbor[utxoRef(utxo.Utxo)]; len(cborBytes) > 0 {
+		ref, err := utxoRef(utxo.Utxo)
+		if err != nil {
+			return nil, 0, err
+		}
+		if cborBytes := utxoCbor[ref]; len(cborBytes) > 0 {
 			if output, decodeErr := gledger.NewTransactionOutputFromCbor(
 				cborBytes,
 			); decodeErr == nil {
