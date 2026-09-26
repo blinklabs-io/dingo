@@ -3754,6 +3754,21 @@ The `LedgerView` interface provides query access to ledger state:
   present. Cold authorization/resignation certificates and hot committee votes
   therefore match the complete tagged credential; other ledger-state
   implementations retain the upstream compatibility path.
+- Conway and Dijkstra transaction validation run the gouroboros committee
+  voting rules: committee votes on `NoConfidence` and `UpdateCommittee` actions
+  are rejected at every Conway protocol version, and from PV11 each committee
+  hot voter must be authorized by a cold credential of the enacted committee.
+  Earlier protocol versions still accept an authorized member who is not
+  elected. `LedgerView` supplies `common.CommitteeVotingState` for the PV11
+  rule: `CommitteeHotCredentialColdCredentials` returns every cold credential
+  currently authorizing the exact tagged hot credential, seated or not and
+  omitting resigned members, and `CommitteeCredentialIsElected` reports seated
+  membership, which includes expired members and excludes pending proposals.
+- `CommitteeHotCredentialMember` prefers a seated member. A cold credential
+  that is not seated authorizes a hot credential only when its latest
+  authorization was recorded in the view's pinned epoch and no resignation
+  followed it, because cardano-ledger drops such committee state at every
+  epoch boundary.
 - Every transaction-validation composition pins committee proposal resolution
   to the same epoch, protocol parameters, consensus generation, and SQL
   transaction used by the rest of that validation. This includes direct and

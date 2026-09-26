@@ -16,8 +16,10 @@ package ledger
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -26,10 +28,14 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,6 +45,63 @@ func committeeTestCredential(seed byte) lcommon.Credential {
 		Credential: lcommon.NewBlake2b224(
 			bytes.Repeat([]byte{seed}, len(lcommon.Blake2b224{})),
 		),
+	}
+}
+
+func committeeTestVotingKey(
+	seed byte,
+) (lcommon.Credential, ed25519.PrivateKey) {
+	privateKey := ed25519.NewKeyFromSeed(
+		bytes.Repeat([]byte{seed}, ed25519.SeedSize),
+	)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	return lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.Blake2b224Hash(publicKey),
+	}, privateKey
+}
+
+func committeeTestAddSpend(
+	t *testing.T,
+	lv *LedgerView,
+	paymentKeyHash []byte,
+) (shelley.ShelleyTransactionInput, lcommon.Address) {
+	t.Helper()
+	input := shelley.NewShelleyTransactionInput(strings.Repeat("a7", 32), 0)
+	address := mustCommitteeTestAddress(t, paymentKeyHash)
+	output := &shelley.ShelleyTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  2_000_000,
+	}
+	lv.intraBlockUtxos = map[utxoref.Key]lcommon.Utxo{
+		utxoref.ForInput(input): {Id: input, Output: output},
+	}
+	return input, address
+}
+
+func mustCommitteeTestAddress(
+	t *testing.T,
+	paymentKeyHash []byte,
+) lcommon.Address {
+	t.Helper()
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		paymentKeyHash,
+		bytes.Repeat([]byte{0x7a}, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	return address
+}
+
+func committeeTestVKeyWitness(
+	tx lcommon.Transaction,
+	key ed25519.PrivateKey,
+) lcommon.VkeyWitness {
+	hash := tx.Hash()
+	return lcommon.VkeyWitness{
+		Vkey:      key.Public().(ed25519.PublicKey),
+		Signature: ed25519.Sign(key, hash[:]),
 	}
 }
 
@@ -252,6 +315,44 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 					t,
 					committeeTestCredential(0x72).Credential,
 					*member.HotKey,
+				)
+				hot := committeeTestCredential(0x72)
+				voterMember, err := lv.CommitteeHotCredentialMember(hot)
+				require.NoError(t, err)
+				require.NotNil(
+					t,
+					voterMember,
+					"pending committee proposals still contribute authorization state",
+				)
+				elected, err := lv.CommitteeCredentialIsElected(cold)
+				require.NoError(t, err)
+				require.False(
+					t,
+					elected,
+					"a pending member must remain distinct from an elected member",
+				)
+				voter := &lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: [28]byte(hot.Credential),
+				}
+				tx := &conway.ConwayTransaction{
+					Body: conway.ConwayTransactionBody{
+						TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+					},
+					TxIsValid: true,
+				}
+				err = eras.ValidateTxConway(
+					tx,
+					0,
+					lv,
+					&conway.ConwayProtocolParameters{},
+				)
+				var unknownVoter conway.UnknownVoterError
+				require.False(
+					t,
+					errors.As(err, &unknownVoter),
+					"authorized pending voter must pass the unknown-voter rule: %v",
+					err,
 				)
 			} else {
 				require.Nil(t, member.HotKey)
@@ -1111,6 +1212,331 @@ func TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal(t *testing.T) {
 		"a term renewal must not reject a still-valid hot key as unknown: %v",
 		err,
 	)
+}
+
+func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
+	pparams := &conway.ConwayProtocolParameters{}
+	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+	lv, db := committeeTestView(t, pparams)
+	lv.skipPhase2Validation = true
+	cold := committeeTestCredential(0xd1)
+	hot := committeeTestCredential(0xd2)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	storeCommitteeUpdateProposal(t, db, 0xd4, cold, 10)
+	elected := committeeTestCredential(0xd3)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(elected.CredType),
+		ColdCredHash:      elected.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+
+	err := eras.ValidateTxConway(tx, 0, lv, pparams)
+	require.ErrorContains(t, err, "committee voter is not elected")
+}
+
+func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
+	pparams := dijkstraTestProtocolParameters()
+	pparams.ConwayProtocolParameters.ProtocolVersion.Major =
+		lcommon.ProtocolVersionVanRossem
+	pparams.ConwayProtocolParameters.MaxTxSize = 16_384
+	pparams.ConwayProtocolParameters.MaxValueSize = 5_000
+	lv, db := committeeTestView(t, pparams)
+	cold := committeeTestCredential(0xe1)
+	hot, votingKey := committeeTestVotingKey(0xe2)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(cold.CredType),
+		ColdCredHash:      cold.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	input, address := committeeTestAddSpend(t, lv, hot.Credential[:])
+	output := &shelley.ShelleyTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  2_000_000,
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{input},
+			),
+			TxOutputs: []gdijkstra.DijkstraTransactionOutput{
+				{Output: output},
+			},
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+		[]lcommon.VkeyWitness{committeeTestVKeyWitness(tx, votingKey)}, true,
+	)
+
+	require.NoError(t, eras.ValidateTxDijkstra(tx, 0, lv, pparams))
+}
+
+func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
+	pparams := &conway.ConwayProtocolParameters{}
+	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+	pparams.MaxTxSize = 16_384
+	pparams.MaxValueSize = 5_000
+	lv, db := committeeTestView(t, pparams)
+	cold := committeeTestCredential(0xd1)
+	hot, votingKey := committeeTestVotingKey(0xd2)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(cold.CredType),
+		ColdCredHash:      cold.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	input, address := committeeTestAddSpend(t, lv, hot.Credential[:])
+	output := &shelley.ShelleyTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  2_000_000,
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{input},
+			),
+			TxOutputs: []babbage.BabbageTransactionOutput{{
+				OutputAddress: output.OutputAddress,
+				OutputAmount: mary.MaryTransactionOutputValue{
+					Amount: output.OutputAmount,
+				},
+			}},
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+		[]lcommon.VkeyWitness{committeeTestVKeyWitness(tx, votingKey)}, true,
+	)
+
+	require.NoError(t, eras.ValidateTxConway(tx, 0, lv, pparams))
+}
+
+func TestValidateTxConwayAcceptsAuthorizedPendingCommitteeVoterAtPV10(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	pparams := &conway.ConwayProtocolParameters{}
+	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
+	pparams.MaxTxSize = 16_384
+	pparams.MaxValueSize = 5_000
+	lv, db := committeeTestView(t, pparams)
+	cold := committeeTestCredential(0xd8)
+	hot, votingKey := committeeTestVotingKey(0xd9)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	elected := committeeTestCredential(0xda)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(elected.CredType),
+		ColdCredHash:      elected.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	storeCommitteeUpdateProposal(t, db, 0xdb, cold, 10)
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	input, address := committeeTestAddSpend(t, lv, hot.Credential[:])
+	output := &shelley.ShelleyTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  2_000_000,
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{input},
+			),
+			TxOutputs: []babbage.BabbageTransactionOutput{{
+				OutputAddress: output.OutputAddress,
+				OutputAmount: mary.MaryTransactionOutputValue{
+					Amount: output.OutputAmount,
+				},
+			}},
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+		TxIsValid: true,
+	}
+	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+		[]lcommon.VkeyWitness{committeeTestVKeyWitness(tx, votingKey)}, true,
+	)
+
+	require.NoError(t, eras.ValidateTxConway(tx, 0, lv, pparams))
+}
+
+func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		certificate func(
+			cold, oldHot, newHot lcommon.Credential,
+		) lcommon.Certificate
+	}{
+		{
+			name: "hot key replacement",
+			certificate: func(
+				cold, _ lcommon.Credential,
+				newHot lcommon.Credential,
+			) lcommon.Certificate {
+				return &lcommon.AuthCommitteeHotCertificate{
+					CertType: uint(
+						lcommon.CertificateTypeAuthCommitteeHot,
+					),
+					ColdCredential: cold,
+					HotCredential:  newHot,
+				}
+			},
+		},
+		{
+			name: "cold key resignation",
+			certificate: func(
+				cold, _, _ lcommon.Credential,
+			) lcommon.Certificate {
+				return &lcommon.ResignCommitteeColdCertificate{
+					CertType: uint(
+						lcommon.CertificateTypeResignCommitteeCold,
+					),
+					ColdCredential: cold,
+				}
+			},
+		},
+	}
+
+	for _, era := range []string{"Conway", "Dijkstra"} {
+		for _, test := range tests {
+			t.Run(era+"/"+test.name, func(t *testing.T) {
+				pparams := &conway.ConwayProtocolParameters{}
+				pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+				lv, db := committeeTestView(t, pparams)
+				lv.skipPhase2Validation = true
+				cold := committeeTestCredential(0xdc)
+				oldHot := committeeTestCredential(0xdd)
+				newHot := committeeTestCredential(0xde)
+				seedCommitteeCredentialAuthorization(t, db, cold, oldHot, 1, 1)
+				require.NoError(
+					t,
+					db.SetCommitteeMembers([]*models.CommitteeMember{{
+						ColdCredentialTag: uint8(cold.CredType),
+						ColdCredHash:      cold.Credential[:],
+						ExpiresEpoch:      10,
+					}}, nil),
+				)
+				cert := test.certificate(cold, oldHot, newHot)
+				voter := &lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: [28]byte(oldHot.Credential),
+				}
+				var err error
+				if era == "Conway" {
+					tx := &conway.ConwayTransaction{
+						Body: conway.ConwayTransactionBody{
+							TxCertificates: []lcommon.CertificateWrapper{{
+								Type: cert.Type(), Certificate: cert,
+							}},
+							TxVotingProcedures: lcommon.VotingProcedures{
+								voter: {},
+							},
+						},
+						TxIsValid: true,
+					}
+					err = eras.ValidateTxConway(tx, 0, lv, pparams)
+				} else {
+					dijkstraPParams := &gdijkstra.DijkstraProtocolParameters{
+						ConwayProtocolParameters: *pparams,
+					}
+					tx := &gdijkstra.DijkstraTransaction{
+						Body: gdijkstra.DijkstraTransactionBody{
+							TxCertificates: []lcommon.CertificateWrapper{{
+								Type: cert.Type(), Certificate: cert,
+							}},
+							TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+						},
+						TxIsValid: true,
+					}
+					err = eras.ValidateTxDijkstra(tx, 0, lv, dijkstraPParams)
+				}
+				require.ErrorContains(t, err, "committee voter is not elected")
+			})
+		}
+	}
+}
+
+func TestValidateTxConwayRejectsCommitteeUpdateVoteBeforePV11(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		version uint
+	}{
+		{name: "PV9", version: lcommon.ProtocolVersionPlomin - 1},
+		{name: "PV10", version: lcommon.ProtocolVersionPlomin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			validateCommitteeUpdateVoteRejectedAtVersion(t, tc.version)
+		})
+	}
+}
+
+func validateCommitteeUpdateVoteRejectedAtVersion(t *testing.T, version uint) {
+	t.Helper()
+	pparams := &conway.ConwayProtocolParameters{}
+	pparams.ProtocolVersion.Major = version
+	lv, db := committeeTestView(t, pparams)
+	lv.skipPhase2Validation = true
+	cold := committeeTestCredential(0xd5)
+	hot := committeeTestCredential(0xd6)
+	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(cold.CredType),
+		ColdCredHash:      cold.Credential[:],
+		ExpiresEpoch:      10,
+	}}, nil))
+	storeCommitteeUpdateProposal(t, db, 0xd7, cold, 10)
+	require.NoError(t, db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil))
+	var actionTxID [32]byte
+	copy(actionTxID[:], governanceTestHash(0xd7))
+	actionID := &lcommon.GovActionId{TransactionId: actionTxID}
+	resolvedAction, err := lv.GovActionById(*actionID)
+	require.NoError(t, err)
+	require.NotNil(t, resolvedAction)
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{
+				voter: {actionID: {}},
+			},
+		},
+		TxIsValid: true,
+	}
+
+	err = eras.ValidateTxConway(tx, 0, lv, pparams)
+	require.ErrorContains(t, err, "CC cannot vote on UpdateCommittee")
 }
 
 // TestLedgerViewCommitteeResignationSurvivesTermRenewal covers the opposite

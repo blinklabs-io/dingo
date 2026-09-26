@@ -302,7 +302,10 @@ var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 // ledger/common.CommitteeCredentialState, so this also proves *LedgerView
 // satisfies the upstream capability. Point it at the upstream type once the
 // gouroboros pin exports it.
-var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
+var (
+	_ eras.CommitteeCredentialState = (*LedgerView)(nil)
+	_ lcommon.CommitteeVotingState  = (*LedgerView)(nil)
+)
 
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
@@ -1402,7 +1405,7 @@ func (lv *LedgerView) committeeSnapshot() (
 }
 
 // CommitteeHotCredentialMember resolves a committee authorization by exact
-// tagged hot credential identity.
+// tagged hot credential identity, preferring a seated member.
 //
 // Deliberately not filtered by term expiry. The Conway GOV rule resolves a
 // committee voter against the authorization map, which excludes only resigned
@@ -1411,38 +1414,220 @@ func (lv *LedgerView) committeeSnapshot() (
 // tally and in the committeeMinSize active count, so skipping an expired
 // member here would raise UnknownVoterError on a vote cardano-ledger accepts.
 // A resigned member is excluded, matching the upstream authorization set.
+//
+// A cold credential that is not seated authorizes a hot credential only for
+// the rest of the epoch its authorization was recorded in; see
+// committeeHotAuthorizations.
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, true)
+	if err != nil || len(authorizations) == 0 {
+		return nil, err
+	}
+	return authorizations[0].member, nil
+}
+
+// CommitteeHotCredentialColdCredentials returns every cold credential whose
+// committee state currently authorizes this exact tagged hot credential,
+// seated or not and regardless of expiry, omitting resigned members. It
+// implements the lookup half of gouroboros common.CommitteeVotingState; the
+// PV11 elected-voter rule applies the enacted-committee filter through
+// CommitteeCredentialIsElected.
+func (lv *LedgerView) CommitteeHotCredentialColdCredentials(
+	hotCredential lcommon.Credential,
+) ([]lcommon.Credential, error) {
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, false)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]lcommon.Credential, 0, len(authorizations))
+	for _, authorization := range authorizations {
+		ret = append(ret, authorization.cold)
+	}
+	return ret, nil
+}
+
+type committeeHotAuthorization struct {
+	cold   lcommon.Credential
+	member *lcommon.CommitteeMember
+}
+
+// committeeHotAuthorizations returns the cold credentials whose committee
+// state currently authorizes hotCredential, seated members first.
+//
+// cardano-ledger keeps one csCommitteeCreds entry per cold credential and, at
+// every epoch boundary, replaces the map with its intersection with the
+// enacted committee (Conway EPOCH, updateCommitteeState). A seated member's
+// entry is its latest certificate of the current term. A cold credential that
+// is not seated has an entry only because GOVCERT accepted a certificate
+// naming a pending UpdateCommittee member, and that entry is dropped at the
+// next boundary. Its authorization therefore counts only when it was recorded
+// at or after the current epoch's first slot and no resignation followed it.
+func (lv *LedgerView) committeeHotAuthorizations(
+	hotCredential lcommon.Credential,
+	firstOnly bool,
+) ([]committeeHotAuthorization, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
 	}
-	authorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
+	matchesHot := func(authorization *models.AuthCommitteeHot) bool {
+		return authorization != nil &&
+			authorization.HotCredentialTag == hotTag &&
+			bytes.Equal(
+				authorization.HotCredential,
+				hotCredential.Credential[:],
+			)
+	}
+	coldCredential := func(
+		authorization *models.AuthCommitteeHot,
+	) (lcommon.Credential, error) {
+		hash, err := lcommon.NewBlake2b224Checked(authorization.ColdCredential)
+		if err != nil {
+			return lcommon.Credential{}, fmt.Errorf(
+				"invalid committee cold credential in authorization: %w",
+				err,
+			)
+		}
+		return lcommon.Credential{
+			CredType:   uint(authorization.ColdCredentialTag),
+			Credential: hash,
+		}, nil
+	}
+	type coldKey struct {
+		tag  uint8
+		hash lcommon.Blake2b224
+	}
+	var ret []committeeHotAuthorization
+	seen := make(map[coldKey]struct{})
+	seatedAuthorizations, err := lv.ls.db.GetActiveCommitteeMembers(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
 	}
-	for _, authorization := range authorizations {
-		if authorization.HotCredentialTag != hotTag ||
-			!bytes.Equal(
-				authorization.HotCredential,
-				hotCredential.Credential[:],
-			) {
+	for _, authorization := range seatedAuthorizations {
+		if !matchesHot(authorization) {
 			continue
 		}
-		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
-			CredType:   uint(authorization.ColdCredentialTag),
-			Credential: lcommon.NewBlake2b224(authorization.ColdCredential),
-		})
+		cold, err := coldCredential(authorization)
 		if err != nil {
 			return nil, err
 		}
-		if member == nil || member.Resigned {
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: cold.Credential,
+		}
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		return member, nil
+		member, err := lv.CommitteeCredentialMember(cold)
+		if err != nil {
+			return nil, err
+		}
+		if member == nil || member.Resigned || member.HotKey == nil ||
+			*member.HotKey != hotCredential.Credential {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, committeeHotAuthorization{cold: cold, member: member})
+		if firstOnly {
+			return ret, nil
+		}
 	}
-	return nil, nil
+	seated, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get committee members: %w", err)
+	}
+	seatedColds := make(map[coldKey]struct{}, len(seated))
+	for _, member := range seated {
+		if member == nil {
+			continue
+		}
+		seatedColds[coldKey{
+			tag:  member.ColdCredentialTag,
+			hash: lcommon.NewBlake2b224(member.ColdCredHash),
+		}] = struct{}{}
+	}
+	authorizations, err := lv.ls.db.GetCommitteeHotAuthorizationsSince(
+		lv.epochStartSlot,
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get committee hot credentials: %w", err)
+	}
+	for _, authorization := range authorizations {
+		if !matchesHot(authorization) {
+			continue
+		}
+		cold, err := coldCredential(authorization)
+		if err != nil {
+			return nil, err
+		}
+		key := coldKey{
+			tag:  authorization.ColdCredentialTag,
+			hash: cold.Credential,
+		}
+		if _, ok := seatedColds[key]; ok {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+			authorization.ColdCredentialTag,
+			authorization.ColdCredential,
+			authorization.AddedSlot,
+			lv.txn,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"check committee member resignation: %w",
+				err,
+			)
+		}
+		if resigned {
+			continue
+		}
+		hotKey := hotCredential.Credential
+		seen[key] = struct{}{}
+		ret = append(ret, committeeHotAuthorization{
+			cold: cold,
+			member: &lcommon.CommitteeMember{
+				ColdKey: cold.Credential,
+				HotKey:  &hotKey,
+			},
+		})
+		if firstOnly {
+			return ret, nil
+		}
+	}
+	return ret, nil
+}
+
+// CommitteeCredentialIsElected reports whether an exact tagged cold credential
+// is seated in the enacted committee of this view's snapshot. It implements
+// the membership half of gouroboros common.CommitteeVotingState. Expired
+// members stay seated until an enacted action removes them, and members that
+// appear only in pending UpdateCommittee proposals are not elected, matching
+// cardano-ledger's authorizedElectedHotCommitteeCredentials.
+func (lv *LedgerView) CommitteeCredentialIsElected(
+	coldCredential lcommon.Credential,
+) (bool, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return false, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	members, err := lv.ls.db.GetCommitteeMembers(lv.txn)
+	if err != nil {
+		return false, fmt.Errorf("get elected committee members: %w", err)
+	}
+	for _, member := range members {
+		if member != nil && member.ColdCredentialTag == coldTag &&
+			bytes.Equal(member.ColdCredHash, coldCredential.Credential[:]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CommitteeMembers returns all seated committee members.
