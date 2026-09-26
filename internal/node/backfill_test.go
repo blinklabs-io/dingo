@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -574,6 +575,73 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	require.True(t, checkpoint.Completed)
 	require.Equal(t, uint64(1), checkpoint.LastSlot)
 	require.Equal(t, uint64(1), checkpoint.TotalSlots)
+}
+
+// TestRun_ResumeStopsAtRecordedMithrilAnchor covers a Mithril API backfill
+// resumed by `dingo serve`, which calls Run without SetEndSlot. Blocks after
+// the recorded ledger anchor belong to ledger replay: a historical pass over
+// them journals each withdrawal without debiting the reward balance, and the
+// replay then finds the journal row and skips the debit as well.
+func TestRun_ResumeStopsAtRecordedMithrilAnchor(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	for _, block := range blocks {
+		require.NotEmpty(t, block.Transactions())
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	anchor := blocks[0].SlotNumber()
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, bf.Run(context.Background()))
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, checkpoint.Completed)
+	assert.Equal(t, anchor, checkpoint.LastSlot)
+	assert.Equal(t, anchor, checkpoint.TotalSlots)
+	for _, tx := range blocks[0].Transactions() {
+		stored, err := db.Metadata().GetTransactionByHash(
+			tx.Hash().Bytes(),
+			nil,
+		)
+		require.NoError(t, err)
+		assert.NotNil(t, stored, "anchor block transaction was not backfilled")
+	}
+	for _, tx := range blocks[1].Transactions() {
+		stored, err := db.Metadata().GetTransactionByHash(
+			tx.Hash().Bytes(),
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Nil(t, stored, "post-anchor transaction was backfilled")
+	}
 }
 
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are

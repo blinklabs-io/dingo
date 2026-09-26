@@ -1127,6 +1127,13 @@ missing one is not (issue #3788):
   established and hide the real defect, so the run fails closed and the
   checkpoint stays before the block that failed.
 
+Historical backfill ends at the Mithril ledger anchor. `mithril sync` passes
+the anchor explicitly, and a backfill resumed by `dingo serve` reads the
+recorded `mithril_ledger_slot` instead. Blocks after the anchor are left to
+ledger replay: a historical pass over them would journal their withdrawals
+without the debit, and replay would then find the journal row and skip the
+debit as already applied.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |

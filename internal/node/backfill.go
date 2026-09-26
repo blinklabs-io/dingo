@@ -102,6 +102,7 @@ type Backfill struct {
 	// endSlot optionally bounds historical metadata replay. Mithril imports
 	// use the stable ledger-state anchor here so blocks from the artifact's
 	// volatile suffix are left for the normal validating ledger pipeline.
+	// When unset, Run falls back to the recorded anchor.
 	endSlot    uint64
 	endSlotSet bool
 	// useRunningTotalsFinalization is enabled only by the Mithril API import
@@ -201,7 +202,8 @@ func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
 
 // SetEndSlot limits backfill to blocks at or below slot. The checkpoint is
 // completed at that boundary; later blocks are intentionally handled by the
-// normal ledger replay path.
+// normal ledger replay path. Without it, Run stops at the recorded Mithril
+// ledger anchor (the mithril_ledger_slot sync-state key) when one exists.
 func (b *Backfill) SetEndSlot(slot uint64) {
 	b.endSlot = slot
 	b.endSlotSet = true
@@ -764,8 +766,21 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return nil
 	}
 	tipSlot := tipBlocks[0].Slot
-	if b.endSlotSet && b.endSlot < tipSlot {
-		tipSlot = b.endSlot
+	endSlot, endSlotSet := b.endSlot, b.endSlotSet
+	if !endSlotSet {
+		// `dingo serve` resumes an interrupted Mithril API backfill without
+		// an end slot. The blob store also holds the blocks after the ledger
+		// anchor, and ledger replay applies those itself: a historical pass
+		// over them would journal their withdrawals without the debit, and
+		// replay would then skip the debit as already applied.
+		anchor, anchorErr := b.db.MithrilTrustBoundarySlotStrict(nil)
+		if anchorErr != nil {
+			return fmt.Errorf("reading Mithril ledger anchor: %w", anchorErr)
+		}
+		endSlot, endSlotSet = anchor, anchor > 0
+	}
+	if endSlotSet && endSlot < tipSlot {
+		tipSlot = endSlot
 	}
 
 	// Load epoch boundaries for slot-to-epoch mapping.
