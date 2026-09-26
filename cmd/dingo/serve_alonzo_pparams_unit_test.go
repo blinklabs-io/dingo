@@ -74,7 +74,10 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 	))
 	require.NoError(t, runtime.Close(context.Background()))
 
-	sqlDB, err := sql.Open("sqlite", filepath.Join(dir, "metadata.sqlite"))
+	sqlDB, err := sql.Open(
+		"sqlite",
+		filepath.Join(dir, "metadata.sqlite")+"?_pragma=synchronous(OFF)",
+	)
 	require.NoError(t, err)
 	_, err = sqlDB.Exec(
 		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,

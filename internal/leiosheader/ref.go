@@ -15,6 +15,7 @@
 package leiosheader
 
 import (
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -49,24 +50,28 @@ func ReferencedEndorserBlock(
 	return legacyExtensionRef(dijkstraHeader.LeiosHeaderExtension)
 }
 
+// legacyExtensionRef reads the prototype's one-field Leios header extension.
+// The extension elements are raw CBOR carried inside a peer's block header and
+// are decoded here for the first time, so each decode goes through
+// safedecode.Cbor and a decoder panic becomes the same "no reference" answer a
+// malformed extension already produces. The function only decodes into locals,
+// so a contained panic leaves nothing half-updated.
 func legacyExtensionRef(
 	extension []cbor.RawMessage,
 ) (lcommon.Blake2b256, uint64, bool) {
 	if len(extension) != 1 {
 		return lcommon.Blake2b256{}, 0, false
 	}
-	var pair []cbor.RawMessage
-	if _, err := cbor.Decode(extension[0], &pair); err != nil ||
-		len(pair) != 2 {
+	pair, _, err := safedecode.Cbor[[]cbor.RawMessage](extension[0])
+	if err != nil || len(pair) != 2 {
 		return lcommon.Blake2b256{}, 0, false
 	}
-	var hashBytes []byte
-	if _, err := cbor.Decode(pair[0], &hashBytes); err != nil ||
-		len(hashBytes) != lcommon.Blake2b256Size {
+	hashBytes, _, err := safedecode.Cbor[[]byte](pair[0])
+	if err != nil || len(hashBytes) != lcommon.Blake2b256Size {
 		return lcommon.Blake2b256{}, 0, false
 	}
-	var size uint64
-	if _, err := cbor.Decode(pair[1], &size); err != nil {
+	size, _, err := safedecode.Cbor[uint64](pair[1])
+	if err != nil {
 		return lcommon.Blake2b256{}, 0, false
 	}
 	return lcommon.NewBlake2b256(hashBytes), size, true

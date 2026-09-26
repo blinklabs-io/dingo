@@ -4182,6 +4182,12 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		require.True(t, ok)
 		require.NotNil(t, app)
 		require.True(t, app.precomputed)
+		require.Equal(
+			t,
+			rewards.Efficiency(app.totalBlocks, app.params),
+			app.rewardEfficiency,
+			"reused reward outputs must retain efficiency attribution",
+		)
 		require.Equal(t, uint64(100), app.snapshotCapturedSlot)
 		require.Equal(t, uint64(100), app.snapshotBoundarySlot)
 		require.NoError(t, txn.Rollback())

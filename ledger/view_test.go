@@ -59,9 +59,16 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	adaPots, err := lv.GetAdaPotsWithError()
 	require.ErrorIs(t, err, ErrNotImplemented)
 	require.Equal(t, lcommon.AdaPots{}, adaPots)
-	require.PanicsWithValue(t, ErrNotImplemented, func() {
-		_ = lv.GetAdaPots()
+
+	// GetAdaPots satisfies common.RewardState, which gives it no way to
+	// report the sentinel, so it stands in a zero value rather than killing
+	// a caller that reaches it through the interface.
+	var rewardState lcommon.RewardState = lv
+	var interfacePots lcommon.AdaPots
+	require.NotPanics(t, func() {
+		interfacePots = rewardState.GetAdaPots()
 	})
+	require.Equal(t, lcommon.AdaPots{}, interfacePots)
 
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)
@@ -709,7 +716,11 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 // compare against PoolCurrentState and reject the reuse: PoolCurrentState
 // returns P's latest registration (C), which does not equal the requested
 // key (B).
-func TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey(
+// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins dingo#4466 at the
+// LedgerView production entry point: once a pool's same-epoch registration
+// is itself superseded by a later same-epoch registration, IsVrfKeyInUse
+// must report it free, not still claimed.
+func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -788,15 +799,14 @@ func TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey(
 	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
 	lv.epochStartSlot = 30
 
-	inUse, owner, err := lv.IsVrfKeyInUse(keyB)
+	inUse, _, err := lv.IsVrfKeyInUse(keyB)
 	require.NoError(t, err)
-	assert.True(t, inUse,
-		"a superseded same-epoch future key must still be claimed")
-	assert.Equal(t, poolKeyHash, owner)
+	assert.False(t, inUse,
+		"a superseded same-epoch future key must be freed once a "+
+			"later same-epoch registration replaces it")
 
-	// The mechanism the caller relies on: P's current (latest)
-	// registration is genuinely C, which disagrees with a requested B,
-	// so gouroboros's validatePoolRegistration rejects the reuse.
+	// P's current (latest) registration is genuinely C, not B: B was
+	// never P's effective key and is no longer its pending one.
 	current, _, err := lv.PoolCurrentState(poolKeyHash)
 	require.NoError(t, err)
 	require.NotNil(t, current)
@@ -924,7 +934,11 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 // proves the actual rejection fires through the real validation entry
 // point, not just that IsVrfKeyInUse and PoolCurrentState individually
 // return the values the rejection depends on.
-func TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey(
+// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins dingo#4466
+// through the full production validation entry point: a key a pool cycled
+// through and then superseded within the same epoch is free for any pool
+// (including the pool that originally proposed it) to register.
+func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -965,8 +979,15 @@ func TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey(
 	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
 	lv.epochStartSlot = 30
 
-	// P attempts to reuse B, a key it itself proposed and then superseded
-	// within the same epoch. Not written to the database.
+	// P re-registers with B, a key it itself proposed and then superseded
+	// within the same epoch. B is free -- neither P's effective key (still
+	// A) nor its current pending key (now C) -- so the VRF-duplicate rule
+	// must not fire. This deliberately minimal transaction (unresolvable
+	// input, no witnesses, mismatched network) trips other, unrelated
+	// Dijkstra UTxO validation rules; ValidateTxDijkstra joins all rule
+	// errors, and this test only asserts on the VRF-duplicate substring,
+	// the same pattern TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView
+	// uses for its own companion negative assertion.
 	reuseTx := newUnwrittenDijkstraPoolRegistrationTx(t, 0x04, poolP, keyB)
 	err := eras.ValidateTxDijkstra(
 		reuseTx,
@@ -974,8 +995,9 @@ func TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey(
 		lv,
 		dijkstraTestProtocolParameters(),
 	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already registered")
+	if err != nil {
+		assert.NotContains(t, err.Error(), "already registered by pool")
+	}
 }
 
 // TestLedgerStateNewViewPinsEpochStartSlot is the regression test for a

@@ -804,13 +804,17 @@ func ProcessEpoch(
 			parameterChange = a
 		}
 		decision := ShouldRatify(RatifyInputs{
-			Tally:                 tally,
-			PParams:               conwayPParams,
-			ParameterChange:       parameterChange,
-			GovAction:             action,
-			CurrentEpoch:          in.NewEpoch,
-			ActiveDRepCount:       activeDRepCount,
-			ActiveCCCount:         activeCCCount,
+			Tally:           tally,
+			PParams:         conwayPParams,
+			ParameterChange: parameterChange,
+			GovAction:       action,
+			CurrentEpoch:    in.NewEpoch,
+			ActiveDRepCount: activeDRepCount,
+			ActiveCCCount:   activeCCCount,
+			CommitteeAbsent: committeeAbsent(
+				rootsByPurpose[purposeCommittee], in.ConwayGenesis,
+				committeeState.CommitteePresent,
+			),
 			CCQuorum:              ccQuorum,
 			MajorVersion:          majorVersion,
 			CommitteeNoConfidence: ccInNoConfidence,
@@ -1065,9 +1069,9 @@ func ratificationEnactmentPrecondition(
 		}
 		return treasuryRemaining - total, nil
 	case *lcommon.UpdateCommitteeGovAction:
-		if a.Quorum.Rat == nil || a.Quorum.Sign() <= 0 {
+		if a.Quorum.Rat == nil || a.Quorum.Sign() < 0 {
 			return treasuryRemaining, errors.New(
-				"committee quorum must be positive",
+				"committee quorum must be non-negative",
 			)
 		}
 	case *lcommon.InfoGovAction:
@@ -1188,6 +1192,21 @@ func committeeNoConfidenceState(
 	return committeeRoot != nil &&
 		lcommon.GovActionType(committeeRoot.ActionType) ==
 			lcommon.GovActionTypeNoConfidence
+}
+
+func committeeAbsent(
+	committeeRoot *models.GovernanceProposal,
+	genesis *conway.ConwayGenesis,
+	hasStoredMembers bool,
+) bool {
+	if committeeRoot != nil {
+		return lcommon.GovActionType(committeeRoot.ActionType) !=
+			lcommon.GovActionTypeUpdateCommittee
+	}
+	if hasStoredMembers {
+		return false
+	}
+	return genesis == nil
 }
 
 func govActionPriority(proposal *models.GovernanceProposal) int {

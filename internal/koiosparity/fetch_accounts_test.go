@@ -84,7 +84,7 @@ func TestFetchAccountRewardsForEpochChunksAndCommits(t *testing.T) {
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -126,7 +126,7 @@ func TestFetchAccountRewardsForEpochChunksAndCommits(t *testing.T) {
 func TestFetchAccountRewardsForEpochEmptyUniverseCommitsComplete(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -168,7 +168,7 @@ func TestFetchAccountRewardsForEpochTransientChunkFailureCommitsNothing(
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -207,7 +207,7 @@ func TestFetchAccountRewardsForEpochPermanentErrorAbortsImmediately(
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -248,7 +248,7 @@ func TestFetchAccountRewardsForEpochZeroRowsWithinGraceLeavesIncomplete(
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -293,7 +293,7 @@ func TestFetchAccountRewardsForEpochZeroRowsPastGraceMarksComplete(
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -338,7 +338,7 @@ func TestFetchAccountRewardsForEpochZeroRowsGraceDisabledMarksComplete(
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -377,7 +377,7 @@ func TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache(t *testing.T) {
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -583,7 +583,7 @@ func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 

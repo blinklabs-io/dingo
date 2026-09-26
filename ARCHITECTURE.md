@@ -496,12 +496,14 @@ sequenceDiagram
     Peer->>OB: RollBackward(point)
     OB->>EB: publish ChainsyncEvent(rollback)
     EB->>LS: handleEventChainsyncRollback()
+    LS->>DB: persist rollback undo outbox (point + block bodies)
+    LS->>EB: publish TransactionEvent(rollback: true) per tx
     LS->>ChM: chain.Rollback(point)
     ChM->>DB: delete blocks/txs after point
     ChM->>DB: restore account/pool/DRep state
     LS->>DB: recompute CIP-0163 account expiration (epoch-owned)
     LS->>LS: reload epoch cache, repair lab nonces
-    LS->>EB: publish TransactionEvent(rollback: true) per tx
+    LS->>DB: clear rollback undo outbox after truncation commits
 ```
 
 An admitted ChainSync rollback atomically refreshes the tracked client's
@@ -703,6 +705,42 @@ the `ledger.block` undo events, which are a different event type and so a
 different lane. Before #2287 the undo events were emitted from a `go`
 statement onto the reordering shared pool, which lost the same race twice
 over.
+
+Before that enqueue, the rollback path writes `ledger.rollback.pending` in
+`sync_state`. The versioned record contains the rollback point and explicitly
+tagged block fields needed to decode the undo transactions. It is written after
+rollback validation but before either the undo enqueue or `chain.Rollback`,
+because the latter deletes the block bodies. Success clears the record only
+after metadata truncation, cache reload, durable-floor enforcement, and an
+ordered-lane delivery barrier. Startup replays the stored payload while holding
+the transaction-event mutex, finishes the chain rewind if necessary, and then
+completes metadata truncation. This is an at-least-once outbox: an interruption
+after delivery and before clearing may replay an undo, so consumers must
+tolerate duplicate rollback notifications.
+
+The record is bounded to 4096 blocks and 64 MiB of raw block fields. A larger
+rollback continues with live ordered delivery and logs that crash recovery is
+degraded instead of allocating and writing an unbounded JSON value. Consecutive
+deeper rollback windows merge their payloads into the pending record rather
+than overwriting an earlier window. A record that cannot drive a truncation --
+one whose point leads the applied ledger tip, or whose point has left the
+primary chain -- still emits its captured undo before it is retired, because
+the chain truncation that preceded it already deleted those bodies. Only an
+undecodable or unsupported record is dropped without delivery, and none of
+these outcomes makes startup permanently fail on the same value.
+
+When a lagging ledger iterator reports a rollback after `chain.Rollback` has
+already removed the abandoned blocks, the iterator result carries the chain's
+captured `RollbackBlocks` payload (newest first) into
+`processChainIteratorRollback`. That path uses the captured models to persist
+`ledger.rollback.pending` before metadata truncation; it does not attempt to
+re-read block bodies that chain selection has already deleted. Multiple queued
+iterator rollbacks retain the combined removed-block payload in rollback order.
+The iterator rollback holds the transaction-event mutex while it updates ledger
+metadata, emits undo events from the captured blocks, and waits for their
+ordered delivery before retiring the matching intent. If a reconciliation
+rewind is refused before changing the chain, it restores the intent that was
+pending before preparation, or clears only the new intent when there was none.
 
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply
@@ -1641,6 +1679,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainsync.client_removed` | ChainsyncState | Client tracking removed |
 | `chainsync.client_synced` | ChainsyncState | Client caught up |
 | `chainsync.client_stalled` | ChainsyncState | Client stall detected |
+| `chainsync.client_patience_exhausted` | ChainsyncState | Client exhausted the Genesis Limit on Patience; the stall recycler disconnects it |
 | `chainsync.fork_detected` | ChainsyncState | Chainsync fork detected |
 | `chainsync.client_remove_requested` | Node | Stalled client removal |
 | `chainsync.resync` | LedgerState | Chainsync resync request |
@@ -3043,9 +3082,15 @@ consistent as the boundary is crossed:
   validated while pparams is legitimately nil; reading them first rejects every
   block of the prefix under `ValidateHistorical`.
 
-Byron's own transaction rules need no parameters either: `eras.ValidateTxByron`
-runs `byronValidateBadInputs`, `byronValidateValueConserved` and
-`byronValidateWitnesses`, each of which discards the argument.
+Byron's own transaction rules need no parameters either: every rule
+`eras.ValidateTxByron` runs discards the argument. `ppMaxTxSize` and the fee
+policy come from Byron genesis through the ledger state
+(`ByronMaxTxSizeProvider`, `ByronFeePolicyProvider`). The rules follow the
+reference `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a
+list, so a repeated input is valid, while balances restrict the UTxO to the
+input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
+pairing the two lists as `zip` does; and a witness's address root is hashed
+over the canonical encoding of the address's decoded attributes.
 
 The Byron start applies to an empty database only. `setEpochCache` returns as
 soon as `epochCache` is populated, which is what keeps an already-synced node
@@ -3624,6 +3669,17 @@ The `LedgerView` interface provides query access to ledger state:
   pre-block restricted-map rule, while storage/decode errors and normal
   per-transaction validation remain fail-closed.
 - Protocol parameter queries
+- Classic Shelley-family protocol parameter update (PPUP) and
+  move-instantaneous-rewards validation use two explicit `LedgerView`
+  capabilities. `GenesisDelegationState` resolves each Shelley genesis key to
+  its active delegate at the transaction slot, and supplies the genesis
+  update quorum used to count distinct MIR signers. `ClassicProtocolParameterUpdateWindowState`
+  supplies the current epoch and the first slot whose proposals target the
+  next epoch; the boundary is derived from the epoch schedule and Shelley
+  genesis security parameters. Delegation reads use the validation view's
+  metadata transaction, so certificates already applied in that transaction
+  are visible. The compile-time interface assertions in `ledger/view.go` keep
+  these required gouroboros capabilities wired to the validation view.
 - Stake distribution queries
 - Account registration checks. `IsStakeCredentialRegistered`,
   `IsPoolRegistered`, `IsRewardAccountRegistered`, and `GovActionExists`
@@ -3665,8 +3721,11 @@ The `LedgerView` interface provides query access to ledger state:
 - The credential-aware committee capability reports separately whether its
   SQL view is authoritative, resolves cold and hot credentials with their
   key/script tags intact, and treats an authoritative empty committee as real
-  state rather than an omitted provider. `CommitteeCredentialMember` resolves
-  both seated members and members proposed by active `UpdateCommittee`
+  state rather than an omitted provider. Authority comes from persisted
+  committee history (including soft-deleted members) or an explicitly empty
+  Conway genesis committee, not merely from database reachability.
+  `CommitteeCredentialMember` resolves both seated members and members
+  proposed by active `UpdateCommittee`
   actions. Proposed members retain the latest persisted authorization or
   term-scoped permanent resignation, including a resignation with no earlier
   authorization. Each membership carries a `term_start_slot`; explicit removal
@@ -4555,6 +4614,56 @@ overlap that independent witnesses have observed. Density-at-intersection can
 compare an unseen suffix with the local candidate, but does not independently
 corroborate that suffix.
 
+#### Genesis Limit on Patience
+
+The stall watchdog (`chainsync.CheckStalledClients`) only detects a silent
+peer: any header refreshes `LastActivity`, so a peer that advertises a far
+better tip and drips one valid header per 110 seconds never stalls, keeps a
+ChainSync client slot, and keeps its misleading candidate in consideration.
+The Limit on Patience (LoP) bounds the delivery *rate* instead. Each tracked,
+non-observability client carries a leaky token bucket
+(`chainsync.PatienceState`, exposed on `TrackedClient.Patience`) that starts
+full at `limitOnPatienceCapacity` tokens and leaks `limitOnPatienceRate`
+tokens per second. It follows the reference ChainSync client:
+
+- A header earns one token when it clears verification and raises the highest
+  block number the peer has delivered, so a rollback and re-delivery of the
+  same chain earns nothing. The level is capped at capacity.
+- The leak runs while the peer owes a message. It pauses once the peer has
+  delivered its own advertised tip (the MsgAwaitReply state) and resumes on
+  its next roll-forward or rollback. It also pauses for this node's own work:
+  `ouroboros.chainsyncClientRollForwardAt` charges the peer only up to the
+  header's network arrival (`PatienceMessageArrived`) and resumes after the
+  callback (`PatienceHeaderAccepted`), so decoding, future-header admission
+  waits, verification and ledger backpressure are not charged, and a
+  ChainSync restart pauses it (`PatiencePause`). A new bucket starts paused
+  until the peer's first accepted header or rollback, because tracked clients
+  are registered inside their first callback. Headers from a peer that is
+  not ingress-eligible are not verified, so they pause the bucket rather than
+  leak it.
+- It applies only while Genesis selection is active
+  (`ChainSelector.GenesisSelectionState`, wired as
+  `chainsync.Config.PatienceActiveFunc` by `Node.chainsyncConfig`); outside it
+  the bucket is held full, like the reference node outside GSM `Syncing`.
+- At zero the bucket latches exhausted. The latch clears, and the bucket
+  refills, if Genesis selection ends or the client becomes observability-only
+  before it is reported, so a peer is never disconnected once the limit has
+  stopped applying to it. The stall recycler's tick calls
+  `CheckPatienceExhausted`, which publishes
+  `chainsync.client_patience_exhausted` and increments
+  `dingo_chainsync_patience_exhausted_total`, and then requests
+  `connmanager.connection_recycle_requested` with reason
+  `genesis_patience_exhausted`. That disconnect skips the stall path's grace,
+  cooldown, and only-eligible-peer guard, and is reported once per
+  connection.
+
+The defaults are 1000 tokens and 5 tokens per second: a 200-second allowance,
+the same budget as the reference node's 100,000 tokens at 500 per second. The
+rate is lower than the reference because Dingo pipelines 10 ChainSync
+requests, so one honest peer delivers about `10/RTT` headers per second; at 5
+per second a peer with up to two seconds of round-trip time keeps a full
+bucket. The Limit on Eagerness (#3270) is separate and not implemented.
+
 #### Anti-flap incumbent pin
 
 The active connection (the peer that drives the chainsync+blockfetch pipeline
@@ -4604,7 +4713,11 @@ pin to a dead/minority peer:
   repeated same-or-lower tip updates (including rollbacks) do NOT reset the
   stall clock, so a stalled incumbent cannot keep the pin alive by re-reporting
   an unchanged tip. The clock is fed by an injectable `nowFn` (defaulting to
-  `time.Now`) for deterministic tests.
+  `time.Now`) for deterministic tests. `ChainSelector` propagates the same
+  `nowFn` into each `PeerChainTip` it creates, so `PeerChainTip.IsStale`
+  (`StaleTipThreshold`) is driven by the identical clock instead of a separate
+  `time.Now()` call — a test can hold both the stall clock and per-peer
+  staleness fixed and advance them together.
 
 The existing equal-tip incumbent preservation (when `ComparePraosTips` returns
 `ChainEqual`, and the same-block transport tiebreaker) is preserved and runs
@@ -5176,13 +5289,28 @@ missing-input failures. In particular a duplicate input -- regular, collateral,
 or reference -- cannot be repaired by selecting a different UTxO producer
 history. Every Shelley-family era delegates that rule to
 `shelley.UtxoValidateNoDuplicateInputs` and so reports
-`shelley.DuplicateInputError`; Byron has its own rule and reports
-`eras.DuplicateInputByronError`. `isDeterministicTxValidationError` classifies
-both. Replay recovery therefore rejects the primary-chain branch
+`shelley.DuplicateInputError`. Byron permits a repeated input, but its
+`eras.TxTooLargeByronError`, `eras.UnknownAttributesByronError` and
+`eras.UnknownAddressAttributesByronError` read only the transaction and the
+protocol parameters. `isDeterministicTxValidationError` classifies all of them. Replay recovery therefore rejects the primary-chain branch
 and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors
-continue through producer resolution and the unresolved-producer fallback.
+continue through producer resolution and the unresolved-producer fallback,
+except for missing-redeemer errors. A missing redeemer is classified as
+deterministic for every `RedeemerTag` purpose (spend, mint, certificate,
+reward, voting, proposing, and guarding): each validator either resolves the
+referenced input or reports an input-resolution error before the redeemer
+verdict, so replaying a different local UTxO history cannot remove the missing
+redeemer. `conway.ExtraRedeemerError` is left unclassified and continues
+through producer resolution because one Go type is shared by emitters of both
+kinds. The Conway-era emitters are decided by the transaction alone, but the
+Dijkstra emitter skips an unresolved consumed input and so drops its spend
+purpose from the required set; resolving the input removes that verdict.
+Recovery cannot tell the two apart by type, so a Conway-era extra-redeemer
+rejection still takes the producer-resolution rewind. Babbage and Alonzo
+report the same transaction-only bounds check as
+`common.ExtraneousRedeemerError`, which is also unclassified.
 
 `lcommon.MalformedReferenceScriptsError` and
 `lcommon.MalformedScriptWitnessesError` are classified the same way.
@@ -6587,6 +6715,15 @@ the same signal to the active child, waits for it, and exits with its status.
 Successful bootstrap clears the tracked PID before the entrypoint hands off to
 `serve`, so the same lifecycle contract applies on both sides of startup.
 
+When a legacy imported database is marked for reward-state repair, `serve`
+blocks node startup until Mithril v2 reconciles the database against a
+certificate-backed artifact. The repair preserves configured artifact pins and
+resolves an omitted network name from the configured network magic. Its active
+marker is written before repair writes begin, so restart accepts only an
+interrupted sync that is positively identified as this repair. API-mode resumes
+continue from their immutable import marker only while the pending repair marker
+remains; ordinary API-mode metadata replacement is rejected.
+
 Two artifact backends are supported, selected by `mithril.backend`
 (`--mithril-backend`, `DINGO_MITHRIL_BACKEND`):
 
@@ -7304,6 +7441,14 @@ ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
 
+When serving a database marked for legacy Mithril reward-state repair, startup
+runs a v2 certified catch-up before exposing the node. The catch-up verifies
+the existing chain against the selected artifact before mutating ledger rows;
+API storage also resets and reruns historical metadata backfill through the
+certified ledger anchor. The repair marker remains until import and deferred
+index rebuilding complete, so an interrupted repair resumes with startup
+blocked instead of serving partially reconciled state.
+
 During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
 snapshot manager to ensure the initial stake snapshot state before starting the
 client APIs. If the imported database already contains a non-empty Mark snapshot
@@ -7481,7 +7626,8 @@ and terminates at the exact requested end point; a mismatch falls through to
 the next bootstrap peer before any block is stored.
 
 The epoch nonce for the boundary into epoch N+1 is
-`candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce`, where the carried
+`candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce ⭒ extraEntropy(N+1)`,
+where the carried
 `LastEpochBlockNonce` is cardano-ledger's `praosStateLastEpochBlockNonce`:
 `prevHashToNonce(lastBlock.prevHash)` — the PARENT hash of the last block of the
 closing epoch (a one-block Praos lag), computed by `LedgerState.epochLabNonce`
@@ -7491,6 +7637,23 @@ epoch nonce from the network at every self-computed boundary (only the imported
 bootstrap boundary escapes it), wedging the node at the tip of the following
 epoch. For an empty closing epoch (no blocks of its own) the previous carried
 nonce is passed through unchanged.
+
+`extraEntropy` is the protocol parameter of the same name, the third term of
+cardano-ledger's TICKN rule. It belongs to the epoch being entered, not the one
+closing: `processEpochRollover` passes the parameters its own enactment just
+produced, and the pre-rollover header-verification path
+(`computeEpochNonceForSlot`) forecasts them the way TICKF does, taking the
+recorded parameters for that epoch and applying the pending genesis-key update
+the boundary will enact. Startup lab recovery recomputes a past epoch's nonce
+from the parameters recorded for that epoch, with no forecast. Only the TPraos
+eras carry the parameter -- Praos drops the term from Babbage on, so Babbage and
+later protocol parameters have no such field. A boundary that hard-forks out of
+Alonzo drops the term as well, which the parameter type alone cannot express:
+the parameters that boundary enacts are still Alonzo-typed while their protocol
+version is already Babbage's, so the term is gated on that version. Mainnet set
+a non-neutral value for exactly one epoch, 259; every other mainnet epoch and
+every preprod and preview epoch carries `NeutralNonce`, the identity of `⭒`,
+which leaves the result unchanged.
 
 In API storage mode, the shared SQL metadata providers can defer selected query
 indexes during bulk load. Deferred indexes are classified as critical or lazy in
@@ -8522,13 +8685,54 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   side of the split, not with `blocks_produced`, because they are read at K-1
   (dingo #3484).
 
+  **Zero-stake pools (dingo #4691).** A pool that stays registered but whose
+  delegated stake reaches zero at the K+1 boundary — its only delegator
+  redelegates away or deregisters — is neither of the above: it did not
+  depart the pool set (no retirement, still listed with delegators), and it
+  is not missing input either. `rewardStakeDistribution`
+  (`ledger/snapshot/rotation.go`) correctly drops zero-stake pools before
+  building `reward_pool_input`, so such a pool simply never gets a K+1 row,
+  and neither departure route above can classify it: `pool_stake_snapshot`
+  membership proves nothing here (the pool genuinely has no reward-input row,
+  but it also never "left"), and the `epoch_summary.TotalPoolCount` fallback
+  can structurally never close, because that count includes every delegated
+  pool regardless of stake while `reward_pool_input` only ever held the
+  positive-stake ones — a network with any zero-stake-but-delegated pool has
+  the two permanently mismatched by that pool's own count (observed on
+  Preview: epoch 160 declared 113 pools via `epoch_summary` against 111 real
+  reward-input rows, with `reward_snapshot` for the same epoch reporting
+  `total_pool_count=111`, `excluded_active_stake=0`).
+
+  `checkEpoch` resolves this with a third, independent completeness proof:
+  `RewardParitySource.GetRewardSnapshot` reads the mark `reward_snapshot` row
+  for the K+1 epoch, whose `TotalPoolCount` — unlike `epoch_summary`'s — is
+  written by `buildRewardStateInputs` from exactly the set `reward_pool_input`
+  holds rows for. When that count equals the size of the K+1 reward-input set
+  *and* `ExcludedActiveStake` is known and zero (so no degraded pool's
+  exclusion, dingo #4025, is hiding inside the gap), the reward-input set is
+  proven to be the network's complete positive-stake pool set, and any pool
+  absent from it genuinely has zero stake for a proven reason. `ComparePoolEpoch`
+  reports that case as `pool_zero_stake` rather than `pool_departed` — the pool
+  never left the network, so folding it into the departure category would
+  misstate that — and rather than `dingo_db_missing`, since it is not a gap in
+  Dingo's own computation. `reward_snapshot` rows are retained for the life of
+  the database (never pruned by `cleanupOldSnapshots`), so this proof survives
+  the same snapshot-retention window that closes off `pool_stake_snapshot`
+  membership for a trailing observer. A nonzero or unknown
+  `ExcludedActiveStake` leaves the route closed and the stricter
+  `dingo_db_missing` classification stands, the same fail-closed shape as the
+  other two routes.
+
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (absence may be transient — either the epoch
 closed within --grace-hours, or the chain tip has not yet reached the boundary
 that applies this stake epoch's rewards; see "Reward timing" below),
 `pool_departed` (informational: the pool left the pool set
-at K+1, so its epoch-K block count has no row to live on), plus #3097's
+at K+1, so its epoch-K block count has no row to live on), `pool_zero_stake`
+(informational: the pool is still registered but its delegated stake reached
+zero at K+1, proven via `reward_snapshot`'s own pool count rather than
+`epoch_summary`'s — see "Zero-stake pools" above), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
 reward_type, pool) row within one side — a data-integrity problem, not a
@@ -8628,10 +8832,11 @@ second sync:
 - **`DatabaseSource`** (same file) is the narrow, in-process adapter: it
   wraps an already-open, live `*database.Database` and reads
   `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
-  `reward_account_output` through the existing typed `MetadataStore`
-  accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
-  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`, and
-  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above) inside a
+  `reward_account_output`/`reward_snapshot` through the existing typed
+  `MetadataStore` accessors (`GetEpochSummary`, `GetRewardAdaPots`,
+  `GetRewardPoolInputs`, `GetRewardPoolOutputs`, `GetRewardAccountOutputs`,
+  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above, and
+  `GetRewardSnapshot` for the zero-stake completeness proof above) inside a
   fresh read-only transaction per call — the same tables `ledger/snapshot/rotation.go`
   already populates at every epoch boundary, with no new table and no
   metadata export. `GetRewardAccountOutputs` is what #3097's per-account
@@ -8831,6 +9036,41 @@ second sync:
     may already have failed — cannot be read as the epoch's own answer. The
     observer's `epoch validated` log line and `reportError`'s synthesized
     `ERROR` carry that set too.
+  - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this,
+    a FAIL/ERROR result was visible only by grepping the node's log or
+    querying `check_epoch_status`/`check_mismatches` directly. `Observer
+    .emitResult` — the single choke point every `OnResult` call already goes
+    through (`processEpoch`'s and `processAccountEpoch`'s success paths, and
+    `reportError`'s synthesized `ERROR` path) — also calls
+    `metrics.recordResult`, so all three are covered from one call site:
+    `dingo_koiosparity_epoch_result_total` (by queue/status),
+    `dingo_koiosparity_mismatch_total` (by queue/category/severity, mirroring
+    `check_mismatches.category`), `dingo_koiosparity_last_checked_epoch`, and
+    `dingo_koiosparity_epoch_mismatch_count` (mirroring
+    `check_epoch_status.mismatch_count`). None of these collectors declares
+    its own `network` variable label: `configWrapPromRegistry` (`config.go`)
+    already wraps every registry the node hands to a component with a
+    constant `network` label, and a collector that also declared `network` as
+    a variable label would conflict with that constant label and fail to
+    register (dingo#4723). Every series still carries a `queue`
+    label (`aggregate`/`account`, from the result's `CheckedScopes`): both
+    queues emit a result for the same epoch and the account queue can lag
+    arbitrarily, so a shared gauge would let a late account-queue PASS
+    overwrite the aggregate queue's latest FAIL. `dingo_koiosparity_last_fail_epoch`/
+    `_last_error_epoch` are deliberately sticky — set on a FAIL/ERROR result
+    and never cleared by a later PASS — so a stale, undiagnosed mismatch does
+    not silently disappear from a dashboard. The metric's severity label comes
+    from `severityLabel`, a thin wrapper over `severityOf` (the same
+    classification `DetermineStatus`/`CountSignificant` already use), so the
+    label can never drift from the persisted `Status`. `ObserverConfig
+    .PromRegistry`, wired from `node_koiosparity.go`'s
+    `n.config.promRegistry`, follows every other component's own
+    `PromRegistry` field; `newMetrics` returns nil for a nil registerer (the
+    standalone `cmd/koios-parity` CLI, and any test that builds an
+    `ObserverConfig` without one), and every `recordResult` call tolerates a
+    nil receiver. A live restore/truncate re-runs `startKoiosParityObserver`
+    against the same registry, so `newMetrics` reuses already-registered
+    collectors instead of registering them again.
 - **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
   `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
   both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
@@ -11654,7 +11894,55 @@ pot from `UTxOState` -- so the round at the first boundary after import is not
 skipped for want of pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
-it. The per-credential reward basis is seeded from the same import: mark, set and
+it.
+
+That fee pot -- `SnapShots.ssFee` -- is exact for the imported epoch's own
+row and the boundary that reads it, but was not enough for the boundary after
+that one (issue #3975). `LedgerState.rewardEpochFees` computes the *following*
+epoch's fee pot by summing stored transaction fees over the whole epoch that
+just ended, reading only this node's local transactions. A node bootstrapped
+mid-epoch stores no transactions at or before its anchor, so that sum silently
+dropped every pre-anchor fee -- correct for the round the import itself seeded,
+wrong one boundary later, and permanently: the shortfall folds into reserves
+and both are then carried forward, so the same error recurs every following
+boundary a live node computes from a still-off basis, which is why a fresh
+re-bootstrap only ever bought one correct boundary. `seedImportedRewardBasis`
+also writes `RewardAdaPots.ImportedEpochFees`: `UTxOState.utxosFees` minus
+`SnapShots.ssFee`, the fees this epoch already collected up to and including
+the anchor. cardano-ledger's NEWEPOCH rule leaves `utxosFees` equal to the new
+`ssFee` after every boundary and only transactions add to it within an epoch,
+so a snapshot whose `utxosFees` is below its `ssFee` was not decoded as a
+consistent ledger state, and the import refuses it. Leaving the field `NULL`
+instead would be indistinguishable from a live-computed row and would credit
+the next round short with no record of why.
+`rewardEpochFees` reads the ended epoch's own pots row, and when its anchor
+(`CapturedSlot`) lies within that epoch -- its first and last slots included
+-- and `ImportedEpochFees` is set, sums local fees only over
+`(CapturedSlot, epochEnd]` and adds the imported amount instead of summing
+from the epoch start. The two ranges are
+disjoint by construction the same way the block-count import's observed and
+imported counts are (see below): a bootstrap applies no block, and files no
+transaction, at or below its anchor. Summing from the epoch start regardless
+of the anchor would then double-count once the historical backfill (issue
+#4061) has stored pre-anchor transactions locally. `ImportedEpochFees` is
+additive schema (migration `v24`). Migrations `v24` and `v25` mark legacy
+Mithril databases for repair when the anchor has no fee basis, including
+older imports that left no anchor reward-pot row. Before
+`dingo serve` starts, core- and API-mode databases with that marker automatically
+run a Mithril v2 catch-up against the latest certified state. Catch-up verifies
+the existing chain intersection before reconciling ledger rows, retains the local
+block history, and clears the marker only on completion. During reconciliation,
+the certified live UTxO set and each output's CBOR are restored together, so
+outputs live at the anchor remain available when replaying post-anchor blocks
+that spent them; UTxO-HD MemPack outputs are converted back to ledger TxOut
+CBOR for this purpose. API mode also rebuilds
+its historical metadata through the certified ledger anchor. If the selected
+artifact does not cover the local tip, startup remains blocked and the database
+is left intact while Dingo retries the repair every five minutes; it is never
+treated as a clean bootstrap. Cancelling startup stops the retry without
+changing the pending repair marker.
+
+The per-credential reward basis is seeded from the same import: mark, set and
 go each carry one epoch's per-credential stake and its credential-to-pool
 delegations, and the three of them line up with the three epochs a freshly
 bootstrapped node cannot otherwise compute. The seeding is the last step of `importSnapShots`, after every stage
@@ -12440,26 +12728,36 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    succeeds; the certificates are scoped to the ended epoch's slot range, so a
    discarded MIR is not retried at the next boundary.
 
-   The reference DELEG transition rejects a distribution certificate at
-   transaction-validation time before any of this runs, via
-   `MIRProducesNegativeUpdate`, whenever folding its delta into a credential's
-   InstantaneousRewards accumulated so far in the epoch would drive it
-   negative — this is what makes the boundary's own capacity check above
-   normally unreachable for a fully validated chain. gouroboros's shelley
-   validation rules implement the sibling pre-Alonzo check
-   (`MIRNegativesNotCurrentlyAllowedError`, which rejects any negative delta
-   before protocol version 5) but not this one, because it needs epoch-scoped
-   ledger state their `common.LedgerState` interface does not expose.
-   `ledger/eras.validateMIRAccumulatedRewards`, called from `ValidateTxAlonzo`
-   and `ValidateTxBabbage`, is dingo's implementation: it walks a
-   transaction's move-instantaneous-rewards certificates in order, seeding a
-   running per-credential total from `*LedgerView.PendingMIRRewardDeltas`
-   (certificates already committed earlier in the epoch, same block or
-   earlier — every transaction's certificates are written immediately after
-   that transaction validates, so this is always caught up as of the
-   currently validating slot) and folding in each certificate's own delta as
-   it goes, so a later certificate in the same transaction sees the effect of
-   an earlier one.
+   The reference DELEG transition rejects most of what this check guards
+   against at transaction-validation time, before any of it runs, which is
+   what makes the boundary's own capacity check normally unreachable for a
+   fully validated chain. gouroboros's shelley validation rules implement only
+   the parts expressible against `common.LedgerState`, such as
+   `MIRNegativesNotCurrentlyAllowedError`. The rest need epoch-scoped state.
+   `ledger/eras.validateShelleyDelegCerts`, called from every
+   Shelley-through-Babbage `ValidateTx*` function, is dingo's implementation.
+   It walks a transaction's certificates in order, as DELEGS does, and it is
+   skipped for a phase-2-invalid transaction, for which DELEGS never runs.
+   For move instantaneous rewards it enforces
+   `MIRCertificateTooLateinEpochDELEG` (slot below `firstSlot(nextEpoch) -
+   3k/f`), `MIRTransferNotCurrentlyAllowed` (no pot transfer before protocol
+   version 5), `MIRProducesNegativeUpdate`,
+   `InsufficientForInstantaneousRewardsDELEG` and
+   `InsufficientForTransferDELEG`. Each certificate is checked against the
+   pots and pending rewards its predecessors left, so a later transfer
+   cannot fund an earlier distribution. The starting state comes from
+   `*LedgerView.MIRDelegState`: the `NetworkState` pots, the epoch's committed
+   distributions (summed from protocol version 5, replaced before it) and
+   net pot transfers, and the cutoff. Every transaction's certificates are
+   written immediately after that transaction validates, so this is always
+   caught up as of the currently validating slot. For legacy stake
+   certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
+   `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
+   with withdrawals drained first. It also rejects delegation from a
+   credential deregistered earlier in the transaction. Upstream value
+   conservation counts a deposit for every registration and a refund for
+   every deregistration, and those amounts match real accounts only because
+   this walk has already rejected the certificates that name no account.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two
@@ -12626,7 +12924,45 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    manager and stake-aggregation chokepoint use), excluding delegated stake
    whose reward account expired before `NewEpoch` from the DRep tally exactly
    as the stake-aggregation chokepoint excludes it from Mark stake, the reward
-   basis, and SPO vote power. `TallyContext.DelegatorInactivityOn` mirrors the
+   basis, and SPO vote power. `LoadDRepVotingState` also folds each active
+   governance proposal's own deposit into its return account's delegated DRep
+   voting power (`ActiveProposalDepositDRepPower`, `ledger/governance/
+   proposal_deposits.go`): per CIP-1694 a proposal's deposit is escrowed but
+   still counts as part of the depositor's active voting stake for as long as
+   the proposal remains active, which `GetDRepVotingPowerBatch`/
+   `GetDRepVotingPowerByType`'s plain `account`⋈`utxo` aggregation does not
+   express on its own (blinklabs-io/dingo#4355). It reads
+   `GetActiveGovernanceProposals(currentEpoch)`, resolves each deposit-bearing
+   proposal's `ReturnAddress` to a stake credential, batches those credentials
+   through `GetAccountsByCredential` to find each one's DRep delegation, and
+   adds the deposit onto that DRep's (or `AlwaysNoConfidence`'s) power;
+   `AlwaysAbstain` delegators are excluded, matching `tallyDRepVotes`'
+   treatment of Abstain stake as outside every bucket. It applies the same
+   `active` and CIP-0163 expiry gates to the return account that
+   `GetDRepVotingPowerBatch` applies to ordinary stake, so a return account
+   already excluded from the ordinary tally by those gates does not have its
+   deposit counted either. This is the production counterpart of the
+   conformance harness's local `activeProposalDeposits`/
+   `credentialVotingStake` (`internal/test/conformance/state_manager.go`),
+   which implemented the same rule scoped to `NoConfidence`/`UpdateCommittee`
+   ratification before this landed; the production version applies to the
+   DRep tally for every DRep-gated action type. `ActiveProposalDepositDRepPower`
+   is exported specifically so every other DRep voting-power reporting path
+   calls it too: the Blockfrost adapter's `predefinedDRep`, `drepByCredentialTag`,
+   and the `DReps` list handler's `fillAmounts` (all in
+   `api/blockfrost/adapter.go`), and `LedgerView.GetDRepVotingPower`
+   (`ledger/view.go` -- the local-state-query `GetDRepState` path, currently
+   unwired to any caller). Each merges its result into
+   `GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`'s (or, for the two
+   single-credential reads, `GetDRepVotingPower`'s) plain figure the same way
+   `LoadDRepVotingState` does; without that, a DRep's reported voting power
+   would silently disagree with the value ratification actually used for it.
+   Those call sites pass `expiryEpoch = 0` (matching `GetDRepVotingPower`'s
+   existing point-in-time, ungated convention noted above), not
+   `LoadDRepVotingState`'s epoch-boundary CIP-0163 value, so a return
+   account's deposit is counted there even if the CIP-0163 gate would exclude
+   it from the epoch-boundary tally.
+   `TallyContext.DelegatorInactivityOn` mirrors the
    same flag into the lazy (non-precomputed) `tallyDRepVotes` fallback path
    used by standalone/test callers. The mid-epoch HardForkInitiation stability
    check snapshots and threads this gate through `StabilityCheckInputs` as well,
@@ -13322,50 +13658,28 @@ commit, which is what keeps the undo ahead of any forward `ledger.tx` event
 on the same ordered lane, regardless of this internal before/after
 ordering relative to the truncation itself.
 
-The emit still runs before `ls.rollback` — the separate call, made outside
-this closure, that durably updates `ls.currentTip` and the ledger's own
-metadata — so a failure in that later call leaves a narrow inconsistency:
-subscribers already believe these blocks are undone while durable ledger
-metadata still shows them applied (Cubic and wolf31o2 review, PR #3611).
-This is not a shape unique to this reconciler: `rollbackChainAndState` —
-the pre-existing, far-more-frequently exercised peer-driven rollback path
-— has the identical structure (`validateAndEmitRollbackUndo`'s emit inside
-`transactionEventMutex`, `ls.rollback` as a separate call afterward that
-can fail), and `validateAndEmitRollbackUndo`'s own doc comment already
-accepts this exact class of window: "an I/O failure mid-truncation is not
-predictable at all ... leaves the chain needing recovery regardless."
-Closing it here alone, differently from that canonical path, would leave
-the two rollback contracts inconsistent for no benefit.
+The captured undo payload is persisted before the primary-chain rewind and
+before metadata truncation. The reconciler retains that intent after the
+metadata commit, publishes the undo while still holding
+`transactionEventMutex`, and clears the record only after the ordered-delivery
+barrier succeeds. A crash after the chain or metadata mutation but before the
+undo is acknowledged therefore leaves the payload available for startup
+recovery. If the process stops after delivery but before clearing the record,
+recovery may deliver the undo again; consumers must tolerate this documented
+at-least-once behavior.
 
-Neither alternative ordering is free of its own hazard, either: running
-`ls.rollback` inside this closure, before the emit, would risk a real
-reentrancy hazard the placement above already avoids — `ls.rollback` can
-publish `ChainsyncResyncEventType`/`ChainsyncResyncReasonLocalLedgerRollback`
-synchronously via `EventBus.Publish`, and `Ouroboros.SubscribeChainsyncResync`
-(`ouroboros/chainsync.go`) subscribes to exactly that reason and calls the
-substantial `LedgerState.RecoverAfterLocalRollback`, whose own locking has
-not been audited for safety under `transactionEventMutex` — while
-deferring the emit until after `ls.rollback` returns (outside
-`transactionEventMutex`) would let a concurrent forward apply's
-`ledger.tx` event land first on the same ordered lane, reopening exactly
-what holding `transactionEventMutex` across the emit prevents.
-
-The window is narrowed, not merely bounded: both branches now pre-check
-the one deterministic rejection `ls.rollback` could otherwise hit — the
-Mithril boundary — before ever resolving or emitting an undo, the same way
-`rollbackChainAndState` checks it before calling
-`validateAndEmitRollbackUndo` at all. Proven by
-`TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`:
-a target below the boundary is declined immediately, with no undo
-published and no primary-chain truncation attempted either. That leaves
-`ls.rollback`'s only remaining failure mode a genuine, unpredictable DB
-error, logged at ERROR with the inconsistency called out if it happens; the
-next reconciliation attempt then lands in the "ledger tip ahead of primary
-chain tip" branch below (see its own doc comment), which retries both the
-(idempotent) undo notification and this same rollback — proven by
-`TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit`.
-A true durable, atomic handoff across every rollback path in this file,
-not a fix scoped to this one reconciler, is tracked as issue #3817.
+The emit remains outside the chain's own locks. `emitRollbackTransactionEvents`
+can publish `LedgerErrorEventType` via `EventBus.Publish`, which invokes
+subscribers synchronously on the caller's goroutine; running it from inside
+the chain rewind would risk reentrancy into `c.mutex` or `c.manager.mutex`.
+The durable intent allows the reconciler to commit metadata before publishing
+without opening a loss window, while holding `transactionEventMutex` keeps the
+undo ahead of any forward `ledger.tx` event on the same ordered lane. The
+Mithril and consumed-UTxO prune boundaries are checked before the intent is
+written or the primary chain is truncated. The boundary-refusal regression is
+covered by `TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`;
+delivery retention is covered by
+`TestRollbackRetainsIntentUntilOrderedDelivery`.
 
 That resolution is also where the reconciler's undo events diverge from
 `blocksAboveSlot`'s: by the time this rewind runs, chain selection has
@@ -13399,29 +13713,12 @@ this section releases it, so the fresh read stays valid through the
 snapshot, that lets a test force this interleaving deterministically rather
 than relying on goroutine scheduling.
 
-A crash between `RewindPrimaryChainToPoint` returning success (primary
-chain truncated, durable) and `emitRollbackTransactionEvents` completing
-(an in-memory `EventBus` publish, not durable on its own) loses that undo
-notification for good if nothing else attempts it again (wolf31o2 review,
-PR #3611). Recovery does not happen by re-entering this same branch: after
-such a crash, `ls.currentTip` is still the stale pre-crash value (this
-closure's caller only calls `ls.rollback(ancestor)`, which updates it,
-after the closure returns), while `ls.chain.Tip()` already reports the
-truncated point, so the next reconciliation attempt instead takes the
-earlier `chainTip.Point.Slot < ledgerTip.Point.Slot` branch ("ledger tip
-ahead of primary chain tip"). That branch now runs the same
-`reconciliationUndoBlocks`/`emitRollbackTransactionEvents` sequence, under
-the same `blockPipelineGatherMutex`/drain/`transactionEventMutex`
-protections, before calling `ls.rollback`, so a crash-interrupted attempt's
-undo notification is retried on the very next reconciliation attempt
-(startup or live — this branch is reachable from all three callers, the
-same as the common-ancestor branch), subject to the same block-cache-
-eviction resolution limits `reconciliationUndoBlocks` already documents and
-counts via `reconciliationUndoUnresolved`, rather than being silently and
-permanently lost. This also fixes that branch's ordinary, non-crash case:
-it previously called `ls.rollback` directly with no undo emission at all,
-live or at startup, whenever the primary chain was simply behind the
-ledger tip for any reason.
+Both reconciliation branches persist their captured undo payload before
+metadata truncation and retain it through ordered delivery. Startup recovery
+replays a surviving intent before reconciliation begins, including after the
+primary chain or metadata was already rewound. This also ensures the ordinary
+case where the primary chain is behind the ledger tip emits the missing undo
+notifications before forward processing resumes.
 
 `reconciliationUndoBlocks` also detects, and counts separately via
 `reconciliationUndoMissingRecord`, an applied block with no `block_nonce`

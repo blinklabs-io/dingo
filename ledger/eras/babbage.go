@@ -227,9 +227,7 @@ func ValidateTxBabbage(
 			)
 		}
 	}
-	if err := validateMIRAccumulatedRewards(
-		tx, slot, ls, tmpPparams.ProtocolMajorVersion(),
-	); err != nil {
+	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -292,6 +290,7 @@ func ValidateTxBabbage(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()
@@ -529,6 +528,7 @@ func EvaluateTxBabbage(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()

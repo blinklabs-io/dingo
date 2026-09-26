@@ -195,9 +195,7 @@ func ValidateTxAlonzo(
 			)
 		}
 	}
-	if err := validateMIRAccumulatedRewards(
-		tx, slot, ls, tmpPparams.ProtocolMajorVersion(),
-	); err != nil {
+	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -276,6 +274,7 @@ func ValidateTxAlonzo(
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
 			script.StrictValidityUpperBoundForTransaction(tx),
+			uint(tmpPparams.ProtocolMajor),
 		)
 		if err != nil {
 			return err
@@ -432,6 +431,7 @@ func EvaluateTxAlonzo(
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
 			script.StrictValidityUpperBoundForTransaction(tx),
+			uint(tmpPparams.ProtocolMajor),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err

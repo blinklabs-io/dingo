@@ -157,6 +157,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
 		n, ev, c, lab, err := ls.calculateEpochNonce(
 			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
+			nil,
 		)
 		rNonce, rEvolving, rCandidate, rLab = n, ev, c, lab
 		return err

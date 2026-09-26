@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -323,7 +322,10 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: t.TempDir()},
+			)
 			require.NoError(t, err)
 			cm, err := chain.NewManager(db, nil)
 			require.NoError(t, err)
@@ -361,7 +363,9 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 				Database:          db,
 				ChainManager:      cm,
 				CardanoNodeConfig: nodeConfig,
-				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
 			})
 			require.NoError(t, err)
 			ls.currentEra.Id = 1
@@ -411,110 +415,124 @@ func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
 	t.Parallel()
 
 	for _, securityParam := range []int{2, 3, 4, 5} {
-		t.Run(fmt.Sprintf("security param %d", securityParam), func(t *testing.T) {
-			t.Parallel()
+		t.Run(
+			fmt.Sprintf("security param %d", securityParam),
+			func(t *testing.T) {
+				t.Parallel()
 
-			db, err := dbtest.NewDatabase(
-				t,
-				&database.Config{DataDir: t.TempDir()},
-			)
-			require.NoError(t, err)
-			cm, err := chain.NewManager(db, nil)
-			require.NoError(t, err)
-
-			blocks := []chain.RawBlock{
-				testRawBlock("no-anchor-one", 80, 1, nil),
-				testRawBlock("no-anchor-two", 100, 2, nil),
-				testRawBlock("no-anchor-three", 120, 3, nil),
-				testRawBlock("no-anchor-producer", 140, 4, nil),
-				testRawBlock("no-anchor-current", 160, 5, nil),
-			}
-			for i := 1; i < len(blocks); i++ {
-				blocks[i].PrevHash = blocks[i-1].Hash
-			}
-			require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
-
-			// Prune the first two blocks, leaving the producer's own parent
-			// retained but every fallback anchor index below the window.
-			pruned := make([]models.Block, 2)
-			for i := range pruned {
-				pruned[i], err = database.BlockByHash(db, blocks[i].Hash)
+				db, err := dbtest.NewDatabase(
+					t,
+					&database.Config{DataDir: t.TempDir()},
+				)
 				require.NoError(t, err)
-			}
-			txn := db.BlobTxn(true)
-			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				for _, block := range pruned {
-					if err := database.BlockDeleteTxn(txn, block); err != nil {
-						return err
-					}
+				cm, err := chain.NewManager(db, nil)
+				require.NoError(t, err)
+
+				blocks := []chain.RawBlock{
+					testRawBlock("no-anchor-one", 80, 1, nil),
+					testRawBlock("no-anchor-two", 100, 2, nil),
+					testRawBlock("no-anchor-three", 120, 3, nil),
+					testRawBlock("no-anchor-producer", 140, 4, nil),
+					testRawBlock("no-anchor-current", 160, 5, nil),
 				}
-				return nil
-			}))
+				for i := 1; i < len(blocks); i++ {
+					blocks[i].PrevHash = blocks[i-1].Hash
+				}
+				require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
 
-			nodeConfig := newTestShelleyGenesisCfg(t)
-			nodeConfig.ShelleyGenesis().SecurityParam = securityParam
-			ls, err := NewLedgerState(LedgerStateConfig{
-				Database:          db,
-				ChainManager:      cm,
-				CardanoNodeConfig: nodeConfig,
-				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			})
-			require.NoError(t, err)
-			ls.currentEra.Id = 1
-			require.NoError(t, cm.SetLedger(ls))
-			ls.metrics.init(prometheus.NewRegistry())
+				// Prune the first two blocks, leaving the producer's own parent
+				// retained but every fallback anchor index below the window.
+				pruned := make([]models.Block, 2)
+				for i := range pruned {
+					pruned[i], err = database.BlockByHash(db, blocks[i].Hash)
+					require.NoError(t, err)
+				}
+				txn := db.BlobTxn(true)
+				require.NoError(t, txn.Do(func(txn *database.Txn) error {
+					for _, block := range pruned {
+						if err := database.BlockDeleteTxn(txn, block); err != nil {
+							return err
+						}
+					}
+					return nil
+				}))
 
-			currentTip := ochainsync.Tip{
-				Point:       ocommon.NewPoint(blocks[4].Slot, blocks[4].Hash),
-				BlockNumber: blocks[4].BlockNumber,
-			}
-			require.NoError(t, db.SetTip(currentTip, nil))
-			ls.currentTip = currentTip
-			ls.publishSnapshotsLocked()
+				nodeConfig := newTestShelleyGenesisCfg(t)
+				nodeConfig.ShelleyGenesis().SecurityParam = securityParam
+				ls, err := NewLedgerState(LedgerStateConfig{
+					Database:          db,
+					ChainManager:      cm,
+					CardanoNodeConfig: nodeConfig,
+					Logger: slog.New(
+						slog.NewJSONHandler(io.Discard, nil),
+					),
+				})
+				require.NoError(t, err)
+				ls.currentEra.Id = 1
+				require.NoError(t, cm.SetLedger(ls))
+				ls.metrics.init(prometheus.NewRegistry())
 
-			knownTxHash := testHashBytes("no-anchor-known-producer-tx")
-			seedReplayRecoveryTransaction(
-				t,
-				db,
-				knownTxHash,
-				blocks[3].Hash,
-				blocks[3].Slot,
-			)
+				currentTip := ochainsync.Tip{
+					Point: ocommon.NewPoint(
+						blocks[4].Slot,
+						blocks[4].Hash,
+					),
+					BlockNumber: blocks[4].BlockNumber,
+				}
+				require.NoError(t, db.SetTip(currentTip, nil))
+				ls.currentTip = currentTip
+				ls.publishSnapshotsLocked()
 
-			fallback, err := ls.replayRecoveryFallbackCandidate(
-				currentTip.Point,
-				[]lcommon.TransactionInput{
-					&replayRecoveryInput{
-						txId:  testHashBytes("no-anchor-unresolved-tx"),
-						index: 0,
+				knownTxHash := testHashBytes("no-anchor-known-producer-tx")
+				seedReplayRecoveryTransaction(
+					t,
+					db,
+					knownTxHash,
+					blocks[3].Hash,
+					blocks[3].Slot,
+				)
+
+				fallback, err := ls.replayRecoveryFallbackCandidate(
+					currentTip.Point,
+					[]lcommon.TransactionInput{
+						&replayRecoveryInput{
+							txId:  testHashBytes("no-anchor-unresolved-tx"),
+							index: 0,
+						},
 					},
-				},
-			)
-			require.NoError(t, err)
-			require.Nil(t, fallback, "fixture must leave no retained fallback anchor")
+				)
+				require.NoError(t, err)
+				require.Nil(
+					t,
+					fallback,
+					"fixture must leave no retained fallback anchor",
+				)
 
-			candidate, err := ls.findReplayRecoveryCandidate(&txValidationError{
-				BlockPoint: currentTip.Point,
-				TxHash:     testHashBytes("no-anchor-failure"),
-				Inputs: []lcommon.TransactionInput{
-					&replayRecoveryInput{txId: knownTxHash, index: 0},
-					&replayRecoveryInput{
-						txId:  testHashBytes("no-anchor-unresolved-tx"),
-						index: 0,
+				candidate, err := ls.findReplayRecoveryCandidate(
+					&txValidationError{
+						BlockPoint: currentTip.Point,
+						TxHash:     testHashBytes("no-anchor-failure"),
+						Inputs: []lcommon.TransactionInput{
+							&replayRecoveryInput{txId: knownTxHash, index: 0},
+							&replayRecoveryInput{
+								txId:  testHashBytes("no-anchor-unresolved-tx"),
+								index: 0,
+							},
+						},
+						Cause: errors.New("bad input"),
 					},
-				},
-				Cause: errors.New("bad input"),
-			})
-			require.NoError(t, err)
-			require.NotNil(t, candidate)
-			assert.Equal(t, "metadata", candidate.Strategy)
-			assert.Equal(t, blocks[2].Slot, candidate.RollbackPoint.Slot)
-			assert.True(
-				t,
-				candidate.ProducerUnresolved,
-				"unresolved provenance must still force the primary-chain rewind",
-			)
-		})
+				)
+				require.NoError(t, err)
+				require.NotNil(t, candidate)
+				assert.Equal(t, "metadata", candidate.Strategy)
+				assert.Equal(t, blocks[2].Slot, candidate.RollbackPoint.Slot)
+				assert.True(
+					t,
+					candidate.ProducerUnresolved,
+					"unresolved provenance must still force the primary-chain rewind",
+				)
+			},
+		)
 	}
 }
 
@@ -1752,7 +1770,11 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	// This recovery test uses a synthetic Shelley-only cache. Keep the config
 	// Shelley-only so the forecast shape does not alter recovery semantics.
 	recoveryCfg := &nodeconfig.CardanoNodeConfig{}
-	err = recoveryCfg.LoadShelleyGenesisFromReader(strings.NewReader(`{"activeSlotsCoeff":0.05,"securityParam":432,"slotsPerKESPeriod":129600,"systemStart":"2022-10-25T00:00:00Z"}`))
+	err = recoveryCfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(
+			`{"activeSlotsCoeff":0.05,"securityParam":432,"slotsPerKESPeriod":129600,"systemStart":"2022-10-25T00:00:00Z"}`,
+		),
+	)
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
@@ -2122,8 +2144,12 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	recovered, err := ls.tryRecoverFromTxValidationError(txErr())
 	require.NoError(t, err)
 	require.True(t, recovered)
-	require.Greater(t, ls.rewardInputGeneration.Load(), generationBeforeFirstHold,
-		"the first held cycle must repair same-tip metadata")
+	require.Greater(
+		t,
+		ls.rewardInputGeneration.Load(),
+		generationBeforeFirstHold,
+		"the first held cycle must repair same-tip metadata",
+	)
 
 	require.True(t, ls.replayRecoveryHolding)
 	assert.Equal(
@@ -2158,8 +2184,12 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	recovered, err = ls.tryRecoverFromTxValidationError(txErr())
 	require.NoError(t, err)
 	require.True(t, recovered)
-	require.Equal(t, generationBeforeSecondHold, ls.rewardInputGeneration.Load(),
-		"a repeated held cycle at an unchanged tip must not repair again")
+	require.Equal(
+		t,
+		generationBeforeSecondHold,
+		ls.rewardInputGeneration.Load(),
+		"a repeated held cycle at an unchanged tip must not repair again",
+	)
 }
 
 // newReplayRecoveryAuditLedger builds the fallback topology with an
@@ -2283,7 +2313,10 @@ func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
 		TxHash:     testHashBytes("mixed-provenance-failure"),
 		Inputs: []lcommon.TransactionInput{
 			&replayRecoveryInput{txId: knownTxHash, index: 0},
-			&replayRecoveryInput{txId: testHashBytes("unresolved-producer"), index: 0},
+			&replayRecoveryInput{
+				txId:  testHashBytes("unresolved-producer"),
+				index: 0,
+			},
 		},
 		Cause: errors.New("bad input"),
 	})
@@ -2627,7 +2660,9 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 // reproduced live on preview: 138 identical "block processing failed,
 // restarting pipeline" warnings for one tx over 46+ minutes with no rewind,
 // no peer rotation, and no halt).
-func TestReplayRecoveryRejectsDeterministicMalformedReferenceScripts(t *testing.T) {
+func TestReplayRecoveryRejectsDeterministicMalformedReferenceScripts(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
@@ -2670,7 +2705,9 @@ func TestReplayRecoveryRejectsDeterministicMalformedReferenceScripts(t *testing.
 // verdict as a malformed reference script (both are raised by
 // common.ValidatePlutusScriptsWellFormed) and must be classified the same
 // way.
-func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(t *testing.T) {
+func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
@@ -2886,11 +2923,12 @@ func deterministicResyncChannel(
 	return resyncCh
 }
 
-// Byron does not share the Shelley duplicate-input rule: ledger/eras returns
-// DuplicateInputByronError. The verdict is the same structural one, so a Byron
-// duplicate must take the deterministic branch instead of the state-dependent
+// A Byron unknown-attribute verdict reads only the transaction, so it must
+// take the deterministic branch instead of the state-dependent
 // unresolved-producer fallback that repeatedly rediscovers the same block.
-func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
+func TestReplayRecoveryRejectsDeterministicByronUnknownAttributes(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
@@ -2914,17 +2952,14 @@ func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
 
 	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
 		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
-		TxHash:     testHashBytes("byron-duplicate-input-tx"),
+		TxHash:     testHashBytes("byron-unknown-attributes-tx"),
 		Inputs: []lcommon.TransactionInput{
 			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
 		},
 		Cause: errors.Join(
 			fmt.Errorf(
 				"byron UTxO rule: %w",
-				eras.DuplicateInputByronError{
-					TxId:  hex.EncodeToString(testHashBytes("byron-dup")),
-					Index: 0,
-				},
+				eras.UnknownAttributesByronError{Size: 128},
 			),
 			errors.New("unrelated joined validation detail"),
 		),
@@ -3307,4 +3342,233 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, present, "a missing UTxO is not present")
 	assert.Nil(t, resolved)
+}
+
+// A missing redeemer is deterministic for every script purpose. Each tag gets
+// its own subtest so that dropping one from the classification switch fails
+// here instead of passing quietly.
+func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		tag  lcommon.RedeemerTag
+	}{
+		{name: "spend purpose", tag: lcommon.RedeemerTagSpend},
+		{name: "mint purpose", tag: lcommon.RedeemerTagMint},
+		{name: "cert purpose", tag: lcommon.RedeemerTagCert},
+		{name: "reward purpose", tag: lcommon.RedeemerTagReward},
+		{name: "voting purpose", tag: lcommon.RedeemerTagVoting},
+		{name: "proposing purpose", tag: lcommon.RedeemerTagProposing},
+		{name: "guarding purpose", tag: lcommon.RedeemerTagGuarding},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			requireMissingRedeemerRecovery(t, tc.tag, true)
+		})
+	}
+}
+
+// The spend purpose is one of the seven tags the upstream
+// UtxoValidateRequiredRedeemers rule reports at the gouroboros v0.205.7 pin,
+// and it reaches its redeemer check only on inputs that already resolved, so
+// its verdict is as replay-invariant as the other six. A joined error chain
+// must still reach isRewardWithdrawalMismatch: ValidateTxConway runs every
+// rule and joins the failures rather than stopping at the first, so a
+// spend-tagged missing redeemer can arrive alongside a withdrawal mismatch.
+func TestIsDeterministicMissingRedeemerAcrossJoinedErrors(t *testing.T) {
+	t.Parallel()
+
+	missingSpend := lcommon.MissingRedeemerForScriptError{
+		ScriptHash: lcommon.Blake2b224Hash([]byte("joined-script")),
+		Tag:        lcommon.RedeemerTagSpend,
+		Index:      0,
+		RedeemerKey: lcommon.RedeemerKey{
+			Tag:   lcommon.RedeemerTagSpend,
+			Index: 0,
+		},
+	}
+	require.True(
+		t,
+		isDeterministicTxValidationError(missingSpend),
+		"a spend-tagged missing redeemer is decided by the transaction",
+	)
+	require.True(
+		t,
+		isDeterministicTxValidationError(errors.Join(
+			fmt.Errorf("conway utxow rule: %w", missingSpend),
+			fmt.Errorf(
+				"conway utxo rule: %w",
+				shelley.IncorrectWithdrawalAmountError{},
+			),
+		)),
+		"a joined chain carrying a withdrawal mismatch stays deterministic",
+	)
+	// The control, on the bare error: an unresolved input carries no
+	// deterministic classification of its own. It is only a control in
+	// isolation -- errors.AsType walks a join, so an InputResolutionError
+	// joined with any classified verdict classifies deterministic, which the
+	// monotone argument above makes correct.
+	require.False(
+		t,
+		isDeterministicTxValidationError(lcommon.InputResolutionError{}),
+		"an unresolved input is decided by local UTxO state",
+	)
+	// The shared ExtraRedeemerError type has both a transaction-only Conway
+	// emitter and a state-dependent Dijkstra emitter. The latter is the reason
+	// this type remains unclassified: an unresolved consumed input is skipped,
+	// so its spend purpose never reaches the required set and a legitimate spend
+	// redeemer reads as extra; resolving the input removes the verdict. The
+	// type alone cannot distinguish those emitters.
+	require.False(
+		t,
+		isDeterministicTxValidationError(conway.ExtraRedeemerError{}),
+		"the shared extra-redeemer type includes a state-dependent Dijkstra emitter",
+	)
+	require.True(
+		t,
+		isDeterministicTxValidationError(errors.Join(
+			lcommon.InputResolutionError{},
+			lcommon.MissingRedeemerForScriptError{
+				ScriptHash: lcommon.Blake2b224Hash([]byte("joined-mint")),
+				Tag:        lcommon.RedeemerTagMint,
+				Index:      0,
+				RedeemerKey: lcommon.RedeemerKey{
+					Tag:   lcommon.RedeemerTagMint,
+					Index: 0,
+				},
+			},
+		)),
+		"a join carrying a missing redeemer stays deterministic even "+
+			"alongside an unresolved input",
+	)
+}
+
+func requireMissingRedeemerRecovery(
+	t *testing.T,
+	tag lcommon.RedeemerTag,
+	deterministic bool,
+) {
+	t.Helper()
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		// The same failing block the producer-resolution path recovers from
+		// in TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind, so the
+		// rewind path is genuinely available here and the classification is
+		// what routes the rejection away from it.
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("missing-redeemer-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId: testHashBytes("missing-redeemer-producer"),
+			},
+		},
+		Cause: fmt.Errorf(
+			"conway plutus redeemer validation: %w",
+			lcommon.MissingRedeemerForScriptError{
+				ScriptHash: lcommon.Blake2b224Hash(
+					[]byte("missing-redeemer-script"),
+				),
+				Tag:   tag,
+				Index: 0,
+				RedeemerKey: lcommon.RedeemerKey{
+					Tag:   tag,
+					Index: 0,
+				},
+			},
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	if deterministic {
+		// The deterministic branch holds the applied tip and rewinds the
+		// primary chain to meet it, rather than descending to a producer's
+		// parent.
+		assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+		assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+		assert.Nil(t, ls.lastAtTipRecovery)
+		assert.Nil(t, ls.continuationAudit.Load())
+
+		resync := testutil.RequireReceive(
+			t,
+			resyncCh,
+			2*time.Second,
+			"deterministic missing-redeemer rejection must request a fresh "+
+				"ChainSync intersection",
+		)
+		assert.Equal(t, ls.Tip().Point, resync.Point)
+		return
+	}
+
+	// Retained for callers that assert the state-dependent rewind path.
+	assert.NotNil(
+		t,
+		ls.continuationAudit.Load(),
+		"a state-dependent missing-redeemer rejection must take the rewind path",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"a state-dependent missing-redeemer rejection must not request a "+
+			"fresh ChainSync intersection",
+	)
+}
+
+// The control for the classification above. A bad-input verdict is exactly the
+// state-dependent case replay recovery exists for: the input is absent from
+// this node's UTxO window, and rebuilding that window from the producer's
+// branch can make the same block valid. It must keep taking the
+// producer-resolution rewind, so classifying rejections wholesale -- or
+// widening isDeterministicTxValidationError past what a transaction alone
+// decides -- fails here rather than passing quietly.
+func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("bad-inputs-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId: testHashBytes("bad-inputs-producer"),
+			},
+		},
+		Cause: fmt.Errorf(
+			"shelley utxo validation rule 8: %w",
+			shelley.BadInputsUtxoError{},
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	// armContinuationAudit runs only on the producer-resolution rewind, so an
+	// armed window is proof this rejection did not take the deterministic
+	// branch.
+	require.NotNil(
+		t,
+		ls.continuationAudit.Load(),
+		"a state-dependent rejection must take the rewind path",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"a state-dependent rejection must not use the deterministic "+
+			"fresh-intersection path",
+	)
+	require.False(
+		t,
+		isDeterministicTxValidationError(shelley.BadInputsUtxoError{}),
+		"a missing input is decided by local UTxO state, not by the tx",
+	)
 }
