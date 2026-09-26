@@ -666,10 +666,6 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("get committee quorum: %w", err)
 	}
 
-	// Track ratifications per delaying purpose (not per action type) so
-	// NoConfidence and UpdateCommittee in the same tick don't both fire.
-	// ParameterChange is non-delaying and can advance its chain more than once.
-	ratifiedThisTickByPurpose := make(map[govActionPurpose]bool)
 	// RATIFY carries the post-ENACT treasury in its enactment state. Accepted
 	// withdrawals consume this budget immediately, even though they are not
 	// enacted until a later boundary and even when an unregistered destination
@@ -701,13 +697,6 @@ func ProcessEpoch(
 	for _, proposal := range stillActive {
 		actionType := lcommon.GovActionType(proposal.ActionType)
 		purpose := govActionPurposeOf(actionType)
-		if purpose != purposeNone &&
-			purpose != purposeParameterChange &&
-			ratifiedThisTickByPurpose[purpose] {
-			// The spec ratifies at most one action per purpose per
-			// epoch tick. Skip to avoid double-enacting next tick.
-			continue
-		}
 
 		// Parent chain check: look up the root by purpose so that,
 		// e.g., an UpdateCommittee validates against the most recent
@@ -888,11 +877,12 @@ func ProcessEpoch(
 			majorVersion = conwayPParams.ProtocolVersion.Major
 			tallyCtx.MajorVersion = majorVersion
 			rootsByPurpose[purpose] = proposal
-		} else if purpose != purposeNone {
-			ratifiedThisTickByPurpose[purpose] = true
 		}
 		ratificationTreasuryRemaining = nextTreasuryRemaining
 		out.RatifiedCount++
+		// Conway RATIFY accepts nothing after a delaying action (NoConfidence,
+		// UpdateCommittee, NewConstitution, HardForkInitiation) in the same
+		// pass; only non-delaying actions keep the pass going.
 		if isDelayingActionPurpose(purpose) {
 			break
 		}
