@@ -1919,7 +1919,7 @@ func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
 			Type:  block.Type,
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		// Flush after each block to simulate near-tip behavior where
@@ -1984,7 +1984,7 @@ func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 		}
 		blockIdx++
 
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
@@ -2118,7 +2118,7 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 			Type:  uint(block.Type()),
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
@@ -2273,7 +2273,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatal(err)
 		}
 		ledgerState.pendingBlockfetchEvents = ledgerState.pendingBlockfetchEvents[:0]

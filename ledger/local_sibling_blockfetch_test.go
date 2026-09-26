@@ -57,7 +57,7 @@ func stageInFlightBlockfetchBatch(
 	defer func() {
 		ls.mithrilLedgerSlot = previousMithrilLedgerSlot
 	}()
-	require.NoError(t, ls.handleEventBlockfetchBlockDeferred(
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls,
 		BlockfetchEvent{
 			ConnectionId: connId,
 			Block:        block,

@@ -846,8 +846,8 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
-	ls.metrics.beginBlockfetchEvent()
-	defer ls.metrics.endBlockfetchEvent()
+	blockfetchEventID := ls.metrics.beginBlockfetchEvent()
+	defer ls.metrics.endBlockfetchEvent(blockfetchEventID)
 	// Registered before the mutex is taken so defer's LIFO order runs it
 	// after the unlock. RecoverAfterLocalRollback nests this mutex inside
 	// chainsyncMutex, so publishing while holding it deadlocks the same
@@ -4252,18 +4252,6 @@ func (ls *LedgerState) tryResolveFork(
 		ls.chainsyncBlockfetchMutex.Unlock()
 	}
 	return true, nil
-}
-
-// handleEventBlockfetchBlockDeferred is handleEventBlockfetchBlock that threads
-// the caller's pendingPublishes queue into flushPendingBlockfetchBlocksDeferred,
-// so chain.update events emitted while chainsyncBlockfetchMutex is held are
-// published only after it is released. A nil pubs preserves the standalone
-// immediate-publish behaviour for test callers.
-func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
-	e BlockfetchEvent,
-	pubs *pendingPublishes,
-) error {
-	return ls.handleEventBlockfetchBlockDeferredInternal(e, pubs, false)
 }
 
 func (ls *LedgerState) handleEventBlockfetchBlockDeferredWhileLocked(

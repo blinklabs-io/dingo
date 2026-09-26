@@ -195,6 +195,7 @@ type Store struct {
 	bulkConn         *sql.Conn
 
 	closeOnce sync.Once
+	closeDone chan struct{}
 	closeErr  error
 
 	// stmtMu and stmts back the prepared-statement cache; see
@@ -286,6 +287,7 @@ func New(config Config) (*Store, error) {
 		prepare:                     config.Prepare,
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
+		closeDone:                   make(chan struct{}),
 		sqlOperations: newSQLOperationsCounter(
 			config.PromRegistry,
 		),
@@ -531,14 +533,17 @@ func (s *Store) Close() error {
 }
 
 // CloseContext cancels maintenance, vacuum, and checkpoint tickers and closes
-// each owned pool. The lifecycle context bounds how long shutdown waits for
-// callbacks already in flight.
+// each owned pool after their callbacks drain. The lifecycle context bounds
+// how long this call waits. A timed-out call leaves shutdown running so a
+// later call can still wait for completion.
 func (s *Store) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("sqlstore: close context is nil")
 	}
 	s.startMu.Lock()
-	defer s.startMu.Unlock()
+	if s.closeDone == nil {
+		s.closeDone = make(chan struct{})
+	}
 	s.closeOnce.Do(func() {
 		s.closeMaintenanceAdmission()
 		s.closeVacuumAdmission()
@@ -574,33 +579,28 @@ func (s *Store) CloseContext(ctx context.Context) error {
 		if s.checkpointCancel != nil {
 			s.checkpointCancel()
 		}
-		if s.maintenanceCancel != nil {
-			select {
-			case <-s.maintenanceDone:
-			case <-ctx.Done():
-				s.closeErr = errors.Join(ctx.Err(), s.closePools())
-				return
+		go func() {
+			if s.maintenanceDone != nil {
+				<-s.maintenanceDone
 			}
-		}
-		if s.vacuumCancel != nil {
-			select {
-			case <-s.vacuumDone:
-			case <-ctx.Done():
-				s.closeErr = errors.Join(ctx.Err(), s.closePools())
-				return
+			if s.vacuumDone != nil {
+				<-s.vacuumDone
 			}
-		}
-		if s.checkpointCancel != nil {
-			select {
-			case <-s.checkpointDone:
-			case <-ctx.Done():
-				s.closeErr = errors.Join(ctx.Err(), s.closePools())
-				return
+			if s.checkpointDone != nil {
+				<-s.checkpointDone
 			}
-		}
-		s.closeErr = s.closePools()
+			s.closeErr = s.closePools()
+			close(s.closeDone)
+		}()
 	})
-	return s.closeErr
+	done := s.closeDone
+	s.startMu.Unlock()
+	select {
+	case <-done:
+		return s.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Store) closePools() error {

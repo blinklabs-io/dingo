@@ -68,23 +68,24 @@ func TestBlockfetchEventInProgressGaugeReportsStalls(t *testing.T) {
 	const metric = "dingo_ledger_blockfetch_event_in_progress_seconds"
 	require.Zero(t, namedMetricGaugeValue(t, registry, metric))
 
-	m.beginBlockfetchEvent()
+	olderID := m.beginBlockfetchEvent()
 	m.blockfetchEventMu.Lock()
-	m.blockfetchEventStart = time.Now().Add(-14 * time.Minute)
+	m.blockfetchEventStarts[olderID] = time.Now().Add(-14 * time.Minute)
 	m.blockfetchEventMu.Unlock()
 	require.GreaterOrEqual(
 		t,
 		namedMetricGaugeValue(t, registry, metric),
 		14*60.0,
 	)
-	m.beginBlockfetchEvent()
-	m.endBlockfetchEvent()
-	require.GreaterOrEqual(
-		t,
-		namedMetricGaugeValue(t, registry, metric),
-		14*60.0,
-	)
-	m.endBlockfetchEvent()
+	newerID := m.beginBlockfetchEvent()
+	m.blockfetchEventMu.Lock()
+	m.blockfetchEventStarts[newerID] = time.Now().Add(-7 * time.Minute)
+	m.blockfetchEventMu.Unlock()
+	m.endBlockfetchEvent(olderID)
+	remaining := namedMetricGaugeValue(t, registry, metric)
+	require.GreaterOrEqual(t, remaining, 7*60.0)
+	require.Less(t, remaining, 14*60.0)
+	m.endBlockfetchEvent(newerID)
 	require.Zero(t, namedMetricGaugeValue(t, registry, metric))
 }
 

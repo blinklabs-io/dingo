@@ -363,9 +363,10 @@ until the locked, offline run succeeds. PostgreSQL/MySQL advisory locks are
 connection-owned for the complete migration run. Bulk-load session settings are held on a dedicated
 connection for the duration of a bulk window and restored before that
 connection returns to the pool. Optional SQLite VACUUM receives the provider
-stop context, but SQLite does not interrupt an active full VACUUM when that
-context is canceled; shutdown can stop waiting at its deadline while the
-database driver finishes the operation.
+stop context. The modernc SQLite driver requests `sqlite3_interrupt` when
+`ExecContext` is canceled, and SQLite exits when execution reaches an
+interruptible point. Shutdown can still reach its deadline before an active
+VACUUM callback exits; a later close call can wait for that callback to drain.
 
 The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls `DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros' strict Conway decoder first and only falls back to reconstructing a Leios-extended block when strict decode fails. This is detection-based, so the Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field Leios-extended header body) decode from stored CBOR while real Conway networks (mainnet/preprod/preview) are unaffected. The reconstruct preserves the original wire bytes, so `Block.Cbor()` returns the verbatim block and any `DOFF` byte offsets recorded against the stored block CBOR stay valid.
 

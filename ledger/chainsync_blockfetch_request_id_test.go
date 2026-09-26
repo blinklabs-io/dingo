@@ -223,7 +223,7 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 		}
 		// Request 2 is still streaming: its block must be dropped, not
 		// buffered into the replacement batch.
-		require.NoError(t, ls.handleEventBlockfetchBlockDeferred(
+		require.NoError(t, handleEventBlockfetchBlockDeferred(ls,
 			BlockfetchEvent{
 				ConnectionId: connId,
 				RequestId:    2,

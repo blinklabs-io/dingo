@@ -44,14 +44,20 @@ const maxVacuumIntervalSeconds uint64 = uint64(
 func sqliteVacuum(
 	writeDB *sql.DB,
 	intervalSeconds uint64,
-) (func(context.Context) error, time.Duration) {
+) (func(context.Context) error, time.Duration, error) {
 	if intervalSeconds == 0 {
-		return nil, 0
+		return nil, 0, nil
+	}
+	if intervalSeconds > maxVacuumIntervalSeconds {
+		return nil, 0, fmt.Errorf(
+			"SQLite vacuumIntervalSeconds exceeds maximum %d",
+			maxVacuumIntervalSeconds,
+		)
 	}
 	return func(ctx context.Context) error {
 		_, err := writeDB.ExecContext(ctx, "VACUUM")
 		return err
-	}, time.Duration(intervalSeconds) * time.Second
+	}, time.Duration(intervalSeconds) * time.Second, nil // #nosec G115 -- bounded above by maxVacuumIntervalSeconds
 }
 
 // sqliteCommonPragmas is the DSN fragment applied to both the write and read
@@ -421,10 +427,15 @@ func openSQLStore(
 		}
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
 		diskSizeFunc = sqliteDiskSize(databaseURI, databasePath)
-		vacuum, vacuumInterval = sqliteVacuum(
+		vacuum, vacuumInterval, err = sqliteVacuum(
 			writeDB,
 			config.VacuumIntervalSeconds,
 		)
+		if err != nil {
+			_ = readDB.Close()
+			_ = writeDB.Close()
+			return nil, nil, nil, err
+		}
 		checkpointLogger := dependencies.Logger
 		if checkpointLogger == nil {
 			checkpointLogger = slog.Default()

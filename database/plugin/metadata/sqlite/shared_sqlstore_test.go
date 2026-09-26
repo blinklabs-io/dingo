@@ -60,11 +60,13 @@ func TestSQLiteVacuumMaintenanceIsOptInAndConfigurable(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
-	maintenance, interval := sqliteVacuum(db, 0)
+	maintenance, interval, err := sqliteVacuum(db, 0)
+	require.NoError(t, err)
 	require.Nil(t, maintenance)
 	require.Zero(t, interval)
 
-	maintenance, interval = sqliteVacuum(db, 30)
+	maintenance, interval, err = sqliteVacuum(db, 30)
+	require.NoError(t, err)
 	require.NotNil(t, maintenance)
 	require.Equal(t, 30*time.Second, interval)
 	require.NoError(t, maintenance(context.Background()))

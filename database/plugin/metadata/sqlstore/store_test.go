@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -535,6 +536,53 @@ func TestStoreVacuumTickerIsIndependentFromMaintenance(t *testing.T) {
 	require.NoError(t, store.Close())
 	require.Equal(t, uint32(1), vacuumCalls.Load())
 	require.Zero(t, maintenanceCalls.Load())
+}
+
+func TestStoreCloseContextCanWaitAfterVacuumTimeout(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Vacuum: func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			<-release
+			return ctx.Err()
+		},
+		VacuumInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	defer store.Close()
+	defer releaseOnce.Do(func() { close(release) })
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("vacuum did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, store.CloseContext(ctx), context.DeadlineExceeded)
+	require.NoError(t, db.Ping(), "pool closed before vacuum callback drained")
+	cancelledCtx, cancelLater := context.WithCancel(context.Background())
+	cancelLater()
+	require.ErrorIs(t, store.CloseContext(cancelledCtx), context.Canceled)
+
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, store.CloseContext(context.Background()))
+	require.Error(t, db.Ping())
 }
 
 // TestStoreCheckpointTickerIndependentOfVacuum proves a slow VACUUM cannot

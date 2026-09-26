@@ -416,7 +416,7 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 	// While the discard window is still open, a block for connId must be
 	// dropped rather than misattributed to whatever dispatch follows.
 	ls.chainsyncBlockfetchMutex.Lock()
-	err = ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err = handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Point:        ocommon.NewPoint(51, hashes[50].Bytes()),
 		Block: &blockfetchTestBlock{
@@ -471,7 +471,7 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 	// Once the discard window has closed, a block for connId belongs to the
 	// fresh dispatch and must be accepted.
 	ls.chainsyncBlockfetchMutex.Lock()
-	err = ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err = handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Point:        ocommon.NewPoint(51, hashes[50].Bytes()),
 		Block: &blockfetchTestBlock{
