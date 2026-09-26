@@ -1468,9 +1468,18 @@ func (lv *LedgerView) CommitteeHotCredentialColdCredentials(
 			) {
 			continue
 		}
+		coldHash, err := lcommon.NewBlake2b224Checked(
+			authorization.ColdCredential,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"invalid committee cold credential in active authorization: %w",
+				err,
+			)
+		}
 		cold := lcommon.Credential{
 			CredType:   uint(authorization.ColdCredentialTag),
-			Credential: lcommon.NewBlake2b224(authorization.ColdCredential),
+			Credential: coldHash,
 		}
 		key := string([]byte{authorization.ColdCredentialTag}) +
 			string(authorization.ColdCredential)

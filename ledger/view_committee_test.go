@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -997,6 +998,87 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 		available,
 		"an authoritatively empty committee after NoConfidence must stay authoritative",
 	)
+}
+
+func TestLedgerViewCommitteeHotCredentialColdCredentialsRejectsMalformedPersistedHash(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		length int
+	}{
+		{name: "short", length: lcommon.Blake2b224Size - 1},
+		{name: "long", length: lcommon.Blake2b224Size + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			pparams := &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 11},
+			}
+			lv, db := committeeTestView(t, pparams)
+			lv.pinCommitteeState(0, pparams)
+
+			coldCredential := bytes.Repeat([]byte{0xa1}, tc.length)
+			hot := committeeTestCredential(0xa2)
+			require.NoError(t, db.SetCommitteeMembers(
+				[]*models.CommitteeMember{{
+					ColdCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+					ColdCredHash:      coldCredential,
+					ExpiresEpoch:      100,
+					AddedSlot:         1,
+				}},
+				nil,
+			))
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)`,
+				lcommon.CredentialTypeAddrKeyHash,
+				coldCredential,
+				hot.CredType,
+				hot.Credential[:],
+				1,
+				1,
+			)
+			require.NoError(t, err)
+
+			coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(hot)
+			require.Nil(t, coldCredentials)
+			require.ErrorContains(t, err, "invalid blake2b-224 hash")
+			require.ErrorContains(t, err, fmt.Sprintf("got %d", tc.length))
+
+			action := lcommon.GovActionId{
+				TransactionId: lcommon.Blake2b256{0xa3},
+			}
+			tx := &conway.ConwayTransaction{
+				TxIsValid: true,
+				Body: conway.ConwayTransactionBody{
+					TxVotingProcedures: lcommon.VotingProcedures{
+						&lcommon.Voter{
+							Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+							Hash: hot.Credential,
+						}: {&action: {Vote: lcommon.GovVoteYes}},
+					},
+				},
+			}
+			validationErr := conway.UtxoValidateUnelectedCommitteeVoters(
+				tx,
+				0,
+				lv,
+				pparams,
+			)
+			var lookupErr conway.CommitteeMemberLookupError
+			require.ErrorAs(t, validationErr, &lookupErr)
+			require.Equal(t, hot, lookupErr.MemberCredential)
+			require.ErrorContains(t, validationErr, fmt.Sprintf("got %d", tc.length))
+		})
+	}
 }
 
 func TestLedgerViewCommitteeVotingState(t *testing.T) {
