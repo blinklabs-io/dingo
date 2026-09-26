@@ -3675,8 +3675,9 @@ The `LedgerView` interface provides query access to ledger state:
   its active delegate at the transaction slot, and supplies the genesis
   update quorum used to count distinct MIR signers. `ClassicProtocolParameterUpdateWindowState`
   supplies the current epoch and the first slot whose proposals target the
-  next epoch; the boundary is derived from the epoch schedule and Shelley
-  genesis security parameters. Delegation reads use the validation view's
+  next epoch: the next epoch's first slot less twice the Shelley stability
+  window `ceil(3k/f)`, clamped to the epoch's first slot when that window
+  covers the whole epoch. Delegation reads use the validation view's
   metadata transaction, so certificates already applied in that transaction
   are visible. The compile-time interface assertions in `ledger/view.go` keep
   these required gouroboros capabilities wired to the validation view.
