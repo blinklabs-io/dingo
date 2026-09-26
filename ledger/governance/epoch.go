@@ -874,6 +874,15 @@ func ProcessEpoch(
 		}
 	}
 
+	if len(stillActive) == 0 {
+		if _, err := in.DB.BumpDormantDRepExpiries(
+			in.BoundarySlot,
+			in.Txn,
+		); err != nil {
+			return nil, fmt.Errorf("extend dormant DRep expiries: %w", err)
+		}
+	}
+
 	return out, nil
 }
 

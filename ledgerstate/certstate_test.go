@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/stretchr/testify/require"
 )
 
 type testCredentialKey struct {
@@ -532,6 +533,60 @@ func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
 	}
 }
 
+func TestParseVStateAddsDormantEpochsToDRepExpiry(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x44}, 28),
+	})
+	require.NoError(t, err)
+	state, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, state...)
+	encodedVState, err := cbor.Encode([]any{cbor.RawMessage(drepMap), map[any]any{}, uint64(3)})
+	require.NoError(t, err)
+
+	dreps, _, _, dormant, err := parseVState(encodedVState)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormant)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(13), dreps[0].ExpiryEpoch)
+}
+
+func TestParseVStateReadsDormancyAfterFlattenedCommitteeState(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x47}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	_, resignMap := committeeVStateFixture(t)
+	hotMap := []byte{0xa0}
+
+	encodedVState, err := cbor.Encode([]any{
+		cbor.RawMessage(drepMap),
+		cbor.RawMessage(hotMap),
+		cbor.RawMessage(resignMap),
+		uint64(3),
+	})
+	require.NoError(t, err)
+
+	dreps, hotKeys, resignations, dormant, err := parseVState(encodedVState)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormant)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(13), dreps[0].ExpiryEpoch)
+	require.Empty(t, hotKeys)
+	require.Len(t, resignations, 1)
+}
+
 func toFixed28(src []byte) [28]byte {
 	var dst [28]byte
 	copy(dst[:], src)
@@ -666,6 +721,168 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 			result.CommitteeResignations[0],
 		)
 	}
+}
+
+func TestParseDRepMapPreservesReverseDelegators(t *testing.T) {
+	t.Parallel()
+
+	drepHash := bytes.Repeat([]byte{0x49}, 28)
+	delegatorKey := bytes.Repeat([]byte{0x4a}, 28)
+	delegatorScript := bytes.Repeat([]byte{0x4b}, 28)
+	drepCredential, err := cbor.Encode([]any{uint64(CredentialTypeKey), drepHash})
+	require.NoError(t, err)
+	delegatorKeyCredential, err := cbor.Encode([]any{uint64(CredentialTypeKey), delegatorKey})
+	require.NoError(t, err)
+	delegatorScriptCredential, err := cbor.Encode([]any{uint64(CredentialTypeScript), delegatorScript})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{
+		uint64(50), nil, uint64(500),
+		[]cbor.RawMessage{delegatorKeyCredential, delegatorScriptCredential},
+	})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, drepCredential...)
+	drepMap = append(drepMap, drepState...)
+
+	dreps, err := parseDRepMap(drepMap)
+	require.NoError(t, err)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(CredentialTypeKey), dreps[0].Credential.Type)
+	require.Equal(t, drepHash, dreps[0].Credential.Hash)
+	require.Equal(t, []Credential{
+		{Type: CredentialTypeKey, Hash: delegatorKey},
+		{Type: CredentialTypeScript, Hash: delegatorScript},
+	}, dreps[0].Delegators)
+}
+
+// TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry pins the
+// flattened Mithril CertState layout where the dormant count follows the
+// nested committee state after the DRep map.
+func TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x44}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+
+	hotMap, resignMap := committeeVStateFixture(t)
+	committeeState := append([]byte{0x82}, hotMap...)
+	committeeState = append(committeeState, resignMap...)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	dstate := []byte{0xa2}
+	for _, tag := range []byte{0x77, 0x78} {
+		delegator, encodeErr := cbor.Encode(
+			[]any{uint64(CredentialTypeKey), bytes.Repeat([]byte{tag}, 28)},
+		)
+		require.NoError(t, encodeErr)
+		dstate = append(dstate, delegator...)
+		dstate = append(dstate, 0x80)
+	}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		committeeState,
+		{0x03},
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	require.NotNil(t, result)
+	require.Equal(t, uint64(3), result.DormantEpochs)
+	require.Len(t, result.DReps, 1)
+	require.Equal(t, uint64(13), result.DReps[0].ExpiryEpoch)
+}
+
+func TestParseCertStateConwayRejectsMalformedDRepDelegators(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x46}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{
+		uint64(10), nil, uint64(500), "malformed delegator list",
+	})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	dstate := []byte{0xa4}
+	for i := range 4 {
+		accountMapEntry := encodeCredentialMapEntry(
+			t,
+			[]any{
+				uint64(CredentialTypeKey),
+				bytes.Repeat([]byte{byte(0x50 + i)}, 28),
+			},
+			[]any{},
+		)
+		dstate = append(dstate, accountMapEntry[1:]...)
+	}
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	certStateCBOR, err := cbor.Encode([]any{
+		cbor.RawMessage(drepMap),
+		cbor.RawMessage([]byte{0xa0}),
+		uint64(3),
+		cbor.RawMessage(poolState),
+		cbor.RawMessage(dstate),
+		uint64(0),
+	})
+	require.NoError(t, err)
+
+	result, err := ParseCertState(certStateCBOR)
+	require.ErrorContains(t, err, "decoding DRep delegators")
+	require.Nil(t, result, "a malformed selected DRep map must not yield partial imported state")
+}
+
+func TestParseCertStateConwayIgnoresUnrelatedIntegerAfterDRepMap(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x45}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	dstate := []byte{0xa2}
+	for _, tag := range []byte{0x76, 0x77} {
+		delegator, encodeErr := cbor.Encode([]any{
+			uint64(CredentialTypeKey),
+			bytes.Repeat([]byte{tag}, 28),
+		})
+		require.NoError(t, encodeErr)
+		dstate = append(dstate, delegator...)
+		dstate = append(dstate, 0x80)
+	}
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		{0x00}, // unrelated field; the following integer is not VState dormancy
+		{0x03},
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	require.NotNil(t, result)
+	require.Zero(t, result.DormantEpochs)
+	require.Len(t, result.DReps, 1)
+	require.Equal(t, uint64(10), result.DReps[0].ExpiryEpoch)
 }
 
 // DState and ccHotKeys are both credential-keyed, so picking DState by map size

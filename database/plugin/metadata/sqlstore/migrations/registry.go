@@ -60,6 +60,9 @@ const (
 	governanceVoteHistorySchemaRelease            = "governance-vote-history"
 	rewardAdaPotsImportedFeesSchemaRelease        = "reward-ada-pots-imported-epoch-fees"
 	mithrilRewardRepairCoverageSchemaRelease      = "mithril-reward-repair-coverage"
+	drepExpiryHistorySchemaRelease                = "drep-expiry-history"
+	drepDormancyStateSchemaRelease                = "drep-dormancy-state"
+	drepDelegatorStateSchemaRelease               = "drep-delegator-state"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -153,6 +156,9 @@ var schemaVersions = []struct {
 		Name:    mithrilRewardRepairCoverageSchemaRelease,
 		Dir:     "v25",
 	},
+	{Version: 26, Name: drepExpiryHistorySchemaRelease, Dir: "v26"},
+	{Version: 27, Name: drepDormancyStateSchemaRelease, Dir: "v27"},
+	{Version: 28, Name: drepDelegatorStateSchemaRelease, Dir: "v28"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

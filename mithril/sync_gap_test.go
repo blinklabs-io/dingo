@@ -28,6 +28,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -38,9 +39,178 @@ import (
 
 type mockGapGovernanceTransaction struct {
 	hash               lcommon.Blake2b256
+	certificates       []lcommon.Certificate
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
 	isValid            bool
+}
+
+func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	drepOne := testGapHash28("pv9-drep-one")
+	drepTwo := testGapHash28("pv9-drep-two")
+	stakeCredential := testGapHash28("pv9-stake")
+	for _, credential := range [][]byte{drepOne, drepTwo} {
+		require.NoError(t, db.CreateDrep(nil, &models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     1,
+			Active:        true,
+		}))
+	}
+
+	delegation := func(label string, drep []byte) *mockGapGovernanceTransaction {
+		return &mockGapGovernanceTransaction{
+			hash: lcommon.Blake2b256Hash(testGapHash32(label)),
+			certificates: []lcommon.Certificate{&lcommon.VoteDelegationCertificate{
+				CertType: uint(lcommon.CertificateTypeVoteDelegation),
+				StakeCredential: lcommon.Credential{
+					CredType:   lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.NewBlake2b224(stakeCredential),
+				},
+				Drep: lcommon.Drep{
+					Type:       lcommon.DrepTypeAddrKeyHash,
+					Credential: drep,
+				},
+			}},
+			isValid: true,
+		}
+	}
+	first := delegation("pv9-drep-first", drepOne)
+	move := delegation("pv9-drep-move", drepTwo)
+	deregistration := &mockGapGovernanceTransaction{
+		hash: lcommon.Blake2b256Hash(testGapHash32("pv9-drep-deregistration")),
+		certificates: []lcommon.Certificate{&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(drepOne),
+			},
+			Amount: 500,
+		}},
+		isValid: true,
+	}
+	txns := []lcommon.Transaction{first, move, deregistration}
+	point := ocommon.Point{Slot: 1000, Hash: testGapHash32("pv9-gap-block")}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	txOffsets := make(map[[32]byte]database.CborOffset, len(txns))
+	for i, tx := range txns {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		txOffsets[txHash] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: uint32(i),
+			ByteLength: 1,
+		}
+	}
+	pparams := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	require.NoError(t, processGapBlockTransactions(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point,
+		txns,
+		&database.BlockIngestionResult{
+			TxOffsets:   txOffsets,
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		},
+		100,
+		babbage.EraIdBabbage,
+		pparams,
+		nil,
+	))
+	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
+}
+
+func TestGapBlockResetsDormancyBeforeFreshDRepRegistration(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+
+	drepCredential := testGapHash28("fresh-gap-drep")
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         lcommon.ProtocolParametersProtocolVersion{Major: 9},
+		DRepDeposit:             500,
+		DRepInactivityPeriod:    20,
+		GovActionValidityPeriod: 20,
+	}
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, testGapHash28("gap-proposal-return")...),
+	)
+	require.NoError(t, err)
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/gap-dormancy",
+			DataHash: lcommon.Blake2b256Hash(testGapHash32("gap-proposal-anchor")),
+		},
+	}
+	tx := &mockGapGovernanceTransaction{
+		hash: lcommon.Blake2b256Hash(testGapHash32("gap-registration-proposal")),
+		certificates: []lcommon.Certificate{&lcommon.RegistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(drepCredential),
+			},
+			Amount: 500,
+		}},
+		proposalProcedures: []lcommon.ProposalProcedure{proposal},
+		isValid:            true,
+	}
+	point := ocommon.Point{Slot: 100, Hash: testGapHash32("gap-dormancy-block")}
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	require.NoError(t, processGapBlockTransactions(
+		db,
+		logger,
+		point,
+		[]lcommon.Transaction{tx},
+		&database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				txHash: {BlockSlot: point.Slot, BlockHash: blockHash, ByteLength: 1},
+			},
+			UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+		},
+		100,
+		uint(conway.EraIdConway),
+		pparams,
+		pparams,
+	))
+
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	assert.Zero(t, dormantEpochs)
 }
 
 func (m *mockGapGovernanceTransaction) Hash() lcommon.Blake2b256 {
@@ -100,7 +270,7 @@ func (m *mockGapGovernanceTransaction) Collateral() []lcommon.TransactionInput {
 }
 
 func (m *mockGapGovernanceTransaction) Certificates() []lcommon.Certificate {
-	return nil
+	return m.certificates
 }
 
 func (m *mockGapGovernanceTransaction) ProtocolParameterUpdates() (
@@ -354,7 +524,7 @@ func testGapConwayProtocolParameters() *conway.ConwayProtocolParameters {
 	}
 }
 
-func TestProcessGapBlockTransactionsProcessesGovernance(
+func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -425,6 +595,36 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 			},
 		},
 	}
+	drepCred := testGapHash28("drep-voter")
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drepCred,
+		Active:        true,
+	}))
+	var drepVoterHash [28]byte
+	copy(drepVoterHash[:], drepCred)
+	drepVoter := &lcommon.Voter{
+		Type: lcommon.VoterTypeDRepKeyHash,
+		Hash: drepVoterHash,
+	}
+	voteTx.votingProcedures[drepVoter] = map[*lcommon.GovActionId]lcommon.VotingProcedure{
+		actionID: {Vote: models.VoteYes},
+	}
+
+	var deregHash lcommon.Blake2b256
+	copy(deregHash[:], testGapHash32("drep-deregistration-tx"))
+	deregTx := &mockGapGovernanceTransaction{
+		hash:    deregHash,
+		isValid: true,
+		certificates: []lcommon.Certificate{&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   0,
+				Credential: lcommon.NewBlake2b224(drepCred),
+			},
+			Amount: 500,
+		}},
+	}
 
 	point := ocommon.Point{
 		Slot: 1000,
@@ -436,6 +636,8 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 	copy(proposalTxHashArray[:], proposalTxHash.Bytes())
 	var voteTxHashArray [32]byte
 	copy(voteTxHashArray[:], voteTxHash.Bytes())
+	var deregTxHashArray [32]byte
+	copy(deregTxHashArray[:], deregHash.Bytes())
 	// The TxOffsets entries below are placeholders, not real offsets
 	// into a stored block: the test builds proposalTxHash from the
 	// in-memory proposalBodyCbor and never persists that CBOR to the
@@ -461,6 +663,12 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 				ByteOffset: 1,
 				ByteLength: 1,
 			},
+			deregTxHashArray: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteOffset: 2,
+				ByteLength: 1,
+			},
 		},
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
@@ -470,7 +678,7 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
-		[]lcommon.Transaction{proposalTx, voteTx},
+		[]lcommon.Transaction{proposalTx, voteTx, deregTx},
 		offsets,
 		100,
 		conway.EraIdConway,

@@ -909,8 +909,20 @@ func (m *DingoStateManager) ApplyTransaction(
 	}
 
 	certDeposits := m.certDepositsFor(tx.Certificates())
+	protocolMajor := uint64(0)
+	if versioned, ok := m.protocolParams.(common.PoolRuleProtocolParameters); ok {
+		protocolMajor = uint64(versioned.ProtocolMajorVersion())
+	}
+	if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+		tx,
+		point,
+		m.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+	}
 	if err := m.db.SetTransactionMetadataOnly(
-		tx, point, idx, certDeposits, txn,
+		tx, point, idx, certDeposits, txn, protocolMajor,
 	); err != nil {
 		return fmt.Errorf("apply certificates: %w", err)
 	}
@@ -925,15 +937,6 @@ func (m *DingoStateManager) ApplyTransaction(
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
 	}
 
-	if proposals := tx.ProposalProcedures(); len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, m.currentEpoch, govActionLifetime, m.db, txn,
-		); err != nil {
-			return fmt.Errorf("process proposals: %w", err)
-		}
-		m.recordProposalsInGovState(tx, govActionLifetime)
-	}
-
 	if votes := tx.VotingProcedures(); len(votes) > 0 {
 		if err := governance.ProcessVotes(
 			tx, point, m.currentEpoch, drepInactivityPeriod, m.db, txn,
@@ -944,10 +947,29 @@ func (m *DingoStateManager) ApplyTransaction(
 	}
 
 	if governance.HasDRepActivityCertificates(tx) {
+		protocolMajor := uint64(0)
+		if conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+			protocolMajor = uint64(conwayPP.ProtocolVersion.Major)
+		}
 		if err := governance.ProcessDRepActivityCertificates(
-			tx, m.currentEpoch, drepInactivityPeriod, m.db, txn,
+			tx, point, m.currentEpoch, drepInactivityPeriod, protocolMajor, m.db, txn,
 		); err != nil {
 			return fmt.Errorf("process drep activity certs: %w", err)
+		}
+	}
+	if proposals := tx.ProposalProcedures(); len(proposals) > 0 {
+		if err := governance.ProcessProposals(
+			tx, point, m.currentEpoch, govActionLifetime, m.db, txn,
+		); err != nil {
+			return fmt.Errorf("process proposals: %w", err)
+		}
+		m.recordProposalsInGovState(tx, govActionLifetime)
+	}
+	if governance.HasDRepDeregistrationCertificates(tx) {
+		if err := governance.ProcessDRepDeregistrationEffects(
+			tx, point, m.currentEpoch, m.db, txn,
+		); err != nil {
+			return fmt.Errorf("process drep deregistration effects: %w", err)
 		}
 	}
 

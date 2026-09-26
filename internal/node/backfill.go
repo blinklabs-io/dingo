@@ -638,7 +638,9 @@ func (b *Backfill) processBlockGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	hasDRepDeregistrations := governance.HasDRepDeregistrationCertificates(tx)
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts &&
+		!hasDRepDeregistrations {
 		return nil
 	}
 	var conwayPP *conway.ConwayProtocolParameters
@@ -652,17 +654,6 @@ func (b *Backfill) processBlockGovernance(
 	}
 	if conwayPP == nil {
 		return nil
-	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, epochId,
-			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance proposals: %w", err,
-			)
-		}
 	}
 	if len(votes) > 0 {
 		if err := governance.ProcessVotes(
@@ -678,14 +669,36 @@ func (b *Backfill) processBlockGovernance(
 	if hasDRepActivityCerts {
 		if err := governance.ProcessDRepActivityCertificates(
 			tx,
+			point,
 			epochId,
 			conwayPP.DRepInactivityPeriod,
+			uint64(conwayPP.ProtocolVersion.Major),
 			b.db,
 			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"DRep activity certificates: %w", err,
 			)
+		}
+	}
+	if len(proposals) > 0 {
+		if err := governance.ProcessProposals(
+			tx, point, epochId,
+			conwayPP.GovActionValidityPeriod,
+			b.db, txn,
+		); err != nil {
+			return fmt.Errorf("governance proposals: %w", err)
+		}
+	}
+	if hasDRepDeregistrations {
+		if err := governance.ProcessDRepDeregistrationEffects(
+			tx,
+			point,
+			epochId,
+			b.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("DRep deregistration effects: %w", err)
 		}
 	}
 	return nil
@@ -1201,6 +1214,20 @@ func (b *Backfill) processBlockTxsBatched(
 			b.skippedUtxoRefs += uint64(len(tx.Produced()))
 		}
 		setTxStart := time.Now()
+		protocolMajor := uint64(0)
+		if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
+			protocolMajor = uint64(versioned.ProtocolMajorVersion())
+		}
+		if tx.IsValid() {
+			if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+				tx,
+				point,
+				b.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+			}
+		}
 		if err := b.db.SetTransactionBatchedWithOpts(
 			tx, point, uint32(i), // #nosec G115
 			updateEpoch, paramUpdates,
@@ -1220,6 +1247,7 @@ func (b *Backfill) processBlockTxsBatched(
 				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
 				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
 				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
+				ProtocolMajor:              protocolMajor,
 				// Historical replay follows the snapshot's complete reward
 				// state, not the balance at each historical slot. Preserve
 				// withdrawal history without applying the live-path balance

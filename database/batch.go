@@ -59,6 +59,10 @@ func (d *Database) FlushBatch(
 // (currently API-mode Mithril backfill) into write-elision when the offsets
 // are known to already be present.
 type BatchedTxIngestOpts struct {
+	// ProtocolMajor is the protocol version in force for certificate
+	// transitions. Zero means the caller has no version context.
+	ProtocolMajor uint64
+
 	// SkipProducedUtxoOffsetWrites elides blob.SetUtxo calls for produced
 	// outputs. Use when the produced-UTxO offset references for this block
 	// have already been written (e.g. by the Mithril immutable-copy phase
@@ -129,6 +133,7 @@ type transactionStoreHistoricalBackfill interface {
 		bool,
 		BatchAccumulator,
 		types.Txn,
+		...uint64,
 	) error
 }
 
@@ -309,12 +314,13 @@ func (d *Database) SetTransactionBatchedWithOpts(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,
 			opts.HistoricalBackfill,
-			acc, metadataTxn,
+			acc, metadataTxn, opts.ProtocolMajor,
 		)
 	} else {
 		metadataErr = d.transactionStore().SetTransactionBatched(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
+			opts.ProtocolMajor,
 		)
 	}
 	if err := metadataErr; err != nil {

@@ -231,6 +231,7 @@ type ParsedCertState struct {
 	Pools                  []ParsedPool
 	PendingPoolRetirements map[uint64][][]byte
 	DReps                  []ParsedDRep
+	DormantEpochs          uint64
 	CommitteeHotKeys       []ParsedCommitteeHotKey
 	CommitteeResignations  []Credential
 }
@@ -336,6 +337,7 @@ type ParsedDRep struct {
 	Deposit     uint64
 	ExpiryEpoch uint64 // epoch when this DRep expires (0 = unknown)
 	Active      bool
+	Delegators  []Credential
 }
 
 // ParsedSnapShots holds the three stake distribution snapshots
@@ -1022,6 +1024,12 @@ func importCertState(
 			"warning", err.Error(),
 		)
 	}
+	if err := cfg.Database.SetImportedDormantDRepEpochs(
+		certState.DormantEpochs,
+		nil,
+	); err != nil {
+		return 0, fmt.Errorf("importing dormant DRep epochs: %w", err)
+	}
 
 	// Catch-up reconcile: record the snapshot's live cert-state keys (the
 	// registered accounts/pools/DReps at this tip) so the post-import reconcile
@@ -1570,6 +1578,21 @@ func importDReps(
 			AddedSlot:     slot,
 			ExpiryEpoch:   drep.ExpiryEpoch,
 			Active:        drep.Active,
+		}
+		for _, delegator := range drep.Delegators {
+			tag, err := models.CredentialTagFromUint(uint(delegator.Type))
+			if err != nil {
+				return fmt.Errorf(
+					"importing DRep %x delegator credential type %d: %w",
+					drep.Credential.Hash,
+					delegator.Type,
+					err,
+				)
+			}
+			model.Delegators = append(model.Delegators, models.NewStakeCredentialRef(
+				tag,
+				delegator.Hash,
+			))
 		}
 
 		reg := &models.RegistrationDrep{

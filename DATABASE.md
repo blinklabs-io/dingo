@@ -341,6 +341,37 @@ committee quorum rows whose value is `0` into SQL NULL. Those rows were written
 as NoConfidence clear markers; new clear markers use NULL, leaving numeric zero
 available as a valid enacted UnitInterval threshold.
 
+Migrations `v24` (`reward-ada-pots-imported-epoch-fees`) and `v25`
+(`mithril-reward-repair-coverage`) add the imported Mithril epoch-fee basis and
+mark older imports that need reward repair. The `reward_ada_pots` table entry
+above describes the imported value and startup repair behavior.
+
+Migration `v26` (`drep-expiry-history`) adds `drep_expiry_history` and
+`drep_expiry_epoch_event`. The history stores the pre-write expiry and activity
+epoch once per DRep and slot, allowing activity updates and dormant-epoch
+expiry extensions to roll back together. The event table makes each
+empty-governance boundary idempotent when the boundary is replayed after a
+restart.
+
+Migration `v27` (`drep-dormancy-state`) adds the singleton
+`drep_dormancy_state` counter and `drep_dormancy_history`. The counter preserves
+the consecutive no-proposal epoch count needed by PV9 DRep registration; each
+boundary increment and proposal-driven reset is journaled so rollback restores
+the prior count. Proposal-driven resets run before certificate processing, and
+snapshot import initializes the counter from parsed ledger state.
+
+Migration `v28` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
+reverse index of stake credentials recorded in each active DRep's ledger
+delegator set. The `added_slot`/`removed_slot` pair preserves membership
+history across rollback. Its initial backfill uses current account vote
+delegations only when the target DRep is registered; at the PV10 transition,
+Dingo clears delegations to inactive DReps and rebuilds this reverse index from
+active account state. Later certificate replay maintains the reverse set using
+the active protocol version's ledger rules. DRep deregistration clears the
+stake accounts named by that reverse set, even when PV9 redelegation left their
+forward account assignment pointing elsewhere. The schema also preserves
+reverse delegators imported from cert-state snapshots.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -1146,7 +1177,12 @@ updates preserve the previous activity and expiry epochs.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; certificate persistence and the activity refresh commit atomically. A Mithril bootstrap carries `expiry_epoch` from the imported snapshot's `DRepState` (`ledgerstate.importDReps`), so an imported DRep expires on the schedule the snapshot recorded. `expiry_epoch = 0` means unset and is exempt from expiry by both `drepActiveAtEpoch` (`ledger/governance/epoch.go`) and the expiry sweep, whose predicate is `expiry_epoch > 0 AND expiry_epoch <= ?`, so failing to carry it holds every imported DRep in `countActiveDReps` for the life of the database and inflates the ratification quorum denominator. `last_activity_epoch` is still not carried by the import (the parsed DRep state has no such field) and imported rows are always written `active = 1`; see issue #4492. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; a PV9 registration also includes accumulated dormant epochs. Each empty-proposal epoch boundary extends registered DRep expiry by one. Snapshot import adds the snapshot's dormant epoch count to each recorded expiry before persisting the effective expiry. Activity refresh, boundary extension, and their rollback state commit atomically. `expiry_epoch = 0` means unset and remains exempt from expiry. |
+| `drep_expiry_history` | `credential_tag`, `credential`, `added_slot`, `previous_expiry_epoch`, `previous_last_activity_epoch` | PK `(credential_tag, credential, added_slot)`; index `added_slot` | First pre-mutation DRep activity/expiry state at each slot. Rollback restores the captured values for rows after its target, then removes those history rows. |
+| `drep_expiry_epoch_event` | `added_slot` | PK `added_slot` | Idempotence marker for dormant DRep expiry extension at an empty-proposal epoch boundary. Rollback removes markers after its target. |
+| `drep_dormancy_state` | `id`, `dormant_epochs` | PK `id` (singleton row id 1) | Consecutive epoch count with no governance proposals. PV9 DRep registrations use this count when deriving the initial effective expiry. |
+| `drep_dormancy_history` | `id`, `added_slot`, `previous_dormant_epochs` | PK `id`; index `added_slot` | Previous counter values for boundary increments and proposal resets, replayed in reverse order during rollback. |
+| `drep_delegator` | `id`, `drep_credential_tag`, `drep_credential`, `stake_credential_tag`, `stake_credential`, `added_slot`, `removed_slot` | PK `id`; indexes `(drep_credential_tag, drep_credential, removed_slot)`, `(added_slot, removed_slot)` | Rollbackable reverse membership from registered DReps to stake credentials. DRep deregistration clears the accounts recorded in this set, including PV9 stale memberships left by redelegation; snapshot import preserves the ledger's recorded reverse set. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |

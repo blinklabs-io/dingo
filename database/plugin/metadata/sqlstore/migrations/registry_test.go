@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 25)
+	require.Len(t, registry, 28)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -203,6 +203,39 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, 25, registry[24].Version)
 	require.Equal(t, mithrilRewardRepairCoverageSchemaRelease, registry[24].Name)
 	require.NotNil(t, registry[24].Backfill)
+	require.Equal(t, 26, registry[25].Version)
+	require.Equal(t, drepExpiryHistorySchemaRelease, registry[25].Name)
+	require.Contains(t, strings.Join(registry[25].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
+	require.Equal(t, 27, registry[26].Version)
+	require.Equal(t, drepDormancyStateSchemaRelease, registry[26].Name)
+	require.Equal(t, 28, registry[27].Version)
+	require.Equal(t, drepDelegatorStateSchemaRelease, registry[27].Name)
+}
+
+func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		registry func() ([]Migration, error)
+		dialect  string
+	}{
+		{name: "sqlite", registry: SQLiteRegistry, dialect: "sqlite"},
+		{name: "postgres", registry: PostgresRegistry, dialect: "postgres"},
+		{name: "mysql", registry: MySQLRegistry, dialect: "mysql"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry, err := tc.registry()
+			require.NoError(t, err)
+			require.NoError(t, validateRegistry(registry, tc.dialect))
+			require.Len(t, registry, 28)
+			migration := registry[26]
+			require.Equal(t, "drep-dormancy-state", migration.Name)
+			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
+			require.Contains(t, seed, "WHERE NOT EXISTS")
+			require.NotContains(t, strings.ToUpper(seed), "ON CONFLICT")
+		})
+	}
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -328,7 +361,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 25)
+	require.Len(t, registry, 28)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,
@@ -416,4 +449,19 @@ func TestSplitSQLPreservesCommentTokenBoundaries(t *testing.T) {
 		"CREATE TABLE thing (id INTEGER)",
 		"SELECT 1",
 	}, statements)
+}
+
+func TestMySQLRegistryPrefixesDRepExpiryHistoryCredentialPrimaryKey(t *testing.T) {
+	t.Parallel()
+
+	registry, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.NoError(t, validateRegistry(registry, "mysql"))
+	expand := registry[25].SQL["mysql"].Expand
+	require.Len(t, expand, 3)
+	require.Contains(
+		t,
+		expand[0],
+		"PRIMARY KEY (`credential_tag`,`credential`(255), `added_slot`)",
+	)
 }

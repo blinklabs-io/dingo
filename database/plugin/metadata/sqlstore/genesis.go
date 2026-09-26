@@ -262,6 +262,25 @@ WHERE NOT EXISTS (
 		if err != nil {
 			return err
 		}
+		if len(drepCredential) > 0 {
+			if drepType > models.DrepTypeScriptHash {
+				return fmt.Errorf(
+					"genesis DRep credential has non-credential type: %d",
+					drepType,
+				)
+			}
+			if err := addDrepDelegator(
+				ctx,
+				db,
+				uint8(drepType),
+				drepCredential,
+				tag,
+				stakeKey,
+				0,
+			); err != nil {
+				return fmt.Errorf("create genesis DRep delegator: %w", err)
+			}
+		}
 		refs = append(refs, models.NewStakeCredentialRef(tag, stakeKey))
 	}
 	return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)

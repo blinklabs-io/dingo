@@ -92,13 +92,13 @@ func (s *Store) ImportDrep(
 				regParams,
 			)
 			if errors.Is(err, sql.ErrNoRows) {
-				return nil
+				return insertImportedDrepDelegators(ctx, db, drep)
 			}
 			if err != nil {
 				return fmt.Errorf("import drep registration: %w", err)
 			}
 			registration.ID = uint(registrationID)
-			return nil
+			return insertImportedDrepDelegators(ctx, db, drep)
 		},
 	)
 }
@@ -110,6 +110,15 @@ func (s *Store) RestoreDrepStateAtSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
+DELETE FROM drep_delegator WHERE added_slot > ?`, slot); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+UPDATE drep_delegator SET removed_slot = NULL
+WHERE removed_slot > ?`, slot); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM drep
 WHERE added_slot > ?
@@ -222,12 +231,8 @@ FROM drep WHERE added_slot > ?`,
 					) > 0 {
 					latest = update
 				}
-				expiry := uint64(0)
-				lastActivity := uint64(0)
-				if registration.position.slot == 0 {
-					expiry = item.expiry
-					lastActivity = item.lastActivity
-				}
+				expiry := item.expiry
+				lastActivity := item.lastActivity
 				if _, err := db.ExecContext(ctx, `
 UPDATE drep
 SET active = ?, anchor_url = ?, anchor_hash = ?, added_slot = ?,
@@ -245,7 +250,7 @@ WHERE credential_tag = ? AND credential = ?`,
 					return err
 				}
 			}
-			return nil
+			return s.restoreDrepExpiryHistory(db, ctx, slot)
 		},
 	)
 }
@@ -613,6 +618,7 @@ func (s *Store) GetDRepVotingPowerByType(
 func (s *Store) UpdateDRepActivity(
 	credentialTag uint8,
 	credential []byte,
+	slot uint64,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
 	txn types.Txn,
@@ -642,11 +648,6 @@ func (s *Store) UpdateDRepActivity(
 		return models.ErrDrepActivityNotUpdated
 	}
 
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	q := s.operationalQueries(db)
 	activity, err := checkedInt64(activityEpoch)
 	if err != nil {
 		return err
@@ -662,18 +663,37 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
-	if _, err := q.UpdateDRepActivity(
-		ctx,
-		sqlitequery.UpdateDRepActivityParams{
-			LastActivityEpoch: validInt64(activity),
-			ExpiryEpoch:       validInt64(expiry),
-			CredentialTag:     int64(credentialTag),
-			Credential:        credential,
-		},
-	); err != nil {
-		return fmt.Errorf("update drep activity: %w", err)
+	if _, err := checkedInt64(slot); err != nil {
+		return err
 	}
-	return nil
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			if err := recordDrepExpiryHistory(
+				ctx,
+				db,
+				credentialTag,
+				credential,
+				slot,
+				s.dialect.Name(),
+			); err != nil {
+				return fmt.Errorf("record DRep activity rollback state: %w", err)
+			}
+			q := s.operationalQueries(db)
+			if _, err := q.UpdateDRepActivity(
+				ctx,
+				sqlitequery.UpdateDRepActivityParams{
+					LastActivityEpoch: validInt64(activity),
+					ExpiryEpoch:       validInt64(expiry),
+					CredentialTag:     int64(credentialTag),
+					Credential:        credential,
+				},
+			); err != nil {
+				return fmt.Errorf("update drep activity: %w", err)
+			}
+			return nil
+		},
+	)
 }
 
 func (s *Store) GetExpiredDReps(
@@ -929,15 +949,15 @@ func (s *Store) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn types.Txn,
 ) (int, error) {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return 0, err
-	}
 	slot, err := checkedInt64(atSlot)
 	if err != nil {
 		return 0, err
 	}
-	result, err := db.ExecContext(ctx, `
+	var affected int64
+	err = s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			result, err := db.ExecContext(ctx, `
 UPDATE account
 SET drep = NULL, drep_type = 0, added_slot = ?
 WHERE drep IS NOT NULL
@@ -948,11 +968,41 @@ WHERE drep IS NOT NULL
         AND drep.credential = account.drep
         AND drep.active = TRUE
   )`, slot)
+			if err != nil {
+				return err
+			}
+			affected, err = result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+UPDATE drep_delegator SET removed_slot = ?
+WHERE removed_slot IS NULL`, slot); err != nil {
+				return fmt.Errorf("close existing DRep delegator links: %w", err)
+			}
+			if _, err := db.ExecContext(ctx, `
+INSERT INTO drep_delegator (
+    drep_credential_tag, drep_credential, stake_credential_tag,
+    stake_credential, added_slot
+)
+SELECT d.credential_tag, d.credential, a.credential_tag, a.staking_key, ?
+FROM account a
+JOIN drep d
+  ON d.credential_tag = a.drep_type
+ AND d.credential = a.drep
+WHERE a.active = TRUE
+  AND a.drep IS NOT NULL
+  AND a.drep_type IN (0, 1)
+  AND d.active = TRUE`, slot); err != nil {
+				return fmt.Errorf("rebuild DRep delegator links from accounts: %w", err)
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		return 0, err
 	}
-	affected, err := result.RowsAffected()
-	return int(affected), err
+	return int(affected), nil
 }
 
 func expandDrepCollectionQuery(query string, count int) string {

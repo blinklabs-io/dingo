@@ -156,6 +156,13 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// initialized during startup.
 	var pparams lcommon.ProtocolParameters
 	var snapshotLoaded bool
+	ls.RLock()
+	currentPParams := ls.currentPParams
+	ls.RUnlock()
+	protocolMajor := uint64(0)
+	if version, err := GetProtocolVersion(currentPParams); err == nil {
+		protocolMajor = uint64(version.Major)
+	}
 	appliedTxs := make([]bool, len(d.Transactions))
 	for i, tr := range d.Transactions {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
@@ -164,6 +171,16 @@ func (d *LedgerDelta) applyWithDonationRecording(
 
 		// Extract protocol parameter updates
 		updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates()
+		if tr.Tx.IsValid() {
+			if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+				tr.Tx,
+				d.Point,
+				ls.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+			}
+		}
 
 		// Calculate certificate deposits
 		certs := tr.Tx.Certificates()
@@ -212,6 +229,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			d.Offsets,
 			txn,
 			database.BatchedTxIngestOpts{
+				ProtocolMajor:                  protocolMajor,
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
 				StrictAppliedInputConservation: d.strictConsumedInputs,
 				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
@@ -415,9 +433,11 @@ func (d *LedgerDelta) processGovernance(
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
 	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
+	hasDRepDeregistrations := governance.HasDRepDeregistrationCertificates(tx)
 
 	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts &&
+		!hasDRepDeregistrations {
 		return nil
 	}
 
@@ -437,20 +457,6 @@ func (d *LedgerDelta) processGovernance(
 		)
 	}
 
-	// Process governance proposals
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.GovActionValidityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance proposals: %w", err)
-		}
-	}
-
 	// Process governance votes
 	if len(votes) > 0 {
 		if err := governance.ProcessVotes(
@@ -468,12 +474,39 @@ func (d *LedgerDelta) processGovernance(
 	if hasDRepActivityCerts {
 		if err := governance.ProcessDRepActivityCertificates(
 			tx,
+			d.Point,
 			currentEpoch,
 			conwayPParams.DRepInactivityPeriod,
+			uint64(conwayPParams.ProtocolVersion.Major),
 			ls.db,
 			txn,
 		); err != nil {
 			return fmt.Errorf("process DRep activity certificates: %w", err)
+		}
+	}
+	// Process proposals after activity certificates, which consume dormant epochs.
+	if len(proposals) > 0 {
+		if err := governance.ProcessProposals(
+			tx,
+			d.Point,
+			currentEpoch,
+			conwayPParams.GovActionValidityPeriod,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process governance proposals: %w", err)
+		}
+	}
+
+	if hasDRepDeregistrations {
+		if err := governance.ProcessDRepDeregistrationEffects(
+			tx,
+			d.Point,
+			currentEpoch,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process DRep deregistration effects: %w", err)
 		}
 	}
 

@@ -286,6 +286,63 @@ func TestDingoStateManagerRestartSurvivesReopen(t *testing.T) {
 	)
 }
 
+func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(t *testing.T) {
+	t.Parallel()
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         common.ProtocolParametersProtocolVersion{Major: 9},
+		GovActionValidityPeriod: 20,
+		DRepInactivityPeriod:    20,
+	}
+	m.protocolParams = pparams
+	m.currentEpoch = 100
+	drepCredential := testHash28(0xd7)
+	require.NoError(t, m.db.SetImportedDormantDRepEpochs(3, nil))
+
+	rewardHash := testHash28(0xd8)
+	rewardAddress, err := common.NewAddressFromBytes(
+		append([]byte{0xE1}, rewardHash[:]...),
+	)
+	require.NoError(t, err)
+	var anchorHash [32]byte
+	copy(anchorHash[:], testHash32(0xd9))
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(common.GovActionTypeInfo),
+			Action: &common.InfoGovAction{Type: uint(common.GovActionTypeInfo)},
+		},
+		PPAnchor: common.GovAnchor{Url: "https://example.com/new", DataHash: anchorHash},
+	}
+	transaction := mockledger.NewTransactionBuilder()
+	transaction.WithId(testHash32(0xda))
+	transaction.WithType(int(conway.EraIdConway))
+	transaction.WithValid(true)
+	transaction.WithCertificates(&common.RegistrationDrepCertificate{
+		CertType: uint(common.CertificateTypeRegistrationDrep),
+		DrepCredential: common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: common.CredentialHash(drepCredential),
+		},
+		Amount: 500,
+	})
+	transaction.WithProposalProcedures(proposal)
+
+	require.NoError(t, m.ApplyTransaction(transaction, 100))
+	drep, err := m.db.GetDrepByCredential(0, drepCredential[:], true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	require.Equal(t, uint64(100), drep.LastActivityEpoch)
+	require.Equal(t, uint64(120), drep.ExpiryEpoch)
+	dormantEpochs, err := m.db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Zero(t, dormantEpochs)
+}
+
 // TestDingoStateManagerRollbackDiscardsWrites proves the audit's rollback
 // acceptance bullet: a write made inside a real database transaction that
 // is rolled back is not visible via a subsequent, fresh (independent) read

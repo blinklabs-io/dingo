@@ -43,6 +43,46 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	assert.Same(t, pparams, out.UpdatedPParams)
 }
 
+func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	credential := testBytes(28, 0x71)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credential,
+		ExpiryEpoch:   20,
+		Active:        true,
+	}))
+
+	processBoundary := func() {
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		_, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    4,
+			NewEpoch:     5,
+			BoundarySlot: 500,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+	}
+
+	processBoundary()
+	processBoundary()
+	drep, err := store.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
 	t.Parallel()
 

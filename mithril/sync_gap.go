@@ -647,6 +647,20 @@ func processGapBlockTransactions(
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
+		protocolMajor := uint64(0)
+		if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
+			protocolMajor = uint64(versioned.ProtocolMajorVersion())
+		}
+		if tx.IsValid() {
+			if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+				tx,
+				point,
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+			}
+		}
 		if err := db.SetGapBlockTransaction(
 			tx,
 			point,
@@ -654,6 +668,7 @@ func processGapBlockTransactions(
 			gapCertDeposits(logger, tx, point, eraId, pparams),
 			offsets,
 			txn,
+			protocolMajor,
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)
 		}
@@ -662,39 +677,63 @@ func processGapBlockTransactions(
 		}
 		hasGovernance := len(tx.ProposalProcedures()) > 0 ||
 			len(tx.VotingProcedures()) > 0
-		if !hasGovernance {
+		hasDRepActivity := governance.HasDRepActivityCertificates(tx)
+		hasDRepDeregistration := governance.HasDRepDeregistrationCertificates(tx)
+		if !hasGovernance && !hasDRepActivity && !hasDRepDeregistration {
 			continue
 		}
-		if conwayPParams == nil {
+		if (hasGovernance || hasDRepActivity) && conwayPParams == nil {
 			return errors.New(
 				"missing Conway protocol parameters for governance gap block processing",
 			)
 		}
-		if err := governance.ProcessProposals(
-			tx,
-			point,
-			epochId,
-			conwayPParams.GovActionValidityPeriod,
-			db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"processing governance proposals: %w",
-				err,
-			)
+		if hasGovernance {
+			if err := governance.ProcessVotes(
+				tx,
+				point,
+				epochId,
+				conwayPParams.DRepInactivityPeriod,
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("processing governance votes: %w", err)
+			}
 		}
-		if err := governance.ProcessVotes(
-			tx,
-			point,
-			epochId,
-			conwayPParams.DRepInactivityPeriod,
-			db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"processing governance votes: %w",
-				err,
-			)
+		if hasDRepActivity {
+			if err := governance.ProcessDRepActivityCertificates(
+				tx,
+				point,
+				epochId,
+				conwayPParams.DRepInactivityPeriod,
+				uint64(conwayPParams.ProtocolVersion.Major),
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("processing DRep activity certificates: %w", err)
+			}
+		}
+		if len(tx.ProposalProcedures()) > 0 {
+			if err := governance.ProcessProposals(
+				tx,
+				point,
+				epochId,
+				conwayPParams.GovActionValidityPeriod,
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("processing governance proposals: %w", err)
+			}
+		}
+		if hasDRepDeregistration {
+			if err := governance.ProcessDRepDeregistrationEffects(
+				tx,
+				point,
+				epochId,
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("processing DRep deregistration effects: %w", err)
+			}
 		}
 	}
 	if err := txn.Commit(); err != nil {

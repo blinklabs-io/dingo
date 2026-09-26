@@ -27,10 +27,14 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -191,6 +195,303 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0xA7}, 28)
+	stakeCredential := bytes.Repeat([]byte{0xC9}, 28)
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+			Credential:    drepCredential,
+			AddedSlot:     900,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				Key: stakeCredential,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  uint8(lcommon.CredentialTypeAddrKeyHash),
+			DrepCredential: drepCredential,
+			AddedSlot:      900,
+			DepositAmount:  types.Uint64(500),
+		},
+		nil,
+	))
+	proposalHash := bytes.Repeat([]byte{0xB8}, 32)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Drep:          drepCredential,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     950,
+		CreatedSlot:   950,
+		Active:        true,
+	}, nil))
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        proposalHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 100,
+		ExpiresEpoch:  120,
+		AddedSlot:     900,
+	}, nil))
+	proposal, err := db.GetGovernanceProposal(proposalHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, proposal)
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          uint8(models.VoterTypeDRep),
+		VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		VoterCredential:    drepCredential,
+		Vote:               uint8(models.VoteYes),
+		AddedSlot:          900,
+	}, nil))
+
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	pparams := mockledger.NewMockConwayProtocolParams()
+
+	point := ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32))
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
+		},
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			point,
+			100,
+			eras.ConwayEraDesc.Id,
+			&pparams,
+			offsets,
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	require.NoError(t, err)
+	require.Empty(t, votes, "backfill must apply DRep deregistration cleanup")
+	account, err := db.GetAccountByCredential(
+		uint8(lcommon.CredentialTypeAddrKeyHash),
+		stakeCredential,
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Nil(t, account.Drep, "backfill must clear deregistered DRep delegations")
+}
+
+func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepOne := bytes.Repeat([]byte{0x71}, lcommon.Blake2b224Size)
+	drepTwo := bytes.Repeat([]byte{0x72}, lcommon.Blake2b224Size)
+	stakeCredential := bytes.Repeat([]byte{0x73}, lcommon.Blake2b224Size)
+	for _, credential := range [][]byte{drepOne, drepTwo} {
+		require.NoError(t, db.CreateDrep(nil, &models.Drep{
+			CredentialTag: 0,
+			Credential:    credential,
+			AddedSlot:     1,
+			Active:        true,
+		}))
+	}
+	delegation := func(id byte, drep []byte) lcommon.Transaction {
+		credentialHash := lcommon.NewBlake2b224(stakeCredential)
+		tx := mockledger.NewTransactionBuilder().WithCertificates(
+			&lcommon.VoteDelegationCertificate{
+				CertType:        uint(lcommon.CertificateTypeVoteDelegation),
+				StakeCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+				Drep:            lcommon.Drep{Type: lcommon.DrepTypeAddrKeyHash, Credential: drep},
+			},
+		)
+		tx.WithId(bytes.Repeat([]byte{id}, lcommon.Blake2b256Size))
+		tx.WithValid(true)
+		return tx
+	}
+	first := delegation(0x74, drepOne)
+	move := delegation(0x75, drepTwo)
+	credentialHash := lcommon.NewBlake2b224(drepOne)
+	deregistration := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.DeregistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	deregistration.WithId(bytes.Repeat([]byte{0x76}, lcommon.Blake2b256Size))
+	deregistration.WithValid(true)
+	txs := []lcommon.Transaction{first, move, deregistration}
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: bytes.Repeat([]byte{0x77}, lcommon.Blake2b256Size),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	txOffsets := make(map[[32]byte]database.CborOffset, len(txs))
+	for i, tx := range txs {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		txOffsets[txHash] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteOffset: uint32(i),
+			ByteLength: 1,
+		}
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	pparams := &babbage.BabbageProtocolParameters{ProtocolMajor: 9}
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(
+			txs,
+			point,
+			100,
+			babbage.EraIdBabbage,
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets:   txOffsets,
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+	account, err := db.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
+}
+
+func TestBackfillResetsDormancyBeforeFreshDRepRegistration(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0x79}, lcommon.Blake2b224Size)
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         lcommon.ProtocolParametersProtocolVersion{Major: 9},
+		DRepDeposit:             500,
+		DRepInactivityPeriod:    20,
+		GovActionValidityPeriod: 20,
+	}
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, bytes.Repeat([]byte{0x7A}, lcommon.Blake2b224Size)...),
+	)
+	require.NoError(t, err)
+	var anchorHash [32]byte
+	copy(anchorHash[:], bytes.Repeat([]byte{0x7B}, lcommon.Blake2b256Size))
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/backfill-dormancy",
+			DataHash: anchorHash,
+		},
+	}
+	credentialHash := lcommon.NewBlake2b224(drepCredential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.RegistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x7C}, lcommon.Blake2b256Size))
+	tx.WithType(gledger.TxTypeConway)
+	tx.WithValid(true)
+	tx.WithProposalProcedures(proposal)
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0x7D}, lcommon.Blake2b256Size),
+	}
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			point,
+			100,
+			uint(conway.EraIdConway),
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets: map[[32]byte]database.CborOffset{
+					txHash: {BlockSlot: point.Slot, BlockHash: blockHash, ByteLength: 1},
+				},
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	assert.Zero(t, dormantEpochs)
 }
 
 func closeTestDB(db *database.Database) error {

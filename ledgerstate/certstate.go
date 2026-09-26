@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 
@@ -62,11 +63,12 @@ func parseCertState3(
 	result := &ParsedCertState{}
 	var warnings []error
 
-	dreps, hotKeys, resignations, err := parseVState(certState[0])
+	dreps, hotKeys, resignations, dormantEpochs, err := parseVState(certState[0])
 	if err != nil {
 		return nil, fmt.Errorf("parsing VState: %w", err)
 	}
 	result.DReps = dreps
+	result.DormantEpochs = dormantEpochs
 	result.CommitteeHotKeys = hotKeys
 	result.CommitteeResignations = resignations
 
@@ -204,7 +206,9 @@ func parseCertStateConway(
 			looksLikeCredentialMap(elem) {
 			dreps, vErr := parseDRepMap(elem)
 			if vErr != nil {
-				warnings = append(warnings, vErr)
+				// A partial DRep map must not reach the non-reconcile import path,
+				// which can otherwise checkpoint CertState with missing DReps.
+				return nil, fmt.Errorf("parsing DRep state: %w", vErr)
 			}
 			result.DReps = dreps
 			drepFound = true
@@ -213,6 +217,18 @@ func parseCertStateConway(
 		}
 	}
 	_ = drepFound
+	if drepIdx >= 0 && drepIdx+2 < len(certState) &&
+		looksLikeFlattenedCommitteeState(certState[drepIdx+1]) &&
+		isCborUnsigned(certState[drepIdx+2]) {
+		dormant, dormantErr := parseDormantEpochCount(certState[drepIdx+2])
+		if dormantErr != nil {
+			return nil, fmt.Errorf("parsing VState dormant epoch count: %w", dormantErr)
+		}
+		result.DormantEpochs = dormant
+		if err := addDormancyToDRepExpiries(result.DReps, dormant); err != nil {
+			return nil, err
+		}
+	}
 
 	// Recover the committee hot-key authorizations and resignations. The
 	// flattened layout inlines the VState fields into the top-level array, so
@@ -297,6 +313,33 @@ func parseCertStateConway(
 	}
 
 	return result, errors.Join(warnings...)
+}
+
+func looksLikeFlattenedCommitteeState(data []byte) bool {
+	if looksLikeCommitteeCredentialMap(data) {
+		return true
+	}
+	if entries, err := decodeMapEntries(data); err == nil && len(entries) == 0 {
+		return true
+	}
+	if !isCborArray(data) {
+		return false
+	}
+	fields, err := decodeRawElements(data)
+	if err != nil || len(fields) < 2 {
+		return false
+	}
+	if !looksLikeCommitteeCredentialMap(fields[0]) {
+		entries, mapErr := decodeMapEntries(fields[0])
+		if mapErr != nil || len(entries) != 0 {
+			return false
+		}
+	}
+	if _, mapErr := decodeMapEntries(fields[1]); mapErr == nil {
+		return true
+	}
+	_, arrayErr := decodeRawArray(fields[1])
+	return arrayErr == nil
 }
 
 // parsePStateConway decodes the Conway-era pool state where
@@ -1661,16 +1704,16 @@ func parsePoolMetadata(
 }
 
 // parseVState decodes the voting/DRep state.
-// VState = [dreps, ccHotKeys, numDormantEpochs, ...]
+// VState = [dreps, committeeState, numDormantEpochs, ...].
 func parseVState(data []byte) (
-	[]ParsedDRep, []ParsedCommitteeHotKey, []Credential, error,
+	[]ParsedDRep, []ParsedCommitteeHotKey, []Credential, uint64, error,
 ) {
 	vs, err := decodeRawElements(data)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("decoding VState: %w", err)
+		return nil, nil, nil, 0, fmt.Errorf("decoding VState: %w", err)
 	}
 	if len(vs) < 1 {
-		return nil, nil, nil, nil
+		return nil, nil, nil, 0, nil
 	}
 
 	// Parse DRep registrations (index 0). Conway's VState stores committee
@@ -1679,12 +1722,64 @@ func parseVState(data []byte) (
 	dreps, warning := parseDRepMap(vs[0])
 	hotKeys, resignations, committeeErr := parseCommitteeVState(vs[1:])
 	if committeeErr != nil {
-		return nil, nil, nil, fmt.Errorf(
+		return nil, nil, nil, 0, fmt.Errorf(
 			"parsing committee state: %w",
 			committeeErr,
 		)
 	}
-	return dreps, hotKeys, resignations, warning
+	var dormant uint64
+	dormantIndex := 2
+	if len(vs) > 3 && !isCborArray(vs[1]) {
+		_, hotKeysErr := decodeMapEntries(vs[1])
+		_, resignationsErr := decodeMapEntries(vs[2])
+		if hotKeysErr == nil && resignationsErr == nil {
+			// Older encodings flatten CommitteeState into ccHotKeys and ccRes.
+			dormantIndex = 3
+		}
+	}
+	if len(vs) > dormantIndex {
+		if !isCborUnsigned(vs[dormantIndex]) {
+			return nil, nil, nil, 0, errors.New(
+				"parsing dormant epoch count: expected unsigned CBOR value",
+			)
+		}
+		dormant, err = parseDormantEpochCount(vs[dormantIndex])
+		if err != nil {
+			return nil, nil, nil, 0, fmt.Errorf("parsing dormant epoch count: %w", err)
+		}
+	}
+	if err := addDormancyToDRepExpiries(dreps, dormant); err != nil {
+		return nil, nil, nil, 0, err
+	}
+	return dreps, hotKeys, resignations, dormant, warning
+}
+
+func parseDormantEpochCount(data []byte) (uint64, error) {
+	var count uint64
+	if _, err := cbor.Decode(data, &count); err != nil {
+		return 0, fmt.Errorf("decode uint: %w", err)
+	}
+	return count, nil
+}
+
+func isCborUnsigned(data []byte) bool {
+	return len(data) > 0 && data[0]>>5 == 0
+}
+
+func addDormancyToDRepExpiries(dreps []ParsedDRep, dormant uint64) error {
+	if dormant == 0 {
+		return nil
+	}
+	for i := range dreps {
+		if dreps[i].ExpiryEpoch == 0 {
+			continue
+		}
+		if dormant > math.MaxUint64-dreps[i].ExpiryEpoch {
+			return fmt.Errorf("DRep %x expiry overflows after dormant epoch adjustment", dreps[i].Credential.Hash)
+		}
+		dreps[i].ExpiryEpoch += dormant
+	}
+	return nil
 }
 
 // looksLikeCommitteeCredentialMap reports whether a map's entries pair a
@@ -1983,6 +2078,29 @@ func parseDRepMap(data []byte) ([]ParsedDRep, error) {
 					state[2], &deposit,
 				); err == nil {
 					drep.Deposit = deposit
+				}
+			}
+			if len(state) > 3 {
+				var rawDelegators []cbor.RawMessage
+				if _, err := cbor.Decode(state[3], &rawDelegators); err != nil {
+					return nil, fmt.Errorf(
+						"decoding DRep delegators for %x: %w",
+						cred.Hash,
+						err,
+					)
+				}
+				drep.Delegators = make([]Credential, 0, len(rawDelegators))
+				for index, rawDelegator := range rawDelegators {
+					delegator, err := parseCredential(rawDelegator)
+					if err != nil {
+						return nil, fmt.Errorf(
+							"decoding DRep delegator %d for %x: %w",
+							index,
+							cred.Hash,
+							err,
+						)
+					}
+					drep.Delegators = append(drep.Delegators, delegator)
 				}
 			}
 		}
