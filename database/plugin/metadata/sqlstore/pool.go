@@ -534,12 +534,14 @@ func (s *Store) GetPool(
 //     GetPoolEarliestVrfKeyHashAtSlot's forward-direction resolution of the
 //     same rule (see electingVrfKeyHashWithCache in ledger/verify_header.go)
 //     -- this is the reverse lookup, given a key, finding the pool.
-//  2. Any pool whose registration THIS epoch (added_slot >= epochStartSlot)
-//     used this key, even if a later same-epoch re-registration superseded
-//     it. psVRFKeyHashes retains every key placed in
-//     psFutureStakePoolParams during the epoch, not only the current
-//     pending value, so a pool cycling A -> B -> C must still be refused a
-//     later same-epoch reuse of B. LedgerView.IsVrfKeyInUse's caller
+//  2. The pool whose LATEST registration this epoch (added_slot >=
+//     epochStartSlot) used this key. psFutureStakePoolParams holds only the
+//     current pending value, not every key a pool cycled through -- a pool
+//     re-registering A -> B -> C within one epoch frees B the moment C
+//     supersedes it, since B was never placed in psStakePools and is no
+//     longer pending. Only the earliest registration in the epoch (A here,
+//     handled by tier 1 as the still-effective key) and the latest pending
+//     one (C) remain reserved. LedgerView.IsVrfKeyInUse's caller
 //     (gouroboros's validatePoolRegistration) already special-cases
 //     "owningPool == cert.Operator" by comparing against PoolCurrentState,
 //     which is not this pool's effective key but its latest registration --
@@ -687,12 +689,31 @@ active_owner AS (
     JOIN pool_active pa ON pa.pool_id = er.pool_id
     WHERE er.vrf_key_hash = ?
 ),
-same_epoch_claimant AS (
-    SELECT DISTINCT pr.pool_id
+-- Only the latest same-epoch registration per pool reserves its key --
+-- an earlier same-epoch registration that a later one has already
+-- superseded is neither this pool's effective key (tier 1 covers that,
+-- resolved before the epoch began) nor its current pending key, so it
+-- must not still claim this candidate the way an unqualified scan over
+-- every same-epoch pool_registration row would.
+latest_same_epoch_registration AS (
+    SELECT pr.pool_id, pr.vrf_key_hash,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
     FROM pool_registration pr
     JOIN candidates cd ON cd.pool_id = pr.pool_id
-    JOIN pool_active pa ON pa.pool_id = pr.pool_id
-    WHERE pr.vrf_key_hash = ? AND pr.added_slot >= ?
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.added_slot >= ?
+),
+same_epoch_claimant AS (
+    SELECT DISTINCT lser.pool_id
+    FROM latest_same_epoch_registration lser
+    JOIN pool_active pa ON pa.pool_id = lser.pool_id
+    WHERE lser.vrf_key_hash = ? AND lser.rn = 1
 )
 SELECT pool_id, 0 AS tier FROM active_owner
 UNION
@@ -702,8 +723,8 @@ ORDER BY tier, pool_id`,
 		slotValue,
 		slotValue,
 		vrfKeyHash,
-		vrfKeyHash,
 		slotValue,
+		vrfKeyHash,
 	)
 	if err != nil {
 		return nil, err

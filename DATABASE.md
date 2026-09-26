@@ -3354,6 +3354,31 @@ gate flag in from config through `governance.ProcessEpoch`'s `EpochInput`.
 API/ledger-view queries, not the epoch-boundary tally) accepts the same
 parameter but its callers always pass `0`.
 
+None of the three queries add an active governance proposal's own deposit to
+its return account's delegated DRep voting power (CIP-1694 counts an active
+proposal's deposit as part of the depositor's active voting stake). Every
+caller that reports DRep voting power makes up that gap itself, in Go, rather
+than in the SQL above: `governance.ActiveProposalDepositDRepPower`
+(`ledger/governance/proposal_deposits.go`) reads
+`GetActiveGovernanceProposals(currentEpoch)`, decodes each deposit-bearing
+proposal's `ReturnAddress` into a stake credential, and batches those
+credentials through `GetAccountsByCredential` to read each one's `drep`/
+`drep_type` delegation and `active`/`expiration_epoch` gates directly, adding
+the deposit onto the delegated DRep's (or `AlwaysNoConfidence`'s) power
+before it is merged with `GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`'s
+results. `ledger/governance.LoadDRepVotingState` (the epoch-boundary
+ratification tally), the Blockfrost adapter's three DRep voting-power call
+sites (`predefinedDRep`, `drepByCredentialTag`, and the `DReps` list handler's
+`fillAmounts`, all in `api/blockfrost/adapter.go`), and `LedgerView.
+GetDRepVotingPower` (the local-state-query path noted above, currently
+unwired to any caller) each call it directly with `expiryEpoch` set the same
+way they already set it for the base query -- `LoadDRepVotingState`'s
+CIP-0163 gate value for the ratification tally, `0` (ungated) for the two
+point-in-time reads -- so every reporting path agrees with what real
+ratification uses instead of only the plain UTxO+reward figure. See
+ARCHITECTURE.md's `LoadDRepVotingState` section
+(blinklabs-io/dingo#4355) for the full rule.
+
 `GetDRepVotingPowerByType`'s inner subquery joins outward from `account`
 to `utxo` with the same join shape as `GetDRepVotingPowerBatch` below, but
 filters on `drep_type` where the batch form filters on `drep`. Its inner
@@ -3682,18 +3707,21 @@ in two tiers, checked in order:
    first-ever registration, submitted mid-epoch, still reserves its key
    against every other pool immediately rather than only from the next
    boundary.
-2. **Same-epoch claimant.** Any pool with *any* registration this epoch
-   (`added_slot >= epochStartSlot`) naming this key, even one since
-   superseded by a later same-epoch re-registration. Consulted only when (1)
-   finds nothing. This tier exists because `psVRFKeyHashes` retains every key
-   a pool ever placed in `psFutureStakePoolParams` during the epoch, not only
-   the current pending one: a pool cycling `A -> B -> C` within one epoch must
-   still be refused a later same-epoch reuse of `B`. `IsVrfKeyInUse`'s caller
-   (gouroboros's `validatePoolRegistration`) special-cases
-   `owningPool == cert.Operator` by comparing against `PoolCurrentState`
-   (the pool's latest registration, `C` here) rather than its effective one;
-   reporting `B` as claimed by that same pool, not free, is what lets that
-   comparison catch the reuse.
+2. **Same-epoch claimant.** The pool whose *latest* registration this epoch
+   (`added_slot >= epochStartSlot`) names this key (`latest_same_epoch_registration`,
+   ranked the same way as `pre_boundary`). Consulted only when (1) finds
+   nothing. Only the current pending value in `psFutureStakePoolParams`
+   reserves a key this way; a key a pool cycled through and then superseded
+   within the same epoch (`A -> B -> C`) is freed the moment the later
+   registration supersedes it, since it was never placed in `psStakePools`
+   and is no longer pending (`B` here becomes free once `C` supersedes it;
+   dingo#4466 -- an earlier version of this method treated every same-epoch
+   registration as still-claimed, refusing a legitimate reuse of `B`).
+   `IsVrfKeyInUse`'s caller (gouroboros's `validatePoolRegistration`)
+   special-cases `owningPool == cert.Operator` by comparing against
+   `PoolCurrentState` (the pool's latest registration); this tier's
+   latest-only ranking is what keeps that comparison and this lookup
+   agreeing on which key is actually still pending.
 
 Both candidate sets are pre-filtered to pool IDs with *any* historical
 `pool_registration` row naming the queried key, so the query only walks a

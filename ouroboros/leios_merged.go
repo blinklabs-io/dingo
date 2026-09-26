@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -395,7 +396,7 @@ func validateLeiosEndorserBlockTxs(
 	manifestRaw []byte,
 	txsRaw []cbor.RawMessage,
 ) error {
-	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	block, err := decodeLeiosEndorserBlock(manifestRaw)
 	if err != nil {
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
@@ -421,6 +422,13 @@ func validateLeiosEndorserBlockTxs(
 	return nil
 }
 
+// validateLeiosEndorserBlockTx checks one peer-delivered endorser transaction
+// against its manifest reference. Both envelope decodes read leios-fetch bytes
+// and go through safedecode.Cbor, so a decoder panic is reported as the
+// decode failure this function already returns rather than unwinding into the
+// Leios protocol worker. The function is a pure predicate over (ref, raw) --
+// it decodes into locals, hashes, and compares -- so containing a panic here
+// cannot leave shared state half-updated.
 func validateLeiosEndorserBlockTx(
 	index int,
 	ref lcommon.LeiosTransactionReference,
@@ -450,8 +458,7 @@ func validateLeiosEndorserBlockTx(
 func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
 	txCbor := []byte(raw)
 	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
-		var inner []byte
-		bytesRead, err := cbor.Decode(txCbor, &inner)
+		inner, bytesRead, err := safedecode.Cbor[[]byte](txCbor)
 		if err != nil {
 			return nil, fmt.Errorf("unwrap byte-string transaction: %w", err)
 		}
@@ -460,8 +467,7 @@ func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
 		}
 		txCbor = inner
 	}
-	var txElems []cbor.RawMessage
-	bytesRead, err := cbor.Decode(txCbor, &txElems)
+	txElems, bytesRead, err := safedecode.Cbor[[]cbor.RawMessage](txCbor)
 	if err != nil {
 		return nil, fmt.Errorf("decode transaction envelope: %w", err)
 	}
@@ -478,7 +484,7 @@ func leiosEndorserBlockTxValidator(
 	manifestRaw []byte,
 	txCount int,
 ) (func(int, cbor.RawMessage) error, error) {
-	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	block, err := decodeLeiosEndorserBlock(manifestRaw)
 	if err != nil {
 		return nil, fmt.Errorf("decode leios endorser block: %w", err)
 	}
@@ -561,7 +567,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	o.leiosAnnouncementsMu.Lock()
 	verified := origin == leiosStoreAuthoritative ||
 		o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
-	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
+	// leiosAnnouncementsMu is released by explicit Unlock calls on this path,
+	// not by a defer, so this decode must fail by returning rather than by
+	// unwinding: a panic here would leave the lock held for the life of the
+	// process. As an error it takes the branch below, which unlocks.
+	block, err := decodeLeiosEndorserBlock(blockRaw)
 	if err != nil {
 		o.leiosAnnouncementsMu.Unlock()
 		return fmt.Errorf("decode leios endorser block: %w", err)
@@ -1401,7 +1411,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		}
 		return nil, false
 	}
-	block, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
+	block, err := decodeLeiosEndorserBlock(manifestRaw)
 	if err != nil {
 		o.config.Logger.Debug(
 			"failed to decode leios EB manifest loaded from blob store",
@@ -1586,7 +1596,7 @@ func (o *Ouroboros) EndorserBlockTxHashesByHash(
 	if !ok || !data.completeTxCache() || !data.slotVerified {
 		return nil, false
 	}
-	block, err := lcommon.NewLeiosEndorserBlockFromCbor(data.blockRaw)
+	block, err := decodeLeiosEndorserBlock(data.blockRaw)
 	if err != nil {
 		return nil, false
 	}
@@ -1605,12 +1615,20 @@ func (o *Ouroboros) EndorserBlockTxHashesByHash(
 func leiosAnnouncementFromBlockCbor(
 	blockCbor []byte,
 ) (lcommon.Blake2b256, bool) {
-	var top []cbor.RawMessage
-	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
+	top, err := safedecode.Guard(func() ([]cbor.RawMessage, error) {
+		var top []cbor.RawMessage
+		_, err := cbor.Decode(blockCbor, &top)
+		return top, err
+	})
+	if err != nil || len(top) == 0 {
 		return lcommon.Blake2b256{}, false
 	}
-	var header gdijkstra.DijkstraBlockHeader
-	if _, err := cbor.Decode(top[0], &header); err != nil {
+	header, err := safedecode.Guard(func() (gdijkstra.DijkstraBlockHeader, error) {
+		var header gdijkstra.DijkstraBlockHeader
+		_, err := cbor.Decode(top[0], &header)
+		return header, err
+	})
+	if err != nil {
 		return lcommon.Blake2b256{}, false
 	}
 	ebHash, _, ok := header.LeiosAnnouncement()
@@ -1641,12 +1659,20 @@ func leiosAnnouncementFromBlockCbor(
 func (o *Ouroboros) certifiedEndorserBlockHash(
 	blockCbor []byte,
 ) (ebHash lcommon.Blake2b256, ebSlot uint64, certified bool, resolved bool) {
-	var top []cbor.RawMessage
-	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
+	top, err := safedecode.Guard(func() ([]cbor.RawMessage, error) {
+		var top []cbor.RawMessage
+		_, err := cbor.Decode(blockCbor, &top)
+		return top, err
+	})
+	if err != nil || len(top) == 0 {
 		return lcommon.Blake2b256{}, 0, false, false
 	}
-	var header gdijkstra.DijkstraBlockHeader
-	if _, err := cbor.Decode(top[0], &header); err != nil {
+	header, err := safedecode.Guard(func() (gdijkstra.DijkstraBlockHeader, error) {
+		var header gdijkstra.DijkstraBlockHeader
+		_, err := cbor.Decode(top[0], &header)
+		return header, err
+	})
+	if err != nil {
 		return lcommon.Blake2b256{}, 0, false, false
 	}
 	if cert, present := header.LeiosCertified(); !present || !cert {
