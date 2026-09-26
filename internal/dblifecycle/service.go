@@ -267,6 +267,7 @@ func (s *Service) RestoreStorageConfig() lifecycle.RestoreStorageConfig {
 	return lifecycle.RestoreStorageConfig{
 		Blob:     s.cfg.Plugins.Storage.Blob.Config,
 		Metadata: s.cfg.Plugins.Storage.Metadata.Config,
+		Logger:   s.logger,
 		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 			nil, s.cfg.CardanoConfig, s.cfg.Network,
 		),

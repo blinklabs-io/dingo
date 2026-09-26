@@ -350,6 +350,7 @@ func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
 // and clears the pending marker.
 type DeferredIndexRebuilder struct {
 	manager metadata.DeferredIndexManager
+	logger  *slog.Logger
 }
 
 func (r *DeferredIndexRebuilder) BuildCritical() error {
@@ -366,7 +367,11 @@ func (r *DeferredIndexRebuilder) BuildAll() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	if err := r.manager.BuildDeferredIndexes(); err != nil {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if err := ensureAllDeferredIndexes(r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding deferred indexes: %w", err)
 	}
 	return nil
@@ -396,9 +401,9 @@ func WithDeferredIndexes(
 				"continuing and repairing during rebuild phases",
 			"error", err,
 		)
-		return &DeferredIndexRebuilder{manager: manager}
+		return &DeferredIndexRebuilder{manager: manager, logger: logger}
 	}
-	return &DeferredIndexRebuilder{manager: manager}
+	return &DeferredIndexRebuilder{manager: manager, logger: logger}
 }
 
 // criticalIndexRebuildLogThreshold is how long the critical-index check
@@ -476,6 +481,69 @@ func ensureCriticalDeferredIndexes(
 	return nil
 }
 
+// ensureAllDeferredIndexes rebuilds the complete manifest, naming the entries
+// it is about to build and reporting how long the build took.
+//
+// BuildDeferredIndexes is as silent as BuildCriticalDeferredIndexes and has
+// the whole manifest to get through, so without this an operator watching a
+// restored database start up sees the critical announcement, then nothing at
+// all for however long the remaining entries take on a multi-million-row
+// table.
+func ensureAllDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	missing, listed := missingDeferredIndexes(manager, logger)
+	if listed && len(missing) > 0 {
+		logger.Info(
+			"rebuilding missing deferred metadata indexes",
+			"indexes", strings.Join(missing, ","),
+			"count", len(missing),
+		)
+	}
+	start := time.Now()
+	if err := manager.BuildDeferredIndexes(); err != nil {
+		return err
+	}
+	elapsed := time.Since(start)
+	if (listed && len(missing) > 0) ||
+		elapsed >= criticalIndexRebuildLogThreshold {
+		attrs := []any{"duration", elapsed}
+		if listed {
+			indexes := "none"
+			if len(missing) > 0 {
+				indexes = strings.Join(missing, ",")
+			}
+			attrs = append(attrs, "deferred_indexes_built", indexes)
+		}
+		logger.Info("deferred metadata index check complete", attrs...)
+	}
+	return nil
+}
+
+// missingDeferredIndexes names the manifest entries absent from the schema.
+// The second return reports whether the store could answer, on the same terms
+// as missingCriticalDeferredIndexes.
+func missingDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) ([]string, bool) {
+	lister, ok := manager.(metadata.MissingDeferredIndexLister)
+	if !ok {
+		return nil, false
+	}
+	missing, err := lister.MissingDeferredIndexes()
+	if err != nil {
+		logger.Warn(
+			"could not list missing deferred metadata indexes; "+
+				"rebuilding without naming them",
+			"error", err,
+		)
+		return nil, false
+	}
+	return missing, true
+}
+
 // missingCriticalDeferredIndexes names the critical manifest entries absent
 // from the schema. The second return reports whether the store could answer:
 // stores that do not implement the lister, and read errors on the catalog
@@ -501,10 +569,10 @@ func missingCriticalDeferredIndexes(
 	return missing, true
 }
 
-// RepairCriticalDeferredIndexes rebuilds the API/rollback-critical
-// subset, and reports when a prior run left deferred indexes pending. It
-// leaves the pending marker in place so RepairDeferredIndexes can finish
-// the lazy remainder later.
+// RepairCriticalDeferredIndexes rebuilds the full manifest when no bulk-load
+// cycle is pending. During a pending cycle, it preserves that marker and
+// rebuilds only the API/rollback-critical subset so RepairDeferredIndexes can
+// finish the lazy remainder later.
 func RepairCriticalDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -522,8 +590,15 @@ func RepairCriticalDeferredIndexes(
 			"critical deferred metadata indexes pending from a prior run; " +
 				"rebuilding before serving API traffic",
 		)
+		return ensureCriticalDeferredIndexes(manager, logger)
 	}
-	return ensureCriticalDeferredIndexes(manager, logger)
+	// A clear marker means no bulk-load cycle is active. Restore copies can
+	// still be missing any manifest entry because their recorded migrations do
+	// not re-run, so finish the whole manifest before accepting traffic.
+	if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+		return err
+	}
+	return ensureAllDeferredIndexes(manager, logger)
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
@@ -531,9 +606,8 @@ func RepairCriticalDeferredIndexes(
 // when no rebuild is outstanding: BuildDeferredIndexes is itself
 // idempotent and clears the marker.
 //
-// With no cycle outstanding it still restores any missing critical index,
-// because the rollback path the node is about to run depends on those and
-// the marker cannot answer whether they exist.
+// With no cycle outstanding it restores the complete manifest because a
+// restored database can have recorded migrations but missing index entries.
 func RepairDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -547,13 +621,19 @@ func RepairDeferredIndexes(
 		return err
 	}
 	if !pending {
-		return ensureCriticalDeferredIndexes(manager, logger)
+		// A restore can carry missing deferred indexes without the pending
+		// marker. Rebuild the complete manifest before any rollback or query
+		// runs; BuildDeferredIndexes is idempotent on a healthy database.
+		if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+			return err
+		}
+		return ensureAllDeferredIndexes(manager, logger)
 	}
 	logger.Warn(
 		"deferred metadata indexes pending from a prior run; " +
 			"rebuilding before continuing",
 	)
-	return manager.BuildDeferredIndexes()
+	return ensureAllDeferredIndexes(manager, logger)
 }
 
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,

@@ -20,9 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -127,6 +130,11 @@ func syncDirTree(root string) error {
 type RestoreStorageConfig struct {
 	Blob     map[string]any
 	Metadata map[string]any
+	// Logger, when set, receives the restore's deferred-index repair
+	// progress. A full manifest rebuild on a multi-million-row table takes
+	// minutes and is otherwise silent. Nil disables that reporting; nothing
+	// else in this package logs.
+	Logger *slog.Logger
 	// AlonzoLovelacePerUtxoWord is passed through to the validating open's
 	// database.Config. It is here rather than derived because this package
 	// sits under the database import boundary and cannot read a
@@ -1108,11 +1116,87 @@ func restoreBlobStore(
 	return nil
 }
 
+// rebuildRestoredDeferredIndexes repairs the staged metadata copy's deferred
+// indexes before the restore activates it.
+//
+// The build runs on ctx where the store supports it
+// (metadata.ContextDeferredIndexBuilder): a restore is cancellable, and an
+// uninterruptible rebuild would outlive the cancellation by however long the
+// largest index takes. It is still a staging-directory operation either way,
+// so targetDataDir is untouched whichever path runs.
+func rebuildRestoredDeferredIndexes(
+	ctx context.Context,
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	var missing []string
+	var listErr error
+	if lister, ok := manager.(metadata.ContextMissingDeferredIndexLister); ok {
+		missing, listErr = lister.MissingDeferredIndexesContext(ctx)
+	} else if lister, ok := manager.(metadata.MissingDeferredIndexLister); ok {
+		missing, listErr = lister.MissingDeferredIndexes()
+	}
+	if listErr != nil {
+		logger.Warn(
+			"could not list missing deferred metadata indexes in the "+
+				"restored database; rebuilding without naming them",
+			"error", listErr,
+		)
+	} else if len(missing) > 0 {
+		logger.Info(
+			"rebuilding missing deferred metadata indexes in the "+
+				"restored database",
+			"indexes", strings.Join(missing, ","),
+			"count", len(missing),
+		)
+	}
+	start := time.Now()
+	var err error
+	if builder, ok := manager.(metadata.DeferredIndexProgressBuilder); ok {
+		err = builder.BuildDeferredIndexesContextWithProgress(
+			ctx,
+			func(index string) {
+				logger.Info("building deferred metadata index", "index", index)
+			},
+			func(index string, elapsed time.Duration) {
+				logger.Info(
+					"deferred metadata index ready",
+					"index", index,
+					"duration", elapsed,
+				)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("restore deferred metadata indexes: %w", err)
+		}
+		logger.Info(
+			"deferred metadata index repair complete in the restored database",
+			"duration", time.Since(start),
+		)
+		return nil
+	}
+	if builder, ok := manager.(metadata.ContextDeferredIndexBuilder); ok {
+		err = builder.BuildDeferredIndexesContext(ctx)
+	} else {
+		err = manager.BuildDeferredIndexes()
+	}
+	if err != nil {
+		return fmt.Errorf("restore deferred metadata indexes: %w", err)
+	}
+	logger.Info(
+		"deferred metadata index repair complete in the restored database",
+		"duration", time.Since(start),
+	)
+	return nil
+}
+
 // validateRestoredDatabase opens the restored store the same way a normal
 // dingo startup would, letting database.New's own CheckNodeSettings and
-// checkCommitTimestamp checks validate internal consistency, then
-// additionally confirms the restored tip matches what the manifest
-// recorded before closing it again.
+// checkCommitTimestamp checks validate internal consistency, then confirms
+// the restored tip matches what the manifest recorded before closing it.
 func validateRestoredDatabase(
 	ctx context.Context,
 	host *plugin.Host,
@@ -1159,7 +1243,15 @@ func validateRestoredDatabase(
 	defer host.StopCapability( //nolint:errcheck
 		context.WithoutCancel(ctx), plugin.CapabilityStorageMetadata,
 	)
-
+	if manager, ok := metadataStore.(metadata.DeferredIndexManager); ok {
+		if err := rebuildRestoredDeferredIndexes(
+			ctx,
+			manager,
+			storageConfig.Logger,
+		); err != nil {
+			return err
+		}
+	}
 	db, err := database.New(&database.Config{
 		DataDir:                   targetDataDir,
 		StorageMode:               manifest.StorageMode,
