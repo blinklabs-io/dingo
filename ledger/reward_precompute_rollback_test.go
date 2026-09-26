@@ -82,8 +82,8 @@ func TestRollbackRequeuesRewardPrecompute(t *testing.T) {
 				cutoffSlot: 100,
 			}
 
-			require.NoError(t, ls.rollbackWithOptions(
-				fixture.ancestorTip.Point, false, false,
+			require.NoError(t, ls.rollbackWithBlocks(
+				fixture.ancestorTip.Point, nil, false,
 			))
 
 			require.Zero(t, ls.rewardInputRollbackActive.Load())
@@ -137,7 +137,7 @@ func TestRollbackTransactionFailureRestoresRewardPrecompute(t *testing.T) {
 	transactionErr := errors.New("injected rollback transaction failure")
 	failLedgerRollbackAfterChainTruncation(t, ls, transactionErr)
 
-	err = ls.rollbackWithOptions(fixture.ancestorTip.Point, false, false)
+	err = ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false)
 
 	require.ErrorIs(t, err, transactionErr)
 	ls.rewardPrecomputeMu.Lock()
@@ -207,8 +207,8 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			}
 			require.NoError(t, db.SetTip(ls.currentTip, nil))
 
-			require.NoError(t, ls.rollbackWithOptions(
-				ocommon.NewPoint(ancestor.Slot, ancestor.Hash), false, false,
+			require.NoError(t, ls.rollbackWithBlocks(
+				ocommon.NewPoint(ancestor.Slot, ancestor.Hash), nil, false,
 			))
 			ls.rewardPrecomputeWG.Wait()
 
@@ -284,7 +284,7 @@ func TestRollbackDoesNotRestartRewardsWithoutRestoredState(t *testing.T) {
 				point = fixture.currentTip.Point
 			}
 
-			err := ls.rollbackWithOptions(point, false, false)
+			err := ls.rollbackWithBlocks(point, nil, false)
 			if noop {
 				require.NoError(t, err)
 				require.Same(t, pending, ls.rewardPrecomputePending)

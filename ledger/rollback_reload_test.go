@@ -161,6 +161,49 @@ func TestRollbackWithResyncSucceedsWithoutFatalWhenReloadWorks(t *testing.T) {
 	)
 }
 
+func TestRollbackWithResyncFailsFastWhenDurableFloorReadFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	floorErr := errors.New("injected durable tip floor failure")
+	base := ls.db
+	failing, err := database.New(
+		base.Config(),
+		database.Stores{
+			Blob: base.Blob(),
+			Metadata: floorLookupFailingMetadataStore{
+				MetadataStore: base.Metadata(),
+				err:           floorErr,
+			},
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, failing.Close()) })
+	ls.db = failing
+
+	var fatalErrs []error
+	ls.config.FatalErrorFunc = func(err error) {
+		fatalErrs = append(fatalErrs, err)
+	}
+
+	rbErr := ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false)
+
+	var committedErr *rollbackCommittedError
+	require.ErrorAs(t, rbErr, &committedErr)
+	require.ErrorIs(t, rbErr, floorErr)
+	require.Len(
+		t,
+		fatalErrs,
+		1,
+		"a durable-floor read failure after commit must invoke FatalErrorFunc",
+	)
+	require.ErrorIs(t, fatalErrs[0], floorErr)
+	require.Equal(t, fixture.ancestorTip.Point, ls.currentTip.Point)
+}
+
 // epochsOverrideMetadataStore returns a fixed epoch list from the
 // transaction-less GetEpochs read rollbackWithBlocks performs after its
 // metadata transaction commits, so a test can steer that reload into a
