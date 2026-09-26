@@ -6,6 +6,7 @@ name: publish
 #
 #   lint, govulncheck                     2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
+#        go-test (nested modules)         1 runner,  ~1 min
 #       -> go-test (Linux)
 #          go-test (Linux, race)
 #          go-test (macOS)               3 runners, 5-35 min
@@ -13,6 +14,9 @@ name: publish
 #         -> build-<os>, build-images    gated on the SAME OS's tests
 #           -> build-image-manifest
 #             -> finalize-release        tag only
+#
+# go-test (nested modules) fails the run but gates no publishing job: the
+# Antithesis harness ships in no release artifact.
 #
 # A push to main runs this workflow and nothing else: go-test.yml is
 # pull-request only. Previously a merge started go-test.yml's five jobs and
@@ -167,6 +171,37 @@ jobs:
         run: make sql-check
       - name: go-test
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+
+  # Stage 2, alongside go-test (Linux, quick). The root module's `./...` does
+  # not descend into a nested go.mod, so internal/test/antithesis needs a run
+  # of its own. See go-test.yml's copy for the rest.
+  #
+  # It deliberately does not gate create-draft-release: the harness ships in
+  # no release artifact.
+  go-test-modules:
+    name: go-test (nested modules)
+    needs: [lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-modules-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-modules-1.26.x-
+      - name: go-test (internal/test/antithesis)
+        working-directory: internal/test/antithesis
+        run: go test -race -timeout 10m ./...
 
   # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services. Keeps
   # the real PostgreSQL, MySQL and S3 coverage that the release gate has

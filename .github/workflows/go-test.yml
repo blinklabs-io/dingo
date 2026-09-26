@@ -8,10 +8,14 @@ name: ci
 #
 #   lint, govulncheck                     2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
+#        go-test (nested modules)         1 runner,  ~1 min
 #       -> go-test (Linux)                    services, no race
 #          go-test (Linux, race)              race, no services
 #          go-test (macOS)               3 runners, 5-35 min
 #         -> build-<os>, docker          gated on the SAME OS's tests
+#
+# go-test (nested modules) needs lint and gates nothing: the Antithesis
+# harness ships in no binary and no image.
 #
 # Nothing fans out until lint and the cheap Linux suite are green, and a
 # platform's build never starts until that platform's tests pass. A failure in
@@ -198,6 +202,48 @@ jobs:
         # friends and t.Skip when unset, so this replays vectors against SQLite
         # only. go-test (Linux) and go-test (Linux, race) below cover the rest.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+
+  # Stage 2, alongside go-test (Linux, quick). internal/test/antithesis has
+  # its own go.mod, so the root module's `./...` never descends into it -- it
+  # fails outright with "directory prefix ... does not contain main module"
+  # -- and every suite in this pipeline was blind to its three test packages
+  # while golangci-lint covered them. #3497 was the same gap for lint and
+  # #3572 closed it there; this closes it for go test.
+  #
+  # The module runs in well under a minute, so this is one extra runner
+  # briefly rather than another platform-sized job, and it gates nothing: the
+  # harness ships in no artifact.
+  #
+  # -race because go-test (Linux, race) covers the root module only, and
+  # txpump drives concurrent submitters against a live node.
+  #
+  # internal/docsparity's TestGoTestCoversEveryGoModule derives the module
+  # list from the tree and fails until every non-example go.mod has a step
+  # here, in both pipelines.
+  go-test-modules:
+    name: go-test (nested modules)
+    needs: [lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-modules-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-modules-1.26.x-
+      - name: go-test (internal/test/antithesis)
+        working-directory: internal/test/antithesis
+        run: go test -race -timeout 10m ./...
 
   # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services.
   #
