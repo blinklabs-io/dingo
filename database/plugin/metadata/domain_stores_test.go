@@ -95,6 +95,7 @@ var governanceStoreMethods = []string{
 	"GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
 	"UpdateDRepActivity",
+	"RecordDRepActivityEpoch",
 	"GetExpiredDReps",
 	"RestoreDrepStateAtSlot",
 
