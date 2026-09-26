@@ -88,6 +88,7 @@ type TallyContext struct {
 // counts in the denominator only while its cold credential is seated, its term
 // is current, and it has an active hot-key authorization.
 type CommitteeVotingState struct {
+	CommitteePresent      bool
 	ActiveMemberCount     int
 	MemberHotCredentials  []string
 	HotCredentialPresence map[string]struct{}
@@ -162,6 +163,7 @@ func LoadCommitteeVotingState(
 	}
 
 	return &CommitteeVotingState{
+		CommitteePresent:      len(members) > 0,
 		ActiveMemberCount:     len(memberHotCredentials),
 		MemberHotCredentials:  memberHotCredentials,
 		HotCredentialPresence: hotCredentialPresence,

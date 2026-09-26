@@ -202,13 +202,16 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 					err,
 				)
 			}
-			// The first recovery at this tip may still need to repair metadata
-			// the rejected block left above it; a repeat of the same failure at
-			// the same tip reuses what that repair restored.
-			if err := ls.rollbackWithOptions(
+			// The chain prune alone leaves the ledger reflecting the rejected
+			// block's post-apply state; the matching ledger rollback has to be
+			// explicit, for the same reason it is on the transaction-validation
+			// path. The first recovery at this tip may still need to repair
+			// metadata the rejected block left above it; a repeat of the same
+			// failure at the same tip reuses what that repair restored.
+			if err := ls.rollbackWithBlocks(
 				rewindPoint,
+				nil,
 				!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
-				true,
 			); err != nil {
 				return fmt.Errorf(
 					"rollback ledger state after header validation failure: %w",

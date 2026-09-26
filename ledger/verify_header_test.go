@@ -998,7 +998,7 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 432 }
 	}`
-	err := cfg.LoadByronGenesisFromReader(
+	err := loadByronGenesisForTest(t, cfg,
 		strings.NewReader(byronGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1645,7 +1645,7 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
@@ -1695,7 +1695,7 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
@@ -2400,9 +2400,59 @@ func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
 		BlockIndex:          0,
 		CertIndex:           0,
 	})
+	genesisKeyHash := lcommon.Blake2b224{}
+	copy(genesisKeyHash[:], bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size))
+	view := &LedgerView{ls: ls}
+	delegates, err := view.GenesisDelegateKeyHashes(5)
+	require.NoError(t, err)
+	require.Equal(t, []lcommon.Blake2b224{delegateHash}, delegates)
+	activeDelegate, found, err := view.GenesisDelegateForGenesisKey(
+		genesisKeyHash,
+		5,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, delegateHash, activeDelegate)
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.NoError(t, err)
+}
+
+func TestProtocolParameterUpdateWindowUsesShelleyStabilityWindow(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{}
+	genesisConfig := newGenesisDelegateShelleyGenesisCfg(
+		t,
+		strings.Repeat("aa", lcommon.Blake2b224Size),
+		strings.Repeat("bb", lcommon.Blake2b256Size),
+	)
+	shelleyGenesis := genesisConfig.ShelleyGenesis()
+	shelleyGenesis.SecurityParam = 1
+	shelleyGenesis.ActiveSlotsCoeff = cbor.Rat{Rat: big.NewRat(1, 5)}
+	ls.config.CardanoNodeConfig = genesisConfig
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{{
+			EpochId:       4,
+			StartSlot:     500,
+			LengthInSlots: 100,
+		}},
+	})
+
+	for _, tc := range []struct {
+		name     string
+		slot     uint64
+		noReturn uint64
+	}{
+		{name: "before boundary", slot: 569, noReturn: 570},
+		{name: "at boundary", slot: 570, noReturn: 570},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			epoch, noReturn, err := (&LedgerView{ls: ls}).ProtocolParameterUpdateWindow(tc.slot)
+			require.NoError(t, err)
+			require.Equal(t, uint64(4), epoch)
+			require.Equal(t, tc.noReturn, noReturn)
+		})
+	}
 }
 
 // seedPoolStakeSnapshot inserts a pool stake snapshot using the store interface.

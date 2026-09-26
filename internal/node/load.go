@@ -1020,6 +1020,11 @@ func copyBlocksDirect(
 				"decoding block CBOR: %w", err,
 			)
 		}
+		if len(blockBatch) == 0 {
+			return blocksCopied, immutableTip.Slot, errors.New(
+				"decoding block CBOR: non-empty batch decoded to no blocks",
+			)
+		}
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
