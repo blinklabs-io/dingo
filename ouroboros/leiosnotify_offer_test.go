@@ -64,6 +64,23 @@ func TestLeiosForgedEBOfferSetsVotesOfferType(t *testing.T) {
 	require.Equal(t, []lcommon.LeiosPrototypeVote{vote}, offer.PrototypeVotes)
 }
 
+func TestLeiosNotifyVoteOfferHasIndependentWorkLimit(t *testing.T) {
+	t.Parallel()
+
+	valid := &oleiosnotify.MsgVotesOffer{
+		FullVotes: make([]lcommon.LeiosVote, leiosNotifyMaxVoteVerificationsPerOffer),
+	}
+	require.NoError(t, validateLeiosNotifyVoteOffer(valid))
+
+	oversized := &oleiosnotify.MsgVotesOffer{
+		PrototypeVotes: make(
+			[]lcommon.LeiosPrototypeVote,
+			leiosNotifyMaxVoteVerificationsPerOffer+1,
+		),
+	}
+	require.ErrorContains(t, validateLeiosNotifyVoteOffer(oversized), "maximum is 64")
+}
+
 // An empty entry yields no offer.
 func TestLeiosForgedEBOfferEmptyEntryNil(t *testing.T) {
 	t.Parallel()

@@ -34,7 +34,7 @@ func TestNtCAdmissionSlotReleasedBeforeCloseCallback(t *testing.T) {
 		},
 	})
 	conn := newUnstartedConnection(t)
-	release := manager.reserveNtCSlot(nil)
+	release := manager.reserveNtCSlot(nil, false)
 	require.NotNil(t, release)
 	require.True(
 		t,
@@ -139,6 +139,32 @@ func requireNtCAdmissionRejected(t *testing.T, listener net.Listener) {
 		io.EOF,
 		"over-limit NtC connection must close before handshake",
 	)
+}
+
+func TestTrustedLocalNtCAdmissionIsIsolatedFromRemotePeers(t *testing.T) {
+	t.Parallel()
+	manager := NewConnectionManager(ConnectionManagerConfig{
+		MaxNtCConns:             1,
+		MaxNtCConnectionsPerIP:  1,
+		MaxTrustedLocalNtCConns: 2,
+	})
+	remote := &net.TCPAddr{IP: net.ParseIP("198.51.100.10"), Port: 3002}
+	firstLocal := manager.reserveNtCSlot(nil, true)
+	secondLocal := manager.reserveNtCSlot(nil, true)
+	require.NotNil(t, firstLocal)
+	require.NotNil(t, secondLocal)
+	require.Nil(t, manager.reserveNtCSlot(nil, true), "local cap must remain bounded")
+	remoteSlot := manager.reserveNtCSlot(remote, false)
+	require.NotNil(t, remoteSlot, "local clients must not consume the remote quota")
+	require.Nil(t, manager.reserveNtCSlot(&net.TCPAddr{IP: net.ParseIP("203.0.113.3"), Port: 3003}, false),
+		"the remote quota must still be enforced")
+	require.Equal(t, 1, manager.ntcCount)
+	require.Equal(t, 2, manager.trustedLocalNtCCount)
+	remoteSlot()
+	firstLocal()
+	secondLocal()
+	require.Zero(t, manager.ntcCount)
+	require.Zero(t, manager.trustedLocalNtCCount)
 }
 
 func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
@@ -266,7 +292,7 @@ func TestNtCAdmissionConcurrentReservations(t *testing.T) {
 					address[testCase.addressByte] = byte(index)
 					release := manager.reserveNtCSlot(&net.TCPAddr{
 						IP: address, Port: index + 1000,
-					})
+					}, false)
 					if release != nil {
 						accepted.Add(1)
 						releases <- release

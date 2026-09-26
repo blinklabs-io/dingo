@@ -160,11 +160,51 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 	}
 	assert.Zero(t, decodedHeaders)
 	assert.Equal(t, retainedBytes, history.retainedBytes)
+	assert.Equal(t, retainedBytes, fixture.ls.peerHeaderHistoryBytes)
 	assert.LessOrEqual(
 		t,
 		history.retainedBytes,
 		maxPeerHeaderHistoryBytesPerConn,
 	)
+}
+
+func TestPeerHeaderHistoryGlobalBudgetRetiresOldestPeerDeterministically(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
+	const retainedPerRecord = 32 << 10
+	for peer := range 4 {
+		key := fmt.Sprintf("peer-%d", peer)
+		history := &peerHeaderChain{
+			order:  make([]string, 0, minPeerHeaderHistoryRecords),
+			byHash: make(map[string]peerHeaderRecord, minPeerHeaderHistoryRecords),
+		}
+		for idx := range minPeerHeaderHistoryRecords {
+			hash := fmt.Sprintf("%s-header-%d", key, idx)
+			ls.peerHeaderHistorySequence++
+			record := peerHeaderRecord{
+				bytes:    retainedPerRecord,
+				sequence: ls.peerHeaderHistorySequence,
+			}
+			history.order = append(history.order, hash)
+			history.byHash[hash] = record
+			history.retainedBytes += record.bytes
+			ls.peerHeaderHistoryBytes += record.bytes
+		}
+		ls.peerHeaderHistory[key] = history
+	}
+	require.Equal(t, maxPeerHeaderHistoryBytesTotal, ls.peerHeaderHistoryBytes)
+
+	require.True(t, ls.makePeerHeaderHistoryRoom(1<<20, "new-peer"))
+	assert.Nil(t, ls.peerHeaderHistory["peer-0"], "oldest peer retires first")
+	for _, key := range []string{"peer-1", "peer-2", "peer-3"} {
+		require.Len(t, ls.peerHeaderHistory[key].order, minPeerHeaderHistoryRecords)
+	}
+	assert.LessOrEqual(t, ls.peerHeaderHistoryBytes, maxPeerHeaderHistoryBytesTotal)
 }
 
 func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {

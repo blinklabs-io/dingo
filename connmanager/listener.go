@@ -42,6 +42,7 @@ type ListenerConfig struct {
 	ListenAddress  string
 	ConnectionOpts []ouroboros.ConnectionOptionFunc
 	UseNtC         bool
+	TrustedLocal   bool
 	ReuseAddress   bool
 }
 
@@ -263,7 +264,7 @@ func (c *ConnectionManager) startListener(
 			}
 
 			if l.UseNtC {
-				releaseNtCSlot := c.reserveNtCSlot(conn.RemoteAddr())
+				releaseNtCSlot := c.reserveNtCSlot(conn.RemoteAddr(), l.TrustedLocal)
 				if releaseNtCSlot == nil {
 					closeConnAndLog(
 						c.config.Logger,
@@ -495,6 +496,11 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		) {
 			return
 		}
+		c.connectionsMutex.Lock()
+		if info := c.connections[oConn.Id()]; info != nil {
+			info.trustedLocal = l.TrustedLocal
+		}
+		c.connectionsMutex.Unlock()
 		releaseNtCSlot = nil
 	} else {
 		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)

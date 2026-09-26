@@ -642,6 +642,7 @@ type LedgerStateConfig struct {
 	// raw NetworkMagic instead of a named network.
 	Network                     string
 	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
+	RejectBlockDecodeCacheFunc  func(uint, []byte)
 	PeersWithBlockFunc          PeersWithBlockFunc
 	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
 	BlockfetchLatencyFunc       BlockfetchLatencyFunc
@@ -1488,9 +1489,11 @@ type LedgerState struct {
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
 	// Header mismatch tracking for fork detection and re-sync
-	headerMismatchCount  int // consecutive header mismatch count
-	bufferedHeaderEvents map[string][]ChainsyncEvent
-	peerHeaderHistory    map[string]*peerHeaderChain
+	headerMismatchCount       int // consecutive header mismatch count
+	bufferedHeaderEvents      map[string][]ChainsyncEvent
+	peerHeaderHistory         map[string]*peerHeaderChain
+	peerHeaderHistoryBytes    int
+	peerHeaderHistorySequence uint64
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
 	// Test hook called after Close releases the blockfetch continuation mutex

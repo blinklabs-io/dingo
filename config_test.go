@@ -667,6 +667,7 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	WithMaxInboundConns(0)(cfg)
 	WithMaxNtCConns(-3)(cfg)
 	WithMaxNtCConnectionsPerIP(0)(cfg)
+	WithMaxTrustedLocalNtCConns(-1)(cfg)
 
 	assert.Zero(t, cfg.cfg.MinHotPeers)
 	assert.Zero(t, cfg.cfg.ReconcileInterval)
@@ -675,6 +676,7 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	assert.Zero(t, cfg.cfg.MaxInboundConns)
 	assert.Zero(t, cfg.cfg.MaxNtCConns)
 	assert.Zero(t, cfg.cfg.MaxNtCConnectionsPerIP)
+	assert.Zero(t, cfg.cfg.MaxTrustedLocalNtCConns)
 }
 
 func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
@@ -689,6 +691,7 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	WithMaxInboundConns(25)(cfg)
 	WithMaxNtCConns(30)(cfg)
 	WithMaxNtCConnectionsPerIP(6)(cfg)
+	WithMaxTrustedLocalNtCConns(8)(cfg)
 
 	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
 	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
@@ -697,10 +700,21 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
 	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
 	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
+	assert.Equal(t, 8, cfg.cfg.MaxTrustedLocalNtCConns)
 
 	cfg.syncCompatFields()
 	assert.Equal(t, 30, cfg.maxNtCConns)
 	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
+	assert.Equal(t, 8, cfg.maxTrustedLocalNtCConns)
+}
+
+func TestWithSkipRewardLiveStakeBackfillCheck(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{cfg: &internalconfig.Config{}}
+	WithSkipRewardLiveStakeBackfillCheck(true)(cfg)
+	assert.True(t, cfg.cfg.SkipRewardLiveStakeBackfillCheck)
+	cfg.syncCompatFields()
+	assert.True(t, cfg.skipRewardLiveStakeBackfillCheck)
 }
 
 // TestWithGenesisCorroborationPeers covers the public programmatic API path for

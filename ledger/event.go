@@ -57,6 +57,7 @@ type BlockEvent struct {
 type BlockfetchEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
 	Block        ledger.Block
+	RawBlock     []byte        // Original block CBOR used to invalidate rejected decode-cache entries
 	Point        ocommon.Point // Chain point for block
 	Type         uint          // Block type ID
 	BatchDone    bool          // Set to true for a BatchDone event

@@ -65,7 +65,12 @@ const (
 	// VoteManagerConfig so the vote manager and pipeline admit votes over
 	// the same window. Both keep the forgeable vote-id space (window x
 	// committee size) small.
-	slotWindowFutureTolerance = 60
+	slotWindowFutureTolerance  = 60
+	voteVerificationWindow     = time.Minute
+	voteVerificationMaxPerPeer = 128
+	voteVerificationMaxProcess = 4096
+	voteVerificationMaxPeers   = 1024
+	voteInvalidPeerLimit       = 16
 	// committeeInFlightMaxEpochs bounds how many distinct epochs may be
 	// computing a committee at once, so the coalescing map in
 	// committeeAndParamsForEpoch is size-bounded like every other admission
@@ -146,6 +151,10 @@ var voteNotEmittedReasons = []string{
 // caller waiting on another caller's in-flight committee computation when the
 // manager stops before that computation finishes.
 var ErrVoteManagerStopped = errors.New("leios vote manager stopped")
+
+// ErrPeerMisbehavior is returned after a connection repeatedly submits
+// structurally invalid, equivocal, or over-budget votes within one window.
+var ErrPeerMisbehavior = errors.New("repeated invalid leios votes")
 
 // ErrCommitteeComputationBacklog is returned when committeeInFlightMaxEpochs
 // distinct epochs are already computing a committee, so a further distinct
@@ -434,12 +443,19 @@ type VoteManager struct {
 	now func() time.Time
 	// signVote is the local vote signer; tests may override it to synchronize
 	// configuration changes with an in-flight signature.
-	signVote func(*VoteSigningKey, []byte) ([]byte, error)
+	signVote            func(*VoteSigningKey, []byte) ([]byte, error)
+	verifyVoteSignature func(*bls12381.G2Affine, []byte, []byte) error
 	// voteTTL, maxVotes, and maxRecords bound the vote stores; tests
 	// may lower them.
-	voteTTL    time.Duration
-	maxVotes   int
-	maxRecords int
+	voteTTL                       time.Duration
+	maxVotes                      int
+	maxRecords                    int
+	voteVerificationWindowStarted time.Time
+	voteVerificationCount         int
+	voteVerificationByConn        map[string]int
+	voteVerificationsInFlight     map[lcommon.LeiosVoteId]lcommon.Blake2b256
+	voteInvalidWindowStarted      time.Time
+	voteInvalidByConn             map[string]int
 
 	mu sync.Mutex
 	// localEmissionMu keeps activation replay ahead of ordinary local emission
@@ -566,36 +582,42 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		voteWindowSlots = DefaultPipelineTiming().VoteWindowSlots
 	}
 	m := &VoteManager{
-		logger:             logger.With("component", "leios"),
-		eventBus:           cfg.EventBus,
-		stakeProvider:      cfg.StakeProvider,
-		epochProvider:      cfg.EpochProvider,
-		paramsProvider:     cfg.ParamsProvider,
-		keyProvider:        cfg.KeyProvider,
-		slotProvider:       cfg.SlotProvider,
-		voteWindowSlots:    voteWindowSlots,
-		registry:           registry,
-		now:                time.Now,
-		signVote:           SignVote,
-		voteTTL:            voteStoreTTL,
-		maxVotes:           voteStoreMaxEntries,
-		maxRecords:         voteRecordMaxEntries,
-		committees:         make(map[uint64]*epochEntry),
-		committeeInFlight:  make(map[uint64]*committeeComputation),
-		committeeStopCh:    make(chan struct{}),
-		votesById:          make(map[lcommon.LeiosVoteId]*storedVote),
-		voteLog:            make([]*storedVote, 0),
-		voteRecords:        make(map[lcommon.LeiosVoteId]voteRecord),
-		cursors:            make(map[string]uint64),
-		wakeCh:             make(chan struct{}),
-		tallies:            make(map[tallyKey]*ebTally),
-		announcements:      make(map[lcommon.Blake2b256]announcementRecord),
-		acquiredEbs:        make(map[lcommon.Blake2b256]acquiredEbRecord),
-		votedAnnouncements: make(map[lcommon.Blake2b256]struct{}),
+		logger:              logger.With("component", "leios"),
+		eventBus:            cfg.EventBus,
+		stakeProvider:       cfg.StakeProvider,
+		epochProvider:       cfg.EpochProvider,
+		paramsProvider:      cfg.ParamsProvider,
+		keyProvider:         cfg.KeyProvider,
+		slotProvider:        cfg.SlotProvider,
+		voteWindowSlots:     voteWindowSlots,
+		registry:            registry,
+		now:                 time.Now,
+		signVote:            SignVote,
+		verifyVoteSignature: VerifyVoteSignature,
+		voteTTL:             voteStoreTTL,
+		maxVotes:            voteStoreMaxEntries,
+		maxRecords:          voteRecordMaxEntries,
+		committees:          make(map[uint64]*epochEntry),
+		committeeInFlight:   make(map[uint64]*committeeComputation),
+		committeeStopCh:     make(chan struct{}),
+		votesById:           make(map[lcommon.LeiosVoteId]*storedVote),
+		voteLog:             make([]*storedVote, 0),
+		voteRecords:         make(map[lcommon.LeiosVoteId]voteRecord),
+		cursors:             make(map[string]uint64),
+		wakeCh:              make(chan struct{}),
+		tallies:             make(map[tallyKey]*ebTally),
+		announcements:       make(map[lcommon.Blake2b256]announcementRecord),
+		acquiredEbs:         make(map[lcommon.Blake2b256]acquiredEbRecord),
+		votedAnnouncements:  make(map[lcommon.Blake2b256]struct{}),
 		pendingVotes: make(
 			map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote,
 		),
 		pendingVoteCountByConn: make(map[string]int),
+		voteVerificationByConn: make(map[string]int),
+		voteVerificationsInFlight: make(
+			map[lcommon.LeiosVoteId]lcommon.Blake2b256,
+		),
+		voteInvalidByConn: make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		m.metrics = initVoteManagerMetrics(cfg.PromRegistry)
@@ -1599,9 +1621,101 @@ func (m *VoteManager) rejectVote(
 	)
 }
 
+func (m *VoteManager) reserveIncomingVoteVerification(
+	connKey string,
+	vote lcommon.LeiosVote,
+) (bool, error) {
+	id := lcommon.LeiosVoteId{SlotNo: vote.SlotNo, VoterId: vote.VoterId}
+	m.mu.Lock()
+	now := m.now()
+	if record, ok := m.voteRecords[id]; ok &&
+		now.Sub(record.insertedAt) < m.voteTTL {
+		m.mu.Unlock()
+		if record.ebHash != vote.EndorserBlockHash && m.metrics != nil {
+			m.metrics.votesEquivocationTotal.Inc()
+		}
+		if record.ebHash != vote.EndorserBlockHash {
+			return false, errors.New("vote equivocation for an existing voter and slot")
+		}
+		return false, nil
+	}
+	m.pruneExpiredLocked(now)
+	if inFlightHash, ok := m.voteVerificationsInFlight[id]; ok {
+		m.mu.Unlock()
+		if inFlightHash != vote.EndorserBlockHash && m.metrics != nil {
+			m.metrics.votesEquivocationTotal.Inc()
+		}
+		if inFlightHash != vote.EndorserBlockHash {
+			return false, errors.New("vote equivocation during verification")
+		}
+		return false, nil
+	}
+	if m.voteVerificationWindowStarted.IsZero() ||
+		now.Sub(m.voteVerificationWindowStarted) >= voteVerificationWindow {
+		m.voteVerificationWindowStarted = now
+		m.voteVerificationCount = 0
+		clear(m.voteVerificationByConn)
+	}
+	if _, knownPeer := m.voteVerificationByConn[connKey]; !knownPeer &&
+		len(m.voteVerificationByConn) >= voteVerificationMaxPeers {
+		m.mu.Unlock()
+		return false, errors.New("vote verification peer budget exhausted")
+	}
+	if m.voteVerificationCount >= voteVerificationMaxProcess {
+		m.mu.Unlock()
+		return false, errors.New("process vote verification budget exhausted")
+	}
+	if m.voteVerificationByConn[connKey] >= voteVerificationMaxPerPeer {
+		m.mu.Unlock()
+		return false, errors.New("peer vote verification budget exhausted")
+	}
+	m.voteVerificationCount++
+	m.voteVerificationByConn[connKey]++
+	m.voteVerificationsInFlight[id] = vote.EndorserBlockHash
+	m.mu.Unlock()
+	return true, nil
+}
+
+func (m *VoteManager) rejectIncomingVote(
+	connKey string,
+	reason string,
+	vote lcommon.LeiosVote,
+	err error,
+) error {
+	m.rejectVote(reason, vote, err)
+	now := m.now()
+	m.mu.Lock()
+	if m.voteInvalidWindowStarted.IsZero() ||
+		now.Sub(m.voteInvalidWindowStarted) >= voteVerificationWindow {
+		m.voteInvalidWindowStarted = now
+		clear(m.voteInvalidByConn)
+	}
+	if _, known := m.voteInvalidByConn[connKey]; !known &&
+		len(m.voteInvalidByConn) >= voteVerificationMaxPeers {
+		m.mu.Unlock()
+		return nil
+	}
+	m.voteInvalidByConn[connKey]++
+	penalize := m.voteInvalidByConn[connKey] >= voteInvalidPeerLimit
+	m.mu.Unlock()
+	if penalize {
+		return fmt.Errorf("%w: connection %s exceeded the vote rejection limit", ErrPeerMisbehavior, connKey)
+	}
+	return nil
+}
+
+func (m *VoteManager) releaseIncomingVoteVerification(
+	vote lcommon.LeiosVote,
+) {
+	id := lcommon.LeiosVoteId{SlotNo: vote.SlotNo, VoterId: vote.VoterId}
+	m.mu.Lock()
+	delete(m.voteVerificationsInFlight, id)
+	m.mu.Unlock()
+}
+
 // HandleVote validates and stores a vote received from a peer connection.
-// Invalid votes are logged and dropped without error so a single bad vote
-// does not tear down the peer connection.
+// Isolated invalid votes are logged and dropped; repeated invalid votes can
+// identify a misbehaving connection.
 func (m *VoteManager) HandleVote(
 	connKey string,
 	vote lcommon.LeiosVote,
@@ -1610,17 +1724,23 @@ func (m *VoteManager) HandleVote(
 		m.metrics.votesReceivedTotal.Inc()
 	}
 	if err := vote.Validate(); err != nil {
-		m.rejectVote("structural", vote, err)
-		return nil
+		return m.rejectIncomingVote(connKey, "structural", vote, err)
 	}
 	// Window the vote slot before any epoch or committee work:
 	// EpochForSlot projects future slots indefinitely and committee
 	// computation reaches the stake snapshot in the database, so
 	// out-of-window slots must not get that far.
 	if err := m.slotWindowCheck(vote.SlotNo); err != nil {
-		m.rejectVote("slot_window", vote, err)
+		return m.rejectIncomingVote(connKey, "slot_window", vote, err)
+	}
+	reserved, err := m.reserveIncomingVoteVerification(connKey, vote)
+	if err != nil {
+		return m.rejectIncomingVote(connKey, "admission", vote, err)
+	}
+	if !reserved {
 		return nil
 	}
+	defer m.releaseIncomingVoteVerification(vote)
 	epoch, err := m.epochProvider.EpochForSlot(vote.SlotNo)
 	if err != nil {
 		m.rejectVote("epoch", vote, err)
@@ -1634,7 +1754,7 @@ func (m *VoteManager) HandleVote(
 	committee := entry.committee
 	member, ok := committee.Member(vote.VoterId)
 	if !ok {
-		m.rejectVote(
+		return m.rejectIncomingVote(connKey,
 			"membership",
 			vote,
 			fmt.Errorf(
@@ -1643,18 +1763,16 @@ func (m *VoteManager) HandleVote(
 				committee.Size(),
 			),
 		)
-		return nil
 	}
 	verified := false
 	if pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash); ok {
 		msg := VoteMessageBytes(vote.SlotNo, vote.EndorserBlockHash)
-		if err := VerifyVoteSignature(
+		if err := m.verifyVoteSignature(
 			pub,
 			msg,
 			vote.VoteSignature,
 		); err != nil {
-			m.rejectVote("signature", vote, err)
-			return nil
+			return m.rejectIncomingVote(connKey, "signature", vote, err)
 		}
 		verified = true
 	} else {
@@ -1691,10 +1809,12 @@ func (m *VoteManager) HandlePrototypeVote(
 		m.metrics.votesReceivedTotal.Inc()
 	}
 	if err := vote.Validate(); err != nil {
-		if m.metrics != nil {
-			m.metrics.votesRejectedTotal.WithLabelValues("structural").Inc()
-		}
-		return nil
+		return m.rejectIncomingVote(
+			connKey,
+			"structural",
+			lcommon.LeiosVote{VoterId: vote.VoterId},
+			err,
+		)
 	}
 	m.mu.Lock()
 	record, ok := m.announcements[vote.AnnouncingRbHash]
@@ -1718,14 +1838,28 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	vote lcommon.LeiosPrototypeVote,
 	record announcementRecord,
 ) error {
+	resolved := lcommon.LeiosVote{
+		SlotNo:            record.slot,
+		EndorserBlockHash: record.ebHash,
+		VoterId:           vote.VoterId,
+		VoteSignature:     vote.VoteSignature,
+	}
 	if err := m.slotWindowCheck(record.slot); err != nil {
-		m.rejectVote(
+		return m.rejectIncomingVote(
+			connKey,
 			"slot_window",
-			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			resolved,
 			err,
 		)
+	}
+	reserved, err := m.reserveIncomingVoteVerification(connKey, resolved)
+	if err != nil {
+		return m.rejectIncomingVote(connKey, "admission", resolved, err)
+	}
+	if !reserved {
 		return nil
 	}
+	defer m.releaseIncomingVoteVerification(resolved)
 	entry, err := m.committeeAndParamsForEpoch(record.epoch)
 	if err != nil {
 		m.rejectVote(
@@ -1738,12 +1872,12 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	committee := entry.committee
 	member, ok := committee.Member(vote.VoterId)
 	if !ok {
-		m.rejectVote(
+		return m.rejectIncomingVote(
+			connKey,
 			"membership",
-			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			resolved,
 			errors.New("voter id outside committee"),
 		)
-		return nil
 	}
 	verified := false
 	// A member resolving to no key here is a keyless committee seat: its
@@ -1751,21 +1885,14 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	// verified or aggregated into a certificate.
 	pub, _ := m.resolveVoterKey(entry, member.PoolKeyHash)
 	if pub != nil {
-		if err := VerifyVoteSignature(pub, PrototypeVoteMessageBytes(vote.AnnouncingRbHash), vote.VoteSignature); err != nil {
-			m.rejectVote(
-				"signature",
-				lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
-				err,
-			)
-			return nil
+		if err := m.verifyVoteSignature(
+			pub,
+			PrototypeVoteMessageBytes(vote.AnnouncingRbHash),
+			vote.VoteSignature,
+		); err != nil {
+			return m.rejectIncomingVote(connKey, "signature", resolved, err)
 		}
 		verified = true
-	}
-	resolved := lcommon.LeiosVote{
-		SlotNo:            record.slot,
-		EndorserBlockHash: record.ebHash,
-		VoterId:           vote.VoterId,
-		VoteSignature:     vote.VoteSignature,
 	}
 	inserted := m.insertVote(
 		connKey,

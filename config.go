@@ -248,6 +248,7 @@ type Config struct {
 	inboundPruneAfter, inboundCooldown                                                  time.Duration
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
+	maxTrustedLocalNtCConns                                                             int
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -862,6 +863,7 @@ func (c *Config) syncCompatFields() {
 	c.inboundHotScoreThreshold, c.inboundPruneAfter, c.inboundDuplexOnlyForHot, c.inboundCooldown = c.cfg.InboundHotScoreThreshold, c.cfg.InboundPruneAfter, c.cfg.InboundDuplexOnlyForHot, c.cfg.InboundCooldown
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
+	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
@@ -1448,6 +1450,25 @@ func WithMaxNtCConnectionsPerIP(n int) ConfigOptionFunc {
 		if n > 0 {
 			c.cfg.MaxNtCConnectionsPerIP = n
 		}
+	}
+}
+
+// WithMaxTrustedLocalNtCConns specifies the maximum number of node-to-client
+// connections accepted by listeners bound to local-only transports.
+// Non-positive values are ignored. Default: 100.
+func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.cfg.MaxTrustedLocalNtCConns = n
+		}
+	}
+}
+
+// WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
+// reward live-stake rows against the full UTxO table.
+func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.SkipRewardLiveStakeBackfillCheck = skip
 	}
 }
 
