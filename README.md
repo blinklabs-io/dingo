@@ -711,14 +711,15 @@ database requires approximately 46 GB and a fresh bootstrap needs approximately
 61 GB for the database plus the 15 GB snapshot.
 
 An additional Preview API run on Dingo ref `6d8eb0b4`, with batch size 100,
-took 6m45s from process start through ledger-state import and 30h46m29s for
-historical metadata replay to reach 100% (4,686,805 blocks and 6,916,875
-transactions), averaging about 42 blocks per second. Total process-start-to-
-replay-complete time was 31h07m12s. The final database was about 40 GB (13 GB
-blob and 27.7 GB SQLite) with a 15 GB Mithril cache; peak disk usage was not
-measured. This is a replay measurement, not a confirmed usable API bootstrap:
-the log continued with SQLite WAL checkpoint warnings and API readiness was
-not verified after backfill.
+reached ledger-state import 6m45s after process start, followed by a 30h46m29s
+historical metadata replay to 100% (4,686,805 blocks and 6,916,875
+transactions), averaging about 42 blocks per second. The phase durations sum
+to 30h53m14s; the measured process-start-to-replay-complete duration was
+31h07m12s, leaving 13m58s outside those phase timers. The final database was
+about 40 GB (13 GB blob and 27.7 GB SQLite) with a 15 GB Mithril cache; peak
+disk usage was not measured. This is a replay measurement, not a confirmed
+usable API bootstrap: the log continued with SQLite WAL checkpoint warnings
+and API readiness was not verified after backfill.
 
 ### Disk Space Requirements
 
