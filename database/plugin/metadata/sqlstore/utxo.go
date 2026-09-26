@@ -44,6 +44,13 @@ const qualifiedSQLiteUtxoColumns = "utxo.transaction_id, " +
 	"utxo.deleted_slot, utxo.amount, utxo.output_idx, " +
 	"utxo.payment_script"
 
+const (
+	getLiveUtxoByRefQuery = "SELECT " + sqliteUtxoColumns +
+		" FROM utxo WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0"
+	getUtxoIncludingSpentByRefQuery = "SELECT " + sqliteUtxoColumns +
+		" FROM utxo WHERE tx_id = ? AND output_idx = ?"
+)
+
 func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 	if utxo == nil {
 		return errors.New("create UTxO: UTxO is nil")
@@ -1197,23 +1204,30 @@ func (s *Store) getUtxo(
 	if err != nil {
 		return nil, err
 	}
-	q := s.operationalQueries(db)
-	params := sqlitequery.GetLiveUtxoParams{
-		TxID: txID,
-		OutputIdx: sql.NullInt64{
-			Int64: int64(index),
-			Valid: true,
-		},
-	}
-	var row sqlitequery.Utxo
+	query := getLiveUtxoByRefQuery
 	if includeSpent {
-		row, err = q.GetUtxoIncludingSpent(
-			ctx,
-			sqlitequery.GetUtxoIncludingSpentParams(params),
-		)
-	} else {
-		row, err = q.GetLiveUtxo(ctx, params)
+		query = getUtxoIncludingSpentByRefQuery
 	}
+	queryerCanUseWriteCache := true
+	if s.readDB != s.writeDB {
+		if txn == nil {
+			queryerCanUseWriteCache = false
+		} else if sqlTxn, ok := txn.(*sqlTxn); ok && sqlTxn.readOnly {
+			queryerCanUseWriteCache = false
+		}
+	}
+	args := []any{txID, sql.NullInt64{Int64: int64(index), Valid: true}}
+	var sqlRow *sql.Row
+	if queryerCanUseWriteCache {
+		sqlRow = s.queryRowCached(ctx, db, query, args...)
+	} else {
+		// Start prepares hot statements against writeDB before writes begin.
+		// A file-backed SQLite store has a distinct read-only pool, whose
+		// statements cannot use that write-pool cache; keep those reads on the
+		// instrumented, dialect-aware queryer instead.
+		sqlRow = db.QueryRowContext(ctx, query, args...)
+	}
+	row, err := scanUtxoRow(sqlRow)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1228,6 +1242,29 @@ func (s *Store) getUtxo(
 		return nil, err
 	}
 	return ret, nil
+}
+
+func scanUtxoRow(row *sql.Row) (sqlitequery.Utxo, error) {
+	var ret sqlitequery.Utxo
+	err := row.Scan(
+		&ret.TransactionID,
+		&ret.CollateralReturnForTxID,
+		&ret.TxID,
+		&ret.PaymentKey,
+		&ret.StakingKey,
+		&ret.CredentialTag,
+		&ret.DatumHash,
+		&ret.SpentAtTxID,
+		&ret.ReferencedByTxID,
+		&ret.CollateralByTxID,
+		&ret.ID,
+		&ret.AddedSlot,
+		&ret.DeletedSlot,
+		&ret.Amount,
+		&ret.OutputIdx,
+		&ret.PaymentScript,
+	)
+	return ret, err
 }
 
 // utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in

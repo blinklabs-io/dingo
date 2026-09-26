@@ -846,6 +846,8 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
+	blockfetchEventID := ls.metrics.beginBlockfetchEvent()
+	defer ls.metrics.endBlockfetchEvent(blockfetchEventID)
 	// Registered before the mutex is taken so defer's LIFO order runs it
 	// after the unlock. RecoverAfterLocalRollback nests this mutex inside
 	// chainsyncMutex, so publishing while holding it deadlocks the same
@@ -884,7 +886,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 			)
 		}
 	} else if e.Block != nil {
-		if err := ls.handleEventBlockfetchBlockDeferred(e, &pending); err != nil {
+		if err := ls.handleEventBlockfetchBlockDeferredWhileLocked(
+			e,
+			&pending,
+		); err != nil {
 			if strings.Contains(
 				err.Error(),
 				"block header crypto verification failed",
@@ -4249,14 +4254,17 @@ func (ls *LedgerState) tryResolveFork(
 	return true, nil
 }
 
-// handleEventBlockfetchBlockDeferred is handleEventBlockfetchBlock that threads
-// the caller's pendingPublishes queue into flushPendingBlockfetchBlocksDeferred,
-// so chain.update events emitted while chainsyncBlockfetchMutex is held are
-// published only after it is released. A nil pubs preserves the standalone
-// immediate-publish behaviour for test callers.
-func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
+func (ls *LedgerState) handleEventBlockfetchBlockDeferredWhileLocked(
 	e BlockfetchEvent,
 	pubs *pendingPublishes,
+) error {
+	return ls.handleEventBlockfetchBlockDeferredInternal(e, pubs, true)
+}
+
+func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
+	e BlockfetchEvent,
+	pubs *pendingPublishes,
+	blockfetchMutexHeld bool,
 ) error {
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
@@ -4265,14 +4273,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
 	}
-	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
-		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
-		return nil
-	}
-	fromPrimary := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
-	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
-		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
-	if !fromPrimary && !fromShadow {
+	if !ls.blockfetchEventCurrent(e) {
 		return nil
 	}
 	// Deduplicate: if the other peer already delivered this block,
@@ -4336,9 +4337,33 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 		if verifyErr != nil {
 			if IsHeaderVerificationDeferred(verifyErr) {
 				ls.markDeferredHeaderValidation(e.Point)
-				if err := ls.persistDeferredHeaderValidation(e.Point, nil); err != nil {
+				persist := func() error {
+					return ls.persistDeferredHeaderValidation(e.Point, nil)
+				}
+				var persistErr error
+				if blockfetchMutexHeld {
+					persistErr = ls.withBlockfetchMutexReleased(persist)
+				} else {
+					persistErr = persist()
+				}
+				if persistErr != nil {
 					ls.clearDeferredHeaderValidation(e.Point)
-					return err
+					return persistErr
+				}
+				if blockfetchMutexHeld && !ls.blockfetchEventCurrent(e) {
+					ls.clearDeferredHeaderValidation(e.Point)
+					if ls.db != nil && ls.db.Metadata() != nil {
+						if err := ls.withBlockfetchMutexReleased(
+							func() error {
+								return ls.deleteDeferredMarkerUnlessReadmitted(
+									headerValidationPointKey(e.Point),
+								)
+							},
+						); err != nil {
+							return err
+						}
+					}
+					return nil
 				}
 				ls.config.Logger.Debug(
 					"deferring stateful block header verification until ledger apply",
@@ -4377,6 +4402,27 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
 	}
 	return nil
+}
+
+func (ls *LedgerState) blockfetchEventCurrent(e BlockfetchEvent) bool {
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
+		return false
+	}
+	return sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) ||
+		(connIdKey(ls.shadowBlockfetchConnId) != "" &&
+			sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId))
+}
+
+// withBlockfetchMutexReleased runs a metadata operation without holding the
+// lock shared with chainsync handlers. Its caller must hold the mutex, and it
+// always returns with the mutex held again.
+func (ls *LedgerState) withBlockfetchMutexReleased(
+	fn func() error,
+) error {
+	ls.chainsyncBlockfetchMutex.Unlock()
+	defer ls.chainsyncBlockfetchMutex.Lock()
+	return fn()
 }
 
 func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {

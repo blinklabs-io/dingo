@@ -819,6 +819,15 @@ reader likewise decodes at most one 50-block metadata transaction batch at a
 time. These bounds matter for Dijkstra bodies, whose nested canonical-CBOR
 views make a live decoded block substantially larger than its wire bytes.
 
+When a fetched header needs deferred stateful validation, its durable marker
+is written without holding `chainsyncBlockfetchMutex`, which is also needed by
+ChainSync event handling. After the write, the handler checks that the source
+connection is still an active or shadow blockfetch peer before admitting the
+body. `dingo_ledger_blockfetch_event_in_progress_seconds` reports the elapsed
+wall-clock time since the oldest active BlockFetch handler began, including
+handlers queued on the mutex or waiting on metadata storage; zero means no
+BlockFetch handler is active.
+
 A batch is fetched for the header queue that existed when it was requested, so
 `LedgerState` binds each batch to a chain-rollback generation, bumped before
 every primary-chain rollback and restored when validation refuses one, so a

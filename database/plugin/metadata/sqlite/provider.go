@@ -29,8 +29,11 @@ const ProviderName = "sqlite"
 type Config struct {
 	// DataDir overrides the application-wide database path for this provider.
 	// An empty value uses ProviderDependencies.DataDir.
-	DataDir        string `yaml:"dataDir"`
-	MaxConnections int    `yaml:"maxConnections"`
+	DataDir string `yaml:"dataDir"`
+	// VacuumIntervalSeconds enables periodic full VACUUM when positive. Zero
+	// disables it because SQLite VACUUM holds a database-wide writer lock.
+	VacuumIntervalSeconds uint64 `yaml:"vacuumIntervalSeconds"`
+	MaxConnections        int    `yaml:"maxConnections"`
 }
 
 // DefaultMaxConnections is the default SQLite connection pool size.

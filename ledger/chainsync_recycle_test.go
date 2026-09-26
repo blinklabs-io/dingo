@@ -374,7 +374,7 @@ func TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled(
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        &mockBabbageBlock{slot: 500},
 		Point:        ocommon.Point{Slot: 500, Hash: []byte("fake-hash")},
@@ -410,7 +410,7 @@ func TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot(
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        &mockBabbageBlock{slot: targetSlot},
 		Point: ocommon.Point{
@@ -437,7 +437,7 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	ls.chain = &chain.Chain{}
 
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        tb.block,
 		Point:        point,
@@ -485,7 +485,7 @@ func TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails(
 
 	block := &mockBabbageBlock{slot: targetSlot}
 	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        block,
 		Point:        point,
