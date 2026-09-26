@@ -7607,7 +7607,10 @@ volatile state or pre-processed as gap blocks; chainsync/blockfetch obtains and
 validates them normally. API-mode historical metadata backfill is capped at the
 anchor so it cannot pre-apply and thereby bypass the ledger path for either
 suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
-resumes reads the recorded `mithril_ledger_slot`.
+resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
+without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
+snapshot-imported account's registration and delegation from its import
+baseline before rebuilding the live-stake aggregate.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay

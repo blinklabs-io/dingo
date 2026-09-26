@@ -644,6 +644,141 @@ func TestRun_ResumeStopsAtRecordedMithrilAnchor(t *testing.T) {
 	}
 }
 
+// TestRun_RestoresSnapshotAccountDelegationAtAnchor covers delegation state
+// the snapshot holds but certificate replay cannot reproduce. POOLREAP clears
+// delegations to a retired pool and the PV10 HARDFORK rule clears delegations
+// to an unregistered DRep; backfill runs neither, so replaying the historical
+// delegation certificate re-points the imported account. At the anchor the
+// snapshot is authoritative: a stale pool rejoins that pool's stake if it
+// re-registers (dingo #3794), and a stale DRep lets a PV10/PV11 withdrawal
+// validate that cardano-node rejects.
+func TestRun_RestoresSnapshotAccountDelegationAtAnchor(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	const anchor = uint64(2)
+	require.NoError(t, db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(anchor, 10),
+		nil,
+	))
+
+	stakeKey := bytes.Repeat([]byte{0x71}, lcommon.AddressHashSize)
+	importTxn := db.MetadataTxn(true)
+	require.NoError(t, importTxn.Do(func(txn *database.Txn) error {
+		return db.Metadata().ImportAccount(&models.Account{
+			StakingKey: stakeKey,
+			AddedSlot:  anchor,
+			Reward:     5_000,
+			Active:     true,
+		}, txn.Metadata())
+	}))
+
+	retiredPool := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0x72}, lcommon.AddressHashSize)),
+	)
+	unregisteredDRep := bytes.Repeat([]byte{0x73}, lcommon.AddressHashSize)
+	delegation := &lcommon.StakeVoteDelegationCertificate{
+		CertType: uint(lcommon.CertificateTypeStakeVoteDelegation),
+		StakeCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(stakeKey),
+		},
+		PoolKeyHash: retiredPool,
+		Drep: lcommon.Drep{
+			Type:       lcommon.DrepTypeAddrKeyHash,
+			Credential: unregisteredDRep,
+		},
+	}
+	input, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(bytes.Repeat([]byte{0x74}, 32)).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x77}, lcommon.AddressHashSize),
+		stakeKey,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(address.String()).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	builder := mockledger.NewTransactionBuilder().WithCertificates(delegation)
+	builder.WithId(bytes.Repeat([]byte{0x75}, 32))
+	builder.WithInputs(input)
+	builder.WithOutputs(output)
+	builder.WithValid(true)
+	tx, err := builder.Build()
+	require.NoError(t, err)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+	for _, produced := range tx.Produced() {
+		var producedTxID [32]byte
+		copy(producedTxID[:], produced.Id.Id().Bytes())
+		utxoOffsets[database.UtxoRef{
+			TxId:      producedTxID,
+			OutputIdx: produced.Id.Index(),
+		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
+	}
+
+	// Replay the delegation the way an earlier, interrupted run of the same
+	// backfill would have, then resume from the checkpoint after it.
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.DisableNonceComputation()
+	acc := db.NewBatchAccumulator()
+	replayTxn := db.Transaction(true)
+	require.NoError(t, bf.processBlockTxsBatched(
+		[]lcommon.Transaction{tx},
+		ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x76}, 32)},
+		0,
+		eras.ConwayEraDesc.Id,
+		nil,
+		&database.BlockIngestionResult{
+			TxOffsets: map[[32]byte]database.CborOffset{
+				txHash: {BlockSlot: 1, ByteLength: 1},
+			},
+			UtxoOffsets: utxoOffsets,
+		},
+		acc,
+		replayTxn,
+		nil,
+		false,
+	))
+	require.NoError(t, db.FlushBatch(acc, replayTxn))
+	require.NoError(t, replayTxn.Commit())
+	replayTxn.Release()
+	replayed, err := db.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, retiredPool.Bytes(), replayed.Pool)
+	require.Equal(t, unregisteredDRep, replayed.Drep)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			LastSlot:  1,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+	require.NoError(t, bf.Run(context.Background()))
+
+	account, err := db.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	assert.True(t, account.Active)
+	assert.Empty(t, account.Pool, "retired-pool delegation survived backfill")
+	assert.Empty(t, account.Drep, "unregistered-DRep delegation survived backfill")
+	assert.Equal(t, models.DrepTypeAddrKeyHash, account.DrepType)
+	assert.Equal(t, uint64(5_000), uint64(account.Reward))
+}
+
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
 // published even when the run finishes before the normal 10s progress tick.
 func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {

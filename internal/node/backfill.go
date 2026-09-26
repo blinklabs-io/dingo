@@ -1118,6 +1118,26 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return err
 	}
+	// Replay has reached the anchor, where the snapshot is the ledger state.
+	// Restore before the rebuild, which attributes stake from account.pool.
+	if endSlotSet {
+		restored, err := b.db.RestoreImportedAccountStates(endSlot, nil)
+		if err != nil {
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"restoring imported account state after backfill: %w",
+				err,
+			)
+		}
+		if restored > 0 {
+			b.logger.Info(
+				"restored imported account state at backfill anchor",
+				"component", "backfill",
+				"anchor_slot", endSlot,
+				"accounts", restored,
+			)
+		}
+	}
 	var rebuildErr error
 	if b.useRunningTotalsFinalization {
 		// Historical replay intentionally leaves the imported snapshot live UTxO
