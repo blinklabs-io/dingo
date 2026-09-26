@@ -502,7 +502,8 @@ func (b *Backfill) storedEpochPParams(
 	}
 	era := eras.GetEraById(eraID)
 	if era == nil || era.DecodePParamsFunc == nil {
-		return nil, false, fmt.Errorf("no pparams decoder for era %d", eraID)
+		// Byron has no parameter decoder, and backfill derives none for it.
+		return nil, false, nil
 	}
 	pp, err := era.DecodePParamsFunc(rows[0].Cbor)
 	if err != nil {

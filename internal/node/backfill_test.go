@@ -1270,6 +1270,21 @@ func testRun_KeepsImportedProtocolParameters(
 	}
 }
 
+// TestStoredEpochPParamsIgnoresEraWithoutDecoder keeps resolvePParams from
+// failing on a stored row for an era with no parameter decoder (Byron), which
+// backfill never derives parameters for anyway.
+func TestStoredEpochPParamsIgnoresEraWithoutDecoder(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetPParams([]byte{0x80}, 0, 0, eras.ByronEraDesc.Id, nil))
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	pp, ok, err := bf.storedEpochPParams(0, eras.ByronEraDesc.Id)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, pp)
+}
+
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
 // published even when the run finishes before the normal 10s progress tick.
 func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
