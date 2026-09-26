@@ -2790,6 +2790,24 @@ This path can't refuse to run those later stops the way
 of skipping the fix entirely: a `Run()`-scoped `ledgerStateDrainConfirmed`
 flag, set false by the `ledgerState.Close` stop on a non-nil error, makes
 the `db.Close`/`pluginHost.Stop` stops log and skip rather than run.
+The same rollback also constrains *where* a stop is registered, not just
+what it does: `cleanupFailedStartup` cancels `n.ctx` but joins only the
+stops already on `started`, so a component's stop belongs immediately
+after its start returns, ahead of anything else that can fail.
+`Run()`'s block-producer step uses `startBlockProducer` from
+`node_forging.go`. Its stop is registered immediately after credential
+validation, which may start the KES agent loop, and before ledger checks,
+forger startup, or Leios voting can fail. The nil-guarded stop closes the KES
+agent and joins any started forger and election workers. The Midnight indexer
+had the same gap between `Indexer.Start` and
+its stop registered after `ledgerState.Start`, where a failure in
+between left its block-event subscription live across `n.db.Close()`; it
+is now registered at both points through one `sync.OnceFunc`, which
+keeps the documented `midnight.Stop()` → `ledgerState.Close()` teardown
+order. `Ouroboros` is likewise stored in `ouroborosRef` and registered
+before `attachLeiosHandlers` runs, since the constructor already owns
+EventBus subscriptions and Prometheus collectors that only `Close`
+releases.
 `handleChainSwitchEvent` is one of the
 "closure over `n` itself, self-healing" handlers `Run()`'s subscriber-ID
 doc comment describes as needing no tracked subscription — correct, since

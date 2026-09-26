@@ -845,6 +845,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// are required: the indexer depends on the api-mode indexes to function,
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
+	var stopMidnightIndexer func()
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
 			return fmt.Errorf(
@@ -863,6 +864,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.midnightIndexer.Start(); err != nil {
 			return fmt.Errorf("starting midnight indexer: %w", err)
 		}
+		stopMidnightIndexer = sync.OnceFunc(func() {
+			n.midnightIndexer.Stop()
+		})
+		started = append(started, stopMidnightIndexer)
 	}
 
 	// Initialize snapshot manager for stake snapshot capture and wire the
@@ -992,8 +997,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	})
 	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
-	if n.midnightIndexer != nil {
-		started = append(started, func() { n.midnightIndexer.Stop() })
+	if stopMidnightIndexer != nil {
+		started = append(started, stopMidnightIndexer)
 	}
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
@@ -1277,6 +1282,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to construct ouroboros: %w", err)
 	}
+	n.ouroborosRef.Store(ouro)
+	stopOuroboros := func() { _ = n.ouroboros().Close() }
+	defer stopOuroboros()
+	started = append(started, stopOuroboros)
 	// The Leios managers were started earlier in Run, before this instance
 	// existed, so their handlers are attached here rather than at their own
 	// construction. reinitializeNetworkingCore does the same after its
@@ -1284,14 +1293,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err := n.attachLeiosHandlers(ouro); err != nil {
 		return err
 	}
-	n.ouroborosRef.Store(ouro)
 	// The asynchronous Leios endorser-block persistence writer, the EventBus
 	// subscriptions ouroboros makes on its own behalf, and its Prometheus
 	// collectors are all released by Close. Registering it on both the
 	// unwind stack and a defer covers startup failure and graceful shutdown;
 	// Close is idempotent.
-	defer func() { _ = n.ouroboros().Close() }()
-	started = append(started, func() { _ = n.ouroboros().Close() })
 	// A closure, not a method value, even though n.ouroboros already exists
 	// here: a live restore replaces the instance, and a method value would
 	// pin this subscription to the replaced one forever, so outbound
@@ -1663,62 +1669,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
-		creds, err := n.validateBlockProducerStartup()
+		var err error
+		started, err = n.startBlockProducer(n.ctx, started)
 		if err != nil {
-			return fmt.Errorf(
-				"block producer startup validation failed: %w",
-				err,
-			)
-		}
-		// Registered before the checks below, not after the forger is
-		// built: validateBlockProducerStartup may have dialled a KES agent
-		// and started its serve-key loop, and every step between here and
-		// the end of this block can fail. Registering afterwards left that
-		// client and its background loop outside the rollback stack. Every
-		// stop in the closure is nil-guarded, so it is safe this early.
-		started = append(started, func() {
-			if n.blockForger != nil {
-				n.blockForger.Stop()
-			}
-			n.closeKESAgentClient()
-			if n.leaderElection != nil {
-				logErrIfNotNil(
-					n.config.logger,
-					"failed to stop leader election during cleanup",
-					n.leaderElection.Stop(),
-				)
-			}
-		})
-		// Cross-check loaded credentials against ledger state. Mismatch
-		// against on-chain pool registration is fatal; "not yet
-		// registered" is a warning so operators can stage credentials
-		// before submitting the registration cert.
-		if err := n.validateBlockProducerLedger(creds); err != nil {
-			return fmt.Errorf(
-				"block producer credentials failed ledger check: %w",
-				err,
-			)
-		}
-		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
-		if err := n.initBlockForger(n.ctx, creds); err != nil {
-			return fmt.Errorf("failed to initialize block forger: %w", err)
-		}
-		// Enable Leios vote emission when a vote signing key is
-		// configured (experimental, leios mode only)
-		if err := n.enableLeiosVoting(creds); err != nil {
-			return fmt.Errorf("failed to enable leios voting: %w", err)
-		}
-		// Wire forger's slot tracker into ledger state for slot
-		// battle detection. The forger is created after the ledger
-		// state, so we use the late-binding setter.
-		if n.blockForger != nil {
-			n.ledgerState.SetForgedBlockChecker(
-				n.blockForger.SlotTracker(),
-			)
-			n.ledgerState.SetForgingEnabled(true)
-			n.ledgerState.SetSlotBattleRecorder(
-				n.blockForger,
-			)
+			return err
 		}
 	}
 
