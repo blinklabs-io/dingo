@@ -34,7 +34,9 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -4942,6 +4944,52 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	)
 }
 
+func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.activeEras = append(
+		append([]eras.EraDesc(nil), eras.Eras...),
+		eras.DijkstraEraDesc,
+	)
+	ls.config.PledgeLeverageEnabled = true
+	ls.config.PledgeLeverage = 100
+	performancePParamsValue := mockledger.NewMockConwayProtocolParams()
+	performancePParamsValue.NOpt = 10
+	performancePParamsValue.A0 = rewardCalcRat(1, 2)
+	performancePParamsValue.Rho = rewardCalcRat(1, 100)
+	performancePParamsValue.Tau = rewardCalcRat(0, 1)
+	performancePParamsValue.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 9}
+	performancePParams := &performancePParamsValue
+	calculationPParams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters:  mockledger.NewMockConwayProtocolParams(),
+		RefScriptCostMultiplier:   rewardCalcRat(1, 1),
+		MaxPledgeLeverage:         rewardCalcRat(1, 2),
+		MinPoolMargin:             rewardCalcRat(1, 20),
+		LeiosQuorumStakeThreshold: rewardCalcRat(1, 2),
+		CommitteeStakeCoverage:    rewardCalcRat(1, 2),
+		QuorumStakeThreshold:      rewardCalcRat(1, 2),
+	}
+	performanceCBOR, err := cbor.Encode(performancePParams)
+	require.NoError(t, err)
+	calculationCBOR, err := cbor.Encode(calculationPParams)
+	require.NoError(t, err)
+	meta := db.Metadata()
+	require.NoError(t, meta.SetEpoch(100, 2, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil))
+	require.NoError(t, meta.SetEpoch(200, 3, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil))
+	require.NoError(t, db.SetPParams(performanceCBOR, 100, 2, eras.ConwayEraDesc.Id, nil))
+	require.NoError(t, db.SetPParams(calculationCBOR, 200, 3, eras.DijkstraEraDesc.Id, nil))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	_, params, _, err := ls.rewardParameters(
+		txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},
+	)
+	require.NoError(t, err)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(1, 2), params.PledgeLeverage)
+}
+
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(
 	t *testing.T,
 ) {
@@ -4991,11 +5039,11 @@ func TestRewardParametersRejectIncompletePParams(t *testing.T) {
 	require.ErrorContains(t, err, "missing treasury expansion")
 }
 
-func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
+func TestApplyPledgeLeveragePreDijkstraUsesExperimentalConfig(t *testing.T) {
 	t.Parallel()
 
 	params := rewards.Parameters{}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
+	applyPledgeLeveragePParams(&params, &shelley.ShelleyProtocolParameters{}, LedgerStateConfig{
 		PledgeLeverageEnabled: true,
 		PledgeLeverage:        100,
 	})
@@ -5003,17 +5051,28 @@ func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
 	require.Equal(t, big.NewRat(100, 1), params.PledgeLeverage)
 }
 
-func TestApplyPledgeLeverageConfigDisabledClearsL(t *testing.T) {
+func TestApplyPledgeLeverageDijkstraPParamOverridesConfig(t *testing.T) {
 	t.Parallel()
 
-	params := rewards.Parameters{
-		PledgeLeverageEnabled: true,
-		PledgeLeverage:        big.NewRat(50, 1),
-	}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
-		PledgeLeverageEnabled: false,
-		PledgeLeverage:        100,
-	})
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{MaxPledgeLeverage: rewardCalcRat(5, 1)},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(5, 1), params.PledgeLeverage)
+}
+
+func TestApplyPledgeLeverageDijkstraNilIgnoresConfig(t *testing.T) {
+	t.Parallel()
+
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
 	require.False(t, params.PledgeLeverageEnabled)
 	require.Nil(t, params.PledgeLeverage)
 }

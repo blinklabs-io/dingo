@@ -2454,15 +2454,24 @@ func TestCalculatePledgeLeverageZeroPledgeZerosPoolReward(t *testing.T) {
 	require.Empty(t, result.AccountRewards)
 }
 
-// L below the minimum of 1 is rejected when the feature is enabled.
-func TestCalculateRejectsPledgeLeverageBelowMinimum(t *testing.T) {
-	_, err := leverageCalc(100, 100, true, big.NewRat(1, 2))
-	require.ErrorIs(t, err, ErrInvalidParameters)
+func TestCalculateAllowsPledgeLeverageAcrossReferenceDomain(t *testing.T) {
+	for _, leverage := range []*big.Rat{
+		big.NewRat(0, 1),
+		big.NewRat(1, 2),
+		big.NewRat(20_000, 1),
+	} {
+		_, err := leverageCalc(100, 100, true, leverage)
+		require.NoError(t, err, "leverage %s", leverage)
+	}
 }
 
-// L above the maximum of 10000 is rejected when the feature is enabled.
-func TestCalculateRejectsPledgeLeverageAboveMaximum(t *testing.T) {
-	_, err := leverageCalc(100, 100, true, big.NewRat(10_001, 1))
+func TestCalculatePledgeLeverageBelowOne(t *testing.T) {
+	result := leveragePoolResult(t, 100, 100, true, big.NewRat(1, 2))
+	require.NotNil(t, result.PoolRewards[0])
+}
+
+func TestCalculateRejectsNegativePledgeLeverage(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(-1, 2))
 	require.ErrorIs(t, err, ErrInvalidParameters)
 }
 
@@ -2471,14 +2480,6 @@ func TestCalculateRejectsPledgeLeverageAboveMaximum(t *testing.T) {
 func TestCalculateRejectsPledgeLeverageEnabledWithoutValue(t *testing.T) {
 	_, err := leverageCalc(100, 100, true, nil)
 	require.ErrorIs(t, err, ErrInvalidParameters)
-}
-
-// The inclusive bounds L=1 and L=10000 are accepted.
-func TestCalculateAllowsPledgeLeverageAtBounds(t *testing.T) {
-	_, err := leverageCalc(100, 100, true, big.NewRat(1, 1))
-	require.NoError(t, err)
-	_, err = leverageCalc(100, 100, true, big.NewRat(10_000, 1))
-	require.NoError(t, err)
 }
 
 // --- CIP-0163 full-pot reward distribution -------------------------------

@@ -53,6 +53,44 @@ func (ls *LedgerState) applyStakeRewards(
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
+	err := ls.applyStakeRewardUpdate(txn, newEpoch, boundarySlot)
+	if err == nil || !errors.Is(err, rewards.ErrNegativeLeaderReward) {
+		return err
+	}
+	// cardano-ledger fails this epoch boundary too, so no replay or retry
+	// gets past it: stop the pipeline and the node rather than restart.
+	haltErr := &rewardUpdateHaltError{err: err}
+	ls.config.Logger.Error(
+		"stake reward update cannot be applied, stopping",
+		"component", "ledger",
+		"epoch", newEpoch,
+		"error", err,
+	)
+	if ls.config.FatalErrorFunc != nil {
+		ls.config.FatalErrorFunc(haltErr)
+	}
+	return haltErr
+}
+
+// rewardUpdateHaltError is a reward update that cannot be applied at its
+// boundary. It is an errHaltLedgerPipeline, so the pipeline does not retry it.
+type rewardUpdateHaltError struct {
+	err error
+}
+
+func (e *rewardUpdateHaltError) Error() string {
+	return "unappliable stake reward update: " + e.err.Error()
+}
+
+func (e *rewardUpdateHaltError) Unwrap() []error {
+	return []error{e.err, errHaltLedgerPipeline}
+}
+
+func (ls *LedgerState) applyStakeRewardUpdate(
+	txn *database.Txn,
+	newEpoch uint64,
+	boundarySlot uint64,
+) error {
 	// Byron has no Shelley-era reward parameters. During the Byron prefix,
 	// the delayed reward round reaches a boundary before its performance epoch
 	// can have pparams; the first Shelley boundary has the same shape because
@@ -129,8 +167,15 @@ type stakeRewardApplication struct {
 	effectiveRewards         uint64
 	undistributed            uint64
 	unspendable              uint64
-	precomputed              bool
-	outputsUpdated           bool
+	// negativeLeaderRewards and unspendableDeficit carry the negative leader
+	// rewards of a CIP-50 round (see rewards.PoolReward.LeaderRewardDeficit).
+	// The output tables hold only non-negative amounts, so these exist only
+	// on a freshly calculated application: the precompute declines such a
+	// round and reuse of persisted outputs rejects one.
+	negativeLeaderRewards []rewards.NegativeLeaderReward
+	unspendableDeficit    uint64
+	precomputed           bool
+	outputsUpdated        bool
 	// totalCirculation, totalBlocks and rewardEfficiency record the global
 	// reward-round inputs that scale every pool's reward by the same factor,
 	// so a uniform network-wide shortfall can be attributed to the input that
@@ -460,6 +505,8 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		effectiveRewards:            result.EffectiveRewards,
 		undistributed:               result.Undistributed,
 		unspendable:                 result.Unspendable,
+		negativeLeaderRewards:       result.NegativeLeaderRewards,
+		unspendableDeficit:          result.UnspendableDeficit,
 		totalCirculation:            result.TotalCirculation,
 		totalBlocks:                 result.TotalBlocks,
 		rewardEfficiency:            result.Efficiency,
@@ -483,6 +530,17 @@ func (ls *LedgerState) applyStakeRewardApplication(
 ) error {
 	if app == nil {
 		return errors.New("missing stake reward application")
+	}
+	// Checked before anything is written: cardano-ledger fails applying an
+	// update that owes a registered account a negative reward.
+	if err := rewards.NegativeLeaderRewardError(
+		app.negativeLeaderRewards,
+	); err != nil {
+		return fmt.Errorf(
+			"stake rewards for snapshot epoch %d: %w",
+			app.epochs.snapshot,
+			err,
+		)
 	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
@@ -588,6 +646,8 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"effective_rewards", app.effectiveRewards,
 		"undistributed_rewards", app.undistributed,
 		"unspendable_rewards", app.unspendable,
+		"negative_leader_rewards", len(app.negativeLeaderRewards),
+		"unspendable_deficit", app.unspendableDeficit,
 		"reserves", uint64(app.pots.Reserves),
 		"fees", uint64(app.pots.Fees),
 		"total_active_stake", uint64(app.snapshotTotalActiveStake),
@@ -1157,6 +1217,11 @@ func precomputedRewardPoolRewardsMatchInputs(
 		)
 		if err != nil {
 			return false, err
+		}
+		// Persisted outputs cannot hold a negative leader reward, so a round
+		// that has one is always calculated fresh.
+		if reward.LeaderRewardDeficit != 0 {
+			return false, nil
 		}
 		verifyPools = append(verifyPools, verifyPool{
 			key:    key,
@@ -2288,6 +2353,15 @@ func (ls *LedgerState) precomputeStakeRewardsCalculate(
 	if app == nil {
 		return nil, false, errors.New("missing stake reward application")
 	}
+	if len(app.negativeLeaderRewards) > 0 {
+		ls.config.Logger.Info(
+			"not precomputing stake rewards with negative leader rewards",
+			"component", "ledger",
+			"reward_snapshot_epoch", app.epochs.snapshot,
+			"negative_leader_rewards", len(app.negativeLeaderRewards),
+		)
+		return nil, false, nil
+	}
 	return app, true, nil
 }
 
@@ -2465,19 +2539,28 @@ func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
 			return errors.New("stake reward output total overflow")
 		}
 	}
-	accounted, overflow := addRewardUint64(
+	credited, overflow := addRewardUint64(
 		app.effectiveRewards,
 		app.unspendable,
 	)
-	if overflow || accounted > app.availableRewards {
+	var undistributed uint64
+	if !overflow {
+		undistributed, err = rewards.UndistributedRewards(
+			app.availableRewards,
+			credited,
+			app.unspendableDeficit,
+		)
+	}
+	if overflow || err != nil {
 		return fmt.Errorf(
-			"precomputed rewards exceed available pot: effective=%d unspendable=%d available=%d",
+			"precomputed rewards exceed available pot: effective=%d unspendable=%d deficit=%d available=%d",
 			app.effectiveRewards,
 			app.unspendable,
+			app.unspendableDeficit,
 			app.availableRewards,
 		)
 	}
-	app.undistributed = app.availableRewards - accounted
+	app.undistributed = undistributed
 	return nil
 }
 
@@ -2521,6 +2604,13 @@ func stakeRewardUpdatedPots(
 	treasury, overflow = addRewardUint64(treasury, app.unspendable)
 	if overflow {
 		return 0, 0, errors.New("stake reward treasury overflow")
+	}
+	treasury, err = rewards.SubtractUnspendableDeficit(
+		treasury,
+		app.unspendableDeficit,
+	)
+	if err != nil {
+		return 0, 0, err
 	}
 	return reserves, treasury, nil
 }
@@ -3208,8 +3298,10 @@ func suppressBootstrapStakeRewards(result *rewards.Result) {
 	}
 	result.PoolRewards = nil
 	result.AccountRewards = nil
+	result.NegativeLeaderRewards = nil
 	result.EffectiveRewards = 0
 	result.Unspendable = 0
+	result.UnspendableDeficit = 0
 	result.Undistributed = result.AvailableRewards
 }
 
@@ -3361,7 +3453,7 @@ func (ls *LedgerState) rewardParameters(
 			calculationEpoch,
 		)
 	}
-	// Every protocol-parameter input to the reward calculation comes from the
+	// Most protocol-parameter inputs to the reward calculation come from the
 	// performance epoch, not the calculation epoch. cardano-ledger's startStep
 	// (LedgerState/PulsingReward.hs) binds `pr = es ^. prevPParamsEpochStateL`
 	// and reads d, rho and tau from it, then hands that same `pr` to
@@ -3392,10 +3484,41 @@ func (ls *LedgerState) rewardParameters(
 	// Dijkstra and later. Single chokepoint feeding both the boundary apply and
 	// the async precompute, so both agree.
 	applyMinPoolMarginConfig(&params, ls.config)
-	// CIP-50: overlay the operator-configured pledge-leverage feature gate onto
-	// the on-chain-derived parameters. This is the single chokepoint feeding
-	// both the boundary apply and the async precompute path, so both agree.
-	applyPledgeLeverageConfig(&params, ls.config)
+	// At the first Dijkstra reward round, the performance epoch still carries
+	// Conway parameters, while the reference's prevPParams has already been
+	// upgraded by Dijkstra enactment. Use the calculation epoch's enacted value
+	// for CIP-50 at that boundary; other reward inputs remain performance-era.
+	pledgeLeveragePParams := performancePParams
+	calculationEraDesc, ok := ls.eraById(calculationEpochRow.EraId)
+	if !ok || calculationEraDesc == nil {
+		return nil, rewards.Parameters{}, nil, fmt.Errorf(
+			"unknown era ID %d for reward calculation epoch %d",
+			calculationEpochRow.EraId, calculationEpoch,
+		)
+	}
+	if calculationEraDesc.Id == eras.DijkstraEraDesc.Id &&
+		performanceEraDesc.Id != eras.DijkstraEraDesc.Id {
+		pledgeLeveragePParams, err = ls.loadPersistedProtocolParameters(
+			calculationEpoch,
+			*calculationEraDesc,
+			txn,
+		)
+		if err != nil {
+			return nil, rewards.Parameters{}, nil, fmt.Errorf(
+				"get Dijkstra pparams for reward calculation epoch %d: %w",
+				calculationEpoch, err,
+			)
+		}
+		if pledgeLeveragePParams == nil {
+			return nil, rewards.Parameters{}, nil, fmt.Errorf(
+				"missing Dijkstra pparams for reward calculation epoch %d",
+				calculationEpoch,
+			)
+		}
+	}
+	// Before Dijkstra, retain the experimental operator setting. In Dijkstra,
+	// the enacted chain value (including nil) is authoritative.
+	applyPledgeLeveragePParams(&params, pledgeLeveragePParams, ls.config)
 	// CIP-0163: overlay the operator-configured full-pot feature gate onto the
 	// on-chain-derived parameters. This is the single chokepoint feeding both
 	// the boundary apply and the async precompute path, so both agree.
@@ -4328,15 +4451,19 @@ func rewardFromAccountOutput(
 	}, nil
 }
 
-// applyPledgeLeverageConfig copies the CIP-50 pledge-leverage feature gate from
-// the ledger config onto the reward parameters, converting the integer L to the
-// rational the rewards package expects. When the feature is disabled the
-// pledge-leverage value is cleared (PledgeLeverage stays nil), preserving the
-// pre-CIP-50 formula.
-func applyPledgeLeverageConfig(
+// applyPledgeLeveragePParams uses the enacted Dijkstra CIP-50 parameter when
+// available. Before Dijkstra, the legacy operator setting remains available
+// for experimental local networks.
+func applyPledgeLeveragePParams(
 	params *rewards.Parameters,
+	pparams lcommon.ProtocolParameters,
 	cfg LedgerStateConfig,
 ) {
+	if pp, ok := pparams.(*dijkstra.DijkstraProtocolParameters); ok {
+		params.PledgeLeverage = cloneCBORRat(pp.MaxPledgeLeverage)
+		params.PledgeLeverageEnabled = params.PledgeLeverage != nil
+		return
+	}
 	params.PledgeLeverageEnabled = cfg.PledgeLeverageEnabled
 	if cfg.PledgeLeverageEnabled {
 		params.PledgeLeverage = new(

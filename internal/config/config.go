@@ -841,11 +841,9 @@ type Config struct {
 	// value only where every node also enables the same value. See
 	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
 	MinPoolMargin uint `yaml:"minPoolMargin"                          envconfig:"DINGO_MIN_POOL_MARGIN"`
-	// CIP-50 pledge-leverage staking rewards. Consensus-affecting; defaults
-	// off. PledgeLeverageEnabled turns on the L*pledge reward cap and
-	// PledgeLeverage is L in [1, 10000]. Enable only on a network where every
-	// node also enables it. See ARCHITECTURE.md ("Reward Calculation And
-	// Precomputation").
+	// Experimental pre-Dijkstra CIP-50 override. Dijkstra rewards use the
+	// enacted MaxPledgeLeverage protocol parameter instead. This setting is
+	// consensus-affecting and must match across nodes on local networks.
 	PledgeLeverageEnabled bool `yaml:"pledgeLeverageEnabled"                  envconfig:"DINGO_PLEDGE_LEVERAGE_ENABLED"`
 	PledgeLeverage        uint `yaml:"pledgeLeverage"                         envconfig:"DINGO_PLEDGE_LEVERAGE"`
 	// CIP-0163 full-pot reward distribution. Consensus-affecting; defaults
