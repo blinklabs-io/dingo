@@ -86,6 +86,13 @@ func NewManager(
 	if len(promRegistry) > 0 {
 		registry = promRegistry[0]
 	}
+	blockCache, err := newBlockCache(
+		DefaultBlockCacheCapacity,
+		registry,
+	)
+	if err != nil {
+		return nil, err
+	}
 	cm := &ChainManager{
 		db:       db,
 		eventBus: eventBus,
@@ -93,31 +100,18 @@ func NewManager(
 		chainRollbackEvents: make(
 			map[ChainId][]uint64,
 		),
-		blockCache: newBlockCache(
-			DefaultBlockCacheCapacity,
-			registry,
-		),
+		blockCache: blockCache,
 	}
 	if registry != nil {
 		counter := prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "dingo_chain_rollback_point_not_on_chain_total",
+			Name: rollbackPointNotOnChainMetricName,
 			Help: "rollback targets rejected because the chain no longer holds the resolved block at its retained index",
 		})
-		if err := registry.Register(counter); err != nil {
-			var alreadyRegistered prometheus.AlreadyRegisteredError
-			if !errors.As(err, &alreadyRegistered) {
-				return nil, fmt.Errorf("register rollback point metric: %w", err)
-			}
-			existing, ok := alreadyRegistered.ExistingCollector.(prometheus.Counter)
-			if !ok {
-				return nil, fmt.Errorf(
-					"registered rollback point metric has type %T, want prometheus.Counter",
-					alreadyRegistered.ExistingCollector,
-				)
-			}
-			counter = existing
+		registered, err := registerPrometheusMetric(registry, counter)
+		if err != nil {
+			return nil, fmt.Errorf("register rollback point metric: %w", err)
 		}
-		cm.rollbackPointNotOnChain = counter
+		cm.rollbackPointNotOnChain = registered
 	}
 	if err := cm.loadPrimaryChain(); err != nil {
 		return nil, err
