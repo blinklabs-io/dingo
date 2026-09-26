@@ -6852,6 +6852,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	// Process blocks
 	var nextEpochEraId uint
 	var allowTwoEraBoundaryTransition bool
+	// boundaryShouldValidate is whether the block that opens the next epoch
+	// is validated, which decides whether the Byron-to-Shelley gate runs.
+	var boundaryShouldValidate bool
 	var needsEpochRollover bool
 	var end, i int
 	var err error
@@ -6883,6 +6886,43 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 
 			var rolloverResult *EpochRolloverResult
 			var eraTransitions []*EraTransitionResult
+
+			if snapshotEra.Id == byron.EraIdByron && boundaryShouldValidate {
+				if err := ls.validateByronShelleyTransition(
+					ctx,
+					snapshotEpoch.EpochId+1,
+					nextEpochEraId,
+				); err != nil {
+					// The boundary block waits in cachedNextBatch, so the
+					// reader is still blocked on this read result.
+					if len(cachedNextBatch) == 0 {
+						completeReadResult()
+						return fmt.Errorf("byron transition: %w", err)
+					}
+					// The verdict is deterministic and the block is already
+					// on the primary chain, so a plain restart would re-read
+					// it and fail again. Rewind past it as a rejected header.
+					boundary := cachedNextBatch[0]
+					err = &headerValidationError{
+						BlockPoint: ocommon.Point{
+							Slot: boundary.SlotNumber(),
+							Hash: boundary.Hash().Bytes(),
+						},
+						Cause: err,
+					}
+					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+						err,
+					)
+					completeReadResult()
+					if recoverErr != nil {
+						return fmt.Errorf("byron transition: %w", recoverErr)
+					}
+					if recovered {
+						return errRestartLedgerPipeline
+					}
+					return fmt.Errorf("byron transition: %w", err)
+				}
+			}
 
 			// Block application is blocked for this whole transaction,
 			// including reward application and the governance tally, so
@@ -7500,6 +7540,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
 							snapshotEpoch.SlotLength == 0 {
 							needsEpochRollover = true
+							boundaryShouldValidate, _ = historicalBlockValidationDecision(
+								snapshotValidationEnabled,
+								ls.config.TrustedReplay,
+								snapshotChainsyncState,
+								next.SlotNumber(),
+								cutoffSlot,
+								snapshotMithrilSlot,
+							)
 							headerMajor, headerMajorKnown := HeaderProtocolMajor(
 								next.Header(),
 							)
@@ -7637,6 +7685,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// production; see LedgerView's field doc comment for
 						// why that plumbing is retained rather than deleted.
 						const skipPhase2Validation = false
+						blockPParams := snapshotPParams
+						if trackByronPBFT {
+							blockPParams = byronBlockPParams(
+								next,
+								runningByronPBFTState,
+								snapshotPParams,
+							)
+						}
 						delta, err = ls.ledgerProcessBlock(
 							txn,
 							tmpPoint,
@@ -7651,7 +7707,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							parentEnvelope,
 							blockOffsets,
 							snapshotEra,
-							snapshotPParams,
+							blockPParams,
 							snapshotPrevEraPParams,
 							snapshotEpoch.EpochId,
 							snapshotEpoch.StartSlot,
@@ -12010,37 +12066,32 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	return uint32(protocolMagic), nil
 }
 
-// ByronFeePolicy returns the fee policy from the active Byron genesis.
-func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
-	if ls == nil || ls.config.CardanoNodeConfig == nil {
-		return 0, 0, errors.New("byron genesis configuration is unavailable")
+// ByronProtocolParameters returns the Byron protocol parameters adopted as of
+// the ledger tip, or the Byron genesis parameters before the update state has
+// been built. Block application validates against the parameters adopted for
+// each block's own epoch instead, passed as its pparams.
+func (ls *LedgerState) ByronProtocolParameters() (
+	*eras.ByronProtocolParameters,
+	error,
+) {
+	if ls == nil {
+		return nil, errors.New("byron genesis configuration is unavailable")
 	}
-	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
-	if genesis == nil {
-		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	ls.RLock()
+	state := ls.byronPBFT.state
+	initialized := ls.byronPBFT.initialized
+	ls.RUnlock()
+	if initialized && state.update.Initialized() {
+		return state.update.AdoptedParams(), nil
 	}
-	policy := genesis.BlockVersionData.TxFeePolicy
-	return policy.Summand, policy.Multiplier, nil
-}
-
-// ByronMaxTxSize returns ppMaxTxSize from the Byron genesis protocol
-// parameters.
-func (ls *LedgerState) ByronMaxTxSize() (uint64, error) {
-	if ls == nil || ls.config.CardanoNodeConfig == nil {
-		return 0, errors.New("byron genesis configuration is unavailable")
+	params, err := ls.byronGenesisProtocolParameters()
+	if err != nil {
+		return nil, err
 	}
-	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
-	if genesis == nil {
-		return 0, errors.New("byron genesis configuration is unavailable")
+	if params == nil {
+		return nil, errors.New("byron genesis configuration is unavailable")
 	}
-	maxTxSize := genesis.BlockVersionData.MaxTxSize
-	if maxTxSize <= 0 {
-		return 0, fmt.Errorf(
-			"byron genesis maxTxSize must be positive, got %d",
-			maxTxSize,
-		)
-	}
-	return uint64(maxTxSize), nil
+	return params, nil
 }
 
 // UtxoByRef returns a single UTxO by reference

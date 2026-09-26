@@ -122,7 +122,9 @@ func newSignedByronPBFTBlock(
 	if delegationPayload == nil {
 		delegationPayload = []any{}
 	}
-	delegationPayloadCbor, err := cbor.Encode(cbor.IndefLengthList(delegationPayload))
+	delegationPayloadCbor, err := cbor.Encode(
+		cbor.IndefLengthList(delegationPayload),
+	)
 	require.NoError(t, err)
 	bodyProof, ok := header.BodyProof.([]any)
 	require.True(t, ok)
@@ -353,7 +355,7 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	state, err = ls.advanceByronPBFTState(state, block, true)
@@ -419,7 +421,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -619,7 +621,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256

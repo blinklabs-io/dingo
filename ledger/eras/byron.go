@@ -273,15 +273,36 @@ func byronNetworkMagicString(magic *uint32) string {
 	return strconv.FormatUint(uint64(*magic), 10)
 }
 
-// ByronFeePolicyProvider supplies the active Byron genesis fee policy. Both
-// values are scaled by 10^9.
-type ByronFeePolicyProvider interface {
-	ByronFeePolicy() (summand int64, multiplier int64, err error)
+// ByronProtocolParametersProvider supplies the Byron protocol parameters in
+// effect for a transaction validated outside block application: those adopted
+// as of the ledger tip, or the genesis parameters before any update has been
+// adopted. Block application passes the parameters adopted for the block's own
+// epoch as the pparams argument instead.
+type ByronProtocolParametersProvider interface {
+	ByronProtocolParameters() (*ByronProtocolParameters, error)
 }
 
-// ByronMaxTxSizeProvider supplies the active Byron ppMaxTxSize.
-type ByronMaxTxSizeProvider interface {
-	ByronMaxTxSize() (uint64, error)
+// byronProtocolParameters returns the parameters a Byron rule validates
+// against, or nil when neither pp nor ls carries them.
+func byronProtocolParameters(
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) (*ByronProtocolParameters, error) {
+	if params, ok := pp.(*ByronProtocolParameters); ok && params != nil {
+		return params, nil
+	}
+	provider, ok := ls.(ByronProtocolParametersProvider)
+	if !ok {
+		// Lightweight ledger-state implementations used by structural
+		// callers do not necessarily expose chain configuration. The
+		// production LedgerState does, and enforces the rules there.
+		return nil, nil
+	}
+	params, err := provider.ByronProtocolParameters()
+	if err != nil {
+		return nil, fmt.Errorf("get Byron protocol parameters: %w", err)
+	}
+	return params, nil
 }
 
 const (
@@ -618,75 +639,31 @@ func byronValidateMaxTxSize(
 	tx lcommon.Transaction,
 	_ uint64,
 	ls lcommon.LedgerState,
-	_ lcommon.ProtocolParameters,
+	pp lcommon.ProtocolParameters,
 ) error {
-	provider, ok := ls.(ByronMaxTxSizeProvider)
-	if !ok {
-		// Lightweight ledger-state implementations used by structural callers
-		// do not necessarily expose chain configuration. The production
-		// LedgerState does, and enforces the limit there.
+	params, err := byronProtocolParameters(ls, pp)
+	if err != nil || params == nil {
+		return err
+	}
+	size := TxSizeForFee(tx)
+	if params.MaxTxSize == nil ||
+		new(big.Int).SetUint64(size).Cmp(params.MaxTxSize) <= 0 {
 		return nil
 	}
-	maxSize, err := provider.ByronMaxTxSize()
-	if err != nil {
-		return fmt.Errorf("get Byron max transaction size: %w", err)
-	}
-	if size := TxSizeForFee(tx); size > maxSize {
-		return TxTooLargeByronError{Size: size, Max: maxSize}
-	}
-	return nil
+	return TxTooLargeByronError{Size: size, Max: params.MaxTxSize.Uint64()}
 }
 
-// byronMinFee returns the minimum fee for a transaction of size bytes under a
-// genesis fee policy. The reference loads the policy as summand div 10^9 and
-// multiplier % 10^9, then charges summand + ceiling(multiplier * size); the
-// two roundings differ from one ceiling over the scaled sum.
-func byronMinFee(summand, multiplier int64, size uint64) (*big.Int, error) {
-	if multiplier < 0 || summand < 0 {
-		return nil, fmt.Errorf(
-			"invalid Byron fee policy: multiplier %d summand %d",
-			multiplier,
-			summand,
-		)
-	}
-	scale := big.NewInt(byronFeePolicyScale)
-	base := new(big.Int).Quo(big.NewInt(summand), scale)
-	if err := byronCheckLovelace("fee policy summand", base); err != nil {
-		return nil, err
-	}
-	perSize := new(big.Int).Mul(
-		big.NewInt(multiplier),
-		new(big.Int).SetUint64(size),
-	)
-	quotient, remainder := new(big.Int).QuoRem(perSize, scale, new(big.Int))
-	if remainder.Sign() > 0 {
-		quotient.Add(quotient, big.NewInt(1))
-	}
-	required := base.Add(base, quotient)
-	if err := byronCheckLovelace("minimum fee", required); err != nil {
-		return nil, err
-	}
-	return required, nil
-}
-
-// byronValidateMinFee enforces the Byron genesis fee policy. Byron fees are
+// byronValidateMinFee enforces the adopted Byron fee policy. Byron fees are
 // implicit, so the input balance minus the output balance is the fee.
 func byronValidateMinFee(
 	tx lcommon.Transaction,
 	_ uint64,
 	ls lcommon.LedgerState,
-	_ lcommon.ProtocolParameters,
+	pp lcommon.ProtocolParameters,
 ) error {
-	provider, ok := ls.(ByronFeePolicyProvider)
-	if !ok {
-		// Lightweight ledger-state implementations used by structural callers do
-		// not necessarily expose chain configuration. The production
-		// LedgerState does, and validates the policy there.
-		return nil
-	}
-	summand, multiplier, err := provider.ByronFeePolicy()
-	if err != nil {
-		return fmt.Errorf("get Byron fee policy: %w", err)
+	params, err := byronProtocolParameters(ls, pp)
+	if err != nil || params == nil {
+		return err
 	}
 	consumed, produced, redeemOnly, err := byronBalances(tx, ls)
 	if err != nil {
@@ -700,7 +677,7 @@ func byronValidateMinFee(
 		// value, so a negative implicit fee fails against zero.
 		required = big.NewInt(0)
 	} else {
-		required, err = byronMinFee(summand, multiplier, size)
+		required, err = params.MinFee(size)
 		if err != nil {
 			return err
 		}

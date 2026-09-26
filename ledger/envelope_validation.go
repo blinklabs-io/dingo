@@ -17,6 +17,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -113,7 +114,7 @@ func validateInboundBlockEnvelope(
 		default:
 			return nil
 		}
-		return validateByronBlockSizes(block, nodeConfig)
+		return validateByronBlockSizes(block, pparams, nodeConfig)
 	}
 	if err := validateBlockSizes(block, pparams); err != nil {
 		return err
@@ -311,34 +312,65 @@ func validateBlockSizes(
 	return nil
 }
 
-// validateByronBlockSizes enforces the limits carried by Byron genesis. Byron
-// does not put a body-size declaration in its header, so the encoded block
-// size is the value checked against maxBlockSize.
+// validateByronBlockSizes enforces the Byron block and header size limits.
+// A main block is measured against ppMaxBlockSize and ppMaxHeaderSize as
+// adopted for its epoch when pparams carries them; genesis only initializes
+// those parameters. Epoch boundary blocks, and callers with no adopted
+// parameters, use the genesis limits.
 func validateByronBlockSizes(
 	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
 	config *cardano.CardanoNodeConfig,
 ) error {
-	if config == nil || config.ByronGenesis() == nil {
-		return errors.New("byron genesis is required for block size validation")
+	maxBlockSize, maxHeaderSize, err := byronBlockSizeLimits(
+		block, pparams, config,
+	)
+	if err != nil {
+		return err
 	}
-	genesis := config.ByronGenesis()
-	version := genesis.BlockVersionData
-	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
-		return errors.New("byron genesis has invalid block size limits")
-	}
-	if uint64(len(block.Header().Cbor())) > uint64(version.MaxHeaderSize) {
+	headerSize := new(big.Int).SetInt64(int64(len(block.Header().Cbor())))
+	if headerSize.Cmp(maxHeaderSize) > 0 {
 		return fmt.Errorf(
-			"byron block header size %d exceeds maxHeaderSize %d",
-			len(block.Header().Cbor()), version.MaxHeaderSize,
+			"byron block header size %s exceeds maxHeaderSize %s",
+			headerSize, maxHeaderSize,
 		)
 	}
-	if uint64(len(block.Cbor())) > uint64(version.MaxBlockSize) {
+	blockSize := new(big.Int).SetInt64(int64(len(block.Cbor())))
+	if blockSize.Cmp(maxBlockSize) > 0 {
 		return fmt.Errorf(
-			"byron block size %d exceeds maxBlockSize %d",
-			len(block.Cbor()), version.MaxBlockSize,
+			"byron block size %s exceeds maxBlockSize %s",
+			blockSize, maxBlockSize,
 		)
 	}
 	return nil
+}
+
+func byronBlockSizeLimits(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+	config *cardano.CardanoNodeConfig,
+) (maxBlockSize, maxHeaderSize *big.Int, err error) {
+	if _, isMain := block.(*byron.ByronMainBlock); isMain {
+		if adopted, ok := pparams.(*eras.ByronProtocolParameters); ok &&
+			adopted != nil && adopted.MaxBlockSize != nil &&
+			adopted.MaxHeaderSize != nil {
+			return adopted.MaxBlockSize, adopted.MaxHeaderSize, nil
+		}
+	}
+	if config == nil || config.ByronGenesis() == nil {
+		return nil, nil, errors.New(
+			"byron genesis is required for block size validation",
+		)
+	}
+	version := config.ByronGenesis().BlockVersionData
+	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
+		return nil, nil, errors.New(
+			"byron genesis has invalid block size limits",
+		)
+	}
+	return big.NewInt(int64(version.MaxBlockSize)),
+		big.NewInt(int64(version.MaxHeaderSize)),
+		nil
 }
 
 // serializedBlockBodySize measures the serialized body portion of block CBOR
