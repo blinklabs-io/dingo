@@ -182,6 +182,103 @@ func opCertBaselineRecorded(
 	return stored, found
 }
 
+// TestLedgerProcessBlockOpCertFirstCounterUsesZeroBaseline pins the reference
+// rule for a producer with no recorded counter through block application.
+// ouroboros-consensus Praos doValidateKESSignature resolves currentIssueNo to
+// 0 for a pool in the stake distribution with no counter, then requires
+// m <= n <= m+1, so a first Praos counter is 0 or 1. cardano-ledger TPraos
+// OCERT uses the same 0 but only requires m <= n.
+func TestLedgerProcessBlockOpCertFirstCounterUsesZeroBaseline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		praos   bool
+		counter uint64
+		wantErr string
+	}{
+		{name: "praos first counter zero", praos: true, counter: 0},
+		{name: "praos first counter one", praos: true, counter: 1},
+		{
+			name:    "praos first counter two is gapped",
+			praos:   true,
+			counter: 2,
+			wantErr: "opcert counter 2 skips ahead of last seen 0",
+		},
+		{name: "tpraos large first counter", praos: false, counter: 490},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ls := newOpCertBaselineLedgerState(t, 0)
+
+			err := applyOpCertBaselineBlock(t, ls, tt.praos, 10, tt.counter)
+
+			stored, found := opCertBaselineRecorded(t, ls)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				require.False(
+					t,
+					found,
+					"a rejected block must not record its counter",
+				)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, tt.counter, stored)
+		})
+	}
+}
+
+// TestLedgerProcessBlockOpCertMithrilPoolWithoutCertifiedCounter covers a
+// Mithril-restored ledger whose certified HeaderState counter map was
+// imported but does not name this pool: the reference has no counter for it
+// either, so the zero baseline applies to its first block after the boundary.
+func TestLedgerProcessBlockOpCertMithrilPoolWithoutCertifiedCounter(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const boundarySlot = uint64(100)
+	for _, tt := range []struct {
+		name    string
+		counter uint64
+		wantErr string
+	}{
+		{name: "counter one", counter: 1},
+		{
+			name:    "counter two is gapped",
+			counter: 2,
+			wantErr: "opcert counter 2 skips ahead of last seen 0",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ls := newOpCertBaselineLedgerState(t, boundarySlot)
+			otherPool := lcommon.PoolKeyHash(
+				lcommon.NewBlake2b224([]byte("certified-other-pool")),
+			)
+			require.NoError(t, ls.db.UpdatePoolOpCertSequence(
+				otherPool, 7, boundarySlot, nil,
+			))
+
+			err := applyOpCertBaselineBlock(
+				t, ls, true, boundarySlot+10, tt.counter,
+			)
+
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			stored, found := opCertBaselineRecorded(t, ls)
+			require.True(t, found)
+			require.Equal(t, tt.counter, stored)
+		})
+	}
+}
+
 // TestLedgerProcessBlockOpCertMithrilWithoutCertifiedCounterMapFailsClosed
 // covers a Mithril-restored ledger that holds no certified counter at its
 // trust boundary at all: a database imported before the HeaderState counter
