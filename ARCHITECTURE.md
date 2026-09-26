@@ -5292,11 +5292,10 @@ history. Every Shelley-family era delegates that rule to
 `shelley.DuplicateInputError`. Byron permits a repeated input, but its
 `eras.TxTooLargeByronError`, `eras.UnknownAttributesByronError` and
 `eras.UnknownAddressAttributesByronError` read only the transaction and the
-protocol parameters. `isDeterministicTxValidationError` classifies all of them.
-Replay recovery therefore rejects the primary-chain branch and rolls both
-stores back to the last applied ledger tip, then publishes a `chainsync.resync`
-event with reason `deterministic tx validation recovery` so ChainSync obtains a
-fresh intersection. Other transaction-validation errors
+protocol parameters. `isDeterministicTxValidationError` classifies all of them. Replay recovery therefore rejects the primary-chain branch
+and rolls both stores back to the last applied ledger tip, then publishes a
+`chainsync.resync` event with reason `deterministic tx validation recovery` so
+ChainSync obtains a fresh intersection. Other transaction-validation errors
 continue through producer resolution and the unresolved-producer fallback,
 except for missing-redeemer errors. A missing redeemer is classified as
 deterministic for every `RedeemerTag` purpose (spend, mint, certificate,
@@ -9012,11 +9011,16 @@ second sync:
     through (`processEpoch`'s and `processAccountEpoch`'s success paths, and
     `reportError`'s synthesized `ERROR` path) — also calls
     `metrics.recordResult`, so all three are covered from one call site:
-    `dingo_koiosparity_epoch_result_total` (by network/queue/status),
-    `dingo_koiosparity_mismatch_total` (by network/queue/category/severity, mirroring
+    `dingo_koiosparity_epoch_result_total` (by queue/status),
+    `dingo_koiosparity_mismatch_total` (by queue/category/severity, mirroring
     `check_mismatches.category`), `dingo_koiosparity_last_checked_epoch`, and
     `dingo_koiosparity_epoch_mismatch_count` (mirroring
-    `check_epoch_status.mismatch_count`). Every series carries a `queue`
+    `check_epoch_status.mismatch_count`). None of these collectors declares
+    its own `network` variable label: `configWrapPromRegistry` (`config.go`)
+    already wraps every registry the node hands to a component with a
+    constant `network` label, and a collector that also declared `network` as
+    a variable label would conflict with that constant label and fail to
+    register (dingo#4723). Every series still carries a `queue`
     label (`aggregate`/`account`, from the result's `CheckedScopes`): both
     queues emit a result for the same epoch and the account queue can lag
     arbitrarily, so a shared gauge would let a late account-queue PASS
@@ -12877,7 +12881,45 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    manager and stake-aggregation chokepoint use), excluding delegated stake
    whose reward account expired before `NewEpoch` from the DRep tally exactly
    as the stake-aggregation chokepoint excludes it from Mark stake, the reward
-   basis, and SPO vote power. `TallyContext.DelegatorInactivityOn` mirrors the
+   basis, and SPO vote power. `LoadDRepVotingState` also folds each active
+   governance proposal's own deposit into its return account's delegated DRep
+   voting power (`ActiveProposalDepositDRepPower`, `ledger/governance/
+   proposal_deposits.go`): per CIP-1694 a proposal's deposit is escrowed but
+   still counts as part of the depositor's active voting stake for as long as
+   the proposal remains active, which `GetDRepVotingPowerBatch`/
+   `GetDRepVotingPowerByType`'s plain `account`⋈`utxo` aggregation does not
+   express on its own (blinklabs-io/dingo#4355). It reads
+   `GetActiveGovernanceProposals(currentEpoch)`, resolves each deposit-bearing
+   proposal's `ReturnAddress` to a stake credential, batches those credentials
+   through `GetAccountsByCredential` to find each one's DRep delegation, and
+   adds the deposit onto that DRep's (or `AlwaysNoConfidence`'s) power;
+   `AlwaysAbstain` delegators are excluded, matching `tallyDRepVotes`'
+   treatment of Abstain stake as outside every bucket. It applies the same
+   `active` and CIP-0163 expiry gates to the return account that
+   `GetDRepVotingPowerBatch` applies to ordinary stake, so a return account
+   already excluded from the ordinary tally by those gates does not have its
+   deposit counted either. This is the production counterpart of the
+   conformance harness's local `activeProposalDeposits`/
+   `credentialVotingStake` (`internal/test/conformance/state_manager.go`),
+   which implemented the same rule scoped to `NoConfidence`/`UpdateCommittee`
+   ratification before this landed; the production version applies to the
+   DRep tally for every DRep-gated action type. `ActiveProposalDepositDRepPower`
+   is exported specifically so every other DRep voting-power reporting path
+   calls it too: the Blockfrost adapter's `predefinedDRep`, `drepByCredentialTag`,
+   and the `DReps` list handler's `fillAmounts` (all in
+   `api/blockfrost/adapter.go`), and `LedgerView.GetDRepVotingPower`
+   (`ledger/view.go` -- the local-state-query `GetDRepState` path, currently
+   unwired to any caller). Each merges its result into
+   `GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`'s (or, for the two
+   single-credential reads, `GetDRepVotingPower`'s) plain figure the same way
+   `LoadDRepVotingState` does; without that, a DRep's reported voting power
+   would silently disagree with the value ratification actually used for it.
+   Those call sites pass `expiryEpoch = 0` (matching `GetDRepVotingPower`'s
+   existing point-in-time, ungated convention noted above), not
+   `LoadDRepVotingState`'s epoch-boundary CIP-0163 value, so a return
+   account's deposit is counted there even if the CIP-0163 gate would exclude
+   it from the epoch-boundary tally.
+   `TallyContext.DelegatorInactivityOn` mirrors the
    same flag into the lazy (non-precomputed) `tallyDRepVotes` fallback path
    used by standalone/test callers. The mid-epoch HardForkInitiation stability
    check snapshots and threads this gate through `StabilityCheckInputs` as well,
