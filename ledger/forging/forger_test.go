@@ -1636,9 +1636,9 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
 			require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
-			// Twice: once to resolve the parent the certificate is
-			// selected for, once to re-check it has not moved before the
-			// block is built against it.
+			// Twice: once to resolve the certificate's parent, then again
+			// before the build to ensure endorser-block production did not
+			// move that parent. See buildBlockForSlot.
 			require.Equal(t, 2, parent.calls)
 			// CertifiedEndorserBlockTxHashes must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not
