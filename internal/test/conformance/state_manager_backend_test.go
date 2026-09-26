@@ -300,14 +300,6 @@ func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(t *testing.
 	m.protocolParams = pparams
 	m.currentEpoch = 100
 	drepCredential := testHash28(0xd7)
-	require.NoError(t, m.db.CreateDrep(nil, &models.Drep{
-		CredentialTag:     0,
-		Credential:        drepCredential[:],
-		AddedSlot:         1,
-		LastActivityEpoch: 1,
-		ExpiryEpoch:       21,
-		Active:            false,
-	}))
 	require.NoError(t, m.db.SetImportedDormantDRepEpochs(3, nil))
 
 	rewardHash := testHash28(0xd8)

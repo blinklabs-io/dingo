@@ -273,7 +273,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	assert.Empty(t, expired)
 }
 
-func TestPV9DRepReregistrationUsesProposalDormancyReset(t *testing.T) {
+func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -286,14 +286,6 @@ func TestPV9DRepReregistrationUsesProposalDormancyReset(t *testing.T) {
 	drepCredential := testHash28("drep-ordering-voter")
 	var drepHash lcommon.CredentialHash
 	copy(drepHash[:], drepCredential)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
-		CredentialTag:     0,
-		Credential:        drepCredential,
-		AddedSlot:         1,
-		LastActivityEpoch: 1,
-		ExpiryEpoch:       21,
-		Active:            false,
-	}))
 	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
 
 	rewardAddress, err := lcommon.NewAddressFromBytes(
@@ -314,6 +306,7 @@ func TestPV9DRepReregistrationUsesProposalDormancyReset(t *testing.T) {
 	}
 	registration := &lcommon.RegistrationDrepCertificate{
 		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		Amount:   500,
 		DrepCredential: lcommon.Credential{
 			CredType:   lcommon.CredentialTypeAddrKeyHash,
 			Credential: drepHash,
@@ -321,6 +314,7 @@ func TestPV9DRepReregistrationUsesProposalDormancyReset(t *testing.T) {
 	}
 	tx := mockledger.NewTransactionBuilder()
 	tx.WithId(testHash32("drep-ordering-tx"))
+	tx.WithValid(true)
 	tx.WithCertificates(registration)
 	tx.WithProposalProcedures(proposal)
 	point := ocommon.Point{Slot: 100, Hash: testHash32("drep-ordering-block")}
@@ -336,6 +330,16 @@ func TestPV9DRepReregistrationUsesProposalDormancyReset(t *testing.T) {
 		); err != nil {
 			return err
 		}
+		if err := db.SetTransactionMetadataOnly(
+			tx,
+			point,
+			0,
+			map[int]uint64{0: 500},
+			txn,
+			9,
+		); err != nil {
+			return err
+		}
 		if err := ProcessDRepActivityCertificates(tx, point, 100, 20, 9, db, txn); err != nil {
 			return err
 		}
@@ -344,6 +348,8 @@ func TestPV9DRepReregistrationUsesProposalDormancyReset(t *testing.T) {
 
 	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
 	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
 	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)

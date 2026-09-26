@@ -34,6 +34,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -403,6 +404,94 @@ func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
+}
+
+func TestBackfillResetsDormancyBeforeFreshDRepRegistration(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	drepCredential := bytes.Repeat([]byte{0x79}, lcommon.Blake2b224Size)
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion:         lcommon.ProtocolParametersProtocolVersion{Major: 9},
+		DRepDeposit:             500,
+		DRepInactivityPeriod:    20,
+		GovActionValidityPeriod: 20,
+	}
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, bytes.Repeat([]byte{0x7A}, lcommon.Blake2b224Size)...),
+	)
+	require.NoError(t, err)
+	var anchorHash [32]byte
+	copy(anchorHash[:], bytes.Repeat([]byte{0x7B}, lcommon.Blake2b256Size))
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/backfill-dormancy",
+			DataHash: anchorHash,
+		},
+	}
+	credentialHash := lcommon.NewBlake2b224(drepCredential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.RegistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{CredType: 0, Credential: credentialHash},
+			Amount:         500,
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x7C}, lcommon.Blake2b256Size))
+	tx.WithType(gledger.TxTypeConway)
+	tx.WithValid(true)
+	tx.WithProposalProcedures(proposal)
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0x7D}, lcommon.Blake2b256Size),
+	}
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			point,
+			100,
+			uint(conway.EraIdConway),
+			pparams,
+			&database.BlockIngestionResult{
+				TxOffsets: map[[32]byte]database.CborOffset{
+					txHash: {BlockSlot: point.Slot, BlockHash: blockHash, ByteLength: 1},
+				},
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			},
+			acc,
+			txn,
+			nil,
+			false,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	assert.Zero(t, dormantEpochs)
 }
 
 func closeTestDB(db *database.Database) error {

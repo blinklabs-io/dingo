@@ -227,34 +227,7 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 	drepCredential := bytes.Repeat([]byte{0x51}, lcommon.Blake2b224Size)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], drepCredential)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
-		CredentialTag:     0,
-		Credential:        drepCredential,
-		AddedSlot:         1,
-		LastActivityEpoch: 1,
-		ExpiryEpoch:       21,
-		Active:            false,
-	}))
 	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
-	existingProposalHash := bytes.Repeat([]byte{0x56}, lcommon.Blake2b256Size)
-	require.NoError(t, db.SetGovernanceProposal(
-		&models.GovernanceProposal{
-			TxHash:        existingProposalHash,
-			ActionIndex:   0,
-			ActionType:    uint8(lcommon.GovActionTypeInfo),
-			ProposedEpoch: 99,
-			ExpiresEpoch:  120,
-			AnchorURL:     "https://example.com/existing-proposal",
-			AnchorHash:    bytes.Repeat([]byte{0x57}, lcommon.Blake2b256Size),
-			Deposit:       1,
-			ReturnAddress: append(
-				[]byte{0xE1},
-				bytes.Repeat([]byte{0x58}, lcommon.Blake2b224Size)...,
-			),
-			AddedSlot: 90,
-		},
-		nil,
-	))
 
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.ProtocolVersion.Major = 9
@@ -301,21 +274,6 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 		Amount: 500,
 	})
 	tx.WithProposalProcedures(proposal)
-	var voterHash [lcommon.Blake2b224Size]byte
-	copy(voterHash[:], drepCredential)
-	var actionTxHash [lcommon.Blake2b256Size]byte
-	copy(actionTxHash[:], existingProposalHash)
-	tx.WithVotingProcedures(lcommon.VotingProcedures{
-		&lcommon.Voter{
-			Type: lcommon.VoterTypeDRepKeyHash,
-			Hash: voterHash,
-		}: {
-			&lcommon.GovActionId{
-				TransactionId: actionTxHash,
-				GovActionIdx:  0,
-			}: {Vote: models.VoteYes},
-		},
-	})
 	txHash := tx.Hash()
 	var txHashArray [32]byte
 	copy(txHashArray[:], txHash.Bytes())
@@ -341,16 +299,11 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
 	require.Equal(t, uint64(120), drep.ExpiryEpoch)
-	existingProposal, err := db.GetGovernanceProposal(
-		existingProposalHash,
-		0,
-		nil,
-	)
+	storedProposal, err := db.GetGovernanceProposal(tx.Hash().Bytes(), 0, nil)
 	require.NoError(t, err)
-	existingVotes, err := db.GetGovernanceVotes(existingProposal.ID, nil)
-	require.NoError(t, err)
-	require.Len(t, existingVotes, 1)
-	require.Equal(t, uint8(models.VoteYes), existingVotes[0].Vote)
+	require.NotNil(t, storedProposal)
+	require.Equal(t, uint64(100), storedProposal.ProposedEpoch)
+	require.Equal(t, uint64(120), storedProposal.ExpiresEpoch)
 	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)
 	require.Zero(t, dormantEpochs)
