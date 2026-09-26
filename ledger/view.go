@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -63,8 +64,9 @@ var ErrNotImplemented = errors.New("not implemented")
 var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 
 type LedgerView struct {
-	ls  *LedgerState
-	txn *database.Txn
+	ls          *LedgerState
+	txn         *database.Txn
+	byronParams *byron.ByronGenesisBlockVersionData
 	// Committee proposal resolution must use the same immutable consensus
 	// publication as the validation that owns this view.
 	committeeEpoch       uint64
@@ -365,6 +367,10 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 }
 
 func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
+	if lv.byronParams != nil {
+		policy := lv.byronParams.TxFeePolicy
+		return policy.Summand, policy.Multiplier, nil
+	}
 	return lv.ls.ByronFeePolicy()
 }
 

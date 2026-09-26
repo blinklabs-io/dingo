@@ -16,6 +16,8 @@ package cardano
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,11 +34,17 @@ import (
 // genesis hashes to).
 func writeByronGenesisConfig(t *testing.T, byronGenesisJSON string) *CardanoNodeConfig {
 	t.Helper()
+	defaults, err := EmbeddedConfigFS.ReadFile("mainnet/byron-genesis.json")
+	require.NoError(t, err)
+	completed, err := mergeByronGenesisDefaults(
+		[]byte(byronGenesisJSON), defaults,
+	)
+	require.NoError(t, err)
 
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, "byron-genesis.json"),
-		[]byte(byronGenesisJSON),
+		completed,
 		0o644,
 	))
 	cfg, err := NewCardanoNodeConfigFromReader(
@@ -45,6 +53,106 @@ func writeByronGenesisConfig(t *testing.T, byronGenesisJSON string) *CardanoNode
 	require.NoError(t, err)
 	cfg.path = dir
 	return cfg
+}
+
+type byronJSONEntry struct {
+	key   string
+	value json.RawMessage
+}
+
+func mergeByronGenesisDefaults(input, defaults []byte) ([]byte, error) {
+	inputEntries, err := decodeByronJSONObject(input)
+	if err != nil {
+		return nil, err
+	}
+	defaultEntries, err := decodeByronJSONObject(defaults)
+	if err != nil {
+		return nil, err
+	}
+	inputKeys := make(map[string]struct{}, len(inputEntries))
+	for _, entry := range inputEntries {
+		inputKeys[entry.key] = struct{}{}
+	}
+	merged := make([]byronJSONEntry, 0, len(inputEntries)+len(defaultEntries))
+	for _, entry := range defaultEntries {
+		if _, supplied := inputKeys[entry.key]; !supplied {
+			merged = append(merged, entry)
+		}
+	}
+	seen := make(map[string]struct{}, len(inputEntries))
+	for idx, entry := range inputEntries {
+		if _, alreadySeen := seen[entry.key]; !alreadySeen {
+			seen[entry.key] = struct{}{}
+			for _, defaultEntry := range defaultEntries {
+				if defaultEntry.key != entry.key || !isJSONObject(entry.value) ||
+					!isJSONObject(defaultEntry.value) {
+					continue
+				}
+				entry.value, err = mergeByronGenesisDefaults(
+					entry.value,
+					defaultEntry.value,
+				)
+				if err != nil {
+					return nil, err
+				}
+				inputEntries[idx].value = entry.value
+				break
+			}
+		}
+		merged = append(merged, inputEntries[idx])
+	}
+	var result bytes.Buffer
+	result.WriteByte('{')
+	for idx, entry := range merged {
+		if idx > 0 {
+			result.WriteByte(',')
+		}
+		key, err := json.Marshal(entry.key)
+		if err != nil {
+			return nil, err
+		}
+		result.Write(key)
+		result.WriteByte(':')
+		result.Write(entry.value)
+	}
+	result.WriteByte('}')
+	return result.Bytes(), nil
+}
+
+func decodeByronJSONObject(raw []byte) ([]byronJSONEntry, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if opening != json.Delim('{') {
+		return nil, fmt.Errorf("expected JSON object, got %v", opening)
+	}
+	entries := make([]byronJSONEntry, 0)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected JSON object key, got %T", keyToken)
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		entries = append(entries, byronJSONEntry{key: key, value: value})
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func isJSONObject(raw []byte) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 // TestLoadGenesisConfigsByronDuplicateKeys covers dingo#4424: the reference

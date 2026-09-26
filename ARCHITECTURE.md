@@ -3111,6 +3111,7 @@ The Musashi prototype (prototype-2026w29) tags its early chain as Conway (NtN bl
 - Chain-sync headers: `ouroboros/chainsync.go` takes the raw RollForward callback (`chainsyncClientRollForwardRaw`), and `decodeChainsyncHeader` routes Musashi Conway-tagged headers through the Dijkstra header decoder (`gdijkstra.NewDijkstraBlockHeaderFromCbor`), which accepts the trailing extension. Taking the raw callback is required because the decoded callback would let gouroboros' strict Conway decode fail before dingo can intervene.
 - Block-fetch bodies: `ouroboros/blockfetch.go` takes the raw block callback (`blockfetchClientBlockRaw`) so `decodeBlockfetchBlock` can call `models.DecodeConwayBlock`, which reconstructs the Conway block from the extended header.
 - Ledger re-decode: `database/models` `Block.Decode` (used when reading blocks back from storage) is likewise Leios-aware for Conway blocks, calling `DecodeConwayBlock`.
+- Dijkstra block decode: `database/models.DecodeDijkstraBlock` accepts the earlier four-component Dijkstra body still present in Musashi history. It maps the body-level invalid-transaction indexes onto current transaction validity flags for typed access, but keeps the original block and body CBOR so hashes, stored bytes, and byte offsets remain based on the historical wire encoding. The same decoder is used for live blockfetch and stored, imported, and served blocks.
 
 `DecodeConwayBlock` (`database/models/leios_block.go`) tries the strict Conway decoder first and only falls back to the Leios-extended reconstruct when strict decode fails, so real Conway networks (mainnet/preprod/preview) pay no cost. The reconstruct drops the two extra header fields solely to satisfy the strict decoder, then restores the original header, header-body, and block CBOR, so `block.Hash()` equals the real 12-field header hash chain-sync computed, KES verification runs against the untouched header body, and `block.Cbor()` (and the `DOFF` offsets recorded against it) resolve against the verbatim block. Forged Dijkstra blocks use the same 12-field header shape: plain and announcing RBs set `leios_certified=false`, while CertRBs set it true and carry the prototype body certificate.
 
@@ -3325,7 +3326,11 @@ The `4k/f` check passes rather than rejects when `epochLength` is zero or negati
 - Slot leader eligibility checking
 
 Byron main-block validation derives its configured genesis issuers and initial
-heavy delegations from the Byron genesis file. Stateless validation verifies
+heavy delegations from the Byron genesis file. The optional
+`PBftSignatureThreshold` in the Cardano node configuration is preserved as an
+exact rational and applied to the rolling issuer window; absence selects the
+reference default of 0.22. Both live state construction and canonical-chain
+rebuild use that same configured threshold. Stateless validation verifies
 the protocol magic, genesis issuer, proxy certificate, exact header signature,
 and current-slot bound. Ordered ledger application then ticks the active
 delegation view, validates the signing delegate, and charges the resolved
@@ -3343,6 +3348,21 @@ through the applied tip, while the issuer window retains only its last `k`
 main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
+
+Byron main-block application also replays the update interface alongside the
+delegation view. Update proposals are signature-checked, limited by the active
+`maxProposalSize`, and checked against the successor-version, parameter, and
+software-version rules. Votes are attributed to genesis keys through the
+active delegation map and counted once per key; application versions change
+when their proposal is confirmed. Protocol-version endorsements are attributed
+to the delegate certificate in the block header. Endorsements can accumulate
+before a proposal is stable, but the block that reaches the adoption threshold
+is valid only after the proposal has been confirmed for at least `2k` slots.
+The candidate protocol version and its parameters take effect at the first
+eligible epoch slot after the `4k` stability cutoff. Those active parameters
+drive Byron block, header, and transaction size checks and the linear minimum
+fee policy. The update state is rebuilt from canonical blocks on startup or
+rollback, so no separate database record can become stale.
 
 Cached epochs resolve without forecast configuration, but still require a
 published nonce. Before forecasting an uncached epoch for a live header,

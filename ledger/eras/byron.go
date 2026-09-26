@@ -51,6 +51,12 @@ func EpochLengthByron(
 	if byronGenesis == nil {
 		return 0, 0, errors.New("unable to get byron genesis")
 	}
+	return epochLengthByronGenesis(byronGenesis)
+}
+
+func epochLengthByronGenesis(
+	byronGenesis *byron.ByronGenesis,
+) (uint, uint, error) {
 	if byronGenesis.BlockVersionData.SlotDuration < 0 {
 		return 0, 0, fmt.Errorf(
 			"byron genesis: slotDuration must not be negative, got %d",

@@ -1269,7 +1269,21 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 		100,
 		make([]byte, lcommon.Blake2b256Size),
 	)
-	ebTxs := []cbor.RawMessage{testDijkstraTx(t, 1), testDijkstraTx(t, 2)}
+	// Endorser-block transaction bytes use the mempool transaction order,
+	// where is_valid precedes auxiliary_data. The served Dijkstra block uses
+	// the block transaction order, where auxiliary_data precedes is_valid.
+	ebTxs := make([]cbor.RawMessage, 0, 2)
+	wantBlockTxs := make([][]byte, 0, 2)
+	for seed := byte(1); seed <= 2; seed++ {
+		var blockTx []cbor.RawMessage
+		_, err := cbor.Decode(testDijkstraTx(t, seed), &blockTx)
+		require.NoError(t, err)
+		wantBlockTxs = append(wantBlockTxs, []byte(mustCbor(t, blockTx)))
+		mempoolTx := []cbor.RawMessage{
+			blockTx[0], blockTx[1], blockTx[3], blockTx[2],
+		}
+		ebTxs = append(ebTxs, mustCbor(t, mempoolTx))
+	}
 
 	merged, err := spliceEndorserTxsIntoDijkstraBlock(certRB, ebTxs)
 	require.NoError(t, err)
@@ -1309,8 +1323,8 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	_, err = cbor.Decode(mergedBody[0], &mergedTxs)
 	require.NoError(t, err)
 	require.Len(t, mergedTxs, 2)
-	require.Equal(t, []byte(ebTxs[0]), []byte(mergedTxs[0]))
-	require.Equal(t, []byte(ebTxs[1]), []byte(mergedTxs[1]))
+	require.Equal(t, wantBlockTxs[0], []byte(mergedTxs[0]))
+	require.Equal(t, wantBlockTxs[1], []byte(mergedTxs[1]))
 
 	// The merged block deliberately has a stale body hash: the preserved header
 	// still commits to the original empty body, so a full parse (which verifies
@@ -1331,6 +1345,51 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, decoded.Transactions(), 2)
+}
+
+func TestSpliceEndorserMempoolTxReordersValidityAndAuxiliaryData(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	body := mustCbor(t, []any{uint64(1)})
+	witnesses := mustCbor(t, map[uint]any{})
+	isValid := mustCbor(t, false)
+	auxiliaryData := mustCbor(t, map[uint]any{0: []byte{0x01}})
+	mempoolTx := mustCbor(t, []cbor.RawMessage{
+		body, witnesses, isValid, auxiliaryData,
+	})
+	certRB := testDijkstraCertRBRaw(
+		t,
+		100,
+		make([]byte, lcommon.Blake2b256Size),
+	)
+
+	merged, err := spliceEndorserTxsIntoDijkstraBlock(
+		certRB,
+		[]cbor.RawMessage{mempoolTx},
+	)
+	require.NoError(t, err)
+
+	var top []cbor.RawMessage
+	_, err = cbor.Decode(merged, &top)
+	require.NoError(t, err)
+	var blockBody []cbor.RawMessage
+	_, err = cbor.Decode(top[1], &blockBody)
+	require.NoError(t, err)
+	var transactions []cbor.RawMessage
+	_, err = cbor.Decode(blockBody[0], &transactions)
+	require.NoError(t, err)
+	require.Len(t, transactions, 1)
+
+	var blockTx []cbor.RawMessage
+	_, err = cbor.Decode(transactions[0], &blockTx)
+	require.NoError(t, err)
+	require.Len(t, blockTx, 4)
+	require.Equal(t, []byte(body), []byte(blockTx[0]))
+	require.Equal(t, []byte(witnesses), []byte(blockTx[1]))
+	require.Equal(t, []byte(auxiliaryData), []byte(blockTx[2]))
+	require.Equal(t, []byte(isValid), []byte(blockTx[3]))
 }
 
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {

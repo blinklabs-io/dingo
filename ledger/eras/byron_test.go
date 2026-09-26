@@ -193,6 +193,9 @@ func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
 	require.NoError(t, err)
 	redeemTx, err := byron.NewByronTransactionFromCbor(txCbor)
 	require.NoError(t, err)
+	// The decoded witness omits Byron's tag-24 payload and chain-specific
+	// signing fields, so validation must still use the raw Byron witness.
+	assert.Len(t, redeemTx.Witnesses().Vkey(), 1)
 	// Byron witnesses exposed through TransactionWitnessSet still require
 	// their constructor-specific signature domain.
 

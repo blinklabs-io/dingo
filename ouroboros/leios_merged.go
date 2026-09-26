@@ -1624,9 +1624,11 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
-// three, and the existing transactions segment must be empty. ebTxsRaw must be
-// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
-// auxiliary_data/nil]) in endorser-block order.
+// three, and the existing transactions segment must be empty. Three-field
+// transactions are normalized with is_valid=true. Four-field transactions in
+// mempool order ([body, witnesses, is_valid, auxiliary_data]) are converted to
+// Dijkstra block order ([body, witnesses, auxiliary_data, is_valid]); inputs
+// already in block order are preserved.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
 	ebTxsRaw []cbor.RawMessage,
@@ -1661,7 +1663,43 @@ func spliceEndorserTxsIntoDijkstraBlock(
 			len(existingTxs),
 		)
 	}
-	newTxs, err := cbor.Encode(ebTxsRaw)
+	blockTxs := make([]cbor.RawMessage, len(ebTxsRaw))
+	for idx, rawTx := range ebTxsRaw {
+		var fields []cbor.RawMessage
+		if _, err := cbor.Decode(rawTx, &fields); err != nil {
+			return nil, fmt.Errorf("decode endorser transaction %d: %w", idx, err)
+		}
+		if len(fields) != 3 && len(fields) != 4 {
+			return nil, fmt.Errorf(
+				"endorser transaction %d has %d elements, expected 3 or 4",
+				idx,
+				len(fields),
+			)
+		}
+		blockTx := fields
+		if len(fields) == 3 {
+			blockTx = []cbor.RawMessage{fields[0], fields[1], fields[2], {0xf5}}
+		} else {
+			var isValid bool
+			if _, err := cbor.Decode(fields[2], &isValid); err == nil {
+				blockTx = []cbor.RawMessage{
+					fields[0], fields[1], fields[3], fields[2],
+				}
+			} else if _, err := cbor.Decode(fields[3], &isValid); err != nil {
+				return nil, fmt.Errorf(
+					"decode endorser transaction %d validity: %w",
+					idx,
+					err,
+				)
+			}
+		}
+		encoded, err := cbor.Encode(blockTx)
+		if err != nil {
+			return nil, fmt.Errorf("encode endorser transaction %d: %w", idx, err)
+		}
+		blockTxs[idx] = encoded
+	}
+	newTxs, err := cbor.Encode(blockTxs)
 	if err != nil {
 		return nil, fmt.Errorf("encode endorser transactions: %w", err)
 	}

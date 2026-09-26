@@ -15,32 +15,54 @@
 package eras
 
 import (
-	"bytes"
-	"fmt"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/stretchr/testify/require"
 )
 
-func testByronGenesis(slotDuration string, k int) []byte {
-	return []byte(fmt.Sprintf(`{
-		"avvmDistr": {},
-		"blockVersionData": {
-			"heavyDelThd":"300000000000","maxBlockSize":"2000000",
-			"maxHeaderSize":"2000000","maxProposalSize":"700",
-			"maxTxSize":"4096","mpcThd":"20000000000000",
-			"scriptVersion":0,"slotDuration":%q,
-			"softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},
-			"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},
-			"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000",
-			"updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"
-		},
-		"protocolConsts":{"k":%d,"protocolMagic":164},"startTime":1506203091,
-		"bootStakeholders":{"e551ed0645140f2fc9975a7cee7dd89380d918e091869b19332bcb54":1},
-		"heavyDelegation":{"e551ed0645140f2fc9975a7cee7dd89380d918e091869b19332bcb54":{"cert":"0f28871316b43f19773332984976f5d5838ed55b165c5afef4668b9efaee83c45744af47c41cda4ca3579443e3438bc6c6443106a5b2e8f820ab569bc7c1a907","delegatePk":"4yJc1LKn25BXdt5RFiMPKymb2P+V6qnKxbdi8CzHePekiNiMtPIupsmS+TbnZ43NMP6M7QfOEsLou5730/0Dsg==","issuerPk":"U3i0cs1QPT6ajXHJpZj1Aqj0Nkh2bhqkOOEXkd/MmcyH8XDJVZ2TchvZyt2m5PKsrgnqQWIv/dWmWQGwBB065Q==","omega":0}},
-		"nonAvvmBalances":{}
-	}`, slotDuration, k))
+func byronGenesisForEpochTest(
+	t *testing.T,
+	slotDuration *string,
+	k *int,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	genesis, err := cardano.EmbeddedConfigFS.ReadFile(
+		"mainnet/byron-genesis.json",
+	)
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(genesis, &fields))
+	if slotDuration != nil {
+		var blockVersionData map[string]json.RawMessage
+		require.NoError(
+			t,
+			json.Unmarshal(fields["blockVersionData"], &blockVersionData),
+		)
+		blockVersionData["slotDuration"], err = json.Marshal(*slotDuration)
+		require.NoError(t, err)
+		fields["blockVersionData"], err = json.Marshal(blockVersionData)
+		require.NoError(t, err)
+	}
+	if k != nil {
+		var protocolConsts map[string]json.RawMessage
+		require.NoError(
+			t,
+			json.Unmarshal(fields["protocolConsts"], &protocolConsts),
+		)
+		protocolConsts["k"], err = json.Marshal(*k)
+		require.NoError(t, err)
+		fields["protocolConsts"], err = json.Marshal(protocolConsts)
+		require.NoError(t, err)
+	}
+	genesis, err = json.Marshal(fields)
+	require.NoError(t, err)
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(string(genesis))))
+	return cfg
 }
 
 // TestEpochLengthByronRejectsNegativeSlotDuration covers dingo#4427: the
@@ -54,14 +76,11 @@ func testByronGenesis(slotDuration string, k int) []byte {
 func TestEpochLengthByronRejectsNegativeSlotDuration(t *testing.T) {
 	t.Parallel()
 
-	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadByronGenesisFromReader(
-		bytes.NewReader(testByronGenesis("20000", 2160)),
-	)
-	require.NoError(t, err)
-	cfg.ByronGenesis().BlockVersionData.SlotDuration = -1
-
-	_, _, err = EpochLengthByron(cfg)
+	_, _, err := epochLengthByronGenesis(&byron.ByronGenesis{
+		BlockVersionData: byron.ByronGenesisBlockVersionData{
+			SlotDuration: -1,
+		},
+	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "slotDuration")
 	require.Contains(t, err.Error(), "negative")
@@ -78,14 +97,10 @@ func TestEpochLengthByronRejectsNegativeSlotDuration(t *testing.T) {
 func TestEpochLengthByronRejectsNonPositiveK(t *testing.T) {
 	t.Parallel()
 
-	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadByronGenesisFromReader(
-		bytes.NewReader(testByronGenesis("20000", 2160)),
-	)
-	require.NoError(t, err)
-	cfg.ByronGenesis().ProtocolConsts.K = -1
+	k := -1
+	cfg := byronGenesisForEpochTest(t, nil, &k)
 
-	_, _, err = EpochLengthByron(cfg)
+	_, _, err := EpochLengthByron(cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "protocolConsts.k")
 }
@@ -96,11 +111,9 @@ func TestEpochLengthByronRejectsNonPositiveK(t *testing.T) {
 func TestEpochLengthByronAcceptsNonNegativeSlotDuration(t *testing.T) {
 	t.Parallel()
 
-	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadByronGenesisFromReader(
-		bytes.NewReader(testByronGenesis("20000", 2160)),
-	)
-	require.NoError(t, err)
+	duration := "20000"
+	k := 2160
+	cfg := byronGenesisForEpochTest(t, &duration, &k)
 
 	slotDuration, epochLength, err := EpochLengthByron(cfg)
 	require.NoError(t, err)

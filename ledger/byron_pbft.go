@@ -40,6 +40,7 @@ type byronPBFTCache struct {
 type byronPBFTState struct {
 	issuerState     byronconsensus.PBFTState
 	delegationState byronconsensus.PBFTDelegationState
+	updateState     byronUpdateState
 }
 
 var errByronPBFTCurrentSlotUnavailable = errors.New(
@@ -59,6 +60,17 @@ func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 			"build Byron PBFT config from genesis: %w",
 			err,
 		)
+	}
+	numerator, denominator, configured, err := lsConfig.CardanoNodeConfig.PBFTSignatureThresholdRatio()
+	if err != nil {
+		return byronPBFTCache{}, fmt.Errorf(
+			"read Byron PBFT signature threshold: %w",
+			err,
+		)
+	}
+	if configured {
+		config.PBFTSignatureThresholdNumerator = numerator
+		config.PBFTSignatureThresholdDenominator = denominator
 	}
 	return byronPBFTCache{config: &config}, nil
 }
@@ -330,7 +342,13 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 		bytes.Equal(cachedTip.Hash, tip.Point.Hash) {
 		return cachedState, nil
 	}
-	state, err := newByronPBFTState(config)
+	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
+	if genesis == nil {
+		return byronPBFTState{}, errors.New(
+			"rebuild Byron PBFT state: Byron genesis is unavailable",
+		)
+	}
+	state, err := newByronPBFTState(config, genesis.BlockVersionData)
 	if err != nil {
 		return byronPBFTState{}, err
 	}
@@ -436,11 +454,9 @@ func (ls *LedgerState) byronPBFTStateAtTip(
 
 func newByronPBFTState(
 	config byronconsensus.ByronConfig,
+	initialParams ledgerbyron.ByronGenesisBlockVersionData,
 ) (byronPBFTState, error) {
-	issuerState, err := byronconsensus.NewPBFTState(
-		nil,
-		config.SecurityParam,
-	)
+	issuerState, err := byronconsensus.NewPBFTStateFromConfig(nil, config)
 	if err != nil {
 		return byronPBFTState{}, err
 	}
@@ -451,6 +467,7 @@ func newByronPBFTState(
 	return byronPBFTState{
 		issuerState:     issuerState,
 		delegationState: delegationState,
+		updateState:     newByronUpdateState(initialParams, config.NumGenesisKeys),
 	}, nil
 }
 
@@ -460,6 +477,24 @@ func (ls *LedgerState) advanceByronPBFTState(
 	shouldValidate bool,
 ) (byronPBFTState, error) {
 	epoch, err := byronBlockEpoch(block)
+	if err != nil {
+		return byronPBFTState{}, err
+	}
+	config, err := ls.byronPBFTConfig()
+	if err != nil {
+		return byronPBFTState{}, err
+	}
+	if config.SlotsPerEpoch == 0 || epoch > ^uint64(0)/config.SlotsPerEpoch {
+		return byronPBFTState{}, fmt.Errorf(
+			"advance Byron update state: invalid first slot for epoch %d",
+			epoch,
+		)
+	}
+	state.updateState, err = state.updateState.advanceEpoch(
+		epoch,
+		epoch*config.SlotsPerEpoch,
+		config.SecurityParam,
+	)
 	if err != nil {
 		return byronPBFTState{}, err
 	}
@@ -519,6 +554,51 @@ func (ls *LedgerState) advanceByronPBFTState(
 			block,
 		)
 	}
+	if err := mainBlock.ValidateUpdatePayload(); err != nil {
+		return byronPBFTState{}, fmt.Errorf(
+			"validate Byron update payload at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	state.updateState, err = state.updateState.applyUpdatePayload(
+		mainBlock,
+		state.delegationState.ActiveDelegations(),
+		config.ProtocolMagic,
+		block.SlotNumber(),
+	)
+	if err != nil {
+		return byronPBFTState{}, fmt.Errorf(
+			"apply Byron update payload at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if len(header.ConsensusData.PubKey) > 0 {
+		issuer, err := byronconsensus.PBFTIssuerFromHeader(header)
+		if err != nil {
+			return byronPBFTState{}, fmt.Errorf(
+				"parse Byron update endorsement issuer at slot %d: %w",
+				block.SlotNumber(),
+				err,
+			)
+		}
+		state.updateState, err = state.updateState.registerEndorsement(
+			header.ExtraData.BlockVersion,
+			issuer.DelegateKeyHash,
+			state.delegationState.ActiveDelegations(),
+			block.SlotNumber(),
+			config.SecurityParam,
+		)
+		if err != nil {
+			return byronPBFTState{}, fmt.Errorf(
+				"register Byron protocol endorsement at slot %d: %w",
+				block.SlotNumber(),
+				err,
+			)
+		}
+	}
+	state.updateState = state.updateState.pruneExpired(block.SlotNumber())
 	dlgPayload, err := byronDelegationPayload(mainBlock)
 	if err != nil {
 		return byronPBFTState{}, fmt.Errorf(

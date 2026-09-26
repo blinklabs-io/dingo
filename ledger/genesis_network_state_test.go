@@ -413,12 +413,11 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	)
 }
 
-// TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision pins dingo#4428's
-// cited upstream case (gouroboros#2378): an AVVM redeem address and a
-// non-AVVM address that resolve to the same underlying address bytes
-// produce the same transaction ID through Byron's real
-// ByronGenesis.GenesisUtxos() path, not a hand-built duplicate.
-func TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision(t *testing.T) {
+// TestByronGenesisUtxosRejectAvvmNonAvvmCollision pins dingo#4428's cited
+// upstream case (gouroboros#2378): an AVVM redeem address and a non-AVVM
+// address that resolve to the same underlying address bytes produce the same
+// transaction ID, which the Byron genesis decoder rejects.
+func TestByronGenesisUtxosRejectAvvmNonAvvmCollision(t *testing.T) {
 	t.Parallel()
 
 	pubkeyBytes := make([]byte, 32)

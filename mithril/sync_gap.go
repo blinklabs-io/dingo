@@ -530,7 +530,7 @@ func processGapBlocks(
 		// Gap blocks were already parsed and body-hash validated by the
 		// blockfetch client when fetched from the relay. We only need a
 		// second decode here to extract transactions and offsets.
-		parsedBlock, err := gledger.NewBlockFromCbor(
+		parsedBlock, err := models.DecodeBlockCbor(
 			block.Type,
 			block.Cbor,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},

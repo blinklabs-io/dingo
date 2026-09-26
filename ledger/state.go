@@ -7579,6 +7579,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								)
 							}
 						}
+						var byronParamsForBlock *byron.ByronGenesisBlockVersionData
 						if trackByronPBFT &&
 							next.Era().Id == byron.EraIdByron {
 							nextPBFTState, pbftErr := ls.advanceByronPBFTState(
@@ -7595,6 +7596,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								)
 							}
 							runningByronPBFTState = nextPBFTState
+							activeByronParams := nextPBFTState.updateState.params
+							byronParamsForBlock = &activeByronParams
 							pendingByronPBFTState = nextPBFTState
 							pendingByronPBFTTip = tmpPoint
 							pendingByronPBFT = true
@@ -7656,6 +7659,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							snapshotEpoch.EpochId,
 							snapshotEpoch.StartSlot,
 							snapshotSyntheticV2CostModel,
+							byronParamsForBlock,
 						)
 						if err != nil {
 							deltaBatch.Release()
@@ -8010,7 +8014,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 	committeeEpoch uint64,
 	epochStartSlot uint64,
 	syntheticV2CostModel bool,
+	byronParams ...*byron.ByronGenesisBlockVersionData,
 ) (*LedgerDelta, error) {
+	var activeByronParams *byron.ByronGenesisBlockVersionData
+	if len(byronParams) > 0 {
+		activeByronParams = byronParams[0]
+	}
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
 		if string(
@@ -8038,13 +8047,22 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
 	// per cardano-ledger PR 5785.
 	if shouldValidate {
-		if err := validateInboundBlockEnvelope(
-			block,
-			pparams,
-			ls.config.CardanoNodeConfig,
-			parent,
-		); err != nil {
-			return nil, err
+		var envelopeErr error
+		if activeByronParams == nil {
+			envelopeErr = validateInboundBlockEnvelope(
+				block, pparams, ls.config.CardanoNodeConfig, parent,
+			)
+		} else {
+			envelopeErr = validateInboundBlockEnvelopeWithByronParams(
+				block,
+				pparams,
+				ls.config.CardanoNodeConfig,
+				parent,
+				activeByronParams,
+			)
+		}
+		if envelopeErr != nil {
+			return nil, envelopeErr
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
@@ -8362,6 +8380,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				lv := (&LedgerView{
 					txn:                  txn,
 					ls:                   ls,
+					byronParams:          activeByronParams,
 					intraBlockUtxos:      intraBlockUtxos,
 					skipPhase2Validation: skipPhase2Validation,
 					// The reference implementation ticks from the block's
@@ -12019,7 +12038,17 @@ func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
 	if genesis == nil {
 		return 0, 0, errors.New("byron genesis configuration is unavailable")
 	}
-	policy := genesis.BlockVersionData.TxFeePolicy
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	state, err := ls.byronPBFTStateAtTip(context.Background(), ocommon.Tip{
+		Point:       currentTip.Point,
+		BlockNumber: currentTip.BlockNumber,
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("read active Byron fee policy: %w", err)
+	}
+	policy := state.updateState.params.TxFeePolicy
 	return policy.Summand, policy.Multiplier, nil
 }
 

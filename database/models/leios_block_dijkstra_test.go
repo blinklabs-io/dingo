@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,6 +59,23 @@ func TestDecodeConwayBlockRejectsObsoleteDijkstraLayout(t *testing.T) {
 	require.Error(t, err, "the pre-respin four-field block body is obsolete")
 	require.Nil(t, block)
 }
+
+func TestDecodeStoredConwayBlockAcceptsLegacyDijkstraLayout(t *testing.T) {
+	raw := musashiDijkstraBlock(t)
+
+	block, err := (models.Block{
+		Type: ledger.BlockTypeConway,
+		Cbor: raw,
+	}).Decode()
+	require.NoError(t, err)
+	_, ok := block.(*dijkstra.DijkstraBlock)
+	require.True(t, ok)
+	require.Equal(t, raw, block.Cbor())
+}
+
+// TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
+// fixture swapped for a differently-shaped block fails here with a clear
+// reason rather than making the regression above pass for the wrong one.
 
 // TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
 // fixture swapped for a differently-shaped block fails here with a clear

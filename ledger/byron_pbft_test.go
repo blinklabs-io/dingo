@@ -122,7 +122,9 @@ func newSignedByronPBFTBlock(
 	if delegationPayload == nil {
 		delegationPayload = []any{}
 	}
-	delegationPayloadCbor, err := cbor.Encode(cbor.IndefLengthList(delegationPayload))
+	delegationPayloadCbor, err := cbor.Encode(
+		cbor.IndefLengthList(delegationPayload),
+	)
 	require.NoError(t, err)
 	bodyProof, ok := header.BodyProof.([]any)
 	require.True(t, ok)
@@ -257,7 +259,7 @@ func newGeneratedByronPBFTTestNodeConfig(
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {%q: 1},
+			"bootStakeholders": {%q: 1000},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": 0}
 			},
@@ -311,7 +313,7 @@ func newByronPBFTTestNodeConfig(
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {%q: 1},
+			"bootStakeholders": {%q: 1000},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": %d}
 			},
@@ -353,7 +355,7 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
 	require.NoError(t, err)
 
 	state, err = ls.advanceByronPBFTState(state, block, true)
@@ -363,6 +365,80 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	_, err = ls.advanceByronPBFTState(state, block, true)
 	require.ErrorContains(t, err, "signature threshold")
 	require.Len(t, state.issuerState.SignatureHistory(), 2)
+}
+
+func TestAdvanceByronPBFTStateRejectsMalformedUpdateProposal(t *testing.T) {
+	t.Parallel()
+
+	block, err := loadRealByronMainBlock(t).Decode()
+	require.NoError(t, err)
+	mainBlock, ok := block.(*byron.ByronMainBlock)
+	require.True(t, ok)
+	mainBlock.Body.UpdPayload.Proposals = append(
+		mainBlock.Body.UpdPayload.Proposals,
+		byron.ByronUpdateProposal{},
+	)
+
+	config := newByronPBFTTestNodeConfig(t, block, 10)
+	ls := &LedgerState{config: LedgerStateConfig{CardanoNodeConfig: config}}
+	byronConfig, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(byronConfig, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
+	require.NoError(t, err)
+
+	_, err = ls.advanceByronPBFTState(state, block, false)
+	require.ErrorContains(t, err, "validate Byron update payload")
+	require.ErrorContains(t, err, "update proposal 0")
+}
+
+func TestByronPBFTStateUsesCardanoNodeThreshold(t *testing.T) {
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name        string
+		threshold   string
+		numerator   uint64
+		denominator uint64
+		maxAllowed  uint64
+		shouldBlock bool
+	}{
+		{name: "default", maxAllowed: 2, shouldBlock: true},
+		{name: "0.10", threshold: "0.10", numerator: 1, denominator: 10, maxAllowed: 1, shouldBlock: true},
+		{name: "0.22", threshold: "0.22", numerator: 11, denominator: 50, maxAllowed: 2, shouldBlock: true},
+		{name: "0.50", threshold: "0.50", numerator: 1, denominator: 2, maxAllowed: 5, shouldBlock: true},
+		{name: "1.1", threshold: "1.1", numerator: 11, denominator: 10, maxAllowed: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeConfig := newByronPBFTTestNodeConfig(t, block, 10)
+			if tc.threshold != "" {
+				threshold := cardano.CardanoNodeDecimal(tc.threshold)
+				nodeConfig.PBftSignatureThreshold = &threshold
+			}
+			ls := &LedgerState{config: LedgerStateConfig{
+				CardanoNodeConfig: nodeConfig,
+			}}
+
+			config, err := ls.byronPBFTConfig()
+			require.NoError(t, err)
+			require.Equal(t, tc.numerator, config.PBFTSignatureThresholdNumerator)
+			require.Equal(t, tc.denominator, config.PBFTSignatureThresholdDenominator)
+
+			state, err := ls.byronPBFTStateAtTip(context.Background(), ocommon.Tip{})
+			require.NoError(t, err)
+			issuer := lcommon.Blake2b224Hash([]byte("configured issuer"))
+			for range tc.maxAllowed {
+				state.issuerState, err = state.issuerState.Transition(issuer)
+				require.NoError(t, err)
+			}
+			_, err = state.issuerState.Transition(issuer)
+			if tc.shouldBlock {
+				require.ErrorContains(t, err, "signature threshold")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
@@ -419,7 +495,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -476,7 +552,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleAtActivation, true)
-	require.ErrorContains(t, err, "does not authorize delegate")
+	require.ErrorContains(t, err, "active delegation does not authorize delegate")
 
 	activated := newSignedByronPBFTBlock(
 		t,
@@ -544,7 +620,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleAfterRevocation, true)
-	require.ErrorContains(t, err, "does not authorize delegate")
+	require.ErrorContains(t, err, "active delegation does not authorize delegate")
 
 	revoked := newSignedByronPBFTBlock(
 		t,
@@ -619,7 +695,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -668,7 +744,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleDelegate, true)
-	require.ErrorContains(t, err, "does not authorize delegate")
+	require.ErrorContains(t, err, "active delegation does not authorize delegate")
 	revoked := newSignedByronPBFTBlock(
 		t,
 		template,

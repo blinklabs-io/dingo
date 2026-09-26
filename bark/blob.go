@@ -30,6 +30,7 @@ import (
 	"connectrpc.com/connect"
 	archivev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/archive"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -665,7 +666,7 @@ func verifyArchiveBlock(
 	slot uint64,
 	hash []byte,
 ) (gledger.Block, error) {
-	decoded, err := gledger.NewBlockFromCbor(blockType, body)
+	decoded, err := models.DecodeBlockCbor(blockType, body)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: slot %d, type %d: %w",
