@@ -36,6 +36,11 @@ var (
 	ErrInvalidPoolHash       = errors.New("invalid pool hash")
 	ErrInvalidParameters     = errors.New("invalid reward parameters")
 	ErrRewardAmountOverflow  = errors.New("reward amount overflow")
+	// ErrNegativeLeaderReward reports a reward update that carries a negative
+	// leader reward it cannot apply: one owed to a registered reward account,
+	// which cardano-ledger's compactCoinOrError rejects when the update is
+	// applied, or one larger than the treasury it is charged to.
+	ErrNegativeLeaderReward = errors.New("negative leader reward")
 )
 
 // Credential identifies a stake credential. Tag 0 is a key hash and tag 1 is a
@@ -202,8 +207,16 @@ type Result struct {
 	EffectiveRewards uint64
 	Undistributed    uint64
 	Unspendable      uint64
-	TotalCirculation uint64
-	TotalBlocks      uint64
+	// NegativeLeaderRewards lists every negative leader reward in the update,
+	// in pool order. AccountRewards never carries them.
+	NegativeLeaderRewards []NegativeLeaderReward
+	// UnspendableDeficit is the summed magnitude of the negative leader
+	// rewards owed to unregistered reward accounts. Like Unspendable it goes to
+	// the treasury, with the opposite sign: UpdatedPots.Treasury is reduced by
+	// it and Undistributed, returned to reserves, grows by it.
+	UnspendableDeficit uint64
+	TotalCirculation   uint64
+	TotalBlocks        uint64
 	// ExpectedBlocks is the ledger-specified integer expectation represented
 	// as a rational for compatibility with the existing result contract.
 	ExpectedBlocks *big.Rat
@@ -221,6 +234,51 @@ type PoolReward struct {
 	OwnerStake          uint64
 	Undistributed       uint64
 	Unspendable         uint64
+	// LeaderRewardDeficit is the magnitude of the pool's leader reward when
+	// that reward is negative, which happens when maxPool' is negative (CIP-50
+	// with a small L and a positive a0). OptimalReward, PoolReward and
+	// LeaderReward are then zero and no member is paid.
+	LeaderRewardDeficit uint64
+}
+
+// NegativeLeaderReward is a negative leader reward owed to a pool's reward
+// account. Amount is its magnitude. Spendable reports whether the reward
+// account is registered, in which case the update cannot be applied.
+type NegativeLeaderReward struct {
+	PoolID     PoolID
+	Credential Credential
+	Amount     uint64
+	Spendable  bool
+}
+
+// NegativeLeaderRewardError returns an ErrNegativeLeaderReward error naming the
+// first negative leader reward owed to a registered reward account, or nil when
+// there is none. cardano-ledger fails on such a reward when it applies the
+// update (aggregateCompactRewards rejects a negative Coin), so a caller applying
+// this result must stop rather than apply it.
+func (r *Result) NegativeLeaderRewardError() error {
+	if r == nil {
+		return nil
+	}
+	return NegativeLeaderRewardError(r.NegativeLeaderRewards)
+}
+
+// NegativeLeaderRewardError is Result.NegativeLeaderRewardError over a list of
+// negative leader rewards carried apart from their Result.
+func NegativeLeaderRewardError(negative []NegativeLeaderReward) error {
+	for _, reward := range negative {
+		if !reward.Spendable {
+			continue
+		}
+		return fmt.Errorf(
+			"%w: pool %s leader reward -%d is owed to registered reward account %x",
+			ErrNegativeLeaderReward,
+			reward.PoolID.String(),
+			reward.Amount,
+			reward.Credential.Hash,
+		)
+	}
+	return nil
 }
 
 type AccountReward struct {
@@ -241,7 +299,8 @@ const (
 // Calculate computes rewards for a completed epoch. The returned UpdatedPots
 // reflects the reward calculation alone: reserves lose incentives and regain
 // rewards not paid or sent to treasury, treasury receives the tax and
-// unspendable rewards, and fees are cleared.
+// unspendable rewards less UnspendableDeficit, and fees are cleared. A result
+// whose NegativeLeaderRewardError is non-nil cannot be applied.
 func Calculate(
 	pots Pots,
 	snapshot Snapshot,
@@ -404,6 +463,12 @@ func Calculate(
 		result.PoolRewards = append(result.PoolRewards, poolReward)
 		result.poolAccounted = append(result.poolAccounted, 0)
 
+		if poolReward.LeaderRewardDeficit > 0 &&
+			params.rewardPassesPrefilter(pool.RewardAccountRegistered) {
+			if err := result.addNegativeLeaderReward(pool, poolReward); err != nil {
+				return nil, err
+			}
+		}
 		if poolReward.LeaderReward > 0 &&
 			params.rewardPassesPrefilter(pool.RewardAccountRegistered) {
 			reward := AccountReward{
@@ -472,19 +537,25 @@ func Calculate(
 		result.PoolRewards[i] = poolReward
 	}
 
-	accounted, overflow := addUint64(
+	credited, overflow := addUint64(
 		result.EffectiveRewards,
 		result.Unspendable,
 	)
-	if overflow || accounted > result.AvailableRewards {
+	if overflow {
 		return nil, fmt.Errorf(
 			"%w: rewards exceed available pot",
 			ErrInvalidParameters,
 		)
 	}
-	if accounted < result.AvailableRewards {
-		result.Undistributed = result.AvailableRewards - accounted
+	undistributed, err := UndistributedRewards(
+		result.AvailableRewards,
+		credited,
+		result.UnspendableDeficit,
+	)
+	if err != nil {
+		return nil, err
 	}
+	result.Undistributed = undistributed
 	if err := result.addUndistributedToReserves(); err != nil {
 		return nil, err
 	}
@@ -492,6 +563,88 @@ func Calculate(
 		return nil, err
 	}
 	return result, nil
+}
+
+// UndistributedRewards returns the part of the available reward pot that goes
+// back to reserves: completeRupd's deltaR2 = R - sum(rewards), where the sum
+// counts the credited amount (spendable and unspendable rewards) less the
+// magnitude of the negative leader rewards owed to unregistered accounts.
+// Negative leader rewards owed to registered accounts are excluded because the
+// update carrying them is never applied.
+func UndistributedRewards(
+	availableRewards uint64,
+	credited uint64,
+	unspendableDeficit uint64,
+) (uint64, error) {
+	if credited < unspendableDeficit {
+		ret, overflow := addUint64(
+			availableRewards,
+			unspendableDeficit-credited,
+		)
+		if overflow {
+			return 0, fmt.Errorf(
+				"%w: reserve refund overflow",
+				ErrInvalidParameters,
+			)
+		}
+		return ret, nil
+	}
+	accounted := credited - unspendableDeficit
+	if accounted > availableRewards {
+		return 0, fmt.Errorf(
+			"%w: rewards exceed available pot",
+			ErrInvalidParameters,
+		)
+	}
+	return availableRewards - accounted, nil
+}
+
+// SubtractUnspendableDeficit charges the negative leader rewards owed to
+// unregistered reward accounts to the treasury, as applyRUpdFiltered does by
+// adding frTotalUnregistered to it. The reference would leave a negative
+// treasury where the charge exceeds it; that is refused instead.
+func SubtractUnspendableDeficit(treasury uint64, deficit uint64) (uint64, error) {
+	if deficit > treasury {
+		return 0, fmt.Errorf(
+			"%w: unregistered negative leader rewards %d exceed treasury %d",
+			ErrNegativeLeaderReward,
+			deficit,
+			treasury,
+		)
+	}
+	return treasury - deficit, nil
+}
+
+// addNegativeLeaderReward records a negative leader reward. collectLRs adds a
+// pool's leader reward whatever its sign; one owed to an unregistered account
+// reaches the treasury with the rest of frTotalUnregistered. Only CIP-50
+// produces one, and CIP-50 exists only in Dijkstra, where rewards are
+// aggregated, so Shelley's one-reward-per-credential selection never sees it.
+func (r *Result) addNegativeLeaderReward(
+	pool Pool,
+	poolReward PoolReward,
+) error {
+	r.NegativeLeaderRewards = append(r.NegativeLeaderRewards, NegativeLeaderReward{
+		PoolID:     pool.ID,
+		Credential: pool.RewardAccount,
+		Amount:     poolReward.LeaderRewardDeficit,
+		Spendable:  pool.RewardAccountEligible,
+	})
+	if pool.RewardAccountEligible {
+		return nil
+	}
+	deficit, overflow := addUint64(
+		r.UnspendableDeficit,
+		poolReward.LeaderRewardDeficit,
+	)
+	if overflow {
+		return fmt.Errorf(
+			"%w: unregistered negative leader reward overflow",
+			ErrInvalidParameters,
+		)
+	}
+	r.UnspendableDeficit = deficit
+	return nil
 }
 
 type pendingReward struct {
@@ -621,6 +774,10 @@ func (r *Result) addUnspendableToTreasury() error {
 			"%w: unspendable treasury overflow",
 			ErrInvalidParameters,
 		)
+	}
+	treasury, err := SubtractUnspendableDeficit(treasury, r.UnspendableDeficit)
+	if err != nil {
+		return err
 	}
 	r.UpdatedPots.Treasury = treasury
 	return nil
@@ -1100,7 +1257,7 @@ func calculatePoolRewards(
 		pool.BlocksProduced,
 		totalBlocks,
 	)
-	optimalReward, err := optimalPoolRewardChecked(
+	optimalReward := optimalPoolRewardChecked(
 		availableRewards,
 		params.OptimalPoolCount,
 		params.PledgeInfluence,
@@ -1109,10 +1266,34 @@ func calculatePoolRewards(
 		totalCirculation,
 		params.pledgeLeverageCap(),
 	)
-	if err != nil {
-		return PoolReward{}, err
+	if optimalReward.Sign() < 0 {
+		// mkPoolRewardInfo keeps a negative maxP: poolR = floor(appPerf *
+		// maxP), and calcStakePoolOperatorReward returns poolR itself since
+		// poolR <= cost, so the whole negative pot is the leader's and
+		// calcStakePoolMemberReward pays every member nothing.
+		poolReward := floorRat(new(big.Rat).Mul(
+			ret.ApparentPerformance,
+			new(big.Rat).SetInt(optimalReward),
+		))
+		deficit := poolReward.Neg(poolReward)
+		if !deficit.IsUint64() {
+			return PoolReward{}, fmt.Errorf(
+				"%w: negative pool reward -%s",
+				ErrRewardAmountOverflow,
+				deficit.String(),
+			)
+		}
+		ret.LeaderRewardDeficit = deficit.Uint64()
+		return ret, nil
 	}
-	ret.OptimalReward = optimalReward
+	if !optimalReward.IsUint64() {
+		return PoolReward{}, fmt.Errorf(
+			"%w: floor %s",
+			ErrRewardAmountOverflow,
+			optimalReward.String(),
+		)
+	}
+	ret.OptimalReward = optimalReward.Uint64()
 	poolReward, err := floorMulChecked(
 		ret.ApparentPerformance,
 		uintRat(ret.OptimalReward),
@@ -1348,7 +1529,9 @@ func apparentPerformance(
 	return new(big.Rat).Quo(beta, sigma)
 }
 
-// optimalPoolRewardChecked implements maxPool' from the Shelley ledger.
+// optimalPoolRewardChecked implements maxPool' from cardano-ledger
+// (Cardano.Ledger.State.SnapShots), including its floor toward negative
+// infinity. The result is negative only under CIP-50; see LeaderRewardDeficit.
 func optimalPoolRewardChecked(
 	availableRewards uint64,
 	optimalPoolCount uint64,
@@ -1357,9 +1540,9 @@ func optimalPoolRewardChecked(
 	pledge uint64,
 	totalStake uint64,
 	pledgeLeverage *big.Rat,
-) (uint64, error) {
+) *big.Int {
 	if totalStake == 0 || optimalPoolCount == 0 {
-		return 0, nil
+		return new(big.Int)
 	}
 	z0 := new(big.Rat).SetFrac(
 		big.NewInt(1),
@@ -1379,10 +1562,7 @@ func optimalPoolRewardChecked(
 	// min(sigma, z0, L*p). A zero-pledge pool then has sigma' = 0 and earns no
 	// rewards. L never caps p', so a subunit L can push sigma' below p' and make
 	// the pledge-influence term negative; with a0 > 0 and L = 0 (or any L below
-	// about a0*p'/z0) the whole product is negative. cardano-ledger's maxPool'
-	// floors that to a negative Coin, which compactCoinOrError rejects when the
-	// reward is applied to a registered account; floorRatChecked clamps it to
-	// zero instead.
+	// about a0*p'/z0) the whole product is negative, and so is the result.
 	if pledgeLeverage != nil {
 		leverageCap := new(big.Rat).Mul(pledgeLeverage, pledgeRatio)
 		s = minRat(s, leverageCap)
@@ -1404,7 +1584,7 @@ func optimalPoolRewardChecked(
 		s,
 		new(big.Rat).Mul(new(big.Rat).Mul(p, a0), z0Factor),
 	)
-	return floorRatChecked(new(big.Rat).Mul(left, right))
+	return floorRat(new(big.Rat).Mul(left, right))
 }
 
 func leaderRewardChecked(
@@ -1573,6 +1753,13 @@ func floorMulChecked(values ...*big.Rat) (uint64, error) {
 		acc.Mul(acc, value)
 	}
 	return floorRatChecked(acc)
+}
+
+// floorRat is Haskell's floor on a Rational: it rounds toward negative
+// infinity. big.Int.Div is Euclidean, which matches floor for the positive
+// denominator a big.Rat always has; Quo would truncate toward zero.
+func floorRat(value *big.Rat) *big.Int {
+	return new(big.Int).Div(value.Num(), value.Denom())
 }
 
 func floorRatChecked(value *big.Rat) (uint64, error) {

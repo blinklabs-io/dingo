@@ -54,7 +54,7 @@ func TestHaskellReferenceMaxPoolPledgeLeverage(t *testing.T) {
 		pledge   uint64
 		total    uint64
 		leverage *big.Rat
-		want     uint64
+		want     int64
 	}{
 		{
 			name: "boundary: exact integer is not rounded down",
@@ -111,6 +111,22 @@ func TestHaskellReferenceMaxPoolPledgeLeverage(t *testing.T) {
 			want:     0,
 		},
 		{
+			// sigma' = 0 and p' = pR: R/(1+a0) * (-a0*pR^2/z0) =
+			// -3750000000/3757, which floors to -998137.
+			name: "mainnet scale: zero leverage is negative",
+			r:    mainnetR, nOpt: mainnetNOpt, a0: big.NewRat(3, 10),
+			stake: mainnetStake, pledge: mainnetPledge, total: mainnetTotal,
+			leverage: big.NewRat(0, 1),
+			want:     -998_137,
+		},
+		{
+			name: "mainnet scale: small leverage is negative",
+			r:    mainnetR, nOpt: mainnetNOpt, a0: big.NewRat(3, 10),
+			stake: mainnetStake, pledge: mainnetPledge, total: mainnetTotal,
+			leverage: big.NewRat(1, 1000),
+			want:     -770_880,
+		},
+		{
 			name: "zero pledge with a binding leverage",
 			r:    mainnetR, nOpt: mainnetNOpt, a0: big.NewRat(3, 10),
 			stake: mainnetStake, pledge: 0, total: mainnetTotal,
@@ -120,7 +136,7 @@ func TestHaskellReferenceMaxPoolPledgeLeverage(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := optimalPoolRewardChecked(
+			got := optimalPoolRewardChecked(
 				tc.r,
 				tc.nOpt,
 				tc.a0,
@@ -129,8 +145,13 @@ func TestHaskellReferenceMaxPoolPledgeLeverage(t *testing.T) {
 				tc.total,
 				tc.leverage,
 			)
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got, "maxPool' = %d, want %d", got, tc.want)
+			require.Zero(
+				t,
+				big.NewInt(tc.want).Cmp(got),
+				"maxPool' = %s, want %d",
+				got.String(),
+				tc.want,
+			)
 		})
 	}
 }
