@@ -226,8 +226,8 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	}))
 
 	tx := mockledger.NewTransactionBuilder().WithCertificates(
-		&lcommon.RegistrationDrepCertificate{
-			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		&lcommon.UpdateDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeUpdateDrep),
 			DrepCredential: lcommon.Credential{
 				CredType:   lcommon.CredentialTypeAddrKeyHash,
 				Credential: credentialHash,
@@ -261,7 +261,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	keyDRep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), keyDRep.LastActivityEpoch)
-	assert.Equal(t, uint64(123), keyDRep.ExpiryEpoch)
+	assert.Equal(t, uint64(120), keyDRep.ExpiryEpoch)
 
 	scriptDRep, err := db.GetDrepByCredential(1, credentialBytes, true, nil)
 	require.NoError(t, err)

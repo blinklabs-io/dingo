@@ -104,6 +104,8 @@ func TestDRepDelegationRequiresProtocolMajor(t *testing.T) {
 
 	err := store.SetTransaction(tx, point, 0, nil, false, nil)
 	require.ErrorContains(t, err, "protocol major is required")
+	err = store.SetTransaction(tx, point, 0, nil, false, nil, 0)
+	require.ErrorContains(t, err, "protocol major is required")
 	require.NoError(t, store.SetTransaction(tx, point, 0, nil, false, nil, 9))
 }
 
