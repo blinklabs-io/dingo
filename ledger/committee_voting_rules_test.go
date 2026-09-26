@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -263,9 +264,23 @@ func TestValidateTxAcceptsElectedVoterSharingHotKeyWithPendingMember(
 					pending := committeeTestCredential(order.pendingSeed)
 					hot, hotKey := committeeTestVotingKey(0x5a)
 					seatCommitteeMembers(t, db, elected)
-					seedCommitteeCredentialAuthorization(t, db, elected, hot, 1, 1)
+					seedCommitteeCredentialAuthorization(
+						t,
+						db,
+						elected,
+						hot,
+						1,
+						1,
+					)
 					storeCommitteeUpdateProposal(t, db, 0x5b, pending, 10)
-					seedCommitteeCredentialAuthorization(t, db, pending, hot, 2, 2)
+					seedCommitteeCredentialAuthorization(
+						t,
+						db,
+						pending,
+						hot,
+						2,
+						2,
+					)
 
 					err := committeeVotingValidate(
 						t, era, lv, pparams, hotKey,
@@ -273,7 +288,9 @@ func TestValidateTxAcceptsElectedVoterSharingHotKeyWithPendingMember(
 						nil,
 					)
 					require.NoError(t, err)
-					coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(hot)
+					coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(
+						hot,
+					)
 					require.NoError(t, err)
 					require.Contains(t, coldCredentials, elected)
 				})
@@ -512,7 +529,14 @@ func TestValidateTxConwaySameTransactionResignationKeepsOtherElectedMember(
 			seatCommitteeMembers(t, db, resigning, remaining)
 			seedCommitteeCredentialAuthorization(t, db, resigning, hot, 1, 1)
 			if shared {
-				seedCommitteeCredentialAuthorization(t, db, remaining, hot, 2, 1)
+				seedCommitteeCredentialAuthorization(
+					t,
+					db,
+					remaining,
+					hot,
+					2,
+					1,
+				)
 			}
 
 			err := committeeVotingValidate(
@@ -565,27 +589,30 @@ func TestValidateTxUnelectedCommitteeVoterByProtocolVersion(t *testing.T) {
 			reject: true,
 		},
 	} {
-		t.Run(fmt.Sprintf("%s/PV%d", tc.era.name, tc.major), func(t *testing.T) {
-			t.Parallel()
-			pparams := tc.era.pparams(tc.major)
-			lv, db := committeeTestView(t, pparams)
-			seatCommitteeMembers(t, db, committeeTestCredential(0xa1))
-			pending := committeeTestCredential(0xa2)
-			hot, hotKey := committeeTestVotingKey(0xa3)
-			storeCommitteeUpdateProposal(t, db, 0xa4, pending, 10)
-			seedCommitteeCredentialAuthorization(t, db, pending, hot, 1, 1)
+		t.Run(
+			fmt.Sprintf("%s/PV%d", tc.era.name, tc.major),
+			func(t *testing.T) {
+				t.Parallel()
+				pparams := tc.era.pparams(tc.major)
+				lv, db := committeeTestView(t, pparams)
+				seatCommitteeMembers(t, db, committeeTestCredential(0xa1))
+				pending := committeeTestCredential(0xa2)
+				hot, hotKey := committeeTestVotingKey(0xa3)
+				storeCommitteeUpdateProposal(t, db, 0xa4, pending, 10)
+				seedCommitteeCredentialAuthorization(t, db, pending, hot, 1, 1)
 
-			err := committeeVotingValidate(
-				t, tc.era, lv, pparams, hotKey,
-				lcommon.VotingProcedures{committeeVoter(hot): {}},
-				nil,
-			)
-			if tc.reject {
-				requireUnelectedCommitteeVoter(t, tc.era, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
+				err := committeeVotingValidate(
+					t, tc.era, lv, pparams, hotKey,
+					lcommon.VotingProcedures{committeeVoter(hot): {}},
+					nil,
+				)
+				if tc.reject {
+					requireUnelectedCommitteeVoter(t, tc.era, err)
+				} else {
+					require.NoError(t, err)
+				}
+			},
+		)
 	}
 }
 
@@ -636,72 +663,254 @@ func TestValidateTxCommitteeActionRestrictionAtEveryProtocolVersion(
 		allowed    bool
 	}
 	targets := []target{
-		{name: "InfoAction", actionType: lcommon.GovActionTypeInfo, allowed: true},
+		{
+			name:       "InfoAction",
+			actionType: lcommon.GovActionTypeInfo,
+			allowed:    true,
+		},
 		{name: "NoConfidence", actionType: lcommon.GovActionTypeNoConfidence},
-		{name: "UpdateCommittee", actionType: lcommon.GovActionTypeUpdateCommittee},
+		{
+			name:       "UpdateCommittee",
+			actionType: lcommon.GovActionTypeUpdateCommittee,
+		},
 	}
 	versions := []struct {
 		era   committeeVotingEra
 		major uint
 		label string
 	}{
-		{era: committeeVotingConway, major: lcommon.ProtocolVersionPlomin - 1, label: "PV9"},
-		{era: committeeVotingConway, major: lcommon.ProtocolVersionPlomin, label: "PV10"},
-		{era: committeeVotingConway, major: lcommon.ProtocolVersionVanRossem, label: "PV11"},
-		{era: committeeVotingConway, major: lcommon.ProtocolVersionVanRossem + 1, label: "PV12"},
-		{era: committeeVotingDijkstra, major: lcommon.ProtocolVersionVanRossem + 1, label: "PV12"},
+		{
+			era:   committeeVotingConway,
+			major: lcommon.ProtocolVersionPlomin - 1,
+			label: "PV9",
+		},
+		{
+			era:   committeeVotingConway,
+			major: lcommon.ProtocolVersionPlomin,
+			label: "PV10",
+		},
+		{
+			era:   committeeVotingConway,
+			major: lcommon.ProtocolVersionVanRossem,
+			label: "PV11",
+		},
+		{
+			era:   committeeVotingConway,
+			major: lcommon.ProtocolVersionVanRossem + 1,
+			label: "PV12",
+		},
+		{
+			era:   committeeVotingDijkstra,
+			major: lcommon.ProtocolVersionVanRossem + 1,
+			label: "PV12",
+		},
 	}
 	for _, version := range versions {
 		for _, tgt := range targets {
-			t.Run(version.era.name+"/"+version.label+"/"+tgt.name, func(t *testing.T) {
-				t.Parallel()
-				pparams := version.era.pparams(version.major)
-				lv, db := committeeTestView(t, pparams)
-				require.NoError(t, db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil))
-				cold := committeeTestCredential(0xb1)
-				hot, hotKey := committeeTestVotingKey(0xb2)
-				seatCommitteeMembers(t, db, cold)
-				seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
-				var actionID *lcommon.GovActionId
-				if tgt.actionType == lcommon.GovActionTypeUpdateCommittee {
-					storeCommitteeUpdateProposal(
-						t, db, 0xb3, committeeTestCredential(0xb4), 10,
+			t.Run(
+				version.era.name+"/"+version.label+"/"+tgt.name,
+				func(t *testing.T) {
+					t.Parallel()
+					pparams := version.era.pparams(version.major)
+					lv, db := committeeTestView(t, pparams)
+					require.NoError(
+						t,
+						db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
 					)
-					var txID [32]byte
-					copy(txID[:], governanceTestHash(0xb3))
-					actionID = &lcommon.GovActionId{TransactionId: txID}
-				} else {
-					actionID = storeCommitteeVotingTarget(
-						t, db, 0xb3, tgt.actionType,
-					)
-				}
-				resolved, err := lv.GovActionById(*actionID)
-				require.NoError(t, err)
-				require.NotNil(t, resolved)
+					cold := committeeTestCredential(0xb1)
+					hot, hotKey := committeeTestVotingKey(0xb2)
+					seatCommitteeMembers(t, db, cold)
+					seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+					var actionID *lcommon.GovActionId
+					if tgt.actionType == lcommon.GovActionTypeUpdateCommittee {
+						storeCommitteeUpdateProposal(
+							t, db, 0xb3, committeeTestCredential(0xb4), 10,
+						)
+						var txID [32]byte
+						copy(txID[:], governanceTestHash(0xb3))
+						actionID = &lcommon.GovActionId{TransactionId: txID}
+					} else {
+						actionID = storeCommitteeVotingTarget(
+							t, db, 0xb3, tgt.actionType,
+						)
+					}
+					resolved, err := lv.GovActionById(*actionID)
+					require.NoError(t, err)
+					require.NotNil(t, resolved)
 
-				err = committeeVotingValidate(
-					t, version.era, lv, pparams, hotKey,
-					lcommon.VotingProcedures{
+					err = committeeVotingValidate(
+						t, version.era, lv, pparams, hotKey,
+						lcommon.VotingProcedures{
+							committeeVoter(hot): {
+								actionID: {Vote: lcommon.GovVoteYes},
+							},
+						},
+						nil,
+					)
+					if tgt.allowed {
+						require.NoError(t, err)
+						return
+					}
+					var restriction conway.CCVotingRestrictionError
+					if version.major < lcommon.ProtocolVersionPlomin {
+						// The bootstrap-phase vote restriction also rejects a
+						// committee vote on a non-bootstrap action at PV9, and
+						// cardano-ledger reports both failures.
+						require.ErrorAs(t, err, &restriction)
+						return
+					}
+					requireOnlyRuleError(t, err, &restriction)
+				},
+			)
+		}
+	}
+}
+
+// A committee hot credential is a tagged credential: a script-hash voter
+// sharing its hash with an authorized key-hash hot credential is neither
+// known nor elected.
+func TestValidateTxCommitteeHotCredentialTagIsPartOfIdentity(t *testing.T) {
+	t.Parallel()
+
+	pparams := committeeVotingConway.pparams(lcommon.ProtocolVersionVanRossem)
+	lv, db := committeeTestView(t, pparams)
+	cold := committeeTestCredential(0xd1)
+	keyHot := committeeTestCredential(0xd2)
+	scriptHot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: keyHot.Credential,
+	}
+	seatCommitteeMembers(t, db, cold)
+	seedCommitteeCredentialAuthorization(t, db, cold, keyHot, 1, 1)
+
+	member, err := lv.CommitteeHotCredentialMember(scriptHot)
+	require.NoError(t, err)
+	require.Nil(t, member)
+	coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(scriptHot)
+	require.NoError(t, err)
+	require.Empty(t, coldCredentials)
+	coldCredentials, err = lv.CommitteeHotCredentialColdCredentials(keyHot)
+	require.NoError(t, err)
+	require.Equal(t, []lcommon.Credential{cold}, coldCredentials)
+
+	err = eras.ValidateTxConway(&conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{
+				committeeVoter(scriptHot): {},
+			},
+		},
+		TxIsValid: true,
+	}, 0, lv, pparams)
+	var unelected conway.UnelectedCommitteeVoterError
+	require.ErrorAs(t, err, &unelected)
+	var unknown conway.UnknownVoterError
+	require.ErrorAs(t, err, &unknown)
+}
+
+// A member removed at the epoch boundary loses its csCommitteeCreds entry
+// there (EPOCH updateCommitteeState), so its hot credential is unknown at
+// every protocol version. From PV11 cardano-ledger also reports it as
+// unelected, since the elected-voter check runs first and both failures
+// accumulate.
+func TestValidateTxRejectsHotKeyOfRemovedCommitteeMember(t *testing.T) {
+	t.Parallel()
+
+	const removalSlot = 100
+	for _, major := range []uint{
+		lcommon.ProtocolVersionPlomin,
+		lcommon.ProtocolVersionVanRossem,
+	} {
+		t.Run(fmt.Sprintf("PV%d", major), func(t *testing.T) {
+			t.Parallel()
+			era := committeeVotingConway
+			pparams := era.pparams(major)
+			lv, db := committeeTestView(t, pparams)
+			lv.epochStartSlot = removalSlot
+			removed := committeeTestCredential(0xe1)
+			hot, hotKey := committeeTestVotingKey(0xe2)
+			seatCommitteeMembers(t, db, removed, committeeTestCredential(0xe3))
+			seedCommitteeCredentialAuthorization(t, db, removed, hot, 1, 1)
+			require.NoError(t, db.SoftDeleteCommitteeMembers(
+				[]models.CommitteeCredential{{
+					CredentialTag: uint8(removed.CredType),
+					Credential:    removed.Credential[:],
+				}},
+				removalSlot,
+				nil,
+			))
+
+			err := committeeVotingValidate(
+				t, era, lv, pparams, hotKey,
+				lcommon.VotingProcedures{committeeVoter(hot): {}},
+				nil,
+			)
+			var unknown conway.UnknownVoterError
+			require.ErrorAs(t, err, &unknown)
+			var unelected conway.UnelectedCommitteeVoterError
+			if major >= lcommon.ProtocolVersionVanRossem {
+				require.ErrorAs(t, err, &unelected)
+			} else {
+				requireUnknownCommitteeVoter(t, err)
+			}
+		})
+	}
+}
+
+// The action-type restriction applies to both committee voter types.
+func TestValidateTxCommitteeActionRestrictionForScriptHotVoter(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		actionType lcommon.GovActionType
+		restricted bool
+	}{
+		{name: "InfoAction", actionType: lcommon.GovActionTypeInfo},
+		{
+			name:       "NoConfidence",
+			actionType: lcommon.GovActionTypeNoConfidence,
+			restricted: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pparams := committeeVotingConway.pparams(
+				lcommon.ProtocolVersionPlomin,
+			)
+			lv, db := committeeTestView(t, pparams)
+			require.NoError(
+				t,
+				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+			)
+			cold := committeeTestCredential(0xf1)
+			hot := lcommon.Credential{
+				CredType:   lcommon.CredentialTypeScriptHash,
+				Credential: committeeTestCredential(0xf2).Credential,
+			}
+			seatCommitteeMembers(t, db, cold)
+			seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+			actionID := storeCommitteeVotingTarget(t, db, 0xf3, tc.actionType)
+
+			err := eras.ValidateTxConway(&conway.ConwayTransaction{
+				Body: conway.ConwayTransactionBody{
+					TxVotingProcedures: lcommon.VotingProcedures{
 						committeeVoter(hot): {
 							actionID: {Vote: lcommon.GovVoteYes},
 						},
 					},
-					nil,
-				)
-				if tgt.allowed {
-					require.NoError(t, err)
-					return
-				}
-				var restriction conway.CCVotingRestrictionError
-				if version.major < lcommon.ProtocolVersionPlomin {
-					// The bootstrap-phase vote restriction also rejects a
-					// committee vote on a non-bootstrap action at PV9, and
-					// cardano-ledger reports both failures.
-					require.ErrorAs(t, err, &restriction)
-					return
-				}
-				requireOnlyRuleError(t, err, &restriction)
-			})
-		}
+				},
+				TxIsValid: true,
+			}, 0, lv, pparams)
+			var restriction conway.CCVotingRestrictionError
+			require.Equal(
+				t,
+				tc.restricted,
+				errors.As(err, &restriction),
+				"%v",
+				err,
+			)
+			var unknown conway.UnknownVoterError
+			require.False(t, errors.As(err, &unknown), "%v", err)
+		})
 	}
 }
