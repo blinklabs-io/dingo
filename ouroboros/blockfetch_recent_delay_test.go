@@ -180,3 +180,21 @@ func TestBlockfetchMetricsRegistersRecentBlockDelays(t *testing.T) {
 	got := gatherRecentDelays(t, reg)
 	require.Contains(t, got, strconv.FormatUint(5%recentBlockDelaySlots, 10))
 }
+
+// A late delivery of a block that has already been overwritten by a newer
+// block in the same slot (the ring wrapped) is stale and must not replace the
+// newer sample. Review: blinklabs-io/dingo#4742.
+func TestRecentBlockDelaysWrappedSlotIgnoresStaleDelivery(t *testing.T) {
+	t.Parallel()
+	r, reg := newTestRecentDelays(t)
+	idx := strconv.FormatUint(100%recentBlockDelaySlots, 10)
+
+	r.record(100, testBlockHash(1), 0.40)
+	r.record(100+recentBlockDelaySlots, testBlockHash(2), 0.55)
+	r.record(100, testBlockHash(1), 3.00) // late repeat of the older block
+	r.record(100, testBlockHash(9), 2.00) // older height, different hash
+
+	got := gatherRecentDelays(t, reg)[idx]
+	assert.Equal(t, float64(100+recentBlockDelaySlots), got[0])
+	assert.InDelta(t, 0.55, got[1], 1e-9)
+}

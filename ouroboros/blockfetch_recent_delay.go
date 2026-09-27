@@ -78,7 +78,11 @@ func newRecentBlockDelays() *recentBlockDelays {
 // record stores the delay for a fetched block. A repeat delivery of the same
 // block (same height and hash, e.g. from another peer) keeps the first
 // delivery's delay, since the later one overstates it; a different block at
-// the same height (rollback or slot battle) replaces it.
+// the same height (rollback or slot battle) replaces it. A block lower than
+// the one its slot already holds is a stale, out-of-order delivery from before
+// the ring wrapped and is dropped, so it can never overwrite a newer sample.
+// After a rollback deeper than the ring, slots can keep an orphaned higher
+// block until the new chain reaches that height and replaces it.
 func (r *recentBlockDelays) record(
 	blockNumber uint64,
 	hash lcommon.Blake2b256,
@@ -87,6 +91,9 @@ func (r *recentBlockDelays) record(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &r.slots[blockNumber%recentBlockDelaySlots]
+	if s.set && blockNumber < s.blockNumber {
+		return
+	}
 	if s.set && s.blockNumber == blockNumber && s.hash == hash {
 		return
 	}
