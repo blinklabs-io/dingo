@@ -87,33 +87,38 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
-	const (
-		epoch       = uint64(7)
-		anchorSlot  = uint64(12345)
-		stateFees   = uint64(750_000)
-		snapshotFee = uint64(200_000)
-	)
+	// A real ledger state, because the basis this seeding writes the pots
+	// beside must itself seed: an import that cannot seed every imported
+	// epoch's reward basis fails, and nothing is written.
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err)
+	const preAnchorFees = uint64(550_000)
+	state.Fees = snapshots.Fee + preAnchorFees
 	cfg := ImportConfig{
 		Database: db,
-		State: &RawLedgerState{
-			Epoch: epoch,
-			Fees:  stateFees,
+		State:    state,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	snapshots := &ParsedSnapShots{Fee: snapshotFee}
+	noProgress := func(ImportProgress) {}
+	ctx := context.Background()
+	_, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
+	require.NoError(t, err)
+	require.NoError(t, importSnapShots(
+		ctx, cfg, state.Tip.Slot, noProgress, false,
+	))
 
-	require.NoError(
-		t, seedImportedRewardBasis(cfg, snapshots, epoch, anchorSlot),
-	)
-
-	pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
+	pots, err := db.Metadata().GetRewardAdaPots(state.Epoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 	require.NotNil(t, pots.ImportedEpochFees,
 		"a reconciling basis must seed the pre-anchor fee pot")
-	require.Equal(t, stateFees-snapshotFee, uint64(*pots.ImportedEpochFees))
-	require.Equal(t, snapshotFee, uint64(pots.Fees),
+	require.Equal(t, preAnchorFees, uint64(*pots.ImportedEpochFees))
+	require.Equal(t, snapshots.Fee, uint64(pots.Fees),
 		"the existing fee pot must remain SnapShots' ssFee")
 }
 

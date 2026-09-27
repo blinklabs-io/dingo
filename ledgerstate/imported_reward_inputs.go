@@ -396,7 +396,6 @@ func (b *rewardInputBundle) validate() error {
 // rewardInputStore is the slice of the metadata store this seeding needs.
 type rewardInputStore interface {
 	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
-	SaveRewardSeedFailure(uint64, string, string, uint64, types.Txn) error
 	DeleteRewardSeedFailure(uint64, string, types.Txn) error
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
 	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
@@ -407,12 +406,19 @@ type rewardInputStore interface {
 }
 
 // rewardPParamsValidator checks that the protocol-parameter history needed to
-// consume one imported reward basis is available. An unavailable history is a
-// per-basis eligibility failure, not a failure of the whole import.
+// consume one imported reward basis is available.
 type rewardPParamsValidator func(epoch uint64) error
 
 var errRewardPParamsUnavailable = errors.New(
 	"protocol parameters required by imported reward basis are unavailable",
+)
+
+// errImportedRewardBasisUnusable reports an imported epoch whose reward basis
+// cannot be seeded. The import fails on it: the node would otherwise cross
+// that epoch's boundary without a reward round, leaving every reward in it
+// uncredited and the pots unmoved.
+var errImportedRewardBasisUnusable = errors.New(
+	"imported reward basis cannot be seeded",
 )
 
 // seedImportedRewardInputs writes the reward basis for the epochs an imported
@@ -424,12 +430,12 @@ var errRewardPParamsUnavailable = errors.New(
 // skips them ends up roughly three epochs of rewards short -- the shortfall
 // measured on preview in issue #3165.
 //
-// Each epoch is gated independently: a basis that does not reconcile is
-// dropped with a warning rather than written, leaving that round to be skipped
-// and counted the way it is today. That direction is deliberate. A missing
-// round leaves reward balances short, which the metric and warning make
-// visible; an unusable one would be read back by a path that returns an error
-// rather than skipping, failing the epoch rollover outright.
+// Every epoch must seed. A basis that does not reconcile, or lacks the
+// protocol parameters its round needs, fails the import with
+// errImportedRewardBasisUnusable, naming the epoch and snapshot, instead of
+// being dropped: a dropped basis leaves that epoch's reward round unrun, its
+// rewards never credited and the pots unmoved. Nothing is written for any
+// epoch in that case, because the caller's transaction is not committed.
 func seedImportedRewardInputs(
 	store rewardInputStore,
 	txn types.Txn,
@@ -560,89 +566,53 @@ func seedImportedRewardInputs(
 			capturedSlot,
 			0,
 		)
-		if bundle == nil || len(bundle.poolInputs) == 0 {
-			reason := emptyRewardSeedFailureReason(c.snap)
-			if saveErr := store.SaveRewardSeedFailure(
-				c.epoch, "mark", reason, capturedSlot, txn,
-			); saveErr != nil {
-				return fmt.Errorf(
-					"saving reward seed failure for epoch %d: %w",
-					c.epoch,
-					saveErr,
-				)
-			}
-			if logger != nil {
-				logger.Warn(
-					"not seeding reward inputs for an imported epoch: the derived basis contains no pool inputs, so that epoch's reward round will be skipped and its rewards never credited",
-					"component",
-					"ledgerstate",
-					"epoch",
-					c.epoch,
-					"snapshot",
-					c.name,
-					"error",
-					reason,
-				)
-			}
-			continue
+		// A snapshot with no delegated stake derives an empty basis that
+		// reconciles, and is seeded like any other: its round still moves the
+		// treasury and reserves. An empty basis that does not reconcile had
+		// stake it could not attribute to a described pool.
+		if bundle == nil {
+			return fmt.Errorf(
+				"%w for epoch %d (%s snapshot): no snapshot",
+				errImportedRewardBasisUnusable,
+				c.epoch,
+				c.name,
+			)
 		}
 		if err := bundle.validate(); err != nil {
-			if saveErr := store.SaveRewardSeedFailure(
-				c.epoch, "mark", err.Error(), capturedSlot, txn,
-			); saveErr != nil {
+			if len(bundle.poolInputs) == 0 {
 				return fmt.Errorf(
-					"saving reward seed failure for epoch %d: %w",
+					"%w for epoch %d (%s snapshot): %s: %w",
+					errImportedRewardBasisUnusable,
 					c.epoch,
-					saveErr,
-				)
-			}
-			if logger != nil {
-				logger.Warn(
-					"not seeding reward inputs for an imported epoch: the derived basis does not reconcile, so that epoch's reward round will be skipped and its rewards never credited",
-					"component",
-					"ledgerstate",
-					"epoch",
-					c.epoch,
-					"snapshot",
 					c.name,
-					"error",
-					err.Error(),
+					emptyRewardSeedFailureReason(c.snap),
+					err,
 				)
 			}
-			continue
+			return fmt.Errorf(
+				"%w for epoch %d (%s snapshot): the derived basis does not reconcile: %w",
+				errImportedRewardBasisUnusable,
+				c.epoch,
+				c.name,
+				err,
+			)
 		}
 		if validatePParams != nil {
 			if err := validatePParams(c.epoch); err != nil {
-				if !errors.Is(err, errRewardPParamsUnavailable) {
+				if errors.Is(err, errRewardPParamsUnavailable) {
 					return fmt.Errorf(
-						"checking protocol parameters for imported reward epoch %d: %w",
+						"%w for epoch %d (%s snapshot): %w",
+						errImportedRewardBasisUnusable,
 						c.epoch,
+						c.name,
 						err,
 					)
 				}
-				if saveErr := store.SaveRewardSeedFailure(
-					c.epoch, "mark", err.Error(), capturedSlot, txn,
-				); saveErr != nil {
-					return fmt.Errorf(
-						"saving reward seed failure for epoch %d: %w",
-						c.epoch,
-						saveErr,
-					)
-				}
-				if logger != nil {
-					logger.Warn(
-						"not seeding reward inputs for an imported epoch: required protocol parameters are unavailable, so that epoch's reward round will be skipped and its rewards never credited",
-						"component",
-						"ledgerstate",
-						"epoch",
-						c.epoch,
-						"snapshot",
-						c.name,
-						"error",
-						err.Error(),
-					)
-				}
-				continue
+				return fmt.Errorf(
+					"checking protocol parameters for imported reward epoch %d: %w",
+					c.epoch,
+					err,
+				)
 			}
 		}
 		if err := store.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {

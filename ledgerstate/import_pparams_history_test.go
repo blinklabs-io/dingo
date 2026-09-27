@@ -16,6 +16,7 @@ package ledgerstate
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -179,7 +180,11 @@ func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
 	require.Equal(t, current, currentRows[0].Cbor)
 }
 
-func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
+// TestImportSnapShotsFailsOnGoBasisWithoutCrossEraHistory covers a snapshot
+// taken within two epochs after an era boundary, whose go epoch needs the old
+// era's protocol parameters. Without them that epoch's reward round cannot
+// run, so the import fails naming it rather than leaving the round unrun.
+func TestImportSnapShotsFailsOnGoBasisWithoutCrossEraHistory(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -235,28 +240,13 @@ func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
 		Slot:  state.Tip.Slot,
 		Epoch: state.Epoch,
 	}
-	require.NoError(t, importSnapShots(
+	err = importSnapShots(
 		context.Background(), cfg, state.Tip.Slot, noProgress, false,
-	))
-
-	goBasis, err := db.Metadata().GetRewardSnapshot(
-		state.Epoch-2, "mark", nil,
 	)
-	require.NoError(t, err)
-	require.Nil(t, goBasis,
-		"the Go basis cannot be consumed without old-era historical pparams")
-	goPools, err := db.Metadata().GetRewardPoolInputs(state.Epoch-2, nil)
-	require.NoError(t, err)
-	require.Empty(t, goPools)
-	goStake, err := db.Metadata().GetRewardStakeInputs(state.Epoch-2, nil)
-	require.NoError(t, err)
-	require.Empty(t, goStake)
-	for _, epoch := range []uint64{state.Epoch - 1, state.Epoch} {
-		basis, queryErr := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
-		require.NoError(t, queryErr)
-		require.NotNil(t, basis,
-			"epoch %d does not depend on unavailable old-era history", epoch)
-	}
+	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
+	require.ErrorIs(t, err, errRewardPParamsUnavailable)
+	require.ErrorContains(t, err,
+		fmt.Sprintf("epoch %d (go snapshot)", state.Epoch-2))
 
 	require.NoError(t, importPParams(context.Background(), cfg))
 	previousRows, err := db.Metadata().GetPParams(

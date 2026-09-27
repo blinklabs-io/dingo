@@ -1083,9 +1083,13 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 		Reconcile:     true,
 		reconcileKeys: newReconcileKeys(),
 	}
-	require.NoError(t, importSnapShots(
+	// The fixture's pool carries no reward account and the state no protocol
+	// parameters, so its reward basis cannot be seeded and the import fails
+	// there. The fallback pool import, and its key recording, run before it.
+	err = importSnapShots(
 		context.Background(), cfg, 999, func(ImportProgress) {}, true,
-	))
+	)
+	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
 	_, ok := cfg.reconcileKeys.pools[string(poolHash[:])]
 	require.True(t, ok,
 		"fallback-imported pool must be recorded in the reconcile key set")

@@ -356,11 +356,10 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 }
 
 // The other half: when the snapshot cannot describe its pools either, an
-// unplaceable window leaves nothing to derive from and the epoch is skipped
-// rather than guessed at. It is skipped by the gate, on the same
-// does-not-reconcile grounds as any other underivable basis, and the epochs
-// that can be derived are unaffected.
-func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
+// unplaceable window leaves nothing to derive from. The basis fails the
+// reconciliation gate, and the import fails naming the epoch rather than
+// leaving its reward round unrun.
+func TestSeedImportedRewardInputsFailsOnEpochWithNoParamsWindow(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -384,7 +383,8 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 
 	unplaceable := state.Epoch - 2
 	txn := db.MetadataTxn(true)
-	require.NoError(t, seedImportedRewardInputs(
+	defer txn.Release()
+	err = seedImportedRewardInputs(
 		db.Metadata(),
 		txn.Metadata(),
 		snapshots,
@@ -400,31 +400,11 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 		state.Epoch,
 		state.Tip.Slot,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	))
-	require.NoError(t, txn.Commit())
-
-	skipped, err := db.Metadata().GetRewardSnapshot(unplaceable, "mark", nil)
-	require.NoError(t, err)
-	require.Nil(t, skipped,
-		"with no snapshot parameters and no registration window there is "+
-			"nothing to derive from, so the round must be left uncredited "+
-			"rather than seeded from a guess")
-	failure, err := db.Metadata().GetRewardSeedFailure(unplaceable, "mark", nil)
-	require.NoError(t, err)
-	require.Contains(
-		t,
-		failure,
-		"has no reward account",
-		"an underivable imported basis must leave durable provenance for the later reward skip",
 	)
-
-	// One underivable epoch must not cost the others their rounds.
-	for _, epoch := range []uint64{state.Epoch, state.Epoch - 1} {
-		seeded, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
-		require.NoError(t, err)
-		require.NotNil(t, seeded,
-			"epoch %d is derivable and must still be seeded", epoch)
-	}
+	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
+	require.ErrorContains(t, err,
+		fmt.Sprintf("epoch %d (go snapshot)", unplaceable))
+	require.ErrorContains(t, err, "has no reward account")
 }
 
 func TestEmptyRewardSeedFailureReasonReportsMissingParameters(t *testing.T) {
@@ -445,7 +425,11 @@ func TestEmptyRewardSeedFailureReasonReportsMissingParameters(t *testing.T) {
 	)
 }
 
-func TestSeedImportedRewardInputsPreservesFailureForEmptyBundle(t *testing.T) {
+// TestSeedImportedRewardInputsSeedsEmptyBasis covers a snapshot with no
+// delegated stake, which a chain carries before its first stake snapshot. Its
+// basis is empty and reconciles, and is seeded so the round still runs and
+// moves the treasury and reserves.
+func TestSeedImportedRewardInputsSeedsEmptyBasis(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -468,7 +452,83 @@ func TestSeedImportedRewardInputsPreservesFailureForEmptyBundle(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	reason, err := db.Metadata().GetRewardSeedFailure(2, "mark", nil)
+	for _, epoch := range []uint64{0, 1, 2} {
+		basis, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		require.NoError(t, err)
+		require.NotNil(t, basis, "epoch %d", epoch)
+		require.Zero(t, basis.TotalPoolCount)
+		require.Zero(t, uint64(basis.TotalActiveStake))
+	}
+}
+
+// TestSeedImportedRewardInputsFailsOnUnattributableStake covers a snapshot
+// whose delegated stake points at a pool neither it nor the registrations
+// describe. Its basis derives no pool inputs; the import fails rather than
+// leaving that stake's rewards uncredited.
+func TestSeedImportedRewardInputsFailsOnUnattributableStake(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	require.Equal(t, "derived reward basis contains no pool inputs", reason)
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	err = seedImportedRewardInputs(
+		db.Metadata(),
+		txn.Metadata(),
+		&ParsedSnapShots{
+			Mark: ParsedSnapShot{
+				Stake: map[string]uint64{"aa": 5},
+				Delegations: map[string][]byte{
+					"aa": {0x01, 0x02},
+				},
+			},
+		},
+		nil,
+		nil,
+		2,
+		100,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
+	require.ErrorContains(t, err,
+		"epoch 2 (mark snapshot): derived reward basis contains no pool inputs: pool 0102 has no parameters")
+}
+
+// TestSeedImportedRewardInputsFailsWhenPParamsUnavailable covers a basis that
+// reconciles but whose round cannot run for want of protocol parameters.
+func TestSeedImportedRewardInputsFailsWhenPParamsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err)
+
+	missing := state.Epoch - 1
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	err = seedImportedRewardInputs(
+		db.Metadata(),
+		txn.Metadata(),
+		snapshots,
+		nil,
+		func(epoch uint64) error {
+			if epoch == missing {
+				return fmt.Errorf(
+					"%w: epoch %d", errRewardPParamsUnavailable, epoch,
+				)
+			}
+			return nil
+		},
+		state.Epoch,
+		state.Tip.Slot,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
+	require.ErrorIs(t, err, errRewardPParamsUnavailable)
+	require.ErrorContains(t, err,
+		fmt.Sprintf("epoch %d (set snapshot)", missing))
 }

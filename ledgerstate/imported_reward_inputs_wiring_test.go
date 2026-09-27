@@ -182,7 +182,7 @@ func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
 // compact pool-distr shape -- a VRF key and nothing else -- is what that
 // looks like, and stripping the parsed parameters reproduces it without
 // needing a fixture in that format.
-func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
+func TestSeedImportedRewardInputsFailsWithoutPoolParams(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -196,18 +196,15 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	txn := db.MetadataTxn(true)
-	require.NoError(t, seedImportedRewardInputs(
+	defer txn.Release()
+	err = seedImportedRewardInputs(
 		db.Metadata(), txn.Metadata(), snapshots, nil, nil,
 		state.Epoch, state.Tip.Slot, logger,
-	))
-	require.NoError(t, txn.Commit())
-
-	snapshot, err := db.Metadata().GetRewardSnapshot(state.Epoch, "mark", nil)
-	require.NoError(t, err)
-	require.Nil(t, snapshot,
-		"an unusable basis must be dropped, not written: the ledger reads "+
-			"these rows through a path that errors rather than skips, so a "+
-			"bad row fails the epoch rollover instead of one reward round")
+	)
+	// Written, the basis would fail the epoch rollover that reads it; dropped,
+	// the round would never run. The import fails instead.
+	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
+	require.ErrorContains(t, err, "the derived basis does not reconcile")
 }
 
 // stripPoolParamsToVrfOnly reduces every parsed pool entry to what the
