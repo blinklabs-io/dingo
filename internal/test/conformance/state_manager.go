@@ -421,9 +421,7 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 		if drep, delegated := state.DRepDelegationsByCredential[credential]; delegated {
 			account.Drep = append([]byte(nil), drep.Credential...)
-			account.DrepType = uint64(
-				drep.Type,
-			) //nolint:gosec // conformance DRep types are bounded ledger enums.
+			account.DrepType = uint64(drep.Type) //nolint:gosec // conformance DRep types are bounded ledger enums.
 		}
 		if err := m.db.Metadata().ImportAccount(
 			account,
@@ -1610,9 +1608,7 @@ func (m *DingoStateManager) committeeActionRatified(
 
 	decision := governance.ShouldRatify(governance.RatifyInputs{
 		Tally: &governance.ProposalTally{
-			ActionType: uint8(
-				proposal.ActionType,
-			), //nolint:gosec // bounded by the small fixed set of GovActionType values
+			ActionType:     uint8(proposal.ActionType), //nolint:gosec // bounded by the small fixed set of GovActionType values
 			DRepYesStake:   drepYes,
 			DRepTotalStake: drepTotal,
 			SPOYesStake:    spoYes,
