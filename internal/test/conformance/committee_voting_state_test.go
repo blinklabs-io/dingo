@@ -15,8 +15,10 @@
 package conformance
 
 import (
+	"database/sql"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -110,4 +112,86 @@ func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(
 	)
 	require.NoError(t, err)
 	require.Empty(t, coldCredentials)
+}
+
+// Stored committee credentials of the wrong length are corrupt state: the
+// harness's committee lookups must fail rather than truncate them into a
+// 28-byte credential that matches a real hot key or cold credential.
+func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
+	hot := testHash28(0x91)
+	cold := testHash28(0x92)
+	keyCredential := func(hash common.Blake2b224) common.Credential {
+		return common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: hash,
+		}
+	}
+	overlong := func(hash common.Blake2b224) []byte {
+		return append(append([]byte(nil), hash[:]...), 0xff)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, raw *sql.DB)
+		lookup func(p *DingoStateProvider) error
+	}{
+		{
+			name: "authorized hot credential",
+			mutate: func(t *testing.T, raw *sql.DB) {
+				_, err := raw.Exec(
+					`UPDATE auth_committee_hot SET host_credential = ?`,
+					overlong(hot),
+				)
+				require.NoError(t, err)
+			},
+			lookup: func(p *DingoStateProvider) error {
+				_, err := p.CommitteeHotCredentialMember(keyCredential(hot))
+				if err != nil {
+					return err
+				}
+				_, err = p.CommitteeHotCredentialColdCredentials(
+					keyCredential(hot),
+				)
+				return err
+			},
+		},
+		{
+			name: "seated cold credential",
+			mutate: func(t *testing.T, raw *sql.DB) {
+				_, err := raw.Exec(
+					`UPDATE committee_member SET cold_cred_hash = ?`,
+					overlong(cold),
+				)
+				require.NoError(t, err)
+			},
+			lookup: func(p *DingoStateProvider) error {
+				_, err := p.CommitteeCredentialIsElected(keyCredential(cold))
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := NewDingoStateManager()
+			require.NoError(t, err)
+			defer func() { require.NoError(t, m.Close()) }()
+			require.NoError(t, m.LoadInitialState(
+				&conformance.ParsedInitialState{
+					CurrentEpoch:     5,
+					CommitteeMembers: map[common.Blake2b224]uint64{cold: 999},
+					HotKeyAuthorizations: map[common.Blake2b224]common.Blake2b224{
+						cold: hot,
+					},
+				},
+				&conway.ConwayProtocolParameters{},
+			))
+			raw, err := dbtest.RawSQLiteMetadata(t, m.db)
+			require.NoError(t, err)
+			tc.mutate(t, raw)
+
+			require.ErrorContains(
+				t,
+				tc.lookup(NewDingoStateProvider(m)),
+				"invalid blake2b-224 hash",
+			)
+		})
+	}
 }

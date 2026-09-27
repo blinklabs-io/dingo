@@ -320,3 +320,59 @@ func TestValidateTxCommitteeHotCredentialTagByAuthorizationPath(t *testing.T) {
 		}
 	}
 }
+
+// A seated committee_member row whose cold hash is not 28 bytes is corrupt
+// state. Resolving an unseated authorization consults the seated set, so the
+// lookup must fail rather than truncate or zero-pad the stored bytes into a
+// credential: a 29-byte row whose first 28 bytes are the pending member's
+// hash would otherwise hide that member's authorization, and a short row
+// would otherwise be silently ignored. Validation fails closed on the error.
+func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, length := range []int{
+		lcommon.Blake2b224Size - 1,
+		lcommon.Blake2b224Size + 1,
+	} {
+		t.Run(fmt.Sprintf("%d bytes", length), func(t *testing.T) {
+			t.Parallel()
+			era := committeeVotingConway
+			pparams := era.pparams(lcommon.ProtocolVersionPlomin)
+			lv, db := committeeTestView(t, pparams)
+			pending := committeeTestCredential(0x91)
+			hot, hotKey := committeeTestVotingKey(0x92)
+			malformed := make([]byte, length)
+			copy(malformed, pending.Credential[:])
+			require.NoError(t, db.SetCommitteeMembers(
+				[]*models.CommitteeMember{{
+					ColdCredentialTag: uint8(pending.CredType),
+					ColdCredHash:      malformed,
+					ExpiresEpoch:      10,
+				}},
+				nil,
+			))
+			storeCommitteeUpdateProposal(t, db, 0x93, pending, 10)
+			seedCommitteeCredentialAuthorization(t, db, pending, hot, 1, 1)
+
+			member, err := lv.CommitteeHotCredentialMember(hot)
+			require.Nil(t, member)
+			require.ErrorContains(t, err, "invalid blake2b-224 hash")
+			coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(
+				hot,
+			)
+			require.Nil(t, coldCredentials)
+			require.ErrorContains(t, err, fmt.Sprintf("got %d", length))
+
+			err = committeeVotingValidate(
+				t, era, lv, pparams, hotKey,
+				lcommon.VotingProcedures{committeeVoter(hot): {}},
+				nil,
+			)
+			var lookup conway.CommitteeMemberLookupError
+			require.ErrorAs(t, err, &lookup)
+			require.ErrorContains(t, err, "invalid blake2b-224 hash")
+		})
+	}
+}

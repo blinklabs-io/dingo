@@ -851,14 +851,27 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		)
 	}
 	for _, authorization := range authorizations {
-		if authorization.HotCredentialTag != hotTag ||
-			common.NewBlake2b224(authorization.HotCredential) !=
-				hotCredential.Credential {
+		matches, err := storedHotCredentialMatches(
+			authorization,
+			hotTag,
+			hotCredential,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !matches {
 			continue
+		}
+		coldHash, err := storedCommitteeHash(
+			"cold credential",
+			authorization.ColdCredential,
+		)
+		if err != nil {
+			return nil, err
 		}
 		member, err := p.CommitteeCredentialMember(common.Credential{
 			CredType:   uint(authorization.ColdCredentialTag),
-			Credential: common.NewBlake2b224(authorization.ColdCredential),
+			Credential: coldHash,
 		})
 		if err != nil {
 			return nil, err
@@ -906,15 +919,27 @@ func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
 	seen := make(map[coldKey]struct{}, len(authorizations))
 	var coldCredentials []common.Credential
 	for _, authorization := range authorizations {
-		if authorization == nil ||
-			authorization.HotCredentialTag != hotTag ||
-			common.NewBlake2b224(authorization.HotCredential) !=
-				hotCredential.Credential {
+		matches, err := storedHotCredentialMatches(
+			authorization,
+			hotTag,
+			hotCredential,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !matches {
 			continue
+		}
+		coldHash, err := storedCommitteeHash(
+			"cold credential",
+			authorization.ColdCredential,
+		)
+		if err != nil {
+			return nil, err
 		}
 		cold := common.Credential{
 			CredType:   uint(authorization.ColdCredentialTag),
-			Credential: common.NewBlake2b224(authorization.ColdCredential),
+			Credential: coldHash,
 		}
 		key := coldKey{
 			tag:  authorization.ColdCredentialTag,
@@ -942,12 +967,20 @@ func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
 	}
 	seatedColds := make(map[coldKey]struct{}, len(seated))
 	for _, member := range seated {
-		if member != nil {
-			seatedColds[coldKey{
-				tag:  member.ColdCredentialTag,
-				hash: common.NewBlake2b224(member.ColdCredHash),
-			}] = struct{}{}
+		if member == nil {
+			continue
 		}
+		coldHash, err := storedCommitteeHash(
+			"seated cold credential",
+			member.ColdCredHash,
+		)
+		if err != nil {
+			return nil, err
+		}
+		seatedColds[coldKey{
+			tag:  member.ColdCredentialTag,
+			hash: coldHash,
+		}] = struct{}{}
 	}
 	latest, err := withBadConnRetry(
 		func() ([]*models.AuthCommitteeHot, error) {
@@ -958,15 +991,27 @@ func (p *DingoStateProvider) CommitteeHotCredentialColdCredentials(
 		return nil, fmt.Errorf("lookup committee hot credentials: %w", err)
 	}
 	for _, authorization := range latest {
-		if authorization == nil ||
-			authorization.HotCredentialTag != hotTag ||
-			common.NewBlake2b224(authorization.HotCredential) !=
-				hotCredential.Credential {
+		matches, err := storedHotCredentialMatches(
+			authorization,
+			hotTag,
+			hotCredential,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !matches {
 			continue
+		}
+		coldHash, err := storedCommitteeHash(
+			"cold credential",
+			authorization.ColdCredential,
+		)
+		if err != nil {
+			return nil, err
 		}
 		key := coldKey{
 			tag:  authorization.ColdCredentialTag,
-			hash: common.NewBlake2b224(authorization.ColdCredential),
+			hash: coldHash,
 		}
 		if _, ok := seatedColds[key]; ok {
 			continue
@@ -1014,14 +1059,59 @@ func (p *DingoStateProvider) CommitteeCredentialIsElected(
 		return false, fmt.Errorf("lookup elected committee members: %w", err)
 	}
 	for _, member := range members {
-		if member != nil && member.ColdCredentialTag == coldTag &&
-			common.NewBlake2b224(
-				member.ColdCredHash,
-			) == coldCredential.Credential {
+		if member == nil || member.ColdCredentialTag != coldTag {
+			continue
+		}
+		coldHash, err := storedCommitteeHash(
+			"seated cold credential",
+			member.ColdCredHash,
+		)
+		if err != nil {
+			return false, err
+		}
+		if coldHash == coldCredential.Credential {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// storedCommitteeHash converts a stored committee credential hash, rejecting
+// any length other than 28 bytes instead of truncating or zero-padding it
+// into a credential that could match a real one.
+func storedCommitteeHash(
+	field string,
+	data []byte,
+) (common.Blake2b224, error) {
+	hash, err := common.NewBlake2b224Checked(data)
+	if err != nil {
+		return common.Blake2b224{}, fmt.Errorf(
+			"stored committee %s: %w",
+			field,
+			err,
+		)
+	}
+	return hash, nil
+}
+
+// storedHotCredentialMatches reports whether a stored authorization names
+// this exact tagged hot credential, failing on a malformed stored hash.
+func storedHotCredentialMatches(
+	authorization *models.AuthCommitteeHot,
+	hotTag uint8,
+	hotCredential common.Credential,
+) (bool, error) {
+	if authorization == nil || authorization.HotCredentialTag != hotTag {
+		return false, nil
+	}
+	hash, err := storedCommitteeHash(
+		"hot credential",
+		authorization.HotCredential,
+	)
+	if err != nil {
+		return false, err
+	}
+	return hash == hotCredential.Credential, nil
 }
 
 // DRepRegistration looks up a DRep registration by its full credential.

@@ -1543,9 +1543,16 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		if member == nil {
 			continue
 		}
+		hash, err := lcommon.NewBlake2b224Checked(member.ColdCredHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"invalid seated committee cold credential: %w",
+				err,
+			)
+		}
 		seatedColds[coldKey{
 			tag:  member.ColdCredentialTag,
-			hash: lcommon.NewBlake2b224(member.ColdCredHash),
+			hash: hash,
 		}] = struct{}{}
 	}
 	authorizations, err := lv.ls.db.GetCommitteeHotAuthorizationsSince(
