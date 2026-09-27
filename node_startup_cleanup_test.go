@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -155,6 +156,61 @@ func newStartupCleanupProducerNode(t *testing.T) *Node {
 	return n
 }
 
+func newStartupCleanupRunNode(t *testing.T) *Node {
+	t.Helper()
+	vrf, kes, opcert := devnetCredPaths(t)
+	cardanoCfg, err := cardano.NewCardanoNodeConfigFromFile(
+		filepath.Join("config", "cardano", "devnet", "config.json"),
+	)
+	require.NoError(t, err)
+	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Hour)
+	n, err := New(NewConfig(
+		WithDatabasePath(t.TempDir()),
+		WithNetwork("devnet"),
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithPrometheusRegistry(prometheus.NewRegistry()),
+		WithStorageMode(StorageModeAPI),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+		WithMidnightConfig(MidnightConfig{Port: 0}),
+		WithShutdownTimeout(5*time.Second),
+	))
+	require.NoError(t, err)
+	// Run reaches its block-producer section without binding public sockets.
+	n.config.listeners = nil
+	for _, capability := range []plugin.Capability{
+		plugin.CapabilityAPIUtxorpc,
+		plugin.CapabilityAPIBlockfrost,
+		plugin.CapabilityAPIMesh,
+	} {
+		n.config.pluginSelections[capability] = plugin.Selection{
+			Provider: "unused",
+			Config:   map[string]any{"port": uint(0)},
+		}
+	}
+	n.config.blockProducer = true
+	n.config.shelleyVRFKey = vrf
+	n.config.shelleyKESKey = kes
+	n.config.shelleyOperationalCertificate = opcert
+	n.config.leiosVoteSigningKeyFile = filepath.Join(
+		t.TempDir(),
+		"absent-vote.skey",
+	)
+	n.leiosVoteManager = &leios.VoteManager{}
+	t.Cleanup(func() {
+		if n.blockForger != nil {
+			n.blockForger.Stop()
+		}
+		if n.leaderElection != nil {
+			_ = n.leaderElection.Stop()
+		}
+	})
+	return n
+}
+
 // runStopsLIFO unwinds a startup-cleanup stack the way cleanupFailedStartup
 // does, without cancelling the node context: the components must be stopped by
 // the registered closures, not by context cancellation.
@@ -241,6 +297,27 @@ func TestStartBlockProducerStopJoinsBothComponentsOnSuccess(t *testing.T) {
 
 	runStopsLIFO(started)
 
+	require.False(t, n.blockForger.IsRunning())
+	requireGoroutineGone(t, forgeCreatedBy)
+	requireGoroutineGone(t, electionCreatedBy)
+}
+
+func TestNodeRunRegistersBlockProducerStopBeforeLeiosVotingCanFail(
+	t *testing.T,
+) {
+	n := newStartupCleanupRunNode(t)
+	kesStopped := false
+	n.kesAgentCancel = func() { kesStopped = true }
+
+	err := n.Run(context.Background())
+	require.ErrorContains(t, err, "failed to enable leios voting")
+	require.True(
+		t,
+		kesStopped,
+		"Run startup rollback must invoke the registered block producer stop",
+	)
+	require.Nil(t, n.kesAgentCancel)
+	require.NotNil(t, n.blockForger)
 	require.False(t, n.blockForger.IsRunning())
 	requireGoroutineGone(t, forgeCreatedBy)
 	requireGoroutineGone(t, electionCreatedBy)
