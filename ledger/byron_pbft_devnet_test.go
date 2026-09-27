@@ -67,6 +67,7 @@ func TestNewByronPBFTCacheDevnetEmptyGenesisIssuers(t *testing.T) {
 		cache.config,
 		"no PBFT config should be cached when Byron has no eligible issuers",
 	)
+	assert.True(t, cache.noGenesisIssuers)
 }
 
 // TestNewByronPBFTCacheRealByronGenesis is the control: a Byron genesis that
