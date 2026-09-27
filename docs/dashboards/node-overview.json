@@ -988,102 +988,6 @@
         "type": "prometheus",
         "uid": "default"
       },
-      "description": "Block number over time. Use to confirm the node is making forward progress.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 5,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "locale"
-        }
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 12
-      },
-      "id": 11,
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Block Number",
-      "transparent": true,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
       "description": "Progress through the current epoch expressed as slot number. The orange dashed line shows the expected slot based on wall-clock time \u2014 if node slots fall below the reference, the node is stalling.",
       "fieldConfig": {
         "defaults": {
@@ -1185,10 +1089,10 @@
       "gridPos": {
         "h": 7,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 12
       },
-      "id": 12,
+      "id": 1,
       "options": {
         "legend": {
           "calcs": [
@@ -1231,6 +1135,143 @@
       "title": "Slot In Epoch",
       "transparent": true,
       "type": "timeseries"
+    },
+    {
+      "type": "timeseries",
+      "title": "Chain Progress",
+      "description": "Blocks applied to the ledger per minute (10m rate), against the protocol average of 3/min (active slot coefficient 0.05 at one slot per second). Sustained dips below the line mean the node is falling behind or the network is producing fewer blocks.",
+      "transparent": true,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(event_total{type=\"ledger.block\",network=\"$network\",instance=~\"$instance\"}[10m]) * 60",
+          "legendFormat": "{{instance}} blocks applied/min",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "0 * max(cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}) + 3",
+          "legendFormat": "expected (active slot coeff 0.05 \u00d7 60)",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisLabel": "blocks / min",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "expected.*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    6,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "expected.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#8e8e8e",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*applied.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 2,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      }
     },
     {
       "datasource": {
@@ -1291,13 +1332,13 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*gap.*"
+              "options": ".*tip gap.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#f97316",
+                  "fixedColor": "#FF9830",
                   "mode": "fixed"
                 }
               }
@@ -1306,16 +1347,24 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*skip.*"
+              "options": ".*forge gap.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#ef4444",
+                  "fixedColor": "#B877D9",
                   "mode": "fixed"
                 }
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*skips/min.*"
+            },
+            "properties": [
               {
                 "id": "custom.axisPlacement",
                 "value": "right"
@@ -1325,19 +1374,42 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*clock.*"
+              "options": ".*skips/min.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#f59e0b",
+                  "fixedColor": "#F2495C",
                   "mode": "fixed"
                 }
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*clock errors.*"
+            },
+            "properties": [
               {
                 "id": "custom.axisPlacement",
                 "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*clock errors.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FADE2A",
+                  "mode": "fixed"
+                }
               }
             ]
           }
@@ -1349,7 +1421,7 @@
         "x": 0,
         "y": 19
       },
-      "id": 21,
+      "id": 3,
       "options": {
         "legend": {
           "calcs": [],
@@ -1411,56 +1483,64 @@
       "type": "timeseries"
     },
     {
+      "type": "timeseries",
+      "title": "Chain Switches & Forks",
+      "description": "Chain selection switching to a different peer's chain, and forks (rollbacks) applied, per minute.",
+      "transparent": true,
       "datasource": {
         "type": "prometheus",
         "uid": "default"
       },
-      "description": "Chain switch (rollback) events and number of blocks held in the chain cache.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(event_total{type=\"chainselection.chain_switch\",network=\"$network\",instance=~\"$instance\"}[10m]) * 60",
+          "legendFormat": "{{instance}} chain switches/min",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(cardano_node_metrics_forks_int{network=\"$network\",instance=~\"$instance\"}[10m]) * 60",
+          "legendFormat": "{{instance}} forks/min",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
+            "fillOpacity": 10,
+            "showPoints": "never",
             "spanNulls": false,
+            "axisLabel": "per min",
             "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
+              "mode": "none",
+              "group": "A"
             }
           },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
-                "value": 0
+                "value": null
               }
             ]
           }
@@ -1475,7 +1555,7 @@
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#f59e0b",
+                  "fixedColor": "#5794F2",
                   "mode": "fixed"
                 }
               }
@@ -1484,222 +1564,74 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*cached.*"
+              "options": ".*forks.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#3b82f6",
+                  "fixedColor": "#FF9830",
                   "mode": "fixed"
                 }
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
               }
             ]
           }
         ]
       },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 4,
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 12,
         "y": 19
-      },
-      "id": 22,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(event_total{type=\"chainselection.chain_switch\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} switches/min",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "dingo_chain_manager_cached_blocks{network=~\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} cached blocks",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "Chain Switches & Cached Blocks",
-      "transparent": true,
-      "type": "timeseries"
+      }
     },
     {
+      "type": "row",
+      "title": "Chain Activity",
       "collapsed": false,
+      "panels": [],
+      "id": 5,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 26
-      },
-      "id": 1000,
-      "title": "Go Runtime",
-      "type": "row"
+      }
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "description": "Number of active Go routines. Sustained growth may indicate a goroutine leak.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#b877d9",
-            "mode": "fixed"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        }
-      },
+      "type": "timeseries",
+      "title": "Block Composition by Era",
+      "id": 6,
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 8,
         "x": 0,
         "y": 27
       },
-      "id": 51,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_goroutines{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Goroutines",
-      "transparent": true,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "description": "Go GC pause duration distribution. High values indicate memory pressure.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "showPoints": "auto"
           },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1708,159 +1640,67 @@
                 "value": 0
               }
             ]
-          },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p50.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p75.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p99.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
           }
-        ]
+        },
+        "overrides": []
       },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_blocks_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} blocks/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_block_transactions_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} txs/s",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "transparent": true,
+      "description": "Applied block and transaction rate by era. An era transition or a run of transaction-heavy blocks shows up here before it shows up as SQL load."
+    },
+    {
+      "type": "timeseries",
+      "title": "Script & Redeemer Activity",
+      "id": 7,
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 8,
         "x": 8,
         "y": 27
       },
-      "id": 52,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_gc_duration_seconds{quantile=\"0.5\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} p50",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_gc_duration_seconds{quantile=\"0.75\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} p75",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_gc_duration_seconds{quantile=\"1\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} max",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "title": "GC Pause Duration p50/p75/max",
-      "transparent": true,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "description": "CPU utilization and network I/O for the dingo process.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "showPoints": "auto"
           },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1871,706 +1711,65 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*cpu.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "short"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*rx.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "Bps"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*tx.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f97316",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "Bps"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_blocks_with_scripts_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} script blocks/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (era) (rate(dingo_ledger_redeemers_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} redeemers/s",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "transparent": true,
+      "description": "Rate of blocks carrying at least one Plutus V1/V2/V3 script or redeemer, and the finer-grained redeemer count itself -- a run of script-heavy blocks is one of the more expensive causes of a SQL query-volume spike."
+    },
+    {
+      "type": "timeseries",
+      "title": "UTxO Churn & Certificates",
+      "id": 8,
       "gridPos": {
-        "h": 6,
+        "h": 7,
         "w": 8,
         "x": 16,
         "y": 27
       },
-      "id": 53,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} cpu cores",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(process_network_receive_bytes_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} rx",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(process_network_transmit_bytes_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} tx",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "title": "Process CPU & Network",
-      "transparent": true,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "description": "Go heap memory breakdown: allocated, in-use, idle, and total system reservation.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
           },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "showPoints": "auto"
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "bytes"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*alloc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*inuse.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f97316",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*idle.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*sys.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 33
-      },
-      "id": 54,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_heap_alloc_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} heap alloc",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_heap_inuse_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} heap inuse",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_heap_idle_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} heap idle",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_heap_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} heap sys",
-          "range": true,
-          "refId": "D"
-        }
-      ],
-      "title": "Heap: Alloc / Inuse / Idle / Sys",
-      "transparent": true,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "description": "Memory breakdown including stack, system, RSS, and next GC target.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "bytes"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*rss.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*stack.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#b877d9",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*next gc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*sys total.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 33
-      },
-      "id": 55,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "process_resident_memory_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} rss",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_stack_inuse_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} stack inuse",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_next_gc_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} next gc target",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} sys total",
-          "range": true,
-          "refId": "D"
-        }
-      ],
-      "title": "Memory: Stack / Sys / RSS / Next GC",
-      "transparent": true,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "description": "Rate of memory allocations and frees by the garbage collector.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "Bps"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*alloc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*free.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*(frees|mallocs)/s.*"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "ops"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 40
-      },
-      "id": 56,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.2.2",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(go_memstats_alloc_bytes_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} alloc/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(go_memstats_frees_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} frees/s",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(go_memstats_mallocs_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} mallocs/s",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "title": "GC Alloc / Free Rate",
-      "transparent": true,
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "description": "Number of live heap objects and memory used by the GC subsystem.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2581,99 +1780,26 @@
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*objects.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*gc sys.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "bytes"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*gogc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#94a3b8",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 40
-      },
-      "id": 57,
       "options": {
         "legend": {
-          "calcs": [],
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
         "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi"
         }
       },
-      "pluginVersion": "13.2.2",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "go_memstats_heap_objects{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} heap objects",
+          "expr": "sum by (era) (rate(dingo_ledger_utxo_created_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} created/s",
           "range": true,
           "refId": "A"
         },
@@ -2682,8 +1808,8 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "go_memstats_gc_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} gc sys",
+          "expr": "sum by (era) (rate(dingo_ledger_utxo_consumed_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} consumed/s",
           "range": true,
           "refId": "B"
         },
@@ -2692,15 +1818,14 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "go_gc_gogc_percent{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} GOGC %",
+          "expr": "sum by (era) (rate(dingo_ledger_certificates_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{era}} certs/s",
           "range": true,
           "refId": "C"
         }
       ],
-      "title": "Heap Objects & GC Sys",
       "transparent": true,
-      "type": "timeseries"
+      "description": "UTxO creation/consumption (from each transaction's Produced()/Consumed(), correct for phase-2-failed transactions) and certificate rate by era -- both known query-heavy paths."
     }
   ]
 }

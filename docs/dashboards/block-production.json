@@ -143,10 +143,10 @@
       "type": "marcusolsson-dynamictext-panel",
       "title": " ",
       "gridPos": {
-        "x": 0,
-        "y": 0,
         "h": 12,
-        "w": 24
+        "w": 24,
+        "x": 0,
+        "y": 0
       },
       "fieldConfig": {
         "defaults": {
@@ -990,7 +990,7 @@
       "id": 1,
       "gridPos": {
         "h": 3,
-        "w": 3,
+        "w": 6,
         "x": 0,
         "y": 12
       },
@@ -1053,18 +1053,18 @@
     },
     {
       "type": "stat",
-      "title": "Forged",
+      "title": "Leader Slots (since start)",
       "id": 2,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 3,
+        "w": 6,
+        "x": 6,
         "y": 12
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#22c55e",
+            "fixedColor": "#8ab8ff",
             "mode": "fixed"
           },
           "mappings": [],
@@ -1072,7 +1072,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "#22c55e",
+                "color": "#8ab8ff",
                 "value": 0
               }
             ]
@@ -1095,76 +1095,23 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "cardano_node_metrics_Forge_forged_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "cardano_node_metrics_Forge_node_is_leader_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
       "transparent": true,
-      "description": "Total blocks successfully forged by this node."
-    },
-    {
-      "type": "stat",
-      "title": "Adopted",
-      "id": 3,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 5,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#56a64b",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#56a64b",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_Forge_adopted_int{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Blocks forged and adopted into the chain."
+      "description": "Slots where this node was elected slot leader."
     },
     {
       "type": "stat",
       "title": "Could Not Forge (24h)",
-      "id": 4,
+      "id": 3,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 7,
+        "w": 6,
+        "x": 12,
         "y": 12
       },
       "fieldConfig": {
@@ -1213,231 +1160,12 @@
     },
     {
       "type": "stat",
-      "title": "Slot Leader",
-      "id": 5,
+      "title": "Blocks Served (since start)",
+      "id": 4,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 9,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#8ab8ff",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#8ab8ff",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_Forge_node_is_leader_int{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Slots where this node was elected slot leader."
-    },
-    {
-      "type": "stat",
-      "title": "Not Leader",
-      "id": 6,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 11,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#475569",
-            "mode": "fixed"
-          },
-          "unit": "locale",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#475569",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_Forge_node_not_leader_int{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Expected \u2014 slots where this node was not elected leader."
-    },
-    {
-      "type": "stat",
-      "title": "Slot Battles (24h)",
-      "id": 7,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 13,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#22c55e",
-                "value": 0
-              },
-              {
-                "color": "#f59e0b",
-                "value": 1
-              },
-              {
-                "color": "#ef4444",
-                "value": 3
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "increase(dingo_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}[24h])",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Slots where two nodes attempted to forge at the same time."
-    },
-    {
-      "type": "stat",
-      "title": "Blocks Forged (total)",
-      "id": 8,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 15,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#22c55e",
-            "mode": "fixed"
-          },
-          "unit": "locale",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#22c55e",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blocksForgedNum_int{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Cumulative total of blocks forged by this node since startup."
-    },
-    {
-      "type": "stat",
-      "title": "Blocks Served",
-      "id": 9,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 17,
+        "w": 6,
+        "x": 18,
         "y": 12
       },
       "fieldConfig": {
@@ -1485,703 +1213,14 @@
       "description": "Total blocks served to peers via the blockfetch protocol."
     },
     {
-      "type": "stat",
-      "title": "Late Blocks (1h)",
-      "id": 10,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 19,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#22c55e",
-                "value": 0
-              },
-              {
-                "color": "#f59e0b",
-                "value": 5
-              },
-              {
-                "color": "#ef4444",
-                "value": 20
-              }
-            ]
-          },
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "increase(cardano_node_metrics_blockfetchclient_lateblocks{network=\"$network\",instance=~\"$instance\"}[1h])",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Blocks that arrived or were produced later than expected."
-    },
-    {
-      "type": "stat",
-      "title": "KES Left",
-      "id": 11,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 21,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#ef4444",
-                "value": 0
-              },
-              {
-                "color": "#f59e0b",
-                "value": 5
-              },
-              {
-                "color": "#22c55e",
-                "value": 15
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_remainingKESPeriods_int{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "KES periods remaining before mandatory key rotation."
-    },
-    {
-      "type": "timeseries",
-      "title": "Forge Outcomes Rate",
-      "id": 20,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 15
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto",
-            "spanNulls": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*checked.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#8ab8ff",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*leader.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*not leader.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*skip.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(cardano_node_metrics_Forge_about_to_lead_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} checked/min",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(cardano_node_metrics_Forge_node_is_leader_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} leader/min",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(cardano_node_metrics_Forge_node_not_leader_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} not leader/min",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(dingo_forge_sync_skip_total{network=~\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} skip/min",
-          "range": true,
-          "refId": "D"
-        }
-      ],
-      "transparent": true,
-      "description": "Rate of block forge outcomes over time. Useful for spotting forge failures or slot battles."
-    },
-    {
-      "type": "timeseries",
-      "title": "Block Flow Rate",
-      "id": 21,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 15
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "auto",
-            "spanNulls": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*blockfetch.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#3b82f6",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*applied.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*served.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#60a5fa",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(event_total{type=\"ledger.block\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} applied/min",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(cardano_node_metrics_served_block_count_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} served/min",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true,
-      "description": "Rate of blocks flowing through the chain sync pipeline."
-    },
-    {
-      "type": "timeseries",
-      "title": "Block Forging Latency p50/p95/p99",
-      "id": 22,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 22
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "unit": "s",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p50.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p95.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p99.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "histogram_quantile(0.5, rate(dingo_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} p50",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "histogram_quantile(0.95, rate(dingo_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} p95",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "histogram_quantile(0.99, rate(dingo_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} p99",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true,
-      "description": "Latency distribution for block forging. High values risk missing the slot."
-    },
-    {
-      "type": "timeseries",
-      "title": "Blockfetch Delay & CDF",
-      "id": 23,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 22
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 5,
-            "lineWidth": 1,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*delay s.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f97316",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "s"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*<1s.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*<3s.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*<5s.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#8ab8ff",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} delay s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne{network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} <1s %",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree{network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} <3s %",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive{network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} <5s %",
-          "range": true,
-          "refId": "D"
-        }
-      ],
-      "transparent": true,
-      "description": "Block propagation delay and cumulative distribution. Indicates how quickly blocks reach this node."
-    },
-    {
-      "id": 24,
+      "id": 5,
       "type": "marcusolsson-dynamictext-panel",
       "title": "Block Fetch Delay by Block Number",
       "gridPos": {
-        "h": 7,
-        "w": 12,
+        "h": 8,
+        "w": 16,
         "x": 0,
-        "y": 29
+        "y": 15
       },
       "transparent": true,
       "pluginVersion": "6.2.0",
@@ -2265,54 +1304,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Blocks Served Rate",
-      "id": 25,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 29
-      },
-      "targets": [
-        {
-          "expr": "rate(cardano_node_metrics_served_block_count_int{network=\"$network\",instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} blocks/s served",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          }
-        }
-      ],
-      "transparent": true,
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "blocks/s"
-        },
-        "overrides": []
-      },
-      "description": "Rate at which this node serves blocks to its peers."
-    },
-    {
-      "type": "timeseries",
       "title": "Block Delay CDFs",
-      "id": 26,
+      "id": 6,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 36
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -2428,80 +1426,14 @@
       "description": "Cumulative distribution of block propagation delays."
     },
     {
-      "type": "timeseries",
-      "title": "Forged Block Size p50/p95",
-      "id": 27,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 36
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p50.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p95.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
+      "type": "marcusolsson-dynamictext-panel",
+      "title": "Forged Blocks",
+      "description": "One row per block this node forged in the time range, newest first: size, transaction count and forge time, from the forge histograms. Tip block and tip slot are the node's tip at the first scrape after forging, so they can be up to one scrape interval later than the forged block itself; no metric records the forged block's own number. \"adopted\" means the node adopted it onto its own chain. Click a block number to copy it.",
+      "transparent": true,
+      "pluginVersion": "6.3.0",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
       },
       "targets": [
         {
@@ -2509,148 +1441,185 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "histogram_quantile(0.5, rate(dingo_metrics_forgedBlockSize_bytes_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} p50 bytes",
+          "editorMode": "code",
+          "expr": "dingo_metrics_forgedBlockSize_bytes_count{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
           "range": true,
-          "refId": "A"
+          "instant": false,
+          "refId": "SZC"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "histogram_quantile(0.95, rate(dingo_metrics_forgedBlockSize_bytes_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} p95 bytes",
+          "editorMode": "code",
+          "expr": "dingo_metrics_forgedBlockSize_bytes_sum{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
           "range": true,
-          "refId": "B"
+          "instant": false,
+          "refId": "SZS"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "dingo_metrics_forgedBlockTxCount_int_count{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "TXC"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "dingo_metrics_forgedBlockTxCount_int_sum{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "TXS"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "dingo_metrics_blockForgingLatency_seconds_count{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "LTC"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "dingo_metrics_blockForgingLatency_seconds_sum{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "LTS"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "BN"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "cardano_node_metrics_slotNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "SL"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "cardano_node_metrics_Forge_adopted_int{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "AD"
         }
       ],
-      "transparent": true,
-      "description": "Size distribution of forged blocks. Useful for understanding transaction load."
-    },
-    {
-      "type": "timeseries",
-      "title": "Forged Block TX Count p50/p95",
-      "id": 28,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "renderMode": "data",
+        "editors": [],
+        "editor": {
+          "language": "html",
+          "format": "auto"
+        },
+        "wrap": false,
+        "contentPartials": [],
+        "content": "<div class=\"fbt\"></div>",
+        "defaultContent": "",
+        "helpers": "",
+        "afterRender": "// Forged blocks, one row per block this node forged in the time range.\n// Derived from the forge histograms: at each step where dingo_metrics_forgedBlockSize_bytes_count\n// increases, the increase in each histogram's _sum is that block's size / tx count / forge latency.\n// Block and slot are the node\\u2019s tip at that step; \"adopted\" means Forge_adopted_int also increased\n// within two steps. Counters reset on restart, so a decrease is skipped rather than read as a block.\n(function () {\n  var root = context.element; if (!root) return;\n  root.style.height = '100%';\n  var box = root.querySelector('.fbt'); if (!box) return;\n  var S = (context.panelData && context.panelData.series) || [];\n  function first(ref) {\n    for (var si = 0; si < S.length; si++) {\n      if (S[si].refId !== ref) continue;\n      var f = S[si].fields, tf = null, nf = null;\n      for (var i = 0; i < f.length; i++) { if (f[i].type === 'time' && !tf) tf = f[i]; else if (f[i].type === 'number' && !nf) nf = f[i] }\n      if (tf && nf) { var m = {}; for (var k = 0; k < tf.values.length; k++) { var v = nf.values[k]; if (v !== null && v !== undefined) m[Math.round(tf.values[k] / 1000)] = v } return m }\n    }\n    return {};\n  }\n  var cnt = first('SZC'), szs = first('SZS'), txs = first('TXS'), txc = first('TXC'), lts = first('LTS'), ltc = first('LTC'), bn = first('BN'), sl = first('SL'), ad = first('AD');\n  var ts = Object.keys(cnt).map(Number).sort(function (a, b) { return a - b });\n  function delta(m, t0, t1) { var a = m[t0], b = m[t1]; return (a === undefined || b === undefined || b < a) ? null : b - a }\n  var adT = Object.keys(ad).map(Number).sort(function (a, b) { return a - b });\n  function adoptedNear(t, step) {\n    for (var i = 1; i < adT.length; i++) { var d = ad[adT[i]] - ad[adT[i - 1]]; if (d > 0 && Math.abs(adT[i] - t) <= 2 * step) return true }\n    return false;\n  }\n  var rows = [];\n  for (var i = 1; i < ts.length; i++) {\n    var t0 = ts[i - 1], t1 = ts[i], n = delta(cnt, t0, t1);\n    if (!n) continue;\n    var step = t1 - t0, dsz = delta(szs, t0, t1), dtx = delta(txs, t0, t1), dtc = delta(txc, t0, t1), dls = delta(lts, t0, t1), dlc = delta(ltc, t0, t1);\n    rows.push({\n      t: t1, n: n, block: bn[t1], slot: sl[t1],\n      size: dsz === null ? null : dsz / n,\n      tx: (dtx === null || !dtc) ? null : dtx / dtc,\n      lat: (dls === null || !dlc) ? null : dls / dlc,\n      adopted: adoptedNear(t1, step)\n    });\n  }\n  rows.reverse();\n  function num(x) { return x === null || x === undefined ? '\u2014' : Math.round(x).toLocaleString() }\n  function bytes(x) { return x === null ? '\u2014' : x >= 1024 ? (x / 1024).toFixed(1) + ' KiB' : Math.round(x) + ' B' }\n  function ms(x) { return x === null ? '\u2014' : x < 1 ? Math.round(x * 1000) + ' ms' : x.toFixed(2) + ' s' }\n  function when(t) { var d = new Date(t * 1000); return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }\n  if (!rows.length) { box.innerHTML = '<div class=\"fbt-empty\">No blocks forged by this node in the selected time range</div>'; return }\n  var h = '<table><thead><tr><th>forged</th><th title=\"The node\\u2019s tip at the first scrape after forging. Usually the forged block; can be a later block if another arrived within the same scrape interval. No metric records the forged block\\u2019s own number.\">tip block \\u24d8</th><th title=\"The node\\u2019s tip slot at the first scrape after forging, so up to one scrape interval after the leader slot.\">tip slot \\u24d8</th><th>size</th><th>txs</th><th>forge time</th><th>adopted</th></tr></thead><tbody>';\n  for (var r = 0; r < rows.length; r++) {\n    var x = rows[r];\n    h += '<tr><td>' + when(x.t) + (x.n > 1 ? ' <span class=\"fbt-mute\">(' + x.n + ' blocks, averaged)</span>' : '') + '</td>' +\n      '<td class=\"fbt-copy\" title=\"click to copy\">' + num(x.block) + '</td><td>' + num(x.slot) + '</td>' +\n      '<td>' + bytes(x.size) + '</td><td>' + (x.tx === null ? '\u2014' : x.tx.toFixed(x.n > 1 ? 1 : 0)) + '</td>' +\n      '<td>' + ms(x.lat) + '</td><td class=\"' + (x.adopted ? 'fbt-ok\">yes' : 'fbt-warn\">not seen') + '</td></tr>';\n  }\n  box.innerHTML = h + '</tbody></table>';\n  var cells = box.querySelectorAll('.fbt-copy');\n  for (var c = 0; c < cells.length; c++) cells[c].onclick = function (e) {\n    var v = e.target.textContent.replace(/[^0-9]/g, ''); if (!v) return;\n    var ta = document.createElement('textarea'); ta.value = v; ta.style.cssText = 'position:fixed;left:-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);\n    var o = e.target.textContent; e.target.textContent = 'copied'; setTimeout(function () { e.target.textContent = o }, 900);\n  };\n})();\n",
+        "externalStyles": [],
+        "styles": ".dt-row { overflow: auto !important; height: 100% !important }\n.dt-row > div { height: 100% !important }\n.fbt { width: 100%; font: 12px ui-monospace, \"SF Mono\", monospace }\n.fbt table { width: 100%; border-collapse: collapse }\n.fbt th { text-align: left; font: 600 10px sans-serif; letter-spacing: .8px; text-transform: uppercase; color: rgba(150, 160, 175, .85); padding: 4px 8px; border-bottom: 1px solid rgba(128, 128, 128, .25) }\n.fbt td { padding: 4px 8px; border-bottom: 1px solid rgba(128, 128, 128, .12); white-space: nowrap }\n.fbt-copy { cursor: pointer; color: #6CA6F7 }\n.fbt-ok { color: #73BF69 } .fbt-warn { color: #FF9830 } .fbt-mute { color: rgba(150, 160, 175, .7) }\n.fbt-empty { color: rgba(150, 160, 175, .85); font: 12px sans-serif; padding: 12px 4px }\n"
+      },
+      "maxDataPoints": 4000,
+      "interval": "15s",
+      "id": 7,
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p50.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*p95.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "histogram_quantile(0.5, rate(dingo_metrics_forgedBlockTxCount_int_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} p50 tx",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "histogram_quantile(0.95, rate(dingo_metrics_forgedBlockTxCount_int_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} p95 tx",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true,
-      "description": "Transaction count distribution of forged blocks."
+        "y": 23
+      }
     },
     {
-      "type": "timeseries",
-      "title": "Tip Gap, Forge Gap & Sync Skips",
-      "id": 29,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 43
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
       },
+      "description": "tip gap: wall-clock slot minus applied tip, updated every slot; mainnet averages ~20 between blocks. forge gap: chain-selection tip minus applied tip at each leader check; should be 0, and anything above it means a forged block would build on a stale parent. A spike in sync skips may indicate transient network issues.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "auto",
-            "spanNulls": false
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
-          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2665,13 +1634,13 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*gap.*"
+              "options": ".*tip gap.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#f97316",
+                  "fixedColor": "#FF9830",
                   "mode": "fixed"
                 }
               }
@@ -2680,16 +1649,24 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*skip.*"
+              "options": ".*forge gap.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#ef4444",
+                  "fixedColor": "#B877D9",
                   "mode": "fixed"
                 }
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*skips/min.*"
+            },
+            "properties": [
               {
                 "id": "custom.axisPlacement",
                 "value": "right"
@@ -2699,34 +1676,68 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": ".*clock.*"
+              "options": ".*skips/min.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "#f59e0b",
+                  "fixedColor": "#F2495C",
                   "mode": "fixed"
                 }
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*clock errors.*"
+            },
+            "properties": [
               {
                 "id": "custom.axisPlacement",
                 "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*clock errors.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FADE2A",
+                  "mode": "fixed"
+                }
               }
             ]
           }
         ]
       },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "id": 8,
       "options": {
         "legend": {
+          "calcs": [],
           "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
         "tooltip": {
-          "mode": "single"
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
         }
       },
+      "pluginVersion": "13.2.2",
       "targets": [
         {
           "datasource": {
@@ -2769,744 +1780,9 @@
           "refId": "D"
         }
       ],
+      "title": "Tip Gap, Forge Gap & Sync Skips",
       "transparent": true,
-      "description": "tip gap: wall-clock slot minus applied tip, updated every slot; mainnet averages ~20 between blocks. forge gap: chain-selection tip minus applied tip at each leader check; should be 0, and anything above it means a forged block would build on a stale parent. A spike in sync skips may indicate transient network issues."
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "gradientMode": "hue",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "ops"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "clock errors/s"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#F2495C",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 50
-      },
-      "id": 200,
-      "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "editorMode": "code",
-          "expr": "rate(dingo_forge_slot_clock_errors_total{network=\"$network\",instance=~\"$instance\"}[$__rate_interval])",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "clock errors/s",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "slot clock errors",
-      "transparent": true,
-      "type": "timeseries",
-      "description": "Count of slot clock errors. Non-zero values indicate timing issues on the host."
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#6e7681",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "< 1s"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#73BF69",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "< 3s"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FADE2A",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "< 5s"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#F2495C",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 57
-      },
-      "options": {
-        "barWidth": 0.7,
-        "groupWidth": 0.8,
-        "legend": {
-          "displayMode": "hidden",
-          "placement": "right",
-          "showLegend": false
-        },
-        "orientation": "horizontal",
-        "showValue": "always",
-        "stacking": "none",
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne{network=\"$network\",instance=~\"$instance\"}",
-          "format": "time_series",
-          "instant": true,
-          "legendFormat": "< 1s",
-          "range": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree{network=\"$network\",instance=~\"$instance\"}",
-          "format": "time_series",
-          "instant": true,
-          "legendFormat": "< 3s",
-          "range": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive{network=\"$network\",instance=~\"$instance\"}",
-          "format": "time_series",
-          "instant": true,
-          "legendFormat": "< 5s",
-          "range": false
-        }
-      ],
-      "title": "block delay cdf breakdown",
-      "transparent": true,
-      "type": "barchart",
-      "id": 201,
-      "description": "Block delay CDF breakdown by peer or network segment."
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#33CCE8",
-            "mode": "fixed"
-          },
-          "custom": {
-            "align": "center",
-            "cellOptions": {
-              "mode": "gradient",
-              "type": "color-background"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#0d1117",
-                "value": null
-              },
-              {
-                "color": "#b366ff",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 6,
-        "x": 18,
-        "y": 64
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": true,
-            "displayName": "Value"
-          }
-        ]
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "increase(event_total{type=~\"chain.*|chainselection.*|chainsync.*\",network=\"$network\",instance=~\"$instance\"}[1h])",
-          "format": "time_series",
-          "instant": true,
-          "legendFormat": "{{type}}",
-          "range": false
-        }
-      ],
-      "title": "chain event log",
-      "transparent": true,
-      "type": "table",
-      "id": 202,
-      "description": "Log of recent chain events (blocks added, rolled back). Useful for post-hoc analysis."
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisColorMode": "text",
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#6e7681",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "forged/min"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#4285F4",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "served/min"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#E88C30",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 24,
-        "x": 0,
-        "y": 71
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
-          "displayMode": "hidden",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(cardano_node_metrics_blocksForgedNum_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "format": "time_series",
-          "legendFormat": "forged/min",
-          "range": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(cardano_node_metrics_served_block_count_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "format": "time_series",
-          "legendFormat": "served/min",
-          "range": true
-        }
-      ],
-      "title": "forge rates",
-      "transparent": true,
-      "type": "timeseries",
-      "id": 203,
-      "description": "Block forge rate and served block rate over time."
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 78
-      },
-      "id": 300,
-      "title": "Block Composition & SQL Correlation",
-      "type": "row",
-      "transparent": true
-    },
-    {
-      "type": "timeseries",
-      "title": "SQL Query Volume",
-      "id": 301,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 79
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (op) (rate(dingo_database_sql_operations_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{op}} ops/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum(rate(dingo_database_sql_query_duration_seconds_count{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "queries/s (all ops)",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true,
-      "description": "SQL statement rate against the metadata store, by leading keyword (insert/update/delete/select/other), alongside total query rate. Compare against the block-composition panels in this row to see what kind of block content drove a change in query volume (issue #4367)."
-    },
-    {
-      "type": "timeseries",
-      "title": "Block Composition by Era",
-      "id": 302,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 79
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (era) (rate(dingo_ledger_blocks_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{era}} blocks/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (era) (rate(dingo_ledger_block_transactions_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{era}} txs/s",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true,
-      "description": "Applied block and transaction rate by era. An era transition or a run of transaction-heavy blocks shows up here before it shows up as SQL load."
-    },
-    {
-      "type": "timeseries",
-      "title": "Script & Redeemer Activity",
-      "id": 303,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 86
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (era) (rate(dingo_ledger_blocks_with_scripts_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{era}} script blocks/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (era) (rate(dingo_ledger_redeemers_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{era}} redeemers/s",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "transparent": true,
-      "description": "Rate of blocks carrying at least one Plutus V1/V2/V3 script or redeemer, and the finer-grained redeemer count itself -- a run of script-heavy blocks is one of the more expensive causes of a SQL query-volume spike."
-    },
-    {
-      "type": "timeseries",
-      "title": "UTxO Churn & Certificates",
-      "id": 304,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 86
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (era) (rate(dingo_ledger_utxo_created_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{era}} created/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (era) (rate(dingo_ledger_utxo_consumed_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{era}} consumed/s",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "sum by (era) (rate(dingo_ledger_certificates_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{era}} certs/s",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true,
-      "description": "UTxO creation/consumption (from each transaction's Produced()/Consumed(), correct for phase-2-failed transactions) and certificate rate by era -- both known query-heavy paths."
+      "type": "timeseries"
     }
   ]
 }

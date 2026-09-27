@@ -165,10 +165,10 @@
       "type": "marcusolsson-dynamictext-panel",
       "title": " ",
       "gridPos": {
-        "x": 0,
-        "y": 0,
         "h": 12,
-        "w": 24
+        "w": 24,
+        "x": 0,
+        "y": 0
       },
       "fieldConfig": {
         "defaults": {
@@ -1007,17 +1007,17 @@
       }
     },
     {
+      "type": "row",
+      "title": "Host \u2014 CPU (node_exporter)",
       "collapsed": false,
+      "panels": [],
+      "id": 1,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 12
-      },
-      "id": 1,
-      "title": "Host \u2014 CPU (node_exporter)",
-      "type": "row",
-      "transparent": true
+      }
     },
     {
       "type": "timeseries",
@@ -1367,22 +1367,22 @@
       "description": "Rate of OS context switches and process forks. Elevated values may indicate scheduler pressure."
     },
     {
+      "type": "row",
+      "title": "Host \u2014 Memory & Swap (node_exporter)",
       "collapsed": false,
+      "panels": [],
+      "id": 6,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 27
-      },
-      "id": 10,
-      "title": "Host \u2014 Memory & Swap (node_exporter)",
-      "type": "row",
-      "transparent": true
+      }
     },
     {
       "type": "timeseries",
       "title": "Memory Breakdown",
-      "id": 11,
+      "id": 7,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -1558,7 +1558,7 @@
     {
       "type": "gauge",
       "title": "Memory Used %",
-      "id": 12,
+      "id": 8,
       "gridPos": {
         "h": 7,
         "w": 6,
@@ -1621,7 +1621,7 @@
     {
       "type": "timeseries",
       "title": "Swap Usage",
-      "id": 13,
+      "id": 9,
       "gridPos": {
         "h": 7,
         "w": 6,
@@ -1720,22 +1720,22 @@
       "description": "Swap space used. Non-zero values on a busy node indicate memory pressure."
     },
     {
+      "type": "row",
+      "title": "Host \u2014 Disk (node_exporter)",
       "collapsed": false,
+      "panels": [],
+      "id": 10,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 35
-      },
-      "id": 20,
-      "title": "Host \u2014 Disk (node_exporter)",
-      "type": "row",
-      "transparent": true
+      }
     },
     {
       "type": "timeseries",
       "title": "Disk Throughput (read / write)",
-      "id": 21,
+      "id": 11,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -1814,7 +1814,7 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "rate(node_disk_read_bytes_total{instance=~\"$node_instance\"}[5m])",
+          "expr": "rate(node_disk_read_bytes_total{instance=~\"$node_instance\",device!~\"sr.*|zram.*|loop.*|ram.*\"}[5m])",
           "legendFormat": "{{instance}} {{device}} read",
           "range": true,
           "refId": "A"
@@ -1824,7 +1824,7 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "rate(node_disk_written_bytes_total{instance=~\"$node_instance\"}[5m])",
+          "expr": "rate(node_disk_written_bytes_total{instance=~\"$node_instance\",device!~\"sr.*|zram.*|loop.*|ram.*\"}[5m])",
           "legendFormat": "{{instance}} {{device}} write",
           "range": true,
           "refId": "B"
@@ -1836,7 +1836,7 @@
     {
       "type": "timeseries",
       "title": "Disk IOPS",
-      "id": 22,
+      "id": 12,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -1915,7 +1915,7 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "rate(node_disk_reads_completed_total{instance=~\"$node_instance\"}[5m])",
+          "expr": "rate(node_disk_reads_completed_total{instance=~\"$node_instance\",device!~\"sr.*|zram.*|loop.*|ram.*\"}[5m])",
           "legendFormat": "{{instance}} {{device}} read ops",
           "range": true,
           "refId": "A"
@@ -1925,7 +1925,7 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "rate(node_disk_writes_completed_total{instance=~\"$node_instance\"}[5m])",
+          "expr": "rate(node_disk_writes_completed_total{instance=~\"$node_instance\",device!~\"sr.*|zram.*|loop.*|ram.*\"}[5m])",
           "legendFormat": "{{instance}} {{device}} write ops",
           "range": true,
           "refId": "B"
@@ -1937,7 +1937,7 @@
     {
       "type": "timeseries",
       "title": "Disk I/O Utilisation %",
-      "id": 23,
+      "id": 13,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -1987,7 +1987,7 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "rate(node_disk_io_time_seconds_total{instance=~\"$node_instance\"}[5m]) * 100",
+          "expr": "rate(node_disk_io_time_seconds_total{instance=~\"$node_instance\",device!~\"sr.*|zram.*|loop.*|ram.*\"}[5m]) * 100",
           "legendFormat": "{{instance}} {{device}}",
           "range": true,
           "refId": "A"
@@ -1997,123 +1997,94 @@
       "description": "Disk I/O utilisation percentage. Near 100% means the disk is saturated."
     },
     {
-      "type": "timeseries",
-      "title": "Filesystem Usage",
-      "id": 24,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 43
+      "type": "bargauge",
+      "title": "Filesystem Used %",
+      "transparent": true,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*total.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*used.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
+      "description": "Used space per mounted filesystem.",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "node_filesystem_size_bytes{instance=~\"$node_instance\",fstype!=\"tmpfs\",fstype!=\"overlay\",fstype!=\"squashfs\"}",
-          "legendFormat": "{{instance}} {{mountpoint}} total",
-          "range": true,
+          "editorMode": "code",
+          "expr": "100 * (1 - node_filesystem_avail_bytes{instance=~\"$node_instance\",fstype!~\"tmpfs|overlay|squashfs|vfat\"} / node_filesystem_size_bytes{instance=~\"$node_instance\",fstype!~\"tmpfs|overlay|squashfs|vfat\"})",
+          "legendFormat": "{{mountpoint}} ({{device}})",
+          "range": false,
+          "instant": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "node_filesystem_size_bytes{instance=~\"$node_instance\",fstype!=\"tmpfs\",fstype!=\"overlay\",fstype!=\"squashfs\"} - node_filesystem_avail_bytes{instance=~\"$node_instance\",fstype!=\"tmpfs\",fstype!=\"overlay\",fstype!=\"squashfs\"}",
-          "legendFormat": "{{instance}} {{mountpoint}} used",
-          "range": true,
-          "refId": "B"
         }
       ],
-      "transparent": true,
-      "description": "Filesystem space usage. Running out of disk space will crash the node."
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#73BF69",
+                "value": null
+              },
+              {
+                "color": "#FADE2A",
+                "value": 80
+              },
+              {
+                "color": "#F2495C",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "valueMode": "color"
+      },
+      "id": 14,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      }
     },
     {
+      "type": "row",
+      "title": "Host \u2014 Network (node_exporter)",
       "collapsed": false,
+      "panels": [],
+      "id": 15,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 50
-      },
-      "id": 30,
-      "title": "Host \u2014 Network (node_exporter)",
-      "type": "row",
-      "transparent": true
+      }
     },
     {
       "type": "timeseries",
       "title": "Network Throughput",
-      "id": 31,
+      "id": 16,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -2214,7 +2185,7 @@
     {
       "type": "timeseries",
       "title": "Network Errors & Drops",
-      "id": 32,
+      "id": 17,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -2332,27 +2303,254 @@
       "description": "Network errors and dropped packets. Non-zero values indicate NIC or link issues."
     },
     {
-      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "hue",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "cpu wait.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "mem wait.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "mem stall.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "io wait.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "io stall.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FADE2A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
       "gridPos": {
-        "h": 1,
+        "h": 6,
         "w": 24,
         "x": 0,
         "y": 58
       },
-      "id": 40,
-      "title": "Dingo Process \u2014 RSS, CPU, Network",
+      "id": 18,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(node_pressure_cpu_waiting_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "cpu wait %",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(node_pressure_memory_waiting_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "mem wait %",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(node_pressure_memory_stalled_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "mem stall %",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(node_pressure_io_waiting_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "io wait %",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(node_pressure_io_stalled_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
+          "format": "time_series",
+          "instant": false,
+          "legendFormat": "io stall %",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "title": "Pressure Stall (PSI)",
+      "transparent": true,
+      "type": "timeseries",
+      "description": "Linux PSI (Pressure Stall Information) for CPU, memory, and I/O. Non-zero full-stall values indicate resource saturation."
+    },
+    {
       "type": "row",
-      "transparent": true
+      "title": "Dingo Process",
+      "collapsed": false,
+      "panels": [],
+      "id": 19,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      }
     },
     {
       "type": "timeseries",
       "title": "Process RSS & Heap",
-      "id": 41,
+      "id": 20,
       "gridPos": {
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 59
+        "y": 65
       },
       "fieldConfig": {
         "defaults": {
@@ -2455,16 +2653,6 @@
           "legendFormat": "{{instance}} heap alloc",
           "range": true,
           "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "process_virtual_memory_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} virtual",
-          "range": true,
-          "refId": "C"
         }
       ],
       "transparent": true,
@@ -2473,12 +2661,12 @@
     {
       "type": "timeseries",
       "title": "Process CPU (cores)",
-      "id": 42,
+      "id": 21,
       "gridPos": {
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 59
+        "y": 65
       },
       "fieldConfig": {
         "defaults": {
@@ -2533,12 +2721,12 @@
     {
       "type": "timeseries",
       "title": "Process Network Rx / Tx",
-      "id": 43,
+      "id": 22,
       "gridPos": {
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 59
+        "y": 65
       },
       "fieldConfig": {
         "defaults": {
@@ -2632,27 +2820,380 @@
       "description": "Network bytes received and transmitted by the dingo process."
     },
     {
+      "type": "row",
+      "title": "Dingo Storage",
       "collapsed": false,
+      "panels": [],
+      "id": 23,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 71
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Database Size",
+      "description": "On-disk size of the blob store (left axis), and the SQLite metadata file and its WAL (right axis).",
+      "transparent": true,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
       },
-      "id": 50,
-      "title": "Dingo \u2014 Go Memstats",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "dingo_database_size_bytes{store=\"blob\",network=\"$network\",instance=~\"$instance\"} > 0",
+          "legendFormat": "blob (badger)",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "dingo_database_size_bytes{store=\"metadata\",network=\"$network\",instance=~\"$instance\"} > 0",
+          "legendFormat": "metadata (sqlite)",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "dingo_database_sql_wal_bytes{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "sqlite wal",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisLabel": "",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "sqlite wal"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "metadata.*"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "blob.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "metadata.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "sqlite wal"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 24,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 72
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Database Growth per Day",
+      "description": "Growth of each store per day, from a linear fit over the trailing 24h (zero readings during a restart are ignored). The metadata file grows and shrinks within a day as SQLite reuses pages, so read the trend, not single points.",
+      "transparent": true,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "deriv((dingo_database_size_bytes{network=\"$network\",instance=~\"$instance\"} > 0)[24h:5m]) * 86400",
+          "legendFormat": "{{store}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisLabel": "",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "unit": "bytes",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "blob"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "metadata"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 25,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 72
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "SQL Query Volume",
+      "id": 26,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 72
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (op) (rate(dingo_database_sql_operations_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{op}} ops/s",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum(rate(dingo_database_sql_query_duration_seconds_count{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "queries/s (all ops)",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "transparent": true,
+      "description": "SQL statement rate against the metadata store, by leading keyword (insert/update/delete/select/other), alongside total query rate. Compare against the block-composition panels in this row to see what kind of block content drove a change in query volume (issue #4367)."
+    },
+    {
       "type": "row",
-      "transparent": true
+      "title": "Dingo Go Runtime",
+      "collapsed": false,
+      "panels": [],
+      "id": 27,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 79
+      }
     },
     {
       "type": "timeseries",
       "title": "Heap: Alloc / Inuse / Idle / Sys",
-      "id": 51,
+      "id": 28,
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 80
       },
       "fieldConfig": {
         "defaults": {
@@ -2823,12 +3364,12 @@
     {
       "type": "timeseries",
       "title": "Stack / mspan / mcache / other Sys",
-      "id": 52,
+      "id": 29,
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 80
       },
       "fieldConfig": {
         "defaults": {
@@ -2932,13 +3473,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Goroutines & Heap Objects",
-      "id": 53,
+      "title": "Goroutines",
+      "id": 30,
       "gridPos": {
-        "h": 7,
-        "w": 12,
+        "h": 6,
+        "w": 8,
         "x": 0,
-        "y": 73
+        "y": 87
       },
       "fieldConfig": {
         "defaults": {
@@ -3019,7 +3560,91 @@
           "legendFormat": "{{instance}} goroutines",
           "range": true,
           "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Number of goroutines and live heap objects. Sustained growth indicates leaks."
+    },
+    {
+      "type": "timeseries",
+      "title": "Heap Objects",
+      "id": 31,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 87
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
         },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*goroutines.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#b877d9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*objects.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -3036,262 +3661,13 @@
     },
     {
       "type": "timeseries",
-      "title": "GC Alloc / Free / Malloc Rate",
-      "id": 54,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 73
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          },
-          "unit": "Bps",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*alloc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#ef4444",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*free.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#22c55e",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*malloc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*(frees|mallocs)/s.*"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "ops"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(go_memstats_alloc_bytes_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} alloc/s",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(go_memstats_frees_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} frees/s",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(go_memstats_mallocs_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} mallocs/s",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true,
-      "description": "Rate of Go GC memory allocations, frees, and mallocs."
-    },
-    {
-      "type": "timeseries",
-      "title": "Next GC Target & GC Sys",
-      "id": 55,
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 80
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "auto"
-          },
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*next gc.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f59e0b",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byRegexp",
-              "options": ".*gc sys.*"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#475569",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_next_gc_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} next gc target",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_gc_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} gc sys",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "go_memstats_sys_bytes{instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} total sys",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "transparent": true,
-      "description": "The heap size that will trigger the next GC cycle, and GC system overhead."
-    },
-    {
-      "type": "timeseries",
       "title": "GC Pause Duration p50/p75/max",
-      "id": 56,
+      "id": 32,
       "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 80
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 87
       },
       "fieldConfig": {
         "defaults": {
@@ -3410,27 +3786,326 @@
       "description": "Go GC pause duration distribution. High values indicate memory pressure."
     },
     {
+      "type": "timeseries",
+      "title": "Allocation Rate",
+      "id": 33,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 93
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "Bps",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*alloc.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ef4444",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*free.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#22c55e",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*malloc.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*(frees|mallocs)/s.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ops"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "rate(go_memstats_alloc_bytes_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{instance}} alloc/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Rate of Go GC memory allocations, frees, and mallocs."
+    },
+    {
+      "type": "timeseries",
+      "title": "Mallocs & Frees",
+      "id": 34,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 93
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "ops",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "rate(go_memstats_frees_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{instance}} frees/s",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "rate(go_memstats_mallocs_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{instance}} mallocs/s",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "transparent": true,
+      "description": "Rate of Go GC memory allocations, frees, and mallocs."
+    },
+    {
+      "type": "timeseries",
+      "title": "Next GC Target & GC Sys",
+      "id": 35,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 93
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "unit": "bytes",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*next gc.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#f59e0b",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*gc sys.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#475569",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "go_memstats_next_gc_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} next gc target",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "go_memstats_gc_sys_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} gc sys",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "go_memstats_sys_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} total sys",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "transparent": true,
+      "description": "The heap size that will trigger the next GC cycle, and GC system overhead."
+    },
+    {
+      "type": "row",
+      "title": "Dingo Caches",
       "collapsed": false,
+      "panels": [],
+      "id": 36,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 87
-      },
-      "id": 60,
-      "title": "Dingo \u2014 Cache Performance",
-      "type": "row",
-      "transparent": true
+        "y": 99
+      }
     },
     {
       "type": "gauge",
-      "title": "Badger Block Cache Hit Ratio",
-      "id": 61,
+      "title": "Badger Cache Hit",
+      "id": 37,
       "gridPos": {
         "h": 6,
         "w": 4,
         "x": 0,
-        "y": 88
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -3483,21 +4158,170 @@
           "expr": "database_blob_block_cache_hit_ratio{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "{{instance}}",
-          "refId": "A"
+          "refId": "A",
+          "range": false
         }
       ],
       "transparent": true,
       "description": "Badger blob store block cache hit ratio. Higher is better \u2014 reduces disk reads."
     },
     {
-      "type": "timeseries",
-      "title": "Badger Cache Hits vs Misses",
-      "id": 62,
+      "type": "gauge",
+      "title": "UTxO Cache Hit",
+      "description": "UTxO CBOR hot-cache hit rate over 5m.",
+      "transparent": true,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(dingo_cbor_cache_utxo_hot_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(dingo_cbor_cache_utxo_hot_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(dingo_cbor_cache_utxo_hot_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "utxo",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#FADE2A",
+                "value": 0.5
+              },
+              {
+                "color": "#73BF69",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "orientation": "auto",
+        "minVizHeight": 75,
+        "minVizWidth": 75
+      },
+      "id": 38,
       "gridPos": {
         "h": 6,
-        "w": 10,
+        "w": 4,
         "x": 4,
-        "y": 88
+        "y": 100
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "Block LRU Hit",
+      "description": "Block LRU cache hit rate over 5m.",
+      "transparent": true,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "rate(dingo_cbor_cache_block_lru_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(dingo_cbor_cache_block_lru_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(dingo_cbor_cache_block_lru_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "block",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#FADE2A",
+                "value": 0.5
+              },
+              {
+                "color": "#73BF69",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "orientation": "auto",
+        "minVizHeight": 75,
+        "minVizWidth": 75
+      },
+      "id": 39,
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 100
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Badger Cache Hits vs Misses",
+      "id": 40,
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -3592,13 +4416,13 @@
     },
     {
       "type": "timeseries",
-      "title": "CBOR Cache \u2014 UTxO, Block, TX",
-      "id": 63,
+      "title": "CBOR Cache \u2014 UTxO & Block",
+      "id": 41,
       "gridPos": {
         "h": 6,
-        "w": 10,
-        "x": 14,
-        "y": 88
+        "w": 8,
+        "x": 0,
+        "y": 106
       },
       "fieldConfig": {
         "defaults": {
@@ -3705,26 +4529,6 @@
           "legendFormat": "{{instance}} blk miss/s",
           "range": true,
           "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(dingo_cbor_cache_tx_hot_hits_total{network=~\"$network\",instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} tx hits/s",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(dingo_cbor_cache_tx_hot_misses_total{network=~\"$network\",instance=~\"$instance\"}[5m])",
-          "legendFormat": "{{instance}} tx miss/s",
-          "range": true,
-          "refId": "F"
         }
       ],
       "transparent": true,
@@ -3733,12 +4537,12 @@
     {
       "type": "timeseries",
       "title": "CBOR Cold Extractions",
-      "id": 64,
+      "id": 42,
       "gridPos": {
         "h": 6,
-        "w": 12,
-        "x": 0,
-        "y": 94
+        "w": 8,
+        "x": 8,
+        "y": 106
       },
       "fieldConfig": {
         "defaults": {
@@ -3793,12 +4597,12 @@
     {
       "type": "timeseries",
       "title": "Chain Manager Cached Blocks",
-      "id": 65,
+      "id": 43,
       "gridPos": {
         "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 94
+        "w": 8,
+        "x": 16,
+        "y": 106
       },
       "fieldConfig": {
         "defaults": {
@@ -3851,230 +4655,397 @@
       "description": "Number of blocks held in the chain manager's block cache."
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
+      "type": "row",
+      "title": "Internals \u2014 Event Bus",
+      "collapsed": true,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
           },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "hue",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#33CCE8",
+                "mode": "fixed"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#00ffcc",
+                    "value": null
+                  },
+                  {
+                    "color": "#39ff14",
+                    "value": 0
+                  }
+                ]
+              },
+              "unit": ""
             },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 0,
+            "y": 113
+          },
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 16,
+            "minVizWidth": 8,
+            "namePlacement": "auto",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
             },
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
+            "showUnfilled": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "increase(event_total{network=\"$network\",instance=~\"$instance\"}[5m]) > 0",
+              "format": "time_series",
+              "legendFormat": "{{type}}",
+              "range": true
+            }
+          ],
+          "title": "event rates (per 5m window)",
+          "transparent": true,
+          "type": "bargauge",
+          "id": 45,
+          "description": "Per-event-type rates over a 5-minute window. Identifies dominant event flows."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisGridShow": true,
+                "axisLabel": "",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 5,
+                "gradientMode": "scheme",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "vis": false
+                },
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#6e7681",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": ""
             },
-            "thresholdsStyle": {
-              "mode": "off"
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 12,
+            "y": 113
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
             }
           },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "rate(event_total{type=~\"chain.update|ledger.block|ledger.tx|chainsync.*|chainselection.*\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+              "format": "time_series",
+              "legendFormat": "{{type}}",
+              "range": true
+            }
+          ],
+          "title": "event stream",
+          "transparent": true,
+          "type": "timeseries",
+          "id": 46,
+          "description": "Real-time stream of event bus activity. Useful for diagnosing event delivery issues."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#C8AAFF",
+                "mode": "fixed"
+              },
+              "custom": {
+                "align": "center",
+                "cellOptions": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                },
+                "footer": {
+                  "reducers": []
+                },
+                "inspect": false
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#0d1117",
+                    "value": 0
+                  },
+                  {
+                    "color": "#b366ff",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 123
+          },
+          "id": 47,
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true,
+            "sortBy": [
               {
-                "color": "green",
-                "value": null
+                "desc": true,
+                "displayName": "Value"
+              }
+            ]
+          },
+          "pluginVersion": "12.4.2",
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "event_subscribers{network=\"$network\",instance=~\"$instance\"}",
+              "format": "time_series",
+              "instant": true,
+              "legendFormat": "{{type}} ({{kind}})",
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "event subscribers",
+          "transparent": true,
+          "type": "table",
+          "description": "Active event bus subscribers and their subscription counts."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#F2495C",
+                "mode": "fixed"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "gradientMode": "hue",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "smooth",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "ops",
+              "noValue": "none in range"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "err {{type}}"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#FF0080",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
               },
               {
-                "color": "red",
-                "value": 80
+                "matcher": {
+                  "id": "byName",
+                  "options": "timeout {{type}}"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "#F9C54E",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
               }
             ]
           },
-          "unit": "percent"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "cpu wait %"
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 123
+          },
+          "id": 48,
+          "options": {
+            "legend": {
+              "displayMode": "hidden",
+              "showLegend": false
             },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#F2495C",
-                  "mode": "fixed"
-                }
-              }
-            ]
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
           },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "mem wait %"
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "editorMode": "code",
+              "expr": "rate(event_delivery_blocked_total{network=\"$network\",instance=~\"$instance\"}[$__rate_interval]) > 0",
+              "legendFormat": "blocked {{type}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
             },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#E88C30",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "mem stall %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FF0080",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "io wait %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#00B4D8",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "io stall %"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#FF2DAA",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 24,
-        "x": 0,
-        "y": 100
-      },
-      "id": 500,
-      "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_cpu_waiting_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "cpu wait %",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_memory_waiting_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "mem wait %",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_memory_stalled_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "mem stall %",
-          "range": true,
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_io_waiting_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "io wait %",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "editorMode": "code",
-          "expr": "rate(node_pressure_io_stalled_seconds_total{instance=~\"$node_instance\"}[$__rate_interval]) * 100",
-          "format": "time_series",
-          "instant": false,
-          "legendFormat": "io stall %",
-          "range": true,
-          "refId": "E"
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "editorMode": "code",
+              "expr": "rate(event_subscriber_handler_stalled_total{network=\"$network\",instance=~\"$instance\"}[$__rate_interval]) > 0",
+              "legendFormat": "stalled {{type}}",
+              "range": true,
+              "instant": false,
+              "refId": "B"
+            }
+          ],
+          "title": "Event Delivery Blocked & Stalled",
+          "transparent": true,
+          "type": "timeseries",
+          "description": "Events a publisher could not deliver because a subscriber queue was full (blocked), and subscriber handlers observed running long enough to be flagged as stalled."
         }
       ],
-      "title": "psi pressure",
-      "transparent": true,
-      "type": "timeseries",
-      "description": "Linux PSI (Pressure Stall Information) for CPU, memory, and I/O. Non-zero full-stall values indicate resource saturation."
+      "id": 44,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      }
     }
   ]
 }

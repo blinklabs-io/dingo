@@ -143,10 +143,10 @@
       "type": "marcusolsson-dynamictext-panel",
       "title": " ",
       "gridPos": {
-        "x": 0,
-        "y": 0,
         "h": 12,
-        "w": 24
+        "w": 24,
+        "x": 0,
+        "y": 0
       },
       "fieldConfig": {
         "defaults": {
@@ -990,7 +990,7 @@
       "id": 1,
       "gridPos": {
         "h": 3,
-        "w": 2,
+        "w": 3,
         "x": 0,
         "y": 12
       },
@@ -1047,8 +1047,8 @@
       "id": 2,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 2,
+        "w": 3,
+        "x": 3,
         "y": 12
       },
       "fieldConfig": {
@@ -1100,8 +1100,8 @@
       "id": 3,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 4,
+        "w": 3,
+        "x": 6,
         "y": 12
       },
       "fieldConfig": {
@@ -1149,118 +1149,12 @@
     },
     {
       "type": "stat",
-      "title": "Active",
+      "title": "Known",
       "id": 4,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 6,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#22c55e",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#22c55e",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_peerSelection_ActivePeers{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Total active peer connections (hot + warm)."
-    },
-    {
-      "type": "stat",
-      "title": "Established",
-      "id": 5,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 8,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#60a5fa",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#60a5fa",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_peerSelection_EstablishedPeers{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Established TCP connections to peers."
-    },
-    {
-      "type": "stat",
-      "title": "Known",
-      "id": 6,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 10,
+        "w": 3,
+        "x": 9,
         "y": 12
       },
       "fieldConfig": {
@@ -1308,12 +1202,65 @@
     },
     {
       "type": "stat",
-      "title": "Outgoing Conns",
-      "id": 7,
+      "title": "Established",
+      "id": 5,
       "gridPos": {
         "h": 3,
-        "w": 2,
+        "w": 3,
         "x": 12,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#60a5fa",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#60a5fa",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "cardano_node_metrics_peerSelection_EstablishedPeers{network=\"$network\",instance=~\"$instance\"}",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "transparent": true,
+      "description": "Established TCP connections to peers."
+    },
+    {
+      "type": "stat",
+      "title": "Outgoing",
+      "id": 6,
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 15,
         "y": 12
       },
       "fieldConfig": {
@@ -1361,12 +1308,12 @@
     },
     {
       "type": "stat",
-      "title": "Incoming Conns",
-      "id": 8,
+      "title": "Incoming",
+      "id": 7,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 14,
+        "w": 3,
+        "x": 18,
         "y": 12
       },
       "fieldConfig": {
@@ -1415,11 +1362,11 @@
     {
       "type": "stat",
       "title": "Full Duplex",
-      "id": 9,
+      "id": 8,
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 16,
+        "w": 3,
+        "x": 21,
         "y": 12
       },
       "fieldConfig": {
@@ -1466,168 +1413,9 @@
       "description": "Peers with full-duplex (bidirectional) communication established."
     },
     {
-      "type": "stat",
-      "title": "Duplex Conns",
-      "id": 10,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 18,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#a78bfa",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#a78bfa",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_connectionManager_duplexConns{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Total number of duplex (bidirectional) connections."
-    },
-    {
-      "type": "stat",
-      "title": "Unidirectional",
-      "id": 11,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 20,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#7dd3fc",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#7dd3fc",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_connectionManager_unidirectionalConns{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Peers with only unidirectional communication. Typically transient."
-    },
-    {
-      "type": "stat",
-      "title": "Prunable",
-      "id": 12,
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 22,
-        "y": 12
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "#94a3b8",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#94a3b8",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_connectionManager_prunableConns{network=\"$network\",instance=~\"$instance\"}",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "refId": "A"
-        }
-      ],
-      "transparent": true,
-      "description": "Peers eligible for pruning by the peer selection governor."
-    },
-    {
       "type": "timeseries",
       "title": "Peer States",
-      "id": 20,
+      "id": 9,
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -1704,6 +1492,40 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*cold.*"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*cold.*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    6,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
           }
         ]
       },
@@ -1750,12 +1572,12 @@
         }
       ],
       "transparent": true,
-      "description": "Peer count by state (hot/warm/cold) over time."
+      "description": "Peer count by state (hot/warm/cold) over time. Cold peers are on the right axis."
     },
     {
       "type": "timeseries",
       "title": "Connections",
-      "id": 21,
+      "id": 10,
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -1923,26 +1745,6 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "cardano_node_metrics_connectionManager_duplexConns{network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} duplex conns",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "cardano_node_metrics_connectionManager_unidirectionalConns{network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} uni",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
           "expr": "cardano_node_metrics_connectionManager_prunableConns{network=\"$network\",instance=~\"$instance\"}",
           "legendFormat": "{{instance}} prunable",
           "range": true,
@@ -1955,7 +1757,7 @@
     {
       "type": "timeseries",
       "title": "Peer Promotions & Demotions",
-      "id": 22,
+      "id": 11,
       "gridPos": {
         "h": 7,
         "w": 8,
@@ -2170,7 +1972,7 @@
     {
       "type": "timeseries",
       "title": "Peer Churn",
-      "id": 23,
+      "id": 12,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -2345,7 +2147,7 @@
     {
       "type": "timeseries",
       "title": "Peers by Source (hot & warm)",
-      "id": 24,
+      "id": 13,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -2406,16 +2208,6 @@
           "legendFormat": "{{instance}} {{source}} warm",
           "range": true,
           "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "dingo_metrics_peerSelection_peers_by_source{state=\"cold\",network=\"$network\",instance=~\"$instance\"}",
-          "legendFormat": "{{instance}} {{source}} cold",
-          "range": true,
-          "refId": "C"
         }
       ],
       "transparent": true,
@@ -2423,8 +2215,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Events Rate",
-      "id": 25,
+      "title": "Chainsync & Chain Events",
+      "id": 14,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -2586,45 +2378,15 @@
           "legendFormat": "{{instance}} switches/min",
           "range": true,
           "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(event_total{type=\"connmanager.conn_closed\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} closed/min",
-          "range": true,
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(event_total{type=\"connmanager.inbound_conn\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} inbound/min",
-          "range": true,
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "rate(event_total{type=\"peergov.outbound_conn\",network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
-          "legendFormat": "{{instance}} outbound/min",
-          "range": true,
-          "refId": "F"
         }
       ],
       "transparent": true,
-      "description": "Rate of peer-related events (connect, disconnect, promote, demote)."
+      "description": "Headers received (chainsync), blocks applied and chain switches per minute."
     },
     {
       "type": "timeseries",
       "title": "Peer Gov Events",
-      "id": 26,
+      "id": 15,
       "gridPos": {
         "h": 7,
         "w": 12,
@@ -2780,7 +2542,7 @@
       "gridPos": {
         "h": 7,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 36
       },
       "options": {
@@ -2809,7 +2571,7 @@
       "title": "chainsync event distribution",
       "transparent": true,
       "type": "timeseries",
-      "id": 310,
+      "id": 16,
       "description": "Distribution of chain sync events received from peers."
     },
     {
@@ -2820,8 +2582,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "#8FD47E",
-            "mode": "fixed"
+            "mode": "palette-classic"
           },
           "custom": {
             "axisBorderShow": false,
@@ -2878,13 +2639,14 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 36
       },
-      "id": 311,
+      "id": 17,
       "options": {
         "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
         "tooltip": {
           "mode": "multi",
