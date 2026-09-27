@@ -46,6 +46,41 @@ func newSharedSQLStore(
 	return store, writeDB
 }
 
+func TestSQLiteVacuumMaintenanceIsOptInAndConfigurable(t *testing.T) {
+	t.Parallel()
+	db, err := sqlstore.OpenDB(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlite_vacuum_config_%d?mode=memory&cache=shared",
+			sharedMemoryDBSequence.Add(1),
+		),
+		"sqlite",
+		false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	maintenance, interval, err := sqliteVacuum(db, 0)
+	require.NoError(t, err)
+	require.Nil(t, maintenance)
+	require.Zero(t, interval)
+
+	maintenance, interval, err = sqliteVacuum(db, 30)
+	require.NoError(t, err)
+	require.NotNil(t, maintenance)
+	require.Equal(t, 30*time.Second, interval)
+	require.NoError(t, maintenance(context.Background()))
+}
+
+func TestOpenSQLStoreRejectsVacuumIntervalOverflow(t *testing.T) {
+	t.Parallel()
+	_, _, _, err := openSQLStore(
+		Config{VacuumIntervalSeconds: maxVacuumIntervalSeconds + 1},
+		metadata.ProviderDependencies{},
+	)
+	require.ErrorContains(t, err, "vacuumIntervalSeconds exceeds maximum")
+}
+
 // diskSizeUntilComplete calls store.DiskSize until one call completes or
 // deadline passes, returning the last result. Safe to call off the test
 // goroutine: it never touches *testing.T.

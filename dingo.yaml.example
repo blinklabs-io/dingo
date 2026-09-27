@@ -30,6 +30,9 @@ plugins:
       config:
         # Optional SQLite data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
+        # Full VACUUM can pause SQLite writers. It is disabled by default;
+        # set an interval in seconds only when that maintenance pause is acceptable.
+        # vacuumIntervalSeconds: 86400
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
     #   provider: "postgres"
