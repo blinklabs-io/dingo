@@ -21,6 +21,74 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+type activeProposalDeposit struct {
+	Credential models.StakeCredentialRef
+	Amount     uint64
+}
+
+func activeProposalDepositsByReturnCredential(
+	db *database.Database,
+	txn *database.Txn,
+	currentEpoch uint64,
+) (map[string]activeProposalDeposit, error) {
+	proposals, err := db.GetActiveGovernanceProposals(currentEpoch, txn)
+	if err != nil {
+		return nil, fmt.Errorf("get active governance proposals: %w", err)
+	}
+
+	deposits := make(map[string]activeProposalDeposit)
+	for _, proposal := range proposals {
+		if proposal == nil || proposal.Deposit == 0 {
+			continue
+		}
+		credentialTag, stakeHash, err := rewardAccountStakeCredential(
+			proposal.ReturnAddress,
+		)
+		if err != nil {
+			// A malformed return address already fails this proposal's own
+			// ratification precondition. It must not fail every tally in the
+			// epoch over otherwise unusable deposit data.
+			continue
+		}
+		ref := models.NewStakeCredentialRef(credentialTag, stakeHash)
+		key := ref.MapKey()
+		entry := deposits[key]
+		entry.Credential = ref
+		entry.Amount, err = addUint64(entry.Amount, proposal.Deposit)
+		if err != nil {
+			return nil, fmt.Errorf("sum active proposal deposits: %w", err)
+		}
+		deposits[key] = entry
+	}
+	return deposits, nil
+}
+
+func accountsForProposalDeposits(
+	db *database.Database,
+	txn *database.Txn,
+	deposits map[string]activeProposalDeposit,
+) (map[string]*models.Account, error) {
+	refs := make([]models.StakeCredentialRef, 0, len(deposits))
+	for _, deposit := range deposits {
+		refs = append(refs, deposit.Credential)
+	}
+	// An inactive reward account has no DRep or SPO voting power, deposits
+	// included, matching the account-state checks in Conway's pulser.
+	accounts, err := db.GetAccountsByCredential(refs, false, txn)
+	if err != nil {
+		return nil, fmt.Errorf("get proposal return accounts: %w", err)
+	}
+	return accounts, nil
+}
+
+func proposalDepositAccountActive(
+	account *models.Account,
+	expiryEpoch uint64,
+) bool {
+	return account != nil && (expiryEpoch == 0 ||
+		account.ExpirationEpoch == 0 || account.ExpirationEpoch >= expiryEpoch)
+}
+
 // ActiveProposalDepositDRepPower sums every active governance proposal's own
 // deposit into its return account's delegated DRep voting power. Per
 // CIP-1694, a proposal's deposit is escrowed but still counts as part of the
@@ -46,52 +114,24 @@ func ActiveProposalDepositDRepPower(
 	currentEpoch uint64,
 	expiryEpoch uint64,
 ) (map[string]uint64, uint64, error) {
-	proposals, err := db.GetActiveGovernanceProposals(currentEpoch, txn)
+	deposits, err := activeProposalDepositsByReturnCredential(
+		db, txn, currentEpoch,
+	)
 	if err != nil {
-		return nil, 0, fmt.Errorf("get active governance proposals: %w", err)
-	}
-
-	deposits := make(map[string]uint64)
-	refs := make([]models.StakeCredentialRef, 0, len(proposals))
-	for _, proposal := range proposals {
-		if proposal == nil || proposal.Deposit == 0 {
-			continue
-		}
-		credentialTag, stakeHash, err := rewardAccountStakeCredential(
-			proposal.ReturnAddress,
-		)
-		if err != nil {
-			// A malformed return address already fails this proposal's own
-			// ratification precondition (ratificationEnactmentPrecondition);
-			// skip it here rather than failing every proposal's DRep tally
-			// for this epoch tick over one proposal's bad data.
-			continue
-		}
-		ref := models.NewStakeCredentialRef(credentialTag, stakeHash)
-		key := ref.MapKey()
-		if _, seen := deposits[key]; !seen {
-			refs = append(refs, ref)
-		}
-		deposits[key], err = addUint64(deposits[key], proposal.Deposit)
-		if err != nil {
-			return nil, 0, fmt.Errorf("sum active proposal deposits: %w", err)
-		}
+		return nil, 0, err
 	}
 	if len(deposits) == 0 {
 		return nil, 0, nil
 	}
 
-	// includeInactive=false mirrors the outer `a.active = true` conjunct in
-	// VotingPowerBatchSQL: a deregistered return account contributes no
-	// voting power, deposit included.
-	accounts, err := db.GetAccountsByCredential(refs, false, txn)
+	accounts, err := accountsForProposalDeposits(db, txn, deposits)
 	if err != nil {
-		return nil, 0, fmt.Errorf("get proposal return accounts: %w", err)
+		return nil, 0, err
 	}
 
 	drepPower := make(map[string]uint64, len(accounts))
 	var noConfidencePower uint64
-	for key, amount := range deposits {
+	for key, deposit := range deposits {
 		account, ok := accounts[key]
 		if !ok {
 			continue
@@ -100,10 +140,10 @@ func ActiveProposalDepositDRepPower(
 		// expiration_epoch >= expiryEpoch`: expiryEpoch == 0 means the
 		// CIP-0163 gate is off (delegatorInactivityOn false), so every
 		// account counts regardless of ExpirationEpoch.
-		if expiryEpoch > 0 && account.ExpirationEpoch != 0 &&
-			account.ExpirationEpoch < expiryEpoch {
+		if !proposalDepositAccountActive(account, expiryEpoch) {
 			continue
 		}
+		amount := deposit.Amount
 		switch account.DrepType {
 		case models.DrepTypeAlwaysNoConfidence:
 			noConfidencePower, err = addUint64(noConfidencePower, amount)

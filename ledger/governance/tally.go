@@ -514,10 +514,13 @@ func tallyDRepVotes(
 // once per epoch and reused across every proposal's tally.
 type SPOVotingState struct {
 	// Dist is the pool stake snapshot rows, each carrying the pool's
-	// stake and its pre-resolved reward-account auto-vote.
+	// voting stake and its pre-resolved reward-account auto-vote. Active
+	// proposal deposits are overlaid here for RATIFY only; persisted mark
+	// snapshots continue to contain leader-election stake.
 	Dist []*models.PoolStakeSnapshot
 	// TotalStake is the sum of every snapshot row's stake.
-	TotalStake uint64
+	TotalStake               uint64
+	proposalDepositsIncluded bool
 }
 
 // LoadSPOVotingState reads the "mark" pool stake snapshot for stakeEpoch
@@ -552,6 +555,115 @@ func LoadSPOVotingState(
 	return &SPOVotingState{Dist: dist, TotalStake: total}, nil
 }
 
+func includeActiveProposalDepositsInSPOVotingState(
+	db *database.Database,
+	txn *database.Txn,
+	currentEpoch uint64,
+	expiryEpoch uint64,
+	state *SPOVotingState,
+) error {
+	if state == nil {
+		return errors.New("nil SPO voting state")
+	}
+	if state.proposalDepositsIncluded {
+		return nil
+	}
+	deposits, err := activeProposalDepositsByReturnCredential(
+		db, txn, currentEpoch,
+	)
+	if err != nil {
+		return err
+	}
+	if len(deposits) == 0 {
+		state.proposalDepositsIncluded = true
+		return nil
+	}
+	accounts, err := accountsForProposalDeposits(db, txn, deposits)
+	if err != nil {
+		return err
+	}
+
+	rowsByPool := make(map[string]*models.PoolStakeSnapshot, len(state.Dist))
+	for _, row := range state.Dist {
+		if row == nil {
+			continue
+		}
+		if _, ok := rowsByPool[string(row.PoolKeyHash)]; !ok {
+			rowsByPool[string(row.PoolKeyHash)] = row
+		}
+	}
+	depositsByPool := make(map[string]uint64)
+	for credential, deposit := range deposits {
+		account := accounts[credential]
+		if account == nil ||
+			!proposalDepositAccountActive(account, expiryEpoch) ||
+			len(account.Pool) == 0 {
+			continue
+		}
+		poolKey := string(account.Pool)
+		poolRow, hasVotingStake := rowsByPool[poolKey]
+		if !hasVotingStake || poolRow == nil {
+			// The Conway pulser adds proposal deposits only to a pool already
+			// present in the snapshot voting distribution.
+			continue
+		}
+		depositsByPool[poolKey], err = addUint64(
+			depositsByPool[poolKey], deposit.Amount,
+		)
+		if err != nil {
+			return fmt.Errorf("sum proposal deposits by SPO: %w", err)
+		}
+	}
+
+	additionalStake := uint64(0)
+	updatedPoolStake := make(map[string]uint64, len(depositsByPool))
+	for poolKey, amount := range depositsByPool {
+		poolRow := rowsByPool[poolKey]
+		if poolRow == nil {
+			return fmt.Errorf(
+				"SPO voting pool %x disappeared from the distribution",
+				[]byte(poolKey),
+			)
+		}
+		additionalStake, err = addUint64(additionalStake, amount)
+		if err != nil {
+			return fmt.Errorf(
+				"sum proposal deposits for SPO distribution: %w",
+				err,
+			)
+		}
+		updatedPoolStake[poolKey], err = addUint64(
+			uint64(poolRow.TotalStake), amount,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"SPO voting stake with proposal deposits: %w",
+				err,
+			)
+		}
+	}
+	updatedTotalStake, err := addUint64(state.TotalStake, additionalStake)
+	if err != nil {
+		return fmt.Errorf(
+			"SPO total voting stake with proposal deposits: %w",
+			err,
+		)
+	}
+	for poolKey, amount := range updatedPoolStake {
+		poolRow := rowsByPool[poolKey]
+		if poolRow == nil {
+			return fmt.Errorf(
+				"SPO voting pool %x disappeared from the distribution",
+				[]byte(poolKey),
+			)
+		}
+		poolRow.TotalStake = types.Uint64(amount)
+	}
+	state.TotalStake = updatedTotalStake
+	state.proposalDepositsIncluded = true
+	return nil
+}
+
 func tallySPOVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,
@@ -563,6 +675,24 @@ func tallySPOVotes(
 		state, err = LoadSPOVotingState(ctx.DB, ctx.Txn, ctx.StakeEpoch)
 		if err != nil {
 			return err
+		}
+		ctx.SPOState = state
+	}
+	if ctx.DB != nil {
+		expiryEpoch := uint64(0)
+		if ctx.DelegatorInactivityOn {
+			expiryEpoch = ctx.CurrentEpoch
+		}
+		if err := includeActiveProposalDepositsInSPOVotingState(
+			ctx.DB,
+			ctx.Txn,
+			ctx.CurrentEpoch,
+			expiryEpoch,
+			state,
+		); err != nil {
+			return fmt.Errorf(
+				"active proposal deposit SPO voting power: %w", err,
+			)
 		}
 	}
 
