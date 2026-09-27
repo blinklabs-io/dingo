@@ -8405,6 +8405,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
+	var expandedIndexOffset uint64
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -8413,6 +8414,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.expandedIndexOffset = expandedIndexOffset
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
 				if err := delta.donate(blockDonation); err != nil {
@@ -8645,6 +8647,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 			delta.Release()
 			delta = nil // reset
+			levels := TransactionLevelsForApply(tx)
+			if len(levels) > 1 {
+				expandedIndexOffset += uint64(len(levels)) - 1
+			}
 
 			// Add this transaction's outputs to intra-block map for subsequent TX lookups
 			// Use tx.Produced() instead of tx.Outputs() to handle failed transactions

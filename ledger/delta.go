@@ -71,6 +71,9 @@ type LedgerDelta struct {
 	Offsets      *database.BlockIngestionResult // pre-computed CBOR offsets for this block
 	donation     uint64
 	txSlicePtr   *[]TransactionRecord // store original pointer from pool
+	// expandedIndexOffset reserves block indexes consumed by child bodies in
+	// earlier validation deltas for the same block.
+	expandedIndexOffset uint64
 	// skipConsumedInputRecovery applies transaction effects without the
 	// consumed-utxo recovery/repair pass (see Database.SetTransactionWithOpts).
 	// Set only for the Leios Musashi endorser-block apply, which mirrors the
@@ -96,6 +99,7 @@ func NewLedgerDelta(
 	delta.BlockNumber = blockNumber
 	delta.Offsets = nil // Reset offsets from previous use
 	delta.donation = 0
+	delta.expandedIndexOffset = 0
 	delta.skipConsumedInputRecovery = false
 	delta.strictConsumedInputs = false
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
@@ -116,6 +120,7 @@ func (d *LedgerDelta) Release() {
 	// Clear offsets to avoid retaining large memory across blocks
 	d.Offsets = nil
 	d.donation = 0
+	d.expandedIndexOffset = 0
 	d.skipConsumedInputRecovery = false
 	d.strictConsumedInputs = false
 	// Return the delta to the pool
@@ -157,7 +162,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	var pparams lcommon.ProtocolParameters
 	var snapshotLoaded bool
 	appliedTxs := make([]bool, len(d.Transactions))
-	var storageIndexOffset uint64
+	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)

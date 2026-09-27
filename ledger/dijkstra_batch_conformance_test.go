@@ -16,11 +16,14 @@ package ledger
 
 import (
 	"bytes"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -30,6 +33,125 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	batch := &dijkstra.DijkstraTransaction{
+		Body: dijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]dijkstra.DijkstraSubTransaction{{
+					Body: dijkstra.DijkstraSubTransactionBody{},
+				}},
+				true,
+			),
+		},
+		TxIsValid: true,
+	}
+	batchCbor, err := batch.MarshalCBOR()
+	require.NoError(t, err)
+	batch, err = dijkstra.NewDijkstraTransactionFromCbor(batchCbor)
+	require.NoError(t, err)
+	plain := &dijkstra.DijkstraTransaction{TxIsValid: true}
+	plainCbor, err := plain.MarshalCBOR()
+	require.NoError(t, err)
+	plain, err = dijkstra.NewDijkstraTransactionFromCbor(plainCbor)
+	require.NoError(t, err)
+
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 1,
+					Slot:        10,
+					ProtoVersion: babbage.BabbageProtoVersion{
+						Major: dijkstra.MinProtocolVersionDijkstra,
+					},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*batch, *plain},
+		},
+	}
+	bodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+
+	point := ocommon.Point{Slot: 10, Hash: block.Hash().Bytes()}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	offsets := &database.BlockIngestionResult{
+		TxOffsets:   make(map[[32]byte]database.CborOffset),
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	transactions := []common.Transaction{batch, plain}
+	for _, tx := range transactions {
+		for _, level := range TransactionLevels(tx) {
+			var txHash [32]byte
+			copy(txHash[:], level.Hash().Bytes())
+			offsets.TxOffsets[txHash] = database.CborOffset{
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			}
+		}
+	}
+
+	pparams := dijkstraTestProtocolParameters()
+	pparams.MaxBlockBodySize = 100_000
+	pparams.MaxBlockHeaderSize = 100_000
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig:        nodeConfig,
+			Logger:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			SkipDijkstraTxValidation: true,
+		},
+	}
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			point,
+			block,
+			true,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			offsets,
+			eras.DijkstraEraDesc,
+			pparams,
+			nil,
+			0,
+			0,
+			false,
+		)
+		return err
+	}))
+
+	batchSubTx := batch.Body.TxSubTransactions.Items()[0].Body.Id()
+	for _, want := range []struct {
+		hash  []byte
+		index uint32
+	}{
+		{hash: batchSubTx.Bytes(), index: 0},
+		{hash: batch.Hash().Bytes(), index: 1},
+		{hash: plain.Hash().Bytes(), index: 2},
+	} {
+		stored, err := db.Metadata().GetTransactionByHash(want.hash, nil)
+		require.NoError(t, err)
+		require.NotNil(t, stored)
+		require.Equal(t, want.index, stored.BlockIndex)
+	}
+}
 
 func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 	t.Parallel()
