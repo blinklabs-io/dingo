@@ -307,6 +307,16 @@ var (
 	_ lcommon.CommitteeVotingState  = (*LedgerView)(nil)
 )
 
+// gouroboros ledger/common.CommitteeHotCredentialMembers (gouroboros#2574) is
+// the optional plural capability that lets upstream committee-vote
+// validation resolve every cold credential currently authorizing a shared
+// hot credential, rather than the single arbitrary witness
+// CommitteeHotCredentialMember can express. Without it, a vote cast under a
+// hot credential two cold credentials share can be wrongly rejected as
+// unknown when one sharer's authorization is touched by the same
+// transaction and the singular fallback happened to report that one.
+var _ lcommon.CommitteeHotCredentialMembers = (*LedgerView)(nil)
+
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
 // back to weaker existence-only proposal ancestry checks.
@@ -1424,10 +1434,28 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 	return authorizations[0].member, nil
 }
 
+// CommitteeHotCredentialMembers returns every current cold-credential
+// authorization for this exact tagged hot credential. The Conway certificate
+// overlay uses the full set when same-transaction certificates move one shared
+// hot credential without invalidating another cold credential's authorization.
+func (lv *LedgerView) CommitteeHotCredentialMembers(
+	hotCredential lcommon.Credential,
+) ([]*lcommon.CommitteeMember, error) {
+	authorizations, err := lv.committeeHotAuthorizations(hotCredential, false)
+	if err != nil {
+		return nil, err
+	}
+	members := make([]*lcommon.CommitteeMember, 0, len(authorizations))
+	for _, authorization := range authorizations {
+		members = append(members, authorization.member)
+	}
+	return members, nil
+}
+
 // CommitteeHotCredentialColdCredentials returns every cold credential whose
 // committee state currently authorizes this exact tagged hot credential,
 // seated or not and regardless of expiry, omitting resigned members. It
-// implements the lookup half of gouroboros common.CommitteeVotingState; the
+// implements the lookup half of gOuroboros common.CommitteeVotingState; the
 // PV11 elected-voter rule applies the enacted-committee filter through
 // CommitteeCredentialIsElected.
 func (lv *LedgerView) CommitteeHotCredentialColdCredentials(
@@ -1609,7 +1637,7 @@ func (lv *LedgerView) committeeHotAuthorizations(
 
 // CommitteeCredentialIsElected reports whether an exact tagged cold credential
 // is seated in the enacted committee of this view's snapshot. It implements
-// the membership half of gouroboros common.CommitteeVotingState. Expired
+// the membership half of gOuroboros common.CommitteeVotingState. Expired
 // members stay seated until an enacted action removes them, and members that
 // appear only in pending UpdateCommittee proposals are not elected, matching
 // cardano-ledger's authorizedElectedHotCommitteeCredentials.
@@ -2390,9 +2418,21 @@ func (lv *LedgerView) GetLeiosKeys(
 	if err != nil {
 		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
 	}
+	maxKeyAgeEpochs, err := lv.ls.maxLeiosKeyAgeEpochs()
+	if err != nil {
+		return nil, fmt.Errorf("resolve maximum Leios key age: %w", err)
+	}
 	for _, snapshot := range snapshots {
 		if len(snapshot.LeiosKeyPublic) == 0 ||
 			len(snapshot.LeiosKeyPossessionProof) == 0 {
+			continue
+		}
+		// Reference ledger state carries a registration epoch with each BLS key.
+		// A snapshot without that epoch cannot establish key eligibility.
+		registrationEpoch := snapshot.LeiosKeyRegistrationEpoch
+		if registrationEpoch == nil ||
+			*registrationEpoch > epoch ||
+			epoch-*registrationEpoch >= maxKeyAgeEpochs {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{
@@ -2405,6 +2445,36 @@ func (lv *LedgerView) GetLeiosKeys(
 		}
 	}
 	return out, nil
+}
+
+func (ls *LedgerState) maxLeiosKeyAgeEpochs() (uint64, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("cardano configuration unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxKESEvolutions <= 0 {
+		return 0, errors.New("invalid MaxKESEvolutions")
+	}
+	slotsPerKESPeriod := ls.SlotsPerKESPeriod()
+	slotsPerEpoch := ls.SlotsPerEpoch()
+	if slotsPerKESPeriod == 0 || slotsPerEpoch == 0 {
+		return 0, errors.New("invalid KES-period or epoch length")
+	}
+	maxSlots := new(big.Int).Mul(
+		big.NewInt(int64(genesis.MaxKESEvolutions)),
+		new(big.Int).SetUint64(slotsPerKESPeriod),
+	)
+	divisor := new(big.Int).SetUint64(slotsPerEpoch)
+	epochs, remainder := new(big.Int), new(big.Int)
+	epochs.QuoRem(maxSlots, divisor, remainder)
+	if remainder.Sign() > 0 {
+		epochs.Add(epochs, big.NewInt(1))
+	}
+	epochs.Add(epochs, big.NewInt(2))
+	if !epochs.IsUint64() {
+		return 0, errors.New("maximum Leios key age overflows uint64")
+	}
+	return epochs.Uint64(), nil
 }
 
 // GetPoolStake returns the stake for a specific pool from the snapshot.

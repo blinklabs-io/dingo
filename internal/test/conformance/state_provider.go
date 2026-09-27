@@ -821,6 +821,22 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	return authorizations[0].member, nil
 }
 
+// CommitteeHotCredentialMembers mirrors LedgerView's plural authorization
+// lookup for the conformance provider.
+func (p *DingoStateProvider) CommitteeHotCredentialMembers(
+	hotCredential common.Credential,
+) ([]*common.CommitteeMember, error) {
+	authorizations, err := p.committeeHotAuthorizations(hotCredential, false)
+	if err != nil {
+		return nil, err
+	}
+	members := make([]*common.CommitteeMember, 0, len(authorizations))
+	for _, authorization := range authorizations {
+		members = append(members, authorization.member)
+	}
+	return members, nil
+}
+
 // CommitteeHotCredentialColdCredentials returns every cold credential that
 // currently authorizes this exact tagged hot credential, seated or not,
 // omitting resigned members, as LedgerView.CommitteeHotCredentialColdCredentials
@@ -1336,7 +1352,10 @@ func extractCostModels(
 }
 
 // Compile-time interface check
-var _ conformance.StateProvider = (*DingoStateProvider)(nil)
+var (
+	_ conformance.StateProvider = (*DingoStateProvider)(nil)
+	_ common.EpochState         = (*DingoStateProvider)(nil)
+)
 
 // Keep the conformance provider on the same credential-aware committee
 // capability as the production LedgerView.
@@ -1344,6 +1363,11 @@ var (
 	_ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
 	_ common.CommitteeVotingState   = (*DingoStateProvider)(nil)
 )
+
+// Keep the conformance provider on the same plural committee-authorization
+// capability as the production LedgerView (gouroboros#2574); see
+// LedgerView.CommitteeHotCredentialMembers.
+var _ common.CommitteeHotCredentialMembers = (*DingoStateProvider)(nil)
 
 // conformance.StateProvider does not include DRepDelegationState: the Conway
 // reward-withdrawal rule discovers it with a runtime type assertion instead.

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -1624,4 +1625,267 @@ func TestLedgerViewCommitteeResignationSurvivesTermRenewal(t *testing.T) {
 		&resigned,
 		"a resigned member must not be able to re-authorize after a renewal",
 	)
+}
+
+// TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization
+// is the direct proof for the gouroboros#2574 plural capability: when two
+// cold credentials both currently authorize the same hot credential,
+// CommitteeHotCredentialMembers must return both, not just whichever one the
+// singular CommitteeHotCredentialMember happens to find first (GOVCERT keeps
+// one authorization entry per cold credential, and cardano-ledger's own
+// authorizedHotCommitteeCredentials folds every entry into a set for exactly
+// this reason -- see the CommitteeHotCredentialMembers doc comment in
+// gouroboros ledger/common/state.go). Resigning one cold credential must
+// leave only the other in the result.
+func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+	hot := committeeTestCredential(0xc0)
+	coldA := committeeTestCredential(0xc1)
+	coldB := committeeTestCredential(0xc2)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{
+			ColdCredentialTag: uint8(coldA.CredType),
+			ColdCredHash:      coldA.Credential[:],
+			ExpiresEpoch:      10,
+		},
+		{
+			ColdCredentialTag: uint8(coldB.CredType),
+			ColdCredHash:      coldB.Credential[:],
+			ExpiresEpoch:      10,
+		},
+	}, nil))
+	seedCommitteeCredentialAuthorization(t, db, coldA, hot, 1, 1)
+	seedCommitteeCredentialAuthorization(t, db, coldB, hot, 2, 1)
+
+	members, err := lv.CommitteeHotCredentialMembers(hot)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		members,
+		2,
+		"both cold credentials currently authorize the shared hot credential",
+	)
+	gotColdKeys := make([]lcommon.Blake2b224, 0, len(members))
+	for _, member := range members {
+		gotColdKeys = append(gotColdKeys, member.ColdKey)
+	}
+	require.ElementsMatch(
+		t,
+		[]lcommon.Blake2b224{coldA.Credential, coldB.Credential},
+		gotColdKeys,
+	)
+
+	seedCommitteeCredentialResignation(t, db, coldA, 3, 2)
+
+	members, err = lv.CommitteeHotCredentialMembers(hot)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		members,
+		1,
+		"only the un-resigned cold credential still authorizes the hot credential",
+	)
+	require.Equal(t, coldB.Credential, members[0].ColdKey)
+
+	single, err := lv.CommitteeHotCredentialMember(hot)
+	require.NoError(t, err)
+	require.NotNil(t, single)
+	require.Equal(
+		t,
+		coldB.Credential,
+		single.ColdKey,
+		"the singular accessor must still resolve the remaining authorizer",
+	)
+}
+
+// TestValidateTxDijkstraAcceptsVoteWhenSharedHotCredentialColdKeyResignsInTx
+// is the end-to-end regression for gouroboros#2574 through dingo's real
+// Dijkstra validation path (eras.ValidateTxDijkstra -> a real *LedgerView).
+//
+// Cold A and cold B both currently authorize hot H (persisted, before this
+// transaction). This transaction's first level (a Dijkstra sub-transaction)
+// resigns cold A; its last level (the outer transaction body) casts a
+// committee vote under hot H. Cold A's resignation must not take voting
+// rights away from cold B, which still authorizes H and was never touched by
+// this transaction.
+//
+// gouroboros's per-transaction committee bookkeeping
+// (dijkstraGovernanceStateView) tracks only cold credentials this
+// transaction's own certificates touched (cold A here); for every other cold
+// credential it falls back to what the ledger state reports for hot H. Before
+// gouroboros#2574 that fallback was the singular CommitteeHotCredentialMember,
+// which returns at most one witness and could return cold A -- correctly
+// excluded as touched, but leaving cold B's authorization undiscovered and the
+// vote wrongly rejected as unknown. LedgerView.CommitteeHotCredentialMembers
+// (added by this change) reports both, so gouroboros can exclude the touched
+// one and still find cold B.
+func TestValidateTxDijkstraAcceptsVoteWhenSharedHotCredentialColdKeyResignsInTx(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	pparams := &gdijkstra.DijkstraProtocolParameters{}
+	lv, db := committeeTestView(t, pparams)
+	hot := committeeTestCredential(0xd0)
+	coldA := committeeTestCredential(0xd1)
+	coldB := committeeTestCredential(0xd2)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{
+			ColdCredentialTag: uint8(coldA.CredType),
+			ColdCredHash:      coldA.Credential[:],
+			ExpiresEpoch:      10,
+		},
+		{
+			ColdCredentialTag: uint8(coldB.CredType),
+			ColdCredHash:      coldB.Credential[:],
+			ExpiresEpoch:      10,
+		},
+	}, nil))
+	seedCommitteeCredentialAuthorization(t, db, coldA, hot, 1, 1)
+	seedCommitteeCredentialAuthorization(t, db, coldB, hot, 2, 1)
+
+	resign := &lcommon.ResignCommitteeColdCertificate{
+		CertType:       uint(lcommon.CertificateTypeResignCommitteeCold),
+		ColdCredential: coldA,
+	}
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hot.Credential),
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		TxIsValid: true,
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{
+					{
+						Body: gdijkstra.DijkstraSubTransactionBody{
+							TxCertificates: []lcommon.CertificateWrapper{{
+								Type:        resign.Type(),
+								Certificate: resign,
+							}},
+						},
+					},
+				},
+				false,
+			),
+		},
+	}
+
+	err := eras.ValidateTxDijkstra(tx, 0, lv, pparams)
+	var unknown conway.UnknownVoterError
+	require.False(
+		t,
+		errors.As(err, &unknown),
+		"cold B still authorizes hot after cold A resigns within this "+
+			"transaction, so the vote must not be rejected as unknown: %v",
+		err,
+	)
+}
+
+// TestConwayKnownVoterRuleResolvesEveryAuthorizerOfSharedHotCredential runs
+// the upstream Conway known-voter rule against a real LedgerView at protocol
+// versions 9, 10 and 11. The transaction resigns cold credential A, which
+// authorizes hot credential H, and votes as H.
+//
+// Reference: cardano-ledger-core's authorizedHotCommitteeCredentials is the
+// set of hot credentials that any non-resigned csCommitteeCreds entry maps to,
+// so H stays a known voter while another cold credential still authorizes it,
+// and becomes unknown once its only authorizer resigns; from protocol version
+// 11 the voter must also belong to the enacted committee.
+func TestConwayKnownVoterRuleResolvesEveryAuthorizerOfSharedHotCredential(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		sharerSeated = "seated"
+		sharerNone   = "none"
+	)
+	for _, tc := range []struct {
+		sharer      string
+		major       uint
+		wantUnknown bool
+	}{
+		{sharerSeated, 9, false},
+		{sharerSeated, 10, false},
+		{sharerSeated, 11, false},
+		{sharerNone, 9, true},
+		{sharerNone, 10, true},
+		{sharerNone, 11, true},
+	} {
+		t.Run(
+			fmt.Sprintf("%s sharer pv%d", tc.sharer, tc.major),
+			func(t *testing.T) {
+				t.Parallel()
+
+				pparams := &conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: tc.major,
+					},
+				}
+				lv, db := committeeTestView(t, pparams)
+				hot := committeeTestCredential(0xe0)
+				coldA := committeeTestCredential(0xe1)
+				coldB := committeeTestCredential(0xe2)
+				seated := []*models.CommitteeMember{{
+					ColdCredentialTag: uint8(coldA.CredType),
+					ColdCredHash:      coldA.Credential[:],
+					ExpiresEpoch:      10,
+				}}
+				if tc.sharer == sharerSeated {
+					seated = append(seated, &models.CommitteeMember{
+						ColdCredentialTag: uint8(coldB.CredType),
+						ColdCredHash:      coldB.Credential[:],
+						ExpiresEpoch:      10,
+					})
+				}
+				require.NoError(t, db.SetCommitteeMembers(seated, nil))
+				seedCommitteeCredentialAuthorization(t, db, coldA, hot, 1, 1)
+				if tc.sharer == sharerSeated {
+					seedCommitteeCredentialAuthorization(
+						t,
+						db,
+						coldB,
+						hot,
+						2,
+						1,
+					)
+				}
+
+				resign := &lcommon.ResignCommitteeColdCertificate{
+					CertType: uint(
+						lcommon.CertificateTypeResignCommitteeCold,
+					),
+					ColdCredential: coldA,
+				}
+				voter := &lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: [28]byte(hot.Credential),
+				}
+				tx := &conway.ConwayTransaction{
+					TxIsValid: true,
+					Body: conway.ConwayTransactionBody{
+						TxCertificates: []lcommon.CertificateWrapper{{
+							Type:        resign.Type(),
+							Certificate: resign,
+						}},
+						TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+					},
+				}
+
+				err := conway.UtxoValidateUnknownVoters(tx, 0, lv, pparams)
+				if tc.wantUnknown {
+					var unknown conway.UnknownVoterError
+					require.ErrorAs(t, err, &unknown)
+					return
+				}
+				require.NoError(t, err)
+			},
+		)
+	}
 }

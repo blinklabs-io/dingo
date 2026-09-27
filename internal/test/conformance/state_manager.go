@@ -421,7 +421,9 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 		if drep, delegated := state.DRepDelegationsByCredential[credential]; delegated {
 			account.Drep = append([]byte(nil), drep.Credential...)
-			account.DrepType = uint64(drep.Type) //nolint:gosec // conformance DRep types are bounded ledger enums.
+			account.DrepType = uint64(
+				drep.Type,
+			) //nolint:gosec // conformance DRep types are bounded ledger enums.
 		}
 		if err := m.db.Metadata().ImportAccount(
 			account,
@@ -599,7 +601,9 @@ func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
 	}
 	deposit := provider.DRepDepositAmount()
 	if deposit == nil || deposit.Sign() < 0 || !deposit.IsUint64() {
-		return 0, errors.New("protocol parameters contain an invalid DRep deposit")
+		return 0, errors.New(
+			"protocol parameters contain an invalid DRep deposit",
+		)
 	}
 	return deposit.Uint64(), nil
 }
@@ -1059,7 +1063,8 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 			m.govState.SetPoolDelegation(c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeStakeDelegation:
-		if c, ok := cert.(*common.StakeDelegationCertificate); ok && c.StakeCredential != nil {
+		if c, ok := cert.(*common.StakeDelegationCertificate); ok &&
+			c.StakeCredential != nil {
 			m.govState.SetPoolDelegation(*c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeVoteDelegation:
@@ -1083,7 +1088,10 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 		if c, ok := cert.(*common.PoolRegistrationCertificate); ok {
 			m.govState.RegisterPool(c.Operator)
 			credential := c.RewardAccountCredential()
-			m.govState.SetPoolRewardAccount(c.Operator, rewardAccountKey(credential))
+			m.govState.SetPoolRewardAccount(
+				c.Operator,
+				rewardAccountKey(credential),
+			)
 		}
 	case common.CertificateTypePoolRetirement:
 		if c, ok := cert.(*common.PoolRetirementCertificate); ok {
@@ -1196,7 +1204,9 @@ func (m *DingoStateManager) updateStakeDepositForCertificate(
 	}
 }
 
-func rewardAccountKey(credential common.Credential) mockledger.RewardAccountKey {
+func rewardAccountKey(
+	credential common.Credential,
+) mockledger.RewardAccountKey {
 	return mockledger.RewardAccountKey{
 		CredType:   credential.CredType,
 		Credential: credential.Credential,
@@ -1600,7 +1610,9 @@ func (m *DingoStateManager) committeeActionRatified(
 
 	decision := governance.ShouldRatify(governance.RatifyInputs{
 		Tally: &governance.ProposalTally{
-			ActionType:     uint8(proposal.ActionType), //nolint:gosec // bounded by the small fixed set of GovActionType values
+			ActionType: uint8(
+				proposal.ActionType,
+			), //nolint:gosec // bounded by the small fixed set of GovActionType values
 			DRepYesStake:   drepYes,
 			DRepTotalStake: drepTotal,
 			SPOYesStake:    spoYes,
@@ -2081,13 +2093,19 @@ func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
 	}
 	sort.Strings(utxoIDs)
 	return &conformance.StateSnapshot{
-		CurrentEpoch:                   m.currentEpoch,
-		UtxoIDs:                        utxoIDs,
-		StakeRegistrationsByCredential: maps.Clone(m.govState.StakeRegistrationsByCredential),
-		RewardAccountBalances:          maps.Clone(m.govState.RewardAccountBalances),
-		StakeCredentialDeposits:        maps.Clone(m.stakeDeposits),
-		PoolRegistrations:              maps.Clone(m.govState.PoolRegistrations),
-		Governance:                     m.govState,
+		CurrentEpoch: m.currentEpoch,
+		UtxoIDs:      utxoIDs,
+		StakeRegistrationsByCredential: maps.Clone(
+			m.govState.StakeRegistrationsByCredential,
+		),
+		RewardAccountBalances: maps.Clone(
+			m.govState.RewardAccountBalances,
+		),
+		StakeCredentialDeposits: maps.Clone(m.stakeDeposits),
+		PoolRegistrations: maps.Clone(
+			m.govState.PoolRegistrations,
+		),
+		Governance: m.govState,
 	}
 }
 
@@ -2232,7 +2250,10 @@ func initialCommitteeProposalCbor(info conformance.GovActionInfo) []byte {
 		Quorum:      cbor.Rat{Rat: big.NewRat(0, 1)},
 	}
 	for credential := range info.RemovedMembers {
-		action.Credentials = append(action.Credentials, credential.AsCredential())
+		action.Credentials = append(
+			action.Credentials,
+			credential.AsCredential(),
+		)
 	}
 	for credential, epoch := range info.ProposedMembersByCredential {
 		cred := credential.AsCredential()

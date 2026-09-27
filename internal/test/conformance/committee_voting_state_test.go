@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gouroboros common.CommitteeVotingState: CommitteeHotCredentialColdCredentials
+// gOuroboros common.CommitteeVotingState: CommitteeHotCredentialColdCredentials
 // returns every cold credential currently authorizing the hot credential,
 // seated or not, and omits only resigned ones.
 func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(

@@ -50,6 +50,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -57,6 +58,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/pipeline"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
@@ -4846,6 +4848,12 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	certified, err := cbor.Encode(true)
 	require.NoError(t, err)
 	block := &dijkstra.DijkstraBlock{
+		BlockBody: dijkstra.DijkstraBlockBody{
+			LeiosCertificate: &dijkstra.DijkstraLeiosCertificate{
+				Signers:             []byte{1},
+				AggregatedSignature: make([]byte, 48),
+			},
+		},
 		BlockHeader: &dijkstra.DijkstraBlockHeader{
 			BabbageBlockHeader: babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{
@@ -4868,6 +4876,14 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 				uint64,
 			) ([]cbor.RawMessage, bool) {
 				return nil, false
+			},
+			ValidateLeiosCertificate: func(
+				uint64,
+				[]byte,
+				[]byte,
+				[]byte,
+			) error {
+				return nil
 			},
 		},
 	}
@@ -5123,6 +5139,60 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 			}
 		})
 	}
+}
+
+func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	credential := bytes.Repeat([]byte{0x61}, lcommon.Blake2b224Size)
+	credentialHash := lcommon.NewBlake2b224(credential)
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&lcommon.RegistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: credentialHash,
+			},
+			Amount: 500,
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x62}, lcommon.Blake2b256Size))
+	tx.WithValid(true)
+
+	ls := &LedgerState{
+		db:             db,
+		currentPParams: &conway.ConwayProtocolParameters{DRepDeposit: 500},
+		slotClock: NewSlotClock(
+			newMockSlotTimeProvider(time.Now(), time.Second, 100),
+			DefaultSlotClockConfig(),
+		),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err = ls.withTxValidationSession(nil, nil, true, func(
+		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
+		_ func() bool,
+		applyTx txValidationApplyFunc,
+	) error {
+		return applyTx(
+			tx,
+			0,
+			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x63}, lcommon.Blake2b256Size)},
+			uint(conway.EraIdConway),
+			1,
+		)
+	})
+	require.NoError(t, err)
+
+	_, err = db.GetDrepByCredential(0, credential, true, nil)
+	require.ErrorIs(t, err, models.ErrDrepNotFound)
 }
 
 // TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime covers Close()'s

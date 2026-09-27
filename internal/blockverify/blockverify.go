@@ -57,8 +57,8 @@ var ErrSlotMismatch = errors.New("block content slot mismatch")
 //
 // Hash does not independently re-derive blockType from the decoded header.
 // An earlier version of this check did, via gledger.DetermineBlockType, to
-// catch the case bark's verifyArchiveBlock/blockEraFromHeader also guards
-// against: for Shelley and later, the block hash covers only the header,
+// catch the case where, for Shelley and later, the block hash covers only
+// the header,
 // and adjacent eras share that header's layout, so the same bytes can
 // decode -- with an identical hash and slot -- under more than one era.
 // That check was dropped because DetermineBlockType classifies era from

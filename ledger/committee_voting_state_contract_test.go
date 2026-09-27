@@ -41,7 +41,7 @@ func seatExpiredCommitteeMember(
 	}}, nil))
 }
 
-// gouroboros common.CommitteeVotingState: CommitteeHotCredentialColdCredentials
+// gOuroboros common.CommitteeVotingState: CommitteeHotCredentialColdCredentials
 // returns every cold credential currently authorizing the exact tagged hot
 // credential and does not filter by enacted membership or expiry; only a
 // resigned cold credential has no authorization to return. The current

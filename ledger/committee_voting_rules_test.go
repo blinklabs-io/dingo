@@ -203,7 +203,7 @@ func requireOnlyRuleError(t *testing.T, err error, target any) {
 }
 
 // requireUnelectedCommitteeVoter requires the elected-voter rejection. For
-// Dijkstra it tolerates a second rejection of the same voter: gouroboros'
+// Dijkstra it tolerates a second rejection of the same voter: gOuroboros'
 // Dijkstra unknown-voter rule, which Dingo runs before its own, also rejects
 // an unseated committee voter from PV11. Both reject the same transaction.
 func requireUnelectedCommitteeVoter(
@@ -917,6 +917,41 @@ func TestValidateTxCommitteeActionRestrictionForScriptHotVoter(t *testing.T) {
 			)
 			var unknown conway.UnknownVoterError
 			require.False(t, errors.As(err, &unknown), "%v", err)
+		})
+	}
+}
+
+// A PV11 DRep-only vote still enters the upstream unelected-committee rule,
+// which requires authoritative committee voting state before it filters voters.
+// The production LedgerView must provide that capability even when this
+// transaction has no committee voter.
+func TestValidateTxDRepOnlyVotePassesAtPV11(t *testing.T) {
+	t.Parallel()
+
+	for _, era := range []committeeVotingEra{
+		committeeVotingConway,
+		committeeVotingDijkstra,
+	} {
+		t.Run(era.name, func(t *testing.T) {
+			t.Parallel()
+			pparams := era.pparams(lcommon.ProtocolVersionVanRossem)
+			lv, db := committeeTestView(t, pparams)
+			seatCommitteeMembers(t, db, committeeTestCredential(0xf8))
+			drep, drepKey := committeeTestVotingKey(0xf9)
+			seedImportedDrep(t, db, drep, 0, 1, true)
+
+			err := committeeVotingValidate(
+				t,
+				era,
+				lv,
+				pparams,
+				drepKey,
+				lcommon.VotingProcedures{
+					{Type: lcommon.VoterTypeDRepKeyHash, Hash: [28]byte(drep.Credential)}: {},
+				},
+				nil,
+			)
+			require.NoError(t, err)
 		})
 	}
 }
