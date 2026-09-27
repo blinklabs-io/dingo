@@ -140,11 +140,14 @@ func buildByronBlockTestTx(
 
 // processByronReferenceRuleBlock applies one Byron block holding tx through
 // ledgerProcessBlock with a real LedgerState, database and Byron genesis.
+// byronParams optionally supplies the protocol parameters adopted for the
+// block's epoch.
 func processByronReferenceRuleBlock(
 	t *testing.T,
 	db *database.Database,
 	nodeConfig *cardano.CardanoNodeConfig,
 	tx lcommon.Transaction,
+	byronParams ...*byronProtocolParameters,
 ) error {
 	t.Helper()
 	ls := &LedgerState{
@@ -199,6 +202,7 @@ func processByronReferenceRuleBlock(
 			0,
 			0,
 			false,
+			byronParams...,
 		)
 		return err
 	})

@@ -34,7 +34,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -64,9 +63,11 @@ var ErrNotImplemented = errors.New("not implemented")
 var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 
 type LedgerView struct {
-	ls          *LedgerState
-	txn         *database.Txn
-	byronParams *byron.ByronGenesisBlockVersionData
+	ls  *LedgerState
+	txn *database.Txn
+	// byronParams are the Byron protocol parameters adopted for the block
+	// this view validates; nil outside Byron block application.
+	byronParams *byronProtocolParameters
 	// Committee proposal resolution must use the same immutable consensus
 	// publication as the validation that owns this view.
 	committeeEpoch       uint64
@@ -368,13 +369,15 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 
 func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
 	if lv.byronParams != nil {
-		policy := lv.byronParams.TxFeePolicy
-		return policy.Summand, policy.Multiplier, nil
+		return lv.byronParams.feePolicyNano()
 	}
 	return lv.ls.ByronFeePolicy()
 }
 
 func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
+	if lv.byronParams != nil {
+		return lv.byronParams.maxTxSizeLimit(), nil
+	}
 	return lv.ls.ByronMaxTxSize()
 }
 

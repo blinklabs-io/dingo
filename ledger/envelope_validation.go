@@ -83,12 +83,15 @@ func validateInboundBlockEnvelope(
 	)
 }
 
+// validateInboundBlockEnvelopeWithByronParams validates an inbound block
+// against byronLimits, the Byron size limits adopted for the block's epoch.
+// Nil byronLimits selects the genesis limits.
 func validateInboundBlockEnvelopeWithByronParams(
 	block gledger.Block,
 	pparams lcommon.ProtocolParameters,
 	nodeConfig *cardano.CardanoNodeConfig,
 	parent envelopeParent,
-	byronParams *byron.ByronGenesisBlockVersionData,
+	byronLimits *byronBlockLimits,
 ) error {
 	if block == nil {
 		return errors.New("validate inbound block envelope: nil block")
@@ -103,8 +106,9 @@ func validateInboundBlockEnvelopeWithByronParams(
 		return err
 	}
 	if block.Era().Id == byron.EraIdByron {
-		// Main-block proofs bind the body. EBB proofs are decoded but discarded
-		// by the reference transition, so they do not bind the body.
+		// Main-block proofs bind the body. The reference decodes an EBB's
+		// body proof as a byte string and discards it, so for an EBB this
+		// only rejects a proof that is not a byte string.
 		// Decoded inbound blocks preserve their complete CBOR. Synthetic
 		// blocks used by callers that do not carry wire bytes cannot provide a
 		// body proof to verify and are handled by the normal structural path.
@@ -117,10 +121,13 @@ func validateInboundBlockEnvelopeWithByronParams(
 				return fmt.Errorf("validate Byron main block body proof: %w", err)
 			}
 		case *byron.ByronEpochBoundaryBlock:
+			if err := byronBlock.ValidateBodyProof(); err != nil {
+				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
+			}
 		default:
 			return nil
 		}
-		return validateByronBlockSizes(block, nodeConfig, byronParams)
+		return validateByronBlockSizes(block, nodeConfig, byronLimits)
 	}
 	if err := validateBlockSizes(block, pparams); err != nil {
 		return err
@@ -318,13 +325,21 @@ func validateBlockSizes(
 	return nil
 }
 
-// validateByronBlockSizes enforces the limits carried by Byron genesis. Byron
-// does not put a body-size declaration in its header, so the encoded block
-// size is the value checked against maxBlockSize.
+// byronBlockLimits are the adopted ppMaxBlockSize and ppMaxHeaderSize.
+type byronBlockLimits struct {
+	maxBlockSize  uint64
+	maxHeaderSize uint64
+}
+
+// validateByronBlockSizes enforces Byron's block and header size limits.
+// Byron does not put a body-size declaration in its header, so the encoded
+// block size is the value checked against maxBlockSize. An EBB is bounded
+// only by the reference's fixed 2,000,000-byte limit on its whole encoding.
+// Nil limits selects the genesis limits.
 func validateByronBlockSizes(
 	block gledger.Block,
 	config *cardano.CardanoNodeConfig,
-	activeParams *byron.ByronGenesisBlockVersionData,
+	limits *byronBlockLimits,
 ) error {
 	if _, isEbb := block.(*byron.ByronEpochBoundaryBlock); isEbb {
 		const maxEbbSize = 2_000_000
@@ -337,39 +352,30 @@ func validateByronBlockSizes(
 		}
 		return nil
 	}
-	if config == nil || config.ByronGenesis() == nil {
-		return errors.New("byron genesis is required for block size validation")
+	if limits == nil {
+		if config == nil || config.ByronGenesis() == nil {
+			return errors.New("byron genesis is required for block size validation")
+		}
+		version := config.ByronGenesis().BlockVersionData
+		if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
+			return errors.New("byron genesis has invalid block size limits")
+		}
+		limits = &byronBlockLimits{
+			maxBlockSize:  uint64(version.MaxBlockSize),
+			maxHeaderSize: uint64(version.MaxHeaderSize),
+		}
 	}
-	var version byron.ByronGenesisBlockVersionData
-	if activeParams != nil {
-		version = *activeParams
-	} else {
-		version = config.ByronGenesis().BlockVersionData
-	}
-	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
-		return errors.New("byron genesis has invalid block size limits")
-	}
-	if uint64(len(block.Header().Cbor())) > uint64(version.MaxHeaderSize) {
+	if uint64(len(block.Header().Cbor())) > limits.maxHeaderSize {
 		return fmt.Errorf(
 			"byron block header size %d exceeds maxHeaderSize %d",
-			len(block.Header().Cbor()), version.MaxHeaderSize,
+			len(block.Header().Cbor()), limits.maxHeaderSize,
 		)
 	}
-	if uint64(len(block.Cbor())) > uint64(version.MaxBlockSize) {
+	if uint64(len(block.Cbor())) > limits.maxBlockSize {
 		return fmt.Errorf(
 			"byron block size %d exceeds maxBlockSize %d",
-			len(block.Cbor()), version.MaxBlockSize,
+			len(block.Cbor()), limits.maxBlockSize,
 		)
-	}
-	if mainBlock, ok := block.(*byron.ByronMainBlock); ok {
-		for index, tx := range mainBlock.Body.TxPayload {
-			if txSize := len(tx.Cbor()); txSize > version.MaxTxSize {
-				return fmt.Errorf(
-					"byron transaction %d size %d exceeds maxTxSize %d",
-					index, txSize, version.MaxTxSize,
-				)
-			}
-		}
 	}
 	return nil
 }

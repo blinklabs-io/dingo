@@ -27,6 +27,7 @@ import (
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -41,6 +42,10 @@ type byronPBFTState struct {
 	issuerState     byronconsensus.PBFTState
 	delegationState byronconsensus.PBFTDelegationState
 	updateState     byronUpdateState
+	// updateDelegations is the delegation map after the last main block.
+	// Update proposals, votes and endorsements are registered against it
+	// rather than against the current block's ticked delegation state.
+	updateDelegations map[lcommon.Blake2b224]lcommon.Blake2b224
 }
 
 var errByronPBFTCurrentSlotUnavailable = errors.New(
@@ -468,10 +473,21 @@ func newByronPBFTState(
 	if err != nil {
 		return byronPBFTState{}, err
 	}
+	updateState, err := newByronUpdateState(
+		initialParams,
+		config.NumGenesisKeys,
+	)
+	if err != nil {
+		return byronPBFTState{}, fmt.Errorf(
+			"initialize Byron update state: %w",
+			err,
+		)
+	}
 	return byronPBFTState{
-		issuerState:     issuerState,
-		delegationState: delegationState,
-		updateState:     newByronUpdateState(initialParams, config.NumGenesisKeys),
+		issuerState:       issuerState,
+		delegationState:   delegationState,
+		updateState:       updateState,
+		updateDelegations: delegationState.ActiveDelegations(),
 	}, nil
 }
 
@@ -481,24 +497,6 @@ func (ls *LedgerState) advanceByronPBFTState(
 	shouldValidate bool,
 ) (byronPBFTState, error) {
 	epoch, err := byronBlockEpoch(block)
-	if err != nil {
-		return byronPBFTState{}, err
-	}
-	config, err := ls.byronPBFTConfig()
-	if err != nil {
-		return byronPBFTState{}, err
-	}
-	if config.SlotsPerEpoch == 0 || epoch > ^uint64(0)/config.SlotsPerEpoch {
-		return byronPBFTState{}, fmt.Errorf(
-			"advance Byron update state: invalid first slot for epoch %d",
-			epoch,
-		)
-	}
-	state.updateState, err = state.updateState.advanceEpoch(
-		epoch,
-		epoch*config.SlotsPerEpoch,
-		config.SecurityParam,
-	)
 	if err != nil {
 		return byronPBFTState{}, err
 	}
@@ -558,51 +556,16 @@ func (ls *LedgerState) advanceByronPBFTState(
 			block,
 		)
 	}
-	if err := mainBlock.ValidateUpdatePayload(); err != nil {
-		return byronPBFTState{}, fmt.Errorf(
-			"validate Byron update payload at slot %d: %w",
-			block.SlotNumber(),
-			err,
-		)
-	}
-	state.updateState, err = state.updateState.applyUpdatePayload(
+	state.updateState, err = ls.applyByronUpdate(
+		state.updateState,
+		state.updateDelegations,
 		mainBlock,
-		state.delegationState.ActiveDelegations(),
-		config.ProtocolMagic,
-		block.SlotNumber(),
+		header,
+		epoch,
 	)
 	if err != nil {
-		return byronPBFTState{}, fmt.Errorf(
-			"apply Byron update payload at slot %d: %w",
-			block.SlotNumber(),
-			err,
-		)
+		return byronPBFTState{}, err
 	}
-	if len(header.ConsensusData.PubKey) > 0 {
-		issuer, err := byronconsensus.PBFTIssuerFromHeader(header)
-		if err != nil {
-			return byronPBFTState{}, fmt.Errorf(
-				"parse Byron update endorsement issuer at slot %d: %w",
-				block.SlotNumber(),
-				err,
-			)
-		}
-		state.updateState, err = state.updateState.registerEndorsement(
-			header.ExtraData.BlockVersion,
-			issuer.DelegateKeyHash,
-			state.delegationState.ActiveDelegations(),
-			block.SlotNumber(),
-			config.SecurityParam,
-		)
-		if err != nil {
-			return byronPBFTState{}, fmt.Errorf(
-				"register Byron protocol endorsement at slot %d: %w",
-				block.SlotNumber(),
-				err,
-			)
-		}
-	}
-	state.updateState = state.updateState.pruneExpired(block.SlotNumber())
 	dlgPayload, err := byronDelegationPayload(mainBlock)
 	if err != nil {
 		return byronPBFTState{}, fmt.Errorf(
@@ -623,7 +586,84 @@ func (ls *LedgerState) advanceByronPBFTState(
 			err,
 		)
 	}
+	state.updateDelegations = state.delegationState.ActiveDelegations()
 	return state, nil
+}
+
+// applyByronUpdate runs a main block through the Byron update interface:
+// the epoch transition, then its proposal, votes and header endorsement.
+func (ls *LedgerState) applyByronUpdate(
+	updateState byronUpdateState,
+	delegations map[lcommon.Blake2b224]lcommon.Blake2b224,
+	block *ledgerbyron.ByronMainBlock,
+	header *ledgerbyron.ByronMainBlockHeader,
+	epoch uint64,
+) (byronUpdateState, error) {
+	config, err := ls.byronPBFTConfig()
+	if err != nil {
+		return byronUpdateState{}, err
+	}
+	epochFirstSlot, err := config.EpochFirstSlotChecked(epoch)
+	if err != nil {
+		return byronUpdateState{}, fmt.Errorf(
+			"advance Byron update state to epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	slot, err := ledgerbyron.SlotNumberFromHeader(header, config.SlotsPerEpoch)
+	if err != nil {
+		return byronUpdateState{}, fmt.Errorf(
+			"convert Byron update slot: %w",
+			err,
+		)
+	}
+	updateState, err = updateState.advanceEpoch(
+		epoch,
+		epochFirstSlot,
+		config.SecurityParam,
+	)
+	if err != nil {
+		return byronUpdateState{}, err
+	}
+	if err := block.ValidateUpdatePayload(); err != nil {
+		return byronUpdateState{}, fmt.Errorf(
+			"validate Byron update payload at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	issuer, err := byronconsensus.PBFTIssuerFromHeader(header)
+	if err != nil {
+		return byronUpdateState{}, fmt.Errorf(
+			"parse Byron update endorsement issuer at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	signal, err := byronUpdateSignalFromBlock(block, issuer.DelegateKeyHash)
+	if err != nil {
+		return byronUpdateState{}, fmt.Errorf(
+			"read Byron update payload at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	updateState, err = updateState.registerUpdate(
+		signal,
+		delegations,
+		config.ProtocolMagic,
+		slot,
+		config.SecurityParam,
+	)
+	if err != nil {
+		return byronUpdateState{}, fmt.Errorf(
+			"apply Byron update payload at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	return updateState, nil
 }
 
 // byronDelegationPayload returns the block's delegation certificates as the

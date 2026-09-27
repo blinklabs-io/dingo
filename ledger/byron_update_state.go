@@ -17,9 +17,10 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"math/big"
-	"strings"
-	"unicode"
+	"unicode/utf8"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
@@ -29,223 +30,266 @@ import (
 
 type byronUpdateProposalID [common.Blake2b256Size]byte
 
-type byronRegisteredUpdate struct {
-	version      byron.ByronBlockVersion
-	params       byron.ByronGenesisBlockVersionData
-	hasProtocol  bool
-	softwareName string
-	softwareVer  uint32
-	registeredAt uint64
+// byronProtocolParameters holds Byron's adopted protocol parameters in the
+// reference value ranges. Size limits are Natural, so an update can carry
+// values beyond int64; the fee policy is whole Lovelace plus an exact
+// multiplier in nano-Lovelace per byte.
+type byronProtocolParameters struct {
+	scriptVersion     uint16
+	slotDuration      *big.Int
+	maxBlockSize      *big.Int
+	maxHeaderSize     *big.Int
+	maxTxSize         *big.Int
+	maxProposalSize   *big.Int
+	mpcThd            uint64
+	heavyDelThd       uint64
+	updateVoteThd     uint64
+	updateProposalThd uint64
+	updateProposalTTL uint64
+	softforkInitThd   uint64
+	softforkMinThd    uint64
+	softforkThdDec    uint64
+	feeSummand        uint64
+	feeMultiplierNano *big.Int
+	unlockStakeEpoch  uint64
+}
+
+var (
+	byronFeeNanoScale         = big.NewInt(1_000_000_000)
+	byronLovelacePortionScale = big.NewInt(1_000_000_000_000_000)
+)
+
+func byronNonNegative(name string, value int64) (uint64, error) {
+	if value < 0 {
+		return 0, fmt.Errorf(
+			"byron genesis %s must not be negative, got %d",
+			name, value,
+		)
+	}
+	return uint64(value), nil
+}
+
+// byronProtocolParametersFromGenesis loads genesis blockVersionData the way
+// the reference FromJSON instances do: the fee summand is summand div 10^9
+// and the multiplier is multiplier % 10^9.
+func byronProtocolParametersFromGenesis(
+	data byron.ByronGenesisBlockVersionData,
+) (byronProtocolParameters, error) {
+	if data.ScriptVersion < 0 || data.ScriptVersion > math.MaxUint16 {
+		return byronProtocolParameters{}, fmt.Errorf(
+			"byron genesis scriptVersion %d does not fit in Word16",
+			data.ScriptVersion,
+		)
+	}
+	params := byronProtocolParameters{
+		scriptVersion:     uint16(data.ScriptVersion),
+		unlockStakeEpoch:  data.UnlockStakeEpoch,
+		feeMultiplierNano: big.NewInt(data.TxFeePolicy.Multiplier),
+	}
+	for _, field := range []struct {
+		name   string
+		value  int
+		target **big.Int
+	}{
+		{"slotDuration", data.SlotDuration, &params.slotDuration},
+		{"maxBlockSize", data.MaxBlockSize, &params.maxBlockSize},
+		{"maxHeaderSize", data.MaxHeaderSize, &params.maxHeaderSize},
+		{"maxTxSize", data.MaxTxSize, &params.maxTxSize},
+		{"maxProposalSize", data.MaxProposalSize, &params.maxProposalSize},
+	} {
+		value, err := byronNonNegative(field.name, int64(field.value))
+		if err != nil {
+			return byronProtocolParameters{}, err
+		}
+		*field.target = new(big.Int).SetUint64(value)
+	}
+	for _, field := range []struct {
+		name   string
+		value  int64
+		target *uint64
+	}{
+		{"mpcThd", data.MpcThd, &params.mpcThd},
+		{"heavyDelThd", data.HeavyDelThd, &params.heavyDelThd},
+		{"updateVoteThd", data.UpdateVoteThd, &params.updateVoteThd},
+		{"updateProposalThd", data.UpdateProposalThd, &params.updateProposalThd},
+		{"updateImplicit", int64(data.UpdateImplicit), &params.updateProposalTTL},
+		{"softforkRule.initThd", data.SoftforkRule.InitThd, &params.softforkInitThd},
+		{"softforkRule.minThd", data.SoftforkRule.MinThd, &params.softforkMinThd},
+		{"softforkRule.thdDecrement", data.SoftforkRule.ThdDecrement, &params.softforkThdDec},
+	} {
+		value, err := byronNonNegative(field.name, field.value)
+		if err != nil {
+			return byronProtocolParameters{}, err
+		}
+		*field.target = value
+	}
+	summand, err := byronNonNegative(
+		"txFeePolicy.summand",
+		data.TxFeePolicy.Summand,
+	)
+	if err != nil {
+		return byronProtocolParameters{}, err
+	}
+	params.feeSummand = summand / byronFeeNanoScale.Uint64()
+	return params, nil
+}
+
+func (p byronProtocolParameters) equal(other byronProtocolParameters) bool {
+	return p.scriptVersion == other.scriptVersion &&
+		p.slotDuration.Cmp(other.slotDuration) == 0 &&
+		p.maxBlockSize.Cmp(other.maxBlockSize) == 0 &&
+		p.maxHeaderSize.Cmp(other.maxHeaderSize) == 0 &&
+		p.maxTxSize.Cmp(other.maxTxSize) == 0 &&
+		p.maxProposalSize.Cmp(other.maxProposalSize) == 0 &&
+		p.mpcThd == other.mpcThd &&
+		p.heavyDelThd == other.heavyDelThd &&
+		p.updateVoteThd == other.updateVoteThd &&
+		p.updateProposalThd == other.updateProposalThd &&
+		p.updateProposalTTL == other.updateProposalTTL &&
+		p.softforkInitThd == other.softforkInitThd &&
+		p.softforkMinThd == other.softforkMinThd &&
+		p.softforkThdDec == other.softforkThdDec &&
+		p.feeSummand == other.feeSummand &&
+		p.feeMultiplierNano.Cmp(other.feeMultiplierNano) == 0 &&
+		p.unlockStakeEpoch == other.unlockStakeEpoch
+}
+
+// byronSizeLimit saturates a Natural size limit. Every encoded block, header
+// and transaction is far below math.MaxUint64 bytes, so a comparison against
+// the saturated value decides exactly as one against the Natural.
+func byronSizeLimit(value *big.Int) uint64 {
+	if !value.IsUint64() {
+		return math.MaxUint64
+	}
+	return value.Uint64()
+}
+
+func (p byronProtocolParameters) blockLimits() byronBlockLimits {
+	return byronBlockLimits{
+		maxBlockSize:  byronSizeLimit(p.maxBlockSize),
+		maxHeaderSize: byronSizeLimit(p.maxHeaderSize),
+	}
+}
+
+func (p byronProtocolParameters) maxTxSizeLimit() uint64 {
+	return byronSizeLimit(p.maxTxSize)
+}
+
+// feePolicyNano returns the fee policy with both coefficients scaled by
+// 10^9, the representation eras.ByronFeePolicyProvider carries. A policy
+// outside that representation is an error rather than a rounded value.
+func (p byronProtocolParameters) feePolicyNano() (int64, int64, error) {
+	summand := new(big.Int).Mul(
+		new(big.Int).SetUint64(p.feeSummand),
+		byronFeeNanoScale,
+	)
+	if !summand.IsInt64() || !p.feeMultiplierNano.IsInt64() {
+		return 0, 0, fmt.Errorf(
+			"byron fee policy summand %d multiplier %s nano-Lovelace exceeds the supported range",
+			p.feeSummand,
+			p.feeMultiplierNano,
+		)
+	}
+	return summand.Int64(), p.feeMultiplierNano.Int64(), nil
+}
+
+// adoptionThreshold is upAdptThd: floor(minThd * numGenesisKeys), with minThd
+// the adopted softfork rule's LovelacePortion over 10^15. The reference uses
+// it both to confirm a proposal by votes and to adopt a version by
+// endorsements; updateVoteThd and updateProposalThd take no part.
+func (p byronProtocolParameters) adoptionThreshold(numGenesisKeys int) int {
+	value := new(big.Int).Mul(
+		new(big.Int).SetUint64(p.softforkMinThd),
+		big.NewInt(int64(numGenesisKeys)),
+	)
+	value.Quo(value, byronLovelacePortionScale)
+	if !value.IsInt64() || value.Int64() > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(value.Int64())
+}
+
+type byronProtocolProposal struct {
+	version byron.ByronBlockVersion
+	params  byronProtocolParameters
+}
+
+type byronSoftwareProposal struct {
+	name    string
+	version uint32
+}
+
+type byronEndorsement struct {
+	version byron.ByronBlockVersion
+	genesis common.Blake2b224
 }
 
 type byronProtocolAdoption struct {
 	slot    uint64
 	version byron.ByronBlockVersion
-	params  byron.ByronGenesisBlockVersionData
+	params  byronProtocolParameters
 }
 
+// byronUpdateState is the Byron update-interface state. Proposals are keyed
+// by UpId, the hash of the proposal's complete encoding. Slots are absolute
+// slots under the network's configured epoch length.
 type byronUpdateState struct {
-	protocolVersion  byron.ByronBlockVersion
-	params           byron.ByronGenesisBlockVersionData
-	numGenesisKeys   int
-	lastEpoch        uint64
-	epochInitialized bool
-	proposals        map[byronUpdateProposalID]byronRegisteredUpdate
-	confirmed        map[byronUpdateProposalID]uint64
-	votes            map[byronUpdateProposalID]map[common.Blake2b224]struct{}
-	endorsements     map[byron.ByronBlockVersion]map[common.Blake2b224]struct{}
-	applications     map[string]uint32
-	candidates       []byronProtocolAdoption
-}
-
-func (s byronUpdateState) clone() byronUpdateState {
-	ret := s
-	ret.proposals = make(map[byronUpdateProposalID]byronRegisteredUpdate, len(s.proposals))
-	for id, proposal := range s.proposals {
-		ret.proposals[id] = proposal
-	}
-	ret.confirmed = make(map[byronUpdateProposalID]uint64, len(s.confirmed))
-	for id, slot := range s.confirmed {
-		ret.confirmed[id] = slot
-	}
-	ret.votes = cloneByronUpdateKeySets(s.votes)
-	ret.endorsements = cloneByronUpdateKeySets(s.endorsements)
-	ret.applications = make(map[string]uint32, len(s.applications))
-	for name, version := range s.applications {
-		ret.applications[name] = version
-	}
-	ret.candidates = append([]byronProtocolAdoption(nil), s.candidates...)
-	return ret
-}
-
-func cloneByronUpdateKeySets[K comparable](
-	input map[K]map[common.Blake2b224]struct{},
-) map[K]map[common.Blake2b224]struct{} {
-	ret := make(map[K]map[common.Blake2b224]struct{}, len(input))
-	for key, values := range input {
-		ret[key] = make(map[common.Blake2b224]struct{}, len(values))
-		for value := range values {
-			ret[key][value] = struct{}{}
-		}
-	}
-	return ret
+	protocolVersion   byron.ByronBlockVersion
+	params            byronProtocolParameters
+	numGenesisKeys    int
+	lastEpoch         uint64
+	candidates        []byronProtocolAdoption
+	applications      map[string]uint32
+	protocolProposals map[byronUpdateProposalID]byronProtocolProposal
+	softwareProposals map[byronUpdateProposalID]byronSoftwareProposal
+	confirmed         map[byronUpdateProposalID]uint64
+	votes             map[byronUpdateProposalID]map[common.Blake2b224]struct{}
+	endorsements      map[byronEndorsement]struct{}
+	registeredAt      map[byronUpdateProposalID]uint64
 }
 
 func newByronUpdateState(
-	params byron.ByronGenesisBlockVersionData,
+	genesis byron.ByronGenesisBlockVersionData,
 	numGenesisKeys int,
-) byronUpdateState {
-	return byronUpdateState{
-		params:         params,
-		numGenesisKeys: numGenesisKeys,
-		proposals:      make(map[byronUpdateProposalID]byronRegisteredUpdate),
-		confirmed:      make(map[byronUpdateProposalID]uint64),
-		votes:          make(map[byronUpdateProposalID]map[common.Blake2b224]struct{}),
-		endorsements:   make(map[byron.ByronBlockVersion]map[common.Blake2b224]struct{}),
-		applications:   make(map[string]uint32),
-	}
-}
-
-func (s byronUpdateState) registerProposal(
-	proposal byron.ByronUpdateProposal,
-	delegations map[common.Blake2b224]common.Blake2b224,
-	slot uint64,
 ) (byronUpdateState, error) {
-	state := s.clone()
-	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(proposal.From)
+	params, err := byronProtocolParametersFromGenesis(genesis)
 	if err != nil {
-		return s, fmt.Errorf("hash Byron update proposer key: %w", err)
+		return byronUpdateState{}, err
 	}
-	if _, ok := genesisForByronDelegate(delegations, issuerHash); !ok {
-		return s, fmt.Errorf("byron update proposer %x is not an active genesis delegate", issuerHash)
-	}
-
-	proposalID := byronUpdateProposalID(common.Blake2b256Hash(proposal.Cbor()))
-	if _, exists := state.proposals[proposalID]; exists {
-		return s, fmt.Errorf("byron update proposal %x is already registered", proposalID)
-	}
-	if state.params.MaxProposalSize <= 0 || len(proposal.Cbor()) > state.params.MaxProposalSize {
-		return s, fmt.Errorf(
-			"byron update proposal size %d exceeds maxProposalSize %d",
-			len(proposal.Cbor()), state.params.MaxProposalSize,
-		)
-	}
-
-	updatedParams, err := applyByronBlockVersionMod(state.params, proposal.BlockVersionMod)
-	if err != nil {
-		return s, fmt.Errorf("apply Byron update proposal parameters: %w", err)
-	}
-	versionChanged := proposal.BlockVersion != state.protocolVersion
-	if versionChanged {
-		if err := validateByronProtocolVersionSuccessor(
-			state.protocolVersion, proposal.BlockVersion,
-		); err != nil {
-			return s, err
-		}
-		for _, existing := range state.proposals {
-			if existing.hasProtocol && existing.version == proposal.BlockVersion {
-				return s, fmt.Errorf(
-					"byron protocol version %d.%d.%d is already proposed",
-					proposal.BlockVersion.Major,
-					proposal.BlockVersion.Minor,
-					proposal.BlockVersion.Unknown,
-				)
-			}
-		}
-		if err := validateByronUpdateParameters(state.params, updatedParams); err != nil {
-			return s, err
-		}
-	} else if updatedParams != state.params {
-		return s, errors.New(
-			"byron software update changes protocol parameters without a protocol-version bump",
-		)
-	}
-
-	softwareVersionChanged, err := state.validateSoftwareVersion(proposal)
-	if err != nil {
-		return s, err
-	}
-	if !versionChanged && !softwareVersionChanged {
-		return s, errors.New("byron update proposal changes neither protocol nor software version")
-	}
-	state.proposals[proposalID] = byronRegisteredUpdate{
-		version:      proposal.BlockVersion,
-		params:       updatedParams,
-		hasProtocol:  versionChanged,
-		softwareName: proposal.SoftwareVersion.Name,
-		softwareVer:  proposal.SoftwareVersion.Version,
-		registeredAt: slot,
-	}
-	return state, nil
+	return byronUpdateState{
+		params:            params,
+		numGenesisKeys:    numGenesisKeys,
+		applications:      make(map[string]uint32),
+		protocolProposals: make(map[byronUpdateProposalID]byronProtocolProposal),
+		softwareProposals: make(map[byronUpdateProposalID]byronSoftwareProposal),
+		confirmed:         make(map[byronUpdateProposalID]uint64),
+		votes:             make(map[byronUpdateProposalID]map[common.Blake2b224]struct{}),
+		endorsements:      make(map[byronEndorsement]struct{}),
+		registeredAt:      make(map[byronUpdateProposalID]uint64),
+	}, nil
 }
 
-func (s byronUpdateState) validateSoftwareVersion(
-	proposal byron.ByronUpdateProposal,
-) (bool, error) {
-	name := proposal.SoftwareVersion.Name
-	if len(name) > 12 || strings.IndexFunc(name, func(r rune) bool {
-		return r > unicode.MaxASCII
-	}) >= 0 {
-		return false, errors.New("byron software application name is invalid")
+func (s *byronUpdateState) clone() byronUpdateState {
+	ret := *s
+	ret.candidates = append([]byronProtocolAdoption(nil), s.candidates...)
+	ret.applications = maps.Clone(s.applications)
+	ret.protocolProposals = maps.Clone(s.protocolProposals)
+	ret.softwareProposals = maps.Clone(s.softwareProposals)
+	ret.confirmed = maps.Clone(s.confirmed)
+	ret.votes = make(
+		map[byronUpdateProposalID]map[common.Blake2b224]struct{},
+		len(s.votes),
+	)
+	for id, voters := range s.votes {
+		ret.votes[id] = maps.Clone(voters)
 	}
-	currentVersion, exists := s.applications[name]
-	if exists && proposal.SoftwareVersion.Version == currentVersion {
-		return false, nil
-	}
-	if exists {
-		if currentVersion == ^uint32(0) || proposal.SoftwareVersion.Version != currentVersion+1 {
-			return false, fmt.Errorf("byron software version for %q must increment by one", name)
-		}
-	} else if proposal.SoftwareVersion.Version > 1 {
-		return false, fmt.Errorf("initial byron software version for %q must be 0 or 1", name)
-	}
-	for _, registered := range s.proposals {
-		if registered.softwareName == name {
-			return false, fmt.Errorf("byron software update for %q is already proposed", name)
-		}
-	}
-	return true, nil
+	ret.endorsements = maps.Clone(s.endorsements)
+	ret.registeredAt = maps.Clone(s.registeredAt)
+	return ret
 }
 
-func validateByronProtocolVersionSuccessor(
-	current byron.ByronBlockVersion,
-	next byron.ByronBlockVersion,
-) error {
-	majorDelta := int32(next.Major) - int32(current.Major)
-	minorDelta := uint32(next.Minor) - uint32(current.Minor)
-	if majorDelta < 0 || majorDelta > 1 ||
-		(majorDelta == 0 && minorDelta != 1) ||
-		(majorDelta == 1 && next.Minor != 0) ||
-		(majorDelta == 0 && current.Unknown >= next.Unknown && current.Minor == next.Minor) {
-		return fmt.Errorf(
-			"byron protocol version %d.%d.%d cannot follow %d.%d.%d",
-			next.Major, next.Minor, next.Unknown,
-			current.Major, current.Minor, current.Unknown,
-		)
-	}
-	return nil
-}
-
-func validateByronUpdateParameters(
-	current byron.ByronGenesisBlockVersionData,
-	updated byron.ByronGenesisBlockVersionData,
-) error {
-	if current.MaxBlockSize <= 0 || updated.MaxBlockSize < 0 ||
-		(updated.MaxBlockSize > current.MaxBlockSize &&
-			updated.MaxBlockSize-current.MaxBlockSize > current.MaxBlockSize) {
-		return fmt.Errorf("byron update maxBlockSize %d exceeds twice the current maximum %d", updated.MaxBlockSize, current.MaxBlockSize)
-	}
-	if updated.MaxTxSize >= updated.MaxBlockSize {
-		return fmt.Errorf("byron update maxTxSize %d must be less than maxBlockSize %d", updated.MaxTxSize, updated.MaxBlockSize)
-	}
-	if updated.ScriptVersion < current.ScriptVersion ||
-		(updated.ScriptVersion > current.ScriptVersion &&
-			updated.ScriptVersion-current.ScriptVersion > 1) {
-		return fmt.Errorf("byron update scriptVersion %d must stay the same or increase by one from %d", updated.ScriptVersion, current.ScriptVersion)
-	}
-	return nil
-}
-
+// genesisForByronDelegate is Delegation.lookupR: the genesis key whose active
+// delegate is delegate.
 func genesisForByronDelegate(
 	delegations map[common.Blake2b224]common.Blake2b224,
 	delegate common.Blake2b224,
@@ -258,42 +302,105 @@ func genesisForByronDelegate(
 	return common.Blake2b224{}, false
 }
 
-func (s byronUpdateState) applyUpdatePayload(
-	block *byron.ByronMainBlock,
-	delegations map[common.Blake2b224]common.Blake2b224,
-	protocolMagic uint32,
-	slot uint64,
+// advanceEpoch is the reference epochTransition for a main block in epoch.
+// It must not run for EBBs: they leave cvsLastSlot, and so the epoch compared
+// here, unchanged, and ticking at an EBB could adopt an older candidate than
+// the first main block of a later epoch would.
+func (s *byronUpdateState) advanceEpoch(
+	epoch uint64,
+	epochFirstSlot uint64,
+	securityParam uint64,
 ) (byronUpdateState, error) {
-	state := s
-	if len(block.Body.UpdPayload.Proposals) > 0 {
-		proposal := block.Body.UpdPayload.Proposals[0]
-		if err := proposal.Validate(protocolMagic); err != nil {
-			return s, fmt.Errorf("validate Byron update proposal: %w", err)
-		}
-		var err error
-		state, err = state.registerProposal(proposal, delegations, slot)
-		if err != nil {
-			return s, err
-		}
+	if epoch < s.lastEpoch {
+		return *s, fmt.Errorf(
+			"byron update epoch regressed from %d to %d",
+			s.lastEpoch, epoch,
+		)
 	}
-	voteEntries, err := byronUpdateVoteEntries(block)
+	if epoch == s.lastEpoch {
+		return *s, nil
+	}
+	state := s.registerEpoch(epochFirstSlot, securityParam)
+	state.lastEpoch = epoch
+	return state, nil
+}
+
+// registerEpoch adopts the newest candidate that became a candidate at least
+// 4k slots before the first slot of the new epoch (tryBumpVersion). Slot
+// arithmetic wraps like the reference's Word64 SlotNumber.
+func (s *byronUpdateState) registerEpoch(
+	epochFirstSlot uint64,
+	securityParam uint64,
+) byronUpdateState {
+	stability := 4 * securityParam
+	for _, candidate := range s.candidates {
+		if candidate.slot+stability > epochFirstSlot {
+			continue
+		}
+		if candidate.version == s.protocolVersion {
+			return s.clone()
+		}
+		state := s.clone()
+		state.protocolVersion = candidate.version
+		state.params = candidate.params
+		state.candidates = nil
+		state.protocolProposals = make(map[byronUpdateProposalID]byronProtocolProposal)
+		state.softwareProposals = make(map[byronUpdateProposalID]byronSoftwareProposal)
+		state.confirmed = make(map[byronUpdateProposalID]uint64)
+		state.votes = make(map[byronUpdateProposalID]map[common.Blake2b224]struct{})
+		state.endorsements = make(map[byronEndorsement]struct{})
+		state.registeredAt = make(map[byronUpdateProposalID]uint64)
+		return state
+	}
+	return s.clone()
+}
+
+// byronUpdateSignal is one main block's input to the update interface: its
+// proposal and votes, and the endorsement its header implies.
+type byronUpdateSignal struct {
+	proposal     *byron.ByronUpdateProposal
+	votes        []*byron.UpdateVote
+	endorsement  byron.ByronBlockVersion
+	endorserHash common.Blake2b224
+}
+
+// byronUpdateSignalFromBlock extracts the update signal of a main block whose
+// update payload has passed ValidateUpdatePayload.
+func byronUpdateSignalFromBlock(
+	block *byron.ByronMainBlock,
+	endorserHash common.Blake2b224,
+) (byronUpdateSignal, error) {
+	signal := byronUpdateSignal{
+		endorsement:  block.BlockHeader.ExtraData.BlockVersion,
+		endorserHash: endorserHash,
+	}
+	proposals := block.Body.UpdPayload.Proposals
+	switch len(proposals) {
+	case 0:
+	case 1:
+		proposal := proposals[0]
+		signal.proposal = &proposal
+	default:
+		return byronUpdateSignal{}, fmt.Errorf(
+			"byron update payload carries %d proposals, expected at most one",
+			len(proposals),
+		)
+	}
+	rawVotes, err := byronUpdateVoteEntries(block)
 	if err != nil {
-		return s, err
+		return byronUpdateSignal{}, err
 	}
-	for index, rawVote := range voteEntries {
+	for index, rawVote := range rawVotes {
 		vote, err := byron.ParseUpdateVote(rawVote)
 		if err != nil {
-			return s, fmt.Errorf("parse Byron update vote %d: %w", index, err)
+			return byronUpdateSignal{}, fmt.Errorf(
+				"parse Byron update vote %d: %w",
+				index, err,
+			)
 		}
-		if err := vote.Verify(protocolMagic); err != nil {
-			return s, fmt.Errorf("verify Byron update vote %d: %w", index, err)
-		}
-		state, err = state.registerVote(vote, delegations, slot)
-		if err != nil {
-			return s, fmt.Errorf("apply Byron update vote %d: %w", index, err)
-		}
+		signal.votes = append(signal.votes, vote)
 	}
-	return state, nil
+	return signal, nil
 }
 
 func byronUpdateVoteEntries(
@@ -304,17 +411,26 @@ func byronUpdateVoteEntries(
 	}
 	var bodyFields []cbor.RawMessage
 	if _, err := cbor.Decode(block.Body.Cbor(), &bodyFields); err != nil {
-		return nil, fmt.Errorf("decode Byron main-block body for update votes: %w", err)
+		return nil, fmt.Errorf(
+			"decode Byron main-block body for update votes: %w",
+			err,
+		)
 	}
 	if len(bodyFields) != 4 {
-		return nil, fmt.Errorf("byron main-block body has %d fields, expected 4", len(bodyFields))
+		return nil, fmt.Errorf(
+			"byron main-block body has %d fields, expected 4",
+			len(bodyFields),
+		)
 	}
 	var updateFields []cbor.RawMessage
 	if _, err := cbor.Decode(bodyFields[3], &updateFields); err != nil {
 		return nil, fmt.Errorf("decode Byron update payload for votes: %w", err)
 	}
 	if len(updateFields) != 2 {
-		return nil, fmt.Errorf("byron update payload has %d fields, expected 2", len(updateFields))
+		return nil, fmt.Errorf(
+			"byron update payload has %d fields, expected 2",
+			len(updateFields),
+		)
 	}
 	var votes []cbor.RawMessage
 	if _, err := cbor.Decode(updateFields[1], &votes); err != nil {
@@ -323,186 +439,384 @@ func byronUpdateVoteEntries(
 	return votes, nil
 }
 
-func (s byronUpdateState) registerVote(
-	vote *byron.UpdateVote,
+// registerUpdate applies registerProposal, registerVotes and
+// registerEndorsement in that order. delegations is the delegation map as it
+// stood after the previous main block: the reference registers a block's
+// update payload against the delegation state its own certificates and tick
+// have not yet changed.
+func (s *byronUpdateState) registerUpdate(
+	signal byronUpdateSignal,
 	delegations map[common.Blake2b224]common.Blake2b224,
+	protocolMagic uint32,
 	slot uint64,
+	securityParam uint64,
 ) (byronUpdateState, error) {
 	state := s.clone()
-	proposalID := byronUpdateProposalID(vote.ProposalId)
-	if _, exists := state.proposals[proposalID]; !exists {
-		return s, fmt.Errorf("byron update vote references unregistered proposal %x", vote.ProposalId)
+	if signal.proposal != nil {
+		if err := state.registerProposal(
+			*signal.proposal, delegations, protocolMagic, slot,
+		); err != nil {
+			return *s, err
+		}
 	}
-	voterHash, err := byronconsensus.PBFTVerificationKeyHash(vote.VoterVK)
+	if err := state.registerVotes(
+		signal.votes, delegations, protocolMagic, slot,
+	); err != nil {
+		return *s, err
+	}
+	if err := state.registerEndorsement(
+		signal.endorsement,
+		signal.endorserHash,
+		delegations,
+		slot,
+		securityParam,
+	); err != nil {
+		return *s, err
+	}
+	return state, nil
+}
+
+// byronNullUpdateExempt reproduces the reference exemption for the two null
+// update proposals on the legacy staging network.
+func byronNullUpdateExempt(protocolMagic uint32, slot uint64) bool {
+	return protocolMagic == 633343913 && (slot == 969188 || slot == 1915231)
+}
+
+func (s *byronUpdateState) registerProposal(
+	proposal byron.ByronUpdateProposal,
+	delegations map[common.Blake2b224]common.Blake2b224,
+	protocolMagic uint32,
+	slot uint64,
+) error {
+	proposerHash, err := byronconsensus.PBFTVerificationKeyHash(proposal.From)
 	if err != nil {
-		return s, fmt.Errorf("hash Byron update voter key: %w", err)
+		return fmt.Errorf("hash Byron update proposer key: %w", err)
 	}
-	genesis, ok := genesisForByronDelegate(delegations, voterHash)
-	if !ok {
-		return s, fmt.Errorf("byron update voter %x is not an active genesis delegate", voterHash)
-	}
-	voters := state.votes[proposalID]
-	if voters == nil {
-		voters = make(map[common.Blake2b224]struct{})
-		state.votes[proposalID] = voters
-	}
-	if _, exists := voters[genesis]; exists {
-		return s, fmt.Errorf("byron genesis delegate %x voted more than once on proposal %x", genesis, vote.ProposalId)
-	}
-	voters[genesis] = struct{}{}
-	threshold := byronPortionThreshold(state.params.UpdateVoteThd, state.numGenesisKeys)
-	if len(voters) >= threshold {
-		if _, confirmed := state.confirmed[proposalID]; !confirmed {
-			state.confirmed[proposalID] = slot
-			proposal := state.proposals[proposalID]
-			if proposal.softwareName != "" {
-				state.applications[proposal.softwareName] = proposal.softwareVer
-			}
-		}
-	}
-	return state, nil
-}
-
-func byronPortionThreshold(portion int64, genesisKeys int) int {
-	if portion <= 0 || genesisKeys <= 0 {
-		return 0
-	}
-	value := new(big.Int).Mul(big.NewInt(portion), big.NewInt(int64(genesisKeys)))
-	value.Quo(value, big.NewInt(1_000_000_000_000_000))
-	if value.Sign() < 0 || value.Cmp(big.NewInt(int64(genesisKeys))) >= 0 {
-		return genesisKeys
-	}
-	return int(value.Int64())
-}
-
-func (s byronUpdateState) registerEndorsement(
-	version byron.ByronBlockVersion,
-	delegateHash common.Blake2b224,
-	delegations map[common.Blake2b224]common.Blake2b224,
-	slot uint64,
-	securityParam uint64,
-) (byronUpdateState, error) {
-	state := s.clone()
-	var proposalID byronUpdateProposalID
-	var proposal byronRegisteredUpdate
-	found := false
-	for id, candidate := range state.proposals {
-		if candidate.hasProtocol && candidate.version == version {
-			if found {
-				return s, fmt.Errorf("multiple Byron update proposals target protocol version %d.%d.%d", version.Major, version.Minor, version.Unknown)
-			}
-			proposalID, proposal, found = id, candidate, true
-		}
-	}
-	if !found {
-		return state, nil
-	}
-	genesis, ok := genesisForByronDelegate(delegations, delegateHash)
-	if !ok {
-		return s, fmt.Errorf("byron update endorser %x is not an active genesis delegate", delegateHash)
-	}
-	endorsers := state.endorsements[version]
-	if endorsers == nil {
-		endorsers = make(map[common.Blake2b224]struct{})
-		state.endorsements[version] = endorsers
-	}
-	endorsers[genesis] = struct{}{}
-	threshold := byronPortionThreshold(state.params.UpdateProposalThd, state.numGenesisKeys)
-	if len(endorsers) < threshold {
-		return state, nil
-	}
-	confirmedAt, confirmed := state.confirmed[proposalID]
-	if securityParam > ^uint64(0)/2 {
-		return s, fmt.Errorf("byron update stability window overflows for security parameter %d", securityParam)
-	}
-	if !confirmed || confirmedAt > slot || slot-confirmedAt < securityParam*2 {
-		return s, fmt.Errorf("byron update proposal %x is not confirmed and stable", proposalID)
-	}
-	candidate := byronProtocolAdoption{
-		slot: slot, version: proposal.version, params: proposal.params,
-	}
-	if len(state.candidates) == 0 || byronProtocolVersionLess(state.candidates[0].version, version) {
-		state.candidates = append([]byronProtocolAdoption{candidate}, state.candidates...)
-	}
-	return state, nil
-}
-
-func (s byronUpdateState) tickEpoch(
-	epochFirstSlot uint64,
-	securityParam uint64,
-) byronUpdateState {
-	state := s.clone()
-	if securityParam > ^uint64(0)/4 {
-		return state
-	}
-	stabilityDelay := securityParam * 4
-	if epochFirstSlot < stabilityDelay {
-		return state
-	}
-	cutoff := epochFirstSlot - stabilityDelay
-	for _, candidate := range state.candidates {
-		if candidate.slot > cutoff {
-			continue
-		}
-		state.protocolVersion = candidate.version
-		state.params = candidate.params
-		state.candidates = nil
-		state.proposals = make(map[byronUpdateProposalID]byronRegisteredUpdate)
-		state.confirmed = make(map[byronUpdateProposalID]uint64)
-		state.votes = make(map[byronUpdateProposalID]map[common.Blake2b224]struct{})
-		state.endorsements = make(map[byron.ByronBlockVersion]map[common.Blake2b224]struct{})
-		return state
-	}
-	return state
-}
-
-func (s byronUpdateState) advanceEpoch(
-	epoch uint64,
-	epochFirstSlot uint64,
-	securityParam uint64,
-) (byronUpdateState, error) {
-	if s.epochInitialized && epoch < s.lastEpoch {
-		return s, fmt.Errorf(
-			"byron update epoch regressed from %d to %d",
-			s.lastEpoch, epoch,
+	if _, ok := genesisForByronDelegate(delegations, proposerHash); !ok {
+		return fmt.Errorf(
+			"byron update proposer %x is not a genesis delegate",
+			proposerHash,
 		)
 	}
-	if s.epochInitialized && epoch == s.lastEpoch {
-		return s, nil
+	if err := proposal.Validate(protocolMagic); err != nil {
+		return fmt.Errorf("validate Byron update proposal: %w", err)
 	}
-	state := s.tickEpoch(epochFirstSlot, securityParam)
-	state.lastEpoch = epoch
-	state.epochInitialized = true
-	return state, nil
+	newParams, err := applyByronBlockVersionMod(
+		s.params,
+		proposal.BlockVersionMod,
+	)
+	if err != nil {
+		return fmt.Errorf("apply Byron update proposal parameters: %w", err)
+	}
+	name := proposal.SoftwareVersion.Name
+	currentAppVersion, knownApp := s.applications[name]
+	softwareChanged := !knownApp ||
+		currentAppVersion != proposal.SoftwareVersion.Version
+	protocolChanged := proposal.BlockVersion != s.protocolVersion ||
+		!newParams.equal(s.params)
+	if !protocolChanged && !softwareChanged &&
+		!byronNullUpdateExempt(protocolMagic, slot) {
+		return errors.New(
+			"byron update proposal changes neither protocol nor software version",
+		)
+	}
+	if protocolChanged {
+		if err := s.validateProtocolUpdate(proposal, newParams); err != nil {
+			return err
+		}
+	}
+	if softwareChanged {
+		if err := s.validateSoftwareUpdate(proposal); err != nil {
+			return err
+		}
+	}
+	proposalID := byronUpdateProposalID(common.Blake2b256Hash(proposal.Cbor()))
+	if protocolChanged {
+		s.protocolProposals[proposalID] = byronProtocolProposal{
+			version: proposal.BlockVersion,
+			params:  newParams,
+		}
+	}
+	if softwareChanged {
+		s.softwareProposals[proposalID] = byronSoftwareProposal{
+			name:    name,
+			version: proposal.SoftwareVersion.Version,
+		}
+	}
+	s.registeredAt[proposalID] = slot
+	return nil
 }
 
-func (s byronUpdateState) pruneExpired(slot uint64) byronUpdateState {
-	state := s.clone()
-	ttl := uint64(0)
-	if state.params.UpdateImplicit > 0 {
-		ttl = uint64(state.params.UpdateImplicit)
+// validateProtocolUpdate is registerProtocolUpdate with canUpdate. The
+// proposal-size bound belongs to canUpdate, so a software-only proposal is
+// not subject to it.
+func (s *byronUpdateState) validateProtocolUpdate(
+	proposal byron.ByronUpdateProposal,
+	newParams byronProtocolParameters,
+) error {
+	version := proposal.BlockVersion
+	for _, existing := range s.protocolProposals {
+		if existing.version == version {
+			return fmt.Errorf(
+				"byron protocol version %d.%d.%d is already proposed",
+				version.Major, version.Minor, version.Unknown,
+			)
+		}
 	}
-	for id, proposal := range state.proposals {
-		_, confirmed := state.confirmed[id]
-		if confirmed || (proposal.registeredAt <= slot && slot-proposal.registeredAt <= ttl) {
+	if !byronProtocolVersionCanFollow(version, s.protocolVersion) {
+		return fmt.Errorf(
+			"byron protocol version %d.%d.%d cannot follow %d.%d.%d",
+			version.Major, version.Minor, version.Unknown,
+			s.protocolVersion.Major, s.protocolVersion.Minor,
+			s.protocolVersion.Unknown,
+		)
+	}
+	proposalSize := big.NewInt(int64(len(proposal.Cbor())))
+	if proposalSize.Cmp(s.params.maxProposalSize) > 0 {
+		return fmt.Errorf(
+			"byron update proposal size %s exceeds maxProposalSize %s",
+			proposalSize, s.params.maxProposalSize,
+		)
+	}
+	doubled := new(big.Int).Lsh(s.params.maxBlockSize, 1)
+	if newParams.maxBlockSize.Cmp(doubled) > 0 {
+		return fmt.Errorf(
+			"byron update maxBlockSize %s exceeds twice the adopted %s",
+			newParams.maxBlockSize, s.params.maxBlockSize,
+		)
+	}
+	if newParams.maxTxSize.Cmp(newParams.maxBlockSize) >= 0 {
+		return fmt.Errorf(
+			"byron update maxTxSize %s must be less than maxBlockSize %s",
+			newParams.maxTxSize, newParams.maxBlockSize,
+		)
+	}
+	// The reference subtracts Word16 values, so the difference wraps.
+	if newParams.scriptVersion-s.params.scriptVersion > 1 {
+		return fmt.Errorf(
+			"byron update scriptVersion %d must equal or follow %d",
+			newParams.scriptVersion, s.params.scriptVersion,
+		)
+	}
+	return nil
+}
+
+// byronProtocolVersionCanFollow is pvCanFollow. Major and minor differences
+// are Word16 arithmetic in the reference.
+func byronProtocolVersionCanFollow(
+	next byron.ByronBlockVersion,
+	adopted byron.ByronBlockVersion,
+) bool {
+	if !byronProtocolVersionLess(adopted, next) {
+		return false
+	}
+	switch next.Major - adopted.Major {
+	case 0:
+		return next.Minor == adopted.Minor+1
+	case 1:
+		return next.Minor == 0
+	default:
+		return false
+	}
+}
+
+// validateSoftwareUpdate is registerSoftwareUpdate. The metadata system tags
+// are checked by ByronUpdateProposal.Validate.
+func (s *byronUpdateState) validateSoftwareUpdate(
+	proposal byron.ByronUpdateProposal,
+) error {
+	name := proposal.SoftwareVersion.Name
+	for _, existing := range s.softwareProposals {
+		if existing.name == name {
+			return fmt.Errorf(
+				"byron software update for %q is already proposed",
+				name,
+			)
+		}
+	}
+	if utf8.RuneCountInString(name) > 12 {
+		return fmt.Errorf("byron application name %q is too long", name)
+	}
+	for _, r := range name {
+		if r > 0x7f {
+			return fmt.Errorf("byron application name %q is not ASCII", name)
+		}
+	}
+	version := proposal.SoftwareVersion.Version
+	current, known := s.applications[name]
+	if !known {
+		if version != 0 && version != 1 {
+			return fmt.Errorf(
+				"byron software version %d for new application %q must be 0 or 1",
+				version, name,
+			)
+		}
+		return nil
+	}
+	// Word32 arithmetic, as in svCanFollow.
+	if version != current+1 {
+		return fmt.Errorf(
+			"byron software version %d for %q must follow %d",
+			version, name, current,
+		)
+	}
+	return nil
+}
+
+// registerVotes folds registerVoteWithConfirmation over the votes, then
+// records the version of every confirmed software proposal and removes those
+// proposals, so the application can be proposed again.
+func (s *byronUpdateState) registerVotes(
+	votes []*byron.UpdateVote,
+	delegations map[common.Blake2b224]common.Blake2b224,
+	protocolMagic uint32,
+	slot uint64,
+) error {
+	threshold := s.params.adoptionThreshold(s.numGenesisKeys)
+	for index, vote := range votes {
+		if vote == nil || len(vote.ProposalId) != common.Blake2b256Size {
+			return fmt.Errorf("byron update vote %d is malformed", index)
+		}
+		proposalID := byronUpdateProposalID(vote.ProposalId)
+		if _, registered := s.registeredAt[proposalID]; !registered {
+			return fmt.Errorf(
+				"byron update vote %d references unregistered proposal %x",
+				index, vote.ProposalId,
+			)
+		}
+		voterHash, err := byronconsensus.PBFTVerificationKeyHash(vote.VoterVK)
+		if err != nil {
+			return fmt.Errorf(
+				"hash Byron update vote %d voter key: %w",
+				index, err,
+			)
+		}
+		genesis, ok := genesisForByronDelegate(delegations, voterHash)
+		if !ok {
+			return fmt.Errorf(
+				"byron update vote %d voter %x is not a genesis delegate",
+				index, voterHash,
+			)
+		}
+		voters := s.votes[proposalID]
+		if _, voted := voters[genesis]; voted {
+			return fmt.Errorf(
+				"byron genesis key %x voted more than once on proposal %x",
+				genesis, vote.ProposalId,
+			)
+		}
+		if err := vote.Verify(protocolMagic); err != nil {
+			return fmt.Errorf("verify Byron update vote %d: %w", index, err)
+		}
+		if voters == nil {
+			voters = make(map[common.Blake2b224]struct{})
+			s.votes[proposalID] = voters
+		}
+		voters[genesis] = struct{}{}
+		if _, confirmed := s.confirmed[proposalID]; !confirmed &&
+			len(voters) >= threshold {
+			s.confirmed[proposalID] = slot
+		}
+	}
+	for proposalID, proposal := range s.softwareProposals {
+		if _, confirmed := s.confirmed[proposalID]; !confirmed {
 			continue
 		}
-		delete(state.proposals, id)
-		delete(state.votes, id)
+		s.applications[proposal.name] = proposal.version
+		delete(s.softwareProposals, proposalID)
 	}
-	for version := range state.endorsements {
-		found := false
-		for _, proposal := range state.proposals {
-			if proposal.hasProtocol && proposal.version == version {
-				found = true
-				break
+	return nil
+}
+
+// registerEndorsement is Endorsement.register followed by the interface's
+// removal of expired, unconfirmed proposals. An endorsement of an unproposed
+// version, of a proposal not yet confirmed for 2k slots, or by a key that is
+// not a genesis delegate is ignored rather than rejected.
+func (s *byronUpdateState) registerEndorsement(
+	version byron.ByronBlockVersion,
+	endorserHash common.Blake2b224,
+	delegations map[common.Blake2b224]common.Blake2b224,
+	slot uint64,
+	securityParam uint64,
+) error {
+	var (
+		proposalID byronUpdateProposalID
+		proposal   byronProtocolProposal
+		matches    int
+	)
+	for id, candidate := range s.protocolProposals {
+		if candidate.version == version {
+			proposalID, proposal = id, candidate
+			matches++
+		}
+	}
+	if matches > 1 {
+		return fmt.Errorf(
+			"multiple Byron update proposals target protocol version %d.%d.%d",
+			version.Major, version.Minor, version.Unknown,
+		)
+	}
+	if matches == 1 {
+		confirmedAt, confirmed := s.confirmed[proposalID]
+		if confirmed && confirmedAt+2*securityParam <= slot {
+			genesis, ok := genesisForByronDelegate(delegations, endorserHash)
+			if ok {
+				s.endorsements[byronEndorsement{
+					version: version,
+					genesis: genesis,
+				}] = struct{}{}
+			}
+			endorsed := 0
+			for endorsement := range s.endorsements {
+				if endorsement.version == version {
+					endorsed++
+				}
+			}
+			if endorsed >= s.params.adoptionThreshold(s.numGenesisKeys) &&
+				(len(s.candidates) == 0 ||
+					byronProtocolVersionLess(s.candidates[0].version, version)) {
+				s.candidates = append([]byronProtocolAdoption{{
+					slot:    slot,
+					version: version,
+					params:  proposal.params,
+				}}, s.candidates...)
 			}
 		}
-		if !found {
-			delete(state.endorsements, version)
+	}
+	s.pruneExpired(slot)
+	return nil
+}
+
+// pruneExpired keeps proposals registered within ppUpdateProposalTTL slots,
+// and every confirmed proposal. Endorsements survive only for versions a
+// remaining protocol proposal targets.
+func (s *byronUpdateState) pruneExpired(slot uint64) {
+	ttl := s.params.updateProposalTTL
+	for proposalID, registeredAt := range s.registeredAt {
+		if _, confirmed := s.confirmed[proposalID]; confirmed {
+			continue
+		}
+		// Word64 addition, which wraps as the reference's addSlotCount does.
+		if slot <= registeredAt+ttl {
+			continue
+		}
+		delete(s.registeredAt, proposalID)
+		delete(s.protocolProposals, proposalID)
+		delete(s.softwareProposals, proposalID)
+		delete(s.votes, proposalID)
+	}
+	versions := make(
+		map[byron.ByronBlockVersion]struct{},
+		len(s.protocolProposals),
+	)
+	for _, proposal := range s.protocolProposals {
+		versions[proposal.version] = struct{}{}
+	}
+	for endorsement := range s.endorsements {
+		if _, ok := versions[endorsement.version]; !ok {
+			delete(s.endorsements, endorsement)
 		}
 	}
-	return state
 }
 
 func byronProtocolVersionLess(
@@ -518,8 +832,8 @@ func byronProtocolVersionLess(
 	return left.Unknown < right.Unknown
 }
 
-var byronFeeNanoScale = big.NewInt(1_000_000_000)
-
+// roundByronNanoToInteger rounds a Nano value to an integer, halves to even,
+// as the reference's round does when TxSizeLinear decodes its summand.
 func roundByronNanoToInteger(value *big.Int) *big.Int {
 	quotient, remainder := new(big.Int), new(big.Int)
 	quotient.QuoRem(value, byronFeeNanoScale, remainder)
@@ -536,114 +850,82 @@ func roundByronNanoToInteger(value *big.Int) *big.Int {
 	return quotient
 }
 
-// applyByronBlockVersionMod returns the block-version parameters produced by
-// applying a Byron protocol-parameter update. The input remains unchanged so
-// the caller can retain the prior parameters until the update is enacted.
+// applyByronBlockVersionMod is ProtocolParametersUpdate.apply. The input is
+// not modified, so the adopted parameters stay in force until an adoption.
 func applyByronBlockVersionMod(
-	current byron.ByronGenesisBlockVersionData,
+	current byronProtocolParameters,
 	mod byron.ByronUpdateProposalBlockVersionMod,
-) (byron.ByronGenesisBlockVersionData, error) {
+) (byronProtocolParameters, error) {
 	updated := current
-	maxInt := int64(int(^uint(0) >> 1))
-	setInt := func(name string, values []*big.Int, target *int) error {
-		if len(values) == 0 {
-			return nil
-		}
-		value := values[0]
-		if value == nil || !value.IsInt64() || value.Sign() < 0 || value.Int64() > maxInt {
-			return fmt.Errorf("byron update %s does not fit in int", name)
-		}
-		*target = int(value.Int64())
-		return nil
-	}
-	setInt64 := func(name string, values []byron.ByronLovelacePortion, target *int64) error {
-		if len(values) == 0 {
-			return nil
-		}
-		if uint64(values[0]) > uint64(^uint64(0)>>1) {
-			return fmt.Errorf("byron update %s does not fit in int64", name)
-		}
-		*target = int64(values[0]) // #nosec G115 -- the preceding bound checks this conversion.
-		return nil
-	}
-	setUint64 := func(values []uint64, target *uint64) {
-		if len(values) != 0 {
-			*target = values[0]
-		}
-	}
-
 	if len(mod.ScriptVersion) != 0 {
-		if uint64(mod.ScriptVersion[0]) > uint64(int(^uint(0)>>1)) {
-			return current, errors.New("byron update scriptVersion does not fit in int")
-		}
-		updated.ScriptVersion = int(mod.ScriptVersion[0])
+		updated.scriptVersion = mod.ScriptVersion[0]
 	}
 	for _, field := range []struct {
 		name   string
 		values []*big.Int
-		target *int
+		target **big.Int
 	}{
-		{"slotDuration", mod.SlotDuration, &updated.SlotDuration},
-		{"maxBlockSize", mod.MaxBlockSize, &updated.MaxBlockSize},
-		{"maxHeaderSize", mod.MaxHeaderSize, &updated.MaxHeaderSize},
-		{"maxTxSize", mod.MaxTxSize, &updated.MaxTxSize},
-		{"maxProposalSize", mod.MaxProposalSize, &updated.MaxProposalSize},
+		{"slotDuration", mod.SlotDuration, &updated.slotDuration},
+		{"maxBlockSize", mod.MaxBlockSize, &updated.maxBlockSize},
+		{"maxHeaderSize", mod.MaxHeaderSize, &updated.maxHeaderSize},
+		{"maxTxSize", mod.MaxTxSize, &updated.maxTxSize},
+		{"maxProposalSize", mod.MaxProposalSize, &updated.maxProposalSize},
 	} {
-		if err := setInt(field.name, field.values, field.target); err != nil {
-			return current, err
+		if len(field.values) == 0 {
+			continue
 		}
+		value := field.values[0]
+		if value == nil || value.Sign() < 0 {
+			return current, fmt.Errorf(
+				"byron update %s is not a Natural",
+				field.name,
+			)
+		}
+		*field.target = new(big.Int).Set(value)
 	}
 	for _, field := range []struct {
-		name   string
 		values []byron.ByronLovelacePortion
-		target *int64
+		target *uint64
 	}{
-		{"mpcThd", mod.MpcThd, &updated.MpcThd},
-		{"heavyDelThd", mod.HeavyDelThd, &updated.HeavyDelThd},
-		{"updateVoteThd", mod.UpdateVoteThd, &updated.UpdateVoteThd},
-		{"updateProposalThd", mod.UpdateProposalThd, &updated.UpdateProposalThd},
+		{mod.MpcThd, &updated.mpcThd},
+		{mod.HeavyDelThd, &updated.heavyDelThd},
+		{mod.UpdateVoteThd, &updated.updateVoteThd},
+		{mod.UpdateProposalThd, &updated.updateProposalThd},
 	} {
-		if err := setInt64(field.name, field.values, field.target); err != nil {
-			return current, err
+		if len(field.values) != 0 {
+			*field.target = uint64(field.values[0])
 		}
 	}
 	if len(mod.UpdateImplicit) != 0 {
-		if mod.UpdateImplicit[0] > uint64(maxInt) {
-			return current, errors.New("byron update updateImplicit does not fit in int")
-		}
-		updated.UpdateImplicit = int(mod.UpdateImplicit[0]) // #nosec G115 -- the preceding bound checks this conversion.
+		updated.updateProposalTTL = mod.UpdateImplicit[0]
 	}
 	if len(mod.SoftForkRule) != 0 {
 		rule := mod.SoftForkRule[0]
-		maxInt64 := uint64(^uint64(0) >> 1)
-		if uint64(rule.InitThreshold) > maxInt64 || uint64(rule.MinThreshold) > maxInt64 ||
-			uint64(rule.ThresholdDecrement) > maxInt64 {
-			return current, errors.New("byron update softforkRule does not fit in int64")
-		}
-		updated.SoftforkRule = byron.ByronGenesisBlockVersionDataSoftforkRule{
-			InitThd:      int64(rule.InitThreshold),      // #nosec G115 -- all thresholds were bounded above.
-			MinThd:       int64(rule.MinThreshold),       // #nosec G115 -- all thresholds were bounded above.
-			ThdDecrement: int64(rule.ThresholdDecrement), // #nosec G115 -- all thresholds were bounded above.
-		}
+		updated.softforkInitThd = uint64(rule.InitThreshold)
+		updated.softforkMinThd = uint64(rule.MinThreshold)
+		updated.softforkThdDec = uint64(rule.ThresholdDecrement)
 	}
 	if len(mod.TxFeePolicy) != 0 {
 		policy := mod.TxFeePolicy[0]
 		if policy.SummandNano == nil || policy.MultiplierNano == nil {
-			return current, errors.New("byron update txFeePolicy is missing a coefficient")
+			return current, errors.New(
+				"byron update txFeePolicy is missing a coefficient",
+			)
 		}
-		if policy.SummandNano.Sign() < 0 || policy.MultiplierNano.Sign() < 0 {
-			return current, errors.New("byron update txFeePolicy coefficients must be nonnegative")
-		}
+		// DecCBOR TxSizeLinear rounds only the summand to whole Lovelace
+		// and keeps the multiplier as an exact Nano rational.
 		summand := roundByronNanoToInteger(policy.SummandNano)
-		multiplier := roundByronNanoToInteger(policy.MultiplierNano)
-		if !summand.IsInt64() || !multiplier.IsInt64() {
-			return current, errors.New("byron update txFeePolicy coefficient does not fit in int64")
+		if summand.Sign() < 0 || !summand.IsUint64() {
+			return current, fmt.Errorf(
+				"byron update txFeePolicy summand %s is not a Lovelace value",
+				summand,
+			)
 		}
-		updated.TxFeePolicy = byron.ByronGenesisBlockVersionDataTxFeePolicy{
-			Summand:    summand.Int64(),
-			Multiplier: multiplier.Int64(),
-		}
+		updated.feeSummand = summand.Uint64()
+		updated.feeMultiplierNano = new(big.Int).Set(policy.MultiplierNano)
 	}
-	setUint64(mod.UnlockStakeEpoch, &updated.UnlockStakeEpoch)
+	if len(mod.UnlockStakeEpoch) != 0 {
+		updated.unlockStakeEpoch = mod.UnlockStakeEpoch[0]
+	}
 	return updated, nil
 }

@@ -3071,10 +3071,12 @@ Both validation steps in `ledgerProcessBlock` key that decision on the block or
 header in hand rather than on the ledger's era plus a nil check, so the two stay
 consistent as the boundary is crossed:
 
-- `validateInboundBlockEnvelope` validates decoded Byron main and epoch
-  boundary blocks against the body proof in their header and the
-  `maxHeaderSize` and `maxBlockSize` limits in Byron genesis. It does not need
-  Shelley protocol parameters. Structured test or embedding block types with no
+- `validateInboundBlockEnvelope` validates decoded Byron main blocks against
+  the body proof in their header and the `maxHeaderSize` and `maxBlockSize`
+  limits adopted for the block's epoch (genesis until an update is adopted).
+  An epoch boundary block's proof is only required to be a byte string, and
+  its whole encoding is bounded by the fixed 2,000,000 bytes rather than by
+  those limits. It does not need Shelley protocol parameters. Structured test or embedding block types with no
   complete wire CBOR remain outside those wire-level checks.
 - `validateBlockHeaderProtocolVersion` returns before reading pparams when
   `HeaderProtocolMajor` reports no version, which is Byron -- headers there have
@@ -3084,8 +3086,10 @@ consistent as the boundary is crossed:
 
 Byron's own transaction rules need no parameters either: every rule
 `eras.ValidateTxByron` runs discards the argument. `ppMaxTxSize` and the fee
-policy come from Byron genesis through the ledger state
-(`ByronMaxTxSizeProvider`, `ByronFeePolicyProvider`). The rules follow the
+policy come from the Byron update state through the ledger state
+(`ByronMaxTxSizeProvider`, `ByronFeePolicyProvider`): the parameters adopted
+for the block's epoch inside a block, and those of the slot after the tip
+otherwise. The rules follow the
 reference `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a
 list, so a repeated input is valid, while balances restrict the UTxO to the
 input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
@@ -3351,18 +3355,26 @@ bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
 
 Byron main-block application also replays the update interface alongside the
-delegation view. Update proposals are signature-checked, limited by the active
-`maxProposalSize`, and checked against the successor-version, parameter, and
-software-version rules. Votes are attributed to genesis keys through the
-active delegation map and counted once per key; application versions change
-when their proposal is confirmed. Protocol-version endorsements are attributed
-to the delegate certificate in the block header. Endorsements can accumulate
-before a proposal is stable, but the block that reaches the adoption threshold
-is valid only after the proposal has been confirmed for at least `2k` slots.
-The candidate protocol version and its parameters take effect at the first
-eligible epoch slot after the `4k` stability cutoff. Those active parameters
-drive Byron block, header, and transaction size checks and the linear minimum
-fee policy. The update state is rebuilt from canonical blocks on startup or
+delegation view (`ledger/byron_update_state.go`). Each main block first runs
+the epoch transition, which adopts the newest candidate that became a
+candidate at least `4k` slots before the new epoch's first slot; an EBB does
+not run it. The block's proposal, votes and header endorsement are then
+registered against the delegation map as it stood after the previous main
+block. A proposal registers a protocol update when it changes the version or
+the parameters, and a software update when it changes the application
+version; the `maxProposalSize` bound applies to protocol updates only. Votes
+confirm a proposal, and endorsements adopt a version, at the same threshold,
+`floor(minThd * genesis keys)` of the adopted softfork rule. A confirmed
+software update records the application version and frees the application for
+the next proposal. An endorsement counts only once its proposal has been
+confirmed for `2k` slots and its issuer is a genesis delegate; otherwise it is
+ignored, not rejected. Unconfirmed proposals expire after
+`ppUpdateProposalTTL` slots. The adopted parameters drive Byron block and
+header size checks, `ppMaxTxSize`, and the linear minimum fee: an update's fee
+summand is rounded to whole Lovelace and its multiplier kept exact, and the
+fee policy is exposed scaled by 10^9 like the genesis values. A transaction
+validated outside a block uses the tip's update state ticked to the slot after
+the tip. The update state is rebuilt from canonical blocks on startup or
 rollback, so no separate database record can become stale.
 
 Cached epochs resolve without forecast configuration, but still require a

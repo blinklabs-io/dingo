@@ -18,14 +18,23 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"math/big"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+const byronUpdateTestMagic = 42
 
 type byronUpdateTestDelegate struct {
 	verificationKey []byte
@@ -38,14 +47,16 @@ func newByronUpdateTestDelegate(t *testing.T) byronUpdateTestDelegate {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	verificationKey := append(append([]byte(nil), publicKey...), make([]byte, 32)...)
+	verificationKey := append(
+		append([]byte(nil), publicKey...),
+		make([]byte, 32)...,
+	)
 	delegateHash, err := byronconsensus.PBFTVerificationKeyHash(verificationKey)
 	require.NoError(t, err)
-	genesisHash := common.Blake2b224Hash(publicKey)
 	return byronUpdateTestDelegate{
 		verificationKey: verificationKey,
 		privateKey:      privateKey,
-		genesisHash:     genesisHash,
+		genesisHash:     common.Blake2b224Hash(publicKey),
 		delegateHash:    delegateHash,
 	}
 }
@@ -58,33 +69,62 @@ func encodeByronTestArray(fields ...[]byte) []byte {
 	return ret
 }
 
+// byronUpdateTestProposal describes an update proposal; mod holds the 14
+// optional ProtocolParametersUpdate fields, each an empty or singleton list.
+type byronUpdateTestProposal struct {
+	version  byron.ByronBlockVersion
+	mod      []any
+	software byron.ByronSoftwareVersion
+	// signer, when set, signs in place of the proposing delegate.
+	signer *byronUpdateTestDelegate
+}
+
+func emptyByronUpdateTestMod() []any {
+	mod := make([]any, 14)
+	for index := range mod {
+		mod[index] = []any{}
+	}
+	return mod
+}
+
+func byronUpdateTestFeePolicy(
+	t *testing.T,
+	summandNano uint64,
+	multiplierNano uint64,
+) any {
+	t.Helper()
+	coefficients, err := cbor.Encode([]any{summandNano, multiplierNano})
+	require.NoError(t, err)
+	return []any{[]any{uint64(0), cbor.WrappedCbor(coefficients)}}
+}
+
 func makeByronUpdateTestProposal(
 	t *testing.T,
-	protocolMagic uint32,
 	delegate byronUpdateTestDelegate,
+	spec byronUpdateTestProposal,
 ) byron.ByronUpdateProposal {
 	t.Helper()
-	version, err := cbor.Encode(byron.ByronBlockVersion{Major: 0, Minor: 1})
-	require.NoError(t, err)
-	modFields := make([]any, 14)
-	for index := range modFields {
-		modFields[index] = []any{}
+	if spec.mod == nil {
+		spec.mod = emptyByronUpdateTestMod()
 	}
-	modFields[2] = []any{uint64(1_500_000)}
-	mod, err := cbor.Encode(modFields)
+	version, err := cbor.Encode(spec.version)
 	require.NoError(t, err)
-	software, err := cbor.Encode(byron.ByronSoftwareVersion{
-		Name: "cardano-sl", Version: 1,
-	})
+	mod, err := cbor.Encode(spec.mod)
+	require.NoError(t, err)
+	software, err := cbor.Encode(spec.software)
 	require.NoError(t, err)
 	metadata := []byte{0xa0}
 	attributes := []byte{0xa0}
 	signedBody := encodeByronTestArray(version, mod, software, metadata, attributes)
-	magic, err := cbor.Encode(protocolMagic)
+	magic, err := cbor.Encode(uint32(byronUpdateTestMagic))
 	require.NoError(t, err)
 	signed := append([]byte{byron.SignTagUSProposal}, magic...)
 	signed = append(signed, signedBody...)
-	signature := ed25519.Sign(delegate.privateKey, signed)
+	signer := delegate
+	if spec.signer != nil {
+		signer = *spec.signer
+	}
+	signature := ed25519.Sign(signer.privateKey, signed)
 	verificationKey, err := cbor.Encode(delegate.verificationKey)
 	require.NoError(t, err)
 	signatureCBOR, err := cbor.Encode(signature)
@@ -95,324 +135,764 @@ func makeByronUpdateTestProposal(
 	var proposal byron.ByronUpdateProposal
 	_, err = cbor.Decode(proposalRaw, &proposal)
 	require.NoError(t, err)
-	require.NoError(t, proposal.Validate(protocolMagic))
+	if spec.signer == nil {
+		require.NoError(t, proposal.Validate(byronUpdateTestMagic))
+	}
 	return proposal
+}
+
+func byronUpdateTestProposalID(
+	proposal byron.ByronUpdateProposal,
+) byronUpdateProposalID {
+	return byronUpdateProposalID(common.Blake2b256Hash(proposal.Cbor()))
 }
 
 func makeByronUpdateTestVote(
 	t *testing.T,
-	protocolMagic uint32,
 	proposalID byronUpdateProposalID,
 	delegate byronUpdateTestDelegate,
-) cbor.RawMessage {
+) *byron.UpdateVote {
+	t.Helper()
+	vote := makeByronUpdateTestVoteSignedBy(t, proposalID, delegate, delegate)
+	require.NoError(t, vote.Verify(byronUpdateTestMagic))
+	return vote
+}
+
+func makeByronUpdateTestVoteSignedBy(
+	t *testing.T,
+	proposalID byronUpdateProposalID,
+	delegate byronUpdateTestDelegate,
+	signer byronUpdateTestDelegate,
+) *byron.UpdateVote {
 	t.Helper()
 	verificationKey, err := cbor.Encode(delegate.verificationKey)
 	require.NoError(t, err)
 	proposalIDCBOR, err := cbor.Encode(proposalID[:])
 	require.NoError(t, err)
-	magic, err := cbor.Encode(protocolMagic)
+	magic, err := cbor.Encode(uint32(byronUpdateTestMagic))
 	require.NoError(t, err)
 	signed := append([]byte{byron.SignTagUSVote}, magic...)
 	signed = append(signed, 0x82)
 	signed = append(signed, proposalIDCBOR...)
 	signed = append(signed, 0xf5)
-	signature := ed25519.Sign(delegate.privateKey, signed)
+	signature := ed25519.Sign(signer.privateKey, signed)
 	signatureCBOR, err := cbor.Encode(signature)
 	require.NoError(t, err)
-	return encodeByronTestArray(
+	vote, err := byron.ParseUpdateVote(encodeByronTestArray(
 		verificationKey, proposalIDCBOR, []byte{0xf5}, signatureCBOR,
-	)
-}
-
-func makeByronUpdateTestMainBlock(
-	t *testing.T,
-	protocolMagic uint32,
-	proposal byron.ByronUpdateProposal,
-	votes ...cbor.RawMessage,
-) *byron.ByronMainBlock {
-	t.Helper()
-	proposalList := encodeByronTestArray(proposal.Cbor())
-	voteList := []byte{0x9f}
-	for _, vote := range votes {
-		voteList = append(voteList, vote...)
-	}
-	voteList = append(voteList, 0xff)
-	updatePayload := encodeByronTestArray(proposalList, voteList)
-	sscPayload, err := cbor.Encode([]any{uint64(3), []any{}})
-	require.NoError(t, err)
-	bodyRaw := encodeByronTestArray(
-		[]byte{0x9f, 0xff},
-		sscPayload,
-		[]byte{0x9f, 0xff},
-		updatePayload,
-	)
-	var body byron.ByronMainBlockBody
-	_, err = cbor.Decode(bodyRaw, &body)
-	require.NoError(t, err)
-	return &byron.ByronMainBlock{
-		BlockHeader: &byron.ByronMainBlockHeader{ProtocolMagic: protocolMagic},
-		Body:        body,
-	}
-}
-
-func TestApplyByronBlockVersionMod(t *testing.T) {
-	t.Parallel()
-
-	current := byron.ByronGenesisBlockVersionData{
-		ScriptVersion:     1,
-		SlotDuration:      20,
-		MaxBlockSize:      2_000_000,
-		MaxHeaderSize:     2_000,
-		MaxTxSize:         4_000,
-		MaxProposalSize:   1_000,
-		MpcThd:            100,
-		HeavyDelThd:       200,
-		UpdateVoteThd:     300,
-		UpdateProposalThd: 400,
-		UpdateImplicit:    5,
-		SoftforkRule: byron.ByronGenesisBlockVersionDataSoftforkRule{
-			InitThd:      10,
-			MinThd:       20,
-			ThdDecrement: 30,
-		},
-		TxFeePolicy: byron.ByronGenesisBlockVersionDataTxFeePolicy{
-			Summand: 1, Multiplier: 2,
-		},
-		UnlockStakeEpoch: 7,
-	}
-	mod := byron.ByronUpdateProposalBlockVersionMod{
-		ScriptVersion:     []uint16{2},
-		SlotDuration:      []*big.Int{big.NewInt(10)},
-		MaxBlockSize:      []*big.Int{big.NewInt(3_000_000)},
-		MaxHeaderSize:     []*big.Int{big.NewInt(3_000)},
-		MaxTxSize:         []*big.Int{big.NewInt(5_000)},
-		MaxProposalSize:   []*big.Int{big.NewInt(2_000)},
-		MpcThd:            []byron.ByronLovelacePortion{11},
-		HeavyDelThd:       []byron.ByronLovelacePortion{21},
-		UpdateVoteThd:     []byron.ByronLovelacePortion{31},
-		UpdateProposalThd: []byron.ByronLovelacePortion{41},
-		UpdateImplicit:    []uint64{6},
-		SoftForkRule: []byron.ByronSoftForkRule{{
-			InitThreshold:      12,
-			MinThreshold:       22,
-			ThresholdDecrement: 32,
-		}},
-		TxFeePolicy: []byron.ByronTxFeePolicy{{
-			SummandNano:    big.NewInt(1_500_000_000),
-			MultiplierNano: big.NewInt(2_500_000_000),
-		}},
-		UnlockStakeEpoch: []uint64{8},
-	}
-
-	updated, err := applyByronBlockVersionMod(current, mod)
-	require.NoError(t, err)
-	require.Equal(t, 2, updated.ScriptVersion)
-	require.Equal(t, 10, updated.SlotDuration)
-	require.Equal(t, 3_000_000, updated.MaxBlockSize)
-	require.Equal(t, 3_000, updated.MaxHeaderSize)
-	require.Equal(t, 5_000, updated.MaxTxSize)
-	require.Equal(t, 2_000, updated.MaxProposalSize)
-	require.Equal(t, int64(11), updated.MpcThd)
-	require.Equal(t, int64(21), updated.HeavyDelThd)
-	require.Equal(t, int64(31), updated.UpdateVoteThd)
-	require.Equal(t, int64(41), updated.UpdateProposalThd)
-	require.Equal(t, 6, updated.UpdateImplicit)
-	require.Equal(t, byron.ByronGenesisBlockVersionDataSoftforkRule{
-		InitThd: 12, MinThd: 22, ThdDecrement: 32,
-	}, updated.SoftforkRule)
-	require.Equal(t, byron.ByronGenesisBlockVersionDataTxFeePolicy{
-		Summand: 2, Multiplier: 2,
-	}, updated.TxFeePolicy)
-	require.Equal(t, uint64(8), updated.UnlockStakeEpoch)
-	require.Equal(t, 2_000_000, current.MaxBlockSize)
-}
-
-func TestApplyByronBlockVersionModRejectsUnrepresentableValues(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		mod  byron.ByronUpdateProposalBlockVersionMod
-	}{
-		{
-			name: "nil size parameter",
-			mod:  byron.ByronUpdateProposalBlockVersionMod{MaxBlockSize: []*big.Int{nil}},
-		},
-		{
-			name: "size parameter overflows int",
-			mod: byron.ByronUpdateProposalBlockVersionMod{
-				MaxBlockSize: []*big.Int{new(big.Int).Lsh(big.NewInt(1), 100)},
-			},
-		},
-		{
-			name: "negative size parameter",
-			mod:  byron.ByronUpdateProposalBlockVersionMod{MaxTxSize: []*big.Int{big.NewInt(-1)}},
-		},
-		{
-			name: "softfork threshold overflows int64",
-			mod: byron.ByronUpdateProposalBlockVersionMod{
-				SoftForkRule: []byron.ByronSoftForkRule{{InitThreshold: byron.ByronLovelacePortion(^uint64(0))}},
-			},
-		},
-		{
-			name: "fee policy missing coefficient",
-			mod:  byron.ByronUpdateProposalBlockVersionMod{TxFeePolicy: []byron.ByronTxFeePolicy{{}}},
-		},
-		{
-			name: "negative fee coefficient",
-			mod: byron.ByronUpdateProposalBlockVersionMod{
-				TxFeePolicy: []byron.ByronTxFeePolicy{{
-					SummandNano: big.NewInt(-1), MultiplierNano: big.NewInt(0),
-				}},
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := applyByronBlockVersionMod(
-				byron.ByronGenesisBlockVersionData{}, tc.mod,
-			)
-			require.Error(t, err)
-		})
-	}
-}
-
-func TestRoundByronNanoToInteger(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		value int64
-		want  int64
-	}{
-		{value: 1_499_999_999, want: 1},
-		{value: 1_500_000_000, want: 2},
-		{value: 2_500_000_000, want: 2},
-		{value: 3_500_000_000, want: 4},
-	} {
-		require.Equal(t, big.NewInt(tc.want), roundByronNanoToInteger(big.NewInt(tc.value)))
-	}
-}
-
-func TestLedgerViewByronFeePolicyUsesBlockParameters(t *testing.T) {
-	t.Parallel()
-
-	params := &byron.ByronGenesisBlockVersionData{
-		TxFeePolicy: byron.ByronGenesisBlockVersionDataTxFeePolicy{
-			Summand: 17, Multiplier: 23,
-		},
-	}
-	view := &LedgerView{byronParams: params}
-	summand, multiplier, err := view.ByronFeePolicy()
-	require.NoError(t, err)
-	require.Equal(t, int64(17), summand)
-	require.Equal(t, int64(23), multiplier)
-}
-
-func TestByronUpdateStateRegistersVotesAndAdoptsProtocolUpdate(t *testing.T) {
-	t.Parallel()
-	const protocolMagic = 42
-	delegates := []byronUpdateTestDelegate{
-		newByronUpdateTestDelegate(t),
-		newByronUpdateTestDelegate(t),
-		newByronUpdateTestDelegate(t),
-	}
-	delegations := make(map[common.Blake2b224]common.Blake2b224, len(delegates))
-	for _, delegate := range delegates {
-		delegations[delegate.genesisHash] = delegate.delegateHash
-	}
-	params := byron.ByronGenesisBlockVersionData{
-		MaxBlockSize:      1_000_000,
-		MaxHeaderSize:     10_000,
-		MaxProposalSize:   10_000,
-		MaxTxSize:         100_000,
-		UpdateVoteThd:     666_666_666_666_667,
-		UpdateProposalThd: 666_666_666_666_667,
-	}
-	state := newByronUpdateState(params, len(delegates))
-	proposal := makeByronUpdateTestProposal(t, protocolMagic, delegates[0])
-	proposalID := byronUpdateProposalID(common.Blake2b256Hash(proposal.Cbor()))
-	block := makeByronUpdateTestMainBlock(
-		t,
-		protocolMagic,
-		proposal,
-		makeByronUpdateTestVote(t, protocolMagic, proposalID, delegates[0]),
-		makeByronUpdateTestVote(t, protocolMagic, proposalID, delegates[1]),
-	)
-	state, err := state.applyUpdatePayload(block, delegations, protocolMagic, 12)
-	require.NoError(t, err)
-	require.Contains(t, state.proposals, proposalID)
-	confirmedAt, confirmed := state.confirmed[proposalID]
-	require.True(t, confirmed)
-	require.Equal(t, uint64(12), confirmedAt)
-	require.Equal(t, uint32(1), state.applications["cardano-sl"])
-	_, err = state.registerVote(
-		mustParseByronUpdateTestVote(t, protocolMagic, proposalID, delegates[0]),
-		delegations,
-		13,
-	)
-	require.ErrorContains(t, err, "voted more than once")
-	state, err = state.registerEndorsement(
-		byron.ByronBlockVersion{Major: 9},
-		delegates[0].delegateHash,
-		delegations,
-		13,
-		2,
-	)
-	require.NoError(t, err)
-	require.Empty(t, state.endorsements)
-
-	version := proposal.BlockVersion
-	state, err = state.registerEndorsement(
-		version,
-		delegates[0].delegateHash,
-		delegations,
-		14,
-		2,
-	)
-	require.NoError(t, err)
-	require.Empty(t, state.candidates)
-	require.Len(t, state.endorsements[version], 1)
-	premature, err := state.registerEndorsement(
-		version,
-		delegates[1].delegateHash,
-		delegations,
-		15,
-		2,
-	)
-	require.ErrorContains(t, err, "not confirmed and stable")
-	require.Empty(t, premature.candidates)
-	state, err = state.registerEndorsement(
-		version,
-		delegates[1].delegateHash,
-		delegations,
-		16,
-		2,
-	)
-	require.NoError(t, err)
-	require.Len(t, state.candidates, 1)
-
-	state, err = state.advanceEpoch(1, 23, 2)
-	require.NoError(t, err)
-	require.Equal(t, uint16(0), state.protocolVersion.Major)
-	state, err = state.advanceEpoch(2, 24, 2)
-	require.NoError(t, err)
-	require.Equal(t, version, state.protocolVersion)
-	require.Equal(t, 1_500_000, state.params.MaxBlockSize)
-	require.Empty(t, state.proposals)
-}
-
-func mustParseByronUpdateTestVote(
-	t *testing.T,
-	protocolMagic uint32,
-	proposalID byronUpdateProposalID,
-	delegate byronUpdateTestDelegate,
-) *byron.UpdateVote {
-	t.Helper()
-	vote, err := byron.ParseUpdateVote(makeByronUpdateTestVote(
-		t, protocolMagic, proposalID, delegate,
 	))
 	require.NoError(t, err)
-	require.NoError(t, vote.Verify(protocolMagic))
 	return vote
+}
+
+// byronUpdateTestNetwork is a seven-key genesis with mainnet's softfork rule,
+// so the adoption threshold is floor(0.6 * 7) = 4, while updateVoteThd and
+// updateProposalThd would each give 0.
+type byronUpdateTestNetwork struct {
+	delegates   []byronUpdateTestDelegate
+	delegations map[common.Blake2b224]common.Blake2b224
+	state       byronUpdateState
+}
+
+const byronUpdateTestK = 2
+
+func mainnetByronBlockVersionData() byron.ByronGenesisBlockVersionData {
+	return byron.ByronGenesisBlockVersionData{
+		HeavyDelThd:       300_000_000_000,
+		MaxBlockSize:      2_000_000,
+		MaxHeaderSize:     2_000_000,
+		MaxProposalSize:   700,
+		MaxTxSize:         4096,
+		MpcThd:            20_000_000_000_000,
+		SlotDuration:      20_000,
+		UnlockStakeEpoch:  18446744073709551615,
+		UpdateImplicit:    10_000,
+		UpdateProposalThd: 100_000_000_000_000,
+		UpdateVoteThd:     1_000_000_000_000,
+		SoftforkRule: byron.ByronGenesisBlockVersionDataSoftforkRule{
+			InitThd:      900_000_000_000_000,
+			MinThd:       600_000_000_000_000,
+			ThdDecrement: 50_000_000_000_000,
+		},
+		TxFeePolicy: byron.ByronGenesisBlockVersionDataTxFeePolicy{
+			Summand:    155_381_000_000_000,
+			Multiplier: 43_946_000_000,
+		},
+	}
+}
+
+func newByronUpdateTestNetwork(
+	t *testing.T,
+	genesis byron.ByronGenesisBlockVersionData,
+) byronUpdateTestNetwork {
+	t.Helper()
+	network := byronUpdateTestNetwork{
+		delegations: make(map[common.Blake2b224]common.Blake2b224),
+	}
+	for range 7 {
+		delegate := newByronUpdateTestDelegate(t)
+		network.delegates = append(network.delegates, delegate)
+		network.delegations[delegate.genesisHash] = delegate.delegateHash
+	}
+	state, err := newByronUpdateState(genesis, len(network.delegates))
+	require.NoError(t, err)
+	require.Equal(t, 4, state.params.adoptionThreshold(state.numGenesisKeys))
+	network.state = state
+	return network
+}
+
+// apply registers one main block's signal. endorser indexes the delegate
+// that issued the block.
+func (n *byronUpdateTestNetwork) apply(
+	t *testing.T,
+	slot uint64,
+	endorser int,
+	endorsement byron.ByronBlockVersion,
+	proposal *byron.ByronUpdateProposal,
+	votes ...*byron.UpdateVote,
+) error {
+	t.Helper()
+	state, err := n.state.registerUpdate(
+		byronUpdateSignal{
+			proposal:     proposal,
+			votes:        votes,
+			endorsement:  endorsement,
+			endorserHash: n.delegates[endorser].delegateHash,
+		},
+		n.delegations,
+		byronUpdateTestMagic,
+		slot,
+		byronUpdateTestK,
+	)
+	if err == nil {
+		n.state = state
+	}
+	return err
+}
+
+func (n *byronUpdateTestNetwork) votes(
+	t *testing.T,
+	proposal byron.ByronUpdateProposal,
+	delegates ...int,
+) []*byron.UpdateVote {
+	t.Helper()
+	proposalID := byronUpdateTestProposalID(proposal)
+	votes := make([]*byron.UpdateVote, 0, len(delegates))
+	for _, delegate := range delegates {
+		votes = append(votes, makeByronUpdateTestVote(t, proposalID, n.delegates[delegate]))
+	}
+	return votes
+}
+
+var byronUpdateTestV1 = byron.ByronBlockVersion{Major: 1}
+
+func TestByronUpdateConfirmationUsesSoftforkMinThreshold(t *testing.T) {
+	t.Parallel()
+
+	network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+	proposal := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+		version:  byronUpdateTestV1,
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 1},
+	})
+	proposalID := byronUpdateTestProposalID(proposal)
+	require.NoError(t, network.apply(
+		t, 10, 0, byron.ByronBlockVersion{}, &proposal,
+		network.votes(t, proposal, 0, 1, 2)...,
+	))
+	require.NotContains(t, network.state.confirmed, proposalID)
+	require.NotContains(t, network.state.applications, "cardano-sl")
+
+	require.NoError(t, network.apply(
+		t, 11, 1, byron.ByronBlockVersion{}, nil,
+		network.votes(t, proposal, 3)...,
+	))
+	require.Equal(t, uint64(11), network.state.confirmed[proposalID])
+	require.Equal(t, uint32(1), network.state.applications["cardano-sl"])
+	require.Empty(t, network.state.softwareProposals)
+	require.Contains(t, network.state.protocolProposals, proposalID)
+
+	err := network.apply(
+		t, 12, 1, byron.ByronBlockVersion{}, nil,
+		network.votes(t, proposal, 3)...,
+	)
+	require.ErrorContains(t, err, "voted more than once")
+}
+
+func TestByronUpdateEndorsementsCountOnlyOnceStable(t *testing.T) {
+	t.Parallel()
+
+	network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+	proposal := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+		version:  byronUpdateTestV1,
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 1},
+	})
+	require.NoError(t, network.apply(
+		t, 10, 0, byron.ByronBlockVersion{}, &proposal,
+		network.votes(t, proposal, 0, 1, 2, 3)...,
+	))
+
+	// Confirmed at slot 10 and stable from 10+2k = 14. Endorsements before
+	// that are dropped, even by enough keys to reach the threshold.
+	for index := range 4 {
+		require.NoError(t, network.apply(t, 13, index, byronUpdateTestV1, nil))
+	}
+	require.Empty(t, network.state.endorsements)
+	require.Empty(t, network.state.candidates)
+
+	stranger := newByronUpdateTestDelegate(t)
+	network.delegates = append(network.delegates, stranger)
+	require.NoError(t, network.apply(t, 14, len(network.delegates)-1, byronUpdateTestV1, nil))
+	require.Empty(t, network.state.endorsements)
+
+	for index := range 3 {
+		require.NoError(t, network.apply(t, 14+uint64(index), index, byronUpdateTestV1, nil))
+	}
+	require.Len(t, network.state.endorsements, 3)
+	require.Empty(t, network.state.candidates)
+	require.NoError(t, network.apply(t, 20, 3, byronUpdateTestV1, nil))
+	require.Len(t, network.state.candidates, 1)
+	require.Equal(t, uint64(20), network.state.candidates[0].slot)
+
+	// A candidate at slot 20 is adoptable at an epoch whose first slot is
+	// at least 20+4k.
+	next, err := network.state.advanceEpoch(1, 27, byronUpdateTestK)
+	require.NoError(t, err)
+	require.Equal(t, byron.ByronBlockVersion{}, next.protocolVersion)
+	next, err = network.state.advanceEpoch(1, 28, byronUpdateTestK)
+	require.NoError(t, err)
+	require.Equal(t, byronUpdateTestV1, next.protocolVersion)
+	require.Empty(t, next.protocolProposals)
+	require.Equal(t, uint32(1), next.applications["cardano-sl"])
+}
+
+func TestByronUpdateConfirmedSoftwareProposalReleasesApplication(t *testing.T) {
+	t.Parallel()
+
+	network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+	first := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+		software: byron.ByronSoftwareVersion{Name: "csl-daedalus", Version: 1},
+	})
+	require.NoError(t, network.apply(
+		t, 10, 0, byron.ByronBlockVersion{}, &first,
+		network.votes(t, first, 0, 1, 2, 3)...,
+	))
+	require.Equal(t, uint32(1), network.state.applications["csl-daedalus"])
+	require.Empty(t, network.state.protocolProposals)
+
+	second := makeByronUpdateTestProposal(t, network.delegates[1], byronUpdateTestProposal{
+		software: byron.ByronSoftwareVersion{Name: "csl-daedalus", Version: 2},
+	})
+	require.NoError(t, network.apply(t, 20, 1, byron.ByronBlockVersion{}, &second))
+	require.Contains(t, network.state.softwareProposals, byronUpdateTestProposalID(second))
+
+	duplicate := makeByronUpdateTestProposal(t, network.delegates[2], byronUpdateTestProposal{
+		version:  byronUpdateTestV1,
+		software: byron.ByronSoftwareVersion{Name: "csl-daedalus", Version: 2},
+	})
+	require.ErrorContains(
+		t,
+		network.apply(t, 21, 2, byron.ByronBlockVersion{}, &duplicate),
+		"already proposed",
+	)
+}
+
+func TestByronUpdateProtocolOnlyProposalLeavesApplicationFree(t *testing.T) {
+	t.Parallel()
+
+	network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+	release := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 1},
+	})
+	require.NoError(t, network.apply(
+		t, 10, 0, byron.ByronBlockVersion{}, &release,
+		network.votes(t, release, 0, 1, 2, 3)...,
+	))
+
+	protocolOnly := makeByronUpdateTestProposal(t, network.delegates[1], byronUpdateTestProposal{
+		version:  byronUpdateTestV1,
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 1},
+	})
+	require.NoError(t, network.apply(t, 20, 1, byron.ByronBlockVersion{}, &protocolOnly))
+	require.Empty(t, network.state.softwareProposals)
+
+	software := makeByronUpdateTestProposal(t, network.delegates[2], byronUpdateTestProposal{
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 2},
+	})
+	require.NoError(t, network.apply(t, 21, 2, byron.ByronBlockVersion{}, &software))
+}
+
+func TestByronUpdateProposalSizeBoundsOnlyProtocolUpdates(t *testing.T) {
+	t.Parallel()
+
+	genesis := mainnetByronBlockVersionData()
+	genesis.MaxProposalSize = 100
+	network := newByronUpdateTestNetwork(t, genesis)
+	software := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 1},
+	})
+	require.Greater(t, len(software.Cbor()), genesis.MaxProposalSize)
+	require.NoError(t, network.apply(t, 10, 0, byron.ByronBlockVersion{}, &software))
+
+	protocol := makeByronUpdateTestProposal(t, network.delegates[1], byronUpdateTestProposal{
+		version:  byronUpdateTestV1,
+		software: byron.ByronSoftwareVersion{Name: "other", Version: 1},
+	})
+	require.ErrorContains(
+		t,
+		network.apply(t, 11, 1, byron.ByronBlockVersion{}, &protocol),
+		"exceeds maxProposalSize",
+	)
+}
+
+func TestByronUpdateRejectsNullProposal(t *testing.T) {
+	t.Parallel()
+
+	network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+	release := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 1},
+	})
+	require.NoError(t, network.apply(
+		t, 10, 0, byron.ByronBlockVersion{}, &release,
+		network.votes(t, release, 0, 1, 2, 3)...,
+	))
+	mod := emptyByronUpdateTestMod()
+	mod[12] = byronUpdateTestFeePolicy(t, 155_381_000_000_000, 43_946_000_000)
+	restated := makeByronUpdateTestProposal(t, network.delegates[1], byronUpdateTestProposal{
+		mod:      mod,
+		software: byron.ByronSoftwareVersion{Name: "cardano-sl", Version: 1},
+	})
+	require.ErrorContains(
+		t,
+		network.apply(t, 11, 1, byron.ByronBlockVersion{}, &restated),
+		"changes neither protocol nor software version",
+	)
+}
+
+func TestApplyByronBlockVersionModKeepsNanoFeeScale(t *testing.T) {
+	t.Parallel()
+
+	genesis, err := byronProtocolParametersFromGenesis(mainnetByronBlockVersionData())
+	require.NoError(t, err)
+	summand, multiplier, err := genesis.feePolicyNano()
+	require.NoError(t, err)
+	require.Equal(t, int64(155_381_000_000_000), summand)
+	require.Equal(t, int64(43_946_000_000), multiplier)
+
+	decodeMod := func(mod []any) byron.ByronUpdateProposalBlockVersionMod {
+		raw, err := cbor.Encode(mod)
+		require.NoError(t, err)
+		var decoded byron.ByronUpdateProposalBlockVersionMod
+		_, err = cbor.Decode(raw, &decoded)
+		require.NoError(t, err)
+		return decoded
+	}
+	for _, tc := range []struct {
+		name           string
+		summandNano    uint64
+		multiplierNano uint64
+		wantSummand    int64
+	}{
+		{"restated mainnet policy", 155_381_000_000_000, 43_946_000_000, 155_381_000_000_000},
+		{"summand half rounds to even upward", 155_381_500_000_000, 43_946_000_001, 155_382_000_000_000},
+		{"summand half rounds to even downward", 155_382_500_000_000, 1, 155_382_000_000_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mod := emptyByronUpdateTestMod()
+			mod[12] = byronUpdateTestFeePolicy(t, tc.summandNano, tc.multiplierNano)
+			updated, err := applyByronBlockVersionMod(genesis, decodeMod(mod))
+			require.NoError(t, err)
+			summand, multiplier, err := updated.feePolicyNano()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSummand, summand)
+			require.Equal(t, int64(tc.multiplierNano), multiplier)
+		})
+	}
+
+	mod := emptyByronUpdateTestMod()
+	mod[12] = byronUpdateTestFeePolicy(t, 155_381_000_000_000, 43_946_000_000)
+	restated, err := applyByronBlockVersionMod(genesis, decodeMod(mod))
+	require.NoError(t, err)
+	require.True(t, restated.equal(genesis))
+	require.Equal(t, big.NewInt(43_946_000_000), genesis.feeMultiplierNano)
+}
+
+func TestByronUpdateThresholdUsesSoftforkRuleOfAdoptedParameters(t *testing.T) {
+	t.Parallel()
+
+	genesis := mainnetByronBlockVersionData()
+	params, err := byronProtocolParametersFromGenesis(genesis)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		minThd uint64
+		want   int
+	}{
+		{600_000_000_000_000, 4},
+		{571_428_571_428_571, 3},
+		{571_428_571_428_572, 4},
+		{1_000_000_000_000_000, 7},
+		{0, 0},
+	} {
+		params.softforkMinThd = tc.minThd
+		require.Equal(t, tc.want, params.adoptionThreshold(7), "minThd %d", tc.minThd)
+	}
+}
+
+// TestLedgerProcessBlockByronUsesAdoptedParameters drives Byron block
+// application with parameters adopted above genesis: ppMaxTxSize and the fee
+// policy of the block's epoch decide, not the genesis values.
+func TestLedgerProcessBlockByronUsesAdoptedParameters(t *testing.T) {
+	t.Parallel()
+
+	nodeConfig := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		loadByronGenesisForTest(t, nodeConfig, strings.NewReader(`{
+		"blockVersionData": {
+			"slotDuration": "20000",
+			"maxBlockSize": "2000000",
+			"maxHeaderSize": "2000000",
+			"maxProposalSize": "700",
+			"maxTxSize": "600",
+			"txFeePolicy": {"summand": "0", "multiplier": "0"}
+		},
+		"protocolConsts": {"k": 2160, "protocolMagic": 764824073}
+	}`)),
+	)
+	const protocolMagic = 764824073
+	genesis, err := byronProtocolParametersFromGenesis(
+		nodeConfig.ByronGenesis().BlockVersionData,
+	)
+	require.NoError(t, err)
+	decodeMod := func(mod []any) byron.ByronUpdateProposalBlockVersionMod {
+		raw, err := cbor.Encode(mod)
+		require.NoError(t, err)
+		var decoded byron.ByronUpdateProposalBlockVersionMod
+		_, err = cbor.Decode(raw, &decoded)
+		require.NoError(t, err)
+		return decoded
+	}
+	sizeMod := emptyByronUpdateTestMod()
+	sizeMod[4] = []any{uint64(4096)}
+	largerTx, err := applyByronBlockVersionMod(genesis, decodeMod(sizeMod))
+	require.NoError(t, err)
+	feeMod := emptyByronUpdateTestMod()
+	feeMod[12] = byronUpdateTestFeePolicy(t, 155_381_000_000_000, 43_946_000_000)
+	mainnetFee, err := applyByronBlockVersionMod(genesis, decodeMod(feeMod))
+	require.NoError(t, err)
+
+	key := newByronBlockTestKey(t, 0x71)
+	payTo := newByronBlockTestKey(t, 0x72).address
+	largeTx := func(t *testing.T, db *database.Database) *byron.ByronTransaction {
+		input := seedByronUtxoWithAmount(t, db, 0x01, key.address, 1_000)
+		outputs := make([]byronBlockTestOutput, 0, 20)
+		for range 20 {
+			outputs = append(outputs, byronBlockTestOutput{payTo, 1})
+		}
+		tx := buildByronBlockTestTx(t, protocolMagic,
+			[]byronBlockTestInput{{input, 0}},
+			outputs, nil, []byronBlockTestKey{key})
+		require.Greater(t, len(tx.Cbor()), 600)
+		return tx
+	}
+
+	t.Run("genesis maxTxSize rejects", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		var tooLarge eras.TxTooLargeByronError
+		require.ErrorAs(t, processByronReferenceRuleBlock(
+			t, db, nodeConfig, largeTx(t, db), &genesis,
+		), &tooLarge)
+	})
+	t.Run("adopted maxTxSize admits", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		require.NoError(t, processByronReferenceRuleBlock(
+			t, db, nodeConfig, largeTx(t, db), &largerTx,
+		))
+	})
+	t.Run("adopted fee policy keeps its nano scale", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		input := seedByronUtxoWithAmount(t, db, 0x01, key.address, 1_000_000)
+		tx := buildByronBlockTestTx(t, protocolMagic,
+			[]byronBlockTestInput{{input, 0}},
+			[]byronBlockTestOutput{{payTo, 1_000_000 - 100}},
+			nil, []byronBlockTestKey{key})
+		err := processByronReferenceRuleBlock(t, db, nodeConfig, tx, &mainnetFee)
+		var feeErr eras.FeeTooLowByronError
+		require.ErrorAs(t, err, &feeErr)
+		size := int64(len(tx.Cbor()))
+		want := 155_381 + (43_946*size+999)/1000
+		require.Equal(t, big.NewInt(want), feeErr.Required)
+		require.NoError(t, processByronReferenceRuleBlock(t, db, nodeConfig, tx, &genesis))
+	})
+}
+
+// TestLedgerStateByronParametersTickToSlotAfterTip checks the parameters a
+// transaction submitted outside a block is validated against: the tip's
+// update state ticked to the slot after the tip, as the reference mempool
+// ticks its ledger. A candidate stable for the next epoch is already in force
+// when the tip is the last slot of the current one.
+func TestLedgerStateByronParametersTickToSlotAfterTip(t *testing.T) {
+	t.Parallel()
+
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"preprod/config.json",
+	)
+	require.NoError(t, err)
+	ls := &LedgerState{config: LedgerStateConfig{
+		CardanoNodeConfig: nodeConfig,
+	}}
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(
+		config,
+		nodeConfig.ByronGenesis().BlockVersionData,
+	)
+	require.NoError(t, err)
+	adopted := state.updateState.params
+	adopted.maxTxSize = big.NewInt(8192)
+	adopted.feeSummand = 7
+	adopted.feeMultiplierNano = big.NewInt(3)
+	state.updateState.candidates = []byronProtocolAdoption{{
+		slot:    0,
+		version: byron.ByronBlockVersion{Major: 1},
+		params:  adopted,
+	}}
+	for _, tc := range []struct {
+		tipSlot   uint64
+		maxTxSize uint64
+		summand   int64
+	}{
+		{tipSlot: config.SlotsPerEpoch - 2, maxTxSize: 4096, summand: 155_381_000_000_000},
+		{tipSlot: config.SlotsPerEpoch - 1, maxTxSize: 8192, summand: 7_000_000_000},
+	} {
+		tip := ocommon.Point{Slot: tc.tipSlot, Hash: []byte{0x01}}
+		ls.currentTip = ochainsync.Tip{Point: tip, BlockNumber: 1}
+		ls.byronPBFT.state = state
+		ls.byronPBFT.tip = tip
+		ls.byronPBFT.initialized = true
+		maxTxSize, err := ls.ByronMaxTxSize()
+		require.NoError(t, err)
+		require.Equal(t, tc.maxTxSize, maxTxSize, "tip slot %d", tc.tipSlot)
+		summand, _, err := ls.ByronFeePolicy()
+		require.NoError(t, err)
+		require.Equal(t, tc.summand, summand, "tip slot %d", tc.tipSlot)
+	}
+}
+
+// TestByronUpdateUsesDelegationMapBeforeBlock pins the delegation map the
+// update rules read. The reference registers a block's endorsement against
+// the delegation state before that block's tick, so a delegate whose
+// delegation activates at the block's own slot endorses from the next block.
+func TestByronUpdateUsesDelegationMapBeforeBlock(t *testing.T) {
+	t.Parallel()
+
+	const (
+		protocolMagic = uint32(42)
+		securityParam = uint64(100)
+	)
+	template := loadRealByronMainBlock(t)
+	issuer := newByronPBFTTestKey(0x71)
+	initialDelegate := newByronPBFTTestKey(0x72)
+	replacementDelegate := newByronPBFTTestKey(0x73)
+	genesisCertificate := newSignedByronPBFTDelegationCertificate(
+		t, protocolMagic, 0, issuer, initialDelegate,
+	)
+	activationCertificate := newSignedByronPBFTDelegationCertificate(
+		t, protocolMagic, 1, issuer, replacementDelegate,
+	)
+	ls := &LedgerState{config: LedgerStateConfig{
+		CardanoNodeConfig: newGeneratedByronPBFTTestNodeConfig(
+			t, protocolMagic, securityParam, issuer, initialDelegate,
+			genesisCertificate,
+		),
+	}}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-50_000*time.Second), time.Second, 1_000,
+		),
+		DefaultSlotClockConfig(),
+	)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(
+		config,
+		ls.config.CardanoNodeConfig.ByronGenesis().BlockVersionData,
+	)
+	require.NoError(t, err)
+
+	var origin common.Blake2b256
+	schedule := newSignedByronPBFTBlock(
+		t, template, protocolMagic, 1, 1, 1, origin,
+		issuer, initialDelegate, genesisCertificate,
+		[]any{activationCertificate},
+	)
+	state, err = ls.advanceByronPBFTState(state, schedule, true)
+	require.NoError(t, err)
+
+	// A confirmed, stable protocol proposal for the version the blocks
+	// endorse, so each endorsement is either recorded or ignored by lookup.
+	version := schedule.BlockHeader.ExtraData.BlockVersion
+	proposalID := byronUpdateProposalID{0x01}
+	state.updateState.protocolProposals[proposalID] = byronProtocolProposal{
+		version: version,
+		params:  state.updateState.params,
+	}
+	state.updateState.confirmed[proposalID] = 0
+	state.updateState.registeredAt[proposalID] = 0
+	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(issuer.verificationKey)
+	require.NoError(t, err)
+	endorsement := byronEndorsement{version: version, genesis: issuerHash}
+
+	activated := newSignedByronPBFTBlock(
+		t, template, protocolMagic, 1, 201, 2, schedule.Hash(),
+		issuer, replacementDelegate, activationCertificate, nil,
+	)
+	state, err = ls.advanceByronPBFTState(state, activated, true)
+	require.NoError(t, err)
+	require.NotContains(t, state.updateState.endorsements, endorsement)
+
+	next := newSignedByronPBFTBlock(
+		t, template, protocolMagic, 1, 202, 3, activated.Hash(),
+		issuer, replacementDelegate, activationCertificate, nil,
+	)
+	state, err = ls.advanceByronPBFTState(state, next, true)
+	require.NoError(t, err)
+	require.Contains(t, state.updateState.endorsements, endorsement)
+}
+
+// TestByronUpdateRejectsEachRegistrationPredicate drives one rejection vector
+// per Registration and Voting predicate of the reference update interface,
+// beside the boundary value each predicate still accepts.
+func TestByronUpdateRejectsEachRegistrationPredicate(t *testing.T) {
+	t.Parallel()
+
+	sizeMod := func(index int, value uint64) []any {
+		mod := emptyByronUpdateTestMod()
+		mod[index] = []any{value}
+		return mod
+	}
+	v := func(major, minor uint16) byron.ByronBlockVersion {
+		return byron.ByronBlockVersion{Major: major, Minor: minor}
+	}
+	sw := func(name string, version uint32) byron.ByronSoftwareVersion {
+		return byron.ByronSoftwareVersion{Name: name, Version: version}
+	}
+	type proposalCase struct {
+		name    string
+		spec    byronUpdateTestProposal
+		wantErr string
+	}
+	for _, tc := range []proposalCase{
+		{"next major accepted", byronUpdateTestProposal{version: v(1, 0), software: sw("a", 1)}, ""},
+		{"next minor accepted", byronUpdateTestProposal{version: v(0, 1), software: sw("a", 1)}, ""},
+		{"major skip rejected", byronUpdateTestProposal{version: v(2, 0), software: sw("a", 1)}, "cannot follow"},
+		{"minor skip rejected", byronUpdateTestProposal{version: v(0, 2), software: sw("a", 1)}, "cannot follow"},
+		{"major bump with minor rejected", byronUpdateTestProposal{version: v(1, 1), software: sw("a", 1)}, "cannot follow"},
+		{"maxBlockSize doubled accepted", byronUpdateTestProposal{version: v(1, 0), mod: sizeMod(2, 4_000_000), software: sw("a", 1)}, ""},
+		{"maxBlockSize above double rejected", byronUpdateTestProposal{version: v(1, 0), mod: sizeMod(2, 4_000_001), software: sw("a", 1)}, "exceeds twice"},
+		{"maxTxSize equal to maxBlockSize rejected", byronUpdateTestProposal{version: v(1, 0), mod: sizeMod(4, 2_000_000), software: sw("a", 1)}, "must be less than maxBlockSize"},
+		{"scriptVersion step accepted", byronUpdateTestProposal{version: v(1, 0), mod: sizeMod(0, 1), software: sw("a", 1)}, ""},
+		{"scriptVersion skip rejected", byronUpdateTestProposal{version: v(1, 0), mod: sizeMod(0, 2), software: sw("a", 1)}, "scriptVersion"},
+		{"new application at 0 accepted", byronUpdateTestProposal{software: sw("a", 0)}, ""},
+		{"new application at 2 rejected", byronUpdateTestProposal{software: sw("a", 2)}, "must be 0 or 1"},
+		{"twelve character name accepted", byronUpdateTestProposal{software: sw("abcdefghijkl", 1)}, ""},
+		{"thirteen character name rejected", byronUpdateTestProposal{software: sw("abcdefghijklm", 1)}, "too long"},
+		{"non-ASCII name rejected", byronUpdateTestProposal{software: sw("caf\u00e9", 1)}, "not ASCII"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+			proposal := makeByronUpdateTestProposal(t, network.delegates[0], tc.spec)
+			err := network.apply(t, 10, 0, byron.ByronBlockVersion{}, &proposal)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				require.Contains(t, network.state.registeredAt, byronUpdateTestProposalID(proposal))
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+
+	t.Run("proposer is not a delegate", func(t *testing.T) {
+		t.Parallel()
+		network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+		proposal := makeByronUpdateTestProposal(t, newByronUpdateTestDelegate(t), byronUpdateTestProposal{
+			version: v(1, 0), software: sw("a", 1),
+		})
+		require.ErrorContains(t, network.apply(t, 10, 0, byron.ByronBlockVersion{}, &proposal), "not a genesis delegate")
+	})
+	t.Run("proposal signature", func(t *testing.T) {
+		t.Parallel()
+		network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+		proposal := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+			version: v(1, 0), software: sw("a", 1), signer: &network.delegates[1],
+		})
+		require.ErrorIs(t, network.apply(t, 10, 0, byron.ByronBlockVersion{}, &proposal), byron.ErrInvalidSignature)
+	})
+	t.Run("duplicate protocol version", func(t *testing.T) {
+		t.Parallel()
+		network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+		first := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+			version: v(1, 0), software: sw("a", 1),
+		})
+		require.NoError(t, network.apply(t, 10, 0, byron.ByronBlockVersion{}, &first))
+		second := makeByronUpdateTestProposal(t, network.delegates[1], byronUpdateTestProposal{
+			version: v(1, 0), software: sw("b", 1),
+		})
+		require.ErrorContains(t, network.apply(t, 11, 1, byron.ByronBlockVersion{}, &second), "already proposed")
+	})
+	t.Run("expired proposal can be proposed again", func(t *testing.T) {
+		t.Parallel()
+		network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+		first := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+			version: v(1, 0), software: sw("a", 1),
+		})
+		require.NoError(t, network.apply(t, 10, 0, byron.ByronBlockVersion{}, &first))
+		require.NoError(t, network.apply(t, 10+10_000, 0, byron.ByronBlockVersion{}, nil))
+		require.Contains(t, network.state.registeredAt, byronUpdateTestProposalID(first))
+		require.NoError(t, network.apply(t, 10+10_001, 0, byron.ByronBlockVersion{}, nil))
+		require.Empty(t, network.state.registeredAt)
+		again := makeByronUpdateTestProposal(t, network.delegates[1], byronUpdateTestProposal{
+			version: v(1, 0), software: sw("b", 1),
+		})
+		require.NoError(t, network.apply(t, 10+10_002, 1, byron.ByronBlockVersion{}, &again))
+		require.ErrorContains(t, network.apply(
+			t, 10+10_003, 1, byron.ByronBlockVersion{}, nil,
+			network.votes(t, first, 0)...,
+		), "unregistered proposal")
+	})
+
+	voteNetwork := func(t *testing.T) (byronUpdateTestNetwork, byron.ByronUpdateProposal) {
+		t.Helper()
+		network := newByronUpdateTestNetwork(t, mainnetByronBlockVersionData())
+		proposal := makeByronUpdateTestProposal(t, network.delegates[0], byronUpdateTestProposal{
+			version: v(1, 0), software: sw("a", 1),
+		})
+		require.NoError(t, network.apply(t, 10, 0, byron.ByronBlockVersion{}, &proposal))
+		return network, proposal
+	}
+	t.Run("vote for unregistered proposal", func(t *testing.T) {
+		t.Parallel()
+		network, _ := voteNetwork(t)
+		vote := makeByronUpdateTestVote(t, byronUpdateProposalID{0xaa}, network.delegates[1])
+		require.ErrorContains(t, network.apply(t, 11, 1, byron.ByronBlockVersion{}, nil, vote), "unregistered proposal")
+	})
+	t.Run("voter is not a delegate", func(t *testing.T) {
+		t.Parallel()
+		network, proposal := voteNetwork(t)
+		vote := makeByronUpdateTestVote(t, byronUpdateTestProposalID(proposal), newByronUpdateTestDelegate(t))
+		require.ErrorContains(t, network.apply(t, 11, 1, byron.ByronBlockVersion{}, nil, vote), "not a genesis delegate")
+	})
+	t.Run("vote signature", func(t *testing.T) {
+		t.Parallel()
+		network, proposal := voteNetwork(t)
+		vote := makeByronUpdateTestVoteSignedBy(
+			t, byronUpdateTestProposalID(proposal), network.delegates[1], network.delegates[2],
+		)
+		require.ErrorIs(t, network.apply(t, 11, 1, byron.ByronBlockVersion{}, nil, vote), byron.ErrInvalidSignature)
+	})
 }

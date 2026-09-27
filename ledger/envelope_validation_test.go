@@ -443,6 +443,35 @@ func TestValidateInboundBlockEnvelopeAcceptsSubstitutedByronEbbBody(t *testing.T
 	))
 }
 
+// TestByronEbbNonBytesProofIsRejectedAtDecode pins the one check the
+// reference applies to an EBB body proof: its decoder reads the field as a
+// byte string, so an inbound EBB carrying any other CBOR value never decodes.
+func TestByronEbbNonBytesProofIsRejectedAtDecode(t *testing.T) {
+	genuine := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(genuine.Cbor(), &block)
+	require.NoError(t, err)
+	var header []cbor.RawMessage
+	_, err = cbor.Decode(block[0], &header)
+	require.NoError(t, err)
+	header[2], err = cbor.Encode(uint64(7))
+	require.NoError(t, err)
+	block[0], err = cbor.Encode(header)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(block)
+	require.NoError(t, err)
+
+	_, err = gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		encoded,
+	)
+	require.ErrorIs(t, err, byron.ErrMalformedBodyProof)
+}
+
 func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
 	fixture := loadEnvelopeByronFixture(
 		t,
@@ -581,28 +610,32 @@ func TestValidateByronBlockSizesUsesActiveParameters(t *testing.T) {
 		"Block_Byron_regular",
 		uint(gledger.BlockTypeByronMain),
 	)
-	blockSize := len(block.Cbor())
-	headerSize := len(block.Header().Cbor())
-	config := newByronEnvelopeNodeConfig(t, blockSize-1, headerSize-1)
-	activeParams := &byron.ByronGenesisBlockVersionData{
-		MaxBlockSize:  blockSize,
-		MaxHeaderSize: headerSize,
-		MaxTxSize:     1_000,
-	}
-	require.NoError(t, validateByronBlockSizes(block, config, activeParams))
-
-	activeParams.MaxBlockSize = blockSize - 1
+	blockSize := uint64(len(block.Cbor()))
+	headerSize := uint64(len(block.Header().Cbor()))
+	config := newByronEnvelopeNodeConfig(t, int(blockSize-1), int(headerSize-1))
 	require.ErrorContains(
 		t,
-		validateByronBlockSizes(block, config, activeParams),
+		validateByronBlockSizes(block, config, nil),
+		"exceeds maxHeaderSize",
+	)
+	limits := &byronBlockLimits{
+		maxBlockSize:  blockSize,
+		maxHeaderSize: headerSize,
+	}
+	require.NoError(t, validateByronBlockSizes(block, config, limits))
+
+	limits.maxBlockSize = blockSize - 1
+	require.ErrorContains(
+		t,
+		validateByronBlockSizes(block, config, limits),
 		"exceeds maxBlockSize",
 	)
-	activeParams.MaxBlockSize = blockSize
-	activeParams.MaxTxSize = len(block.(*byron.ByronMainBlock).Body.TxPayload[0].Cbor()) - 1
+	limits.maxBlockSize = blockSize
+	limits.maxHeaderSize = headerSize - 1
 	require.ErrorContains(
 		t,
-		validateByronBlockSizes(block, config, activeParams),
-		"exceeds maxTxSize",
+		validateByronBlockSizes(block, config, limits),
+		"exceeds maxHeaderSize",
 	)
 }
 
