@@ -18,6 +18,21 @@ Limit violations wrap `lifecycle.ErrManifestTooLarge`. Bark snapshot verify
 and restore report this as `ResourceExhausted` for local and cloud manifests,
 distinct from missing snapshots, checksum corruption, or cloud transport errors.
 
+## Mithril MemPack datum hashes
+
+The UTxO-HD MemPack tag-3 output stores its `DataHash32` as four
+little-endian `Word64` values. `ledgerstate` converts each word to the
+big-endian hash bytes before writing `utxo.datum_hash` and reconstructing
+the output CBOR. Tag-1 `SafeHash` and the datum-hash variant inside tag-5
+outputs already contain raw digest bytes and must not undergo that conversion.
+
+An import made with the incorrect tag-3 decoder can contain a datum hash with
+each eight-byte word reversed in both metadata and output CBOR. Updating the
+decoder does not repair existing imports. Recovery requires a fresh import
+with the corrected decoder or a verified repair from original outputs that
+updates both stores; reversing all stored datum hashes would also alter
+correctly imported outputs.
+
 ## Storage provider ownership
 
 Blob and metadata stores are constructed by the application plugin host and
