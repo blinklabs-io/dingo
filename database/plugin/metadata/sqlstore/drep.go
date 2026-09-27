@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -494,7 +495,19 @@ func (s *Store) GetDRepVotingPower(
 	).Scan(&stake); err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
-	return uint64(stake), nil
+	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	byCredential, _, err := s.pendingDRepCredits(
+		ctx, db, pendingEpochs, expiryEpoch, "drep", []any{credential},
+	)
+	if err != nil {
+		return 0, err
+	}
+	return uint64(stake) + byCredential[models.NewStakeCredentialRef(
+		credentialTag, credential,
+	).MapKey()], nil
 }
 
 func (s *Store) GetDRepVotingPowerBatch(
@@ -510,11 +523,32 @@ func (s *Store) GetDRepVotingPowerBatch(
 	if err != nil {
 		return nil, err
 	}
-	hashes := make([][]byte, len(credentials))
+	allHashes := make([][]byte, len(credentials))
 	requested := make(map[string]struct{}, len(credentials))
 	for i := range credentials {
-		hashes[i] = credentials[i].Key
+		allHashes[i] = credentials[i].Key
 		requested[credentials[i].MapKey()] = struct{}{}
+	}
+	values := make([]any, len(allHashes))
+	for i := range allHashes {
+		values[i] = allHashes[i]
+	}
+	live, incomplete, err := s.drepVotingPowerFromLiveStake(
+		ctx, db, "drep", values, expiryEpoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for key, stake := range live.byCredential {
+		if _, ok := requested[key]; ok {
+			ret[key] = stake
+		}
+	}
+	var hashes [][]byte
+	for _, hash := range allHashes {
+		if _, ok := incomplete[string(hash)]; ok {
+			hashes = append(hashes, hash)
+		}
 	}
 	// Each hash occurs in both the inner and outer IN list.
 	chunkSize := s.dialect.ParameterLimit() / 2
@@ -563,6 +597,23 @@ func (s *Store) GetDRepVotingPowerBatch(
 			return nil, err
 		}
 	}
+	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if len(pendingEpochs) > 0 {
+		byCredential, _, err := s.pendingDRepCredits(
+			ctx, db, pendingEpochs, expiryEpoch, "drep", values,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for key, amount := range byCredential {
+			if _, ok := requested[key]; ok {
+				ret[key] += amount
+			}
+		}
+	}
 	return ret, nil
 }
 
@@ -581,6 +632,24 @@ func (s *Store) GetDRepVotingPowerByType(
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
+	}
+	typeValues := make([]any, len(drepTypes))
+	for i := range drepTypes {
+		typeValues[i] = drepTypes[i]
+	}
+	live, incomplete, err := s.drepVotingPowerFromLiveStake(
+		ctx, db, "drep_type", typeValues, expiryEpoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(incomplete) == 0 {
+		for _, drepType := range drepTypes {
+			if stake, ok := live.byType[drepType]; ok {
+				ret[drepType] = stake
+			}
+		}
+		return s.addPendingDRepTypeCredits(ctx, db, ret, drepTypes, expiryEpoch)
 	}
 	query := expandDrepCollectionQuery(
 		drepquery.VotingPowerByTypeSQL(s.dialect.Name(), expiryEpoch),
@@ -607,7 +676,125 @@ func (s *Store) GetDRepVotingPowerByType(
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return s.addPendingDRepTypeCredits(ctx, db, ret, drepTypes, expiryEpoch)
+}
+
+func (s *Store) addPendingDRepTypeCredits(
+	ctx context.Context,
+	db queryer,
+	ret map[uint64]uint64,
+	drepTypes []uint64,
+	expiryEpoch uint64,
+) (map[uint64]uint64, error) {
+	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if len(pendingEpochs) == 0 {
+		return ret, nil
+	}
+	values := make([]any, len(drepTypes))
+	for i := range drepTypes {
+		values[i] = drepTypes[i]
+	}
+	_, byType, err := s.pendingDRepCredits(
+		ctx, db, pendingEpochs, expiryEpoch, "drep_type", values,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, drepType := range drepTypes {
+		if amount := byType[drepType]; amount > 0 {
+			ret[drepType] += amount
+		}
+	}
 	return ret, nil
+}
+
+type drepLiveStakeTotals struct {
+	byCredential map[string]uint64
+	byType       map[uint64]uint64
+}
+
+// drepVotingPowerFromLiveStake totals DRep voting power from each delegator's
+// reward_live_stake UTxO total and its account reward, the same sum the
+// UTxO-scanning query computes, with one indexed lookup per delegator instead
+// of a scan of its UTxOs. A DRep with a delegator that has no current
+// reward_live_stake row is returned in incomplete, keyed by the filterCol
+// value, and its power must come from the UTxO-scanning query instead.
+func (s *Store) drepVotingPowerFromLiveStake(
+	ctx context.Context,
+	db queryer,
+	filterCol string,
+	values []any,
+	expiryEpoch uint64,
+) (*drepLiveStakeTotals, map[string]struct{}, error) {
+	totals := &drepLiveStakeTotals{
+		byCredential: make(map[string]uint64),
+		byType:       make(map[uint64]uint64),
+	}
+	incomplete := make(map[string]struct{})
+	cast := s.pendingCreditCastType()
+	chunkSize := max(1, s.dialect.ParameterLimit()-2)
+	for start := 0; start < len(values); start += chunkSize {
+		end := min(start+chunkSize, len(values))
+		args := make([]any, 0, end-start+2)
+		args = append(args, models.RewardStakeCalculationVersion)
+		args = append(args, values[start:end]...)
+		expiry := ""
+		if expiryEpoch > 0 {
+			expiry = " AND (a.expiration_epoch = 0 OR a.expiration_epoch >= ?)"
+			args = append(args, expiryEpoch)
+		}
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT a.drep, a.drep_type,
+       COALESCE(SUM(COALESCE(CAST(rls.utxo_stake AS `+cast+`), 0)
+           + COALESCE(CAST(a.reward AS `+cast+`), 0)), 0),
+       SUM(CASE WHEN rls.id IS NULL THEN 1 ELSE 0 END)
+FROM account a
+LEFT JOIN reward_live_stake rls
+  ON rls.credential_tag = a.credential_tag
+ AND rls.staking_key = a.staking_key
+ AND rls.calculation_version = ?
+WHERE a.`+filterCol+` IN (`+bindPlaceholders(end-start)+`)
+  AND a.active = TRUE`+expiry+`
+GROUP BY a.drep, a.drep_type`), args...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get drep voting power: %w", err)
+		}
+		for rows.Next() {
+			var drep []byte
+			var drepType, stake, missing int64
+			if err := rows.Scan(&drep, &drepType, &stake, &missing); err != nil {
+				rows.Close()
+				return nil, nil, err
+			}
+			if missing > 0 {
+				if filterCol == "drep_type" {
+					incomplete[strconv.FormatInt(drepType, 10)] = struct{}{}
+				} else {
+					incomplete[string(drep)] = struct{}{}
+				}
+				continue
+			}
+			if drepType <= 1 {
+				totals.byCredential[models.NewStakeCredentialRef(
+					uint8(drepType), drep, //nolint:gosec
+				).MapKey()] += uint64(stake) //nolint:gosec
+			}
+			totals.byType[uint64(drepType)] += uint64(stake) //nolint:gosec
+		}
+		if err := rows.Close(); err != nil {
+			return nil, nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, nil, err
+		}
+	}
+	return totals, incomplete, nil
 }
 
 func (s *Store) UpdateDRepActivity(

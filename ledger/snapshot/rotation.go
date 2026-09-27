@@ -135,6 +135,26 @@ func (m *Manager) saveSnapshotInTxn(
 	checkAuthoritativeMark bool,
 	txn *database.Txn,
 ) error {
+	return m.saveSnapshotInTxnDeferring(
+		epoch, snapshotType, distribution, evt, resolveAutoVote,
+		persistRewardInputs, checkAuthoritativeMark, false, txn,
+	)
+}
+
+// saveSnapshotInTxnDeferring is saveSnapshotInTxn that, with
+// deferStakeInputs, stages the reward_stake_input rows for
+// TakeDeferredRewardStakeInputs instead of writing them.
+func (m *Manager) saveSnapshotInTxnDeferring(
+	epoch uint64,
+	snapshotType string,
+	distribution *StakeDistribution,
+	evt event.EpochTransitionEvent,
+	resolveAutoVote bool,
+	persistRewardInputs bool,
+	checkAuthoritativeMark bool,
+	deferStakeInputs bool,
+	txn *database.Txn,
+) error {
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
 
@@ -286,9 +306,19 @@ func (m *Manager) saveSnapshotInTxn(
 	// replace the per-pool and per-credential rows keyed off it.
 	if bundle != nil {
 		if err := m.saveRewardStateInputRows(
-			epoch, bundle, meta, metaTxn,
+			epoch, bundle, deferStakeInputs, meta, metaTxn,
 		); err != nil {
 			return fmt.Errorf("save reward state inputs: %w", err)
+		}
+		if deferStakeInputs {
+			m.mu.Lock()
+			m.deferredStakeInputs = &DeferredRewardStakeInputs{
+				txn:          txn,
+				Epoch:        epoch,
+				BoundarySlot: evt.BoundarySlot,
+				Inputs:       bundle.stakeInputs,
+			}
+			m.mu.Unlock()
 		}
 	}
 
@@ -545,6 +575,7 @@ func rewardStakeDistribution(
 func (m *Manager) saveRewardStateInputRows(
 	epoch uint64,
 	bundle *rewardStateBundle,
+	deferStakeInputs bool,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 ) error {
@@ -557,6 +588,9 @@ func (m *Manager) saveRewardStateInputRows(
 
 	if err := meta.SaveRewardPoolInputs(bundle.poolInputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward pool inputs: %w", err)
+	}
+	if deferStakeInputs {
+		return nil
 	}
 	if err := meta.SaveRewardStakeInputs(bundle.stakeInputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward stake inputs: %w", err)

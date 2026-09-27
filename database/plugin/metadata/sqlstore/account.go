@@ -1163,6 +1163,11 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					return err
 				}
 			}
+			if err := s.recordRewardEligibilityRecheck(
+				ctx, db, refs,
+			); err != nil {
+				return err
+			}
 			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
@@ -1414,6 +1419,266 @@ UPDATE account SET reward = ? WHERE id = ?`,
 		},
 	)
 }
+
+// rewardCreditBatchSize bounds each derived-table lookup below: four bound
+// parameters per journal key, well inside SQLite's 999.
+const rewardCreditBatchSize = 200
+
+type rewardCreditJournalKey struct {
+	sourceHash    string
+	credentialTag uint8
+	stakingKey    string
+	slot          uint64
+}
+
+func (s *Store) AddAccountRewardsByCredential(
+	credits []models.AccountRewardCredit,
+	txn types.Txn,
+) error {
+	if len(credits) == 0 {
+		return nil
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			for start := 0; start < len(credits); start += rewardCreditBatchSize {
+				end := min(start+rewardCreditBatchSize, len(credits))
+				if err := s.addAccountRewardCreditBatch(
+					ctx, db, credits[start:end],
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+}
+
+// addAccountRewardCreditBatch is AddAccountRewardByCredential for a bounded
+// batch. Batches run in order, so a credential repeated across batches sees
+// the balance the earlier batch wrote.
+func (s *Store) addAccountRewardCreditBatch(
+	ctx context.Context,
+	db queryer,
+	credits []models.AccountRewardCredit,
+) error {
+	type pendingCredit struct {
+		key    rewardCreditJournalKey
+		credit models.AccountRewardCredit
+	}
+	pending := make([]pendingCredit, 0, len(credits))
+	seen := make(map[rewardCreditJournalKey]struct{}, len(credits))
+	for _, credit := range credits {
+		if credit.Amount == 0 {
+			continue
+		}
+		if credit.SourceHash == nil {
+			credit.SourceHash = []byte{}
+		}
+		key := rewardCreditJournalKey{
+			sourceHash:    string(credit.SourceHash),
+			credentialTag: credit.CredentialTag,
+			stakingKey:    string(credit.StakingKey),
+			slot:          credit.Slot,
+		}
+		// The journal's unique key makes a repeated credit a no-op.
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		pending = append(pending, pendingCredit{key: key, credit: credit})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	// IN lists on the leading columns of idx_account_reward_delta_w_tx_s_slot
+	// and idx_account_credential; a derived-table join here was planned as a
+	// scan of the joined table per batch.
+	hashes := make([]any, 0, len(pending))
+	seenHash := make(map[string]struct{}, len(pending))
+	for _, item := range pending {
+		if _, ok := seenHash[item.key.sourceHash]; ok {
+			continue
+		}
+		seenHash[item.key.sourceHash] = struct{}{}
+		hashes = append(hashes, item.credit.SourceHash)
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT tx_hash, credential_tag, staking_key, added_slot
+FROM account_reward_delta
+WHERE withdrawal = FALSE AND tx_hash IN (`+bindPlaceholders(len(hashes))+`)`),
+		hashes...,
+	)
+	if err != nil {
+		return fmt.Errorf("look up applied reward credits: %w", err)
+	}
+	applied := make(map[rewardCreditJournalKey]struct{})
+	for rows.Next() {
+		var hash, key []byte
+		var tag, slot int64
+		if err := rows.Scan(&hash, &tag, &key, &slot); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan applied reward credit: %w", err)
+		}
+		applied[rewardCreditJournalKey{
+			sourceHash:    string(hash),
+			credentialTag: uint8(tag), //nolint:gosec // stored from uint8
+			stakingKey:    string(key),
+			slot:          uint64(slot), //nolint:gosec // stored from uint64
+		}] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate applied reward credits: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	type accountCredit struct {
+		ref    models.StakeCredentialRef
+		amount uint64
+		slot   uint64
+	}
+	byAccount := make(map[string]accountCredit)
+	order := make([]string, 0, len(pending))
+	fresh := pending[:0]
+	for _, item := range pending {
+		if _, ok := applied[item.key]; ok {
+			continue
+		}
+		fresh = append(fresh, item)
+		ref := models.NewStakeCredentialRef(
+			item.credit.CredentialTag, item.credit.StakingKey,
+		)
+		entry, ok := byAccount[ref.MapKey()]
+		if !ok {
+			entry = accountCredit{ref: ref}
+			order = append(order, ref.MapKey())
+		}
+		if entry.amount > ^uint64(0)-item.credit.Amount {
+			return fmt.Errorf(
+				"account reward overflow for stake key %x",
+				item.credit.StakingKey,
+			)
+		}
+		entry.amount += item.credit.Amount
+		// The live-stake refresh stamps the last credit's slot, as the
+		// one-at-a-time path's final refresh does.
+		entry.slot = item.credit.Slot
+		byAccount[ref.MapKey()] = entry
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+
+	type accountRow struct {
+		id     int64
+		reward uint64
+	}
+	accounts := make(map[string]accountRow, len(order))
+	keysByTag := make(map[uint8][]any)
+	for _, mapKey := range order {
+		ref := byAccount[mapKey].ref
+		keysByTag[ref.Tag] = append(keysByTag[ref.Tag], ref.Key)
+	}
+	for tag, keys := range keysByTag {
+		accountRows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT id, staking_key, reward FROM account
+WHERE credential_tag = ? AND active = TRUE
+  AND staking_key IN (`+bindPlaceholders(len(keys))+`)`),
+			append([]any{tag}, keys...)...,
+		)
+		if err != nil {
+			return fmt.Errorf("look up credited accounts: %w", err)
+		}
+		for accountRows.Next() {
+			var id int64
+			var key []byte
+			var reward sql.NullString
+			if err := accountRows.Scan(&id, &key, &reward); err != nil {
+				_ = accountRows.Close()
+				return fmt.Errorf("scan credited account: %w", err)
+			}
+			current, err := parseNullUint64("account reward", reward)
+			if err != nil {
+				_ = accountRows.Close()
+				return err
+			}
+			mapKey := models.NewStakeCredentialRef(tag, key).MapKey()
+			accounts[mapKey] = accountRow{id: id, reward: current}
+		}
+		if err := accountRows.Err(); err != nil {
+			_ = accountRows.Close()
+			return fmt.Errorf("iterate credited accounts: %w", err)
+		}
+		if err := accountRows.Close(); err != nil {
+			return err
+		}
+	}
+	for _, mapKey := range order {
+		entry := byAccount[mapKey]
+		account, ok := accounts[mapKey]
+		if !ok {
+			return models.ErrAccountNotFound
+		}
+		if account.reward > ^uint64(0)-entry.amount {
+			return fmt.Errorf(
+				"account reward overflow for stake key %x", entry.ref.Key,
+			)
+		}
+	}
+
+	values := make([]string, len(fresh))
+	insertArgs := make([]any, 0, len(fresh)*5)
+	for index, item := range fresh {
+		slot, err := checkedInt64(item.credit.Slot)
+		if err != nil {
+			return err
+		}
+		values[index] = "(?, ?, ?, ?, NULL, ?, FALSE)"
+		insertArgs = append(
+			insertArgs,
+			item.credit.StakingKey,
+			item.credit.CredentialTag,
+			item.credit.SourceHash,
+			strconv.FormatUint(item.credit.Amount, 10),
+			slot,
+		)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO account_reward_delta (
+    staking_key, credential_tag, tx_hash, amount, previous_reward,
+    added_slot, withdrawal
+) VALUES `+strings.Join(values, ", ")+`
+ON CONFLICT (
+    withdrawal, tx_hash, credential_tag, staking_key, added_slot
+) DO NOTHING`,
+		insertArgs...,
+	); err != nil {
+		return fmt.Errorf("journal reward credits: %w", err)
+	}
+	for _, mapKey := range order {
+		entry := byAccount[mapKey]
+		account := accounts[mapKey]
+		if _, err := s.execCached(
+			ctx, db, rewardCreditAccountUpdateQuery,
+			strconv.FormatUint(account.reward+entry.amount, 10),
+			account.id,
+		); err != nil {
+			return fmt.Errorf("credit account reward: %w", err)
+		}
+		if err := s.refreshRewardLiveStakeAggregate(
+			ctx, db, entry.ref, entry.slot,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const rewardCreditAccountUpdateQuery = `UPDATE account SET reward = ? WHERE id = ?`
 
 func (s *Store) AddPostSnapshotAccountRewardByCredential(
 	credentialTag uint8,

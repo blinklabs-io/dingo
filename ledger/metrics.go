@@ -83,6 +83,11 @@ type stateMetrics struct {
 	// "where does per-block processing time go", which no existing
 	// histogram covers end to end.
 	blockStageDuration *prometheus.HistogramVec
+	// epochRolloverDuration is the whole processEpochRollover transaction
+	// body, and epochRolloverPhaseDuration each of its named phases; see
+	// timeRolloverPhase.
+	epochRolloverDuration      prometheus.Histogram
+	epochRolloverPhaseDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
 	blockStageHeaderVerify  prometheus.Observer
@@ -889,6 +894,23 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
 		},
+	)
+	m.epochRolloverDuration = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_epoch_rollover_duration_seconds",
+			Help: "wall-clock time of the epoch-boundary transaction body, during which no block is applied",
+			// 1ms to ~2.3h: a healthy boundary is sub-second, a stalled one
+			// has been measured at 13m30s on mainnet.
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 24),
+		},
+	)
+	m.epochRolloverPhaseDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "dingo_ledger_epoch_rollover_phase_duration_seconds",
+			Help:    "wall-clock time of each named phase of the epoch-boundary transaction",
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 27),
+		},
+		[]string{"phase"},
 	)
 	m.blockStageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{

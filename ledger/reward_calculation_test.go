@@ -222,6 +222,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	rewardOwner, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
 	require.NoError(t, err)
@@ -281,6 +282,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	rewardOwner, err = db.GetAccountByCredential(0, rewardAccount, false, nil)
 	require.NoError(t, err)
@@ -507,6 +509,7 @@ func applyGuardExpiredLeaderScenario(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	rewardOwner, err := db.GetAccountByCredential(0, rewardAccount, true, nil)
 	require.NoError(t, err)
@@ -666,6 +669,7 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, 2, 43_200)
 	}))
+	settleRewardCredits(t, ls)
 }
 
 // TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch is the
@@ -710,6 +714,7 @@ func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, 1, 21_600)
 	}))
+	settleRewardCredits(t, ls)
 
 	state, err := meta.GetNetworkState(nil)
 	require.NoError(t, err)
@@ -972,6 +977,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	accountOutputs, err := meta.GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
@@ -1530,6 +1536,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	rewardOwner, err = db.GetAccountByCredential(0, rewardAccount, false, nil)
 	require.NoError(t, err)
@@ -1727,6 +1734,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	rewardOwner, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
 	require.NoError(t, err)
@@ -1898,6 +1906,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	keyAccount, err := db.GetAccountByCredential(0, sharedStakeHash, false, nil)
 	require.NoError(t, err)
@@ -2059,6 +2068,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	keyAccount, err := db.GetAccountByCredential(0, sharedStakeHash, false, nil)
 	require.NoError(t, err)
@@ -4600,6 +4610,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	accountOutputs, err := meta.GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
@@ -4674,6 +4685,7 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	accountOutputs, err := meta.GetRewardAccountOutputs(
 		rewardSnapshotEpoch,
@@ -4783,6 +4795,7 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
 	}))
+	settleRewardCredits(t, ls)
 
 	state, err := meta.GetNetworkState(nil)
 	require.NoError(t, err)
@@ -5651,7 +5664,7 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 }
 
 func newRewardCalculationTestLedger(
-	t *testing.T,
+	t testing.TB,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
 	cfg := newRewardCalculationTestNodeConfig(t)
@@ -5672,7 +5685,7 @@ func newRewardCalculationTestLedger(
 }
 
 func newRewardCalculationTestNodeConfig(
-	t *testing.T,
+	t testing.TB,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{
@@ -6463,4 +6476,14 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.False(t, match)
+}
+
+// settleRewardCredits waits for the background credit of every pending reward
+// round, so a test reading account rows sees what the round wrote.
+func settleRewardCredits(t *testing.T, ls *LedgerState) {
+	t.Helper()
+	ls.rewardCreditFoldWG.Wait()
+	rounds, err := ls.db.Metadata().GetPendingRewardCreditRounds(nil)
+	require.NoError(t, err)
+	require.Empty(t, rounds, "every applied round must be credited")
 }

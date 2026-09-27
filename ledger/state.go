@@ -1019,10 +1019,11 @@ type LedgerState struct {
 	slotsPerKESPeriod           atomic.Uint64
 	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
-	cachedShape                 atomic.Pointer[hardfork.Shape]                    // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
-	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]         // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
-	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder]   // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
-	epochSnapshotStakeHook      atomic.Pointer[epochBoundarySnapshotHookHolder]   // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
+	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
+	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
+	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
+	epochSnapshotStakeHook      atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
+	deferredStakeInputsHook     atomic.Pointer[epochBoundaryDeferredStakeInputsHookHolder]
 	currentBoundarySPOStakeHook atomic.Pointer[currentBoundarySPOStakeHookHolder] // optional same-boundary SPO stake rows for governance's RATIFY phase (nil = governance falls back to reading the not-yet-written persisted row)
 	reachedTip                  atomic.Bool
 	currentTip                  ochainsync.Tip
@@ -1470,7 +1471,34 @@ type LedgerState struct {
 	// runs inside the precompute write transaction after the rollback guard
 	// passes and before the outputs are written.
 	rewardPrecomputeBeforeSaveHook func()
-	validationEnabled              bool
+	// rewardPrecomputeChunkPoolsOverride forces a smaller chunked-precompute
+	// pool batch than rewardPrecomputeChunkPools; zero (the production
+	// default) means use the package default. Tests use a small override so
+	// a handful of fixture pools still exercise multiple chunks.
+	rewardPrecomputeChunkPoolsOverride int
+	// rewardPrecomputeChunkHook is a test seam, nil in production. It runs
+	// after each non-final chunk commits, with the number of pools processed
+	// so far and the round's total pool count -- e.g. to stop a test's
+	// precompute mid-round and simulate a restart from the persisted cursor.
+	rewardPrecomputeChunkHook func(processed, total int)
+	// rewardPrecomputeFence is bumped, under rewardPrecomputeWriteMu, before
+	// an epoch boundary applies rewards. A background chunk whose round was
+	// resolved under an older value stops instead of writing: the boundary
+	// completes that round in its own transaction.
+	rewardPrecomputeFence atomic.Uint64
+	// deferredStakeInputsWG tracks the writers of deferred reward_stake_input
+	// rows (queueDeferredRewardStakeInputs), and deferredStakeInputsWriting
+	// the snapshot epochs they are writing; both are guarded by
+	// rewardPrecomputeMu like the precompute worker's registration.
+	deferredStakeInputsWG      sync.WaitGroup
+	deferredStakeInputsWriting map[uint64]struct{}
+	// rewardCreditFoldWG tracks the background writers of pending reward
+	// credit rounds (queueRewardCreditFold).
+	rewardCreditFoldWG sync.WaitGroup
+	// rewardCreditFoldHook is a test seam, nil in production. It runs before
+	// each background fold chunk, so a test can hold a round pending.
+	rewardCreditFoldHook func()
+	validationEnabled    bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -2038,6 +2066,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Without it, a node started mid-epoch calculates that round inline inside
 	// the next epoch-rollover transaction instead of ahead of it.
 	ls.queueStartupRewardPrecompute()
+	ls.resumePendingRewardCreditFolds()
 	if ls.startupRewardPrecomputeHook != nil {
 		ls.startupRewardPrecomputeHook()
 	}
@@ -2810,6 +2839,8 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.rewardPrecomputeRetry = nil
 	ls.rewardPrecomputeMu.Unlock()
 	ls.rewardPrecomputeWG.Wait()
+	ls.deferredStakeInputsWG.Wait()
+	ls.rewardCreditFoldWG.Wait()
 	ls.config.Logger.Info(
 		"reward precompute handlers finished",
 		"elapsed", time.Since(rewardStart).Round(time.Millisecond),
@@ -3216,6 +3247,47 @@ func (ls *LedgerState) epochBoundarySnapshotStakeHook() func(*database.Txn, even
 		return h.fn
 	}
 	return nil
+}
+
+// epochBoundaryDeferredStakeInputsHookHolder wraps the optional hook that
+// hands over the reward_stake_input rows the authoritative capture staged
+// instead of writing.
+type epochBoundaryDeferredStakeInputsHookHolder struct {
+	fn func(*database.Txn) (uint64, uint64, []*models.RewardStakeInput, bool)
+}
+
+// SetEpochBoundaryDeferredStakeInputsHook installs (or clears, with a nil fn)
+// the hook that returns the epoch, boundary slot and reward_stake_input rows
+// the authoritative epoch-boundary capture staged in a transaction instead of
+// writing them. The ledger writes them in the background once that
+// transaction commits. Install it together with a capture configured to
+// defer those rows (snapshot.Manager.SetDeferRewardStakeInputs).
+func (ls *LedgerState) SetEpochBoundaryDeferredStakeInputsHook(
+	fn func(*database.Txn) (uint64, uint64, []*models.RewardStakeInput, bool),
+) {
+	if fn == nil {
+		ls.deferredStakeInputsHook.Store(nil)
+		return
+	}
+	ls.deferredStakeInputsHook.Store(
+		&epochBoundaryDeferredStakeInputsHookHolder{fn: fn},
+	)
+}
+
+func (ls *LedgerState) epochBoundaryDeferredStakeInputsHook() func(
+	*database.Txn,
+) (uint64, uint64, []*models.RewardStakeInput, bool) {
+	if h := ls.deferredStakeInputsHook.Load(); h != nil {
+		return h.fn
+	}
+	return nil
+}
+
+// discardDeferredRewardStakeInputs drops rows a failed capture staged in txn.
+func (ls *LedgerState) discardDeferredRewardStakeInputs(txn *database.Txn) {
+	if hook := ls.epochBoundaryDeferredStakeInputsHook(); hook != nil {
+		_, _, _, _ = hook(txn)
+	}
 }
 
 // currentBoundarySPOStakeHookHolder wraps the optional same-boundary SPO
@@ -6825,6 +6897,18 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 
 		progress = ls.trackPipelineProgress(progress)
 		tipSlot := progress.lastTipSlot
+		if errors.Is(err, errRestartLedgerPipeline) {
+			// The no-progress Warn below fires only at 10 and every 100
+			// restarts, so without this each restart that moves the counter
+			// toward the halt threshold would leave no trace.
+			ls.config.Logger.Info(
+				"ledger pipeline restarting",
+				"component", "ledger",
+				"consecutive_no_progress", progress.consecutiveNoProgress,
+				"tip_slot", tipSlot,
+				"error", err,
+			)
+		}
 
 		backoff, stuck := ledgerPipelineBackoff(
 			progress.consecutiveNoProgress,
@@ -6990,6 +7074,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// including reward application and the governance tally, so
 			// it is timed as its own stage whether it commits or fails.
 			rolloverStart := time.Now()
+			ls.fenceRewardPrecompute()
 			// Execute transaction WITHOUT holding ls.Lock()
 			//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
 			err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
@@ -7097,10 +7182,16 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				return nil
 			}, true)
+			rolloverElapsed := time.Since(rolloverStart)
 			ls.metrics.observeBlockStage(
 				blockStageEpochRollover,
-				time.Since(rolloverStart),
+				rolloverElapsed,
 			)
+			if ls.metrics.epochRolloverDuration != nil {
+				ls.metrics.epochRolloverDuration.Observe(
+					rolloverElapsed.Seconds(),
+				)
+			}
 			if err != nil {
 				// This runs on the pass after a boundary-crossing batch
 				// deferred its remainder to cachedNextBatch, which (per the

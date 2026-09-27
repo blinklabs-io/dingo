@@ -927,6 +927,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
 	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
 	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
 	// that row is not durably written until the hook above runs, later in
@@ -2389,4 +2390,25 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
 	}
 	return chainsyncCfg
+}
+
+// wireDeferredRewardStakeInputs lets the authoritative boundary capture leave
+// the snapshot's per-credential reward inputs to the ledger's background
+// writer instead of writing them inside the boundary transaction.
+func wireDeferredRewardStakeInputs(
+	ls *ledger.LedgerState,
+	mgr *snapshot.Manager,
+) {
+	ls.SetEpochBoundaryDeferredStakeInputsHook(
+		func(
+			txn *database.Txn,
+		) (uint64, uint64, []*models.RewardStakeInput, bool) {
+			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
+			if !ok {
+				return 0, 0, nil, false
+			}
+			return deferred.Epoch, deferred.BoundarySlot, deferred.Inputs, true
+		},
+	)
+	mgr.SetDeferRewardStakeInputs(true)
 }

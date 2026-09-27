@@ -61,13 +61,13 @@ type Querier interface {
 	DeletePoolStakeSnapshotsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeletePoolStakeSnapshotsForEpoch(ctx context.Context, arg DeletePoolStakeSnapshotsForEpochParams) error
 	DeleteProvisionalRewardSnapshot(ctx context.Context, arg DeleteProvisionalRewardSnapshotParams) error
-	DeleteRewardAccountOutputsAfterSlot(ctx context.Context, arg DeleteRewardAccountOutputsAfterSlotParams) error
+	DeleteRewardAccountOutputsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardAccountOutputsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardAccountOutputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardAdaPotsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardPoolInputsAfterSlot(ctx context.Context, arg DeleteRewardPoolInputsAfterSlotParams) error
 	DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int64) error
-	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, arg DeleteRewardPoolOutputsAfterSlotParams) error
+	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardPoolOutputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardSeedFailure(ctx context.Context, arg DeleteRewardSeedFailureParams) error
 	DeleteRewardSeedFailuresAfterSlot(ctx context.Context, capturedSlot int64) error
@@ -160,6 +160,7 @@ type Querier interface {
 	GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFailureParams) (string, error)
 	GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotParams) (RewardSnapshot, error)
 	GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error)
+	GetRewardStakeInputsInPoolKeyHashRange(ctx context.Context, arg GetRewardStakeInputsInPoolKeyHashRangeParams) ([]RewardStakeInput, error)
 	GetScript(ctx context.Context, hash []byte) (Script, error)
 	GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error)
 	GetSyncState(ctx context.Context, syncKey string) (string, error)

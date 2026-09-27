@@ -1345,7 +1345,23 @@ func (s *Store) GetLiveStakeInputsForPools(
 		)
 	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
-	chunkSize := s.dialect.ParameterLimit()
+	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
+	}
+	// A pending round's credits belong to the balance the aggregate carries
+	// once they are written.
+	stakeExpr := "rls.total_stake"
+	var pendingArgs []any
+	if len(pendingEpochs) > 0 {
+		var pendingExpr string
+		pendingExpr, pendingArgs = s.pendingRewardCreditSubquery(
+			"rls.credential_tag", "rls.staking_key", pendingEpochs,
+		)
+		stakeExpr = "CAST(rls.total_stake AS " + s.pendingCreditCastType() +
+			") + " + pendingExpr
+	}
+	chunkSize := s.dialect.ParameterLimit() - len(pendingArgs)
 	if expiryEpoch > 0 {
 		chunkSize--
 	}
@@ -1353,7 +1369,8 @@ func (s *Store) GetLiveStakeInputsForPools(
 	for start := 0; start < len(poolKeyHashes); start += chunkSize {
 		end := min(start+chunkSize, len(poolKeyHashes))
 		chunk := poolKeyHashes[start:end]
-		args := make([]any, 0, len(chunk)+1)
+		args := make([]any, 0, len(pendingArgs)+len(chunk)+1)
+		args = append(args, pendingArgs...)
 		for i := range chunk {
 			args = append(args, chunk[i])
 		}
@@ -1372,7 +1389,7 @@ LEFT JOIN account acct
 		}
 		query := `
 SELECT rls.pool_key_hash, rls.staking_key, rls.credential_tag,
-       rls.total_stake
+       ` + stakeExpr + `
 FROM reward_live_stake rls` + join + `
 WHERE rls.pool_key_hash IN (` + bindPlaceholders(len(chunk)) + `)
   AND rls.registered = TRUE` + expiry + `

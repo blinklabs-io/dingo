@@ -557,6 +557,54 @@ undo delivered before the record is removed. Malformed or unsupported records
 are logged and removed so one damaged notification record cannot permanently
 prevent startup.
 
+**Reward precompute chunk cursor.** Key
+`dingo:stake-reward:precompute-cursor:<snapshot epoch>` in `sync_state` holds a
+version-2 JSON record: `format_version`, `snapshot_epoch`, the `generation` the
+round was resolved under, `input_fingerprint` (a hash of every pool-level input
+the calculation reads -- ADA pots, reward snapshot, pool inputs, reward
+parameters, block counts and prefilter slot), the hex `last_pool_key_hash` and
+`completed_pools` count of committed pools, the running
+`effective_rewards`/`unspendable_rewards` totals, `done`, and, once done,
+`output_fingerprint`, a hash of the finished `reward_pool_output` rows. Each
+chunk reads it and resumes from the next pool (ascending `pool_key_hash`,
+`GetRewardPoolInputs`'s order) only while the input fingerprint matches and the
+epoch holds one pool output per completed pool; otherwise it clears the epoch's
+outputs (`DeleteRewardOutputsForEpoch`) and starts over. A finished cursor whose
+output fingerprint matches the stored pool outputs is the precompute's
+completion record.
+
+**Pending reward credit rounds.** Key `dingo:reward-credit:pending-rounds`
+(`models.PendingRewardCreditRoundsKey`) holds a JSON list of
+`{snapshot_epoch, boundary_slot}` (`models.RewardCreditRound`): reward rounds an
+epoch boundary applied whose account credits are still being written. While a
+round is listed, a credential's balance is `account.reward` plus its
+`reward_account_output` rows for the round with `spendable = TRUE` and
+`guarded = FALSE` that have no `account_reward_delta` journal row yet.
+`GetLiveStakeInputsForPools` and the DRep voting-power reads add those rows'
+amounts per credential while a round is listed (at the boundary that applied
+it, before anything writes one of them). `GetPendingRewardCreditRounds` and
+`SetPendingRewardCreditRounds` read and replace the list, and
+`DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after the
+rollback slot. Key `dingo:stake-reward:fold-cursor:<snapshot epoch>` holds the
+background writer's progress through a round (`{boundary_slot, next_pool}`,
+an index into the round's pool outputs in `pool_key_hash` order); a cursor for a
+different boundary slot is ignored.
+
+**Reward eligibility recheck.** Key `dingo:reward-credit:eligibility-recheck`
+(`models.RewardEligibilityRecheckKey`) holds the JSON list of credentials whose
+account state `RestoreAccountStateAtSlot` restored in a rollback.
+`TakeRewardEligibilityRecheck` returns and clears it; the epoch boundary re-reads
+those credentials' registration, together with every credential
+`GetStakeCredentialsWithRegistrationEvents` returns for the slots between the
+round's pots capture and the boundary.
+
+**Pending reward stake inputs.** Key `dingo:stake-reward:stake-inputs-pending`
+holds `{"entries": [{epoch, boundary_slot}]}`: mark snapshots whose
+`reward_stake_input` rows the ledger writes after the boundary that captured
+them commits. The boundary transaction adds the entry and the last write batch
+removes it; while it is listed the epoch's `reward_stake_input` rows are
+incomplete.
+
 The truncate deletion range ends at the newest block in the indexed blob chain, not at the metadata ledger tip. During live synchronization, BlockFetch can have persisted a speculative blob tail that the ledger has not applied yet. If the requested target equals the metadata tip, that tail must still be deleted; treating the operation as a no-op would leave non-contiguous block indexes visible after the live node rebuild and prevent ChainSync from making forward progress.
 
 `lifecycle.Restore` accepts either a local directory or a cloud destination URI for `snapshotDir` — a cloud URI is downloaded into a temporary local directory first (`downloadCloudSnapshot`), then Restore proceeds exactly as it would for a local path. Restoring from the cloud requires the full per-snapshot URI (`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not the bare base destination, which is a catalog of potentially many snapshots. This is also how a snapshot captured on one node can be restored onto another, since the two never need to share a filesystem.
@@ -1563,7 +1611,11 @@ transaction back instead of exposing a partial reconstructed credential set.
 
 Rollback is separate from retention and unaffected by it. Retention only ever
 deletes rows below the window, so it never competes with a rewind. Rollback
-deletes rolled-back reward state through `DeleteRewardStateAfterSlot`; it leaves
+deletes rolled-back reward state through `DeleteRewardStateAfterSlot`, which
+removes reward inputs, snapshots and pots captured or bounded after the
+rollback slot, and reward outputs captured after it: an output's
+`boundary_slot` is the boundary that applies it, which a rollback in the
+epoch before that boundary does not reach. It leaves
 `pool_stake_snapshot` and `epoch_summary` rows for rewound boundaries in place,
 because Cardano epoch numbering is derived from the slot and the boundary is
 therefore re-crossed on the selected chain, where `SavePoolStakeSnapshots`
@@ -2621,6 +2673,65 @@ UPDATE utxo SET deleted_slot = $1
 WHERE deleted_slot = 0 AND id IN ($2, $3);
 ```
 
+### `GetRewardStakeInputsInPoolKeyHashRange`
+
+Reads `reward_stake_input` rows for one epoch whose `pool_key_hash` falls in an
+inclusive `[lo, hi]` range, ordered `pool_key_hash ASC, credential_tag ASC,
+staking_key ASC` -- the same ordering `GetRewardStakeInputs` returns for the
+whole epoch. The chunked reward precompute calls it once per pool batch, with
+`lo`/`hi` drawn from that batch's first and last `reward_pool_input` row (both
+already fetched, both real pool-key-hash values, so the range never needs an
+unbounded low or high sentinel), rather than reading every stake input for the
+epoch to process one batch of pools. Portable across sqlite, PostgreSQL, and
+MySQL as a plain two-sided comparison on the indexed `(pool_key_hash, ...)`
+column, unlike an `IN (...)` list of arbitrary size, which the dialect-rewriting
+query layer (`newDialectQueryer`) does not translate.
+
+### `AddAccountRewardsByCredential`
+
+Applies a batch of `models.AccountRewardCredit` values with exactly the effect
+of one `AddAccountRewardByCredential` call per credit, in order: a credit whose
+`(withdrawal = FALSE, tx_hash, credential_tag, staking_key, added_slot)` journal
+row exists is skipped, a repeated credit in the batch counts once, every other
+credit is journaled and added to its account's `reward`, and each credited
+credential's `reward_live_stake` row is refreshed. Credits run in batches of
+200: one `tx_hash IN (...)` lookup of existing journal rows, one
+`staking_key IN (...)` lookup per credential tag of the active accounts, one
+multi-row journal insert, then one account update and one live-stake refresh
+per credited account. A missing or inactive account fails the batch with
+`models.ErrAccountNotFound` before anything is written. The epoch-boundary
+reward round and its background writer credit through it.
+
+### `RewardCreditsAlreadyApplied`
+
+Reports, per credit, whether its journal row exists, with the same
+`tx_hash IN (...)` lookup.
+
+### `GetRewardAccountOutputsForCredential`, `GetRewardAccountOutputsInPoolKeyHashRange`
+
+Read one credential's `reward_account_output` rows in a set of snapshot epochs
+(on the `(credential_tag, staking_key, ...)` index), and one epoch's rows whose
+`pool_key_hash` is in an inclusive `[lo, hi]` range, in pool order.
+
+### `GetStakeCredentialsWithRegistrationEvents`
+
+Returns the distinct credentials with a row in any registration or
+deregistration certificate table (`stake_registration`,
+`stake_registration_delegation`, `stake_vote_registration_delegation`,
+`vote_registration_delegation`, `registration`, `stake_deregistration`,
+`deregistration`) whose `added_slot` is in an inclusive slot range, as one
+`UNION` over their `added_slot` indexes.
+
+### `SaveRewardStakeInputs`
+
+Writes multi-row upserts of up to `ParameterLimit / 9` rows, keyed on
+`(epoch, pool_key_hash, credential_tag, staking_key)` with the last row for a
+key winning, then resolves every input's ID by its natural key. Derived-table
+lookups like this one cast their key parameters: `BYTEA`/`BIGINT` on
+PostgreSQL, where an untyped parameter resolves to text, and `BINARY` on MySQL,
+where an uncast parameter takes the connection character set and loses hash
+bytes above `0x7f`.
+
 ### `SaveRewardAccountOutputs` ID resolution
 
 Resolving the generated IDs after a multi-row upsert into
@@ -3377,6 +3488,16 @@ ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index;
 ```
 
 ### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
+
+`GetDRepVotingPowerBatch` and `GetDRepVotingPowerByType` first total each
+DRep's power from its delegators' `reward_live_stake.utxo_stake` running total
+plus `account.reward`, one indexed lookup per delegator
+(`drepVotingPowerFromLiveStake`), which equals the UTxO sum below because the
+aggregate is maintained transactionally with every UTxO write and verified at
+startup. A DRep with an active delegator that has no `reward_live_stake` row at
+the current `calculation_version` falls back to the UTxO-scanning query shown
+below. All three add a pending reward round's credits (see "Pending reward
+credit rounds") by the credited account's DRep delegation.
 
 All three DRep voting-power queries take an `expiryEpoch uint64` argument that
 drives the same CIP-0163 reward-account inactivity exclusion as

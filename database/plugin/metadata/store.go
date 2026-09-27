@@ -2128,6 +2128,18 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// AddAccountRewardsByCredential applies a batch of credits with exactly
+	// the effect of calling AddAccountRewardByCredential for each in order:
+	// a credit whose journal row already exists is skipped, every other
+	// credit is journaled and added to its account's reward balance, and the
+	// credited credentials' reward_live_stake rows are refreshed. It fails
+	// with models.ErrAccountNotFound before writing anything when a credited
+	// account is missing or inactive.
+	AddAccountRewardsByCredential(
+		[]models.AccountRewardCredit,
+		types.Txn,
+	) error
+
 	// AddPostSnapshotAccountRewardByCredential is AddAccountRewardByCredential
 	// for a boundary credit that cardano-ledger applies after the epoch-boundary
 	// stake snapshot (SNAP): POOLREAP deposit refunds, enacted treasury
@@ -2502,11 +2514,67 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
 
+	// GetPendingRewardCreditRounds returns the reward rounds applied at an
+	// epoch boundary whose account credits are still being written.
+	GetPendingRewardCreditRounds(types.Txn) ([]models.RewardCreditRound, error)
+
+	// SetPendingRewardCreditRounds replaces the pending reward credit rounds.
+	SetPendingRewardCreditRounds([]models.RewardCreditRound, types.Txn) error
+
+	// RewardCreditsAlreadyApplied reports, for each credit, whether its
+	// account_reward_delta journal row already exists.
+	RewardCreditsAlreadyApplied(
+		[]models.AccountRewardCredit,
+		types.Txn,
+	) ([]bool, error)
+
+	// TakeRewardEligibilityRecheck returns and clears the credentials whose
+	// registration a rollback restored since the last call.
+	TakeRewardEligibilityRecheck(types.Txn) ([]models.StakeCredentialRef, error)
+
+	// GetStakeCredentialsWithRegistrationEvents returns the credentials with
+	// a registration or deregistration certificate in the inclusive slot
+	// range.
+	GetStakeCredentialsWithRegistrationEvents(
+		uint64, // fromSlot
+		uint64, // toSlot
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// GetRewardAccountOutputsForCredential returns one credential's reward
+	// account outputs in the given snapshot epochs.
+	GetRewardAccountOutputsForCredential(
+		[]uint64, // epochs
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// GetRewardAccountOutputsInPoolKeyHashRange returns an epoch's reward
+	// account outputs whose pool_key_hash is in the inclusive [lo, hi] range.
+	GetRewardAccountOutputsInPoolKeyHashRange(
+		uint64, // epoch
+		[]byte, // lo
+		[]byte, // hi
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
 	// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
 	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
 
 	// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
 	GetRewardStakeInputs(uint64, types.Txn) ([]*models.RewardStakeInput, error)
+
+	// GetRewardStakeInputsInPoolKeyHashRange retrieves per-credential reward
+	// inputs for an epoch whose pool_key_hash falls in the inclusive [lo, hi]
+	// range, so a caller can process a contiguous batch of pools' delegators
+	// at a time instead of loading every pool's stake inputs at once.
+	GetRewardStakeInputsInPoolKeyHashRange(
+		epoch uint64,
+		poolKeyHashLo []byte,
+		poolKeyHashHi []byte,
+		txn types.Txn,
+	) ([]*models.RewardStakeInput, error)
 
 	// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
 	DeleteRewardInputsForEpoch(uint64, types.Txn) error
