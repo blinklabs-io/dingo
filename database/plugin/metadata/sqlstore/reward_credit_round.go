@@ -61,13 +61,13 @@ func (s *Store) SetPendingRewardCreditRounds(
 	return s.SetSyncState(models.PendingRewardCreditRoundsKey, string(raw), txn)
 }
 
-// pendingRewardCreditEpochs reads the pending rounds' snapshot epochs through
-// the caller's own handle, so a read inside a boundary transaction sees the
-// round that transaction just applied.
-func (s *Store) pendingRewardCreditEpochs(
+// pendingRewardCreditRounds reads the pending rounds through the caller's own
+// handle, so a read inside a boundary transaction sees the round that
+// transaction just applied.
+func (s *Store) pendingRewardCreditRounds(
 	ctx context.Context,
 	db queryer,
-) ([]uint64, error) {
+) ([]models.RewardCreditRound, error) {
 	var raw string
 	err := db.QueryRowContext(
 		ctx,
@@ -80,15 +80,116 @@ func (s *Store) pendingRewardCreditEpochs(
 	if err != nil {
 		return nil, fmt.Errorf("read pending reward credit rounds: %w", err)
 	}
-	rounds, err := decodeRewardCreditRounds(raw)
-	if err != nil {
-		return nil, err
-	}
+	return decodeRewardCreditRounds(raw)
+}
+
+func rewardCreditRoundEpochs(rounds []models.RewardCreditRound) []uint64 {
 	epochs := make([]uint64, 0, len(rounds))
 	for _, round := range rounds {
 		epochs = append(epochs, round.SnapshotEpoch)
 	}
-	return epochs, nil
+	return epochs
+}
+
+// pendingCreditsForCredentials totals, per credential, the unfolded credits
+// of the given credited rounds.
+func (s *Store) pendingCreditsForCredentials(
+	ctx context.Context,
+	db queryer,
+	rounds []models.RewardCreditRound,
+	selected map[historicalRewardKey]struct{},
+) (map[historicalRewardKey]uint64, error) {
+	ret := make(map[historicalRewardKey]uint64)
+	if len(rounds) == 0 || len(selected) == 0 {
+		return ret, nil
+	}
+	epochs := rewardCreditRoundEpochs(rounds)
+	keys := make([]historicalRewardKey, 0, len(selected))
+	for key := range selected {
+		keys = append(keys, key)
+	}
+	batch := max(1, (s.dialect.ParameterLimit()-len(epochs))/2)
+	for start := 0; start < len(keys); start += batch {
+		end := min(start+batch, len(keys))
+		batchSelected := make(map[historicalRewardKey]struct{}, end-start)
+		for _, key := range keys[start:end] {
+			batchSelected[key] = struct{}{}
+		}
+		predicate, predicateArgs := historicalRewardCredentialPredicate(
+			batchSelected,
+		)
+		args := make([]any, 0, len(epochs)+len(predicateArgs))
+		for _, epoch := range epochs {
+			args = append(args, epoch)
+		}
+		args = append(args, predicateArgs...)
+		if err := func() error {
+			rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT credential_tag, staking_key,
+       SUM(CAST(amount AS `+s.pendingCreditCastType()+`))
+FROM reward_account_output
+WHERE `+unfoldedRewardCreditPredicate+`
+  AND epoch IN (`+bindPlaceholders(len(epochs))+`)
+  AND (`+predicate+`)
+GROUP BY credential_tag, staking_key`), args...)
+			if err != nil {
+				return fmt.Errorf("get unfolded reward credits: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var tag uint8
+				var key []byte
+				var amount int64
+				if err := rows.Scan(&tag, &key, &amount); err != nil {
+					return err
+				}
+				if amount < 0 {
+					return fmt.Errorf("negative unfolded reward credit %d", amount)
+				}
+				ret[historicalRewardKey{tag: tag, key: string(key)}] += uint64(amount)
+			}
+			return rows.Err()
+		}(); err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
+}
+
+// unfoldedRewardCreditPredicate selects a credited round's reward_account_output
+// rows that are part of their account's balance but not yet in
+// account.reward.
+const unfoldedRewardCreditPredicate = `spendable = TRUE AND guarded = FALSE AND folded = FALSE`
+
+// FoldRewardAccountOutputs marks a credential's unfolded credits of the given
+// rounds as added to account.reward, in the transaction that adds them.
+func (s *Store) FoldRewardAccountOutputs(
+	epochs []uint64,
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) error {
+	if len(epochs) == 0 || len(stakingKey) == 0 {
+		return nil
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			args := make([]any, 0, 2+len(epochs))
+			args = append(args, credentialTag, stakingKey)
+			for _, epoch := range epochs {
+				args = append(args, epoch)
+			}
+			if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+UPDATE reward_account_output SET folded = TRUE
+WHERE credential_tag = ? AND staking_key = ?
+  AND epoch IN (`+bindPlaceholders(len(epochs))+`)
+  AND `+unfoldedRewardCreditPredicate), args...); err != nil {
+				return fmt.Errorf("fold reward account outputs: %w", err)
+			}
+			return nil
+		},
+	)
 }
 
 // deleteRewardCreditRoundsAfterSlot drops rounds applied at a boundary a
@@ -114,9 +215,17 @@ func (s *Store) deleteRewardCreditRoundsAfterSlot(
 	if err != nil {
 		return err
 	}
-	kept := rounds[:0]
+	kept := make([]models.RewardCreditRound, 0, len(rounds))
 	for _, round := range rounds {
 		if round.BoundarySlot > slot {
+			// The rollback reverts the folded credits' journal rows and
+			// account balances; the outputs, if they survive it, are
+			// unfolded credits again when the boundary reapplies the round.
+			if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+UPDATE reward_account_output SET folded = FALSE
+WHERE epoch = ? AND folded = TRUE`), round.SnapshotEpoch); err != nil {
+				return fmt.Errorf("unfold reward account outputs: %w", err)
+			}
 			continue
 		}
 		kept = append(kept, round)
@@ -170,7 +279,8 @@ func (s *Store) pendingRewardCreditSubquery(
 	return `(SELECT COALESCE(SUM(CAST(prc.amount AS ` + s.pendingCreditCastType() +
 		`)), 0) FROM reward_account_output prc WHERE prc.credential_tag = ` +
 		tagCol + ` AND prc.staking_key = ` + keyCol +
-		` AND prc.spendable = TRUE AND prc.guarded = FALSE AND prc.epoch IN (` +
+		` AND prc.spendable = TRUE AND prc.guarded = FALSE AND prc.folded = FALSE` +
+		` AND prc.epoch IN (` +
 		bindPlaceholders(
 			len(epochs),
 		) + `))`, args
@@ -233,6 +343,7 @@ SELECT `+rewardAccountOutputColumns+`
 FROM reward_account_output
 WHERE credential_tag = ? AND staking_key = ?
   AND epoch IN (`+bindPlaceholders(len(epochs))+`)
+  AND `+unfoldedRewardCreditPredicate+`
 ORDER BY epoch, pool_key_hash, reward_type`), args...)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -272,16 +383,17 @@ ORDER BY pool_key_hash, credential_tag, staking_key, reward_type`),
 func (s *Store) pendingDRepCredits(
 	ctx context.Context,
 	db queryer,
-	epochs []uint64,
+	rounds []models.RewardCreditRound,
 	expiryEpoch uint64,
 	filterCol string,
 	values []any,
 ) (map[string]uint64, map[uint64]uint64, error) {
 	byCredential := make(map[string]uint64)
 	byType := make(map[uint64]uint64)
-	if len(epochs) == 0 || len(values) == 0 {
+	if len(rounds) == 0 || len(values) == 0 {
 		return byCredential, byType, nil
 	}
+	epochs := rewardCreditRoundEpochs(rounds)
 	chunkSize := max(1, s.dialect.ParameterLimit()-len(epochs)-1)
 	for start := 0; start < len(values); start += chunkSize {
 		end := min(start+chunkSize, len(values))
@@ -296,16 +408,15 @@ func (s *Store) pendingDRepCredits(
 		}
 		// Driven from the DRep's delegators, with one indexed lookup of
 		// each delegator's outputs, like the base voting-power query.
-		var sb strings.Builder
-		sb.WriteString(`
+		query := `
 SELECT a.drep, a.drep_type, SUM(` + pendingExpr + `)
 FROM account a
 WHERE a.` + filterCol + ` IN (` + bindPlaceholders(end-start) + `)
   AND a.active = TRUE` + expiry + `
-GROUP BY a.drep, a.drep_type`)
+GROUP BY a.drep, a.drep_type`
 		if err := func() error {
 			rows, err := db.QueryContext(
-				ctx, s.dialect.Rebind(sb.String()), args...,
+				ctx, s.dialect.Rebind(query), args...,
 			)
 			if err != nil {
 				return fmt.Errorf("get pending drep credits: %w", err)
@@ -317,13 +428,19 @@ GROUP BY a.drep, a.drep_type`)
 				if err := rows.Scan(&drep, &drepType, &amount); err != nil {
 					return err
 				}
+				if drepType < 0 || amount < 0 {
+					return fmt.Errorf(
+						"invalid pending drep credit type %d amount %d",
+						drepType, amount,
+					)
+				}
 				if drepType <= 1 {
 					key := models.NewStakeCredentialRef(
 						uint8(drepType), drep, //nolint:gosec
 					).MapKey()
-					byCredential[key] += uint64(amount) //nolint:gosec
+					byCredential[key] += uint64(amount)
 				}
-				byType[uint64(drepType)] += uint64(amount) //nolint:gosec
+				byType[uint64(drepType)] += uint64(amount)
 			}
 			return rows.Err()
 		}(); err != nil {

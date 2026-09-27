@@ -455,7 +455,7 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
 	// v2 adds four columns, v5 two, v7/v8 one each, v17 one more, and v24
 	// one more.
-	const shippedAddColumns = 16
+	const shippedAddColumns = 17
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after

@@ -279,6 +279,7 @@ CREATE TABLE reward_account_output (
     guarded BOOLEAN NOT NULL DEFAULT FALSE,
     captured_slot INTEGER NOT NULL,
     boundary_slot INTEGER NOT NULL,
+    folded BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (
         epoch, credential_tag, staking_key, pool_key_hash, reward_type
     )

@@ -514,3 +514,71 @@ func TestChunkedRewardPrecomputeRestartsOnGenerationChange(t *testing.T) {
 	require.Len(t, final.poolOutputs, poolCount)
 	require.Len(t, final.accountOutputs, poolCount*(delegatorsPerPool+1))
 }
+
+// TestChunkedRewardPrecomputeFinishesDegenerateRound pins a round with pools
+// but nothing to split (no reserves and no fees): Pass 1 returns no per-pool
+// results, so the chunked precompute must finish the round without running
+// the member split, and the boundary must move the same pots as the
+// monolithic calculation.
+func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rewardSnapshotEpoch = uint64(1)
+		potsEpoch           = uint64(3)
+		newEpoch            = rewardSnapshotEpoch + 3
+		capturedSlot        = uint64(200)
+		boundarySlot        = uint64(1_200)
+	)
+	degenerate := func(t *testing.T) (*LedgerState, *database.Database) {
+		ls, db := seedMultiPoolRewardPrecomputeFixture(t, 8, 3, 7)
+		require.NoError(t, db.Metadata().SaveRewardAdaPots(
+			&models.RewardAdaPots{
+				Epoch:        potsEpoch,
+				Treasury:     5_000,
+				CapturedSlot: capturedSlot,
+			}, nil,
+		))
+		return ls, db
+	}
+
+	monolithic, monolithicDB := degenerate(t)
+	writeTxn := monolithicDB.Transaction(true)
+	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
+		app, ok, err := monolithic.calculateStakeRewardApplication(
+			txn, newEpoch, capturedSlot, boundarySlot, true,
+		)
+		require.NoError(t, err)
+		require.True(t, ok)
+		return monolithic.applyStakeRewardApplication(txn, app, boundarySlot)
+	}))
+	want := snapshotRewardPrecomputeOutputs(
+		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
+	)
+	wantState, err := monolithicDB.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+
+	chunked, chunkedDB := degenerate(t)
+	chunked.rewardPrecomputeChunkPoolsOverride = 3
+	require.NoError(t, chunked.runChunkedStakeRewardPrecompute(
+		newEpoch, capturedSlot, boundarySlot,
+	))
+	cursor, err := loadRewardPrecomputeCursor(
+		chunkedDB.Metadata(), nil, rewardSnapshotEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	require.True(t, cursor.Done, "a degenerate round finishes in one step")
+	writeTxn = chunkedDB.Transaction(true)
+	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
+		return chunked.applyStakeRewards(txn, newEpoch, boundarySlot)
+	}))
+	settleRewardCredits(t, chunked)
+	require.Equal(t, want, snapshotRewardPrecomputeOutputs(
+		t, chunkedDB, rewardSnapshotEpoch, potsEpoch,
+	))
+	gotState, err := chunkedDB.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.Equal(t, wantState.Reserves, gotState.Reserves)
+	require.Equal(t, wantState.Treasury, gotState.Treasury)
+}

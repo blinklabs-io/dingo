@@ -491,10 +491,7 @@ VALUES (?, ?, 0, '2000000')`), 300+index, ref.Key)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			return ls.applyStakeRewards(txn, 4, 1_200)
 		}))
-		ls.rewardCreditFoldWG.Wait()
-		rounds, err := db.Metadata().GetPendingRewardCreditRounds(nil)
-		require.NoError(t, err)
-		require.Empty(t, rounds)
+		settleRewardCredits(t, ls)
 		var sb strings.Builder
 		for _, query := range []string{
 			`SELECT slot, treasury, reserves FROM network_state ORDER BY slot`,

@@ -15,34 +15,33 @@
 package ledger
 
 import (
-	"sync"
+	"errors"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
 
-// heldRewardCreditFold runs the dump fixture's boundary with its background
-// credit held, returning the fixture and a release function.
-func heldRewardCreditFold(t *testing.T) (*epochBoundaryBenchFixture, func()) {
+// creditedRewardRound runs the dump fixture's boundary with the reward
+// precompute complete, leaving the round credited and every credit unfolded.
+func creditedRewardRound(t *testing.T) *epochBoundaryBenchFixture {
 	t.Helper()
 	f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
 	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 		epochBoundaryBenchPrecomputeEvent(),
 	))
-	hold := make(chan struct{})
-	var once sync.Once
-	release := func() { once.Do(func() { close(hold) }) }
-	t.Cleanup(release)
-	f.ls.rewardCreditFoldHook = func() { <-hold }
 	f.rollover(t)
+	f.ls.waitEpochBoundaryBenchBackground()
 	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
-	require.Len(t, rounds, 1, "the boundary must leave its round pending")
-	return f, release
+	require.Len(t, rounds, 1, "the boundary must record its round credited")
+	return f
 }
 
 // rewardedCredentials returns every credential the round credits, with the
@@ -86,7 +85,7 @@ func accountRewards(
 // do not move when the background write lands.
 func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 	t.Parallel()
-	f, release := heldRewardCreditFold(t)
+	f := creditedRewardRound(t)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
 
@@ -116,12 +115,7 @@ func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 	_, rewardsDuring := unwrapFilteredDelegationResult(t, result)
 	powerDuring := dumpDRepVotingPower(t, f)
 
-	release()
-	f.ls.waitEpochBoundaryBenchBackground()
-
-	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
-	require.NoError(t, err)
-	require.Empty(t, rounds)
+	settleRewardCredits(t, f.ls)
 	credited := accountRewards(t, f, credits)
 	for key, credit := range credits {
 		require.Equal(t, stored[key]+credit, credited[key])
@@ -139,7 +133,7 @@ func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 // and the background write does not credit it a second time.
 func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 	t.Parallel()
-	f, release := heldRewardCreditFold(t)
+	f := creditedRewardRound(t)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
 	var key string
@@ -167,29 +161,49 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 			make([]byte, 32), txn.Metadata(),
 		)
 	}))
-	release()
-	f.ls.waitEpochBoundaryBenchBackground()
+	var hash lcommon.Blake2b224
+	copy(hash[:], key)
+	readTxn := f.db.Transaction(false)
+	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
+		view := &LedgerView{ls: f.ls, txn: txn}
+		after, err := view.RewardAccountBalance(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash(hash),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, after)
+		require.Zero(t, *after, "a folded credit must not count again")
+		return nil
+	}))
+	settleRewardCredits(t, f.ls)
 	account, err := f.db.GetAccountByCredential(0, []byte(key), true, nil)
 	require.NoError(t, err)
 	require.Zero(t, uint64(account.Reward),
-		"the background write must not credit a withdrawn round again")
+		"folding the round must not credit a withdrawn credit again")
 }
 
 // TestPendingRewardRoundRollbackBelowBoundary pins rollback: undoing the
-// boundary drops the pending round and reverts every credit already written,
-// and applying the boundary again reproduces the same balances.
+// boundary drops the credited round, reverts every credit already folded, and
+// leaves the surviving outputs unfolded for the boundary to credit again.
 func TestPendingRewardRoundRollbackBelowBoundary(t *testing.T) {
 	t.Parallel()
-	f, release := heldRewardCreditFold(t)
+	f := creditedRewardRound(t)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
-	// One chunk of the fold lands before the rollback.
+	// Some credits are folded, as by withdrawals, before the rollback.
 	txn := f.db.Transaction(true)
-	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
-	require.NoError(t, err)
+	folded := 0
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		_, err := f.ls.foldRewardCreditChunk(txn, rounds[0], 5)
-		return err
+		for key := range credits {
+			if folded == 5 {
+				break
+			}
+			folded++
+			if err := f.ls.foldRewardCreditFor(txn, 0, []byte(key)); err != nil {
+				return err
+			}
+		}
+		return nil
 	}))
 	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
 	txn = f.db.Transaction(true)
@@ -199,75 +213,17 @@ func TestPendingRewardRoundRollbackBelowBoundary(t *testing.T) {
 		}
 		return f.db.DeleteRewardStateAfterSlot(boundary-1, txn)
 	}))
-	rounds, err = f.db.Metadata().GetPendingRewardCreditRounds(nil)
+	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
 	require.Empty(t, rounds, "a rollback below the boundary drops the round")
 	require.Equal(t, stored, accountRewards(t, f, credits),
-		"a rollback below the boundary reverts written credits")
-	release()
-	f.ls.waitEpochBoundaryBenchBackground()
-	require.Equal(t, stored, accountRewards(t, f, credits),
-		"the dropped round must not be written after the rollback")
-}
-
-// TestPendingRewardRoundResumesAfterRestart pins resumption: a fold stopped
-// part way, as by a restart, finishes from its cursor with every credential
-// credited exactly once.
-func TestPendingRewardRoundResumesAfterRestart(t *testing.T) {
-	t.Parallel()
-	f, release := heldRewardCreditFold(t)
-	credits := rewardedCredentials(t, f)
-	stored := accountRewards(t, f, credits)
-	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
-	require.NoError(t, err)
-	txn := f.db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		done, err := f.ls.foldRewardCreditChunk(txn, rounds[0], 7)
-		require.False(t, done)
-		return err
-	}))
-	f.ls.rewardCreditFoldHook = nil
-	release()
-	f.ls.waitEpochBoundaryBenchBackground()
-	f.ls.resumePendingRewardCreditFolds()
-	f.ls.waitEpochBoundaryBenchBackground()
-	credited := accountRewards(t, f, credits)
-	for key, credit := range credits {
-		require.Equal(t, stored[key]+credit, credited[key],
-			"credential %x credited exactly once", key)
-	}
-	var deltas int
-	raw := rewardCalcSQLDB(t, f.db)
-	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
-		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1),
-	).Scan(&deltas))
-	var outputs int
-	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM reward_account_output
-WHERE epoch = 8 AND spendable AND NOT guarded AND amount != '0'`).Scan(&outputs))
-	require.Equal(t, outputs, deltas, "one journal row per credit")
-}
-
-// TestNextBoundaryFinishesEarlierPendingRound pins the next boundary's first
-// step: a round still pending from an earlier boundary is written in full
-// before the new round is applied.
-func TestNextBoundaryFinishesEarlierPendingRound(t *testing.T) {
-	t.Parallel()
-	f, _ := heldRewardCreditFold(t)
-	credits := rewardedCredentials(t, f)
-	stored := accountRewards(t, f, credits)
-	next := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 2)
-	txn := f.db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return f.ls.finishPendingRewardCreditsInTxn(txn, next)
-	}))
-	rounds, err := f.db.Metadata().GetPendingRewardCreditRounds(nil)
-	require.NoError(t, err)
-	require.Empty(t, rounds)
-	credited := accountRewards(t, f, credits)
-	for key, credit := range credits {
-		require.Equal(t, stored[key]+credit, credited[key])
-	}
+		"a rollback below the boundary reverts folded credits")
+	var stillFolded int
+	require.NoError(t, rewardCalcSQLDB(t, f.db).QueryRow(
+		`SELECT COUNT(*) FROM reward_account_output WHERE folded`,
+	).Scan(&stillFolded))
+	require.Zero(t, stillFolded,
+		"a reapplied round must count its outputs as unfolded again")
 }
 
 // TestFencedPrecomputeChunkDoesNotWrite pins the boundary fence: a background
@@ -314,4 +270,85 @@ func TestPendingRewardStakeInputsHoldBackTheRound(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.False(t, ok, "a round must wait for its snapshot's inputs")
+}
+
+// TestDeferredStakeInputWriteRetriesAfterError pins the deferred stake-input
+// writer: a failed write is retried until the snapshot's rows are written,
+// without a reader having to rebuild them.
+func TestDeferredStakeInputWriteRetriesAfterError(t *testing.T) {
+	t.Parallel()
+	stakeInputs := func(t *testing.T, fail bool) string {
+		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
+			epochBoundaryBenchPrecomputeEvent(),
+		))
+		var failures atomic.Int32
+		if fail {
+			f.ls.deferredStakeInputsFailHook = func() error {
+				if failures.Add(1) == 1 {
+					return errors.New("transient write failure")
+				}
+				return nil
+			}
+		}
+		f.rollover(t)
+		f.ls.waitEpochBoundaryBenchBackground()
+		if fail {
+			require.GreaterOrEqual(t, failures.Load(), int32(2),
+				"the failed write must be attempted again")
+		}
+		meta := f.db.Metadata()
+		pending, err := loadRewardStakeInputsPending(meta, nil)
+		require.NoError(t, err)
+		require.Empty(t, pending.Entries,
+			"the retried write must complete the snapshot's rows")
+		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+		require.NoError(t, err)
+		defer raw.Close()
+		dump := dumpEpochBoundaryState(t, raw)
+		i := strings.Index(dump, "== reward_stake_input")
+		require.GreaterOrEqual(t, i, 0)
+		return dump[i:]
+	}
+	require.Equal(t, stakeInputs(t, false), stakeInputs(t, true))
+}
+
+// TestPrecomputeLeavesCreditedRoundAlone pins that a precompute run for a
+// round the boundary already credited, as a queued startup precompute can be,
+// neither recomputes nor rewrites its outputs: they are balances, and a
+// rewrite would count its folded credits again.
+func TestPrecomputeLeavesCreditedRoundAlone(t *testing.T) {
+	t.Parallel()
+	f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
+		epochBoundaryBenchPrecomputeEvent(),
+	))
+	// Deregistrations after the precompute make the boundary correct the
+	// outputs, so a later precompute no longer matches them.
+	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+	require.NoError(t, err)
+	defer raw.Close()
+	deregisterEpochBoundaryDumpDelegators(t, raw)
+	f.rollover(t)
+	f.ls.waitEpochBoundaryBenchBackground()
+	credits := rewardedCredentials(t, f)
+	keys := make([]string, 0, len(credits))
+	for key := range credits {
+		keys = append(keys, key)
+	}
+	txn := f.db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		for _, key := range keys[:len(keys)/4] {
+			if err := f.ls.foldRewardCreditFor(txn, 0, []byte(key)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	before := observePendingRoundReaders(t, f, credits)
+	f.ls.queueStartupRewardPrecompute()
+	f.ls.rewardPrecomputeWG.Wait()
+	after := observePendingRoundReaders(t, f, credits)
+	require.Equal(t, before, after,
+		"a credited round's balances must not move")
 }

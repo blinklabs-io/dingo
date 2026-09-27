@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -188,17 +189,47 @@ func (ls *LedgerState) queueDeferredRewardStakeInputs(
 			delete(ls.deferredStakeInputsWriting, epoch)
 			ls.rewardPrecomputeMu.Unlock()
 		}()
-		if err := ls.writeDeferredRewardStakeInputs(
-			epoch, boundarySlot, inputs, generation,
-		); err != nil {
+		// The write is idempotent and stops by itself once a rollback or a
+		// rebuild has taken the entry, so a failed attempt is retried: with
+		// no writer left, only a read-write reader could rebuild the rows.
+		backoff := deferredStakeInputRetryMin
+		for {
+			err := ls.writeDeferredRewardStakeInputs(
+				epoch, boundarySlot, inputs, generation,
+			)
+			if err == nil {
+				return
+			}
 			ls.config.Logger.Warn(
-				"failed to write deferred reward stake inputs",
+				"failed to write deferred reward stake inputs; retrying",
 				"component", "ledger",
 				"epoch", epoch,
+				"retry_in", backoff,
 				"error", err,
 			)
+			if !ls.waitUnlessClosed(backoff) {
+				return
+			}
+			backoff = min(backoff*2, deferredStakeInputRetryMax)
 		}
 	}()
+}
+
+const (
+	deferredStakeInputRetryMin = 100 * time.Millisecond
+	deferredStakeInputRetryMax = 30 * time.Second
+)
+
+// waitUnlessClosed waits d, returning false as soon as the ledger closes.
+func (ls *LedgerState) waitUnlessClosed(d time.Duration) bool {
+	const poll = 100 * time.Millisecond
+	for waited := time.Duration(0); waited < d; waited += poll {
+		if ls.closed.Load() {
+			return false
+		}
+		time.Sleep(min(poll, d-waited))
+	}
+	return !ls.closed.Load()
 }
 
 // writeDeferredRewardStakeInputs writes one snapshot's staged rows in chunks.
@@ -226,6 +257,11 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 				ls.rewardInputGeneration.Load() != generation {
 				stop = true
 				return nil
+			}
+			if ls.deferredStakeInputsFailHook != nil {
+				if err := ls.deferredStakeInputsFailHook(); err != nil {
+					return err
+				}
 			}
 			meta := ls.db.Metadata()
 			metaTxn := txn.Metadata()

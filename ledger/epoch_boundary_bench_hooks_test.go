@@ -55,7 +55,6 @@ func epochBoundaryBenchPartialPrecomputeT(
 }
 
 func (ls *LedgerState) waitEpochBoundaryBenchBackground() {
-	ls.rewardCreditFoldWG.Wait()
 	ls.deferredStakeInputsWG.Wait()
 }
 

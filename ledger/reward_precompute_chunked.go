@@ -230,6 +230,10 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 	if !ok || epochs.bootstrap {
 		return nil, false, nil
 	}
+	credited, err := ls.rewardRoundCredited(txn, newEpoch)
+	if err != nil || credited {
+		return nil, false, err
+	}
 	generation := ls.rewardInputGeneration.Load()
 	fence := ls.rewardPrecomputeFence.Load()
 	if err := ls.ensureRewardStakeInputsReady(txn, epochs.snapshot); err != nil {
@@ -484,6 +488,10 @@ func (ls *LedgerState) runChunkedStakeRewardPrecomputeRound(
 	capturedSlot uint64,
 	boundarySlot uint64,
 ) (bool, error) {
+	credited, err := ls.rewardRoundCredited(nil, newEpoch)
+	if err != nil || credited {
+		return credited, err
+	}
 	if err := ls.completePendingRewardStakeInputs(newEpoch); err != nil {
 		return false, err
 	}
@@ -598,6 +606,16 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(
 			InputFingerprint: round.inputFingerprint,
 		}
 		startIndex = 0
+	}
+	// A degenerate round has no per-pool results and nothing to split: Pass 1
+	// already returned the whole available pot to reserves.
+	if round.totals.Degenerate {
+		if err := ls.finishStakeRewardPrecomputeLocked(
+			meta, metaTxn, round, cursor,
+		); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	for chunks := 0; maxChunks <= 0 || chunks < maxChunks; chunks++ {
 		if startIndex >= len(round.poolInputs) {

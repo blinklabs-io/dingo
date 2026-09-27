@@ -1492,13 +1492,10 @@ type LedgerState struct {
 	// rewardPrecomputeMu like the precompute worker's registration.
 	deferredStakeInputsWG      sync.WaitGroup
 	deferredStakeInputsWriting map[uint64]struct{}
-	// rewardCreditFoldWG tracks the background writers of pending reward
-	// credit rounds (queueRewardCreditFold).
-	rewardCreditFoldWG sync.WaitGroup
-	// rewardCreditFoldHook is a test seam, nil in production. It runs before
-	// each background fold chunk, so a test can hold a round pending.
-	rewardCreditFoldHook func()
-	validationEnabled    bool
+	// deferredStakeInputsFailHook is a test seam, nil in production. A
+	// non-nil error it returns fails that deferred stake-input chunk.
+	deferredStakeInputsFailHook func() error
+	validationEnabled           bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -2066,7 +2063,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Without it, a node started mid-epoch calculates that round inline inside
 	// the next epoch-rollover transaction instead of ahead of it.
 	ls.queueStartupRewardPrecompute()
-	ls.resumePendingRewardCreditFolds()
 	if ls.startupRewardPrecomputeHook != nil {
 		ls.startupRewardPrecomputeHook()
 	}
@@ -2840,7 +2836,6 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.rewardPrecomputeMu.Unlock()
 	ls.rewardPrecomputeWG.Wait()
 	ls.deferredStakeInputsWG.Wait()
-	ls.rewardCreditFoldWG.Wait()
 	ls.config.Logger.Info(
 		"reward precompute handlers finished",
 		"elapsed", time.Since(rewardStart).Round(time.Millisecond),

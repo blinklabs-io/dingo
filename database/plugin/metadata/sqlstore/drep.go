@@ -495,12 +495,12 @@ func (s *Store) GetDRepVotingPower(
 	).Scan(&stake); err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
-	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	pendingRounds, err := s.pendingRewardCreditRounds(ctx, db)
 	if err != nil {
 		return 0, err
 	}
 	byCredential, _, err := s.pendingDRepCredits(
-		ctx, db, pendingEpochs, expiryEpoch, "drep", []any{credential},
+		ctx, db, pendingRounds, expiryEpoch, "drep", []any{credential},
 	)
 	if err != nil {
 		return 0, err
@@ -597,13 +597,13 @@ func (s *Store) GetDRepVotingPowerBatch(
 			return nil, err
 		}
 	}
-	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	pendingRounds, err := s.pendingRewardCreditRounds(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	if len(pendingEpochs) > 0 {
+	if len(pendingRounds) > 0 {
 		byCredential, _, err := s.pendingDRepCredits(
-			ctx, db, pendingEpochs, expiryEpoch, "drep", values,
+			ctx, db, pendingRounds, expiryEpoch, "drep", values,
 		)
 		if err != nil {
 			return nil, err
@@ -689,11 +689,11 @@ func (s *Store) addPendingDRepTypeCredits(
 	drepTypes []uint64,
 	expiryEpoch uint64,
 ) (map[uint64]uint64, error) {
-	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	pendingRounds, err := s.pendingRewardCreditRounds(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	if len(pendingEpochs) == 0 {
+	if len(pendingRounds) == 0 {
 		return ret, nil
 	}
 	values := make([]any, len(drepTypes))
@@ -701,7 +701,7 @@ func (s *Store) addPendingDRepTypeCredits(
 		values[i] = drepTypes[i]
 	}
 	_, byType, err := s.pendingDRepCredits(
-		ctx, db, pendingEpochs, expiryEpoch, "drep_type", values,
+		ctx, db, pendingRounds, expiryEpoch, "drep_type", values,
 	)
 	if err != nil {
 		return nil, err

@@ -236,8 +236,13 @@ func TestEpochBoundaryDumpForDifferential(t *testing.T) {
 			deregisterEpochBoundaryDumpDelegators(t, raw)
 			f.rollover(t)
 			f.ls.waitEpochBoundaryBenchBackground()
+			// DRep power is read from the derived balances; the tables are
+			// dumped with every credit folded into its account, the shape an
+			// eager boundary writes.
+			power := dumpDRepVotingPower(t, f)
+			settleRewardCredits(t, f.ls)
 			dump := dumpEpochBoundaryState(t, raw) + "== drep_power\n" +
-				dumpDRepVotingPower(t, f)
+				power
 			require.NoError(t, os.WriteFile(
 				filepath.Join(dir, "boundary-"+state+".txt"),
 				[]byte(dump), 0o644,

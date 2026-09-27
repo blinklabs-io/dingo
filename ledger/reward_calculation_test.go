@@ -6478,12 +6478,33 @@ func TestRewardCalculatorInputsRejectsDelegatorCountMismatch(t *testing.T) {
 	require.False(t, match)
 }
 
-// settleRewardCredits waits for the background credit of every pending reward
-// round, so a test reading account rows sees what the round wrote.
+// settleRewardCredits folds every credited round's unfolded credits into the
+// account rows, so a test can read account.Reward as the balance.
 func settleRewardCredits(t *testing.T, ls *LedgerState) {
 	t.Helper()
-	ls.rewardCreditFoldWG.Wait()
-	rounds, err := ls.db.Metadata().GetPendingRewardCreditRounds(nil)
+	meta := ls.db.Metadata()
+	rounds, err := meta.GetPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
-	require.Empty(t, rounds, "every applied round must be credited")
+	credited := make(map[string]models.StakeCredentialRef)
+	for _, round := range rounds {
+		outputs, err := meta.GetRewardAccountOutputs(round.SnapshotEpoch, nil)
+		require.NoError(t, err)
+		for _, output := range outputs {
+			if output.Spendable && !output.Guarded {
+				ref := models.NewStakeCredentialRef(
+					output.CredentialTag, output.StakingKey,
+				)
+				credited[ref.MapKey()] = ref
+			}
+		}
+	}
+	txn := ls.db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		for _, ref := range credited {
+			if err := ls.foldRewardCreditFor(txn, ref.Tag, ref.Key); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
 }

@@ -1345,15 +1345,16 @@ func (s *Store) GetLiveStakeInputsForPools(
 		)
 	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
-	pendingEpochs, err := s.pendingRewardCreditEpochs(ctx, db)
+	pendingRounds, err := s.pendingRewardCreditRounds(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
 	}
-	// A pending round's credits belong to the balance the aggregate carries
-	// once they are written.
+	// reward_stake carries account.reward; a credited round's unfolded
+	// credits are the rest of the balance.
 	stakeExpr := "rls.total_stake"
 	var pendingArgs []any
-	if len(pendingEpochs) > 0 {
+	if len(pendingRounds) > 0 {
+		pendingEpochs := rewardCreditRoundEpochs(pendingRounds)
 		var pendingExpr string
 		pendingExpr, pendingArgs = s.pendingRewardCreditSubquery(
 			"rls.credential_tag", "rls.staking_key", pendingEpochs,

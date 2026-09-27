@@ -16,8 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -46,7 +44,7 @@ import (
 )
 
 // The rollover stack consumes the application entry points below.
-const stakeRewardSourcePrefix = "dingo:stake-reward:"
+const stakeRewardSourcePrefix = models.StakeRewardSourcePrefix
 
 func (ls *LedgerState) applyStakeRewards(
 	txn *database.Txn,
@@ -84,9 +82,6 @@ func (ls *LedgerState) applyStakeRewards(
 			performanceEpoch.EraId == eras.ByronEraDesc.Id {
 			return nil
 		}
-	}
-	if err := ls.finishPendingRewardCreditsInTxn(txn, boundarySlot); err != nil {
-		return fmt.Errorf("finish pending reward credits: %w", err)
 	}
 	app, ok, err := ls.boundaryStakeRewardApplication(
 		txn, newEpoch, boundarySlot,
@@ -913,7 +908,6 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 	if err := registerPendingRewardCreditRound(meta, metaTxn, round); err != nil {
 		return fmt.Errorf("register pending reward credits: %w", err)
 	}
-	txn.AfterCommit(func() { ls.queueRewardCreditFold(round) })
 	ls.config.Logger.Info(
 		"applied stake rewards",
 		"component", "ledger",
@@ -2777,6 +2771,18 @@ func saveStakeRewardOutputs(
 ) error {
 	if app == nil {
 		return errors.New("missing stake reward application")
+	}
+	rounds, err := meta.GetPendingRewardCreditRounds(metaTxn)
+	if err != nil {
+		return err
+	}
+	if slices.ContainsFunc(rounds, func(r models.RewardCreditRound) bool {
+		return r.SnapshotEpoch == app.epochs.snapshot
+	}) {
+		return fmt.Errorf(
+			"reward outputs for epoch %d are a credited round",
+			app.epochs.snapshot,
+		)
 	}
 	if err := meta.DeleteRewardOutputsForEpoch(app.epochs.snapshot, metaTxn); err != nil {
 		return fmt.Errorf(
@@ -4888,16 +4894,13 @@ func stakeRewardSourceHash(
 	epoch uint64,
 	reward rewards.AccountReward,
 ) []byte {
-	h := sha256.New()
-	h.Write([]byte(stakeRewardSourcePrefix)) //nolint:errcheck
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], epoch)
-	h.Write(buf[:])                        //nolint:errcheck
-	h.Write(reward.PoolID[:])              //nolint:errcheck
-	h.Write([]byte{reward.Credential.Tag}) //nolint:errcheck
-	h.Write(reward.Credential.Hash[:])     //nolint:errcheck
-	h.Write([]byte(reward.Type))           //nolint:errcheck
-	return h.Sum(nil)
+	return models.StakeRewardSourceHash(
+		epoch,
+		reward.PoolID[:],
+		reward.Credential.Tag,
+		reward.Credential.Hash[:],
+		string(reward.Type),
+	)
 }
 
 // rewardEfficiencyLogValue renders eta for the applied-rewards log line.

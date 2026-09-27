@@ -14,7 +14,12 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"crypto/sha256"
+	"encoding/binary"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 // RewardStakeCalculationVersion identifies the stake-accounting algorithm
 // used to produce persisted live stake and consensus snapshots. Bump it when
@@ -198,6 +203,31 @@ type RewardAccountOutput struct {
 type RewardCreditRound struct {
 	SnapshotEpoch uint64 `json:"snapshot_epoch"`
 	BoundarySlot  uint64 `json:"boundary_slot"`
+}
+
+// StakeRewardSourcePrefix namespaces the sync_state keys and the journal
+// source hashes of the stake-reward round.
+const StakeRewardSourcePrefix = "dingo:stake-reward:"
+
+// StakeRewardSourceHash is the account_reward_delta tx_hash of the credit a
+// reward_account_output row produces, which makes crediting it idempotent.
+func StakeRewardSourceHash(
+	epoch uint64,
+	poolKeyHash []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+	rewardType string,
+) []byte {
+	h := sha256.New()
+	h.Write([]byte(StakeRewardSourcePrefix)) //nolint:errcheck
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], epoch)
+	h.Write(buf[:])                //nolint:errcheck
+	h.Write(poolKeyHash)           //nolint:errcheck
+	h.Write([]byte{credentialTag}) //nolint:errcheck
+	h.Write(stakingKey)            //nolint:errcheck
+	h.Write([]byte(rewardType))    //nolint:errcheck
+	return h.Sum(nil)
 }
 
 // PendingRewardCreditRoundsKey is the sync_state key holding the JSON list of

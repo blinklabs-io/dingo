@@ -1530,23 +1530,59 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 	epoch uint64,
 	txn types.Txn,
 ) error {
-	return s.deleteRewardPair(
+	err := s.deleteRewardPair(
 		"state before epoch",
 		epoch,
 		txn,
 		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
-			if err := q.DeleteRewardStakeInputsBeforeEpoch(
-				ctx,
-				value,
-			); err != nil {
-				return err
-			}
-			return q.DeleteRewardAccountOutputsBeforeEpoch(
+			return q.DeleteRewardStakeInputsBeforeEpoch(
 				ctx,
 				value,
 			)
 		},
 	)
+	if err != nil {
+		return err
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			return s.deleteRewardAccountOutputsBeforeEpoch(ctx, db, epoch)
+		},
+	)
+}
+
+// deleteRewardAccountOutputsBeforeEpoch prunes reward outputs before epoch
+// except a credited round's unfolded credits, which are part of their
+// account's balance until a withdrawal folds them.
+func (s *Store) deleteRewardAccountOutputsBeforeEpoch(
+	ctx context.Context,
+	db queryer,
+	epoch uint64,
+) error {
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	rounds, err := s.pendingRewardCreditRounds(ctx, db)
+	if err != nil {
+		return err
+	}
+	keep := ""
+	args := []any{sqlEpoch}
+	if len(rounds) > 0 {
+		keep = ` AND NOT (spendable = TRUE AND guarded = FALSE AND folded = FALSE
+  AND epoch IN (` + bindPlaceholders(len(rounds)) + `))`
+		for _, round := range rounds {
+			args = append(args, round.SnapshotEpoch)
+		}
+	}
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM reward_account_output WHERE epoch < ?`+keep,
+	), args...); err != nil {
+		return fmt.Errorf("delete reward account outputs before epoch: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) DeleteRewardStakeInputBeforeEpoch(

@@ -2541,8 +2541,17 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
 
-	// GetRewardAccountOutputsForCredential returns one credential's reward
-	// account outputs in the given snapshot epochs.
+	// FoldRewardAccountOutputs marks a credential's unfolded credits of the
+	// given credited rounds as added to account.reward. Call it in the
+	// transaction that adds them.
+	FoldRewardAccountOutputs(
+		[]uint64, // snapshot epochs of the credited rounds
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) error
+	// GetRewardAccountOutputsForCredential returns one credential's unfolded
+	// credits (spendable, unguarded, not folded) in the given snapshot epochs.
 	GetRewardAccountOutputsForCredential(
 		[]uint64, // epochs
 		uint8, // credentialTag

@@ -13122,28 +13122,32 @@ and the boundary, and those a rollback restored
 pool outputs' unspendable totals, and moves the reserves and treasury from the
 corrected cursor totals. It does not read the round's account outputs.
 
-The round's account credits are not written in the boundary transaction. The
-boundary records the round as pending (`RewardCreditRound` in `sync_state`) and,
-once it commits, `queueRewardCreditFold` writes the credits in the background, a
-bounded batch of pools per transaction, at the boundary slot and with the same
-`account_reward_delta` journal rows, source hashes and `reward_live_stake`
-refresh the boundary would have written (`AddAccountRewardsByCredential`); the
-final batch removes the round from the pending list. While a round is pending, a
-credential's balance is its account reward plus its spendable, unguarded outputs
-in the round that have no journal row yet. The store adds those outputs where it
-reads balances in aggregate: the SNAP-point stake read
-(`GetLiveStakeInputsForPools`) and DRep voting power
-(`GetDRepVotingPower*`). Ledger adds them for one credential in
-`LedgerView.RewardAccountBalance`, the local state query reward accounts and the
-Blockfrost account endpoint (`PendingRewardCredit`, read in the same
-transaction as the account row). A transaction that withdraws from a credential
-with a pending round first writes that credential's credits
-(`foldRewardCreditsForWithdrawals`); the background write skips a credit whose
-journal row exists, so each credit lands once. The next boundary writes any
-round still pending from an earlier boundary before applying its own
-(`finishPendingRewardCreditsInTxn`). A rollback below the boundary removes the
-round from the pending list in the same transaction that reverts its journaled
-credits. `LedgerState.Start` resumes the fold of every round still pending.
+The round's account credits are not written to account rows. The boundary
+records the round as credited (`RewardCreditRound` in `sync_state`), and the
+round's `reward_account_output` rows with `spendable = TRUE`,
+`guarded = FALSE` and `folded = FALSE` are the credits: a credential's balance
+is `account.reward` plus those rows across every credited round. Every balance
+reader uses that definition. The store adds the rows where it reads balances
+in aggregate: the SNAP-point stake read (`GetLiveStakeInputsForPools`), DRep
+voting power (`GetDRepVotingPower*`) and the historical stake reconstruction
+(local state query stake distribution, `GetStakeByPoolsAtSlot`,
+`GetEpochBoundaryStakeByPools`, the persist-time snapshot fallback and the
+stake-input rebuild), for rounds applied at or before the slot read. Ledger
+adds them for one credential in `LedgerView.RewardAccountBalance`, the local
+state query reward accounts and the Blockfrost account endpoint
+(`PendingRewardCredit`, read in the same transaction as the account row).
+
+A credential's credits are folded into its account only where its stored
+balance changes: a transaction withdrawing from it first writes them with the
+journal rows and `reward_live_stake` refresh an eager boundary writes
+(`foldRewardCreditsForWithdrawals`, `AddAccountRewardsByCredential`) and marks
+the rows `folded` in the same transaction (`FoldRewardAccountOutputs`), so no
+reader counts a credit twice. A rollback below the boundary removes the round
+and clears `folded` on its surviving outputs in the transaction that reverts
+the folded credits' journal rows. Core-mode retention keeps a credited round's
+unfolded rows. A precompute for a credited round does nothing, and replacing a
+credited round's outputs is refused: they are balances, and rewritten rows
+would count folded credits again.
 
 The mark snapshot's per-credential reward basis (`reward_stake_input`) is first
 read by the reward round two epochs later, so the authoritative capture stages
