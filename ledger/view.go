@@ -65,9 +65,6 @@ var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 type LedgerView struct {
 	ls  *LedgerState
 	txn *database.Txn
-	// byronParams are the Byron protocol parameters adopted for the block
-	// this view validates; nil outside Byron block application.
-	byronParams *byronProtocolParameters
 	// Committee proposal resolution must use the same immutable consensus
 	// publication as the validation that owns this view.
 	committeeEpoch       uint64
@@ -368,16 +365,10 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 }
 
 func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
-	if lv.byronParams != nil {
-		return lv.byronParams.feePolicyNano()
-	}
 	return lv.ls.ByronFeePolicy()
 }
 
 func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
-	if lv.byronParams != nil {
-		return lv.byronParams.maxTxSizeLimit(), nil
-	}
 	return lv.ls.ByronMaxTxSize()
 }
 

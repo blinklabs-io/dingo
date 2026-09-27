@@ -638,11 +638,11 @@ func byronValidateMaxTxSize(
 }
 
 // byronMinFee returns the minimum fee for a transaction of size bytes under a
-// fee policy scaled by 10^9. The reference loads the policy as summand div
-// 10^9 and multiplier % 10^9, then charges summand + ceiling(multiplier *
-// size); the two roundings differ from one ceiling over the scaled sum.
+// genesis fee policy. The reference loads the policy as summand div 10^9 and
+// multiplier % 10^9, then charges summand + ceiling(multiplier * size); the
+// two roundings differ from one ceiling over the scaled sum.
 func byronMinFee(summand, multiplier int64, size uint64) (*big.Int, error) {
-	if summand < 0 {
+	if multiplier < 0 || summand < 0 {
 		return nil, fmt.Errorf(
 			"invalid Byron fee policy: multiplier %d summand %d",
 			multiplier,
@@ -661,15 +661,6 @@ func byronMinFee(summand, multiplier int64, size uint64) (*big.Int, error) {
 	quotient, remainder := new(big.Int).QuoRem(perSize, scale, new(big.Int))
 	if remainder.Sign() > 0 {
 		quotient.Add(quotient, big.NewInt(1))
-	}
-	// A negative multiplier is valid policy, but the reference converts the
-	// size term to Word64 Lovelace: a negative term wraps and the sum
-	// overflows, while a term that rounds up to zero charges the summand.
-	if quotient.Sign() < 0 {
-		return nil, LovelaceBoundByronError{
-			Balance: "minimum fee",
-			Value:   quotient,
-		}
 	}
 	required := base.Add(base, quotient)
 	if err := byronCheckLovelace("minimum fee", required); err != nil {

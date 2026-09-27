@@ -356,7 +356,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	err = validateInboundBlockEnvelope(
@@ -369,7 +369,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
 }
 
-func TestValidateInboundBlockEnvelopeAcceptsSubstitutedByronEbbBody(t *testing.T) {
+func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *testing.T) {
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -377,7 +377,7 @@ func TestValidateInboundBlockEnvelopeAcceptsSubstitutedByronEbbBody(t *testing.T
 	)
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	require.NoError(t, validateInboundBlockEnvelope(
@@ -391,6 +391,7 @@ func TestValidateInboundBlockEnvelopeAcceptsSubstitutedByronEbbBody(t *testing.T
 	tampered, err := gledger.NewBlockFromCbor(
 		uint(gledger.BlockTypeByronEbb),
 		tamperedCbor,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
 	)
 	require.NoError(t, err)
 	require.Equal(t, genuine.Hash(), tampered.Hash())
@@ -403,131 +404,6 @@ func TestValidateInboundBlockEnvelopeAcceptsSubstitutedByronEbbBody(t *testing.T
 		envelopeParent{origin: true},
 	)
 	require.NoError(t, err)
-
-	shortProof := substituteByronEbbProof(t, genuine.Cbor(), make([]byte, 31))
-	shortProofBlock, err := gledger.NewBlockFromCbor(
-		uint(gledger.BlockTypeByronEbb),
-		shortProof,
-	)
-	require.NoError(t, err)
-	parsedShortProof, ok := shortProofBlock.(*byron.ByronEpochBoundaryBlock)
-	require.True(t, ok)
-	decodedProof, ok := parsedShortProof.BlockHeader.BodyProof.([]byte)
-	require.True(t, ok)
-	require.Len(t, decodedProof, 31)
-	require.NoError(t, validateInboundBlockEnvelope(
-		shortProofBlock,
-		nil,
-		config,
-		envelopeParent{origin: true},
-	))
-
-	wrongProofValue := []byte(strings.Repeat("x", 32))
-	genuineEbb, ok := genuine.(*byron.ByronEpochBoundaryBlock)
-	require.True(t, ok)
-	originalProof, ok := genuineEbb.BlockHeader.BodyProof.([]byte)
-	require.True(t, ok)
-	require.Len(t, wrongProofValue, 32)
-	require.NotEqual(t, originalProof, wrongProofValue)
-	wrongProof := substituteByronEbbProof(t, genuine.Cbor(), wrongProofValue)
-	wrongProofBlock, err := gledger.NewBlockFromCbor(
-		uint(gledger.BlockTypeByronEbb),
-		wrongProof,
-	)
-	require.NoError(t, err)
-	require.NoError(t, validateInboundBlockEnvelope(
-		wrongProofBlock,
-		nil,
-		config,
-		envelopeParent{origin: true},
-	))
-}
-
-// TestByronEbbNonBytesProofIsRejectedAtDecode pins the one check the
-// reference applies to an EBB body proof: its decoder reads the field as a
-// byte string, so an inbound EBB carrying any other CBOR value never decodes.
-func TestByronEbbNonBytesProofIsRejectedAtDecode(t *testing.T) {
-	genuine := loadEnvelopeByronFixture(
-		t,
-		"Block_Byron_EBB",
-		uint(gledger.BlockTypeByronEbb),
-	)
-	var block []cbor.RawMessage
-	_, err := cbor.Decode(genuine.Cbor(), &block)
-	require.NoError(t, err)
-	var header []cbor.RawMessage
-	_, err = cbor.Decode(block[0], &header)
-	require.NoError(t, err)
-	header[2], err = cbor.Encode(uint64(7))
-	require.NoError(t, err)
-	block[0], err = cbor.Encode(header)
-	require.NoError(t, err)
-	encoded, err := cbor.Encode(block)
-	require.NoError(t, err)
-
-	_, err = gledger.NewBlockFromCbor(
-		uint(gledger.BlockTypeByronEbb),
-		encoded,
-	)
-	require.ErrorIs(t, err, byron.ErrMalformedBodyProof)
-}
-
-func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
-	fixture := loadEnvelopeByronFixture(
-		t,
-		"Block_Byron_EBB",
-		uint(gledger.BlockTypeByronEbb),
-	)
-	for _, tc := range []struct {
-		name         string
-		blockSize    int
-		maxBlockSize int
-		maxHeader    int
-		wantErr      string
-	}{
-		{
-			name:         "accept at limit below configured max block size",
-			blockSize:    2_000_000,
-			maxBlockSize: 1_500_000,
-			maxHeader:    1,
-		},
-		{
-			name:         "accept at limit above configured max block size",
-			blockSize:    2_000_000,
-			maxBlockSize: 2_500_000,
-			maxHeader:    1,
-		},
-		{
-			name:         "reject one byte over fixed limit despite configured max",
-			blockSize:    2_000_001,
-			maxBlockSize: 2_500_000,
-			maxHeader:    100_000,
-			wantErr:      "exceeds fixed limit 2000000",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			blockCbor := byronEbbBlockWithSize(t, fixture.Cbor(), tc.blockSize)
-			block, err := gledger.NewBlockFromCbor(
-				uint(gledger.BlockTypeByronEbb),
-				blockCbor,
-			)
-			require.NoError(t, err)
-			require.Len(t, block.Cbor(), tc.blockSize)
-
-			config := newByronEnvelopeNodeConfig(t, tc.maxBlockSize, tc.maxHeader)
-			err = validateInboundBlockEnvelope(
-				block,
-				nil,
-				config,
-				envelopeParent{origin: true},
-			)
-			if tc.wantErr == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorContains(t, err, tc.wantErr)
-		})
-	}
 }
 
 func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
@@ -602,41 +478,6 @@ func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
 			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
-}
-
-func TestValidateByronBlockSizesUsesActiveParameters(t *testing.T) {
-	block := loadEnvelopeByronFixture(
-		t,
-		"Block_Byron_regular",
-		uint(gledger.BlockTypeByronMain),
-	)
-	blockSize := uint64(len(block.Cbor()))
-	headerSize := uint64(len(block.Header().Cbor()))
-	config := newByronEnvelopeNodeConfig(t, int(blockSize-1), int(headerSize-1))
-	require.ErrorContains(
-		t,
-		validateByronBlockSizes(block, config, nil),
-		"exceeds maxHeaderSize",
-	)
-	limits := &byronBlockLimits{
-		maxBlockSize:  blockSize,
-		maxHeaderSize: headerSize,
-	}
-	require.NoError(t, validateByronBlockSizes(block, config, limits))
-
-	limits.maxBlockSize = blockSize - 1
-	require.ErrorContains(
-		t,
-		validateByronBlockSizes(block, config, limits),
-		"exceeds maxBlockSize",
-	)
-	limits.maxBlockSize = blockSize
-	limits.maxHeaderSize = headerSize - 1
-	require.ErrorContains(
-		t,
-		validateByronBlockSizes(block, config, limits),
-		"exceeds maxHeaderSize",
-	)
 }
 
 // TestValidateInboundBlockEnvelopeOrdering checks normal block number and
@@ -978,33 +819,11 @@ func newByronEnvelopeNodeConfig(
 	t.Helper()
 	config := &cardano.CardanoNodeConfig{}
 	genesis := fmt.Sprintf(`{
-		"avvmDistr": {},
 		"blockVersionData": {
-			"heavyDelThd": "0",
 			"maxBlockSize": "%d",
-			"maxHeaderSize": "%d",
-			"maxProposalSize": "0",
-			"maxTxSize": "%d",
-			"mpcThd": "0",
-			"scriptVersion": 0,
-			"slotDuration": "20000",
-			"softforkRule": {
-				"initThd": "0",
-				"minThd": "0",
-				"thdDecrement": "0"
-			},
-			"txFeePolicy": {"multiplier": "0", "summand": "0"},
-			"unlockStakeEpoch": "0",
-			"updateImplicit": "0",
-			"updateProposalThd": "0",
-			"updateVoteThd": "0"
-		},
-		"protocolConsts": {"k": 2160, "protocolMagic": 42},
-		"startTime": 0,
-		"bootStakeholders": {},
-		"heavyDelegation": {},
-		"nonAvvmBalances": {}
-	}`, maxBlockSize, maxHeaderSize, maxBlockSize)
+			"maxHeaderSize": "%d"
+		}
+	}`, maxBlockSize, maxHeaderSize)
 	require.NoError(
 		t,
 		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),
@@ -1073,6 +892,200 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 	return tampered
 }
 
+// TestValidateBlockOrderPinsTheEqualSlotAlternativeShape pins, from the
+// validator's side, exactly which of the two possible equal-slot blocks may
+// ever be built.
+//
+// When a rival occupies the slot this node is about to forge, there are two
+// candidate shapes. Binding the parent to the live chain tip -- what
+// DefaultBlockBuilder does for an uncontested slot -- names the rival as
+// parent, so the block's parent slot equals its own and this validator rejects
+// it; so does every Praos peer. Binding the rival's predecessor instead (the
+// alternative-block context, mirroring ouroboros-consensus
+// mkCurrentBlockContext) is a well-ordered sibling of the rival and passes.
+//
+// DefaultBlockBuilder refuses to construct the first shape at all
+// (TestBuildBlockRefusesAParentAtItsOwnSlot in ledger/forging); this test
+// documents why it must, and fails if either side of the rule ever moves.
+func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
+	const (
+		predecessorSlot   = uint64(999)
+		predecessorNumber = uint64(99)
+		contestedSlot     = uint64(1000)
+		rivalNumber       = predecessorNumber + 1
+	)
+
+	// The block a live-tip-bound builder would produce at a contested slot:
+	// the rival is the parent, so parent slot == block slot.
+	sameSlotParent := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber + 1,
+			era:    shelley.EraShelley,
+		},
+	}
+	err := validateBlockOrder(sameSlotParent, envelopeParent{
+		slot:        contestedSlot,
+		blockNumber: rivalNumber,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not follow parent slot")
+
+	// The alternative: same block number as the rival, the rival's
+	// predecessor as parent.
+	alternative := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber,
+			era:    shelley.EraShelley,
+		},
+	}
+	require.NoError(t, validateBlockOrder(alternative, envelopeParent{
+		slot:        predecessorSlot,
+		blockNumber: predecessorNumber,
+	}))
+}
+
+// TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof covers the
+// reference decoder reading an EBB body proof as a byte string of any length
+// and discarding it: a 31-byte proof and a wrong 32-byte proof are both valid.
+func TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof(t *testing.T) {
+	genuine := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	config := newByronEnvelopeNodeConfig(
+		t,
+		len(genuine.Cbor())+64,
+		len(genuine.Header().Cbor()),
+	)
+	shortProof := substituteByronEbbProof(t, genuine.Cbor(), make([]byte, 31))
+	shortProofBlock, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		shortProof,
+	)
+	require.NoError(t, err)
+	parsedShortProof, ok := shortProofBlock.(*byron.ByronEpochBoundaryBlock)
+	require.True(t, ok)
+	decodedProof, ok := parsedShortProof.BlockHeader.BodyProof.([]byte)
+	require.True(t, ok)
+	require.Len(t, decodedProof, 31)
+	require.NoError(t, validateInboundBlockEnvelope(
+		shortProofBlock,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	))
+
+	wrongProofValue := []byte(strings.Repeat("x", 32))
+	genuineEbb, ok := genuine.(*byron.ByronEpochBoundaryBlock)
+	require.True(t, ok)
+	originalProof, ok := genuineEbb.BlockHeader.BodyProof.([]byte)
+	require.True(t, ok)
+	require.Len(t, wrongProofValue, 32)
+	require.NotEqual(t, originalProof, wrongProofValue)
+	wrongProof := substituteByronEbbProof(t, genuine.Cbor(), wrongProofValue)
+	wrongProofBlock, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		wrongProof,
+	)
+	require.NoError(t, err)
+	require.NoError(t, validateInboundBlockEnvelope(
+		wrongProofBlock,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	))
+}
+
+// TestByronEbbNonBytesProofIsRejectedAtDecode pins the one check the
+// reference applies to an EBB body proof: its decoder reads the field as a
+// byte string, so an inbound EBB carrying any other CBOR value never decodes.
+func TestByronEbbNonBytesProofIsRejectedAtDecode(t *testing.T) {
+	genuine := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(genuine.Cbor(), &block)
+	require.NoError(t, err)
+	var header []cbor.RawMessage
+	_, err = cbor.Decode(block[0], &header)
+	require.NoError(t, err)
+	header[2], err = cbor.Encode(uint64(7))
+	require.NoError(t, err)
+	block[0], err = cbor.Encode(header)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(block)
+	require.NoError(t, err)
+
+	_, err = gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		encoded,
+	)
+	require.ErrorIs(t, err, byron.ErrMalformedBodyProof)
+}
+
+func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
+	fixture := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	for _, tc := range []struct {
+		name         string
+		blockSize    int
+		maxBlockSize int
+		maxHeader    int
+		wantErr      string
+	}{
+		{
+			name:         "accept at limit below configured max block size",
+			blockSize:    2_000_000,
+			maxBlockSize: 1_500_000,
+			maxHeader:    1,
+		},
+		{
+			name:         "accept at limit above configured max block size",
+			blockSize:    2_000_000,
+			maxBlockSize: 2_500_000,
+			maxHeader:    1,
+		},
+		{
+			name:         "reject one byte over fixed limit despite configured max",
+			blockSize:    2_000_001,
+			maxBlockSize: 2_500_000,
+			maxHeader:    100_000,
+			wantErr:      "exceeds fixed limit 2000000",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blockCbor := byronEbbBlockWithSize(t, fixture.Cbor(), tc.blockSize)
+			block, err := gledger.NewBlockFromCbor(
+				uint(gledger.BlockTypeByronEbb),
+				blockCbor,
+			)
+			require.NoError(t, err)
+			require.Len(t, block.Cbor(), tc.blockSize)
+
+			config := newByronEnvelopeNodeConfig(t, tc.maxBlockSize, tc.maxHeader)
+			err = validateInboundBlockEnvelope(
+				block,
+				nil,
+				config,
+				envelopeParent{origin: true},
+			)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
 func substituteByronEbbProof(t *testing.T, blockCbor, proof []byte) []byte {
 	t.Helper()
 	var block []cbor.RawMessage
@@ -1127,58 +1140,4 @@ func byronEbbBlockWithSize(
 	}
 	t.Fatalf("could not encode Byron EBB at %d bytes", targetSize)
 	return nil
-}
-
-// TestValidateBlockOrderPinsTheEqualSlotAlternativeShape pins, from the
-// validator's side, exactly which of the two possible equal-slot blocks may
-// ever be built.
-//
-// When a rival occupies the slot this node is about to forge, there are two
-// candidate shapes. Binding the parent to the live chain tip -- what
-// DefaultBlockBuilder does for an uncontested slot -- names the rival as
-// parent, so the block's parent slot equals its own and this validator rejects
-// it; so does every Praos peer. Binding the rival's predecessor instead (the
-// alternative-block context, mirroring ouroboros-consensus
-// mkCurrentBlockContext) is a well-ordered sibling of the rival and passes.
-//
-// DefaultBlockBuilder refuses to construct the first shape at all
-// (TestBuildBlockRefusesAParentAtItsOwnSlot in ledger/forging); this test
-// documents why it must, and fails if either side of the rule ever moves.
-func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
-	const (
-		predecessorSlot   = uint64(999)
-		predecessorNumber = uint64(99)
-		contestedSlot     = uint64(1000)
-		rivalNumber       = predecessorNumber + 1
-	)
-
-	// The block a live-tip-bound builder would produce at a contested slot:
-	// the rival is the parent, so parent slot == block slot.
-	sameSlotParent := &envelopeTestBlock{
-		header: &envelopeTestHeader{
-			slot:   contestedSlot,
-			number: rivalNumber + 1,
-			era:    shelley.EraShelley,
-		},
-	}
-	err := validateBlockOrder(sameSlotParent, envelopeParent{
-		slot:        contestedSlot,
-		blockNumber: rivalNumber,
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not follow parent slot")
-
-	// The alternative: same block number as the rival, the rival's
-	// predecessor as parent.
-	alternative := &envelopeTestBlock{
-		header: &envelopeTestHeader{
-			slot:   contestedSlot,
-			number: rivalNumber,
-			era:    shelley.EraShelley,
-		},
-	}
-	require.NoError(t, validateBlockOrder(alternative, envelopeParent{
-		slot:        predecessorSlot,
-		blockNumber: predecessorNumber,
-	}))
 }
