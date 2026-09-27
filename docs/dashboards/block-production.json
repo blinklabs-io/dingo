@@ -2174,143 +2174,24 @@
       "description": "Block propagation delay and cumulative distribution. Indicates how quickly blocks reach this node."
     },
     {
-      "type": "barchart",
-      "title": "Block Fetch Delay by Block Number",
       "id": 24,
+      "type": "marcusolsson-dynamictext-panel",
+      "title": "Block Fetch Delay by Block Number",
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 0,
         "y": 29
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "dark-blue",
-            "mode": "thresholds"
-          },
-          "custom": {
-            "axisBorderShow": true,
-            "axisPlacement": "hidden",
-            "axisSoftMax": 2,
-            "fillOpacity": 99,
-            "lineWidth": 0,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "dark-blue",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Fetch Delay"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "dark-green",
-                      "value": 0
-                    },
-                    {
-                      "color": "dark-green",
-                      "value": 0.25
-                    },
-                    {
-                      "color": "green",
-                      "value": 0.5
-                    },
-                    {
-                      "color": "dark-orange",
-                      "value": 1
-                    },
-                    {
-                      "color": "dark-red",
-                      "value": 2
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.thresholdsStyle",
-                "value": {
-                  "mode": "dashed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Fetch Size"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "decbytes"
-              },
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": false,
-                  "tooltip": true,
-                  "viz": true
-                }
-              }
-            ]
-          }
-        ]
+      "transparent": true,
+      "pluginVersion": "6.2.0",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "default"
       },
-      "options": {
-        "barWidth": 0.83,
-        "colorByField": "Fetch Delay",
-        "groupWidth": 0,
-        "legend": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "orientation": "auto",
-        "showValue": "auto",
-        "stacking": "normal",
-        "text": {
-          "valueSize": 1
-        },
-        "tooltip": {
-          "mode": "multi"
-        },
-        "xField": "BlockNum",
-        "xTickLabelSpacing": 200
-      },
+      "description": "Block delay (wall clock minus slot time) per block, oldest on the left. Every block comes from the per-block ring (dingo_blockfetch_recent_*); blocks from before the node exported the ring, or from nodes without it, come from the latest-block gauge and only include blocks current at a scrape. When more blocks than bars fit, each bar shows the slowest block of its group. Hover for the block and delay; click to copy the block number. Colours: dark green \u2264250ms, light green \u22641s, orange >1s, red \u22652s.",
+      "interval": "15s",
+      "maxDataPoints": 4000,
       "targets": [
         {
           "datasource": {
@@ -2318,10 +2199,11 @@
             "uid": "default"
           },
           "editorMode": "code",
-          "expr": "last_over_time(cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}[30s])",
-          "legendFormat": "BlockNum",
+          "expr": "dingo_blockfetch_recent_delay_seconds{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
           "range": true,
-          "refId": "A"
+          "instant": false,
+          "refId": "RDR"
         },
         {
           "datasource": {
@@ -2329,14 +2211,57 @@
             "uid": "default"
           },
           "editorMode": "code",
-          "expr": "last_over_time(cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}[30s])",
-          "legendFormat": "Fetch Delay",
+          "expr": "dingo_blockfetch_recent_block_number{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
           "range": true,
-          "refId": "B"
+          "instant": false,
+          "refId": "RBN"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "GBD"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "editorMode": "code",
+          "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "range": true,
+          "instant": false,
+          "refId": "GBN"
         }
       ],
-      "transparent": true,
-      "description": "Block fetch delay broken down by block number. Outliers indicate specific slow peers."
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "renderMode": "data",
+        "editors": [],
+        "editor": {
+          "language": "html",
+          "format": "auto"
+        },
+        "wrap": false,
+        "contentPartials": [],
+        "content": "<div class=\"bfr\"><canvas class=\"bfr-cv\"></canvas><div class=\"bfr-note\"></div><div class=\"bfr-tip\"></div></div>",
+        "defaultContent": "",
+        "helpers": "",
+        "afterRender": "// Block fetch delay by block number, one bar per block.\n// Source: the per-block ring (dingo_blockfetch_recent_delay_seconds / _recent_block_number, RDR/RBN),\n// which keeps each block for ~16 blocks, so a range query with a step under ~5 minutes sees every block.\n// Blocks the ring does not cover (older than the node's ring, or nodes without it) come from the\n// latest-block gauges (GBD/GBN), which only see blocks current at a scrape.\n(function () {\n  var root = context.element; if (!root) return;\n  root.style.height = '100%';\n  var box = root.querySelector('.bfr'), cv = root.querySelector('.bfr-cv'), tip = root.querySelector('.bfr-tip'), note = root.querySelector('.bfr-note');\n  if (!box || !cv) return;\n  var S = (context.panelData && context.panelData.series) || [];\n  var tFrom = 0, tTo = Infinity;\n  try { tFrom = context.grafana.timeRange.from.valueOf(); tTo = context.grafana.timeRange.to.valueOf() } catch (e) { }\n\n  function frames(ref) {\n    var out = [];\n    for (var si = 0; si < S.length; si++) {\n      if (S[si].refId !== ref) continue;\n      var f = S[si].fields, tf = null, nf = null;\n      for (var i = 0; i < f.length; i++) { if (f[i].type === 'time' && !tf) tf = f[i]; else if (f[i].type === 'number' && !nf) nf = f[i] }\n      if (tf && nf) out.push({ labels: nf.labels || {}, t: tf.values, v: nf.values });\n    }\n    return out;\n  }\n  function at(fr) { var m = {}; for (var i = 0; i < fr.t.length; i++) { var x = fr.v[i]; if (x !== null && x !== undefined) m[Math.round(fr.t[i] / 1000)] = x } return m }\n\n  /* one instance only: the first one the ring (or the gauge) reports */\n  var inst = null, byBlock = {}, D = {}, B = {};\n  var rd = frames('RDR'), rb = frames('RBN');\n  for (var i = 0; i < rd.length; i++) { var l = rd[i].labels; if (l.idx === undefined) continue; if (inst === null) inst = l.instance || ''; if ((l.instance || '') === inst) D[l.idx] = rd[i] }\n  for (var i = 0; i < rb.length; i++) { var l = rb[i].labels; if (l.idx === undefined) continue; if ((l.instance || '') === inst) B[l.idx] = rb[i] }\n  var ringFirst = Infinity;\n  for (var k in D) {\n    if (!B[k]) continue; var bAt = at(B[k]), d = D[k];\n    for (var i = 0; i < d.t.length; i++) {\n      var t = d.t[i], bn = bAt[Math.round(t / 1000)], dv = d.v[i];\n      if (bn === undefined || dv === null || dv === undefined) continue;\n      if (t < ringFirst) ringFirst = t;\n      var e = byBlock[bn];\n      if (!e) byBlock[bn] = { t: t, d: dv, ring: true }; else { if (t < e.t) e.t = t; else e.d = dv }\n    }\n  }\n  var gd = frames('GBD'), gb = frames('GBN'), gbi = null, gdi = null;\n  for (var i = 0; i < gd.length && !gdi; i++) if (inst === null || (gd[i].labels.instance || '') === inst) gdi = gd[i];\n  for (var i = 0; i < gb.length && !gbi; i++) if (inst === null || (gb[i].labels.instance || '') === inst) gbi = gb[i];\n  var fallback = 0;\n  if (gdi && gbi) {\n    var gAt = at(gbi);\n    for (var i = 0; i < gdi.t.length; i++) {\n      var t = gdi.t[i], bn = gAt[Math.round(t / 1000)], dv = gdi.v[i];\n      if (bn === undefined || dv === null || dv === undefined || byBlock[bn]) continue;\n      if (t >= ringFirst) continue; /* the ring covers everything from its first sample on */\n      byBlock[bn] = { t: t, d: dv, ring: false }; fallback++;\n    }\n  }\n  var keys = Object.keys(byBlock).map(Number).filter(function (bn) { var t = byBlock[bn].t; return t >= tFrom && t <= tTo }).sort(function (a, b) { return a - b });\n\n  var dpr = window.devicePixelRatio || 1, w = box.clientWidth, h = box.clientHeight;\n  cv.width = w * dpr; cv.height = h * dpr;\n  var c = cv.getContext('2d'); c.scale(dpr, dpr); c.clearRect(0, 0, w, h);\n  var muted = 'rgba(150,160,175,.9)';\n  if (keys.length < 2) { c.fillStyle = muted; c.font = '11px sans-serif'; c.fillText('no block delay data in this range', 8, h / 2); if (note) note.textContent = ''; return }\n\n  var AX = 30, BOT = 13, pw = w - AX, ph = h - BOT;\n  var fit = Math.max(2, Math.floor(pw / 2)), per = Math.ceil(keys.length / fit), groups = [];\n  for (var gi = 0; gi < keys.length; gi += per) {\n    var mi = gi, end = Math.min(gi + per, keys.length);\n    for (var gj = gi + 1; gj < end; gj++) if (byBlock[keys[gj]].d > byBlock[keys[mi]].d) mi = gj;\n    groups.push({ first: keys[gi], last: keys[end - 1], count: end - gi, block: keys[mi], d: byBlock[keys[mi]].d });\n  }\n  var dataMx = 0; for (var i = 0; i < groups.length; i++) if (groups[i].d > dataMx) dataMx = groups[i].d;\n  var top = Math.max(2, Math.min(10, dataMx * 1.05));\n  function yOf(v) { return ph - Math.min(v, top) / top * (ph - 2) }\n  function col(v) { return v >= 2 ? '#D4413A' : v > 1 ? '#E88C30' : v > 0.25 ? '#73BF69' : '#1a7a42' }\n  var n = groups.length, gap = n * 3 <= pw ? 1 : 0, bw = Math.max(1, (pw - gap * n) / n);\n\n  function paint(hi) {\n    c.clearRect(0, 0, w, h);\n    for (var i = 0; i < n; i++) {\n      var g = groups[i], y = yOf(g.d), x = i * (bw + gap);\n      c.fillStyle = i === hi ? 'rgba(255,255,255,.9)' : col(g.d);\n      c.fillRect(x, y, bw, ph - y);\n    }\n    var marks = [[0.25, '250', '#1a7a42'], [0.5, '500', '#73BF69'], [1, '1s', '#E88C30'], [2, '2s', '#D4413A']];\n    if (top >= 5) marks.push([5, '5s', muted]);\n    if (top >= 10) marks.push([10, '10s', muted]);\n    c.font = '9px sans-serif'; c.textBaseline = 'middle'; c.textAlign = 'left';\n    var seen = [];\n    for (var m = 0; m < marks.length; m++) {\n      var ty = yOf(marks[m][0]); if (marks[m][0] > top) continue;\n      c.beginPath(); c.setLineDash([4, 3]); c.moveTo(0, ty); c.lineTo(pw, ty); c.strokeStyle = marks[m][2]; c.globalAlpha = .6; c.lineWidth = 1; c.stroke(); c.globalAlpha = 1; c.setLineDash([]);\n      var ly = Math.max(6, ty), hit = false; for (var s = 0; s < seen.length; s++) if (Math.abs(seen[s] - ly) < 10) hit = true;\n      if (hit) continue; seen.push(ly); c.fillStyle = marks[m][2]; c.fillText(marks[m][1], pw + 4, ly);\n    }\n    c.fillStyle = muted; c.textBaseline = 'bottom';\n    c.textAlign = 'left'; c.fillText('#' + keys[0].toLocaleString(), 0, h);\n    c.textAlign = 'right'; c.fillText('#' + keys[keys.length - 1].toLocaleString(), pw, h);\n  }\n  paint(-1);\n\n  function fmt(v) { return v < 1 ? Math.round(v * 1000) + 'ms' : v.toFixed(2) + 's' }\n  if (note) {\n    var src = fallback === 0 ? 'every block (ring)' : ringFirst === Infinity ? 'scraped blocks only: this node exports no per-block ring' : 'every block since ' + new Date(ringFirst).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ', scraped blocks before';\n    note.textContent = keys.length.toLocaleString() + ' blocks' + (per > 1 ? ' \u00b7 ' + per + ' per bar, slowest shown' : '') + ' \u00b7 ' + src;\n  }\n  function idxAt(e) { var r = cv.getBoundingClientRect(), x = e.clientX - r.left; if (x < 0 || x > pw) return -1; var i = Math.floor(x / (bw + gap)); return i >= 0 && i < n ? i : -1 }\n  function label(g) { return g.count === 1 ? 'block ' + g.block.toLocaleString() + ' \u00b7 ' + fmt(g.d) : 'blocks ' + g.first.toLocaleString() + '\u2013' + g.last.toLocaleString() + ' (' + g.count + ') \u00b7 slowest ' + g.block.toLocaleString() + ' \u00b7 ' + fmt(g.d) }\n  cv.onmousemove = function (e) {\n    var i = idxAt(e); if (i < 0) { tip.style.display = 'none'; return }\n    var r = box.getBoundingClientRect();\n    tip.textContent = label(groups[i]); tip.style.display = 'block';\n    var tx = e.clientX - r.left + 12; if (tx + tip.offsetWidth > w) tx = e.clientX - r.left - tip.offsetWidth - 12;\n    tip.style.left = Math.max(0, tx) + 'px'; tip.style.top = Math.max(0, e.clientY - r.top - 28) + 'px';\n  };\n  cv.onmouseleave = function () { tip.style.display = 'none' };\n  cv.onclick = function (e) {\n    var i = idxAt(e); if (i < 0) return; var bn = String(groups[i].block);\n    var ta = document.createElement('textarea'); ta.value = bn; ta.style.cssText = 'position:fixed;left:-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);\n    tip.textContent = 'block ' + Number(bn).toLocaleString() + ' copied'; tip.style.display = 'block';\n    paint(i); setTimeout(function () { paint(-1) }, 350);\n  };\n})();\n",
+        "externalStyles": [],
+        "styles": ".dt-row { overflow: hidden !important; height: 100% !important }\n.dt-row > div { height: 100% !important }\n.bfr { position: relative; width: 100%; height: 100%; min-height: 80px }\n.bfr-cv { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer }\n.bfr-note { position: absolute; top: 0; left: 2px; font: 10px sans-serif; color: rgba(150, 160, 175, .85); pointer-events: none }\n.bfr-tip { position: absolute; display: none; pointer-events: none; z-index: 5; white-space: nowrap; background: rgba(20, 26, 36, .95); color: #e6edf3; font: 11px ui-monospace, \"SF Mono\", monospace; padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, .12) }\n"
+      }
     },
     {
       "type": "timeseries",
