@@ -34,6 +34,12 @@ var errCatchUpLocalAhead = errors.New(
 	"local chain is ahead of the target Mithril artifact",
 )
 
+// ErrRewardStateRepairWaitingForSnapshot means the latest certified state is
+// an ancestor of the local chain, so repair must wait for a newer artifact.
+var ErrRewardStateRepairWaitingForSnapshot = errors.New(
+	"reward-state repair is waiting for a certified snapshot that covers the local chain tip",
+)
+
 // openBootstrappedImmutable opens the ImmutableDB a bootstrap produced, through
 // the handle the bootstrap vetted the directory under and held open. What gets
 // loaded is then the tree the bootstrap accepted, not whatever holds its name
@@ -193,8 +199,8 @@ func verifyCatchupIntersection(
 		return fmt.Errorf(
 			"local chain diverges from the target Mithril v2 artifact at "+
 				"slot %d (local block %x; artifact has slot %d block %x); "+
-				"perform a full Mithril resync (remove the database and run "+
-				"`dingo mithril sync` again)",
+				"the existing database was left untouched because catch-up "+
+				"cannot safely reconcile divergent chains",
 			tip.Slot, tip.Hash, first.Slot, first.Hash,
 		)
 	}
@@ -237,8 +243,9 @@ func verifyLocalAheadOfArtifactTip(
 	return fmt.Errorf(
 		"local chain diverges from the target Mithril v2 artifact above "+
 			"slot %d (local tip slot %d block %x; artifact tip block %x "+
-			"is not an ancestor of the local tip); perform a full Mithril resync "+
-			"(remove the database and run `dingo mithril sync` again)",
+			"is not an ancestor of the local tip); the existing database was "+
+			"left untouched because catch-up cannot safely reconcile divergent "+
+			"chains",
 		artifactTip.Slot, localTip.Slot, localTip.Hash, artifactTip.Hash,
 	)
 }

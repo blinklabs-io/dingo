@@ -486,21 +486,17 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			"remote_addr",
 			peerAddr,
 		)
-		if !c.addConnectionImpl(
+		if !c.addConnectionImplWithTrust(
 			oConn,
 			true,
 			true,
 			peerAddr,
 			"",
 			releaseNtCSlot,
+			l.TrustedLocal,
 		) {
 			return
 		}
-		c.connectionsMutex.Lock()
-		if info := c.connections[oConn.Id()]; info != nil {
-			info.trustedLocal = l.TrustedLocal
-		}
-		c.connectionsMutex.Unlock()
 		releaseNtCSlot = nil
 	} else {
 		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -265,6 +266,45 @@ type peerHeaderChain struct {
 	order         []string
 	byHash        map[string]peerHeaderRecord
 	retainedBytes int
+}
+
+type peerHeaderHistoryCandidate struct {
+	historyKey string
+	sequence   uint64
+	index      int
+}
+
+type peerHeaderHistoryCandidateHeap []*peerHeaderHistoryCandidate
+
+func (h peerHeaderHistoryCandidateHeap) Len() int { return len(h) }
+
+func (h peerHeaderHistoryCandidateHeap) Less(i, j int) bool {
+	if h[i].sequence != h[j].sequence {
+		return h[i].sequence < h[j].sequence
+	}
+	return h[i].historyKey < h[j].historyKey
+}
+
+func (h peerHeaderHistoryCandidateHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+
+func (h *peerHeaderHistoryCandidateHeap) Push(value any) {
+	candidate := value.(*peerHeaderHistoryCandidate) //nolint:forcetypeassert
+	candidate.index = len(*h)
+	*h = append(*h, candidate)
+}
+
+func (h *peerHeaderHistoryCandidateHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	candidate := old[last]
+	old[last] = nil
+	candidate.index = -1
+	*h = old[:last]
+	return candidate
 }
 
 // peerHeaderHistoryPathCacheEntry memoizes one retained header's walk toward
@@ -848,6 +888,8 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
+	blockfetchEventID := ls.metrics.beginBlockfetchEvent()
+	defer ls.metrics.endBlockfetchEvent(blockfetchEventID)
 	// Registered before the mutex is taken so defer's LIFO order runs it
 	// after the unlock. RecoverAfterLocalRollback nests this mutex inside
 	// chainsyncMutex, so publishing while holding it deadlocks the same
@@ -886,7 +928,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 			)
 		}
 	} else if e.Block != nil {
-		if err := ls.handleEventBlockfetchBlockDeferred(e, &pending); err != nil {
+		if err := ls.handleEventBlockfetchBlockDeferredWhileLocked(
+			e,
+			&pending,
+		); err != nil {
 			if ls.config.RejectBlockDecodeCacheFunc != nil && len(e.RawBlock) > 0 {
 				ls.config.RejectBlockDecodeCacheFunc(e.Type, e.RawBlock)
 			}
@@ -1628,44 +1673,69 @@ func (ls *LedgerState) makePeerHeaderHistoryRoom(
 	recordBytes int,
 	protectedKey string,
 ) bool {
+	var (
+		evictable peerHeaderHistoryCandidateHeap
+		retirable peerHeaderHistoryCandidateHeap
+	)
+	retirableByKey := make(
+		map[string]*peerHeaderHistoryCandidate,
+		len(ls.peerHeaderHistory),
+	)
+	for key, history := range ls.peerHeaderHistory {
+		if len(history.order) == 0 {
+			continue
+		}
+		oldest := history.byHash[history.order[0]].sequence
+		if len(history.order) > minPeerHeaderHistoryRecords {
+			evictable = append(evictable, &peerHeaderHistoryCandidate{
+				historyKey: key,
+				sequence:   oldest,
+			})
+		}
+		if key != protectedKey {
+			candidate := &peerHeaderHistoryCandidate{
+				historyKey: key,
+				sequence:   oldest,
+			}
+			retirable = append(retirable, candidate)
+			retirableByKey[key] = candidate
+		}
+	}
+	heap.Init(&evictable)
+	heap.Init(&retirable)
+
 	for ls.peerHeaderHistoryBytes+recordBytes > maxPeerHeaderHistoryBytesTotal {
-		oldestKey := ""
-		oldestSequence := ^uint64(0)
-		for key, history := range ls.peerHeaderHistory {
-			if len(history.order) <= minPeerHeaderHistoryRecords {
+		if evictable.Len() > 0 {
+			candidate := heap.Pop(&evictable).(*peerHeaderHistoryCandidate) //nolint:forcetypeassert
+			if !ls.evictOldestPeerHeaderRecord(candidate.historyKey) {
 				continue
 			}
-			oldest := history.byHash[history.order[0]]
-			if oldest.sequence < oldestSequence {
-				oldestKey = key
-				oldestSequence = oldest.sequence
+			history := ls.peerHeaderHistory[candidate.historyKey]
+			if history == nil || len(history.order) == 0 {
+				continue
 			}
-		}
-		if oldestKey != "" {
-			ls.evictOldestPeerHeaderRecord(oldestKey)
+			oldestSequence := history.byHash[history.order[0]].sequence
+			if retirableCandidate := retirableByKey[candidate.historyKey]; retirableCandidate != nil {
+				retirableCandidate.sequence = oldestSequence
+				heap.Fix(&retirable, retirableCandidate.index)
+			}
+			if len(history.order) > minPeerHeaderHistoryRecords {
+				candidate.sequence = oldestSequence
+				heap.Push(&evictable, candidate)
+			}
 			continue
 		}
 
-		// Keep each peer's minimum ancestry when possible. If every history
-		// has reached that floor, retire the oldest other peer's history so a
-		// newly active peer can build a fresh intersection within the process
-		// budget. If only the current peer remains, its next header is omitted.
-		oldestKey = ""
-		oldestSequence = ^uint64(0)
-		for key, history := range ls.peerHeaderHistory {
-			if key == protectedKey || len(history.order) == 0 {
-				continue
-			}
-			oldest := history.byHash[history.order[0]]
-			if oldest.sequence < oldestSequence {
-				oldestKey = key
-				oldestSequence = oldest.sequence
-			}
-		}
-		if oldestKey == "" {
+		// Each heap is built once for this admission. Prefer evicting records
+		// above the per-peer ancestry floor; once none remain, retire the
+		// oldest other peer's full history so the active peer can keep making
+		// progress without a map walk for every evicted record.
+		if retirable.Len() == 0 {
 			return false
 		}
-		ls.removePeerHeaderHistory(oldestKey)
+		candidate := heap.Pop(&retirable).(*peerHeaderHistoryCandidate) //nolint:forcetypeassert
+		delete(retirableByKey, candidate.historyKey)
+		ls.removePeerHeaderHistory(candidate.historyKey)
 	}
 	return true
 }
@@ -4332,14 +4402,17 @@ func (ls *LedgerState) tryResolveFork(
 	return true, nil
 }
 
-// handleEventBlockfetchBlockDeferred is handleEventBlockfetchBlock that threads
-// the caller's pendingPublishes queue into flushPendingBlockfetchBlocksDeferred,
-// so chain.update events emitted while chainsyncBlockfetchMutex is held are
-// published only after it is released. A nil pubs preserves the standalone
-// immediate-publish behaviour for test callers.
-func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
+func (ls *LedgerState) handleEventBlockfetchBlockDeferredWhileLocked(
 	e BlockfetchEvent,
 	pubs *pendingPublishes,
+) error {
+	return ls.handleEventBlockfetchBlockDeferredInternal(e, pubs, true)
+}
+
+func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
+	e BlockfetchEvent,
+	pubs *pendingPublishes,
+	blockfetchMutexHeld bool,
 ) error {
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
@@ -4348,14 +4421,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
 	}
-	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
-		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
-		return nil
-	}
-	fromPrimary := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
-	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
-		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
-	if !fromPrimary && !fromShadow {
+	if !ls.blockfetchEventCurrent(e) {
 		return nil
 	}
 	// Deduplicate: if the other peer already delivered this block,
@@ -4419,9 +4485,33 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 		if verifyErr != nil {
 			if IsHeaderVerificationDeferred(verifyErr) {
 				ls.markDeferredHeaderValidation(e.Point)
-				if err := ls.persistDeferredHeaderValidation(e.Point, nil); err != nil {
+				persist := func() error {
+					return ls.persistDeferredHeaderValidation(e.Point, nil)
+				}
+				var persistErr error
+				if blockfetchMutexHeld {
+					persistErr = ls.withBlockfetchMutexReleased(persist)
+				} else {
+					persistErr = persist()
+				}
+				if persistErr != nil {
 					ls.clearDeferredHeaderValidation(e.Point)
-					return err
+					return persistErr
+				}
+				if blockfetchMutexHeld && !ls.blockfetchEventCurrent(e) {
+					ls.clearDeferredHeaderValidation(e.Point)
+					if ls.db != nil && ls.db.Metadata() != nil {
+						if err := ls.withBlockfetchMutexReleased(
+							func() error {
+								return ls.deleteDeferredMarkerUnlessReadmitted(
+									headerValidationPointKey(e.Point),
+								)
+							},
+						); err != nil {
+							return err
+						}
+					}
+					return nil
 				}
 				ls.config.Logger.Debug(
 					"deferring stateful block header verification until ledger apply",
@@ -4460,6 +4550,27 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
 	}
 	return nil
+}
+
+func (ls *LedgerState) blockfetchEventCurrent(e BlockfetchEvent) bool {
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
+		return false
+	}
+	return sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) ||
+		(connIdKey(ls.shadowBlockfetchConnId) != "" &&
+			sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId))
+}
+
+// withBlockfetchMutexReleased runs a metadata operation without holding the
+// lock shared with chainsync handlers. Its caller must hold the mutex, and it
+// always returns with the mutex held again.
+func (ls *LedgerState) withBlockfetchMutexReleased(
+	fn func() error,
+) error {
+	ls.chainsyncBlockfetchMutex.Unlock()
+	defer ls.chainsyncBlockfetchMutex.Lock()
+	return fn()
 }
 
 func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {

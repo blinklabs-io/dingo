@@ -549,14 +549,13 @@ func TestValidateTxShelleyFamily_RejectsUnregisteredDeregistration(
 		})
 	}
 
-	// On the balanced Shelley transaction, the only rule that rejects is
-	// this one: value conservation counts the refund, as it should for a
-	// real account.
+	// The Shelley transaction balances only when a registered credential's key
+	// deposit is refunded. An unregistered credential receives no refund.
 	pp := shelleyPP
 	pp.ProtocolMajor = lcommon.ProtocolVersionShelley
 	err := ValidateTxShelley(
 		&shelley.ShelleyTransaction{Body: shelleyBody}, 100, newLS(), &pp,
 	)
 	var notConserved shelley.ValueNotConservedUtxoError
-	assert.NotErrorAs(t, err, &notConserved)
+	assert.ErrorAs(t, err, &notConserved)
 }

@@ -22,6 +22,8 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -56,13 +58,14 @@ const (
 )
 
 type connectionInfo struct {
-	conn         *ouroboros.Connection
-	onClose      func()
-	peerAddr     string
-	isInbound    bool
-	isNtC        bool // true for node-to-client (local) connections
-	trustedLocal bool
-	ipKey        string // rate-limit key (IP or /64 prefix for IPv6)
+	conn             *ouroboros.Connection
+	ntcBufferTracker *ntcBufferTracker
+	onClose          func()
+	peerAddr         string
+	isInbound        bool
+	isNtC            bool // true for node-to-client (local) connections
+	trustedLocal     bool
+	ipKey            string // rate-limit key (IP or /64 prefix for IPv6)
 }
 
 type ConnectionManager struct {
@@ -79,25 +82,27 @@ type ConnectionManager struct {
 	// ListenersProvider/OutboundConnOptsProvider. Using sync.Once also
 	// supplies the happens-before edge that lets the resolved slices be read
 	// from the listener and outbound-dial paths without further locking.
-	resolveDeferredOnce  sync.Once
-	listenerConfigs      []ListenerConfig
-	outboundConnOptsCfgs []ouroboros.ConnectionOptionFunc
-	connectionsMutex     sync.Mutex
-	listenersMutex       sync.Mutex
-	closing              bool
-	goroutineWg          sync.WaitGroup // tracks spawned goroutines for clean shutdown
-	ipConns              map[string]int // IP key -> active connection count
-	ipConnsMutex         sync.Mutex
-	outboundCount        int
-	fullDuplexCount      int
-	unidirectional       int
-	duplexPeers          int
-	prunableConns        int
-	trackedConnCount     int
-	ntcAdmissionMutex    sync.Mutex
-	ntcCount             int
-	trustedLocalNtCCount int
-	ntcIPConns           map[string]int
+	resolveDeferredOnce          sync.Once
+	listenerConfigs              []ListenerConfig
+	outboundConnOptsCfgs         []ouroboros.ConnectionOptionFunc
+	connectionsMutex             sync.Mutex
+	listenersMutex               sync.Mutex
+	closing                      bool
+	goroutineWg                  sync.WaitGroup // tracks spawned goroutines for clean shutdown
+	ipConns                      map[string]int // IP key -> active connection count
+	ipConnsMutex                 sync.Mutex
+	outboundCount                int
+	fullDuplexCount              int
+	unidirectional               int
+	duplexPeers                  int
+	prunableConns                int
+	trackedConnCount             int
+	ntcAdmissionMutex            sync.Mutex
+	ntcCount                     int
+	trustedLocalNtCCount         int
+	ntcIPConns                   map[string]int
+	ntcTrustedLocalBufferedBytes atomic.Int64
+	ntcRemoteBufferedBytes       atomic.Int64
 }
 
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
@@ -737,6 +742,26 @@ func (c *ConnectionManager) addConnectionImpl(
 	ipKey string,
 	onClose func(),
 ) bool {
+	return c.addConnectionImplWithTrust(
+		conn,
+		isInbound,
+		isNtC,
+		peerAddr,
+		ipKey,
+		onClose,
+		false,
+	)
+}
+
+func (c *ConnectionManager) addConnectionImplWithTrust(
+	conn *ouroboros.Connection,
+	isInbound bool,
+	isNtC bool,
+	peerAddr string,
+	ipKey string,
+	onClose func(),
+	trustedLocal bool,
+) bool {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
 	c.listenersMutex.Lock()
@@ -825,6 +850,9 @@ func (c *ConnectionManager) addConnectionImpl(
 				"error closing evicted inbound connection",
 				"peer_addr", existingPeerAddr,
 			)
+			if existing.ntcBufferTracker != nil {
+				existing.ntcBufferTracker.close(c)
+			}
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
@@ -873,6 +901,9 @@ func (c *ConnectionManager) addConnectionImpl(
 				"error closing replaced connection",
 				"peer_addr", existingPeerAddr,
 			)
+			if existing.ntcBufferTracker != nil {
+				existing.ntcBufferTracker.close(c)
+			}
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
@@ -885,15 +916,22 @@ func (c *ConnectionManager) addConnectionImpl(
 		}
 	}
 
-	c.connections[connId] = &connectionInfo{
-		conn:      conn,
-		onClose:   onClose,
-		isInbound: isInbound,
-		isNtC:     isNtC,
-		peerAddr:  peerAddr,
-		ipKey:     ipKey,
+	info := &connectionInfo{
+		conn:         conn,
+		onClose:      onClose,
+		isInbound:    isInbound,
+		isNtC:        isNtC,
+		trustedLocal: trustedLocal,
+		peerAddr:     peerAddr,
+		ipKey:        ipKey,
 	}
-	info := c.connections[connId]
+	if isNtC {
+		info.ntcBufferTracker = &ntcBufferTracker{
+			conn:         conn,
+			trustedLocal: trustedLocal,
+		}
+	}
+	c.connections[connId] = info
 	if isInbound && !isNtC && c.tracksInboundPeerAddresses() {
 		if peerKey := NormalizePeerAddr(peerAddr); peerKey != "" {
 			c.inboundPeerAddrs[peerKey]++
@@ -907,7 +945,25 @@ func (c *ConnectionManager) addConnectionImpl(
 		if onClose != nil {
 			defer onClose()
 		}
-		err := <-conn.ErrorChan()
+		var err error
+		if info.ntcBufferTracker != nil {
+			ticker := time.NewTicker(ntcBufferedBytesSampleInterval)
+			defer ticker.Stop()
+		sampleLoop:
+			for {
+				select {
+				case <-ticker.C:
+					info.ntcBufferTracker.sample(c)
+				case err = <-conn.ErrorChan():
+					break sampleLoop
+				}
+			}
+		} else {
+			err = <-conn.ErrorChan()
+		}
+		if info.ntcBufferTracker != nil {
+			info.ntcBufferTracker.close(c)
+		}
 		// Remove connection (also releases IP slot)
 		if !c.RemoveConnection(connId, conn) {
 			return
@@ -1017,6 +1073,9 @@ func (c *ConnectionManager) RemoveConnection(
 	// Decrement per-IP counter if the connection had a tracked IP key
 	if info != nil && info.ipKey != "" {
 		c.releaseIPSlot(info.ipKey)
+	}
+	if info.ntcBufferTracker != nil {
+		info.ntcBufferTracker.close(c)
 	}
 	if info.onClose != nil {
 		info.onClose()

@@ -29,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -86,6 +87,15 @@ const (
 	// warning so catching up cannot flood the log; the
 	// dingo_metrics_leios_votes_not_emitted_total counter carries the rate.
 	slotWindowWarnInterval = 30 * time.Second
+)
+
+var (
+	errVoteVerificationProcessBudget = errors.New(
+		"process vote verification budget exhausted",
+	)
+	errVoteVerificationPeerTrackingBudget = errors.New(
+		"vote verification peer tracking capacity exhausted",
+	)
 )
 
 // Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
@@ -247,12 +257,12 @@ type SlotProvider interface {
 	CurrentOrTipSlot() uint64
 }
 
-// CommitteeParamsProvider supplies the Leios committee protocol
-// parameters. Implementations must validate the tau < sigma_c invariant
-// (DijkstraProtocolParameters.ValidateLeiosCommitteeParameters) and
-// surface failures as errors.
+// CommitteeParamsProvider supplies the committee size and quorum threshold
+// captured by the mark snapshot used for the requested epoch.
 type CommitteeParamsProvider interface {
-	LeiosCommitteeParameters() (sigmaC, tau *big.Rat, err error)
+	LeiosCommitteeParameters(
+		snapshotEpoch uint64,
+	) (committeeSize uint16, tau *big.Rat, err error)
 }
 
 // VoteManagerConfig configures a VoteManager.
@@ -447,15 +457,12 @@ type VoteManager struct {
 	verifyVoteSignature func(*bls12381.G2Affine, []byte, []byte) error
 	// voteTTL, maxVotes, and maxRecords bound the vote stores; tests
 	// may lower them.
-	voteTTL                       time.Duration
-	maxVotes                      int
-	maxRecords                    int
-	voteVerificationWindowStarted time.Time
-	voteVerificationCount         int
-	voteVerificationByConn        map[string]int
-	voteVerificationsInFlight     map[lcommon.LeiosVoteId]lcommon.Blake2b256
-	voteInvalidWindowStarted      time.Time
-	voteInvalidByConn             map[string]int
+	voteTTL                   time.Duration
+	maxVotes                  int
+	maxRecords                int
+	voteVerificationBudget    *ratewindow.FixedWindow
+	voteVerificationsInFlight map[lcommon.LeiosVoteId]lcommon.Blake2b256
+	voteInvalidBudget         *ratewindow.FixedWindow
 
 	mu sync.Mutex
 	// localEmissionMu keeps activation replay ahead of ordinary local emission
@@ -613,11 +620,21 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 			map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote,
 		),
 		pendingVoteCountByConn: make(map[string]int),
-		voteVerificationByConn: make(map[string]int),
+		voteVerificationBudget: ratewindow.NewFixedWindow(
+			voteVerificationWindow,
+			voteVerificationMaxPerPeer,
+			voteVerificationMaxProcess,
+			voteVerificationMaxPeers,
+		),
 		voteVerificationsInFlight: make(
 			map[lcommon.LeiosVoteId]lcommon.Blake2b256,
 		),
-		voteInvalidByConn: make(map[string]int),
+		voteInvalidBudget: ratewindow.NewFixedWindow(
+			voteVerificationWindow,
+			0,
+			0,
+			voteVerificationMaxPeers,
+		),
 	}
 	if cfg.PromRegistry != nil {
 		m.metrics = initVoteManagerMetrics(cfg.PromRegistry)
@@ -1230,6 +1247,61 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 	return entry.committee, nil
 }
 
+// ValidateDijkstraCertificate verifies a Dijkstra certificate against the
+// historical committee and keys resolved for epoch. Unlike vote admission,
+// block admission is strict: every selected signer must have a verified key.
+func (m *VoteManager) ValidateDijkstraCertificate(
+	epoch uint64,
+	signers []byte,
+	aggregatedSignature []byte,
+	message []byte,
+) error {
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return fmt.Errorf("resolve Leios committee for epoch %d: %w", epoch, err)
+	}
+	if err := lcommon.ValidateLeiosSignature(
+		"Dijkstra Leios certificate aggregated signature",
+		aggregatedSignature,
+	); err != nil {
+		return err
+	}
+	if err := lcommon.ValidateLeiosSignerBitfield(signers, entry.committee.Size()); err != nil {
+		return err
+	}
+	var signerStake uint64
+	signerPubs := make([]*bls12381.G2Affine, 0, len(entry.committee.Members))
+	for _, member := range entry.committee.Members {
+		if !lcommon.LeiosSignerBit(signers, member.VoterId) {
+			continue
+		}
+		pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
+		if !ok {
+			return fmt.Errorf("leios certificate signer %d has no usable key", member.VoterId)
+		}
+		if ^uint64(0)-signerStake < member.Stake {
+			return errors.New("leios certificate signer stake overflows uint64")
+		}
+		signerStake += member.Stake
+		signerPubs = append(signerPubs, pub)
+	}
+	quorumMet, err := MeetsStakeQuorum(
+		signerStake,
+		entry.committee.TotalActiveStake,
+		entry.tau,
+	)
+	if err != nil {
+		return err
+	}
+	if !quorumMet {
+		return ErrQuorumNotMet
+	}
+	if err := VerifyAggregateSignature(signerPubs, message, aggregatedSignature); err != nil {
+		return fmt.Errorf("verify Leios certificate aggregate signature: %w", err)
+	}
+	return nil
+}
+
 // committeeAndParamsForEpoch returns the memoized epochEntry (committee,
 // quorum threshold, and resolved on-chain voter keys) for an epoch,
 // computing it from the stake snapshot on first use. Failures (snapshot
@@ -1353,14 +1425,16 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 func (m *VoteManager) computeCommitteeEntry(
 	epoch uint64,
 ) (*epochEntry, uint64, error) {
-	sigmaC, tau, err := m.paramsProvider.LeiosCommitteeParameters()
+	snapshotEpoch := CommitteeSnapshotEpoch(epoch)
+	committeeSize, tau, err := m.paramsProvider.LeiosCommitteeParameters(
+		snapshotEpoch,
+	)
 	if err != nil {
-		return nil, 0, fmt.Errorf(
+		return nil, snapshotEpoch, fmt.Errorf(
 			"leios committee parameters: %w",
 			err,
 		)
 	}
-	snapshotEpoch := CommitteeSnapshotEpoch(epoch)
 	poolStakes, totalActiveStake, err := m.stakeProvider.GetStakeDistribution(
 		snapshotEpoch,
 	)
@@ -1376,7 +1450,7 @@ func (m *VoteManager) computeCommitteeEntry(
 		snapshotEpoch,
 		poolStakes,
 		totalActiveStake,
-		sigmaC,
+		uint64(committeeSize), // #nosec G115 -- uint16 always fits uint64
 	)
 	if err != nil {
 		return nil, snapshotEpoch, fmt.Errorf(
@@ -1388,7 +1462,7 @@ func (m *VoteManager) computeCommitteeEntry(
 	// Resolve keys only for committee members, not every pool in the stake
 	// distribution: resolveVoterKey only ever looks up a member.PoolKeyHash,
 	// and ComputeCommittee already trimmed poolStakes down to the
-	// stake-coverage prefix that actually made the committee. Verifying a
+	// top-N members that make the committee. Verifying a
 	// proof of possession is a pairing operation (measured ~0.75ms/key on
 	// this branch); at Cardano's pool counts, verifying every registered
 	// pool instead of just the committee would burn seconds of pairing
@@ -1650,27 +1724,17 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 		}
 		return false, nil
 	}
-	if m.voteVerificationWindowStarted.IsZero() ||
-		now.Sub(m.voteVerificationWindowStarted) >= voteVerificationWindow {
-		m.voteVerificationWindowStarted = now
-		m.voteVerificationCount = 0
-		clear(m.voteVerificationByConn)
-	}
-	if _, knownPeer := m.voteVerificationByConn[connKey]; !knownPeer &&
-		len(m.voteVerificationByConn) >= voteVerificationMaxPeers {
+	switch m.voteVerificationBudget.Admit(connKey, now) {
+	case ratewindow.ProcessBudgetExceeded:
 		m.mu.Unlock()
-		return false, errors.New("vote verification peer budget exhausted")
-	}
-	if m.voteVerificationCount >= voteVerificationMaxProcess {
-		m.mu.Unlock()
-		return false, errors.New("process vote verification budget exhausted")
-	}
-	if m.voteVerificationByConn[connKey] >= voteVerificationMaxPerPeer {
+		return false, errVoteVerificationProcessBudget
+	case ratewindow.PeerBudgetExceeded:
 		m.mu.Unlock()
 		return false, errors.New("peer vote verification budget exhausted")
+	case ratewindow.PeerTrackingCapacityExceeded:
+		m.mu.Unlock()
+		return false, errVoteVerificationPeerTrackingBudget
 	}
-	m.voteVerificationCount++
-	m.voteVerificationByConn[connKey]++
 	m.voteVerificationsInFlight[id] = vote.EndorserBlockHash
 	m.mu.Unlock()
 	return true, nil
@@ -1683,20 +1747,14 @@ func (m *VoteManager) rejectIncomingVote(
 	err error,
 ) error {
 	m.rejectVote(reason, vote, err)
-	now := m.now()
-	m.mu.Lock()
-	if m.voteInvalidWindowStarted.IsZero() ||
-		now.Sub(m.voteInvalidWindowStarted) >= voteVerificationWindow {
-		m.voteInvalidWindowStarted = now
-		clear(m.voteInvalidByConn)
-	}
-	if _, known := m.voteInvalidByConn[connKey]; !known &&
-		len(m.voteInvalidByConn) >= voteVerificationMaxPeers {
-		m.mu.Unlock()
+	if errors.Is(err, errVoteVerificationProcessBudget) ||
+		errors.Is(err, errVoteVerificationPeerTrackingBudget) {
 		return nil
 	}
-	m.voteInvalidByConn[connKey]++
-	penalize := m.voteInvalidByConn[connKey] >= voteInvalidPeerLimit
+	now := m.now()
+	m.mu.Lock()
+	count, tracked := m.voteInvalidBudget.Record(connKey, now)
+	penalize := tracked && count >= voteInvalidPeerLimit
 	m.mu.Unlock()
 	if penalize {
 		return fmt.Errorf("%w: connection %s exceeded the vote rejection limit", ErrPeerMisbehavior, connKey)

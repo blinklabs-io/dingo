@@ -828,9 +828,22 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	hotCredential common.Credential,
 ) (*common.CommitteeMember, error) {
-	// Converted before the authorizations load so an unsupported tag is
-	// rejected even when the committee has no active authorizations, matching
-	// the production ordering in LedgerView.CommitteeHotCredentialMember.
+	members, err := p.CommitteeHotCredentialMembers(hotCredential)
+	if err != nil || len(members) == 0 {
+		return nil, err
+	}
+	return members[0], nil
+}
+
+// CommitteeHotCredentialMembers implements the optional gouroboros
+// ledger/common.CommitteeHotCredentialMembers capability (gouroboros#2574);
+// see LedgerView.CommitteeHotCredentialMembers for why a plural result is
+// required. Mirrors the production ordering in that method: an unsupported
+// hot credential tag is rejected even when the committee has no active
+// authorizations.
+func (p *DingoStateProvider) CommitteeHotCredentialMembers(
+	hotCredential common.Credential,
+) ([]*common.CommitteeMember, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
@@ -846,6 +859,7 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 			err,
 		)
 	}
+	var members []*common.CommitteeMember
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||
 			common.NewBlake2b224(authorization.HotCredential) !=
@@ -865,9 +879,9 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		if member == nil || member.Resigned {
 			continue
 		}
-		return member, nil
+		members = append(members, member)
 	}
-	return nil, nil
+	return members, nil
 }
 
 // DRepRegistration looks up a DRep registration by its full credential.
@@ -1127,11 +1141,19 @@ func extractCostModels(
 }
 
 // Compile-time interface check
-var _ conformance.StateProvider = (*DingoStateProvider)(nil)
+var (
+	_ conformance.StateProvider = (*DingoStateProvider)(nil)
+	_ common.EpochState         = (*DingoStateProvider)(nil)
+)
 
 // Keep the conformance provider on the same credential-aware committee
 // capability as the production LedgerView.
 var _ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
+
+// Keep the conformance provider on the same plural committee-authorization
+// capability as the production LedgerView (gouroboros#2574); see
+// LedgerView.CommitteeHotCredentialMembers.
+var _ common.CommitteeHotCredentialMembers = (*DingoStateProvider)(nil)
 
 // conformance.StateProvider does not include DRepDelegationState: the Conway
 // reward-withdrawal rule discovers it with a runtime type assertion instead.

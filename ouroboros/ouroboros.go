@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -102,6 +103,12 @@ type Ouroboros struct {
 	leiosAnnouncementLedger LeiosAnnouncementLedger
 	leiosVotes              LeiosVoteHandler
 	leiosPipeline           LeiosPipelineHandler
+	leiosValidationCtx      context.Context
+	leiosValidationCancel   context.CancelFunc
+	leiosValidationSlots    chan struct{}
+	leiosValidationWG       sync.WaitGroup
+	leiosValidationMu       sync.Mutex
+	leiosValidationClosed   bool
 	config                  OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
@@ -255,7 +262,7 @@ type Ouroboros struct {
 	leiosAnnouncementsMu       sync.Mutex
 	leiosAnnouncements         map[string]leiosAnnouncement
 	leiosAnnouncementInFlight  map[string]struct{}
-	leiosInvalidAnnouncements  map[string]leiosInvalidAnnouncementState
+	leiosInvalidAnnouncements  *ratewindow.FixedWindow
 	leiosInvalidAnnouncementMu sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
@@ -456,6 +463,10 @@ type blockfetchMetrics struct {
 	blocksUnder1s      atomic.Int64
 	blocksUnder3s      atomic.Int64
 	blocksUnder5s      atomic.Int64
+	// Ring of the last N at-tip block delays, exported by block slot so a
+	// per-block chart sees every block; blockDelay above keeps only the most
+	// recent one, which a scrape interval longer than the block gap misses.
+	recentDelays *recentBlockDelays
 	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
 	// into a gledger.Block, by stage ("decode"). Only observed on a
 	// decode-cache miss, since a hit reuses another connection's already
@@ -503,6 +514,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	futureHeaderResyncCtx, futureHeaderResyncCancel := context.WithCancel(
 		context.Background(),
 	)
+	leiosValidationCtx, leiosValidationCancel := context.WithCancel(
+		context.Background(),
+	)
 	o := &Ouroboros{
 		config:                  cfg,
 		registerer:              newTrackingRegisterer(cfg.PromRegistry),
@@ -510,6 +524,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		connManager:             cfg.ConnManager,
 		ledgerState:             cfg.LedgerState,
 		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		leiosValidationCtx:      leiosValidationCtx,
+		leiosValidationCancel:   leiosValidationCancel,
+		leiosValidationSlots:    make(chan struct{}, 2),
 		mempool:                 cfg.Mempool,
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
@@ -545,10 +562,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),
-		leiosEBLog:                 newLeiosForgedEBLog(),
-		leiosAnnouncements:         make(map[string]leiosAnnouncement),
-		leiosAnnouncementInFlight:  make(map[string]struct{}),
-		leiosInvalidAnnouncements:  make(map[string]leiosInvalidAnnouncementState),
+		leiosEBLog:                newLeiosForgedEBLog(),
+		leiosAnnouncements:        make(map[string]leiosAnnouncement),
+		leiosAnnouncementInFlight: make(map[string]struct{}),
+		leiosInvalidAnnouncements: ratewindow.NewFixedWindow(
+			leiosInvalidAnnouncementWindow,
+			0,
+			0,
+			leiosInvalidAnnouncementMaxPeers,
+		),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
 		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
@@ -597,6 +619,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "delay in seconds for the most recent block fetch",
 		},
 	)
+	o.blockfetchMetrics.recentDelays = newRecentBlockDelays()
+	o.registerer.MustRegister(o.blockfetchMetrics.recentDelays)
 	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_blockfetchclient_lateblocks",

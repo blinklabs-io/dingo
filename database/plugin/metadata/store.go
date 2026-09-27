@@ -213,9 +213,9 @@ type GovernanceStore interface {
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
-	// GetExpiringGovernanceProposals returns proposals whose
-	// `expires_epoch` is strictly less than the given epoch and that
-	// have not yet been enacted, expired, or soft-deleted. Used at
+	// GetExpiringGovernanceProposals returns unratified proposals whose
+	// `expires_epoch` is strictly less than the given epoch and that have
+	// not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark proposals expired (ineligible for further
 	// ratification). Their deposit is not returned yet -- see
 	// GetExpiredAwaitingDropGovernanceProposals.
@@ -840,9 +840,8 @@ type UtxoStore interface {
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
-	// row are silently ignored (the SQL filter is deleted_slot == 0,
-	// so already-deleted rows don't get rewritten). Rollback
-	// un-deletion is handled by SetUtxosNotDeletedAfterSlot.
+	// row are silently ignored. Rollback un-deletion is handled by
+	// SetUtxosNotDeletedAfterSlot.
 	MarkUtxosDeletedAtSlot(
 		txn types.Txn,
 		refs []types.UtxoKey,
@@ -1896,12 +1895,11 @@ type MetadataStore interface {
 	// first-ever registration is immediate). Callers must pass the current
 	// epoch's start slot, not an arbitrary point in the past.
 	//
-	// A key a pool proposed earlier in the same epoch and then superseded
-	// with a later re-registration (A -> B -> C) also still counts as
-	// claimed by that pool for the rest of the epoch, even though it is
-	// no longer that pool's pending value either: psVRFKeyHashes retains
-	// every key placed in psFutureStakePoolParams during the epoch, not
-	// only the current one.
+	// Only the pool's latest same-epoch registration reserves its key. A
+	// key proposed earlier in the same epoch and then superseded by a
+	// later re-registration (A -> B -> C) is freed once superseded: it was
+	// never placed in psStakePools and is no longer the pending value in
+	// psFutureStakePoolParams, so a different pool may claim it.
 	GetPoolByVrfKeyHash(
 		vrfKeyHash []byte,
 		epochStartSlot uint64,
@@ -2234,6 +2232,14 @@ type MetadataStore interface {
 	// decoder for the CBOR to decode.
 	GetPParams(
 		uint64, // epoch
+		uint, // eraId
+		types.Txn,
+	) ([]models.PParams, error)
+
+	// ListPParamsForEra returns every stored protocol-parameter row for an era
+	// in insertion order. Callers that need the era's initial parameters use
+	// the first row rather than substituting a later parameter update.
+	ListPParamsForEra(
 		uint, // eraId
 		types.Txn,
 	) ([]models.PParams, error)

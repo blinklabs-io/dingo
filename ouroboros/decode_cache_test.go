@@ -1257,6 +1257,38 @@ func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 	)
 }
 
+func TestBlockfetchClientBlockRawRetainsMalformedEnvelopeFailure(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	blockType, _ := conwayBlockFixtureBytes(t)
+	badEnvelope := []byte{0x81, 0x00}
+	ctx := blockfetch.CallbackContext{}
+
+	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badEnvelope))
+	require.Equal(t, 1, decodeCacheLen(o.blockDecodeCache))
+	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badEnvelope))
+	require.Equal(t, 1, decodeCacheLen(o.blockDecodeCache))
+}
+
+func TestChainsyncClientRollForwardRawRetainsMalformedEnvelopeFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+	headerType, _ := conwayHeaderFixtureBytes(t)
+	badEnvelope := []byte{0x81, 0x00}
+	ctx := ochainsync.CallbackContext{ConnectionId: decodeCacheTestConnId()}
+
+	require.Error(t, o.chainsyncClientRollForwardRaw(
+		ctx, headerType, badEnvelope, ochainsync.Tip{},
+	))
+	require.Equal(t, 1, decodeCacheLen(o.headerDecodeCache))
+	require.Error(t, o.chainsyncClientRollForwardRaw(
+		ctx, headerType, badEnvelope, ochainsync.Tip{},
+	))
+	require.Equal(t, 1, decodeCacheLen(o.headerDecodeCache))
+}
+
 // TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses proves the
 // same fix for the concurrent-waiter case specifically: N callers racing on
 // one in-flight decode that ultimately fails all get decoded=false from

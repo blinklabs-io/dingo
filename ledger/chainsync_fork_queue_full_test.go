@@ -43,6 +43,21 @@ type encodedHeader struct {
 
 func (h encodedHeader) Cbor() []byte { return h.cbor }
 
+func assertPeerHeaderHistoryByteAccounting(t *testing.T, ls *LedgerState) {
+	t.Helper()
+
+	total := 0
+	for _, history := range ls.peerHeaderHistory {
+		historyBytes := 0
+		for _, record := range history.byHash {
+			historyBytes += record.bytes
+		}
+		assert.Equal(t, historyBytes, history.retainedBytes)
+		total += historyBytes
+	}
+	assert.Equal(t, total, ls.peerHeaderHistoryBytes)
+}
+
 // buildOverflowForkPath constructs a chain of headerCount headers extending
 // directly from the fixture's committed tip and records all but the last
 // into peerHeaderHistory, exactly as recordPeerHeaderHistory does for every
@@ -161,6 +176,7 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 	assert.Zero(t, decodedHeaders)
 	assert.Equal(t, retainedBytes, history.retainedBytes)
 	assert.Equal(t, retainedBytes, fixture.ls.peerHeaderHistoryBytes)
+	assertPeerHeaderHistoryByteAccounting(t, fixture.ls)
 	assert.LessOrEqual(
 		t,
 		history.retainedBytes,
@@ -205,6 +221,50 @@ func TestPeerHeaderHistoryGlobalBudgetRetiresOldestPeerDeterministically(
 		require.Len(t, ls.peerHeaderHistory[key].order, minPeerHeaderHistoryRecords)
 	}
 	assert.LessOrEqual(t, ls.peerHeaderHistoryBytes, maxPeerHeaderHistoryBytesTotal)
+	assertPeerHeaderHistoryByteAccounting(t, ls)
+}
+
+func TestPeerHeaderHistoryEvictsExtraRecordsBeforeRetiringPeer(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
+	const retainedPerRecord = 32 << 10
+	for peer := range 4 {
+		key := fmt.Sprintf("peer-%d", peer)
+		count := minPeerHeaderHistoryRecords
+		if peer == 3 {
+			count++
+		}
+		history := &peerHeaderChain{
+			order:  make([]string, 0, count),
+			byHash: make(map[string]peerHeaderRecord, count),
+		}
+		for idx := range count {
+			ls.peerHeaderHistorySequence++
+			hash := fmt.Sprintf("%s-header-%d", key, idx)
+			bytes := retainedPerRecord
+			if peer == 3 && idx == count-1 {
+				bytes = 16 << 10
+			}
+			record := peerHeaderRecord{
+				bytes:    bytes,
+				sequence: ls.peerHeaderHistorySequence,
+			}
+			history.order = append(history.order, hash)
+			history.byHash[hash] = record
+			history.retainedBytes += bytes
+			ls.peerHeaderHistoryBytes += bytes
+		}
+		ls.peerHeaderHistory[key] = history
+	}
+
+	require.True(t, ls.makePeerHeaderHistoryRoom(1<<20, "new-peer"))
+	assert.Nil(t, ls.peerHeaderHistory["peer-0"], "retire the oldest peer only after excess records are gone")
+	require.NotNil(t, ls.peerHeaderHistory["peer-3"])
+	assert.Len(t, ls.peerHeaderHistory["peer-3"].order, minPeerHeaderHistoryRecords)
+	assert.LessOrEqual(t, ls.peerHeaderHistoryBytes, maxPeerHeaderHistoryBytesTotal)
+	assertPeerHeaderHistoryByteAccounting(t, ls)
 }
 
 func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {

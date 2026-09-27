@@ -4,7 +4,74 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
+
+	ouroboros "github.com/blinklabs-io/gouroboros"
 )
+
+const ntcBufferedBytesSampleInterval = time.Second
+
+type ntcBufferTracker struct {
+	conn         *ouroboros.Connection
+	trustedLocal bool
+	lastSample   int
+	closed       bool
+	mu           sync.Mutex
+}
+
+func (t *ntcBufferTracker) sample(manager *ConnectionManager) {
+	current := 0
+	if t.conn != nil {
+		if muxer := t.conn.Muxer(); muxer != nil {
+			current = muxer.ReadBufferInUse()
+		}
+	}
+	t.record(manager, current)
+}
+
+func (t *ntcBufferTracker) close(manager *ConnectionManager) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return
+	}
+	t.sampleLocked(manager)
+	manager.addNtCBufferedBytes(t.trustedLocal, -t.lastSample)
+	t.lastSample = 0
+	t.closed = true
+}
+
+func (t *ntcBufferTracker) record(manager *ConnectionManager, current int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return
+	}
+	manager.addNtCBufferedBytes(t.trustedLocal, current-t.lastSample)
+	t.lastSample = current
+}
+
+func (t *ntcBufferTracker) sampleLocked(manager *ConnectionManager) {
+	current := 0
+	if t.conn != nil {
+		if muxer := t.conn.Muxer(); muxer != nil {
+			current = muxer.ReadBufferInUse()
+		}
+	}
+	manager.addNtCBufferedBytes(t.trustedLocal, current-t.lastSample)
+	t.lastSample = current
+}
+
+func (c *ConnectionManager) addNtCBufferedBytes(
+	trustedLocal bool,
+	delta int,
+) {
+	if trustedLocal {
+		c.ntcTrustedLocalBufferedBytes.Add(int64(delta))
+		return
+	}
+	c.ntcRemoteBufferedBytes.Add(int64(delta))
+}
 
 func (c *ConnectionManager) reserveNtCSlot(addr net.Addr, trustedLocal bool) func() {
 	ipKey := ""
@@ -69,16 +136,8 @@ func (c *ConnectionManager) reserveNtCSlot(addr net.Addr, trustedLocal bool) fun
 }
 
 func (c *ConnectionManager) ntcBufferedBytes(trustedLocal bool) float64 {
-	c.connectionsMutex.Lock()
-	defer c.connectionsMutex.Unlock()
-	var total float64
-	for _, info := range c.connections {
-		if info == nil || !info.isNtC || info.trustedLocal != trustedLocal || info.conn == nil {
-			continue
-		}
-		if muxer := info.conn.Muxer(); muxer != nil {
-			total += float64(muxer.ReadBufferInUse())
-		}
+	if trustedLocal {
+		return float64(c.ntcTrustedLocalBufferedBytes.Load())
 	}
-	return total
+	return float64(c.ntcRemoteBufferedBytes.Load())
 }

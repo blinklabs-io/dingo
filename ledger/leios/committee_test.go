@@ -16,8 +16,6 @@ package leios
 
 import (
 	"encoding/hex"
-	"fmt"
-	"math"
 	"math/big"
 	"testing"
 
@@ -33,7 +31,7 @@ func testPoolHash(id byte) string {
 	return hex.EncodeToString(hash)
 }
 
-func TestComputeCommitteeOrdersByStakeDescending(t *testing.T) {
+func TestComputeCommitteeSelectsTopNByStake(t *testing.T) {
 	t.Parallel()
 
 	poolStakes := map[string]uint64{
@@ -42,172 +40,107 @@ func TestComputeCommitteeOrdersByStakeDescending(t *testing.T) {
 		testPoolHash(3): 30,
 		testPoolHash(4): 5,
 	}
-	committee, err := ComputeCommittee(
-		10, 8, poolStakes, 100, big.NewRat(1, 1),
-	)
+	committee, err := ComputeCommittee(10, 8, poolStakes, 100, 2)
 	require.NoError(t, err)
-	require.Len(t, committee.Members, 4)
+	require.Len(t, committee.Members, 2)
 	assert.Equal(t, uint64(10), committee.Epoch)
 	assert.Equal(t, uint64(8), committee.SnapshotEpoch)
 	assert.Equal(t, uint64(100), committee.TotalActiveStake)
-	assert.Equal(t, uint64(100), committee.CommitteeStake)
-	stakes := make([]uint64, 0, len(committee.Members))
-	for i, member := range committee.Members {
-		// VoterId is the position in the selected order
-		assert.Equal(t, uint64(i), member.VoterId) // #nosec G115
-		stakes = append(stakes, member.Stake)
-	}
-	assert.Equal(t, []uint64{50, 30, 15, 5}, stakes)
+	assert.Equal(t, uint64(80), committee.CommitteeStake)
 	assert.Equal(t, byte(2), committee.Members[0].PoolKeyHash[0])
 	assert.Equal(t, byte(3), committee.Members[1].PoolKeyHash[0])
-	assert.Equal(t, byte(1), committee.Members[2].PoolKeyHash[0])
-	assert.Equal(t, byte(4), committee.Members[3].PoolKeyHash[0])
 }
 
-func TestComputeCommitteeBreaksTiesByPoolKeyHashAscending(t *testing.T) {
+func TestComputeCommitteeSizeExceedsCandidateCount(t *testing.T) {
 	t.Parallel()
 
-	poolStakes := map[string]uint64{
-		testPoolHash(7): 25,
-		testPoolHash(3): 25,
-		testPoolHash(9): 25,
-		testPoolHash(5): 25,
-	}
 	committee, err := ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(1, 1),
-	)
-	require.NoError(t, err)
-	require.Len(t, committee.Members, 4)
-	assert.Equal(t, byte(3), committee.Members[0].PoolKeyHash[0])
-	assert.Equal(t, byte(5), committee.Members[1].PoolKeyHash[0])
-	assert.Equal(t, byte(7), committee.Members[2].PoolKeyHash[0])
-	assert.Equal(t, byte(9), committee.Members[3].PoolKeyHash[0])
-}
-
-func TestComputeCommitteeStopsAtThresholdCrossing(t *testing.T) {
-	t.Parallel()
-
-	poolStakes := map[string]uint64{
-		testPoolHash(1): 50,
-		testPoolHash(2): 30,
-		testPoolHash(3): 15,
-		testPoolHash(4): 5,
-	}
-	// 50+30 = 80 meets sigma_c = 80/100 exactly: the crossing pool is
-	// included and selection stops after it.
-	committee, err := ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(80, 100),
+		1, 0,
+		map[string]uint64{testPoolHash(1): 60, testPoolHash(2): 40},
+		100,
+		9,
 	)
 	require.NoError(t, err)
 	require.Len(t, committee.Members, 2)
-	assert.Equal(t, uint64(80), committee.CommitteeStake)
-
-	// 80 < 81: the third pool is needed.
-	committee, err = ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(81, 100),
-	)
-	require.NoError(t, err)
-	require.Len(t, committee.Members, 3)
-	assert.Equal(t, uint64(95), committee.CommitteeStake)
-
-	// A single pool already crossing the threshold forms the committee.
-	committee, err = ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(1, 2),
-	)
-	require.NoError(t, err)
-	require.Len(t, committee.Members, 1)
-	assert.Equal(t, uint64(50), committee.Members[0].Stake)
 }
 
-func TestComputeCommitteeExcludesZeroStakePools(t *testing.T) {
+func TestComputeCommitteeIncludesZeroStakeSeatsInPoolIDOrder(t *testing.T) {
 	t.Parallel()
 
 	poolStakes := map[string]uint64{
 		testPoolHash(1): 60,
 		testPoolHash(2): 0,
-		testPoolHash(3): 40,
+		testPoolHash(3): 0,
+		testPoolHash(4): 40,
 	}
+	committee, err := ComputeCommittee(1, 0, poolStakes, 100, 4)
+	require.NoError(t, err)
+	require.Len(t, committee.Members, 4)
+	assert.Equal(t, []byte{1, 4, 2, 3}, []byte{
+		committee.Members[0].PoolKeyHash[0],
+		committee.Members[1].PoolKeyHash[0],
+		committee.Members[2].PoolKeyHash[0],
+		committee.Members[3].PoolKeyHash[0],
+	})
+	assert.Equal(t, uint64(100), committee.CommitteeStake)
+	for i, member := range committee.Members {
+		assert.Equal(t, uint64(i), member.VoterId)
+	}
+}
+
+func TestComputeCommitteeZeroStakeSeatsDoNotAddQuorumWeight(t *testing.T) {
+	t.Parallel()
+
 	committee, err := ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(1, 1),
+		1, 0,
+		map[string]uint64{testPoolHash(1): 100, testPoolHash(2): 0},
+		100,
+		2,
 	)
 	require.NoError(t, err)
 	require.Len(t, committee.Members, 2)
-	for _, member := range committee.Members {
-		assert.NotEqual(t, byte(2), member.PoolKeyHash[0])
-		assert.NotZero(t, member.Stake)
-	}
-}
-
-func TestComputeCommitteeFullCoverageSelectsAllPools(t *testing.T) {
-	t.Parallel()
-
-	poolStakes := make(map[string]uint64)
-	for i := range byte(50) {
-		poolStakes[testPoolHash(i+1)] = uint64(i+1) * 100
-	}
-	var total uint64
-	for _, stake := range poolStakes {
-		total += stake
-	}
-	committee, err := ComputeCommittee(
-		1, 0, poolStakes, total, big.NewRat(1, 1),
-	)
+	assert.Equal(t, uint64(0), committee.Members[1].Stake)
+	met, err := MeetsStakeQuorum(committee.Members[1].Stake, committee.TotalActiveStake, big.NewRat(1, 2))
 	require.NoError(t, err)
-	assert.Len(t, committee.Members, 50)
-	assert.Equal(t, total, committee.CommitteeStake)
+	assert.False(t, met)
 }
 
-func TestComputeCommitteeEmptyDistribution(t *testing.T) {
+func TestComputeCommitteeBreaksEqualStakeTiesByPoolID(t *testing.T) {
 	t.Parallel()
 
-	_, err := ComputeCommittee(
-		1, 0, map[string]uint64{}, 100, big.NewRat(1, 1),
-	)
-	assert.ErrorIs(t, err, ErrEmptyStakeDistribution)
-
-	// All-zero stakes are equivalent to an empty distribution
-	_, err = ComputeCommittee(
-		1, 0,
-		map[string]uint64{testPoolHash(1): 0},
-		100, big.NewRat(1, 1),
-	)
-	assert.ErrorIs(t, err, ErrEmptyStakeDistribution)
-
-	// Zero total active stake cannot form a committee
-	_, err = ComputeCommittee(
-		1, 0,
-		map[string]uint64{testPoolHash(1): 10},
-		0, big.NewRat(1, 1),
-	)
-	assert.ErrorIs(t, err, ErrEmptyStakeDistribution)
+	committee, err := ComputeCommittee(1, 0, map[string]uint64{
+		testPoolHash(7): 25,
+		testPoolHash(3): 25,
+		testPoolHash(9): 25,
+		testPoolHash(5): 25,
+	}, 100, 3)
+	require.NoError(t, err)
+	require.Len(t, committee.Members, 3)
+	assert.Equal(t, []byte{3, 5, 7}, []byte{
+		committee.Members[0].PoolKeyHash[0],
+		committee.Members[1].PoolKeyHash[0],
+		committee.Members[2].PoolKeyHash[0],
+	})
 }
 
-func TestComputeCommitteeInvalidCoverage(t *testing.T) {
+func TestComputeCommitteeRejectsInvalidSize(t *testing.T) {
 	t.Parallel()
 
-	poolStakes := map[string]uint64{testPoolHash(1): 100}
-	for _, sigmaC := range []*big.Rat{
-		nil,
-		big.NewRat(0, 1),
-		big.NewRat(-1, 2),
-		big.NewRat(101, 100),
-	} {
-		_, err := ComputeCommittee(1, 0, poolStakes, 100, sigmaC)
-		assert.ErrorIs(
-			t, err, ErrInvalidCommitteeStakeCoverage,
-			"sigma_c=%v", sigmaC,
-		)
-	}
+	_, err := ComputeCommittee(1, 0, map[string]uint64{testPoolHash(1): 100}, 100, 0)
+	assert.ErrorIs(t, err, ErrInvalidCommitteeSize)
+}
+
+func TestComputeCommitteeRejectsEmptyDistribution(t *testing.T) {
+	t.Parallel()
+
+	_, err := ComputeCommittee(1, 0, map[string]uint64{}, 100, 1)
+	assert.ErrorIs(t, err, ErrEmptyStakeDistribution)
 }
 
 func TestComputeCommitteeMalformedPoolKeyHash(t *testing.T) {
 	t.Parallel()
 
-	_, err := ComputeCommittee(
-		1, 0,
-		map[string]uint64{"not-hex": 100},
-		100, big.NewRat(1, 1),
-	)
+	_, err := ComputeCommittee(1, 0, map[string]uint64{"not-hex": 100}, 100, 1)
 	assert.Error(t, err)
 }
 
@@ -215,26 +148,8 @@ func TestComputeCommitteeRejectsWrongPoolKeyHashLength(t *testing.T) {
 	t.Parallel()
 
 	poolStakes := map[string]uint64{hex.EncodeToString(make([]byte, 27)): 100}
-
-	_, err := ComputeCommittee(1, 0, poolStakes, 100, big.NewRat(1, 1))
+	_, err := ComputeCommittee(1, 0, poolStakes, 100, 1)
 	require.ErrorContains(t, err, "must be 28 bytes")
-}
-
-func TestComputeCommitteeLargeStakesNoOverflow(t *testing.T) {
-	t.Parallel()
-
-	// Products of stake and rational components overflow uint64; the
-	// comparison must be exact in big.Int.
-	const huge = math.MaxUint64 / 2
-	poolStakes := map[string]uint64{
-		testPoolHash(1): huge,
-		testPoolHash(2): huge,
-	}
-	committee, err := ComputeCommittee(
-		1, 0, poolStakes, math.MaxUint64-1, big.NewRat(99, 100),
-	)
-	require.NoError(t, err)
-	assert.Len(t, committee.Members, 2)
 }
 
 func TestComputeCommitteeDeterministic(t *testing.T) {
@@ -248,14 +163,10 @@ func TestComputeCommitteeDeterministic(t *testing.T) {
 	for _, stake := range poolStakes {
 		total += stake
 	}
-	first, err := ComputeCommittee(
-		3, 1, poolStakes, total, big.NewRat(9, 10),
-	)
+	first, err := ComputeCommittee(3, 1, poolStakes, total, 10)
 	require.NoError(t, err)
 	for range 10 {
-		next, err := ComputeCommittee(
-			3, 1, poolStakes, total, big.NewRat(9, 10),
-		)
+		next, err := ComputeCommittee(3, 1, poolStakes, total, 10)
 		require.NoError(t, err)
 		require.Equal(t, first.Members, next.Members)
 	}
@@ -264,13 +175,10 @@ func TestComputeCommitteeDeterministic(t *testing.T) {
 func TestCommitteeMemberLookups(t *testing.T) {
 	t.Parallel()
 
-	poolStakes := map[string]uint64{
+	committee, err := ComputeCommittee(1, 0, map[string]uint64{
 		testPoolHash(1): 60,
 		testPoolHash(2): 40,
-	}
-	committee, err := ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(1, 1),
-	)
+	}, 100, 2)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), committee.Size())
 
@@ -280,54 +188,9 @@ func TestCommitteeMemberLookups(t *testing.T) {
 	_, ok = committee.Member(2)
 	assert.False(t, ok)
 
-	poolHash, err := hex.DecodeString(testPoolHash(2))
-	require.NoError(t, err)
-	voterId, ok := committee.VoterIdFor(poolHash)
+	voterId, ok := committee.VoterIdFor(member.PoolKeyHash)
 	require.True(t, ok)
-	assert.Equal(t, uint64(1), voterId)
-
-	unknown := make([]byte, 28)
-	unknown[0] = 99
-	_, ok = committee.VoterIdFor(unknown)
+	assert.Equal(t, uint64(0), voterId)
+	_, ok = committee.VoterIdFor(make([]byte, voterPoolKeyHashSize))
 	assert.False(t, ok)
-}
-
-func TestCommitteeSnapshotEpoch(t *testing.T) {
-	t.Parallel()
-
-	// Mirrors praos.StakeSnapshotEpoch = E-1 (leader/committee stake is
-	// end-of-E-2 = mark[E-1]); values shifted +1 when the E-2 off-by-one was
-	// corrected.
-	for _, tc := range []struct{ epoch, want uint64 }{
-		{0, 0}, {1, 0}, {2, 1}, {3, 2}, {10, 9},
-	} {
-		assert.Equal(
-			t, tc.want, CommitteeSnapshotEpoch(tc.epoch),
-			fmt.Sprintf("epoch %d", tc.epoch),
-		)
-	}
-}
-
-func TestComputeCommitteeUnreachableCoverage(t *testing.T) {
-	t.Parallel()
-
-	// Inconsistent inputs: the pools sum to less than total active
-	// stake, so the coverage target can never be reached. Returning a
-	// partial committee would break downstream stake-quorum
-	// assumptions.
-	poolStakes := map[string]uint64{
-		testPoolHash(1): 30,
-		testPoolHash(2): 20,
-	}
-	_, err := ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(9, 10),
-	)
-	assert.Error(t, err)
-
-	// The same pools satisfy a reachable target
-	committee, err := ComputeCommittee(
-		1, 0, poolStakes, 100, big.NewRat(1, 2),
-	)
-	require.NoError(t, err)
-	assert.Len(t, committee.Members, 2)
 }

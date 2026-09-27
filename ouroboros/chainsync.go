@@ -2170,7 +2170,7 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 		o.headerDecodeCache,
 		key,
 		cacheBytes,
-		false,
+		true,
 		func() (gledger.BlockHeader, error) {
 			return o.decodeChainsyncHeader(blockType, blockData)
 		},

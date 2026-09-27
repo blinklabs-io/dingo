@@ -148,8 +148,10 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 	// the rollover will enact as the new epoch's parameters.
 	entropyNonce := lcommon.Nonce{Type: lcommon.NonceTypeNonce}
 	copy(entropyNonce.Value[:], entropy)
-	updateCbor, err := cbor.Encode(&mary.MaryProtocolParameterUpdate{
-		ExtraEntropy: &entropyNonce,
+	// A parameter update is a sparse map. Encoding the struct also serializes
+	// unset rational fields as null, which the classic update decoder rejects.
+	updateCbor, err := cbor.Encode(map[uint]any{
+		13: entropyNonce,
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(

@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -303,6 +304,16 @@ var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 // gouroboros pin exports it.
 var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
 
+// gouroboros ledger/common.CommitteeHotCredentialMembers (gouroboros#2574) is
+// the optional plural capability that lets upstream committee-vote
+// validation resolve every cold credential currently authorizing a shared
+// hot credential, rather than the single arbitrary witness
+// CommitteeHotCredentialMember can express. Without it, a vote cast under a
+// hot credential two cold credentials share can be wrongly rejected as
+// unknown when one sharer's authorization is touched by the same
+// transaction and the singular fallback happened to report that one.
+var _ lcommon.CommitteeHotCredentialMembers = (*LedgerView)(nil)
+
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
 // back to weaker existence-only proposal ancestry checks.
@@ -314,6 +325,13 @@ var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 // (DRepDelegationStateUnavailableError), so signature drift here is a
 // consensus-level break. Make it a compile error instead.
 var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
+
+// PPUP and MIR rules discover these optional capabilities through the
+// transaction-scoped LedgerView passed to ValidateTx.
+var (
+	_ lcommon.GenesisDelegationState                    = (*LedgerView)(nil)
+	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerView)(nil)
+)
 
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
@@ -689,6 +707,40 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 		return 0, err
 	}
 	return epoch.EpochId, nil
+}
+
+func (lv *LedgerView) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
+}
+
+func (lv *LedgerView) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return lv.ls.genesisDelegateForGenesisKey(
+		genesisKeyHash,
+		slot,
+		lv.metadataTxn(),
+	)
+}
+
+func (lv *LedgerView) GenesisUpdateQuorum() (uint, error) {
+	return lv.ls.GenesisUpdateQuorum()
+}
+
+func (lv *LedgerView) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	return lv.ls.ProtocolParameterUpdateWindow(slot)
+}
+
+func (lv *LedgerView) metadataTxn() types.Txn {
+	if lv.txn == nil {
+		return nil
+	}
+	return lv.txn.Metadata()
 }
 
 // IsPoolRegistered checks if a pool is currently registered
@@ -1372,6 +1424,24 @@ func (lv *LedgerView) committeeSnapshot() (
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	members, err := lv.CommitteeHotCredentialMembers(hotCredential)
+	if err != nil || len(members) == 0 {
+		return nil, err
+	}
+	return members[0], nil
+}
+
+// CommitteeHotCredentialMembers implements the optional gouroboros
+// ledger/common.CommitteeHotCredentialMembers capability (gouroboros#2574):
+// it resolves every cold credential that currently authorizes hotCredential,
+// not just one. cardano-ledger's GOVCERT keeps one authorization entry per
+// cold credential, so a hot credential two cold credentials share has two
+// active authorizers at once, and upstream committee-vote validation needs
+// both to correctly determine which still authorize the hot credential
+// after a same-transaction certificate touches one of them.
+func (lv *LedgerView) CommitteeHotCredentialMembers(
+	hotCredential lcommon.Credential,
+) ([]*lcommon.CommitteeMember, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
@@ -1380,6 +1450,7 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
 	}
+	var members []*lcommon.CommitteeMember
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||
 			!bytes.Equal(
@@ -1398,9 +1469,9 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		if member == nil || member.Resigned {
 			continue
 		}
-		return member, nil
+		members = append(members, member)
 	}
-	return nil, nil
+	return members, nil
 }
 
 // CommitteeMembers returns all seated committee members.
@@ -2160,9 +2231,21 @@ func (lv *LedgerView) GetLeiosKeys(
 	if err != nil {
 		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
 	}
+	maxKeyAgeEpochs, err := lv.ls.maxLeiosKeyAgeEpochs()
+	if err != nil {
+		return nil, fmt.Errorf("resolve maximum Leios key age: %w", err)
+	}
 	for _, snapshot := range snapshots {
 		if len(snapshot.LeiosKeyPublic) == 0 ||
 			len(snapshot.LeiosKeyPossessionProof) == 0 {
+			continue
+		}
+		// Reference ledger state carries a registration epoch with each BLS key.
+		// A snapshot without that epoch cannot establish key eligibility.
+		registrationEpoch := snapshot.LeiosKeyRegistrationEpoch
+		if registrationEpoch == nil ||
+			*registrationEpoch > epoch ||
+			epoch-*registrationEpoch >= maxKeyAgeEpochs {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{
@@ -2175,6 +2258,36 @@ func (lv *LedgerView) GetLeiosKeys(
 		}
 	}
 	return out, nil
+}
+
+func (ls *LedgerState) maxLeiosKeyAgeEpochs() (uint64, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("cardano configuration unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxKESEvolutions <= 0 {
+		return 0, errors.New("invalid MaxKESEvolutions")
+	}
+	slotsPerKESPeriod := ls.SlotsPerKESPeriod()
+	slotsPerEpoch := ls.SlotsPerEpoch()
+	if slotsPerKESPeriod == 0 || slotsPerEpoch == 0 {
+		return 0, errors.New("invalid KES-period or epoch length")
+	}
+	maxSlots := new(big.Int).Mul(
+		big.NewInt(int64(genesis.MaxKESEvolutions)),
+		new(big.Int).SetUint64(slotsPerKESPeriod),
+	)
+	divisor := new(big.Int).SetUint64(slotsPerEpoch)
+	epochs, remainder := new(big.Int), new(big.Int)
+	epochs.QuoRem(maxSlots, divisor, remainder)
+	if remainder.Sign() > 0 {
+		epochs.Add(epochs, big.NewInt(1))
+	}
+	epochs.Add(epochs, big.NewInt(2))
+	if !epochs.IsUint64() {
+		return 0, errors.New("maximum Leios key age overflows uint64")
+	}
+	return epochs.Uint64(), nil
 }
 
 // GetPoolStake returns the stake for a specific pool from the snapshot.
@@ -2229,6 +2342,23 @@ func (lv *LedgerView) GetDRepVotingPower(
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
+	// Fold in any active governance proposal's deposit escrowed to a return
+	// account delegating to this DRep, matching the deposit-inclusive tally
+	// governance.LoadDRepVotingState uses for ratification and the
+	// Blockfrost adapter's DRep voting-power reads (CIP-1694;
+	// blinklabs-io/dingo#4355).
+	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
+		lv.ls.db, lv.txn, lv.ls.CurrentEpoch(), 0,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get active proposal deposit voting power: %w", err,
+		)
+	}
+	power += drepDepositPower[models.StakeCredentialRef{
+		Tag: credentialTag,
+		Key: drepCredential,
+	}.MapKey()]
 	return power, nil
 }
 

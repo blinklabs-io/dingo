@@ -356,6 +356,10 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{{
+		EpochId:       6,
+		StartSlot:     0,
+		LengthInSlots: 100,
+	}, {
 		EpochId:       7,
 		StartSlot:     100,
 		LengthInSlots: 100,
@@ -435,6 +439,89 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 	require.Equal(t, oldPublic, stored.LeiosKeyPublic,
 		"mark[8] must retain the key captured before the live rotation")
 	require.Equal(t, oldProof, stored.LeiosKeyPossessionProof)
+	require.NotNil(t, stored.LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *stored.LeiosKeyRegistrationEpoch)
+}
+
+func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := setupTestDB(t)
+	// A Mithril registration has an import slot but no source registration
+	// slot. Even when retained epoch history maps that synthetic slot, it must
+	// not restart the voting-key TTL.
+	seedEpochs(t, db, []models.Epoch{{
+		EpochId:       6,
+		StartSlot:     0,
+		LengthInSlots: 100,
+	}, {
+		EpochId:       7,
+		StartSlot:     100,
+		LengthInSlots: 100,
+	}})
+
+	poolKeyHash := bytes.Repeat([]byte{0x41}, 28)
+	publicKey := bytes.Repeat([]byte{0x51}, 96)
+	proof := bytes.Repeat([]byte{0x61}, 48)
+	pool := &models.Pool{
+		PoolKeyHash:             append([]byte(nil), poolKeyHash...),
+		VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+		LeiosKeyPublic:          append([]byte(nil), publicKey...),
+		LeiosKeyPossessionProof: append([]byte(nil), proof...),
+	}
+	registration := &models.PoolRegistration{
+		PoolKeyHash:                    append([]byte(nil), poolKeyHash...),
+		VrfKeyHash:                     bytes.Repeat([]byte{0x71}, 32),
+		AddedSlot:                      50,
+		LeiosKeyPublic:                 append([]byte(nil), publicKey...),
+		LeiosKeyPossessionProof:        append([]byte(nil), proof...),
+		LeiosKeyRegistrationAgeUnknown: true,
+	}
+	require.NoError(t, db.ImportPool(nil, pool, registration))
+
+	var poolHash lcommon.PoolKeyHash
+	copy(poolHash[:], poolKeyHash)
+	distribution := &StakeDistribution{
+		Slot:           199,
+		PoolStakes:     map[lcommon.PoolKeyHash]uint64{poolHash: 100},
+		DelegatorCount: map[lcommon.PoolKeyHash]uint64{poolHash: 1},
+		TotalStake:     100,
+		TotalPools:     1,
+	}
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	saved, err := mgr.saveSnapshot(
+		context.Background(),
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		distribution,
+		event.EpochTransitionEvent{
+			PreviousEpoch: 7,
+			NewEpoch:      8,
+			BoundarySlot:  200,
+			SnapshotSlot:  199,
+		},
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	require.True(t, saved)
+
+	stored, err := db.Metadata().GetPoolStakeSnapshot(
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, publicKey, stored.LeiosKeyPublic,
+		"the effective key bytes must survive a missing epoch-to-slot mapping")
+	require.Equal(t, proof, stored.LeiosKeyPossessionProof)
+	require.Nil(t, stored.LeiosKeyRegistrationEpoch,
+		"unknown registration age must remain distinguishable from an absent key")
 }
 
 // TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs is the

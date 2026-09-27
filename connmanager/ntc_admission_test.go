@@ -167,6 +167,49 @@ func TestTrustedLocalNtCAdmissionIsIsolatedFromRemotePeers(t *testing.T) {
 	require.Zero(t, manager.trustedLocalNtCCount)
 }
 
+func TestNtCBufferedBytesAreTrackedByPerConnectionDelta(t *testing.T) {
+	t.Parallel()
+	manager := NewConnectionManager(ConnectionManagerConfig{})
+	tracker := &ntcBufferTracker{trustedLocal: true}
+
+	tracker.record(manager, 128)
+	require.Equal(t, float64(128), manager.ntcBufferedBytes(true))
+
+	tracker.record(manager, 80)
+	require.Equal(t, float64(80), manager.ntcBufferedBytes(true))
+
+	tracker.close(manager)
+	require.Zero(t, manager.ntcBufferedBytes(true))
+	tracker.record(manager, 128)
+	require.Zero(t, manager.ntcBufferedBytes(true))
+}
+
+func TestTrustedLocalFlagIsSetBeforeConnectionRegistration(t *testing.T) {
+	t.Parallel()
+	manager := NewConnectionManager(ConnectionManagerConfig{})
+	conn := newUnstartedConnection(t)
+	require.True(t, manager.addConnectionImplWithTrust(
+		conn,
+		true,
+		true,
+		"local",
+		"",
+		nil,
+		true,
+	))
+
+	manager.connectionsMutex.Lock()
+	info := manager.connections[conn.Id()]
+	manager.connectionsMutex.Unlock()
+	require.NotNil(t, info)
+	require.True(t, info.trustedLocal)
+	require.NotNil(t, info.ntcBufferTracker)
+	require.True(t, info.ntcBufferTracker.trustedLocal)
+
+	conn.ErrorChan() <- nil
+	waitForConnectionManagerWatchers(t, manager)
+}
+
 func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string

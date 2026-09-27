@@ -167,11 +167,15 @@ func TestStakeCalculationVersionRoundTrip(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	poolKey := bytes.Repeat([]byte{0x33}, 28)
+	keyRegistrationEpoch := uint64(7)
 	poolSnapshot := &models.PoolStakeSnapshot{
-		Epoch:              10,
-		SnapshotType:       models.PoolStakeSnapshotTypeMark,
-		PoolKeyHash:        poolKey,
-		CalculationVersion: models.RewardStakeCalculationVersion,
+		Epoch:                     10,
+		SnapshotType:              models.PoolStakeSnapshotTypeMark,
+		PoolKeyHash:               poolKey,
+		CalculationVersion:        models.RewardStakeCalculationVersion,
+		LeiosKeyPublic:            []byte{1, 2, 3},
+		LeiosKeyPossessionProof:   []byte{4, 5, 6},
+		LeiosKeyRegistrationEpoch: &keyRegistrationEpoch,
 	}
 	require.NoError(t, store.SavePoolStakeSnapshot(poolSnapshot, nil))
 	gotPool, err := store.GetPoolStakeSnapshot(
@@ -186,6 +190,21 @@ func TestStakeCalculationVersionRoundTrip(t *testing.T) {
 		t,
 		models.RewardStakeCalculationVersion,
 		gotPool.CalculationVersion,
+	)
+	require.Equal(
+		t,
+		poolSnapshot.LeiosKeyPublic,
+		gotPool.LeiosKeyPublic,
+	)
+	require.Equal(
+		t,
+		poolSnapshot.LeiosKeyPossessionProof,
+		gotPool.LeiosKeyPossessionProof,
+	)
+	require.Equal(
+		t,
+		poolSnapshot.LeiosKeyRegistrationEpoch,
+		gotPool.LeiosKeyRegistrationEpoch,
 	)
 
 	rewardSnapshot := &models.RewardSnapshot{
