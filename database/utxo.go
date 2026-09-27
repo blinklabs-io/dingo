@@ -141,12 +141,9 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 			deleteErrors += skipped
 			d.logger.Warn(
 				"UTxO blob deletes left unstaged to keep the transaction committable",
-				"skipped",
-				skipped,
-				"staged",
-				staged,
-				"total",
-				len(utxos),
+				"skipped", skipped,
+				"staged", staged,
+				"total", len(utxos),
 			)
 		}
 	} else {

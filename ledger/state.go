@@ -3801,10 +3801,8 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		}
 		ls.config.Logger.Warn(
 			"rollback undo payload exceeds durable outbox limit; continuing with live delivery",
-			"component",
-			"ledger",
-			"error",
-			err,
+			"component", "ledger",
+			"error", err,
 		)
 	}
 	// Bracket every rollback mutation so split reward precomputation cannot

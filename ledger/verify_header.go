@@ -1060,9 +1060,7 @@ func (ls *LedgerState) ProtocolParameterUpdateWindow(
 	// before its end, where k is the security parameter and f the active-slot
 	// coefficient. Use the same integer slot boundary as the reference rule.
 	votingWindow := new(big.Rat).SetFrac(
-		new(
-			big.Int,
-		).Mul(big.NewInt(6), big.NewInt(int64(genesis.SecurityParam))),
+		new(big.Int).Mul(big.NewInt(6), big.NewInt(int64(genesis.SecurityParam))),
 		big.NewInt(1),
 	)
 	votingWindow.Quo(votingWindow, genesis.ActiveSlotsCoeff.Rat)

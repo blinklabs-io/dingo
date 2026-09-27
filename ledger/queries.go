@@ -1564,9 +1564,7 @@ func genesisConfigResult(
 	startPicoseconds := (int64(start.Hour())*3600+
 		int64(start.Minute())*60+int64(start.Second()))*1_000_000_000_000 +
 		int64(start.Nanosecond())*1000
-	slotLength := new(
-		big.Rat,
-	).Mul(genesis.SlotLength.Rat, big.NewRat(1_000_000, 1))
+	slotLength := new(big.Rat).Mul(genesis.SlotLength.Rat, big.NewRat(1_000_000, 1))
 	if !slotLength.IsInt() || !slotLength.Num().IsInt64() {
 		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
 			"genesis slot length is not an int64 number of microseconds: %s",
@@ -1586,50 +1584,23 @@ func genesisConfigResult(
 			Picoseconds: *big.NewInt(startPicoseconds),
 		},
 		NetworkMagic: int(genesis.NetworkMagic), NetworkId: networkID,
-		ActiveSlotsCoeff: []any{
-			genesis.ActiveSlotsCoeff.Num(),
-			genesis.ActiveSlotsCoeff.Denom(),
-		},
-		SecurityParam: genesis.SecurityParam, EpochLength: genesis.EpochLength,
+		ActiveSlotsCoeff: []any{genesis.ActiveSlotsCoeff.Num(), genesis.ActiveSlotsCoeff.Denom()},
+		SecurityParam:    genesis.SecurityParam, EpochLength: genesis.EpochLength,
 		SlotsPerKESPeriod: genesis.SlotsPerKESPeriod, MaxKESEvolutions: genesis.MaxKESEvolutions,
-		SlotLength: int(
-			slotLength.Num().Int64(),
-		), UpdateQuorum: genesis.UpdateQuorum,
-		MaxLovelaceSupply: int64(
-			genesis.MaxLovelaceSupply,
-		), // #nosec G115 -- checked above
-		GenDelegs: fields[12],
+		SlotLength: int(slotLength.Num().Int64()), UpdateQuorum: genesis.UpdateQuorum,
+		MaxLovelaceSupply: int64(genesis.MaxLovelaceSupply), // #nosec G115 -- checked above
+		GenDelegs:         fields[12],
 		ProtocolParams: olocalstatequery.GenesisConfigResultProtocolParameters{
 			MinFeeA: int(pp.MinFeeA), MinFeeB: int(pp.MinFeeB),
-			MaxBlockBodySize: int(
-				pp.MaxBlockBodySize,
-			), MaxTxSize: int(pp.MaxTxSize),
-			MaxBlockHeaderSize: int(
-				pp.MaxBlockHeaderSize,
-			), KeyDeposit: int(pp.KeyDeposit),
-			PoolDeposit: int(
-				pp.PoolDeposit,
-			), EMax: int(pp.MaxEpoch), NOpt: int(pp.NOpt),
-			A0: []int{
-				int(pp.A0.Num().Int64()),
-				int(pp.A0.Denom().Int64()),
-			},
-			Rho: []int{
-				int(pp.Rho.Num().Int64()),
-				int(pp.Rho.Denom().Int64()),
-			},
-			Tau: []int{
-				int(pp.Tau.Num().Int64()),
-				int(pp.Tau.Denom().Int64()),
-			},
-			DecentralizationParam: []int{
-				int(pp.Decentralization.Num().Int64()),
-				int(pp.Decentralization.Denom().Int64()),
-			},
-			ExtraEntropy: pp.ExtraEntropy, ProtocolVersionMajor: int(pp.ProtocolVersion.Major),
-			ProtocolVersionMinor: int(
-				pp.ProtocolVersion.Minor,
-			), MinUTxOValue: int(pp.MinUtxoValue),
+			MaxBlockBodySize: int(pp.MaxBlockBodySize), MaxTxSize: int(pp.MaxTxSize),
+			MaxBlockHeaderSize: int(pp.MaxBlockHeaderSize), KeyDeposit: int(pp.KeyDeposit),
+			PoolDeposit: int(pp.PoolDeposit), EMax: int(pp.MaxEpoch), NOpt: int(pp.NOpt),
+			A0:                    []int{int(pp.A0.Num().Int64()), int(pp.A0.Denom().Int64())},
+			Rho:                   []int{int(pp.Rho.Num().Int64()), int(pp.Rho.Denom().Int64())},
+			Tau:                   []int{int(pp.Tau.Num().Int64()), int(pp.Tau.Denom().Int64())},
+			DecentralizationParam: []int{int(pp.Decentralization.Num().Int64()), int(pp.Decentralization.Denom().Int64())},
+			ExtraEntropy:          pp.ExtraEntropy, ProtocolVersionMajor: int(pp.ProtocolVersion.Major),
+			ProtocolVersionMinor: int(pp.ProtocolVersion.Minor), MinUTxOValue: int(pp.MinUtxoValue),
 			MinPoolCost: int(pp.MinPoolCost),
 		},
 	}

@@ -592,14 +592,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(
-		block,
-		ocommon.Point{},
-		txn,
-		true,
-		false,
-		nil,
-	)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false, nil)
 	if err != nil {
 		return err
 	}

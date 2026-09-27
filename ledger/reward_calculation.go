@@ -3051,12 +3051,9 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 		if largestOwner == nil || counterparty == nil {
 			ls.config.Logger.Warn(
 				"reconstructed reward owner stake inputs cannot be reconciled without owner and non-owner credentials",
-				"component",
-				"ledger",
-				"reward_snapshot_epoch",
-				rewardSnapshotEpoch,
-				"pool_key_hash",
-				hex.EncodeToString([]byte(key)),
+				"component", "ledger",
+				"reward_snapshot_epoch", rewardSnapshotEpoch,
+				"pool_key_hash", hex.EncodeToString([]byte(key)),
 			)
 			return nil
 		}
