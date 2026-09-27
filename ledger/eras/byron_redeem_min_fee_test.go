@@ -116,18 +116,6 @@ func byronEncodeBody(
 	return body
 }
 
-func byronWireBodyHash(t *testing.T, body []byte) lcommon.Blake2b256 {
-	t.Helper()
-	unsignedTxCbor, err := cbor.Encode(&byronTxWire{
-		Body: body,
-		Twit: cbor.IndefLengthList{},
-	})
-	require.NoError(t, err)
-	unsignedTx, err := byron.NewByronTransactionFromCbor(unsignedTxCbor)
-	require.NoError(t, err)
-	return unsignedTx.WireId()
-}
-
 // byronEncodeOutput builds a Byron output paying the given address.
 func byronEncodeOutput(
 	t *testing.T,
@@ -155,7 +143,7 @@ func byronRedeemWitness(
 	sign bool,
 ) cbor.Value {
 	t.Helper()
-	message, err := byronRedeemSignatureMessage(protocolMagic, bodyHash)
+	message, err := byronSignatureMessage(0x02, protocolMagic, bodyHash)
 	require.NoError(t, err)
 	signature := ed25519.Sign(key.private, message)
 	if !sign {
@@ -172,22 +160,6 @@ func byronRedeemWitness(
 	_, err = cbor.Decode(witness, &value)
 	require.NoError(t, err)
 	return value
-}
-
-func byronRedeemSignatureMessage(
-	protocolMagic uint32,
-	bodyHash lcommon.Blake2b256,
-) ([]byte, error) {
-	magicCbor, err := cbor.Encode(protocolMagic)
-	if err != nil {
-		return nil, err
-	}
-	txPayload, err := cbor.Encode(bodyHash[:])
-	if err != nil {
-		return nil, err
-	}
-	message := append([]byte{0x02}, magicCbor...)
-	return append(message, txPayload...), nil
 }
 
 // byronRedeemTxCase describes one redeem transaction to assemble.
@@ -242,7 +214,7 @@ func buildByronRedeemTx(
 	}
 
 	body := byronEncodeBody(t, inputs, outputs)
-	bodyHash := byronWireBodyHash(t, body)
+	bodyHash := lcommon.Blake2b256Hash(body)
 
 	witnesses := make(cbor.IndefLengthList, 0, len(testCase.keys))
 	for _, key := range testCase.keys {
@@ -266,7 +238,7 @@ func buildByronRedeemTx(
 
 	tx, err := byron.NewByronTransactionFromCbor(txCbor)
 	require.NoError(t, err)
-	// The signature covers the original wire body hash, so the assembled body must be the
+	// The signature covers the body hash, so the assembled body must be the
 	// one the decoded transaction reports.
 	require.Equal(t, bodyHash, tx.WireId())
 	return tx
@@ -364,7 +336,7 @@ func TestValidateTxByron_RedeemOnlyPreservesWitnessRequirement(
 	require.Error(t, err)
 	var feeErr FeeTooLowByronError
 	require.NotErrorAs(t, err, &feeErr)
-	assert.Contains(t, err.Error(), "signature verification failed")
+	assert.Contains(t, err.Error(), "invalid vkey signature")
 }
 
 // TestValidateTxByron_RedeemOnlyNegativeFeeRejected proves the zero
@@ -386,7 +358,7 @@ func TestValidateTxByron_RedeemOnlyNegativeFeeRejected(t *testing.T) {
 		[]lcommon.TransactionInput{input},
 		outputs,
 	)
-	bodyHash := byronWireBodyHash(t, body)
+	bodyHash := lcommon.Blake2b256Hash(body)
 	txCbor, err := cbor.Encode(&byronTxWire{
 		Body: body,
 		Twit: cbor.IndefLengthList{

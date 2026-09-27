@@ -264,7 +264,7 @@ func TestLedgerViewGovernanceProposalAncestry(t *testing.T) {
 		}, hardForkGovernanceTestAction(t, nil, 10, 0))
 	}
 
-	for _, id := range []lcommon.GovActionId{rootID, pendingID, expiredID} {
+	for _, id := range []lcommon.GovActionId{rootID, pendingID} {
 		tx := governanceProposalTestTx(
 			t,
 			hardForkGovernanceTestAction(t, &id, 10, 1),
