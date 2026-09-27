@@ -6971,6 +6971,7 @@ func (ls *LedgerState) processEpochRollover(
 		PrevEpoch:               currentEpoch.EpochId,
 		NewEpoch:                currentEpoch.EpochId + 1,
 		BoundarySlot:            epochStartSlot,
+		PrevEpochStartSlot:      currentEpoch.StartSlot,
 		PParams:                 newPParams,
 		UpdateFn:                currentEra.PParamsUpdateFunc,
 		ConwayGenesis:           conwayGenesis,

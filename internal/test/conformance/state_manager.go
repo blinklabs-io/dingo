@@ -123,6 +123,14 @@ type DingoStateManager struct {
 	// currentEpoch tracks the current epoch
 	currentEpoch uint64
 
+	// appliedSlotMax is the highest slot ApplyTransaction has seen, and
+	// committeeEpochStartSlot is the first slot after the last epoch
+	// boundary. Conformance slots come from the vector rather than from
+	// conformanceSlotsPerEpoch, so the current epoch's committee window is
+	// located by the transactions applied since the boundary.
+	appliedSlotMax          uint64
+	committeeEpochStartSlot uint64
+
 	// committeeRemovals tracks the remove-set of pending UpdateCommittee
 	// proposals, keyed by gov action id. The upstream conformance
 	// GovActionInfo only carries the add-set (ProposedMembers), so this
@@ -264,6 +272,8 @@ func (m *DingoStateManager) Close() error {
 func (m *DingoStateManager) Reset() error {
 	m.protocolParams = nil
 	m.currentEpoch = 0
+	m.appliedSlotMax = 0
+	m.committeeEpochStartSlot = 0
 	m.govState = conformance.NewGovernanceState()
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
@@ -364,6 +374,8 @@ func (m *DingoStateManager) LoadInitialState(
 ) error {
 	m.protocolParams = pp
 	m.currentEpoch = state.CurrentEpoch
+	m.appliedSlotMax = 0
+	m.committeeEpochStartSlot = 0
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
 
@@ -874,6 +886,7 @@ func (m *DingoStateManager) ApplyTransaction(
 ) error {
 	point := m.pointForSlot(slot)
 	idx := m.nextBlockIndex(slot)
+	m.appliedSlotMax = max(m.appliedSlotMax, slot)
 
 	txn := m.db.Transaction(true)
 	defer txn.Release()
@@ -1360,7 +1373,11 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 		}
 	}
 
-	return txn.Commit()
+	if err := txn.Commit(); err != nil {
+		return err
+	}
+	m.committeeEpochStartSlot = m.appliedSlotMax + 1
+	return nil
 }
 
 // pruneCommitteeResignations drops the resignation recorded for a cold
@@ -1985,12 +2002,13 @@ func (m *DingoStateManager) persistEnactment(
 		)
 	}
 	result, err := governance.EnactProposal(&governance.EnactmentContext{
-		DB:       m.db,
-		Txn:      txn,
-		Epoch:    m.currentEpoch,
-		Slot:     boundarySlot,
-		PParams:  conwayPP,
-		UpdateFn: eras.ConwayEraDesc.PParamsUpdateFunc,
+		DB:                 m.db,
+		Txn:                txn,
+		Epoch:              m.currentEpoch,
+		Slot:               boundarySlot,
+		PrevEpochStartSlot: m.committeeEpochStartSlot,
+		PParams:            conwayPP,
+		UpdateFn:           eras.ConwayEraDesc.PParamsUpdateFunc,
 	}, dbProposal)
 	if err != nil {
 		return fmt.Errorf("enact governance proposal: %w", err)
