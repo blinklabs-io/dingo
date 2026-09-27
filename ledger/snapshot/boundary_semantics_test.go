@@ -316,7 +316,10 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 		"a duplicated credential must be counted as one delegator",
 	)
 	require.Equal(t, uint64(10), dist.PoolStakes[keyA]+dist.PoolStakes[keyB])
-	require.Len(t, dist.PoolStakes, 1,
+	require.Contains(t, dist.PoolStakes, keyA)
+	require.Contains(t, dist.PoolStakes, keyB)
+	require.Zero(t, dist.PoolStakes[keyA])
+	require.Equal(t, uint64(10), dist.PoolStakes[keyB],
 		"only the retained assignment may hold the credential's stake")
 }
 

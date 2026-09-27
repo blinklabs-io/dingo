@@ -208,6 +208,17 @@ func newSignedByronPBFTBlock(
 	return rebuilt
 }
 
+func encodeIndefiniteByronList(t *testing.T, values []any) []byte {
+	t.Helper()
+	encoded := []byte{0x9f}
+	for _, value := range values {
+		item, err := cbor.Encode(value)
+		require.NoError(t, err)
+		encoded = append(encoded, item...)
+	}
+	return append(encoded, 0xff)
+}
+
 func rawByronPBFTBlock(
 	t *testing.T,
 	block *byron.ByronMainBlock,
@@ -253,7 +264,16 @@ func newGeneratedByronPBFTTestNodeConfig(
 	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
@@ -307,7 +327,16 @@ func newByronPBFTTestNodeConfig(
 	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,

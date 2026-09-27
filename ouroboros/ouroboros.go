@@ -102,6 +102,12 @@ type Ouroboros struct {
 	leiosAnnouncementLedger LeiosAnnouncementLedger
 	leiosVotes              LeiosVoteHandler
 	leiosPipeline           LeiosPipelineHandler
+	leiosValidationCtx      context.Context
+	leiosValidationCancel   context.CancelFunc
+	leiosValidationSlots    chan struct{}
+	leiosValidationWG       sync.WaitGroup
+	leiosValidationMu       sync.Mutex
+	leiosValidationClosed   bool
 	config                  OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
@@ -504,6 +510,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	futureHeaderResyncCtx, futureHeaderResyncCancel := context.WithCancel(
 		context.Background(),
 	)
+	leiosValidationCtx, leiosValidationCancel := context.WithCancel(
+		context.Background(),
+	)
 	o := &Ouroboros{
 		config:                  cfg,
 		registerer:              newTrackingRegisterer(cfg.PromRegistry),
@@ -511,6 +520,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		connManager:             cfg.ConnManager,
 		ledgerState:             cfg.LedgerState,
 		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		leiosValidationCtx:      leiosValidationCtx,
+		leiosValidationCancel:   leiosValidationCancel,
+		leiosValidationSlots:    make(chan struct{}, 2),
 		mempool:                 cfg.Mempool,
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
