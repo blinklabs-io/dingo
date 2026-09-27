@@ -2079,10 +2079,9 @@ Musashi/Leios prototype's extended 12-field header body (see
 storage stack already accepts it, instead of this check alone rejecting it
 as undecodable.
 
-`blockverify.Hash` does not independently re-derive the type recorded in
-`bp..._metadata` from the decoded header. An earlier version did, mirroring
-bark's `verifyArchiveBlock`/`blockEraFromHeader`: for Shelley and later
-eras the block hash covers only the header, and adjacent eras share that
+`blockverify.Hash`, like bark's `GetBlock` (`bark/blob.go`), does not
+independently re-derive the type recorded in `bp..._metadata` from the
+decoded header. An earlier version did: for Shelley and later eras the block hash covers only the header, and adjacent eras share that
 header's layout, so the same bytes can decode -- with an identical hash
 and slot -- under more than one era, which hash and slot alone cannot
 catch. That check used `gledger.DetermineBlockType` to classify era from

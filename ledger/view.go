@@ -304,6 +304,16 @@ var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 // gouroboros pin exports it.
 var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
 
+// gouroboros ledger/common.CommitteeHotCredentialMembers (gouroboros#2574) is
+// the optional plural capability that lets upstream committee-vote
+// validation resolve every cold credential currently authorizing a shared
+// hot credential, rather than the single arbitrary witness
+// CommitteeHotCredentialMember can express. Without it, a vote cast under a
+// hot credential two cold credentials share can be wrongly rejected as
+// unknown when one sharer's authorization is touched by the same
+// transaction and the singular fallback happened to report that one.
+var _ lcommon.CommitteeHotCredentialMembers = (*LedgerView)(nil)
+
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
 // back to weaker existence-only proposal ancestry checks.
@@ -1414,6 +1424,24 @@ func (lv *LedgerView) committeeSnapshot() (
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	members, err := lv.CommitteeHotCredentialMembers(hotCredential)
+	if err != nil || len(members) == 0 {
+		return nil, err
+	}
+	return members[0], nil
+}
+
+// CommitteeHotCredentialMembers implements the optional gouroboros
+// ledger/common.CommitteeHotCredentialMembers capability (gouroboros#2574):
+// it resolves every cold credential that currently authorizes hotCredential,
+// not just one. cardano-ledger's GOVCERT keeps one authorization entry per
+// cold credential, so a hot credential two cold credentials share has two
+// active authorizers at once, and upstream committee-vote validation needs
+// both to correctly determine which still authorize the hot credential
+// after a same-transaction certificate touches one of them.
+func (lv *LedgerView) CommitteeHotCredentialMembers(
+	hotCredential lcommon.Credential,
+) ([]*lcommon.CommitteeMember, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
@@ -1422,6 +1450,7 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
 	}
+	var members []*lcommon.CommitteeMember
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||
 			!bytes.Equal(
@@ -1440,9 +1469,9 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		if member == nil || member.Resigned {
 			continue
 		}
-		return member, nil
+		members = append(members, member)
 	}
-	return nil, nil
+	return members, nil
 }
 
 // CommitteeMembers returns all seated committee members.

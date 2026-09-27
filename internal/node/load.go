@@ -1206,10 +1206,7 @@ func decodeImmutableBlockBatchWithDecoder(
 	}
 	decodeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	queueSize := workerCount * 2
-	if queueSize > len(rawBlocks) {
-		queueSize = len(rawBlocks)
-	}
+	queueSize := min(workerCount*2, len(rawBlocks))
 	jobs := make(chan immutableDecodeJob, queueSize)
 	results := make(chan immutableDecodeResult, queueSize)
 	var workers sync.WaitGroup
