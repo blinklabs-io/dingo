@@ -327,20 +327,20 @@ WHERE deleted_slot > ?;
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
@@ -348,6 +348,7 @@ ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     captured_slot = excluded.captured_slot,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
+    leios_key_registration_epoch = excluded.leios_key_registration_epoch,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -358,6 +359,7 @@ RETURNING id;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -367,6 +369,7 @@ WHERE epoch = ? AND snapshot_type = ? AND pool_key_hash = ?;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot

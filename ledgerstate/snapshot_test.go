@@ -416,7 +416,7 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 			[]any{},
 			uint64(0),
 			vrfHash[:],
-			[]any{[]any{publicKey, possessionProof}},
+			[]any{[]any{publicKey, possessionProof}, uint64(7)},
 			uint64(1),
 			uint64(2),
 			&cbor.Rat{Rat: big.NewRat(1, 100)},
@@ -430,6 +430,8 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 	require.NotNil(t, pool)
 	require.Equal(t, publicKey, pool.LeiosKeyPublic)
 	require.Equal(t, possessionProof, pool.LeiosKeyPossessionProof)
+	require.NotNil(t, pool.LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *pool.LeiosKeyRegistrationEpoch)
 
 	credentialHex := hex.EncodeToString(credentialHash[:])
 	rows := AggregatePoolStake(&ParsedSnapShot{
@@ -438,6 +440,8 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 		PoolParams:  pools,
 	}, 9, "mark", 99)
 	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *rows[0].LeiosKeyRegistrationEpoch)
 	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
 	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
 
@@ -617,7 +621,7 @@ func TestParseW32ActivePoolDistributionCarriesLeiosKey(t *testing.T) {
 			&cbor.Rat{Rat: big.NewRat(3, 10)},
 			uint64(3),
 			vrfHash,
-			[]any{[]any{publicKey, possessionProof}},
+			[]any{[]any{publicKey, possessionProof}, uint64(7)},
 		},
 	)
 	totalStake, err := cbor.Encode(uint64(10))
@@ -630,10 +634,14 @@ func TestParseW32ActivePoolDistributionCarriesLeiosKey(t *testing.T) {
 	require.Len(t, pools, 1)
 	require.Equal(t, publicKey, pools[0].LeiosKeyPublic)
 	require.Equal(t, possessionProof, pools[0].LeiosKeyPossessionProof)
+	require.NotNil(t, pools[0].LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *pools[0].LeiosKeyRegistrationEpoch)
 	rows := ActivePoolDistributionSnapshots(pools, 12, 120)
 	require.Len(t, rows, 1)
 	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
 	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
+	require.NotNil(t, rows[0].LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *rows[0].LeiosKeyRegistrationEpoch)
 }
 
 func TestParseActivePoolDistributionContainerRejectsStakeMismatch(

@@ -149,6 +149,7 @@ CREATE TABLE pool_stake_snapshot (
     captured_slot INTEGER NOT NULL,
     leios_key_public BLOB,
     leios_key_possession_proof BLOB,
+    leios_key_registration_epoch INTEGER,
     calculation_version INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote_resolved BOOLEAN NOT NULL DEFAULT FALSE,

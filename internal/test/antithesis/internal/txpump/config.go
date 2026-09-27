@@ -64,6 +64,11 @@ type Config struct {
 	// Default: ["payment","delegation","governance","plutus"]
 	Types []string
 
+	// TransactionEra selects the era used for payment transaction encoding.
+	// Conway supports all transaction types; Dijkstra currently supports
+	// payment transactions only.
+	TransactionEra string
+
 	// LogDir is the directory for structured log files.
 	// Default: /logs
 	LogDir string
@@ -122,6 +127,7 @@ func LoadConfig() (*Config, error) {
 			"governance",
 			"plutus",
 		},
+		TransactionEra: envString("TXPUMP_TRANSACTION_ERA", "conway"),
 		LogDir:         envString("TXPUMP_LOG_DIR", "/logs"),
 		FallbackAddr:   envString("TXPUMP_FALLBACK_ADDR", ""),
 		StartupTimeout: 60 * time.Second,
@@ -282,6 +288,12 @@ func (c *Config) validate() error {
 	if len(c.Types) == 0 {
 		return errors.New("TXPUMP_TYPES must not be empty")
 	}
+	if c.TransactionEra != "conway" && c.TransactionEra != "dijkstra" {
+		return fmt.Errorf(
+			"TXPUMP_TRANSACTION_ERA must be conway or dijkstra, got %q",
+			c.TransactionEra,
+		)
+	}
 	validTypes := map[string]bool{
 		"payment":    true,
 		"delegation": true,
@@ -295,6 +307,16 @@ func (c *Config) validate() error {
 					"(valid: payment, delegation, governance, plutus)",
 				t,
 			)
+		}
+	}
+	if c.TransactionEra == "dijkstra" {
+		for _, txType := range c.Types {
+			if txType != "payment" {
+				return fmt.Errorf(
+					"TXPUMP_TRANSACTION_ERA=dijkstra supports payment only, got %q",
+					txType,
+				)
+			}
 		}
 	}
 	stakeConfigured := c.DelegationStakeKeyHash != ""

@@ -402,10 +402,10 @@ const createPoolStakeSnapshot = `-- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -419,6 +419,7 @@ type CreatePoolStakeSnapshotParams struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -435,6 +436,7 @@ func (q *Queries) CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolSta
 		arg.CapturedSlot,
 		arg.LeiosKeyPublic,
 		arg.LeiosKeyPossessionProof,
+		arg.LeiosKeyRegistrationEpoch,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -2937,6 +2939,7 @@ const getPoolStakeSnapshot = `-- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2963,6 +2966,7 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 		&i.CapturedSlot,
 		&i.LeiosKeyPublic,
 		&i.LeiosKeyPossessionProof,
+		&i.LeiosKeyRegistrationEpoch,
 		&i.CalculationVersion,
 		&i.RewardAccountAutoVote,
 		&i.RewardAccountAutoVoteResolved,
@@ -2974,6 +2978,7 @@ const getPoolStakeSnapshotsByEpoch = `-- name: GetPoolStakeSnapshotsByEpoch :man
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -3006,6 +3011,7 @@ func (q *Queries) GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolS
 			&i.CapturedSlot,
 			&i.LeiosKeyPublic,
 			&i.LeiosKeyPossessionProof,
+			&i.LeiosKeyRegistrationEpoch,
 			&i.CalculationVersion,
 			&i.RewardAccountAutoVote,
 			&i.RewardAccountAutoVoteResolved,
@@ -4280,10 +4286,10 @@ const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
@@ -4291,6 +4297,7 @@ ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     captured_slot = excluded.captured_slot,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
+    leios_key_registration_epoch = excluded.leios_key_registration_epoch,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -4308,6 +4315,7 @@ type SavePoolStakeSnapshotParams struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -4324,6 +4332,7 @@ func (q *Queries) SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSn
 		arg.CapturedSlot,
 		arg.LeiosKeyPublic,
 		arg.LeiosKeyPossessionProof,
+		arg.LeiosKeyRegistrationEpoch,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,

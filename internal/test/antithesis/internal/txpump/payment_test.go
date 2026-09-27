@@ -15,8 +15,13 @@
 package txpump
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +57,42 @@ func TestBuildPayment_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes, "encoded transaction should not be empty")
 	requireConwayDecode(t, txBytes)
+}
+
+func TestBuildDijkstraPayment_RoundTripsAsDijkstra(t *testing.T) {
+	seed := bytes.Repeat([]byte{0x42}, ed25519.SeedSize)
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	params := validParams()
+	params.WitnessKeys = []*UTxOKey{{
+		VKey:    privateKey.Public().(ed25519.PublicKey),
+		SKey:    seed,
+		Address: sampleAddr,
+	}}
+
+	txBytes, txID, err := BuildDijkstraPayment(params)
+	require.NoError(t, err)
+
+	var tx dijkstra.DijkstraTransaction
+	_, err = cbor.Decode(txBytes, &tx)
+	require.NoError(t, err)
+	require.Equal(t, txID, tx.Id().String())
+	require.Len(t, tx.Produced(), 2)
+	witnesses := tx.WitnessSet.VkeyWitnesses.Items()
+	require.Len(t, witnesses, 1)
+	bodyHash := tx.Id()
+	assert.True(
+		t,
+		ed25519.Verify(
+			witnesses[0].Vkey,
+			bodyHash[:],
+			witnesses[0].Signature,
+		),
+		"Dijkstra body hash must retain the signed Conway-compatible body bytes",
+	)
+
+	parsed, err := ledger.NewTransactionFromCbor(uint(dijkstraEraID), txBytes)
+	require.NoError(t, err)
+	require.Equal(t, txID, parsed.Hash().String())
 }
 
 func TestBuildPayment_NoInputs(t *testing.T) {
