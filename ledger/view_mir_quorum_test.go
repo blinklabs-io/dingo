@@ -142,6 +142,15 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 			lcommon.LedgerState,
 			lcommon.ProtocolParameters,
 		) error
+		// quorum is the era's MIR genesis-quorum rule on its own. The full
+		// validate path also fails on the fixture's missing inputs, so only
+		// this rule can show that a met quorum is accepted.
+		quorum func(
+			lcommon.Transaction,
+			uint64,
+			lcommon.LedgerState,
+			lcommon.ProtocolParameters,
+		) error
 	}{
 		{
 			name: "shelley",
@@ -155,6 +164,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 			},
 			pparams:  &shelley.ShelleyProtocolParameters{},
 			validate: eras.ValidateTxShelley,
+			quorum:   shelley.UtxoValidateMIRGenesisQuorum,
 		},
 		{
 			name: "allegra",
@@ -168,6 +178,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 			},
 			pparams:  &allegra.AllegraProtocolParameters{},
 			validate: eras.ValidateTxAllegra,
+			quorum:   allegra.UtxoValidateMIRGenesisQuorum,
 		},
 		{
 			name: "mary",
@@ -181,6 +192,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 			},
 			pparams:  &mary.MaryProtocolParameters{},
 			validate: eras.ValidateTxMary,
+			quorum:   mary.UtxoValidateMIRGenesisQuorum,
 		},
 		{
 			name: "alonzo",
@@ -195,6 +207,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 			},
 			pparams:  &alonzo.AlonzoProtocolParameters{},
 			validate: eras.ValidateTxAlonzo,
+			quorum:   alonzo.UtxoValidateMIRGenesisQuorum,
 		},
 		{
 			name: "babbage",
@@ -209,6 +222,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 			},
 			pparams:  &babbage.BabbageProtocolParameters{},
 			validate: eras.ValidateTxBabbage,
+			quorum:   babbage.UtxoValidateMIRGenesisQuorum,
 		},
 	}
 	signerCases := []struct {
@@ -234,7 +248,8 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 						Signature: make([]byte, ed25519.SignatureSize),
 					})
 				}
-				err := era.validate(era.build(witnesses), 0, lv, era.pparams)
+				tx := era.build(witnesses)
+				err := era.validate(tx, 0, lv, era.pparams)
 				var insufficient lcommon.MIRInsufficientGenesisSigsError
 				if !sc.wantRejected {
 					require.False(
@@ -243,6 +258,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 						"quorum met but MIR rejected for genesis signatures: %v",
 						err,
 					)
+					require.NoError(t, era.quorum(tx, 0, lv, era.pparams))
 					return
 				}
 				require.True(
@@ -299,8 +315,9 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 						Signature: make([]byte, ed25519.SignatureSize),
 					})
 				}
+				tx := era.build(witnesses)
 				err := era.validate(
-					era.build(witnesses),
+					tx,
 					redelegatedSlot,
 					redelegated,
 					era.pparams,
@@ -313,6 +330,17 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 					"genesis quorum verdict after redelegation: %v",
 					err,
 				)
+				quorumErr := era.quorum(
+					tx,
+					redelegatedSlot,
+					redelegated,
+					era.pparams,
+				)
+				if sc.wantRejected {
+					require.ErrorAs(t, quorumErr, &insufficient)
+					return
+				}
+				require.NoError(t, quorumErr)
 			})
 		}
 	}
