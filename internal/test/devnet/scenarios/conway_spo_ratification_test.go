@@ -290,6 +290,14 @@ func TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch(t *testing.T) {
 		governanceActionID(noConfidenceProposalID, 0),
 		map[int]struct{}{0: {}, 2: {}},
 	)
+	votedEpoch, err := query.epoch()
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		startEpoch,
+		votedEpoch,
+		"proposal, delegation, and SPO votes must land before the ratification boundary",
+	)
 
 	firstBoundaryEpoch := startEpoch + 1
 	waitForGovernance(
@@ -509,8 +517,6 @@ func waitForGovernanceWindow(
 	epochLength uint64,
 ) {
 	t.Helper()
-	initialEpoch, err := query.epoch()
-	require.NoError(t, err)
 	waitForGovernance(
 		t,
 		query,
@@ -522,11 +528,7 @@ func waitForGovernanceWindow(
 				return false, err
 			}
 			remaining := epochLength - point.Slot%epochLength
-			if remaining >= 45 {
-				return true, nil
-			}
-			epoch, err := query.epoch()
-			return err == nil && epoch > initialEpoch && remaining >= 45, err
+			return remaining >= epochLength*3/4, nil
 		},
 	)
 }

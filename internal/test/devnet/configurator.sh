@@ -243,6 +243,14 @@ find /tmp/testnet -type f \( -name '*stake*.skey' -o -name '*stake*.vkey' -o -na
 find /configs -type d -exec chmod 0755 {} +
 find /configs -type f -exec chmod 0644 {} +
 
+# Pool cold keys are used only by the host-side governance scenario. Keep
+# them unreadable to node containers sharing the UTxO-key volume.
+if [ -d /configs/utxo-keys/pool-keys ]; then
+    chmod 0700 /configs/utxo-keys/pool-keys
+    find /configs/utxo-keys/pool-keys -type f -name '*.skey' \
+        -exec chmod 0600 {} +
+fi
+
 # cardano-node refuses to start when vrf.skey has "other" read permissions,
 # so the per-pool keys directories must be 0700/0600. Pools listed in
 # DINGO_POOL_IDS are consumed by dingo containers, which run as a non-root

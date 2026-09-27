@@ -304,15 +304,19 @@ if [[ "${MODE}" == "dingo" ]]; then
   else
     # Never let a copy failure abort the run. Missing stake keys are handled
     # below by disabling the opt-in CIP-50 scenario for this invocation.
-    # Match the host user so the runner can remove its own temporary tree.
-    # The source volume is world-readable by configurator.sh.
+    # Copy root-only pool cold keys into the host user's private temporary
+    # directory, then return ownership and restrict all copied signing keys.
     docker run --rm \
-      --user "$(id -u):$(id -g)" \
+      --user 0:0 \
+      -e HOST_UID="$(id -u)" \
+      -e HOST_GID="$(id -g)" \
       -v "${UTXO_KEYS_VOLUME}:/k:ro" \
       -v "${STAKE_KEYS_HOST_DIR}:/out" \
       alpine sh -c 'cp -r /k/stake /out/stake; \
         cp -r /k/pool-keys /out/pool-keys; \
-        cp /k/genesis.*.skey /k/genesis.*.vkey /k/genesis.*.addr.info /out/' \
+        cp /k/genesis.*.skey /k/genesis.*.vkey /k/genesis.*.addr.info /out/; \
+        chown -R "${HOST_UID}:${HOST_GID}" /out; \
+        find /out -type f -name "*.skey" -exec chmod 0600 {} +' \
       2>/dev/null || true
   fi
   if [[ -d "${STAKE_KEYS_HOST_DIR}/stake" ]]; then
