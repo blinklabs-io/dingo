@@ -259,7 +259,7 @@ func newGeneratedByronPBFTTestNodeConfig(
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {%q: 1000},
+			"bootStakeholders": {%q: 1},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": 0}
 			},
@@ -313,7 +313,7 @@ func newByronPBFTTestNodeConfig(
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {%q: 1000},
+			"bootStakeholders": {%q: 1},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": %d}
 			},
