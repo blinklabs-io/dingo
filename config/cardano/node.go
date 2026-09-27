@@ -19,6 +19,7 @@ import (
 	"embed"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"os"
 	"path"
@@ -60,9 +61,9 @@ type CardanoNodeConfig struct {
 	ShelleyGenesisHash                         string `yaml:"ShelleyGenesisHash"`
 	CheckpointsFile                            string `yaml:"CheckpointsFile"`
 	CheckpointsFileHash                        string `yaml:"CheckpointsFileHash"`
-	// PBftSignatureThreshold is preserved as a decimal scalar so Byron's
-	// configured PBFT limit can be converted to an exact rational.
-	PBftSignatureThreshold *CardanoNodeDecimal `yaml:"PBftSignatureThreshold"`
+	// PBftSignatureThreshold is the optional Byron PBFT signature threshold,
+	// the maximum share of the last k blocks one genesis key may sign.
+	PBftSignatureThreshold *CardanoNodeDouble `yaml:"PBftSignatureThreshold"`
 
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
@@ -94,17 +95,24 @@ type CardanoNodeConfig struct {
 	PeerSharing *bool `yaml:"PeerSharing"`
 }
 
-// CardanoNodeDecimal preserves the source spelling of a numeric node-config
-// value so rational protocol parameters do not pass through float64.
-type CardanoNodeDecimal string
+// CardanoNodeDouble is a numeric node-config value that cardano-node reads as
+// a Double.
+type CardanoNodeDouble float64
 
-// UnmarshalYAML accepts numeric scalars only and retains their exact text.
-func (d *CardanoNodeDecimal) UnmarshalYAML(node *yaml.Node) error {
+// UnmarshalYAML accepts finite numeric scalars only.
+func (d *CardanoNodeDouble) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode ||
 		(node.Tag != "!!float" && node.Tag != "!!int") {
 		return fmt.Errorf("expected a numeric scalar, got %s", node.Tag)
 	}
-	*d = CardanoNodeDecimal(node.Value)
+	var value float64
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("expected a finite number, got %s", node.Value)
+	}
+	*d = CardanoNodeDouble(value)
 	return nil
 }
 
@@ -119,38 +127,32 @@ func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
 	if err := dec.Decode(&ret); err != nil {
 		return nil, err
 	}
-	if _, _, _, err := ret.PBFTSignatureThresholdRatio(); err != nil {
-		return nil, fmt.Errorf("invalid PBftSignatureThreshold: %w", err)
-	}
 	return &ret, nil
 }
 
-// PBFTSignatureThresholdRatio returns the optional Byron PBFT threshold as
-// an exact numerator/denominator pair. A false configured value means that
-// cardano-node's default applies.
-func (c *CardanoNodeConfig) PBFTSignatureThresholdRatio() (
-	numerator uint64,
-	denominator uint64,
-	configured bool,
-	err error,
-) {
+// PBFTSignatureLimit returns the most blocks one genesis key may sign in a
+// window of the last securityParam Byron blocks. ouroboros-consensus computes
+// floor(threshold * k) in Double arithmetic and stores it as a Word64, so a
+// product just below an integer rounds down and a negative product wraps.
+// configured is false when PBftSignatureThreshold is absent, in which case
+// cardano-node's default of 0.22 applies.
+func (c *CardanoNodeConfig) PBFTSignatureLimit(
+	securityParam uint64,
+) (limit uint64, configured bool, err error) {
 	if c == nil || c.PBftSignatureThreshold == nil {
-		return 0, 0, false, nil
+		return 0, false, nil
 	}
-	ratio, ok := new(big.Rat).SetString(string(*c.PBftSignatureThreshold))
-	if !ok || ratio.Sign() < 0 {
-		return 0, 0, true, fmt.Errorf(
-			"threshold %q is not a non-negative rational number",
-			*c.PBftSignatureThreshold,
+	product := float64(*c.PBftSignatureThreshold) * float64(securityParam)
+	if math.IsNaN(product) || math.IsInf(product, 0) {
+		return 0, true, fmt.Errorf(
+			"PBftSignatureThreshold %v times k %d is not finite",
+			float64(*c.PBftSignatureThreshold),
+			securityParam,
 		)
 	}
-	if !ratio.Num().IsUint64() || !ratio.Denom().IsUint64() {
-		return 0, 0, true, fmt.Errorf(
-			"threshold %q exceeds the supported rational range",
-			*c.PBftSignatureThreshold,
-		)
-	}
-	return ratio.Num().Uint64(), ratio.Denom().Uint64(), true, nil
+	floor, _ := big.NewFloat(math.Floor(product)).Int(nil)
+	modulus := new(big.Int).Lsh(big.NewInt(1), 64)
+	return floor.Mod(floor, modulus).Uint64(), true, nil
 }
 
 func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {

@@ -397,32 +397,28 @@ func TestByronPBFTStateUsesCardanoNodeThreshold(t *testing.T) {
 	require.NoError(t, err)
 	for _, tc := range []struct {
 		name        string
-		threshold   string
-		numerator   uint64
-		denominator uint64
+		threshold   float64
+		k           uint64
 		maxAllowed  uint64
 		shouldBlock bool
 	}{
-		{name: "default", maxAllowed: 2, shouldBlock: true},
-		{name: "0.10", threshold: "0.10", numerator: 1, denominator: 10, maxAllowed: 1, shouldBlock: true},
-		{name: "0.22", threshold: "0.22", numerator: 11, denominator: 50, maxAllowed: 2, shouldBlock: true},
-		{name: "0.50", threshold: "0.50", numerator: 1, denominator: 2, maxAllowed: 5, shouldBlock: true},
-		{name: "1.1", threshold: "1.1", numerator: 11, denominator: 10, maxAllowed: 10},
+		{name: "default", k: 10, maxAllowed: 2, shouldBlock: true},
+		{name: "0.10", threshold: 0.10, k: 10, maxAllowed: 1, shouldBlock: true},
+		{name: "0.22", threshold: 0.22, k: 10, maxAllowed: 2, shouldBlock: true},
+		{name: "0.50", threshold: 0.50, k: 10, maxAllowed: 5, shouldBlock: true},
+		{name: "1.1", threshold: 1.1, k: 10, maxAllowed: 10},
+		// 0.57 * 100 is 56.99999999999999 in Double.
+		{name: "0.57", threshold: 0.57, k: 100, maxAllowed: 56, shouldBlock: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			nodeConfig := newByronPBFTTestNodeConfig(t, block, 10)
-			if tc.threshold != "" {
-				threshold := cardano.CardanoNodeDecimal(tc.threshold)
+			nodeConfig := newByronPBFTTestNodeConfig(t, block, tc.k)
+			if tc.threshold != 0 {
+				threshold := cardano.CardanoNodeDouble(tc.threshold)
 				nodeConfig.PBftSignatureThreshold = &threshold
 			}
 			ls := &LedgerState{config: LedgerStateConfig{
 				CardanoNodeConfig: nodeConfig,
 			}}
-
-			config, err := ls.byronPBFTConfig()
-			require.NoError(t, err)
-			require.Equal(t, tc.numerator, config.PBFTSignatureThresholdNumerator)
-			require.Equal(t, tc.denominator, config.PBFTSignatureThresholdDenominator)
 
 			state, err := ls.byronPBFTStateAtTip(context.Background(), ocommon.Tip{})
 			require.NoError(t, err)

@@ -107,54 +107,32 @@ func TestCardanoNodeConfig(t *testing.T) {
 	})
 }
 
-func TestPBFTSignatureThresholdRatio(t *testing.T) {
+// TestPBFTSignatureLimit pins ouroboros-consensus's Word64 limit
+// floor(threshold * k), computed in Double: 0.57 * 100 is
+// 56.99999999999999 in Double, so the limit is 56 where an exact rational
+// would give 57, and a negative product wraps.
+func TestPBFTSignatureLimit(t *testing.T) {
 	tests := []struct {
-		name        string
-		config      string
-		numerator   uint64
-		denominator uint64
-		configured  bool
-		wantError   bool
+		name       string
+		config     string
+		k          uint64
+		limit      uint64
+		configured bool
+		wantError  bool
 	}{
-		{name: "absent", config: "{}\n", configured: false},
-		{
-			name:        "decimal fraction",
-			config:      "PBftSignatureThreshold: 0.6\n",
-			numerator:   3,
-			denominator: 5,
-			configured:  true,
-		},
-		{
-			name:        "decimal exponent",
-			config:      "PBftSignatureThreshold: 1e-1\n",
-			numerator:   1,
-			denominator: 10,
-			configured:  true,
-		},
-		{
-			name:        "above one",
-			config:      "PBftSignatureThreshold: 1.1\n",
-			numerator:   11,
-			denominator: 10,
-			configured:  true,
-		},
-		{
-			name:        "explicit zero",
-			config:      "PBftSignatureThreshold: 0\n",
-			numerator:   0,
-			denominator: 1,
-			configured:  true,
-		},
-		{
-			name:      "negative",
-			config:    "PBftSignatureThreshold: -0.1\n",
-			wantError: true,
-		},
-		{
-			name:      "string",
-			config:    "PBftSignatureThreshold: invalid\n",
-			wantError: true,
-		},
+		{name: "absent", config: "{}\n", k: 10},
+		{name: "0.10", config: "PBftSignatureThreshold: 0.10\n", k: 10, limit: 1, configured: true},
+		{name: "0.22", config: "PBftSignatureThreshold: 0.22\n", k: 10, limit: 2, configured: true},
+		{name: "0.50", config: "PBftSignatureThreshold: 0.50\n", k: 10, limit: 5, configured: true},
+		{name: "above one", config: "PBftSignatureThreshold: 1.1\n", k: 10, limit: 11, configured: true},
+		{name: "exponent", config: "PBftSignatureThreshold: 1e-1\n", k: 10, limit: 1, configured: true},
+		{name: "integer", config: "PBftSignatureThreshold: 1\n", k: 10, limit: 10, configured: true},
+		{name: "double rounding", config: "PBftSignatureThreshold: 0.57\n", k: 100, limit: 56, configured: true},
+		{name: "mainnet default spelled out", config: "PBftSignatureThreshold: 0.22\n", k: 2160, limit: 475, configured: true},
+		{name: "negative wraps", config: "PBftSignatureThreshold: -0.1\n", k: 10, limit: ^uint64(0), configured: true},
+		{name: "string", config: "PBftSignatureThreshold: invalid\n", wantError: true},
+		{name: "quoted", config: "PBftSignatureThreshold: \"0.5\"\n", wantError: true},
+		{name: "infinite", config: "PBftSignatureThreshold: .inf\n", wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -166,11 +144,9 @@ func TestPBFTSignatureThresholdRatio(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			numerator, denominator, configured, err :=
-				config.PBFTSignatureThresholdRatio()
+			limit, configured, err := config.PBFTSignatureLimit(test.k)
 			require.NoError(t, err)
-			require.Equal(t, test.numerator, numerator)
-			require.Equal(t, test.denominator, denominator)
+			require.Equal(t, test.limit, limit)
 			require.Equal(t, test.configured, configured)
 		})
 	}
