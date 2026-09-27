@@ -555,7 +555,13 @@ func TestValidateTxConwaySameTransactionResignationKeepsOtherElectedMember(
 			if shared {
 				require.NoError(t, err)
 			} else {
-				requireUnelectedCommitteeVoter(t, era, err)
+				// The resignation leaves the hot credential with no
+				// authorization at all, so cardano-ledger reports both
+				// UnelectedCommitteeVoters and VotersDoNotExist for it.
+				var unelected conway.UnelectedCommitteeVoterError
+				require.ErrorAs(t, err, &unelected)
+				var unknown conway.UnknownVoterError
+				require.ErrorAs(t, err, &unknown)
 			}
 		})
 	}
