@@ -453,6 +453,10 @@ type blockfetchMetrics struct {
 	blocksUnder1s      atomic.Int64
 	blocksUnder3s      atomic.Int64
 	blocksUnder5s      atomic.Int64
+	// Ring of the last N at-tip block delays, exported by block slot so a
+	// per-block chart sees every block; blockDelay above keeps only the most
+	// recent one, which a scrape interval longer than the block gap misses.
+	recentDelays *recentBlockDelays
 	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
 	// into a gledger.Block, by stage ("decode"). Only observed on a
 	// decode-cache miss, since a hit reuses another connection's already
@@ -588,6 +592,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "delay in seconds for the most recent block fetch",
 		},
 	)
+	o.blockfetchMetrics.recentDelays = newRecentBlockDelays()
+	o.registerer.MustRegister(o.blockfetchMetrics.recentDelays)
 	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_blockfetchclient_lateblocks",
