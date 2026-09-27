@@ -197,6 +197,12 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			errByronNoGenesisIssuers,
 		)
 	}
+	// Every header entry point routes a Byron header here, and an unsigned
+	// epoch-boundary header would otherwise pass on the anchor and slot bound
+	// alone when it extends a post-Byron block.
+	if err := ls.validateHeaderEraOrder(header); err != nil {
+		return err
+	}
 	if isEbb {
 		if ls.atByronChainOrigin() {
 			// An EBB's block number (Difficulty.Value) and slot (derived from

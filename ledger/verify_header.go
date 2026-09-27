@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -443,6 +444,35 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 	}
 
 	return epoch, epochCache, nil
+}
+
+// validateHeaderEraOrder rejects a non-nil header whose era precedes the era
+// of the header or block it extends (chain.ErrEraRegression). The parent is
+// resolved only when it is the primary chain's header tip or block tip, which
+// covers every header this node would admit; a header extending anything else
+// is checked against its concrete parent at chain admission and by the inbound
+// block envelope.
+func (ls *LedgerState) validateHeaderEraOrder(header ledger.BlockHeader) error {
+	parentEra, found, err := ls.chain.ParentEra(header.PrevHash().Bytes())
+	if err != nil {
+		// Failing to load a local block says nothing about the peer's header.
+		return fmt.Errorf(
+			"%w: resolve parent era: %w",
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
+	if !found {
+		return nil
+	}
+	if err := chain.CheckEraOrder(header.Era().Id, parentEra); err != nil {
+		return fmt.Errorf(
+			"block header at slot %d: %w",
+			header.SlotNumber(),
+			err,
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) headerVerificationEpoch(

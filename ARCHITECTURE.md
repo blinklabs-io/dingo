@@ -3285,6 +3285,22 @@ selector uses the same transaction-wide declared-budget helper, so it cannot
 construct a candidate that inbound envelope validation would reject on that
 block-wide budget.
 
+A header or block may not belong to an earlier era than the block it extends
+(`chain.ErrEraRegression`). The hard-fork combinator only moves a chain's
+ledger state forward (ouroboros-consensus `State.extendToSlot`) and rejects a
+header or block from any era but its parent ledger view's
+(`HardForkEnvelopeErrWrongEra`, `HardForkLedgerErrorWrongEra`). Three checks
+enforce the rule, each against the parent it can see: `Chain.AddBlockHeader`
+against the header tip it extends; `validateHeaderEraOrder`, which every header
+entry point (chainsync, blockfetch, chain selection, Leios announcements)
+reaches for a Byron header through `validateByronPBFTHeaderCrypto`, against the
+primary chain's header tip or block tip when the header names one of them as
+its parent; and the inbound envelope's
+`validateBlockOrder` against the stored parent block or the previous block of
+the batch. Without them a Byron epoch-boundary header, which carries no
+signature and may share its parent's block number, could extend a post-Byron
+block on any network.
+
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now always runs whenever per-tx validation runs at all (issue #3528), including for blocks at or before the immutable tip: the previous shortcut that trusted the block producer's `isValid` flag as authoritative for those blocks fired more broadly than intended -- on ordinary `ValidateHistorical=false` catch-up, not only a trusted-chain-dump import -- and was removed rather than narrowed. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution as before.
 
 Restrictive Phase 2 validation runs the CEK machine against the protocol's
