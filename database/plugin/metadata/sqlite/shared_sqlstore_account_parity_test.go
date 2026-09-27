@@ -224,15 +224,17 @@ func exerciseAccountStore(t *testing.T, store accountStore) accountState {
 	require.NoError(t, err)
 	ret.accountSums, err = store.GetAccountSumsByCredential(0, activeKey, nil)
 	require.NoError(t, err)
+	require.NotNil(t, ret.afterCreditRollback)
+	require.True(t, ret.afterCreditRollback.Active)
 	require.NoError(t, store.DeactivateAccounts(
 		nil,
 		[]models.StakeCredentialRef{
-			models.NewStakeCredentialRef(1, inactiveKey),
+			models.NewStakeCredentialRef(0, activeKey),
 		},
 	))
 	ret.deactivated, err = store.GetAccountByCredential(
-		1,
-		inactiveKey,
+		0,
+		activeKey,
 		true,
 		nil,
 	)

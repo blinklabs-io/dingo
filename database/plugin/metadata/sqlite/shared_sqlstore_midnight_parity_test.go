@@ -122,12 +122,24 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
 	state := exerciseMidnightStore(t, store)
-	require.NotEmpty(t, state.unspentAssets)
-	require.NotEmpty(t, state.unspentRegistrations)
+	assetTxHashes := make([]string, len(state.unspentAssets))
+	for i, asset := range state.unspentAssets {
+		assetTxHashes[i] = string(asset.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-b", "create-c"}, assetTxHashes)
+	registrationTxHashes := make([]string, len(state.unspentRegistrations))
+	for i, registration := range state.unspentRegistrations {
+		registrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, registrationTxHashes)
 	require.NotEmpty(t, state.page)
 	require.NotNil(t, state.governance)
 	require.NotNil(t, state.latestAriadne)
+	require.Equal(t, uint64(2), state.latestAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-b"), state.latestAriadne.Datum)
 	require.NotNil(t, state.historicalAriadne)
+	require.Equal(t, uint64(1), state.historicalAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-a"), state.historicalAriadne.Datum)
 	require.Len(t, state.rollbacks, 1)
 	require.NotNil(t, state.candidates)
 	require.Len(t, state.registrations, 1)
