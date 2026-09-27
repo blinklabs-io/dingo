@@ -3724,17 +3724,25 @@ The `LedgerView` interface provides query access to ledger state:
   state rather than an omitted provider. Authority comes from persisted
   committee history (including soft-deleted members) or an explicitly empty
   Conway genesis committee, not merely from database reachability.
-  `CommitteeCredentialMember` resolves both seated members and members
-  proposed by active `UpdateCommittee`
-  actions. Proposed members retain the latest persisted authorization or
-  term-scoped permanent resignation, including a resignation with no earlier
-  authorization. Each membership carries a `term_start_slot`; explicit removal
-  followed by re-election creates a fresh term without discarding the prior
-  term's rollback history, and an explicit presence bit preserves a valid
-  slot-zero term start. An enacted `UpdateCommittee` that re-elects a member it
-  does not remove is a renewal and keeps that member's existing
-  `term_start_slot`, so a continuing member's hot-key authorization and its
-  resignation both survive the renewal (issue #4584). Hot-voter resolution accepts any matching exact tagged
+  `CommitteeCredentialMember` resolves a seated member, or else a potential
+  future member: a credential that any active `UpdateCommittee` proposal adds,
+  whatever other proposals do with it (GOVCERT `isPotentialFutureMember`). A
+  seated member's resignation stands while it is seated, even while a pending
+  proposal would re-elect it. A credential that is not seated holds committee
+  state only for the current epoch: its authorization and resignation count
+  only when recorded at or after the view's pinned epoch start, because
+  cardano-ledger drops the committee state of every non-member at each epoch
+  boundary (EPOCH `updateCommitteeState`). This pruning is applied when the
+  state is read, so rollback needs no restore of its own. Each membership
+  carries a `term_start_slot`; explicit removal followed by re-election creates
+  a fresh term without discarding the prior term's rollback history, and an
+  explicit presence bit preserves a valid slot-zero term start. A fresh term
+  starts at the later of the proposal's slot and the first slot of the epoch
+  the enactment boundary closes, since certificates recorded before that were
+  dropped at that epoch's own boundary. An enacted `UpdateCommittee` that
+  re-elects a member it does not remove is a renewal and keeps that member's
+  existing `term_start_slot`, so a continuing member's hot-key authorization
+  and its resignation both survive the renewal (issue #4584). Hot-voter resolution accepts any matching exact tagged
   authorization whose member is active at the pinned epoch; expiry is
   inclusive. The legacy hash-only `CommitteeMember` and
   `CommitteeMembers` methods omit ambiguous same-hash key/script identities
@@ -3753,7 +3761,13 @@ The `LedgerView` interface provides query access to ledger state:
   hash-only committee certificate and voter rules when that capability is
   present. Cold authorization/resignation certificates and hot committee votes
   therefore match the complete tagged credential; other ledger-state
-  implementations retain the upstream compatibility path.
+  implementations retain the upstream compatibility path. The voter rule
+  resolves DRep, stake-pool and committee hot voters against the certificate
+  state after the transaction's own certificates, as cardano-ledger's GOV does
+  with `certStateAfterCERTS`; Dijkstra sub-transactions are applied in order
+  before the top-level transaction. A committee hot credential is known while
+  any cold credential authorizes it, so resigning or re-authorizing one cold
+  credential does not unseat another that shares the hot credential.
 - Conway and Dijkstra transaction validation run the gouroboros committee
   voting rules: committee votes on `NoConfidence` and `UpdateCommittee` actions
   are rejected at every Conway protocol version, and from PV11 each committee
