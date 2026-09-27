@@ -58,11 +58,22 @@ case "${1:-}" in
   run)
     shift
     host_user=false
+    host_uid=''
+    host_gid=''
     output_dir=''
     while (( $# > 0 )); do
       case "$1" in
         --user)
-          host_user=true
+          if [[ "$2" != '0:0' ]]; then
+            host_user=true
+          fi
+          shift 2
+          ;;
+        -e)
+          case "$2" in
+            HOST_UID=*) host_uid="${2#HOST_UID=}" ;;
+            HOST_GID=*) host_gid="${2#HOST_GID=}" ;;
+          esac
           shift 2
           ;;
         -v)
@@ -75,6 +86,10 @@ case "${1:-}" in
         *) shift ;;
       esac
     done
+    if [[ -n "${host_uid}" && -n "${host_gid}" ]]; then
+      # Model the runner's chown after the root-only source copy.
+      host_user=true
+    fi
     if [[ -n "${output_dir}" ]]; then
       mkdir -p "${output_dir}/stake"
       printf 'fake stake key\n' >"${output_dir}/stake/genesis.skey"
@@ -159,6 +174,10 @@ func TestRunTestsKeepUpPreservesSuccess(t *testing.T) {
 
 func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 	wantUserMapping := bashUserMapping(t)
+	wantHostUID, wantHostGID, ok := strings.Cut(wantUserMapping, ":")
+	require.True(t, ok)
+	wantCopy := "run --rm --user 0:0 -e HOST_UID=" + wantHostUID +
+		" -e HOST_GID=" + wantHostGID
 
 	for _, test := range []struct {
 		name              string
@@ -172,8 +191,12 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 			result := runFakeDevnet(t, test.testExit, false)
 			assert.Equal(t, test.testExit, result.exitCode, result.output)
 			assert.Contains(t, result.dockerLog,
-				"run --rm --user "+wantUserMapping,
-				"stake-key copy did not use the host uid:gid")
+				wantCopy,
+				"key copy must restore temporary files to the host uid:gid")
+			assert.Contains(t, result.dockerLog, "chown -R",
+				"container-created files must be returned to the host user")
+			assert.Contains(t, result.dockerLog, "chmod 0600",
+				"copied signing keys must remain private")
 			assert.Empty(t, result.stakeDirs,
 				"runner left its stake-key temp tree behind\n%s", result.output)
 			assert.Len(
