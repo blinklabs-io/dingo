@@ -56,11 +56,12 @@ type LeiosAnnouncementLedger interface {
 	) error
 }
 
-// leiosForgedEBEntry holds one locally-forged endorser block ready to
-// be announced to peers via LeiosNotify.
+// leiosForgedEBEntry holds an endorser-block offer ready to be announced to
+// peers via LeiosNotify.
 type leiosForgedEBEntry struct {
 	point          *ocommon.Point
 	size           uint64
+	txOffer        *ocommon.Point
 	vote           *lcommon.LeiosPrototypeVote
 	excludeConnKey string
 	// announcement is the raw Dijkstra ranking-block header sent in the
@@ -98,7 +99,7 @@ type leiosDeliveryReservation struct {
 	retry bool
 }
 
-// leiosForgedEBLog is an append-only log of locally-forged EBs with
+// leiosForgedEBLog is an append-only log of endorser-block offers with
 // per-connection cursors owned by the log itself.
 //
 // Head entries are pruned whenever every registered connection's cursor
@@ -452,11 +453,10 @@ func (l *leiosForgedEBLog) pruneLocked() {
 }
 
 // BroadcastEndorserBlock stores a locally-forged EB and notifies waiting
-// LeiosNotify server goroutines so they can announce it to peers. txBodies are
-// the referenced transactions' raw CBOR in manifest order; they are stored in
-// the endorser block's tx cache so the EB can be served to peers over
-// leios-fetch (completeTxCache() then holds and leiosfetchServerBlockTxsRequest
-// can answer). It satisfies forging.EndorserBlockBroadcaster.
+// LeiosNotify server goroutines so they can announce its manifest and
+// transactions to peers. txBodies are the referenced transactions' raw CBOR
+// in manifest order; they are stored in the endorser block's tx cache so the EB
+// can be served over leios-fetch. It satisfies forging.EndorserBlockBroadcaster.
 func (o *Ouroboros) BroadcastEndorserBlock(
 	slot uint64,
 	hash []byte,
@@ -491,6 +491,7 @@ func (o *Ouroboros) BroadcastEndorserBlock(
 	o.leiosEBLog.append(
 		leiosForgedEBEntry{point: &point, size: uint64(len(data))},
 	)
+	o.leiosEBLog.append(leiosForgedEBEntry{txOffer: &point})
 	return nil
 }
 
@@ -640,6 +641,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
+		o.markLeiosEndorserBlockRelayOffer(m.Point)
 		// While the ledger is deeply behind the head, do not prefetch this
 		// head endorser block: it would expire before the ledger reaches it and
 		// would starve the chain-driven historical backfill for connections. The
@@ -764,6 +766,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			)
 		})
 	case *oleiosnotify.MsgBlockTxsOffer:
+		o.markLeiosEndorserBlockRelayOffer(m.Point)
 		// The peer is offering the transactions for this endorser block. Fetch
 		// them over leios-fetch (off the handler, serialized per connection, and
 		// deduped across connections) so the EB becomes complete and its outputs
@@ -1550,15 +1553,17 @@ func leiosCollectTxs(result []cbor.RawMessage) []cbor.RawMessage {
 	return out
 }
 
-// leiosForgedEBOffer builds the LeiosNotify offer for a queued forged-EB log
-// entry: a votes-offer for a locally emitted vote, or a block-offer for a
-// forged endorser block. Both go through the gouroboros constructors so the
+// leiosForgedEBOffer builds the LeiosNotify offer for a queued log entry: a
+// votes-offer for a locally emitted vote, or a block offer for a forged or
+// relayed endorser block. Both go through the gouroboros constructors so the
 // message MessageType (and, for a block offer, the EB size) are set. A bare
 // struct literal would leave MessageType at its zero value, which the leios-
 // notify state machine rejects when the server has agency in the Busy state,
 // so the EB would never be offered, fetched, voted on, or certified.
 func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 	switch {
+	case entry.txOffer != nil:
+		return oleiosnotify.NewMsgBlockTxsOffer(*entry.txOffer)
 	case entry.announcement != nil:
 		return oleiosnotify.NewMsgBlockAnnouncement(
 			cbor.RawMessage(entry.announcement),

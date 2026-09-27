@@ -321,6 +321,12 @@ type leiosEndorserBlockData struct {
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
+	// relayOfferRequested is set for content received through LeiosNotify.
+	// The cached EB is re-offered only after its slot is verified, and its
+	// transactions only after their complete set has been validated.
+	relayOfferRequested      bool
+	relayManifestOffered     bool
+	relayTransactionsOffered bool
 	// seq is a monotonic insertion sequence assigned while leiosMu is held
 	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
 	// insertedAt. insertedAt is a wall-clock timestamp captured before the
@@ -585,6 +591,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		txCount:                  len(block.TransactionReferences),
 		cacheKeys:                cacheKeys,
 		insertedAt:               time.Now(),
+		relayOfferRequested:      origin == leiosStorePeerOffered,
 		slotVerified:             verified,
 		semanticValidationStatus: leiosEBValidationUnknown,
 	}
@@ -622,6 +629,10 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// block, and dropping the partial would send the next re-offer back to
 		// a from-scratch fetch.
 		data.partialTxs = existing.partialTxs
+		data.relayOfferRequested = data.relayOfferRequested ||
+			existing.relayOfferRequested
+		data.relayManifestOffered = existing.relayManifestOffered
+		data.relayTransactionsOffered = existing.relayTransactionsOffered
 		data.semanticValidationStatus = existing.semanticValidationStatus
 		if len(data.announcementHeaderRaw) == 0 {
 			data.announcementHeaderRaw = slices.Clone(
@@ -705,12 +716,92 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	if data == nil || !data.slotVerified {
 		return
 	}
+	o.enqueueLeiosRelayOffers(point, data)
 	// Persist verified content and advance the advisory slot watermark even
 	// when it is still manifest-only. Voting and pipeline admission remain
 	// separately gated on complete transaction bodies and semantic validation.
 	o.advanceLeiosVerifiedEbSlot(point.Slot)
 	o.enqueueLeiosPersist(point, blockRaw, data)
 	o.scheduleLeiosEndorserBlockValidation(point, data)
+}
+
+// enqueueLeiosRelayOffers forwards a peer-offered endorser block after its
+// announced slot has been verified. The manifest can be forwarded before the
+// transaction fetch completes; the transaction offer waits until every body
+// has been verified against the manifest.
+func (o *Ouroboros) enqueueLeiosRelayOffers(
+	point ocommon.Point,
+	data *leiosEndorserBlockData,
+) {
+	if data == nil || !data.relayOfferRequested || !data.slotVerified {
+		return
+	}
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosMu.Lock()
+	current := o.leiosEndorserBlocks[key]
+	if current == nil || !current.relayOfferRequested || !current.slotVerified {
+		o.leiosMu.Unlock()
+		return
+	}
+	updated := *current
+	manifestOffer := !updated.relayManifestOffered
+	if manifestOffer {
+		updated.relayManifestOffered = true
+	}
+	transactionsOffer := updated.txCount > 0 && updated.completeTxCache() &&
+		!updated.relayTransactionsOffered
+	if transactionsOffer {
+		updated.relayTransactionsOffered = true
+	}
+	if manifestOffer || transactionsOffer {
+		for _, cacheKey := range current.cacheKeys {
+			if o.leiosEndorserBlocks[cacheKey] == current {
+				o.leiosEndorserBlocks[cacheKey] = &updated
+			}
+		}
+	}
+	if manifestOffer {
+		forwardedPoint := ocommon.Point{
+			Slot: point.Slot,
+			Hash: slices.Clone(point.Hash),
+		}
+		o.leiosEBLog.append(leiosForgedEBEntry{
+			point: &forwardedPoint,
+			size:  uint64(len(current.blockRaw)),
+		})
+	}
+	if transactionsOffer {
+		forwardedPoint := ocommon.Point{
+			Slot: point.Slot,
+			Hash: slices.Clone(point.Hash),
+		}
+		o.leiosEBLog.append(leiosForgedEBEntry{txOffer: &forwardedPoint})
+	}
+	o.leiosMu.Unlock()
+}
+
+// markLeiosEndorserBlockRelayOffer records that a peer offered an occurrence
+// already present in cache. This handles the common case where chain sync
+// completed the EB before its separate LeiosNotify offers arrived.
+func (o *Ouroboros) markLeiosEndorserBlockRelayOffer(
+	point ocommon.Point,
+) {
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosMu.Lock()
+	current := o.leiosEndorserBlocks[key]
+	if current == nil {
+		o.leiosMu.Unlock()
+		return
+	}
+	updated := *current
+	updated.relayOfferRequested = true
+	for _, cacheKey := range current.cacheKeys {
+		if o.leiosEndorserBlocks[cacheKey] == current {
+			o.leiosEndorserBlocks[cacheKey] = &updated
+		}
+	}
+	o.leiosMu.Unlock()
+	o.enqueueLeiosRelayOffers(point, &updated)
 }
 
 func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
