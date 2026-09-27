@@ -3302,6 +3302,21 @@ What that horizon is measured *from* is where Dingo had to change. `LedgerState.
 
 `hardForkSummaryAnchoredAt` (`ledger/hardfork_summary.go`) walks the full epoch cache on every call -- one row per epoch since genesis, not per era -- so its cost grows without bound as the chain ages (issue #2093). Rather than adding invalidation hooks at each of epoch rollover, era transition, rollback, and `TransitionInfo` change, the result is cached keyed on `(consensusSnapshot.generation, horizonAnchorSlot)`: every one of those four triggers already mutates writer-owned state under `ls.Lock()` and calls `publishSnapshotsLocked` before `Unlock`, which is the sole point that bumps `generation` and publishes a new immutable `consensusSnapshot`/`tipSnapshot` pair (see "Threading and Concurrency" later in this document for the two-snapshot publication mechanism). A cache entry keyed on `generation` is therefore invalidated by construction on every trigger, reusing an invariant every other lock-free reader of those snapshots already depends on rather than introducing a second one. `horizonAnchorSlot` is part of the key because block application and mempool/query callers legitimately request different horizons against the same published generation. A build racing a concurrent build for a different key can overwrite the cache slot, but the key check always compares against the snapshot generation just loaded, not against whatever the cache holds, so a clobbered entry costs one extra rebuild on the next call and never serves a wrong answer.
 
+### Dijkstra batch state application
+
+A valid Dijkstra transaction is persisted and applied as its sub-transaction
+bodies in encoded ledger order, followed by its enclosing body. Each level uses
+its own body hash for transaction rows and produced UTxOs, and consumes only
+that body's inputs. Body-scoped withdrawals, certificates, direct deposits,
+and governance updates run in that same order inside the block's single
+database transaction. Direct-deposit credits use the body hash in the reward
+rollback journal, so rollback and replay restore the account balance with the
+rest of the block. An invalid batch applies only the enclosing transaction's
+collateral outcome. Historical backfill and Mithril gap indexing also persist
+the child and enclosing body hashes and process governance per body; they do
+not reapply direct deposits to account balances already represented by their
+imported state.
+
 ### Checkpoint Enforcement
 
 When a network config supplies a `CheckpointsFile` (mainnet and preview ship one), `config/cardano` verifies its `CheckpointsFileHash` and loads it into a block-number to block-hash map, exposed via `CardanoNodeConfig.Checkpoints()`. `LedgerState` caches the map at construction, and `ledgerProcessBlock` (`ledger/state.go`) rejects any inbound block whose height matches a checkpoint but whose hash differs, in every validation mode, before header or transaction validation runs. This is an envelope-validity guard against following a chain that diverges from the known-good chain at a checkpointed height; honest chains always agree with the shipped checkpoints, so the rule never rejects a canonical block. Byron epoch boundary blocks share the preceding block's number and are skipped to avoid a false mismatch.

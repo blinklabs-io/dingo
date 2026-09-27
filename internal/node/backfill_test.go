@@ -29,8 +29,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -191,6 +194,139 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xe0}, bytes.Repeat([]byte{0x42}, 28)...),
+	)
+	require.NoError(t, err)
+	proposal := dijkstra.DijkstraProposalProcedure{
+		PPDeposit:       42,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: dijkstra.DijkstraGovAction{
+			Type: uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{
+				Type: uint(lcommon.GovActionTypeInfo),
+			},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.invalid/dijkstra-backfill-child",
+			DataHash: [32]byte(bytes.Repeat([]byte{0x24}, 32)),
+		},
+	}
+	proposalCbor, err := cbor.Encode(proposal)
+	require.NoError(t, err)
+	childBody, err := cbor.Encode(map[uint]any{
+		0:  []any{},
+		1:  []any{map[uint]any{0: append([]byte{0x60}, bytes.Repeat([]byte{0x25}, 28)...), 1: uint64(1_000_000)}},
+		20: []cbor.RawMessage{proposalCbor},
+	})
+	require.NoError(t, err)
+	childTx, err := cbor.Encode([]any{
+		cbor.RawMessage(childBody), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	rootBody, err := cbor.Encode(map[uint]any{
+		0:  []any{},
+		1:  []any{},
+		2:  uint64(0),
+		23: cbor.NewSetType([]cbor.RawMessage{childTx}, true),
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(rootBody), map[uint]any{}, true, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
+	childHash := dijkstraTx.Body.TxSubTransactions.Items()[0].Body.Id()
+	rootHash := tx.Hash()
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber:  1,
+					Slot:         1000,
+					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
+		},
+	}
+	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: bytes.Repeat([]byte{0x26}, 32),
+	}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:   point.Slot,
+		Hash:   point.Hash,
+		Number: 1,
+		Cbor:   blockCbor,
+		Type:   uint(block.Type()),
+	}, nil))
+	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			GovActionValidityPeriod: 20,
+			DRepInactivityPeriod:    20,
+		},
+	}
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(
+			[]lcommon.Transaction{tx},
+			point,
+			12,
+			dijkstra.EraIdDijkstra,
+			pparams,
+			offsets,
+			acc,
+			txn,
+			nil,
+			true,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+
+	childRow, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), childRow.BlockIndex)
+	rootRow, err := db.Metadata().GetTransactionByHash(rootHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), rootRow.BlockIndex)
+	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, childUtxo)
+	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, rootUtxo)
+	proposalRow, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, childHash.Bytes(), proposalRow.TxHash)
 }
 
 func closeTestDB(db *database.Database) error {
