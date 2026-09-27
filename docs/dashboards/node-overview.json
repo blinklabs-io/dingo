@@ -988,7 +988,7 @@
         "type": "prometheus",
         "uid": "default"
       },
-      "description": "Progress through the current epoch expressed as slot number. The orange dashed line shows the expected slot based on wall-clock time \u2014 if node slots fall below the reference, the node is stalling.",
+      "description": "Where the chain tip sits in the current epoch (slots since the epoch started), against the wall-clock slot (gray dashed reference). The vertical distance between the two lines is the tip gap: how many slots the tip trails the wall clock, the same quantity the Tip Gap panel below charts from dingo_tip_gap_slots. Blocks arrive about every 20 slots, so a healthy node trails by a few tens of slots, too small to see at this scale. A visible gap means the node is behind: syncing, stalled, or just restarted. At an epoch boundary the reference drops to 0 a moment before the tip crosses into the new epoch.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1081,6 +1081,21 @@
               {
                 "id": "custom.lineWidth",
                 "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Reference (wall clock)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#8e8e8e",
+                  "mode": "fixed"
+                }
               }
             ]
           }
@@ -1247,6 +1262,21 @@
                 "id": "color",
                 "value": {
                   "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expected (active slot coeff 0.05 \u00d7 60)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#8e8e8e",
                   "mode": "fixed"
                 }
               }
