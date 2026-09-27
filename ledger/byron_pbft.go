@@ -173,6 +173,19 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			"cannot validate nil Byron PBFT block",
 		)
 	}
+	// Header-only blocks cannot preserve the enclosing block discriminator, so
+	// distinguish EBBs from main blocks by their concrete header type. Either
+	// may be a typed-nil pointer, and every check below, including the slot in
+	// their error messages, reads through the asserted header.
+	header := block.Header()
+	ebbHeader, isEbb := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader)
+	mainHeader, isMain := header.(*ledgerbyron.ByronMainBlockHeader)
+	if header == nil || (isEbb && ebbHeader == nil) ||
+		(isMain && mainHeader == nil) {
+		return errors.New(
+			"cannot validate a Byron PBFT block with a nil header",
+		)
+	}
 	_, noGenesisIssuers, err := ls.byronPBFTGenesis()
 	if err != nil {
 		return err
@@ -184,10 +197,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			errByronNoGenesisIssuers,
 		)
 	}
-	// Header-only blocks cannot preserve the enclosing block discriminator, so
-	// distinguish EBBs from main blocks by their concrete header type.
-	header := block.Header()
-	if ebbHeader, ok := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader); ok {
+	if isEbb {
 		if ls.atByronChainOrigin() {
 			// An EBB's block number (Difficulty.Value) and slot (derived from
 			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
@@ -227,8 +237,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			block.SlotNumber(),
 		)
 	}
-	mainHeader, ok := header.(*ledgerbyron.ByronMainBlockHeader)
-	if !ok || header == nil {
+	if !isMain {
 		return fmt.Errorf(
 			"byron main block at slot %d has unexpected header type %T",
 			block.SlotNumber(),
