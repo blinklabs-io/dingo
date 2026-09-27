@@ -16,6 +16,7 @@ package forging
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -232,6 +233,59 @@ func TestBuildBlockRejectsWhenValidationSnapshotGoesStale(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, block)
 	require.ErrorIs(t, err, errTxValidationSnapshotChanged)
+}
+
+// TestBuildBlockRejectsWhenSnapshotGoesStaleOnTheFinalCandidate covers the
+// publication that lands while the last mempool transaction is being
+// re-validated. stillCurrent() is consulted before each candidate, so no
+// later iteration exists to observe it: only the check after the selection
+// loop stands between that publication and a block returned from a
+// superseded snapshot, bypassing the forge loop's in-slot retry. The
+// candidate's own outcome must not matter -- a final candidate rejected by
+// re-validation ends the pass the same way an accepted one does.
+func TestBuildBlockRejectsWhenSnapshotGoesStaleOnTheFinalCandidate(
+	t *testing.T,
+) {
+	for _, tc := range []struct {
+		name          string
+		rejectFinalTx bool
+	}{
+		{name: "final candidate accepted"},
+		{name: "final candidate rejected", rejectFinalTx: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mempool := threeTxMempoolForSelection(t)
+			validator := &sessionMockTxValidator{
+				staleAfterCalls: len(mempool.transactions),
+			}
+			if tc.rejectFinalTx {
+				validator.validateErr = func(string) error {
+					if validator.validateCalls ==
+						len(mempool.transactions) {
+						return errors.New("input already spent")
+					}
+					return nil
+				}
+			}
+			builder := newSelectionTestBuilder(
+				t,
+				mempool,
+				selectionTestChainTip(),
+				validator,
+			)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.ErrorIs(t, err, errTxValidationSnapshotChanged)
+			require.Nil(t, block)
+			require.Equal(
+				t,
+				len(mempool.transactions),
+				validator.validateCalls,
+				"every candidate is validated before the publication is observed",
+			)
+			require.Equal(t, 1, validator.sessions)
+		})
+	}
 }
 
 // TestBuildBlockRejectsWhenParentChangesDuringSelection simulates a peer

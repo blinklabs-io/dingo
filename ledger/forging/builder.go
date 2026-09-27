@@ -565,7 +565,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// block built from transactions checked against different generations.
 	//
 	// Both stillCurrent and the slot deadline are consulted before every
-	// candidate rather than once at the end. Re-validation costs
+	// candidate rather than only once at the end, and stillCurrent once
+	// more after the loop for a publication landing during the final
+	// candidate's re-validation. Re-validation costs
 	// milliseconds per transaction, so a pass over a large mempool runs
 	// for seconds: checking only at the end meant a producer kept paying
 	// for validations against a snapshot that had already been superseded
@@ -906,6 +908,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 				"total_steps", totalExUnits.Steps,
 			)
 		}
+		// However the pass ended -- mempool exhausted, block full, or
+		// slot deadline -- a publication may have landed while the last
+		// candidate was being re-validated, after the per-candidate
+		// check had already run. Returning the block would ship a
+		// selection from a superseded snapshot and bypass the forge
+		// loop's in-slot retry.
 		if !stillCurrent() {
 			return errTxValidationSnapshotChanged
 		}
