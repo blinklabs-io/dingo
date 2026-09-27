@@ -390,38 +390,78 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 	probeDB.SetMaxOpenConns(1)
 
 	done := make(chan struct{})
+	probeDone := make(chan struct{})
+	stopProbe := func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}
+	defer func() {
+		stopProbe()
+		<-probeDone
+	}()
 	blockedCh := make(chan int, 1)
+	probeReadyCh := make(chan error, 1)
 	go func() {
 		blocked := 0
+		ready := false
+		defer func() {
+			blockedCh <- blocked
+			close(probeDone)
+		}()
 		for {
 			select {
 			case <-done:
-				blockedCh <- blocked
 				return
 			default:
 			}
 			tx, beginErr := probeDB.BeginTx(context.Background(), nil)
 			if beginErr != nil {
+				if !ready {
+					probeReadyCh <- beginErr
+					return
+				}
 				blocked++
 				continue
 			}
-			if _, execErr := tx.ExecContext(
+			_, execErr := tx.ExecContext(
 				context.Background(),
 				"INSERT INTO checkpoint_probe (n, payload) VALUES (?, ?)",
 				-1,
 				nil,
-			); execErr != nil {
-				blocked++
-			}
+			)
 			_ = tx.Rollback()
+			if execErr != nil {
+				if !ready {
+					probeReadyCh <- execErr
+					return
+				}
+				blocked++
+				continue
+			}
+			if !ready {
+				ready = true
+				probeReadyCh <- nil
+			}
 		}
 	}()
+	require.NoError(
+		t,
+		testutil.RequireReceive(
+			t,
+			probeReadyCh,
+			10*time.Second,
+			"writer-lock probe must complete a write before checkpoint starts",
+		),
+	)
 
 	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
 	checkpointErr := checkpointWAL(databaseURI, slog.New(
 		slog.NewTextHandler(&bytes.Buffer{}, nil),
 	))(t.Context())
-	close(done)
+	stopProbe()
 
 	blocked := testutil.RequireReceive(
 		t, blockedCh, 10*time.Second,
