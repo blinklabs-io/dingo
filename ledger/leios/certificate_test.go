@@ -45,7 +45,7 @@ func newTestCommitteeFixture(t *testing.T, size byte) *testCommitteeFixture {
 		total += stake
 	}
 	committee, err := ComputeCommittee(
-		5, 3, poolStakes, total, big.NewRat(1, 1),
+		5, 3, poolStakes, total, uint64(size),
 	)
 	require.NoError(t, err)
 	require.Len(t, committee.Members, int(size))

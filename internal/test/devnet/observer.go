@@ -26,6 +26,7 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -180,13 +181,22 @@ func (o *ChainObservers) session(
 			)
 		}
 		hash := header.Hash()
+		observed := ObservedHeader{
+			Slot:        header.SlotNumber(),
+			BlockNumber: header.BlockNumber(),
+			Hash:        hash.Bytes(),
+			BodySize:    header.BlockBodySize(),
+		}
+		if dijkstraHeader, ok := header.(*gdijkstra.DijkstraBlockHeader); ok {
+			announcementHash, announcementSize, announces :=
+				dijkstraHeader.LeiosAnnouncement()
+			if announces {
+				observed.LeiosAnnouncementHash = announcementHash.Bytes()
+				observed.LeiosAnnouncementSize = announcementSize
+			}
+		}
 		chain.RollForward(
-			ObservedHeader{
-				Slot:        header.SlotNumber(),
-				BlockNumber: header.BlockNumber(),
-				Hash:        hash.Bytes(),
-				BodySize:    header.BlockBodySize(),
-			},
+			observed,
 			tipFrom(tip),
 		)
 		return nil

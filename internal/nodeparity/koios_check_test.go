@@ -310,10 +310,6 @@ func TestUTxOChangesAppliesInputsAndOutputs(t *testing.T) {
 	}
 }
 
-// boolPtr is a local helper: the koiosparity package has its own, but a
-// test in this package cannot reach it.
-func boolPtr(b bool) *bool { return &b }
-
 // TestUTxOChangesPhase2InvalidUsesCollateral proves the reconstruction
 // follows what the ledger actually did with a phase-2-invalid transaction,
 // not what its body asked for.
@@ -353,7 +349,7 @@ func TestUTxOChangesPhase2InvalidUsesCollateral(t *testing.T) {
 			TxHash: "failtx", TxIndex: 2, Value: "8500000",
 		},
 		PlutusContracts: []koiosparity.KoiosTxInfoPlutusContract{
-			{ValidContract: boolPtr(false)},
+			{ValidContract: new(false)},
 		},
 	}
 
@@ -403,7 +399,7 @@ func TestUTxOChangesValidTxWithCollateralUsesBody(t *testing.T) {
 			TxHash: "oktx", TxIndex: 1, Value: "8500000",
 		},
 		PlutusContracts: []koiosparity.KoiosTxInfoPlutusContract{
-			{ValidContract: boolPtr(true)},
+			{ValidContract: new(true)},
 		},
 	}
 
