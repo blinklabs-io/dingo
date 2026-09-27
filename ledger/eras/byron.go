@@ -227,7 +227,7 @@ type ValueNotConservedByronError struct {
 }
 
 // FeeTooLowByronError is returned when a Byron transaction's implicit fee is
-// below the fee required by the Byron genesis fee policy.
+// below the fee required by the adopted Byron fee policy.
 type FeeTooLowByronError struct {
 	Actual   *big.Int
 	Required *big.Int

@@ -16,19 +16,28 @@ package ledger
 
 import (
 	"context"
+	"crypto/sha3"
+	"io"
+	"log/slog"
 	"math/big"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/byronupdate"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -397,4 +406,169 @@ func TestByronBlockPParams(t *testing.T) {
 		shelleyParams,
 		byronBlockPParams(firstShelley, state, shelleyParams),
 	)
+}
+
+// seedByronInputFromWitness stores the UTxO a transaction's first input
+// spends, at the pubkey address its first witness controls, so the positional
+// witness check passes against real signatures.
+func seedByronInputFromWitness(
+	t *testing.T,
+	db *database.Database,
+	tx *byron.ByronTransaction,
+	amount uint64,
+) {
+	t.Helper()
+	fields, ok := tx.Twit[0].Value().([]any)
+	require.True(t, ok)
+	wrapped, ok := fields[1].(cbor.WrappedCbor)
+	require.True(t, ok)
+	var payload [][]byte
+	_, err := cbor.Decode(wrapped.Bytes(), &payload)
+	require.NoError(t, err)
+	rootCbor, err := cbor.Encode([]any{
+		uint64(lcommon.ByronAddressTypePubkey),
+		[]any{uint64(lcommon.ByronAddressTypePubkey), payload[0]},
+		cbor.RawMessage{0xa0},
+	})
+	require.NoError(t, err)
+	digest := sha3.Sum256(rootCbor)
+	root := lcommon.Blake2b224Hash(digest[:])
+	addr, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		root.Bytes(),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	out, err := cbor.Encode(byron.ByronTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  amount,
+	})
+	require.NoError(t, err)
+	input := tx.Inputs()[0]
+	txn := db.Transaction(true)
+	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+		TxId:      input.Id().Bytes(),
+		OutputIdx: input.Index(),
+		AddedSlot: 0,
+	}))
+	require.NoError(t, db.Blob().SetUtxo(
+		txn.Blob(), input.Id().Bytes(), input.Index(), out,
+	))
+	require.NoError(t, txn.Commit())
+}
+
+// TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters covers the
+// block-application half of #4379, #4418 and #4419 end to end: a real Byron
+// main block runs through ledgerProcessBlocksFromSource, and its size and
+// transaction checks see the limits and fee policy the update state adopted
+// rather than Byron genesis, which here allows only a one-byte block, header
+// and transaction.
+func TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters(t *testing.T) {
+	t.Parallel()
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	mainBlock, ok := block.(*byron.ByronMainBlock)
+	require.True(t, ok)
+	tx, ok := block.Transactions()[0].(*byron.ByronTransaction)
+	require.True(t, ok)
+
+	nodeConfig := newByronPBFTTestNodeConfig(t, block, 10)
+	// Genesis allows a one-byte block, header and transaction.
+	genesisLimits := &nodeConfig.ByronGenesis().BlockVersionData
+	genesisLimits.MaxBlockSize = 1
+	genesisLimits.MaxHeaderSize = 1
+	genesisLimits.MaxTxSize = 1
+	db := newTestDB(t)
+	outputs := uint64(0)
+	for _, output := range tx.Outputs() {
+		outputs += output.Amount().Uint64()
+	}
+	seedByronInputFromWitness(t, db, tx, outputs)
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{{
+		Slot:        block.SlotNumber(),
+		Hash:        block.Hash().Bytes(),
+		BlockNumber: block.BlockNumber(),
+		Type:        uint(gledger.BlockTypeByronMain),
+		Cbor:        block.Cbor(),
+	}}))
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, eras.ByronEraDesc.Id, 20_000, 21_600, nil,
+	))
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:           db,
+		ChainManager:       cm,
+		CardanoNodeConfig:  nodeConfig,
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ValidateHistorical: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(time.Unix(0, 0), time.Second, 100),
+		DefaultSlotClockConfig(),
+	)
+	parentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(0, mainBlock.PrevHash().Bytes()),
+		BlockNumber: 0,
+	}
+	require.NoError(t, db.SetTip(parentTip, nil))
+	ls.Lock()
+	ls.currentTip = parentTip
+	ls.currentEra = eras.ByronEraDesc
+	ls.currentEpoch = models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    20_000,
+		LengthInSlots: 21_600,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	ls.currentPParams = nil
+	ls.Unlock()
+
+	genesisParams, err := ls.byronGenesisProtocolParameters()
+	require.NoError(t, err)
+	require.Zero(t, genesisParams.MaxTxSize.Cmp(big.NewInt(1)))
+	adopted := genesisParams.Clone()
+	adopted.MaxBlockSize = big.NewInt(2_000_000)
+	adopted.MaxHeaderSize = big.NewInt(2_000_000)
+	adopted.MaxTxSize = big.NewInt(4_096)
+	adopted.TxFeeSummand = 777
+	adopted.TxFeeMultiplierNano = big.NewInt(0)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(config, adopted)
+	require.NoError(t, err)
+	state.update = state.update.Advance(0, 0)
+	ls.Lock()
+	ls.byronPBFT.state = state
+	ls.byronPBFT.tip = ls.currentTip.Point
+	ls.byronPBFT.initialized = true
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{block}}
+	close(results)
+	err = ls.ledgerProcessBlocksFromSource(context.Background(), results)
+	// The golden transaction is not a consistent ledger transaction: its
+	// output carries no network attribute under the test protocol magic and
+	// its witness does not verify. Reaching those per-transaction rules at all
+	// means the block passed the size checks on the adopted limits, and the
+	// fee floor and missing size rejection show the transaction rules read
+	// the adopted parameters rather than genesis. The block's own view cannot
+	// fall back to the tip's parameters, so they came through block
+	// application.
+	require.Error(t, err)
+	require.ErrorContains(t, err, "network magic")
+	require.ErrorContains(t, err, "Byron minimum 777 ")
+	require.NotContains(t, err.Error(), "exceeds max")
+	require.NotContains(t, err.Error(), "adopted protocol parameters")
+	var tooLarge eras.TxTooLargeByronError
+	require.NotErrorAs(t, err, &tooLarge)
 }

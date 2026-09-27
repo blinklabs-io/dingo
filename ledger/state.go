@@ -8336,8 +8336,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 					// snaps up to an epoch boundary, so trailing by even one
 					// block can cost an entire epoch of horizon and reject a
 					// canonical Plutus transaction (issue #3844).
-					horizonAnchorSlot: parent.slot,
-					epochStartSlot:    epochStartSlot,
+					horizonAnchorSlot:    parent.slot,
+					epochStartSlot:       epochStartSlot,
+					byronParamsFromBlock: true,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
 				validateStart := time.Now()

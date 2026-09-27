@@ -113,7 +113,10 @@ func NewByronProtocolParametersFromGenesis(
 		HeavyDelThd:       natural("heavyDelThd", data.HeavyDelThd),
 		UpdateVoteThd:     natural("updateVoteThd", data.UpdateVoteThd),
 		UpdateProposalThd: natural("updateProposalThd", data.UpdateProposalThd),
-		UpdateProposalTTL: natural("updateImplicit", int64(data.UpdateImplicit)),
+		UpdateProposalTTL: natural(
+			"updateImplicit",
+			int64(data.UpdateImplicit),
+		),
 		SoftforkRule: ByronSoftforkRule{
 			InitThd: natural("softforkRule.initThd", data.SoftforkRule.InitThd),
 			MinThd:  natural("softforkRule.minThd", data.SoftforkRule.MinThd),
@@ -152,11 +155,16 @@ func NewByronProtocolParametersFromGenesis(
 	return params, nil
 }
 
-// Clone returns a deep copy.
+// Clone returns a deep copy, or nil for a nil receiver.
 func (p *ByronProtocolParameters) Clone() *ByronProtocolParameters {
 	if p == nil {
 		return nil
 	}
+	return p.clone()
+}
+
+// clone returns a deep copy of a non-nil receiver.
+func (p *ByronProtocolParameters) clone() *ByronProtocolParameters {
 	ret := *p
 	for _, field := range []struct{ dst, src **big.Int }{
 		{&ret.SlotDuration, &p.SlotDuration},
@@ -211,7 +219,10 @@ func (p *ByronProtocolParameters) Equal(other *ByronProtocolParameters) bool {
 func (p *ByronProtocolParameters) ApplyUpdate(
 	mod byron.ByronUpdateProposalBlockVersionMod,
 ) (*ByronProtocolParameters, error) {
-	ret := p.Clone()
+	if p == nil {
+		return nil, errors.New("no Byron protocol parameters to update")
+	}
+	ret := p.clone()
 	if len(mod.ScriptVersion) > 0 {
 		ret.ScriptVersion = mod.ScriptVersion[0]
 	}

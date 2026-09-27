@@ -134,6 +134,12 @@ type LedgerView struct {
 	// -- the exact protocol parameters this operation is actually
 	// evaluating against. See blinklabs-io/dingo#3962's PR review.
 	syntheticV2CostModel bool
+	// byronParamsFromBlock is set for block application, where a Byron
+	// block's rules must read the parameters its update state adopted for
+	// the block's own epoch, passed as pparams. ByronProtocolParameters then
+	// refuses rather than answer with the parameters adopted as of the tip,
+	// which belong to an earlier epoch once a block crosses a boundary.
+	byronParamsFromBlock bool
 	// storageErr is the first non-not-found storage error observed by one of
 	// this view's boolean LedgerState predicates. It is sticky: only the
 	// first recorded error is kept, matching the single LedgerView built per
@@ -358,8 +364,17 @@ func (lv *LedgerView) ByronProtocolParameters() (
 	*eras.ByronProtocolParameters,
 	error,
 ) {
+	if lv.byronParamsFromBlock {
+		return nil, errByronBlockParamsNotPassed
+	}
 	return lv.ls.ByronProtocolParameters()
 }
+
+// errByronBlockParamsNotPassed reports a Byron block applied without its
+// adopted protocol parameters.
+var errByronBlockParamsNotPassed = errors.New(
+	"byron block application must pass the block's adopted protocol parameters",
+)
 
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,

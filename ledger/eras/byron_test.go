@@ -414,10 +414,12 @@ type mockLedgerState struct {
 	protocolMagic uint32
 	// protocolMagicErr, when set, makes ByronProtocolMagic fail, so a test
 	// can prove a rule surfaces the lookup failure rather than skipping.
-	protocolMagicErr   error
-	byronFeeSummand    int64
-	byronFeeMultiplier int64
-	// byronMaxTxSize backs ByronMaxTxSize; zero means no limit.
+	protocolMagicErr error
+	// byronFeeSummand, byronFeeMultiplier and byronMaxTxSize are the
+	// genesis values ByronProtocolParameters loads, the fee policy scaled by
+	// 10^9; a zero byronMaxTxSize means no limit.
+	byronFeeSummand      int64
+	byronFeeMultiplier   int64
 	byronMaxTxSize       uint64
 	skipPhase2Validation bool
 	utxoLookups          int

@@ -3050,7 +3050,9 @@ Byron's transaction rules read `ppMaxTxSize` and the fee policy from
 `eras.ByronProtocolParameters`. Block application passes the parameters the
 Byron update state adopted for the block's epoch as `ValidateTxByron`'s
 pparams; other callers get the parameters adopted as of the ledger tip, or
-Byron genesis, through `ByronProtocolParametersProvider`. The rules follow the
+Byron genesis, through `ByronProtocolParametersProvider`. The view block
+application builds refuses that fallback, so a Byron block missing its own
+parameters fails instead of validating against another epoch's. The rules follow the
 reference `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a
 list, so a repeated input is valid, while balances restrict the UTxO to the
 input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
