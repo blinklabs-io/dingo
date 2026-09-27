@@ -15,10 +15,14 @@
 package conformance
 
 import (
+	"bytes"
 	"database/sql"
+	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -194,4 +198,76 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 			)
 		})
 	}
+}
+
+// The harness mirrors LedgerView's committee windows: an unseated
+// credential's authorization lasts until the next epoch boundary, as
+// cardano-ledger's EPOCH updateCommitteeState drops it there.
+func TestCommitteeHotCredentialMemberDropsUnseatedAuthorizationAtBoundary(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	seatedCold := testHash28(0xa1)
+	require.NoError(t, m.LoadInitialState(
+		&conformance.ParsedInitialState{
+			CurrentEpoch:     5,
+			CommitteeMembers: map[common.Blake2b224]uint64{seatedCold: 999},
+		},
+		&conway.ConwayProtocolParameters{},
+	))
+	pending := common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xa2),
+	}
+	hot := common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xa3),
+	}
+	action, err := common.NewUpdateCommitteeGovAction(
+		nil,
+		nil,
+		map[*common.Credential]uint64{&pending: 999},
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	require.NoError(t, m.db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        testHash32(0xa4),
+			ActionType:    uint8(common.GovActionTypeUpdateCommittee),
+			ExpiresEpoch:  1000,
+			GovActionCbor: encoded,
+			AnchorHash:    testHash32(0xa5),
+			ReturnAddress: bytes.Repeat([]byte{0xa6}, 29),
+		},
+		nil,
+	))
+	tx, err := syntheticTransaction(
+		"pending-authorization",
+		[]common.Certificate{&common.AuthCommitteeHotCertificate{
+			CertType:       uint(common.CertificateTypeAuthCommitteeHot),
+			ColdCredential: pending,
+			HotCredential:  hot,
+		}},
+	)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyTransaction(tx, 10))
+
+	provider := NewDingoStateProvider(m)
+	member, err := provider.CommitteeHotCredentialMember(hot)
+	require.NoError(t, err)
+	require.NotNil(t, member, "the authorization holds for its own epoch")
+
+	require.NoError(t, m.ProcessEpochBoundary(6))
+	member, err = provider.CommitteeHotCredentialMember(hot)
+	require.NoError(t, err)
+	require.Nil(t, member, "the boundary drops an unseated authorization")
+	coldMember, err := provider.CommitteeCredentialMember(pending)
+	require.NoError(t, err)
+	require.NotNil(t, coldMember, "the credential is still a potential member")
+	require.Nil(t, coldMember.HotKey)
 }

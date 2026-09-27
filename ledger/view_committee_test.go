@@ -267,10 +267,11 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		seed         func(*testing.T, *database.Database, lcommon.Credential)
-		wantHot      bool
-		wantResigned bool
+		name           string
+		seed           func(*testing.T, *database.Database, lcommon.Credential)
+		epochStartSlot uint64
+		wantHot        bool
+		wantResigned   bool
 	}{
 		{
 			name: "authorization",
@@ -287,20 +288,33 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 			wantHot: true,
 		},
 		{
-			// A resignation recorded after the replacement proposal belongs to
-			// the term it happened in. Carrying it into the pending term would
-			// reject the re-elected member's authorization as resigned. The
-			// conformance provider already applies this rule.
+			// cardano-ledger drops an unseated credential's committee state at
+			// every epoch boundary (Conway EPOCH, updateCommitteeState), so a
+			// resignation from before the current epoch does not carry into
+			// the pending term, and the conformance provider applies the same
+			// window.
 			name: "resignation does not carry into the pending term",
 			seed: func(t *testing.T, db *database.Database, cold lcommon.Credential) {
 				seedCommitteeCredentialResignation(t, db, cold, 1, 1)
 			},
-			wantResigned: false,
+			epochStartSlot: 2,
+			wantResigned:   false,
+		},
+		{
+			// Within the epoch it was recorded in, a pending credential's
+			// resignation stands, and GOVCERT rejects any later certificate
+			// from it (ConwayCommitteeHasPreviouslyResigned).
+			name: "resignation in the current epoch holds",
+			seed: func(t *testing.T, db *database.Database, cold lcommon.Credential) {
+				seedCommitteeCredentialResignation(t, db, cold, 1, 1)
+			},
+			wantResigned: true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
+			lv.epochStartSlot = test.epochStartSlot
 			cold := committeeTestCredential(0x71)
 			storeCommitteeUpdateProposal(t, db, 0x73, cold, 90)
 			test.seed(t, db, cold)

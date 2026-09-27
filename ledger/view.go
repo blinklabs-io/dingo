@@ -1233,7 +1233,7 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 			ExpiryEpoch: found.ExpiresEpoch,
 		}
 		if err := lv.populateCommitteeMemberStatus(
-			coldCredential, found.TermStartSlot, member, false,
+			coldCredential, found.TermStartSlot, member,
 		); err != nil {
 			return nil, err
 		}
@@ -1242,8 +1242,15 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 	return nil, nil
 }
 
-// CommitteeCredentialMember resolves a seated or pending proposed committee
-// member by full tagged cold credential identity.
+// CommitteeCredentialMember resolves a committee member by full tagged cold
+// credential identity: its latest seated term, or else a potential future
+// member that a pending UpdateCommittee proposal would add.
+//
+// A seated member's resignation stays in force for as long as it is seated,
+// even while a pending proposal would re-elect it: cardano-ledger keeps a
+// seated member's committee state across every epoch boundary, and GOVCERT
+// rejects any further certificate from a resigned cold credential
+// (ConwayCommitteeHasPreviouslyResigned).
 func (lv *LedgerView) CommitteeCredentialMember(
 	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
@@ -1277,74 +1284,61 @@ func (lv *LedgerView) CommitteeCredentialMember(
 		coldCredential,
 		found.TermStartSlot,
 		member,
-		false,
 	); err != nil {
 		return nil, err
-	}
-	// A re-election may replace a resigned term before enactment. The old
-	// historical row remains authoritative for its term, but must not mask the
-	// pending successor when validation asks for this cold credential.
-	if member.Resigned {
-		proposed, err := lv.proposedCommitteeMember(coldCredential)
-		if err != nil {
-			return nil, err
-		}
-		if proposed != nil {
-			return proposed, nil
-		}
-		return member, nil
 	}
 	return member, nil
 }
 
 // populateCommitteeMemberStatus fills in resignation and hot-key authorization
-// for a term starting at termStartSlot.
-//
-// A pending term is one a proposal has not yet enacted. Its termStartSlot is
-// the proposal's own added slot, so a resignation recorded during the member's
-// previous term sits at or after it and would otherwise be read as a
-// resignation from a term that has not begun. A resignation belongs to the term
-// it occurred in, so a pending term is never resigned and a re-elected member
-// can still authorize a hot credential.
+// from the certificates recorded at or after windowStartSlot, the first slot
+// from which cardano-ledger still holds this credential's committee state. A
+// resignation ends the credential's certificates within that window, so it
+// takes precedence over any authorization.
 func (lv *LedgerView) populateCommitteeMemberStatus(
 	coldCredential lcommon.Credential,
-	termStartSlot uint64,
+	windowStartSlot uint64,
 	member *lcommon.CommitteeMember,
-	pending bool,
 ) error {
 	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
 	if err != nil {
 		return fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	if !pending {
-		resigned, err := lv.ls.db.IsCommitteeMemberResigned(
-			coldTag,
-			coldCredential.Credential[:],
-			termStartSlot,
-			lv.txn,
+	resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+		coldTag,
+		coldCredential.Credential[:],
+		windowStartSlot,
+		lv.txn,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"check committee member resignation: %w",
+			err,
 		)
-		if err != nil {
-			return fmt.Errorf(
-				"check committee member resignation: %w",
-				err,
-			)
-		}
-		member.Resigned = resigned
-		if resigned {
-			return nil
-		}
+	}
+	member.Resigned = resigned
+	if resigned {
+		return nil
 	}
 	authorization, err := lv.ls.db.GetCommitteeMember(
 		coldTag,
 		coldCredential.Credential[:],
-		termStartSlot,
+		windowStartSlot,
 		lv.txn,
 	)
 	if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
 		return fmt.Errorf("get committee hot credential: %w", err)
 	}
 	if authorization != nil {
-		hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
+		hotKey, err := lcommon.NewBlake2b224Checked(
+			authorization.HotCredential,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"invalid committee hot credential in authorization: %w",
+				err,
+			)
+		}
 		member.HotKey = &hotKey
 	}
 	return nil
@@ -1381,11 +1375,13 @@ func (lv *LedgerView) proposedCommitteeMember(
 		return nil, err
 	}
 	if member != nil {
+		// A credential that is not seated holds committee state only for the
+		// current epoch: cardano-ledger drops it at every boundary (Conway
+		// EPOCH, updateCommitteeState), including a resignation.
 		if err := lv.populateCommitteeMemberStatus(
 			coldCredential,
-			termStart,
+			max(termStart, lv.epochStartSlot),
 			member,
-			true,
 		); err != nil {
 			return nil, err
 		}
