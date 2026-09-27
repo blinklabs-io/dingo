@@ -16,15 +16,17 @@ package ledgerstate
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lalonzo "github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,10 +66,9 @@ func TestImportPParamsPersistsPreviewRewardHistory(t *testing.T) {
 		"current parameters must not substitute for the historical epoch")
 }
 
-// An imported Go basis whose historical parameters are unavailable must be
-// left ineligible by snapshot seeding. The pparams phase still persists the
-// usable current parameters instead of turning one skipped reward round into a
-// permanently failing bootstrap.
+// Without historical parameters the pparams phase still persists the usable
+// current row; deciding whether the Go basis can run without them belongs to
+// snapshot seeding, which fails the import in that case.
 func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
 	t.Parallel()
 
@@ -99,6 +100,10 @@ func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
 	}
 }
 
+// TestImportPParamsReentryUsesStoredCrossEraHistory models a Babbage snapshot
+// in the first Babbage epoch. Its translated previous parameters cannot be
+// downgraded to Alonzo, so a valid Alonzo row a prior pass stored is what
+// satisfies epoch 1396, and re-entry must leave it in place.
 func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 	t.Parallel()
 
@@ -108,43 +113,89 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
-	// Model the first Conway epoch. GovState's previous field has already been
-	// translated to Conway, while reward performance for E-1 still needs a
-	// Babbage row. A prior pass stored that exact historical row.
 	seedRewardBasisMarkers(t, db, 1395)
-	current, translatedPrevious := distinctConwayPParams(t)
-	storedPrevious, err := cbor.Encode(testBabbagePParams())
+	current, err := cbor.Encode(testBabbagePParams())
+	require.NoError(t, err)
+	translatedPreviousParams := testBabbagePParams()
+	translatedPreviousParams.MinFeeA++
+	translatedPrevious, err := cbor.Encode(translatedPreviousParams)
+	require.NoError(t, err)
+	storedPrevious, err := cbor.Encode(testAlonzoPParams())
 	require.NoError(t, err)
 	require.NoError(t, db.Metadata().SetPParams(
-		storedPrevious, 99_999, 1396, EraBabbage, nil,
+		storedPrevious, 99_999, 1396, EraAlonzo, nil,
 	))
 	cfg := previewPParamsImportConfig(db, current, translatedPrevious)
+	cfg.State.EraIndex = EraBabbage
 	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
-	cfg.State.EraBounds[EraConway] = EraBound{
+	cfg.State.EraBounds = cfg.State.EraBounds[:EraBabbage+1]
+	cfg.State.EraBounds[EraBabbage] = EraBound{
 		Slot:  100_000,
 		Epoch: previewHistoricalPParamsSnapshotEpoch,
 	}
 
 	for range 2 {
 		require.NoError(t, importPParams(context.Background(), cfg))
+		require.NoError(t, validateImportedRewardPParams(cfg, nil, 1395))
 
 		previousRows, queryErr := db.Metadata().GetPParams(
-			1396, EraBabbage, nil,
+			1396, EraAlonzo, nil,
 		)
 		require.NoError(t, queryErr)
 		require.Len(t, previousRows, 1)
 		require.Equal(t, storedPrevious, previousRows[0].Cbor)
 		currentRows, queryErr := db.Metadata().GetPParams(
-			1397, EraConway, nil,
+			1397, EraBabbage, nil,
 		)
 		require.NoError(t, queryErr)
-		require.Len(t, currentRows, 1,
-			"re-entry must not duplicate an already-satisfying current row")
+		require.Len(t, currentRows, 1)
 		require.Equal(t, current, currentRows[0].Cbor)
 	}
 }
 
-func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
+// TestValidateImportedRewardPParamsFailsWhenPreviousEraCannotBeRecovered keeps
+// the fail-closed rule for the one gap the snapshot cannot fill: without a
+// stored Alonzo row, epoch 1396 of a first-Babbage-epoch snapshot has no
+// parameters, since downgradeBabbagePParams needs d and extraEntropy.
+func TestValidateImportedRewardPParamsFailsWhenPreviousEraCannotBeRecovered(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	current, err := cbor.Encode(testBabbagePParams())
+	require.NoError(t, err)
+	cfg := previewPParamsImportConfig(db, current, current)
+	cfg.State.EraIndex = EraBabbage
+	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
+	cfg.State.EraBounds = cfg.State.EraBounds[:EraBabbage+1]
+	cfg.State.EraBounds[EraBabbage] = EraBound{
+		Slot:  100_000,
+		Epoch: previewHistoricalPParamsSnapshotEpoch,
+	}
+	require.NoError(t, importPParams(context.Background(), cfg))
+
+	require.NoError(t, validateImportedRewardPParams(cfg, nil, 1396))
+	err = validateImportedRewardPParams(cfg, nil, 1395)
+	require.ErrorIs(t, err, errRewardPParamsUnavailable)
+	require.ErrorContains(t, err,
+		"historical protocol parameters for epoch 1396 are unavailable in era Alonzo")
+	require.ErrorContains(t, err, "Babbage-to-Alonzo")
+	rows, err := db.Metadata().GetPParams(1396, EraAlonzo, nil)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+}
+
+// TestImportPParamsDowngradesTranslatedCrossEraHistory models an import in
+// the first Conway epoch. The hard fork translated GovState's previous
+// parameters to Conway while epoch 1396 is still Babbage, so the row that
+// epoch's reward round reads is the ledger's downgrade of that payload.
+func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -154,37 +205,53 @@ func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
 	})
 
 	seedPreviewRewardBases(t, db)
-	current, previous := distinctConwayPParams(t)
-	cfg := previewPParamsImportConfig(db, current, previous)
-	// Model an import at the first Conway epoch. GovState's previous payload
-	// is translated to the current-era shape, but the performance epoch is
-	// still Babbage. Persisting it as Babbage would not be exact, so reject it.
+	current, _ := distinctConwayPParams(t)
+	babbageParams, translatedParams := translatedBabbagePParams()
+	translatedPrevious, err := cbor.Encode(translatedParams)
+	require.NoError(t, err)
+	cfg := previewPParamsImportConfig(db, current, translatedPrevious)
 	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
 	cfg.State.EraBounds[EraConway] = EraBound{
 		Slot:  100_000,
 		Epoch: previewHistoricalPParamsSnapshotEpoch,
 	}
 
-	require.NoError(t, importPParams(context.Background(), cfg))
+	var firstRowID uint
+	for pass := range 2 {
+		require.NoError(t, importPParams(context.Background(), cfg))
+		require.NoError(t, validateImportedRewardPParams(cfg, nil, 1395))
 
-	previousRows, queryErr := db.Metadata().GetPParams(
-		1396, EraBabbage, nil,
-	)
-	require.NoError(t, queryErr)
-	require.Empty(t, previousRows)
-	currentRows, queryErr := db.Metadata().GetPParams(
-		1397, EraConway, nil,
-	)
-	require.NoError(t, queryErr)
-	require.Len(t, currentRows, 1)
-	require.Equal(t, current, currentRows[0].Cbor)
+		previousRows, queryErr := db.Metadata().GetPParams(
+			1396, EraBabbage, nil,
+		)
+		require.NoError(t, queryErr)
+		require.Len(t, previousRows, 1)
+		require.Equal(t, uint64(1396), previousRows[0].Epoch)
+		decoded, decodeErr := eras.DecodePParamsBabbage(previousRows[0].Cbor)
+		require.NoError(t, decodeErr)
+		wantPrevious := *babbageParams
+		wantPrevious.CostModels = translatedParams.CostModels
+		require.Equal(t, &wantPrevious, decoded)
+		if pass == 0 {
+			firstRowID = previousRows[0].ID
+		}
+		require.Equal(t, firstRowID, previousRows[0].ID,
+			"re-entry must not rewrite an already-satisfying historical row")
+
+		currentRows, queryErr := db.Metadata().GetPParams(
+			1397, EraConway, nil,
+		)
+		require.NoError(t, queryErr)
+		require.Len(t, currentRows, 1)
+		require.Equal(t, current, currentRows[0].Cbor)
+	}
 }
 
-// TestImportSnapShotsFailsOnGoBasisWithoutCrossEraHistory covers a snapshot
-// taken within two epochs after an era boundary, whose go epoch needs the old
-// era's protocol parameters. Without them that epoch's reward round cannot
-// run, so the import fails naming it rather than leaving the round unrun.
-func TestImportSnapShotsFailsOnGoBasisWithoutCrossEraHistory(t *testing.T) {
+// TestImportSnapShotsSeedsGoBasisInFirstEpochOfEra imports the real snapshot
+// fixture positioned in the first Conway epoch, whose Go round reads the
+// Babbage epoch before it. The snapshot's translated prevPParams supply that
+// epoch, so the basis seeds and the Babbage row is written.
+func TestImportSnapShotsSeedsGoBasisInFirstEpochOfEra(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -196,13 +263,20 @@ func TestImportSnapShotsFailsOnGoBasisWithoutCrossEraHistory(t *testing.T) {
 	state, err := ParseSnapshot(testdataLedgerSnapshot)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, state.Epoch, uint64(2))
-	current, translatedPrevious := distinctConwayPParams(t)
+	current, _ := distinctConwayPParams(t)
+	babbageParams, translatedParams := translatedBabbagePParams()
+	translatedPrevious, err := cbor.Encode(translatedParams)
+	require.NoError(t, err)
 	state.PParamsData = current
 	state.PrevPParamsData = translatedPrevious
 	state.EraIndex = EraConway
 	state.EraBoundEpoch = state.Epoch
 	state.EraBoundSlot = state.Tip.Slot
 	state.EraBounds = previewEraBounds()
+	state.EraBounds[EraConway] = EraBound{
+		Slot:  state.Tip.Slot,
+		Epoch: state.Epoch,
+	}
 	cfg := ImportConfig{
 		Database: db,
 		Logger: slog.New(
@@ -218,42 +292,29 @@ func TestImportSnapShotsFailsOnGoBasisWithoutCrossEraHistory(t *testing.T) {
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
-	// Reproduce the partial state left by the old importer: the provisional Go
-	// basis committed before the pparams phase discovered that its translated
-	// previous payload could not be decoded as the old era.
 	require.NoError(t, importSnapShots(
 		context.Background(), cfg, state.Tip.Slot, noProgress, false,
 	))
-	preexistingGo, err := db.Metadata().GetRewardSnapshot(
+	goBasis, err := db.Metadata().GetRewardSnapshot(
 		state.Epoch-2, "mark", nil,
 	)
 	require.NoError(t, err)
-	require.NotNil(t, preexistingGo)
-	require.False(t, preexistingGo.Authoritative)
-	preexistingPools, err := db.Metadata().GetRewardPoolInputs(
-		state.Epoch-2, nil,
-	)
+	require.NotNil(t, goBasis)
+	goPools, err := db.Metadata().GetRewardPoolInputs(state.Epoch-2, nil)
 	require.NoError(t, err)
-	require.NotEmpty(t, preexistingPools)
-
-	state.EraBounds[EraConway] = EraBound{
-		Slot:  state.Tip.Slot,
-		Epoch: state.Epoch,
-	}
-	err = importSnapShots(
-		context.Background(), cfg, state.Tip.Slot, noProgress, false,
-	)
-	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
-	require.ErrorIs(t, err, errRewardPParamsUnavailable)
-	require.ErrorContains(t, err,
-		fmt.Sprintf("epoch %d (go snapshot)", state.Epoch-2))
+	require.NotEmpty(t, goPools)
 
 	require.NoError(t, importPParams(context.Background(), cfg))
 	previousRows, err := db.Metadata().GetPParams(
 		state.Epoch-1, EraBabbage, nil,
 	)
 	require.NoError(t, err)
-	require.Empty(t, previousRows)
+	require.Len(t, previousRows, 1)
+	decoded, err := eras.DecodePParamsBabbage(previousRows[0].Cbor)
+	require.NoError(t, err)
+	wantPrevious := *babbageParams
+	wantPrevious.CostModels = translatedParams.CostModels
+	require.Equal(t, &wantPrevious, decoded)
 	currentRows, err := db.Metadata().GetPParams(
 		state.Epoch, EraConway, nil,
 	)
@@ -384,5 +445,34 @@ func previewEraBounds() []EraBound {
 		{Slot: 0, Epoch: 0}, // Alonzo
 		{Slot: 0, Epoch: 0}, // Babbage
 		{Slot: 0, Epoch: 0}, // Conway
+	}
+}
+
+func testAlonzoPParams() *lalonzo.AlonzoProtocolParameters {
+	babbageParams := testBabbagePParams()
+	return &lalonzo.AlonzoProtocolParameters{
+		MinFeeA:              babbageParams.MinFeeA,
+		MinFeeB:              babbageParams.MinFeeB,
+		MaxBlockBodySize:     babbageParams.MaxBlockBodySize,
+		MaxTxSize:            babbageParams.MaxTxSize,
+		MaxBlockHeaderSize:   babbageParams.MaxBlockHeaderSize,
+		KeyDeposit:           babbageParams.KeyDeposit,
+		PoolDeposit:          babbageParams.PoolDeposit,
+		MaxEpoch:             babbageParams.MaxEpoch,
+		NOpt:                 babbageParams.NOpt,
+		A0:                   babbageParams.A0,
+		Rho:                  babbageParams.Rho,
+		Tau:                  babbageParams.Tau,
+		Decentralization:     &cbor.Rat{Rat: big.NewRat(0, 1)},
+		ProtocolMajor:        6,
+		MinPoolCost:          babbageParams.MinPoolCost,
+		AdaPerUtxoByte:       34482,
+		CostModels:           babbageParams.CostModels,
+		ExecutionCosts:       babbageParams.ExecutionCosts,
+		MaxTxExUnits:         babbageParams.MaxTxExUnits,
+		MaxBlockExUnits:      babbageParams.MaxBlockExUnits,
+		MaxValueSize:         babbageParams.MaxValueSize,
+		CollateralPercentage: babbageParams.CollateralPercentage,
+		MaxCollateralInputs:  babbageParams.MaxCollateralInputs,
 	}
 }

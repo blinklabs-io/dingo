@@ -11973,9 +11973,13 @@ reward basis is unaffected. If an imported basis is empty, fails
 reconciliation, or lacks the historical protocol parameters needed to consume
 it, the import fails with `errImportedRewardBasisUnusable`, naming the epoch
 and snapshot: continuing would cross that epoch's boundary with no reward
-round, leaving its rewards uncredited and the pots unmoved. A snapshot taken
-within two epochs after an era boundary, whose go epoch needs the old era's
-parameters, therefore cannot bootstrap a node. `reward_seed_failure` is no
+round, leaving its rewards uncredited and the pots unmoved. In the first
+epoch of an era the go round reads the previous era's epoch, while the hard
+fork translated the snapshot's prevPParams to the new era; the import stores
+the ledger's input-free downgrade of it under the previous era
+(`downgradeConwayPParams`, `downgradeDijkstraPParams`), which keeps every
+reward input startStep reads. Only a step with no such downgrade -- Babbage to
+Alonzo needs `d` and `extraEntropy` -- still fails. `reward_seed_failure` is no
 longer written by the import; a later reward boundary still reads a marker a
 database written by an older version carries when its reward snapshot is
 absent, and successful seeding clears it.

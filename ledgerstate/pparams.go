@@ -15,10 +15,15 @@
 package ledgerstate
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 func extractPParamsData(
@@ -44,12 +49,120 @@ func extractPParamsData(
 	if previousIndex >= 0 && previousIndex < len(govFields) {
 		previous = govFields[previousIndex]
 	}
-	// Do not validate the previous payload as though it belonged to the
-	// snapshot's era. At a hard fork GovState can carry a previous-epoch
-	// value while the snapshot itself is already in the new era. The import
-	// phase has the full era telescope and validates this raw payload against
-	// the actual epoch whose row it would populate.
+	// The previous payload is encoded in the snapshot's era even when the
+	// previous epoch belongs to an earlier one; previousPParamsForEra
+	// converts it once the import knows that epoch's era.
 	return current, previous, nil
+}
+
+// previousPParamsForEra returns the snapshot's previous protocol parameters
+// encoded for the era of the epoch they were in force over.
+//
+// The ledger types prevPParams by the snapshot's own era: a hard fork
+// translates it together with the current parameters (translateGovState in
+// Cardano.Ledger.Conway.Translation), so in the first epoch of a new era the
+// payload describes a previous-era epoch in the new era's encoding. That
+// epoch's row is recovered with the ledger's own downgrade, one era at a time.
+// Only the downgrades the ledger defines without extra inputs are applied
+// (downgradeConwayPParams, downgradeDijkstraPParams): each keeps every field
+// of the older era, including the reward inputs startStep reads from
+// prevPParams. Any other step needs values the snapshot no longer carries --
+// downgradeBabbagePParams takes d and extraEntropy as arguments -- and is an
+// error rather than a guess.
+func previousPParamsForEra(
+	snapshotEra int,
+	payload []byte,
+	era int,
+) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, errors.New(
+			"the snapshot carries no previous protocol parameters",
+		)
+	}
+	decoded, err := decodePParamsData(snapshotEra, payload)
+	if err != nil {
+		return nil, fmt.Errorf("previous protocol parameters: %w", err)
+	}
+	if era == snapshotEra {
+		return payload, nil
+	}
+	if era > snapshotEra {
+		return nil, fmt.Errorf(
+			"previous-epoch era %s is later than snapshot era %s",
+			EraName(era), EraName(snapshotEra),
+		)
+	}
+	var params any = decoded
+	for from := snapshotEra; from > era; from-- {
+		params, err = downgradePParams(from, params)
+		if err != nil {
+			return nil, err
+		}
+	}
+	encoded, err := cbor.Encode(params)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"encoding downgraded %s protocol parameters: %w",
+			EraName(era), err,
+		)
+	}
+	if err := validatePParamsData(era, encoded); err != nil {
+		return nil, fmt.Errorf(
+			"downgraded previous protocol parameters: %w", err,
+		)
+	}
+	return encoded, nil
+}
+
+func downgradePParams(from int, params any) (any, error) {
+	switch {
+	case from == int(eras.DijkstraEraDesc.Id):
+		p, ok := params.(*dijkstra.DijkstraProtocolParameters)
+		if !ok {
+			return nil, fmt.Errorf(
+				"downgrading Dijkstra protocol parameters: got %T", params,
+			)
+		}
+		ret := p.ConwayProtocolParameters
+		return &ret, nil
+	case from == EraConway:
+		p, ok := params.(*conway.ConwayProtocolParameters)
+		if !ok {
+			return nil, fmt.Errorf(
+				"downgrading Conway protocol parameters: got %T", params,
+			)
+		}
+		return &babbage.BabbageProtocolParameters{
+			MinFeeA:              p.MinFeeA,
+			MinFeeB:              p.MinFeeB,
+			MaxBlockBodySize:     p.MaxBlockBodySize,
+			MaxTxSize:            p.MaxTxSize,
+			MaxBlockHeaderSize:   p.MaxBlockHeaderSize,
+			KeyDeposit:           p.KeyDeposit,
+			PoolDeposit:          p.PoolDeposit,
+			MaxEpoch:             p.MaxEpoch,
+			NOpt:                 p.NOpt,
+			A0:                   p.A0,
+			Rho:                  p.Rho,
+			Tau:                  p.Tau,
+			ProtocolMajor:        p.ProtocolVersion.Major,
+			ProtocolMinor:        p.ProtocolVersion.Minor,
+			MinPoolCost:          p.MinPoolCost,
+			AdaPerUtxoByte:       p.AdaPerUtxoByte,
+			CostModels:           p.CostModels,
+			ExecutionCosts:       p.ExecutionCosts,
+			MaxTxExUnits:         p.MaxTxExUnits,
+			MaxBlockExUnits:      p.MaxBlockExUnits,
+			MaxValueSize:         p.MaxValueSize,
+			CollateralPercentage: p.CollateralPercentage,
+			MaxCollateralInputs:  p.MaxCollateralInputs,
+		}, nil
+	default:
+		return nil, fmt.Errorf(
+			"the ledger's %s-to-%s protocol parameter downgrade needs values the snapshot does not carry",
+			EraName(from), EraName(from-1),
+		)
+	}
 }
 
 func pparamsFieldIndexes(eraIndex int) (current int, previous int) {
@@ -81,23 +194,34 @@ func protocolParametersField(
 }
 
 func validatePParamsData(eraIndex int, data []byte) error {
+	_, err := decodePParamsData(eraIndex, data)
+	return err
+}
+
+func decodePParamsData(
+	eraIndex int,
+	data []byte,
+) (lcommon.ProtocolParameters, error) {
 	if eraIndex < 0 {
-		return fmt.Errorf("negative era index %d", eraIndex)
+		return nil, fmt.Errorf("negative era index %d", eraIndex)
 	}
 	era := eras.GetEraById(
 		uint(eraIndex),
 	) //nolint:gosec // bounds checked above
 	if era == nil {
-		return fmt.Errorf("unknown era %d", eraIndex)
+		return nil, fmt.Errorf("unknown era %d", eraIndex)
 	}
 	if era.DecodePParamsFunc == nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"%s era does not define protocol parameters",
 			era.Name,
 		)
 	}
-	if _, err := era.DecodePParamsFunc(data); err != nil {
-		return fmt.Errorf("decoding %s protocol parameters: %w", era.Name, err)
+	decoded, err := era.DecodePParamsFunc(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding %s protocol parameters: %w", era.Name, err,
+		)
 	}
-	return nil
+	return decoded, nil
 }

@@ -3140,12 +3140,17 @@ func validateImportedRewardPParams(
 			previousEpoch,
 		)
 	}
+	previousPayload, payloadErr := previousPParamsForEra(
+		cfg.State.EraIndex,
+		[]byte(cfg.State.PrevPParamsData),
+		previousEra,
+	)
 	previousAvailable, err := importedPParamsAvailable(
 		store,
 		txn,
 		previousEpoch,
 		previousEra,
-		[]byte(cfg.State.PrevPParamsData),
+		previousPayload,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -3154,6 +3159,15 @@ func validateImportedRewardPParams(
 		)
 	}
 	if !previousAvailable {
+		if payloadErr != nil {
+			return fmt.Errorf(
+				"%w: historical protocol parameters for epoch %d are unavailable in era %s: %w",
+				errRewardPParamsUnavailable,
+				previousEpoch,
+				EraName(previousEra),
+				payloadErr,
+			)
+		}
 		return fmt.Errorf(
 			"%w: historical protocol parameters for epoch %d are unavailable in era %s",
 			errRewardPParamsUnavailable,
@@ -3274,15 +3288,25 @@ func importPParams(
 	var (
 		previousEpoch uint64
 		previousEra   int
-		previousCbor  = []byte(cfg.State.PrevPParamsData)
+		previousCbor  []byte
 		writePrevious bool
 	)
-	if cfg.State.Epoch > 0 && len(previousCbor) > 0 {
+	if cfg.State.Epoch > 0 && len(cfg.State.PrevPParamsData) > 0 {
 		previousEpoch = cfg.State.Epoch - 1
-		var previousEraKnown bool
+		var (
+			previousEraKnown bool
+			conversionErr    error
+		)
 		previousEra, previousEraKnown = importedEraForEpoch(
 			cfg.State, previousEpoch,
 		)
+		if previousEraKnown {
+			previousCbor, conversionErr = previousPParamsForEra(
+				cfg.State.EraIndex,
+				[]byte(cfg.State.PrevPParamsData),
+				previousEra,
+			)
+		}
 		if !previousEraKnown {
 			cfg.Logger.Warn(
 				"not importing historical protocol parameters from snapshot because the epoch's era cannot be determined",
@@ -3291,15 +3315,13 @@ func importPParams(
 				"epoch",
 				previousEpoch,
 			)
-		} else if validationErr := validatePParamsData(
-			previousEra, previousCbor,
-		); validationErr != nil {
+		} else if conversionErr != nil {
 			cfg.Logger.Warn(
-				"not importing historical protocol parameters from snapshot because the payload is incompatible with the epoch's era",
+				"not importing historical protocol parameters from snapshot because they cannot be expressed in the epoch's era",
 				"component", "ledgerstate",
 				"epoch", previousEpoch,
 				"era", EraName(previousEra),
-				"error", validationErr.Error(),
+				"error", conversionErr.Error(),
 			)
 		} else {
 			previousStored, err := storedValidPParams(
