@@ -454,11 +454,12 @@ func TestImportGovStateRejectsAbsentEnactState(t *testing.T) {
 			"state has 0 elements, expected 7")
 }
 
-// TestImportGovStateSkipsParityWhenEnactedTypesUnknown covers an
-// undecidable rsEnacted: with an entry whose action type cannot be
-// recovered, whether a committee action was accepted is unknown, so the
-// corroboration is unavailable rather than failed.
-func TestImportGovStateSkipsParityWhenEnactedTypesUnknown(t *testing.T) {
+// TestImportGovStateFailsWhenEnactedProposalUndecodable covers an
+// rsEnacted entry that cannot be decoded. The importer records every
+// rsEnacted action as ratified so the next boundary enacts it, so an entry
+// it cannot read would leave a ratified action unenacted; the import fails
+// rather than continue without it.
+func TestImportGovStateFailsWhenEnactedProposalUndecodable(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	left := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
@@ -470,11 +471,13 @@ func TestImportGovStateSkipsParityWhenEnactedTypesUnknown(t *testing.T) {
 			t, right, cbor.RawMessage{0x01},
 		),
 	)
-	require.NoError(t, importGovState(
+	err = importGovState(
 		context.Background(),
 		govImportConfigForTest(db, govStateData),
 		func(ImportProgress) {},
-	))
+	)
+	require.ErrorContains(t, err, "decoding enacted proposal")
+	require.ErrorContains(t, err, "cannot be imported with skipped entries")
 }
 
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
