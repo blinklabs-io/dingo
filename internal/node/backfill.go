@@ -625,33 +625,6 @@ func (b *Backfill) calculateCertDeposits(
 	return certDeposits
 }
 
-// processBlockGovernance calls governance processing for valid Conway-era
-// transactions that have proposals, votes, or DRep activity certificates.
-func (b *Backfill) processBlockGovernance(
-	tx lcommon.Transaction,
-	point ocommon.Point,
-	epochId uint64,
-	pp lcommon.ProtocolParameters,
-	txn *database.Txn,
-) error {
-	if !tx.IsValid() {
-		return nil
-	}
-	conwayPP := backfillConwayProtocolParameters(pp)
-	for _, level := range dledger.TransactionLevelsForApply(tx) {
-		if err := b.processBlockGovernanceLevel(
-			level,
-			point,
-			epochId,
-			conwayPP,
-			txn,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func backfillConwayProtocolParameters(
 	pp lcommon.ProtocolParameters,
 ) *conway.ConwayProtocolParameters {
@@ -1230,16 +1203,16 @@ func (b *Backfill) processBlockTxsBatched(
 	var storageIndexOffset uint64
 	for txIndex, tx := range txs {
 		levels := dledger.TransactionLevelsForApply(tx)
-		childCount := len(levels) - 1
+		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(txIndex) + storageIndexOffset
-		storageParentIndex := storageBaseIndex + uint64(childCount)
+		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {
 			return fmt.Errorf(
 				"expanded transaction index out of range: %d",
 				storageParentIndex,
 			)
 		}
-		storageIndexOffset += uint64(childCount)
+		storageIndexOffset += childCount
 		for levelIndex, level := range levels {
 			storageIndex := storageBaseIndex + uint64(levelIndex)
 			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()

@@ -42,6 +42,7 @@ func (t transactionBodyLevel) Metadata() common.TransactionMetadatum {
 	}
 	return t.Transaction.Metadata()
 }
+
 func (t transactionBodyLevel) Witnesses() common.TransactionWitnessSet {
 	if t.hasBodyWitnesses {
 		return t.witnesses
@@ -52,6 +53,7 @@ func (t transactionBodyLevel) Fee() *big.Int { return t.body.Fee() }
 func (t transactionBodyLevel) Inputs() []common.TransactionInput {
 	return t.body.Inputs()
 }
+
 func (t transactionBodyLevel) Outputs() []common.TransactionOutput {
 	return t.body.Outputs()
 }
@@ -62,57 +64,72 @@ func (t transactionBodyLevel) ProtocolParameterUpdates() (
 ) {
 	return t.body.ProtocolParameterUpdates()
 }
+
 func (t transactionBodyLevel) ValidityIntervalStart() uint64 {
 	return t.body.ValidityIntervalStart()
 }
+
 func (t transactionBodyLevel) ReferenceInputs() []common.TransactionInput {
 	return t.body.ReferenceInputs()
 }
+
 func (t transactionBodyLevel) Collateral() []common.TransactionInput {
 	return t.body.Collateral()
 }
+
 func (t transactionBodyLevel) CollateralReturn() common.TransactionOutput {
 	return t.body.CollateralReturn()
 }
+
 func (t transactionBodyLevel) TotalCollateral() *big.Int {
 	return t.body.TotalCollateral()
 }
+
 func (t transactionBodyLevel) Certificates() []common.Certificate {
 	return t.body.Certificates()
 }
+
 func (t transactionBodyLevel) Withdrawals() map[*common.Address]*big.Int {
 	return t.body.Withdrawals()
 }
+
 func (t transactionBodyLevel) AuxDataHash() *common.Blake2b256 {
 	return t.body.AuxDataHash()
 }
+
 func (t transactionBodyLevel) RequiredSigners() []common.Blake2b224 {
 	return t.body.RequiredSigners()
 }
+
 func (t transactionBodyLevel) AssetMint() *common.MultiAsset[common.MultiAssetTypeMint] {
 	return t.body.AssetMint()
 }
+
 func (t transactionBodyLevel) ScriptDataHash() *common.Blake2b256 {
 	return t.body.ScriptDataHash()
 }
+
 func (t transactionBodyLevel) VotingProcedures() common.VotingProcedures {
 	return t.body.VotingProcedures()
 }
+
 func (t transactionBodyLevel) ProposalProcedures() []common.ProposalProcedure {
 	return t.body.ProposalProcedures()
 }
+
 func (t transactionBodyLevel) CurrentTreasuryValue() *big.Int {
 	return t.body.CurrentTreasuryValue()
 }
 func (t transactionBodyLevel) Donation() *big.Int { return t.body.Donation() }
 func (t transactionBodyLevel) Consumed() []common.TransactionInput {
-	if !t.Transaction.IsValid() {
+	if !t.IsValid() {
 		return t.Transaction.Consumed()
 	}
 	return t.body.Inputs()
 }
+
 func (t transactionBodyLevel) Produced() []common.Utxo {
-	if !t.Transaction.IsValid() {
+	if !t.IsValid() {
 		return t.Transaction.Produced()
 	}
 	outputs := t.body.Outputs()
@@ -125,6 +142,7 @@ func (t transactionBodyLevel) Produced() []common.Utxo {
 	}
 	return produced
 }
+
 func (t transactionBodyLevel) DijkstraDirectDeposits() dijkstra.DijkstraDirectDeposits {
 	switch body := t.body.(type) {
 	case *dijkstra.DijkstraTransactionBody:

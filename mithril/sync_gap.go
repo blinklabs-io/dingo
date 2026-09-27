@@ -658,16 +658,16 @@ func processGapBlockTransactions(
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
 		levels := dledger.TransactionLevelsForApply(tx)
-		childCount := len(levels) - 1
+		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(i) + storageIndexOffset
-		storageParentIndex := storageBaseIndex + uint64(childCount)
+		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {
 			return fmt.Errorf(
 				"expanded transaction index out of range: %d",
 				storageParentIndex,
 			)
 		}
-		storageIndexOffset += uint64(childCount)
+		storageIndexOffset += childCount
 		for levelIndex, level := range levels {
 			if err := db.SetGapBlockTransaction(
 				level,

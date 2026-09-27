@@ -369,9 +369,8 @@ func (bi *BlockIndexer) extractOutputOffsets(
 			if end > uint64(len(blockCbor)) {
 				return fmt.Errorf("output %d offset exceeds block size", utxo.Id.Index())
 			}
-			start, stop := int(loc.Offset), int(end)
 			outputCbor := utxo.Output.Cbor()
-			if len(outputCbor) == 0 || !bytes.Equal(blockCbor[start:stop], outputCbor) {
+			if len(outputCbor) == 0 || !bytes.Equal(blockCbor[loc.Offset:end], outputCbor) {
 				return fmt.Errorf(
 					"output %d: indexed CBOR range does not match produced output",
 					utxo.Id.Index(),

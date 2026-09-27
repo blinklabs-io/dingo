@@ -910,7 +910,7 @@ func (m *DingoStateManager) ApplyTransaction(
 	}
 
 	levels := dledger.TransactionLevelsForApply(tx)
-	childCount := uint64(len(levels) - 1)
+	childCount := uint64(len(levels)) - 1
 	storageParentIndex := uint64(idx) + childCount
 	if storageParentIndex > math.MaxUint32 {
 		return fmt.Errorf(

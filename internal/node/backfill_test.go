@@ -130,11 +130,11 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	txn := db.Transaction(true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return backfill.processBlockGovernance(
+		return backfill.processBlockGovernanceLevel(
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			100,
-			&pparams,
+			backfillConwayProtocolParameters(&pparams),
 			txn,
 		)
 	}))
@@ -181,11 +181,11 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	txn := db.Transaction(true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return backfill.processBlockGovernance(
+		return backfill.processBlockGovernanceLevel(
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			100,
-			pparams,
+			backfillConwayProtocolParameters(pparams),
 			txn,
 		)
 	}))

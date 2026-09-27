@@ -163,16 +163,16 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
 		levels := TransactionLevelsForApply(tr.Tx)
-		childCount := len(levels) - 1
+		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(tr.Index) + storageIndexOffset
-		storageParentIndex := storageBaseIndex + uint64(childCount)
+		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {
 			return fmt.Errorf(
 				"expanded transaction index out of range: %d",
 				storageParentIndex,
 			)
 		}
-		storageIndexOffset += uint64(childCount)
+		storageIndexOffset += childCount
 		for levelIndex, level := range levels {
 			storageIndex := storageBaseIndex + uint64(levelIndex)
 			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
