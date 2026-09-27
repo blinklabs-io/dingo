@@ -1452,12 +1452,25 @@ type LedgerState struct {
 	// rewardPrecomputeMu serializes rewardPrecomputeWG.Add with Close's
 	// rewardPrecomputeWG.Wait and protects the latest-event coalescing state so
 	// Close cannot return while precompute is still issuing database reads/writes.
-	rewardPrecomputeMu      sync.Mutex
-	rewardPrecomputeWG      sync.WaitGroup
-	rewardPrecomputeRunning bool
-	rewardPrecomputePending *event.EpochTransitionEvent
-	rewardPrecomputeRetry   *stakeRewardPrecomputeRetry
-	validationEnabled       bool
+	rewardPrecomputeMu       sync.Mutex
+	rewardPrecomputeWG       sync.WaitGroup
+	rewardPrecomputeRunning  bool
+	rewardPrecomputePending  *event.EpochTransitionEvent
+	rewardPrecomputeRetry    *stakeRewardPrecomputeRetry
+	rewardPrecomputeRollback *rewardPrecomputeRollbackSnapshot
+	// rewardPrecomputeWriteMu orders the precompute write phase against the
+	// rollback bracket's generation bump. The write phase holds it from its
+	// guard through commit, and the bump takes it, so any write that passed
+	// the guard has committed before the rollback's truncation starts and
+	// that truncation deletes its rows. SQLite's single write connection
+	// already imposes this order; Postgres and MySQL run the two transactions
+	// concurrently, and without it the stale write lands after the delete.
+	rewardPrecomputeWriteMu sync.Mutex
+	// rewardPrecomputeBeforeSaveHook is a test seam, nil in production. It
+	// runs inside the precompute write transaction after the rollback guard
+	// passes and before the outputs are written.
+	rewardPrecomputeBeforeSaveHook func()
+	validationEnabled              bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -3793,11 +3806,88 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
 	// state, or account history. The active count also keeps overlapping
 	// rollbacks from exposing an apparently stable even generation.
+	var postCommitReloadErr error
+	ls.rewardPrecomputeWriteMu.Lock()
+	ls.rewardPrecomputeMu.Lock()
+	if ls.rewardPrecomputeRollback == nil {
+		ls.rewardPrecomputeRollback = &rewardPrecomputeRollbackSnapshot{}
+	}
+	rollbackSnapshot := ls.rewardPrecomputeRollback
+	if ls.rewardPrecomputePending != nil {
+		previous := *ls.rewardPrecomputePending
+		previous.EpochNonce = slices.Clone(previous.EpochNonce)
+		rollbackSnapshot.pending = &previous
+	}
+	if ls.rewardPrecomputeRetry != nil {
+		previous := *ls.rewardPrecomputeRetry
+		previous.epochEvent.EpochNonce = slices.Clone(
+			previous.epochEvent.EpochNonce,
+		)
+		rollbackSnapshot.retry = &previous
+	}
 	ls.rewardInputRollbackActive.Add(1)
 	ls.rewardInputGeneration.Add(1)
+	ls.rewardPrecomputePending = nil
+	ls.rewardPrecomputeRetry = nil
+	ls.rewardPrecomputeMu.Unlock()
+	ls.rewardPrecomputeWriteMu.Unlock()
 	defer func() {
+		ls.rewardPrecomputeMu.Lock()
 		ls.rewardInputGeneration.Add(1)
-		ls.rewardInputRollbackActive.Add(-1)
+		remaining := ls.rewardInputRollbackActive.Add(-1)
+		var snapshot *rewardPrecomputeRollbackSnapshot
+		if remaining == 0 {
+			snapshot = ls.rewardPrecomputeRollback
+			ls.rewardPrecomputeRollback = nil
+		}
+		if snapshot == nil {
+			ls.rewardPrecomputeMu.Unlock()
+			return
+		}
+		if snapshot.committed {
+			queueStartup := !snapshot.reloadFailed
+			ls.rewardPrecomputeMu.Unlock()
+			if queueStartup {
+				ls.queueStartupRewardPrecompute()
+			}
+			return
+		}
+		// Close discards queued work and waits for the worker; restoring
+		// after it would re-arm that work and could Add to the wait group
+		// after Close's Wait.
+		if ls.closed.Load() {
+			ls.rewardPrecomputeMu.Unlock()
+			return
+		}
+		startWorker := false
+		if ls.rewardPrecomputePending == nil && snapshot.pending != nil {
+			startWorker = ls.queueRewardPrecomputeLocked(*snapshot.pending)
+		}
+		if ls.rewardPrecomputeRetry == nil && snapshot.retry != nil {
+			restored := *snapshot.retry
+			restored.epochEvent.EpochNonce = slices.Clone(
+				restored.epochEvent.EpochNonce,
+			)
+			restored.generation = ls.rewardInputGeneration.Load()
+			ls.rewardPrecomputeRetry = &restored
+		}
+		hasRetry := ls.rewardPrecomputeRetry != nil
+		hasPending := ls.rewardPrecomputePending != nil
+		ls.rewardPrecomputeMu.Unlock()
+		if startWorker {
+			go ls.runRewardPrecompute(
+				ls.precomputeStakeRewardsAfterEpochTransition,
+			)
+		}
+		if !hasPending && !hasRetry {
+			ls.queueStartupRewardPrecompute()
+		}
+		if hasRetry {
+			ls.RLock()
+			capturedSlot := ls.currentTip.Point.Slot
+			ls.RUnlock()
+			ls.maybeQueueStakeRewardPrecomputeRetry(capturedSlot)
+		}
 	}()
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
@@ -3880,6 +3970,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	if err != nil {
 		return err
 	}
+	ls.rewardPrecomputeMu.Lock()
+	if snapshot := ls.rewardPrecomputeRollback; snapshot != nil {
+		snapshot.committed = true
+	}
+	ls.rewardPrecomputeMu.Unlock()
 	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
 	if publishResync && ls.config.EventBus != nil {
 		ls.config.EventBus.PublishAsync(
@@ -3931,7 +4026,6 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// the database before any later block validates against them --
 	// regardless of which caller (chainsync rollback, primary-chain
 	// reconciliation, tip-floor enforcement) reached this function.
-	var postCommitReloadErr error
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
 	newCurrentEra = ls.currentEra
@@ -4177,6 +4271,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	)
 	floorErr = ls.enforceDurableTipFloor()
 	if postCommitReloadErr != nil {
+		ls.rewardPrecomputeMu.Lock()
+		if snapshot := ls.rewardPrecomputeRollback; snapshot != nil {
+			snapshot.reloadFailed = true
+		}
+		ls.rewardPrecomputeMu.Unlock()
 		// The metadata rollback already committed and ls.currentTip already
 		// reflects it, but epochCache/currentEra/currentPParams (or the
 		// synthetic-PlutusV2 marker) could not be reloaded from the
@@ -4199,6 +4298,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		return &rollbackCommittedError{err: fatalErr}
 	}
 	if floorErr != nil {
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(floorErr)
+		}
 		return &rollbackCommittedError{err: floorErr}
 	}
 	if retainIntent {
