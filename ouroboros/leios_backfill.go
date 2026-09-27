@@ -320,7 +320,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		leiosBackfillAffinityWindow,
 		o.leiosFetchGuardFor,
 	)
-	var lastErr error
+	var lastErr, busyErr error
 	remainingCandidates := len(order)
 	for _, connId := range order {
 		remainingCandidates--
@@ -382,6 +382,14 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			o.requestLeiosFetchConnRecycle(connId, point, err)
 		}
 		if err != nil {
+			// A busy connection was never asked, so its error must not mask
+			// the outcome of a connection that was.
+			if classifyLeiosFetchFailure(err) == leiosFetchFailureBusy {
+				if busyErr == nil {
+					busyErr = err
+				}
+				continue
+			}
 			lastErr = err
 			continue
 		}
@@ -392,6 +400,9 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		lastErr = errors.New(
 			"leios backfill: fetch completed but cache incomplete",
 		)
+	}
+	if lastErr == nil {
+		lastErr = busyErr
 	}
 	if lastErr == nil {
 		lastErr = errors.New("leios backfill: fetch failed")
