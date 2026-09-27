@@ -2164,6 +2164,14 @@ func (a *NodeAdapter) PoolsExtended() (
 	if len(poolKeyHashes) == 0 {
 		return []PoolExtendedInfo{}, nil
 	}
+	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		poolHash, err := lcommon.NewBlake2b224Checked(poolKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf("active pool key hash: %w", err)
+		}
+		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolHash))
+	}
 
 	liveStakeByPool, _, err := db.Metadata().GetStakeByPools(
 		poolKeyHashes,
@@ -2224,14 +2232,6 @@ func (a *NodeAdapter) PoolsExtended() (
 		return nil, fmt.Errorf("get total circulation: %w", err)
 	}
 
-	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
-	for _, poolKeyHash := range poolKeyHashes {
-		poolHash, err := lcommon.NewBlake2b224Checked(poolKeyHash)
-		if err != nil {
-			return nil, fmt.Errorf("active pool key hash: %w", err)
-		}
-		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolHash))
-	}
 	pools, err := db.GetPools(poolHashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get pools: %w", err)
@@ -2370,6 +2370,22 @@ func (a *NodeAdapter) Account(
 	if err != nil {
 		return AccountInfo{}, err
 	}
+	// Per Blockfrost OpenAPI (>=0.1.85), `active` is the delegation
+	// state (the account is registered and currently delegated to a
+	// pool), while `registered` is the registration state on its own.
+	// account.Active is Dingo's registration flag, so it backs
+	// `registered`; `active` additionally requires a pool delegation.
+	delegating := account.Active && len(account.Pool) > 0
+
+	var poolID *string
+	if delegating {
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(account.Pool)
+		if err != nil {
+			return AccountInfo{}, fmt.Errorf("delegated pool key hash: %w", err)
+		}
+		pool := lcommon.PoolId(poolKeyHash).String()
+		poolID = &pool
+	}
 	controlledAmount, err := a.ledgerState.Database().
 		GetControlledAmountByCredential(credentialTag, stakeKey, nil)
 	if err != nil {
@@ -2397,23 +2413,6 @@ func (a *NodeAdapter) Account(
 			return AccountInfo{}, err
 		}
 		activeEpoch = &epochID
-	}
-
-	// Per Blockfrost OpenAPI (>=0.1.85), `active` is the delegation
-	// state (the account is registered and currently delegated to a
-	// pool), while `registered` is the registration state on its own.
-	// account.Active is Dingo's registration flag, so it backs
-	// `registered`; `active` additionally requires a pool delegation.
-	delegating := account.Active && len(account.Pool) > 0
-
-	var poolID *string
-	if delegating {
-		poolKeyHash, err := lcommon.NewBlake2b224Checked(account.Pool)
-		if err != nil {
-			return AccountInfo{}, fmt.Errorf("delegated pool key hash: %w", err)
-		}
-		pool := lcommon.PoolId(poolKeyHash).String()
-		poolID = &pool
 	}
 
 	sums, err := db.GetAccountSumsByCredential(
@@ -2616,6 +2615,10 @@ func (a *NodeAdapter) AccountDelegationHistory(
 	blockNumbers := make(map[string]uint64, len(rows))
 	ret := make([]AccountDelegationHistoryInfo, 0, len(rows))
 	for _, row := range rows {
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(row.PoolKeyHash)
+		if err != nil {
+			return nil, 0, fmt.Errorf("delegation pool key hash: %w", err)
+		}
 		activeEpoch, err := delegationActivationEpoch(
 			a.ledgerState,
 			row.AddedSlot,
@@ -2634,10 +2637,6 @@ func (a *NodeAdapter) AccountDelegationHistory(
 		)
 		if err != nil {
 			return nil, 0, err
-		}
-		poolKeyHash, err := lcommon.NewBlake2b224Checked(row.PoolKeyHash)
-		if err != nil {
-			return nil, 0, fmt.Errorf("delegation pool key hash: %w", err)
 		}
 		ret = append(ret, AccountDelegationHistoryInfo{
 			ActiveEpoch: activeEpoch,
