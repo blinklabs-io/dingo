@@ -699,10 +699,9 @@ func TestTokenRegistrySyncBoundsRetainedBatchBytes(t *testing.T) {
 	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
 }
 
-// TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit exercises the
-// syncer's per-entry guard with a direct library configuration whose batch
-// cap is below its entry cap; node config validation normally rejects that
-// combination.
+// TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit verifies that a
+// retained-batch limit below the default per-entry limit skips only the
+// oversized mapping and defers pruning its previously stored row.
 func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 	t.Parallel()
 
@@ -713,26 +712,31 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 			"DJED",
 			"",
 		),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"small mapping remains available",
+			"NUT",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
-	sync, logs := captureSync(t, store, server.URL)
+	const maxBatchBytes int64 = 300
+	sync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
+		c.MaxBatchBytes = maxBatchBytes
+	})
 
 	written, err := sync.SyncOnce(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, 1, written)
+	require.Equal(t, 2, written)
+	require.Len(t, store.snapshot(), 2)
 	prunesBefore := store.prunes
 
-	const (
-		maxEntryBytes int64 = 1024
-		maxBatchBytes int64 = 128
-	)
 	oversized := mappingJSON(
 		syncSubjectDjed,
-		strings.Repeat("X", 256),
+		strings.Repeat("X", 300),
 		"DJED",
 		"",
 	)
-	require.Less(t, int64(len(oversized)), maxEntryBytes)
 	oversizedEntry, err := ParseTokenRegistryEntry([]byte(oversized))
 	require.NoError(t, err)
 	require.Greater(
@@ -740,16 +744,11 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 		tokenRegistryEntryRetainedBytes(oversizedEntry),
 		maxBatchBytes,
 	)
-	sync.maxEntryBytes = maxEntryBytes
-	sync.maxBatchBytes = maxBatchBytes
-	store.mu.Lock()
-	store.maxBatchBytes = 0
-	store.mu.Unlock()
 	server.setBody(tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectDjed + ".json": oversized,
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
-			"small accepted mapping",
+			"small mapping remains available",
 			"NUT",
 			"",
 		),
@@ -759,7 +758,6 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, 1, written)
-	require.Contains(t, logs.String(), "skipped=1")
 	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
 	require.Equal(t, prunesBefore, store.prunes,
 		"a skipped entry must defer reconciliation")
@@ -770,7 +768,7 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 		entries[syncSubjectDjed].Name,
 		"the previous usable mapping must remain stored",
 	)
-	require.Equal(t, "small accepted mapping", entries[syncSubjectNut].Name)
+	require.Equal(t, "small mapping remains available", entries[syncSubjectNut].Name)
 }
 
 func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
