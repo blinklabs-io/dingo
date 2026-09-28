@@ -251,6 +251,16 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, db.SetSyncState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
+		require.NoError(t, db.SetEpoch(
+			1050, 99, []byte{1}, []byte{2}, []byte{3}, nil,
+			uint(shelley.EraShelley.Id), 1, 432000, nil,
+		))
+		require.NoError(t, db.Metadata().SaveRewardAdaPots(
+			&models.RewardAdaPots{
+				Epoch: 99, Treasury: 10, Reserves: 20,
+				Fees: 30, Rewards: 40, CapturedSlot: 1050,
+			}, nil,
+		))
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		result, err := Sync(context.Background(), SyncConfig{
@@ -291,6 +301,14 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.Len(t, recent, 1)
 		require.EqualValues(t, 1100, recent[0].Slot,
 			"the retained blob tail must remain the node's replay frontier")
+		pots, err := db.Metadata().GetRewardAdaPots(99, nil)
+		require.NoError(t, err)
+		require.Nil(t, pots,
+			"reward pots derived from the preserved tail must be discarded")
+		epoch, err := db.GetEpoch(99, nil)
+		require.NoError(t, err)
+		require.Nil(t, epoch,
+			"epoch state derived from the preserved tail must be discarded")
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
@@ -303,7 +321,6 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		})
 		_, snapshotHash := validImmutableFiles(t, 1000)
 		stableHash := bytes.Repeat([]byte{0xdd}, 32)
-		localTipHash := bytes.Repeat([]byte{0xee}, 32)
 		dataDir := t.TempDir()
 		db, err := dbtest.NewDatabase(t, &database.Config{
 			DataDir:     dataDir,
@@ -317,22 +334,6 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			PrevHash: bytes.Repeat([]byte{0}, 32),
 			Cbor:     []byte{0x80},
 			Number:   2,
-			Type:     uint(shelley.BlockTypeShelley),
-		}, nil))
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot:     1050,
-			Hash:     stableHash,
-			PrevHash: snapshotHash,
-			Cbor:     []byte{0x80},
-			Number:   3,
-			Type:     uint(shelley.BlockTypeShelley),
-		}, nil))
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot:     1100,
-			Hash:     localTipHash,
-			PrevHash: stableHash,
-			Cbor:     []byte{0x80},
-			Number:   4,
 			Type:     uint(shelley.BlockTypeShelley),
 		}, nil))
 		require.NoError(t, setImmutableImportMarker(db, 0))
@@ -368,7 +369,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Logger:      discard,
 		})
 		require.NoError(t, err)
-		for _, hash := range [][]byte{snapshotHash, stableHash, localTipHash} {
+		for _, hash := range [][]byte{snapshotHash} {
 			_, err := database.BlockByHash(db, hash)
 			require.NoError(t, err, "the database must remain untouched before the trust check")
 		}

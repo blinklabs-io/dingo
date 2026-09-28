@@ -1023,8 +1023,7 @@ func Sync(
 			}
 			return SyncResult{}, nil
 		}
-		if cfg.RepairLegacyRewardState &&
-			localTip.Slot > certifiedTip.Slot {
+		if cfg.RepairLegacyRewardState {
 			preparedRepairImport, err = prepareLedgerStateImport(
 				logger, bootstrapResult, certifiedTip.Slot,
 			)
@@ -1227,6 +1226,23 @@ func Sync(
 
 	if err := g.Wait(); err != nil {
 		return SyncResult{}, err
+	}
+	if len(preservedLocalTail) > 0 {
+		mithrilFloor := uint64(0)
+		if loadResult != nil {
+			mithrilFloor = loadResult.ImmutableTipSlot
+		}
+		if err := db.RollbackMetadataAfterSlot(
+			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
+			mithrilFloor,
+			nil,
+		); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"rolling back metadata above reward-repair state slot %d: %w",
+				ledgerStateSlot,
+				err,
+			)
+		}
 	}
 	// A ledger state past the certified tip is refused unless
 	// importLedgerState itself vouches for the reason: a verified ancillary
