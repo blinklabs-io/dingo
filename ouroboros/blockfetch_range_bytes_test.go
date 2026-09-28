@@ -29,6 +29,7 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 )
@@ -88,6 +89,43 @@ func TestBlockfetchClientRequestRangeSendsExpectedBytes(t *testing.T) {
 			require.Equal(t, end, gotEnd)
 		})
 	}
+}
+
+// TestBlockfetchClientRequestRangeUsesLedgerEstimateByDefault covers the
+// production default of the blockfetchRangeBytes seam: an Ouroboros built
+// with a LedgerState sends the ledger's queued-header estimate without any
+// test override.
+func TestBlockfetchClientRequestRangeUsesLedgerEstimateByDefault(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newTestLedgerState(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
+	require.NoError(t, err)
+	for _, b := range blocks {
+		require.NoError(t, ls.Chain().AddBlockHeader(b.Header()))
+	}
+	start := ocommon.NewPoint(blocks[0].SlotNumber(), blocks[0].Hash().Bytes())
+	end := ocommon.NewPoint(blocks[2].SlotNumber(), blocks[2].Hash().Bytes())
+	want := ls.BlockfetchRangeExpectedBytes(start, end)
+	require.NotZero(t, want)
+
+	fake := &capturingRangeRequester{}
+	o := newOuroboros(OuroborosConfig{
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState: ls,
+	})
+	o.blockfetchConnClient = func(
+		ouroboros.ConnectionId,
+	) (blockfetchRangeRequester, error) {
+		return fake, nil
+	}
+
+	_, err = o.BlockfetchClientRequestRange(testConnId(), start, end)
+	require.NoError(t, err)
+	require.Len(t, fake.reqs, 1)
+	require.Equal(t, want, fake.reqs[0].ExpectedBytes)
 }
 
 // TestBlockfetchClientWiringKeepsRangesPipelinedUnderRealEstimates drives
