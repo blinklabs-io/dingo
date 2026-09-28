@@ -440,6 +440,23 @@ func (c *Chain) addBlockHeader(
 				headerTip.BlockNumber,
 			)
 		}
+		// The prev-hash check above makes the header tip this header's
+		// parent. A Byron epoch-boundary header passes the block-number rule
+		// with its parent's number and carries no signature, so this is the
+		// only check that keeps one from extending a post-Byron block.
+		parentEra, found, err := c.parentEraLocked(queued.prevHash)
+		if err != nil {
+			return fmt.Errorf(
+				"resolve parent era of header %s: %w",
+				headerHash.String(),
+				err,
+			)
+		}
+		if found {
+			if err := CheckEraOrder(header.Era().Id, parentEra); err != nil {
+				return fmt.Errorf("header %s: %w", headerHash.String(), err)
+			}
+		}
 	} else if c.atOriginAfterMutation() &&
 		!firstBlockNumberValid(queued.blockNumber) {
 		// The chain was rolled back to origin, so there is no tip to chain

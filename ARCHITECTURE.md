@@ -994,8 +994,9 @@ blocks it has durably adopted:
 
 - **Validate the producer counter for the active era.** Before the node starts
   block production, `node_forging.go` checks the loaded OpCert issue number
-  against the observed on-chain counter. A counter below the observed value is
-  refused in every era. The no-gap rule is era-scoped, so it is applied only
+  against the observed on-chain counter, or against zero when the pool has
+  none, with the rule block application uses. A counter below the observed
+  value is refused in every era. The no-gap rule is era-scoped, so it is applied only
   when the era can be resolved, and the slot it is resolved from is the applied
   chain tip — the same pipeline stage that produces the observed counter, never
   the wall clock. TPraos permits forward counter movement; Praos refuses a
@@ -1658,6 +1659,22 @@ Components use the `EventBus` (`event/event.go`) for asynchronous
 cross-component notifications. Synchronous state queries still use direct
 method calls, callbacks, or narrow interfaces injected by the node composition
 layer.
+
+Node-owned subscriptions classify delivery explicitly. State consumers of
+one-shot connection, peer-selection, and chainsync transitions use
+`Node.subscribeRequiredEvent`, which blocks publishers while a callback queue is
+full so ordinary back-pressure cannot silently detach the consumer. Use this
+only when the event has no safe replay or full-state resynchronization; such a
+consumer can back-pressure its publishers until it drains or the bus shuts
+down. A required handler must not synchronously publish to an EventBus path
+whose delivery can wait on that handler's subscriber; this can exhaust the
+shared async workers while the handler waits for queue capacity. Move follow-up
+publication out of that callback or keep the subscriber detachable until the
+cycle is removed. The chain-fork logger is intentionally detachable because it
+only emits diagnostics. Every node-owned callback registration must use
+`subscribeRequiredEvent`, `subscribeDetachableEvent`, or a specialized helper
+with an explicit policy at its wiring site; required consumers need blocking
+delivery or an explicit recovery/resubscription path.
 
 ```
 Publisher ---publish---> EventBus ---deliver---> Subscribers
@@ -3296,6 +3313,22 @@ selector uses the same transaction-wide declared-budget helper, so it cannot
 construct a candidate that inbound envelope validation would reject on that
 block-wide budget.
 
+A header or block may not belong to an earlier era than the block it extends
+(`chain.ErrEraRegression`). The hard-fork combinator only moves a chain's
+ledger state forward (ouroboros-consensus `State.extendToSlot`) and rejects a
+header or block from any era but its parent ledger view's
+(`HardForkEnvelopeErrWrongEra`, `HardForkLedgerErrorWrongEra`). Three checks
+enforce the rule, each against the parent it can see: `Chain.AddBlockHeader`
+against the header tip it extends; `validateHeaderEraOrder`, which every header
+entry point (chainsync, blockfetch, chain selection, Leios announcements)
+reaches for a Byron header through `validateByronPBFTHeaderCrypto`, against the
+primary chain's header tip or block tip when the header names one of them as
+its parent; and the inbound envelope's
+`validateBlockOrder` against the stored parent block or the previous block of
+the batch. Without them a Byron epoch-boundary header, which carries no
+signature and may share its parent's block number, could extend a post-Byron
+block on any network.
+
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now always runs whenever per-tx validation runs at all (issue #3528), including for blocks at or before the immutable tip: the previous shortcut that trusted the block producer's `isValid` flag as authoritative for those blocks fired more broadly than intended -- on ordinary `ValidateHistorical=false` catch-up, not only a trusted-chain-dump import -- and was removed rather than narrowed. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution as before.
 
 Restrictive Phase 2 validation runs the CEK machine against the protocol's
@@ -3354,6 +3387,22 @@ through the applied tip, while the issuer window retains only its last `k`
 main-block issuers. Byron epoch boundary blocks still enforce the current-slot
 bound and tick due delegations, but do not carry a PBFT issuer signature or
 advance the issuer window.
+
+`newByronPBFTCache` (`ledger/byron_pbft.go`) tolerates a Byron genesis that
+declares no boot stakeholders. `byronconsensus.NewPBFTDelegationState` refuses
+an empty issuer set, but `internal/test/devnet`'s testnet generator produces
+exactly this genesis for a network that hard-forks away from Byron at epoch 0
+(every `TestXHardForkAtEpoch` set to 0), and cardano-node starts from it.
+Instead of failing ledger-state construction, the cache records the shape and
+every Byron block on that chain is rejected with `errByronNoGenesisIssuers`.
+OBFT assigns every Byron slot leader from the boot stakeholders, so no Byron
+main block can be valid there. An epoch-boundary block carries no PBFT
+signature and would otherwise pass on the genesis anchor and current-slot bound
+alone, so `validateByronPBFTHeaderCrypto` refuses it too, which covers every
+header entry point (chainsync, blockfetch, chain selection, and Leios
+announcements); `byronPBFTConfig` returns the same error on the ledger apply
+path. Every Byron genesis under `config/cardano/` declares at least one boot
+stakeholder, so their PBFT validation is unchanged.
 
 Cached epochs resolve without forecast configuration, but still require a
 published nonce. Before forecasting an uncached epoch for a live header,
@@ -3608,12 +3657,20 @@ dependency across two points in the pipeline:
   only for Praos eras (Babbage onward, via `opCertNoGapRuleApplies`); TPraos
   eras (Shelley–Alonzo) enforce only monotonicity, so the gap rule is scoped by
   era rather than by validation mode (`shouldValidate` can be true for
-  historical or near-tip TPraos blocks). A pool with no recorded counter has no
-  baseline and is accepted as the baseline. A Mithril restore imports the
-  certified Praos HeaderState counter map at its trusted tip, so each included
-  pool has an authoritative baseline before the first replayed block; only a
-  pool absent from that map can establish a first local counter. Rollback safety
-  is inherited from the per-`(pool, slot)`
+  historical or near-tip TPraos blocks). A pool with no recorded counter is
+  judged against zero, the reference's baseline for a pool in the stake
+  distribution (ouroboros-consensus Praos `currentIssueNo`, cardano-ledger
+  TPraos `currentIssueNo`): its first Praos counter must be 0 or 1, while
+  TPraos accepts any first counter. Producer eligibility is not decided here:
+  header validation rejects a pool absent from the leader stake distribution,
+  the reference's `VRFKeyUnknown`. A Mithril restore imports the certified Praos HeaderState
+  counter map at its trusted tip, so each included pool has an authoritative
+  baseline before the first replayed block and a pool absent from that map is
+  absent from the reference state too. A Mithril-restored database with no
+  certified row at its boundary never imported the map, so the counter of a
+  pool not observed since the boundary is unknown rather than zero; the read
+  fails with a rebootstrap error instead of rejecting that pool's next valid
+  block. Rollback safety is inherited from the per-`(pool, slot)`
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
   is later rolled back.
@@ -3686,8 +3743,9 @@ The `LedgerView` interface provides query access to ledger state:
   its active delegate at the transaction slot, and supplies the genesis
   update quorum used to count distinct MIR signers. `ClassicProtocolParameterUpdateWindowState`
   supplies the current epoch and the first slot whose proposals target the
-  next epoch; the boundary is derived from the epoch schedule and Shelley
-  genesis security parameters. Delegation reads use the validation view's
+  next epoch: the next epoch's first slot less twice the Shelley stability
+  window `ceil(3k/f)`, clamped to the epoch's first slot when that window
+  covers the whole epoch. Delegation reads use the validation view's
   metadata transaction, so certificates already applied in that transaction
   are visible. The compile-time interface assertions in `ledger/view.go` keep
   these required gouroboros capabilities wired to the validation view.
@@ -9288,7 +9346,19 @@ never the reverse.
   `--koios-parity-allow-insecure-http` on the node, and
   `--koios-allow-insecure-http` / `KOIOS_ALLOW_INSECURE_HTTP` on the standalone
   CLI, where an explicitly-set flag beats the environment per CLAUDE.md's
-  CLI > env rule. A custom root must also carry no query string or fragment,
+  CLI > env rule. Outbound Koios traffic rejects loopback, private,
+  link-local, multicast, and other special-use destinations at the initial
+  URL, after every redirect, and again after DNS resolution immediately before
+  dialing. The transport dials the validated IP directly and does not inherit
+  environment proxy settings, alternate dial hooks, process-global TLS
+  settings, or alternate protocol handlers, so DNS rebinding, an ambient
+  proxy, or a weakened default transport cannot bypass that policy. An intentional
+  private deployment requires the separate `AllowPrivateAddresses` opt-in
+  (`--koios-parity-allow-private-addresses` /
+  `DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES` on the node and
+  `--koios-allow-private-addresses` / `KOIOS_ALLOW_PRIVATE_ADDRESSES` on the
+  standalone CLI); allowing plain HTTP does not imply permission to reach a
+  private address. A custom root must also carry no query string or fragment,
   since `get` and `post` append an endpoint path and their own query to it and
   would otherwise reach a different endpoint than intended. Validation errors
   never echo the URL, because the value they describe is the one

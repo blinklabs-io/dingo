@@ -115,7 +115,7 @@ func TestCheckProtocolParams_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	koiosURL, reqCount := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
@@ -166,7 +166,7 @@ func TestCheckProtocolParams_CacheMissFetchesOnceAndPersists(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`[{"epoch_no":108,"era":"Shelley"}]`))
 	})
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
@@ -227,7 +227,7 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	koiosURL, reqCount := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
@@ -287,7 +287,7 @@ func TestCheckStakeDistribution_CacheMissFetchesOnceAndPersists(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`[{"epoch_no":501,"active_stake":"2000000"}]`))
 	})
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
@@ -392,7 +392,7 @@ func TestFetchTxInfosCached_FullCacheHitSkipsLiveKoiosCall(t *testing.T) {
 	koiosURL, reqCount := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
@@ -426,7 +426,7 @@ func TestFetchTxInfosCached_PartialHitFetchesOnlyMissingHashes(t *testing.T) {
 	var mu sync.Mutex
 	var requested [][]string
 	koiosURL, reqCount := countingKoiosServer(t, txInfoHandler(t, &requested, &mu))
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
@@ -474,7 +474,7 @@ func TestFetchTxInfosCached_NilCacheStillFetchesLive(t *testing.T) {
 	var mu sync.Mutex
 	var requested [][]string
 	koiosURL, reqCount := countingKoiosServer(t, txInfoHandler(t, &requested, &mu))
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	got, err := fetchTxInfosCached(ctx, koios, nil, "preview", []string{"x", "y"})
@@ -497,7 +497,7 @@ func TestFetchTxInfosCached_LiveFetchErrorIsNotSwallowed(t *testing.T) {
 	koiosURL, _ := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	cache := openTestCache(t)

@@ -943,10 +943,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		n.ledgerState,
 		n.chainsyncConfig(),
 	)
-	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 
 	// Providers, not eagerly-computed values, matching Run. Resolving these
 	// here would capture the outgoing ouroboros instance that is replaced
