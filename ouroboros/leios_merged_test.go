@@ -377,7 +377,7 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 
 type misbehavingPrototypeVoteHandler struct{ fakeLeiosVoteHandler }
 
-func (misbehavingPrototypeVoteHandler) HandlePrototypeVote(
+func (*misbehavingPrototypeVoteHandler) HandlePrototypeVote(
 	string,
 	lcommon.LeiosPrototypeVote,
 ) error {
