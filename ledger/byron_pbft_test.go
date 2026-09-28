@@ -989,13 +989,6 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 	)
 }
 
-func TestValidateByronPBFTSlotRejectsFuture(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, validateByronPBFTSlot(42, 42))
-	require.ErrorContains(t, validateByronPBFTSlot(43, 42), "current slot")
-}
-
 func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
 	t.Parallel()
 
@@ -1136,9 +1129,9 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "genesis hash")
 }
 
-// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
-// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
-// (derived from ConsensusData.Epoch) are independent fields.
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin verifies that an
+// EBB's block number (Difficulty.Value) and slot (derived from
+// ConsensusData.Epoch) are independent fields.
 // chain.firstBlockNumberValid only constrains the former, and
 // validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
 // Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to
@@ -1280,4 +1273,48 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 
 	err := ls.validateByronPBFTHeaderCrypto(ebb)
 	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
+// validator with typed-nil headers, the shape a Byron block type can carry
+// in process. It must return an error rather than read through the header.
+func TestValidateByronPBFTHeaderCryptoRejectsNilHeaders(t *testing.T) {
+	t.Parallel()
+
+	blocks := map[string]gledger.Block{
+		"header-only main": headerOnlyBlock{
+			header: (*byron.ByronMainBlockHeader)(nil),
+		},
+		"header-only EBB": headerOnlyBlock{
+			header: (*byron.ByronEpochBoundaryBlockHeader)(nil),
+		},
+		"main block":     &byron.ByronMainBlock{},
+		"boundary block": &byron.ByronEpochBoundaryBlock{},
+	}
+	for name, block := range blocks {
+		for _, atOrigin := range []bool{true, false} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				ls, primaryChain := newByronGenesisAnchorTestLedger(
+					t,
+					lcommon.Blake2b256Hash([]byte("genesis")).String(),
+				)
+				if !atOrigin {
+					require.NoError(t, primaryChain.AddBlock(
+						loadBoundaryBlock(
+							t,
+							"mainnet-byron-last-4492799.cbor",
+							gledger.BlockTypeByronMain,
+						),
+						nil,
+					))
+				}
+				var err error
+				require.NotPanics(t, func() {
+					err = ls.validateByronPBFTHeaderCrypto(block)
+				})
+				require.ErrorContains(t, err, "nil header")
+			})
+		}
+	}
 }

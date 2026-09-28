@@ -24,13 +24,12 @@ import (
 // TestRollbackForkDepthSaturates keeps issue #3040's underflow fix covered at
 // the unit level.
 //
-// The behavioral test that used to reach this branch
-// (TestChainRollbackPointAheadOfTipIsNotDeepFork) now asserts that a rollback
-// point above the tip is refused outright as not-on-chain (issue #3005), so it
-// no longer drives rollbackForkDepth with such an index. The saturating
-// computation still has to be correct: any future caller that reaches it with a
-// point above the tip must get zero, not a wrapped-around uint64 that reads as
-// a fork deeper than any security parameter and denies every peer.
+// TestRollbackRejectsPointAheadOfTip asserts that a rollback point above the
+// tip is refused outright as not-on-chain (issue #3005), so it no longer drives
+// rollbackForkDepth with such an index. The saturating computation still has to
+// be correct: any future caller that reaches it with a point above the tip must
+// get zero, not a wrapped-around uint64 that reads as a fork deeper than any
+// security parameter and denies every peer.
 func TestRollbackForkDepthSaturates(t *testing.T) {
 	t.Parallel()
 

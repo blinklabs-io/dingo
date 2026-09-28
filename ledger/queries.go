@@ -2027,8 +2027,26 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		seen[key] = struct{}{}
 		stakeCreds = append(stakeCreds, ref)
 	}
-	accounts, err := ls.db.GetAccountsByCredential(stakeCreds, false, nil)
-	if err != nil {
+	var accounts map[string]*models.Account
+	pending := make(map[string]uint64)
+	readTxn := ls.db.Transaction(false)
+	if err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		accounts, err = ls.db.GetAccountsByCredential(stakeCreds, false, txn)
+		if err != nil {
+			return err
+		}
+		for key, account := range accounts {
+			amount, err := ls.pendingRewardCredit(
+				txn, account.CredentialTag, account.StakingKey,
+			)
+			if err != nil {
+				return err
+			}
+			pending[key] = amount
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	for _, cred := range creds {
@@ -2036,14 +2054,21 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		if err != nil {
 			return nil, err
 		}
-		account, ok := accounts[models.StakeCredentialRef{
+		mapKey := models.StakeCredentialRef{
 			Tag: credentialTag,
 			Key: cred.Bytes[:],
-		}.MapKey()]
+		}.MapKey()
+		account, ok := accounts[mapKey]
 		if !ok {
 			continue
 		}
-		rewards[cred] = uint64(account.Reward)
+		balance, overflow := addRewardUint64(
+			uint64(account.Reward), pending[mapKey],
+		)
+		if overflow {
+			return nil, errors.New("reward account balance overflow")
+		}
+		rewards[cred] = balance
 		if len(account.Pool) > 0 {
 			delegations[cred] = ledger.NewBlake2b224(account.Pool)
 		}

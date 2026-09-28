@@ -271,7 +271,7 @@ func TestRequireMatchingKoiosSource(t *testing.T) {
 
 	newClient := func(t *testing.T, baseURL string) *koiosparity.KoiosClient {
 		t.Helper()
-		client, err := nodeparity.NewKoiosClient(network, "", baseURL, true)
+		client, err := nodeparity.NewKoiosClient(network, "", baseURL, true, true)
 		require.NoError(t, err)
 		return client
 	}

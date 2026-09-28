@@ -271,3 +271,77 @@ func TestValidateBlockProducerLedger_NilSourceStarts(t *testing.T) {
 		t.Fatalf("missing era context must not refuse startup, got: %v", err)
 	}
 }
+
+// unobservedOpCertLedgerView reports a pool registration matching the loaded
+// VRF key and no opcert counter observed on chain for it.
+type unobservedOpCertLedgerView struct {
+	regVRFHash [32]byte
+}
+
+func (v unobservedOpCertLedgerView) PoolRegistrationVRFKeyHash(
+	[28]byte,
+) ([32]byte, bool, error) {
+	return v.regVRFHash, true, nil
+}
+
+func (v unobservedOpCertLedgerView) LatestOpCertSequence(
+	[28]byte,
+) (uint64, bool, error) {
+	return 0, false, nil
+}
+
+// TestValidateBlockProducerLedger_SyncedTipUnobservedCounterUsesZeroBaseline
+// pins startup to the rule block application applies to a registered pool
+// with no observed counter: zero is the baseline, so on a Praos applied tip
+// counter 1 starts and counter 2 is a gapped rotation.
+func TestValidateBlockProducerLedger_SyncedTipUnobservedCounterUsesZeroBaseline(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		counter uint64
+		wantErr bool
+	}{
+		{name: "counter one starts", counter: 1},
+		{name: "counter two is refused", counter: 2, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			vrf, kes, _ := devnetCredPaths(t)
+			opcert := opCertFixtureWithCounter(t, tt.counter)
+			cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+			n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+			n.config.network = "preview"
+			creds, err := n.validateBlockProducerStartupAtSlot(0)
+			if err != nil {
+				t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
+			}
+			view := unobservedOpCertLedgerView{
+				regVRFHash: lcommon.Blake2b256Hash(creds.GetVRFVKey()),
+			}
+			err = n.validateBlockProducerLedgerWithSource(
+				creds,
+				view,
+				laggingEraSource{
+					tipSlot:       2_000,
+					wallSlot:      2_000,
+					praosFromSlot: 1_500,
+				},
+			)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("counter %d must start, got: %v", tt.counter, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected counter %d to be refused", tt.counter)
+			}
+			if !strings.Contains(err.Error(), "skips ahead of last seen 0") {
+				t.Fatalf("expected a gapped-rotation error, got: %v", err)
+			}
+		})
+	}
+}

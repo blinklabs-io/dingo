@@ -831,6 +831,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
 	// Reinstall governance's same-boundary SPO stake hook too (dingo#4441) --
 	// see node.go's Run() for why a production node must always have this
 	// wired alongside the other two.
@@ -943,10 +944,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		n.ledgerState,
 		n.chainsyncConfig(),
 	)
-	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 
 	// Providers, not eagerly-computed values, matching Run. Resolving these
 	// here would capture the outgoing ouroboros instance that is replaced
