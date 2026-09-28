@@ -1494,10 +1494,29 @@ func TestValidateOpCertSequence(t *testing.T) {
 		wantErr      string
 	}{
 		{
-			name:         "first sighting accepts any counter",
+			name:         "first sighting uses zero baseline under praos",
 			found:        false,
-			candidate:    7,
+			candidate:    0,
 			enforceNoGap: true,
+		},
+		{
+			name:         "first sighting allows one rotation under praos",
+			found:        false,
+			candidate:    1,
+			enforceNoGap: true,
+		},
+		{
+			name:         "first sighting rejects skipped rotations under praos",
+			found:        false,
+			candidate:    2,
+			enforceNoGap: true,
+			wantErr:      "skips ahead",
+		},
+		{
+			name:         "first sighting accepts large counter under tpraos",
+			found:        false,
+			candidate:    490,
+			enforceNoGap: false,
 		},
 		{
 			name:         "equal to last seen",

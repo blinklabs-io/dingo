@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 	"github.com/stretchr/testify/require"
 )
@@ -45,7 +46,7 @@ func txsubmissionLoggedMessages(
 ) []string {
 	t.Helper()
 	var ret []string
-	for _, line := range strings.Split(buf, "\n") {
+	for line := range strings.SplitSeq(buf, "\n") {
 		if line == "" {
 			continue
 		}
@@ -142,7 +143,7 @@ func TestValidateTxsubmissionReplyMismatchReportsSingleHexTxId(t *testing.T) {
 		TxBody: fixtures[1].body,
 	}}
 
-	_, err := validateTxsubmissionReply(requested, returned)
+	_, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "received "+fixtures[1].hash)
 	require.NotContains(t, err.Error(), doubleHex(t, fixtures[1].hash))

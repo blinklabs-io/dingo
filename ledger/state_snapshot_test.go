@@ -265,9 +265,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	// for e+1). Quorum defaults to 0 (no UpdateQuorum in the genesis JSON
 	// above), so a single proposal is enough to apply it.
 	newMinFeeA := uint(99)
-	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
-		MinFeeA: &newMinFeeA,
-	})
+	updateCbor, err := cbor.Encode(map[uint64]any{0: newMinFeeA})
 	require.NoError(t, err)
 	require.NoError(t, db.SetPParamUpdate(
 		[]byte{0x01, 0x02, 0x03},
@@ -284,6 +282,10 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		Rho:              rat(),
 		Tau:              rat(),
 		Decentralization: rat(),
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
 	}
 	ls := &LedgerState{
 		db:             db,

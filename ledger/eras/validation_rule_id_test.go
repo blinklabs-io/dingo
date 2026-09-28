@@ -321,18 +321,18 @@ func eraUtxoValidationRuleCompositions() []eraUtxoValidationRuleComposition {
 			},
 			replaced: map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement{
 				lcommon.UtxoValidationRuleCommitteeCertificates: {
-					upstreamFuncName: "conway.UtxoValidateCommitteeCertificates",
+					upstreamFuncName: "dijkstra.UtxoValidateCommitteeCertificates",
 					dingoFunc:        validateCommitteeCertificates,
 				},
 				lcommon.UtxoValidationRuleUnknownVoters: {
-					upstreamFuncName: "conway.UtxoValidateUnknownVoters",
+					upstreamFuncName: "dijkstra.UtxoValidateUnknownVoters",
 					dingoFunc:        validateUnknownVoters,
 				},
 			},
 			retained: map[lcommon.UtxoValidationRuleId]string{
 				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValue",
 				lcommon.UtxoValidationRuleExUnitsTooBig:        "dijkstra.UtxoValidateExUnitsTooBigUtxo",
-				lcommon.UtxoValidationRuleCertificateDeposits:  "conway.UtxoValidateCertificateDeposits",
+				lcommon.UtxoValidationRuleCertificateDeposits:  "dijkstra.UtxoValidateCertificateDeposits",
 			},
 		},
 	}

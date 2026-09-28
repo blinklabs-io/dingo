@@ -300,6 +300,7 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 		LeiosApplyEndorserBlockTxs: false,
 	}
 	ls := &LedgerState{config: cfg}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 	withLeiosWaitTestSlotLength(t, ls)
 
 	start := time.Now()
@@ -694,6 +695,7 @@ func TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged(t *testing.T) {
 			LeiosApplyEndorserBlockTxs: false,
 		},
 	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 	withLeiosWaitTestSlotLength(t, ls)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -879,6 +881,7 @@ func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
 	}
 	ls := &LedgerState{config: cfg}
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 	withLeiosWaitTestSlotLength(t, ls)
 
 	// The closure never arrives, so the mandatory check fails -- which is the

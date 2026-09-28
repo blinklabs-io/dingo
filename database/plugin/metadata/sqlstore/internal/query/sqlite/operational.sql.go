@@ -402,10 +402,10 @@ const createPoolStakeSnapshot = `-- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -419,6 +419,7 @@ type CreatePoolStakeSnapshotParams struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -435,6 +436,7 @@ func (q *Queries) CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolSta
 		arg.CapturedSlot,
 		arg.LeiosKeyPublic,
 		arg.LeiosKeyPossessionProof,
+		arg.LeiosKeyRegistrationEpoch,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -2949,6 +2951,7 @@ const getPoolStakeSnapshot = `-- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2975,6 +2978,7 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 		&i.CapturedSlot,
 		&i.LeiosKeyPublic,
 		&i.LeiosKeyPossessionProof,
+		&i.LeiosKeyRegistrationEpoch,
 		&i.CalculationVersion,
 		&i.RewardAccountAutoVote,
 		&i.RewardAccountAutoVoteResolved,
@@ -2986,6 +2990,7 @@ const getPoolStakeSnapshotsByEpoch = `-- name: GetPoolStakeSnapshotsByEpoch :man
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -3018,6 +3023,7 @@ func (q *Queries) GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolS
 			&i.CapturedSlot,
 			&i.LeiosKeyPublic,
 			&i.LeiosKeyPossessionProof,
+			&i.LeiosKeyRegistrationEpoch,
 			&i.CalculationVersion,
 			&i.RewardAccountAutoVote,
 			&i.RewardAccountAutoVoteResolved,
@@ -3080,7 +3086,8 @@ func (q *Queries) GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]R
 }
 
 const getRewardAdaPots = `-- name: GetRewardAdaPots :one
-SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot
+SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
 FROM reward_ada_pots
 WHERE epoch = ?
 `
@@ -3096,6 +3103,7 @@ func (q *Queries) GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaP
 		&i.Fees,
 		&i.Rewards,
 		&i.CapturedSlot,
+		&i.ImportedEpochFees,
 	)
 	return i, err
 }
@@ -4240,10 +4248,10 @@ const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
@@ -4251,6 +4259,7 @@ ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     captured_slot = excluded.captured_slot,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
+    leios_key_registration_epoch = excluded.leios_key_registration_epoch,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -4268,6 +4277,7 @@ type SavePoolStakeSnapshotParams struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -4284,6 +4294,7 @@ func (q *Queries) SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSn
 		arg.CapturedSlot,
 		arg.LeiosKeyPublic,
 		arg.LeiosKeyPossessionProof,
+		arg.LeiosKeyRegistrationEpoch,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -4342,24 +4353,27 @@ func (q *Queries) SaveRewardAccountOutput(ctx context.Context, arg SaveRewardAcc
 
 const saveRewardAdaPots = `-- name: SaveRewardAdaPots :one
 INSERT INTO reward_ada_pots (
-    epoch, treasury, reserves, fees, rewards, captured_slot
-) VALUES (?, ?, ?, ?, ?, ?)
+    epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch) DO UPDATE SET
     treasury = excluded.treasury,
     reserves = excluded.reserves,
     fees = excluded.fees,
     rewards = excluded.rewards,
-    captured_slot = excluded.captured_slot
+    captured_slot = excluded.captured_slot,
+    imported_epoch_fees = excluded.imported_epoch_fees
 RETURNING id
 `
 
 type SaveRewardAdaPotsParams struct {
-	Epoch        int64
-	Treasury     string
-	Reserves     string
-	Fees         string
-	Rewards      string
-	CapturedSlot int64
+	Epoch             int64
+	Treasury          string
+	Reserves          string
+	Fees              string
+	Rewards           string
+	CapturedSlot      int64
+	ImportedEpochFees sql.NullString
 }
 
 func (q *Queries) SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsParams) (int64, error) {
@@ -4370,6 +4384,7 @@ func (q *Queries) SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsPa
 		arg.Fees,
 		arg.Rewards,
 		arg.CapturedSlot,
+		arg.ImportedEpochFees,
 	)
 	var id int64
 	err := row.Scan(&id)
