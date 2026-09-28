@@ -2136,13 +2136,17 @@ func (m *DingoStateManager) persistEnactment(
 			m.protocolParams,
 		)
 	}
+	enactmentPP := common.ProtocolParameters(conwayPP)
+	if dijkstraPP, ok := m.protocolParams.(*dijkstra.DijkstraProtocolParameters); ok {
+		enactmentPP = dijkstraPP
+	}
 	result, err := governance.EnactProposal(&governance.EnactmentContext{
 		DB:                 m.db,
 		Txn:                txn,
 		Epoch:              m.currentEpoch,
 		Slot:               boundarySlot,
 		PrevEpochStartSlot: m.committeeEpochStartSlot,
-		PParams:            conwayPP,
+		PParams:            enactmentPP,
 		UpdateFn:           stateManagerPParamsUpdateFunc(m.protocolParams),
 	}, dbProposal)
 	if err != nil {
