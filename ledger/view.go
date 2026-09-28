@@ -213,6 +213,24 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
+// PlutusEvalContextCache forwards the underlying LedgerState's shared
+// PlutusEvalContextCache so that a *LedgerView (the value passed to
+// ValidateTx*/EvaluateTx*) satisfies eras.PlutusEvalContextCacheProvider.
+// Returns nil for a bare-constructed LedgerView with no ls (test-only),
+// which era script evaluation already treats as "no cache available".
+func (lv *LedgerView) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.PlutusEvalContextCache()
+}
+
+// var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil) makes any
+// future drift in the PlutusEvalContextCacheProvider method signature a
+// compile error instead of a silent fallback to uncached EvalContext
+// construction.
+var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil)
+
 // MIRDelegState returns the move instantaneous rewards DELEG state that a
 // certificate at slot is checked against: the chain account pots, the
 // distributions and pot transfers committed this epoch at or before slot, and

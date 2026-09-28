@@ -447,6 +447,16 @@ type mockLedgerState struct {
 	// the balance RewardAccountBalance reports for a registered credential.
 	stakeRegistered map[lcommon.Blake2b224]bool
 	rewardBalances  map[lcommon.Blake2b224]uint64
+	// plutusEvalContextCache backs PlutusEvalContextCache, letting a test opt
+	// a *mockLedgerState into eras.PlutusEvalContextCacheProvider. nil (the
+	// zero value) preserves every existing test's uncached behavior.
+	plutusEvalContextCache *PlutusEvalContextCache
+}
+
+// PlutusEvalContextCache implements eras.PlutusEvalContextCacheProvider, the
+// same way *ledger.LedgerView does in production.
+func (m *mockLedgerState) PlutusEvalContextCache() *PlutusEvalContextCache {
+	return m.plutusEvalContextCache
 }
 
 // MIRDelegState implements eras.MIRDelegStateProvider for tests. The real
