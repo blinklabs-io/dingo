@@ -376,6 +376,122 @@ func TestValidateTxDijkstraRejectsSpendReferenceOverlapForPlutusV3(
 	require.ErrorContains(t, ValidateTxDijkstra(tx, 0, state, params), "is also a regular input")
 }
 
+func TestDijkstraPlutusValidationRejectsPlutusV3ChildWithOverlap(
+	t *testing.T,
+) {
+	t.Parallel()
+	plutusScript := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV3,
+	)
+	tx, state, params := newDijkstraReferenceOverlapScriptTx(
+		t,
+		plutusScript,
+		true,
+	)
+
+	// gOuroboros v0.208.0 rejects Plutus V1-V3 execution in Dijkstra child
+	// transactions before constructing a script context. The overlap must not
+	// mask that earlier, era-specific rule.
+	child := gdijkstra.DijkstraSubTransaction{
+		Body: gdijkstra.DijkstraSubTransactionBody{
+			TxInputs:          tx.Body.TxInputs,
+			TxOutputs:         tx.Body.TxOutputs,
+			TxScriptDataHash:  tx.Body.TxScriptDataHash,
+			TxReferenceInputs: tx.Body.TxReferenceInputs,
+		},
+		WitnessSet: tx.WitnessSet,
+	}
+	tx = &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{child},
+				false,
+			),
+		},
+		TxIsValid: true,
+	}
+
+	err := gdijkstra.UtxoValidatePlutusScripts(tx, 0, state, params)
+	var unsupported gdijkstra.UnsupportedScriptInSubtransactionError
+	require.ErrorAs(t, err, &unsupported)
+	require.Equal(t, uint(2), unsupported.Version)
+}
+
+func TestDijkstraPlutusValidationV3OverlapIgnoresUnusedPlutusV1AndV2Scripts(
+	t *testing.T,
+) {
+	t.Parallel()
+	plutusV3Script := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV3,
+	)
+	tx, state, params := newDijkstraReferenceOverlapScriptTx(
+		t,
+		plutusV3Script,
+		true,
+	)
+	unusedV1Script := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV1,
+	).(lcommon.PlutusV1Script)
+	unusedV2Script := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV2,
+	).(lcommon.PlutusV2Script)
+	tx.WitnessSet.WsPlutusV1Scripts = cbor.NewSetType(
+		[]lcommon.PlutusV1Script{unusedV1Script},
+		false,
+	)
+	tx.WitnessSet.WsPlutusV2Scripts = cbor.NewSetType(
+		[]lcommon.PlutusV2Script{unusedV2Script},
+		false,
+	)
+	unusedV1Input := shelley.NewShelleyTransactionInput(
+		"1128b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
+		0,
+	)
+	unusedV2Input := shelley.NewShelleyTransactionInput(
+		"1228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
+		0,
+	)
+	state.addUtxo(unusedV1Input, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       newTestKeyAddress(t),
+		scriptRef:  unusedV1Script,
+	})
+	state.addUtxo(unusedV2Input, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       newTestKeyAddress(t),
+		scriptRef:  unusedV2Script,
+	})
+	tx.Body.TxReferenceInputs = cbor.NewSetType(
+		[]shelley.ShelleyTransactionInput{
+			tx.Body.TxInputs.Items()[0],
+			unusedV1Input,
+			unusedV2Input,
+		},
+		false,
+	)
+	refreshDijkstraTransactionBodyAndSignature(t, tx)
+	fullValidationErr := ValidateTxDijkstra(tx, 0, state, params)
+	var extraneousErr lcommon.ExtraneousScriptWitnessesError
+	require.ErrorAs(t, fullValidationErr, &extraneousErr)
+
+	// Dijkstra phase one rejects unused script witnesses. Invoke the phase-2
+	// evaluator directly to isolate whether unused available reference scripts
+	// change the V3 context's executed-language rule.
+	err := script.ValidatePlutusV3ReferenceInputs(
+		tx,
+		params.ProtocolVersion.Major,
+	)
+	require.ErrorContains(t, err, "is also a regular input")
+	err = gdijkstra.UtxoValidatePlutusScripts(tx, 0, state, params)
+	var contextErr conway.ScriptContextConstructionError
+	require.ErrorAs(t, err, &contextErr)
+	require.ErrorContains(t, err, "is also a regular input")
+}
+
 func TestValidateTxDijkstraRejectsSpendReferenceOverlapForPlutusV4(
 	t *testing.T,
 ) {
@@ -395,6 +511,25 @@ func TestValidateTxDijkstraRejectsSpendReferenceOverlapForPlutusV4(
 	require.ErrorAs(t, err, &contextErr)
 	require.ErrorContains(t, err, "plutus V4 reference input")
 	require.ErrorContains(t, err, "is also a regular input")
+}
+
+func TestDijkstraPlutusV4OverlapRequiresLedgerState(t *testing.T) {
+	t.Parallel()
+	plutusScript := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV4,
+	)
+	tx, _, _ := newDijkstraReferenceOverlapScriptTx(
+		t,
+		plutusScript,
+		true,
+	)
+	err := validateDijkstraPlutusV4ReferenceInputOverlap(tx, nil)
+	require.ErrorContains(
+		t,
+		err,
+		"ledger state is required for Dijkstra script validation",
+	)
 }
 
 func TestValidateTxDijkstraIgnoresUnusedPlutusV4ReferenceScriptForSpendReferenceOverlap(
@@ -430,22 +565,7 @@ func TestValidateTxDijkstraIgnoresUnusedPlutusV4ReferenceScriptForSpendReference
 		},
 		false,
 	)
-	tx.Body.SetCbor(nil)
-	bodyCbor, err := cbor.Encode(tx.Body)
-	require.NoError(t, err)
-	tx.Body.SetCbor(bodyCbor)
-	seed := make([]byte, ed25519.SeedSize)
-	seed[0] = 0x77
-	privateKey := ed25519.NewKeyFromSeed(seed)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-	txHash := tx.Hash()
-	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
-		[]lcommon.VkeyWitness{{
-			Vkey:      publicKey,
-			Signature: ed25519.Sign(privateKey, txHash[:]),
-		}},
-		false,
-	)
+	refreshDijkstraTransactionBodyAndSignature(t, tx)
 
 	require.NoError(t, ValidateTxDijkstra(tx, 0, state, params))
 }
@@ -704,6 +824,29 @@ func newDijkstraReferenceOverlapScriptTx(
 	)
 
 	return tx, state, params
+}
+
+func refreshDijkstraTransactionBodyAndSignature(
+	t *testing.T,
+	tx *gdijkstra.DijkstraTransaction,
+) {
+	t.Helper()
+	tx.Body.SetCbor(nil)
+	bodyCbor, err := cbor.Encode(tx.Body)
+	require.NoError(t, err)
+	tx.Body.SetCbor(bodyCbor)
+	seed := make([]byte, ed25519.SeedSize)
+	seed[0] = 0x77
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	txHash := tx.Hash()
+	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+		[]lcommon.VkeyWitness{{
+			Vkey:      publicKey,
+			Signature: ed25519.Sign(privateKey, txHash[:]),
+		}},
+		false,
+	)
 }
 
 func referenceOverlapDatum(t *testing.T) (lcommon.Datum, lcommon.Blake2b256) {

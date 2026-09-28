@@ -466,6 +466,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 	if !dijkstraLevelsHaveRedeemers(levels) {
 		return nil
 	}
+	if ls == nil {
+		return errors.New("ledger state is required for Dijkstra script validation")
+	}
 
 	available := make(map[lcommon.ScriptHash]lcommon.Script)
 	for levelIndex := range levels {
