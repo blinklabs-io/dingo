@@ -1363,7 +1363,7 @@ func TestSpliceEndorserMempoolTxReordersValidityAndAuxiliaryData(
 
 	body := mustCbor(t, []any{uint64(1)})
 	witnesses := mustCbor(t, map[uint]any{})
-	isValid := mustCbor(t, false)
+	isValid := mustCbor(t, true)
 	auxiliaryData := mustCbor(t, map[uint]any{0: []byte{0x01}})
 	mempoolTx := mustCbor(t, []cbor.RawMessage{
 		body, witnesses, isValid, auxiliaryData,
