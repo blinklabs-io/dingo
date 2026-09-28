@@ -72,8 +72,21 @@ func (p *PeerGovernor) gossipChurn() {
 	// Demote the lowest-scoring peers
 	demoted := 0
 	eligibleUpstreams := p.countEligibleUpstreamsLocked()
+	// availableReplacements caps how many hot slots this cycle may vacate:
+	// churn used to close a demoted peer's connection unconditionally, and
+	// promoteWarmNonRootPeersLocked below only fills a vacated slot when a
+	// warm peer is actually available. When the warm pool is empty (the
+	// common case once the healthiest upstreams have already cycled
+	// through churn once), nothing ever backfilled the gap, so repeated
+	// churn cycles emptied the hot set with no fallback. Counting the same
+	// eligibility promoteWarmNonRootPeersLocked uses, before any demotion
+	// runs, guarantees demoted never exceeds what that promotion pass can
+	// replace.
+	availableReplacements := p.countPromotableWarmNonRootPeersLocked()
 	skippedLastEligibleUpstream := false
 	skippedUpstreamAddress := ""
+	skippedLastEligibleUpstreamCount := 0
+	skippedNoReplacementCount := 0
 	for i := 0; i < len(hotNonRoot) && demoted < churnCount; i++ {
 		peer := hotNonRoot[i]
 		targetState, canDemote := p.demotionTarget(peer.Source)
@@ -95,6 +108,17 @@ func (p *PeerGovernor) gossipChurn() {
 		if demotionRemovesEligibleUpstream && eligibleUpstreams <= 1 {
 			skippedLastEligibleUpstream = true
 			skippedUpstreamAddress = peer.Address
+			skippedLastEligibleUpstreamCount++
+			continue
+		}
+		// Never demote to cold without a promotable replacement standing
+		// by. This is routine score-based rotation, not dead-peer
+		// eviction: a peer whose transport is actually gone is already
+		// demoted immediately by reconcile's inactivity check, and a
+		// closed connection is reconnected by the level-triggered redial
+		// path, both independent of this guard.
+		if targetState == PeerStateCold && demoted >= availableReplacements {
+			skippedNoReplacementCount++
 			continue
 		}
 		oldSource := peer.Source
@@ -184,6 +208,19 @@ func (p *PeerGovernor) gossipChurn() {
 		}
 	} else {
 		p.lastEligibleUpstreamSkipLogged = false
+	}
+
+	if p.metrics != nil {
+		if skippedNoReplacementCount > 0 {
+			p.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+				"no_replacement",
+			).Add(float64(skippedNoReplacementCount))
+		}
+		if skippedLastEligibleUpstreamCount > 0 {
+			p.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+				"last_eligible_upstream",
+			).Add(float64(skippedLastEligibleUpstreamCount))
+		}
 	}
 
 	// Now promote warm peers to fill slots
@@ -320,6 +357,33 @@ func (p *PeerGovernor) publicRootChurn() {
 
 	// Publish all events outside of lock to avoid deadlock
 	p.publishPendingEvents(events)
+}
+
+// countPromotableWarmNonRootPeersLocked returns the number of warm
+// gossip/ledger peers that promoteWarmNonRootPeersLocked would currently
+// promote: an active connection and a score at or above
+// MinScoreThreshold. gossipChurn uses this to cap how many hot peers it
+// demotes to cold, and reconcile's redial path uses it to decide whether
+// the warm pool can close a hot-set deficit on its own or cold known
+// peers need to be dialed. Must be called with p.mu held.
+func (p *PeerGovernor) countPromotableWarmNonRootPeersLocked() int {
+	count := 0
+	for _, peer := range p.peers {
+		if peer == nil || peer.State != PeerStateWarm {
+			continue
+		}
+		if peer.Source != PeerSourceP2PGossip &&
+			peer.Source != PeerSourceP2PLedger {
+			continue
+		}
+		if peer.Connection == nil {
+			continue
+		}
+		if peer.PerformanceScore >= p.config.MinScoreThreshold {
+			count++
+		}
+	}
+	return count
 }
 
 // promoteWarmNonRootPeers promotes the highest-scoring warm non-root peers to hot.

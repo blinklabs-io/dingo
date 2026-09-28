@@ -61,6 +61,12 @@ type peerGovernorMetrics struct {
 	// Temperature observability
 	peerPromotions *prometheus.CounterVec // transitions toward hot, labels: from, to
 	peerDemotions  *prometheus.CounterVec // transitions toward cold, labels: from, to
+	// Churn-without-replacement observability (dingo#4783): validates that
+	// gossip churn no longer empties the hot set and that cold known peers
+	// get redialed before the pool collapses.
+	churnDemotionsSkippedByReason *prometheus.CounterVec // labels: reason
+	coldPeerRedialsByTrigger      *prometheus.CounterVec // labels: trigger
+	hotSetDeficit                 prometheus.Gauge       // MinHotPeers - current hot count, floored at 0
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -261,6 +267,32 @@ func (p *PeerGovernor) initMetrics() {
 	p.metrics.peerDemotions.WithLabelValues("hot", "warm").Add(0)
 	p.metrics.peerDemotions.WithLabelValues("hot", "cold").Add(0)
 	p.metrics.peerDemotions.WithLabelValues("warm", "cold").Add(0)
+
+	p.metrics.churnDemotionsSkippedByReason = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_peerSelection_churn_demotions_skipped_total",
+			Help: "number of gossip churn demotions skipped, by reason",
+		},
+		[]string{"reason"},
+	)
+	p.metrics.coldPeerRedialsByTrigger = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_peerSelection_cold_peer_redials_total",
+			Help: "number of cold gossip/ledger peer redials, by trigger",
+		},
+		[]string{"trigger"},
+	)
+	p.metrics.hotSetDeficit = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "dingo_metrics_peerSelection_hot_set_deficit",
+		Help: "MinHotPeers minus the current hot peer count, floored at 0",
+	})
+	p.metrics.churnDemotionsSkippedByReason.WithLabelValues("no_replacement").
+		Add(0)
+	p.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+		"last_eligible_upstream",
+	).Add(0)
+	p.metrics.coldPeerRedialsByTrigger.WithLabelValues("zero_upstream").Add(0)
+	p.metrics.coldPeerRedialsByTrigger.WithLabelValues("hot_deficit").Add(0)
 }
 
 // peerStateLabel maps a PeerState to its Prometheus temperature label.
@@ -434,6 +466,7 @@ func (p *PeerGovernor) updatePeerMetrics() {
 	p.metrics.activePeers.Set(float64(activeCount))
 	p.metrics.establishedPeers.Set(float64(establishedCount))
 	p.metrics.knownPeers.Set(float64(knownCount))
+	p.metrics.hotSetDeficit.Set(float64(max(0, p.config.MinHotPeers-hotCount)))
 
 	// Update per-source gauges
 	// Reset all known source/state combinations to 0 first

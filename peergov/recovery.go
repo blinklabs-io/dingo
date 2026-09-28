@@ -48,17 +48,39 @@ func (p *PeerGovernor) countEligibleUpstreamsLocked() int {
 	return count
 }
 
+// hotSetDeficitLocked returns how far the current hot count sits below
+// MinHotPeers, floored at zero. Must be called with p.mu held.
+func (p *PeerGovernor) hotSetDeficitLocked() int {
+	return max(0, p.config.MinHotPeers-p.countHotPeersLocked())
+}
+
 // redialCandidatesLocked returns known peers that should get a new
-// outbound connection attempt. Topology peers are always redialed:
-// they are operator-configured and must converge back to connected.
-// Gossip/ledger peers are only redialed when the node has no eligible
-// upstream connection at all, capped per cycle, so normal churn still
-// retires them as designed. Must be called with p.mu held.
+// outbound connection attempt. Topology peers are always redialed: they
+// are operator-configured and must converge back to connected.
+// Gossip/ledger peers are redialed under budget in two situations: the
+// node has no eligible upstream connection at all (the original
+// emergency case), or the hot set sits below MinHotPeers and the warm
+// pool does not hold enough promotable peers to close that gap on its
+// own. Without the second trigger, a node whose hot set had drained to a
+// handful of peers (but not zero) never dialed a single additional known
+// peer until every warm candidate was already exhausted, even though
+// plenty of cold known peers remained available. Must be called with
+// p.mu held.
 func (p *PeerGovernor) redialCandidatesLocked() []*Peer {
 	var candidates []*Peer
+	eligibleUpstreams := p.countEligibleUpstreamsLocked()
+	warmShortfall := p.hotSetDeficitLocked() >
+		p.countPromotableWarmNonRootPeersLocked()
+
 	emergencyBudget := 0
-	if p.countEligibleUpstreamsLocked() == 0 {
+	trigger := ""
+	switch {
+	case eligibleUpstreams == 0:
 		emergencyBudget = maxEmergencyRedialsPerReconcile
+		trigger = "zero_upstream"
+	case warmShortfall:
+		emergencyBudget = maxEmergencyRedialsPerReconcile
+		trigger = "hot_deficit"
 	}
 	for _, peer := range p.peers {
 		if peer == nil || peer.Connection != nil || peer.Reconnecting {
@@ -81,6 +103,11 @@ func (p *PeerGovernor) redialCandidatesLocked() []*Peer {
 				continue
 			}
 			emergencyBudget--
+			if p.metrics != nil {
+				p.metrics.coldPeerRedialsByTrigger.WithLabelValues(
+					trigger,
+				).Inc()
+			}
 		default:
 			continue
 		}
