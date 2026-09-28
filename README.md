@@ -24,8 +24,9 @@ provides pluggable storage and client interfaces.
 - **Application developers:** [APIs and archive services](https://docs.blinklabs.io/guides/dingo/006-apis-and-archive/)
   and [using Dingo with Cardano CLI](https://docs.blinklabs.io/guides/dingo/004-using-dingo-with-cardano-cli/).
 - **Dingo contributors:** [development guide](docs/development.md),
+  [local DevNet](docs/devnet.md), [benchmarks and profiling](docs/benchmarks.md),
   [architecture](ARCHITECTURE.md), [database design](DATABASE.md), and
-  [plugin development](docs/plugin-development.md).
+  [plugin development](database/plugin/PLUGIN_DEVELOPMENT.md).
 
 ## Codebase
 
@@ -56,6 +57,7 @@ environments, and profiling. For basic node setup and usage, follow the
 - [Development](docs/development.md)
 - [Architecture](ARCHITECTURE.md)
 - [Database](DATABASE.md)
-- [DevNet overview](docs/devnet.md)
+- [Local DevNet](docs/devnet.md)
+- [Benchmarks and profiling](docs/benchmarks.md)
 - [Monitoring dashboards](docs/dashboards/README.md)
 - [Badger garbage collection](docs/badger-gc.md)
