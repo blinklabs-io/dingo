@@ -552,7 +552,7 @@ func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
 }
 
 // TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
-// covers a review finding on blinklabs-io/dingo#4237: a pool that
+// verifies that a pool that
 // re-registers with a new VRF key after a pinned query's slot must still be
 // reported with the key it held at that slot, not its current one. Before
 // this fix, poolVrfKeyHashes always resolved through

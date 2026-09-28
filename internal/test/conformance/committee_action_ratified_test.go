@@ -60,8 +60,7 @@ func noConfidenceCommitteeParams() *conway.ConwayProtocolParameters {
 }
 
 // TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes
-// proves both halves of the fix requested on PR #4333 in one assertion:
-// a NoConfidence proposal whose only backing is a
+// verifies that a NoConfidence proposal whose only backing is a
 // DRep delegated AlwaysNoConfidence (no proposal carries an explicit vote at
 // all) ratifies only if committeeActionRatified (a) judges NoConfidence
 // against DRepVotingThresholds.MotionNoConfidence rather than

@@ -84,8 +84,8 @@ func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
 
 }
 
-// TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner is the
-// regression test for a review finding on this PR: a retired pool's own
+// TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner verifies that a
+// retired pool's own
 // historical registration of a key must not shadow a different, currently
 // active pool that legitimately re-registered the same, by-then-free key.
 // Both pools have a pool_registration row naming the key, so both are

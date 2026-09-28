@@ -332,8 +332,8 @@ func (c *controlledCtx) setErr(err error) {
 	c.err = err
 }
 
-// TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace guards
-// against a race identified in review: lockContext's
+// TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace verifies
+// lockContext's
 // reader-drain loop can be woken either by ctx being cancelled or by the
 // last reader releasing, and those two events can land at essentially
 // the same instant. If the reader-release case wins that race, the

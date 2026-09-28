@@ -96,7 +96,7 @@ func recordTestLeiosAnnouncement(
 // error-returning twin, for use from a worker goroutine: require's t.FailNow
 // is documented as unsafe to call from any goroutine other than the one
 // running the test function, so a concurrent caller must collect the error
-// and assert on it back on the test goroutine instead (review).
+// and assert on it back on the test goroutine instead.
 func recordTestLeiosAnnouncementNoFail(o *Ouroboros, headerRaw []byte) error {
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
 	if err != nil {
@@ -266,10 +266,8 @@ func TestStoreLeiosEndorserBlockAcceptsAnnouncedPointAndIsIdempotent(
 // covers cross-connection arrival order for two live occurrences of the same
 // hash: whichever connection's offer is stored first, a later offer for the
 // same hash at a different, independently announced slot is accepted as its
-// own occurrence rather than rejected, and neither disturbs the other
-// (wolf31o2 review; issue #3513). Table-driven over both arrival orders --
-// cubic's review flagged that only testing point-then-second would leave a
-// regression specific to the reverse order undetected.
+// own occurrence rather than rejected, and neither disturbs the other.
+// The test covers both arrival orders so either occurrence can arrive first.
 func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOfOrder(
 	t *testing.T,
 ) {
@@ -698,8 +696,7 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 
 	// Collected here rather than asserted inside the goroutines below: require
 	// (and t.FailNow, which it calls on failure) is documented as unsafe to
-	// invoke from any goroutine other than the one running the test function
-	// (review).
+	// invoke from any goroutine other than the one running the test function.
 	announceErrs := make([]error, n)
 	var wg sync.WaitGroup
 	wg.Add(2 * n)
@@ -1053,15 +1050,15 @@ func (l *lockProbingVoteHandler) HandleEndorserBlock(
 	l.fakeLeiosVoteHandler.HandleEndorserBlock(slot, ebHash)
 }
 
-// TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock is the
-// regression for the cubic P2 finding: bindLeiosEndorserBlockSlot's promotion
+// TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock verifies
+// bindLeiosEndorserBlockSlot's promotion
 // used to publish (vote emission, pipeline observation, persistence enqueue)
 // while recordLeiosAnnouncement still held leiosAnnouncementsMu, a lock
 // shared by every concurrent announcement. A vote handler that itself needs
 // that lock would then deadlock. The goroutine here is bounded by a timeout
 // so a regression shows up as a clean test failure rather than a hung test
 // binary; recordTestLeiosAnnouncementNoFail (not recordTestLeiosAnnouncement)
-// keeps require calls off that goroutine (review).
+// keeps require calls off that goroutine.
 func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 	t *testing.T,
 ) {

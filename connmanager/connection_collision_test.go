@@ -112,9 +112,9 @@ func TestReplacedConnectionCloseDoesNotPublishStaleEvent(t *testing.T) {
 	waitForConnectionManagerWatchers(t, cm)
 }
 
-// TestSameDirectionCollisionNotifiesEvictedConnection reproduces a gap a
-// automated review of issue #3508's fix identified: a connection evicted by
-// a same-direction ConnectionId collision is closed directly by
+// TestSameDirectionCollisionNotifiesEvictedConnection verifies that a
+// connection evicted by a same-direction ConnectionId collision is closed
+// directly by
 // addConnectionImpl, so its own error-watcher goroutine never observes a
 // live ErrorChan send -- and even if it did, RemoveConnection would already
 // find the replacement's entry under connId and reject it. Without an

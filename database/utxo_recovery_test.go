@@ -179,8 +179,8 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 	require.Equal(t, []byte(wantCbor), recovered)
 }
 
-// TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery is the
-// regression test for a review finding on PR #4084: the mirror image
+// TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery verifies
+// the mirror image
 // of the blob-only case above. A metadata-only Txn (Blob() == nil) hitting
 // a missing blob was passed straight into recoverUtxoCbor with no blob
 // handle at all, so utxoRecoveryBlockForTx's block lookup
@@ -255,7 +255,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 }
 
 // TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
-// is the regression test for a review finding on PR #4084:
+// verifies that
 // withBlobForRecovery copied t.readWrite into aug.readWrite, so a
 // write-capable metadata-only caller made aug's freshly-opened blobTxn
 // write-capable too. repairUtxoBlob then took its "use the caller's own
@@ -441,7 +441,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 }
 
 // TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTxn
-// is the regression test for a review finding on PR #4084:
+// verifies that
 // withBlobForRecovery's aug borrows the caller's metadataTxn (the mirror
 // image of withMetadataForRecovery's borrowed blobTxn) but an earlier
 // version left sharedMetadata unset. Releasing aug after recovery then
@@ -451,8 +451,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 // uncommitted metadata writes to that premature rollback, but this
 // test's caller (metadataOnlyTxn) is read-only and writes nothing through
 // it, so it does not exercise that loss -- only the narrower property
-// below (review: an earlier version of this comment described the
-// write-loss case as if this test's read-only setup demonstrated it).
+// below.
 //
 // Proves the caller's own metadata handle is still usable after recovery
 // completes: a plain read through metadataOnlyTxn.Metadata() must not fail
@@ -549,19 +548,11 @@ func TestResolveUtxoCborWithRecoveryPropagatesUnrecoverable(t *testing.T) {
 		"a UTxO with no indexed producer block must report unavailable, not succeed silently")
 }
 
-// TestRepairUtxoBlobWritesThroughCallersPinnedStore is a regression test for
-// a cubic finding on PR #4084: ResolveUtxoCborWithRecovery's block lookup was
-// fixed to read through the caller's already-pinned blob store rather than
-// whatever store is *currently* installed (see Txn.withMetadataForRecovery),
-// but repairUtxoBlob's write-back still opened a fresh NewBlobOnlyTxn, which
-// re-pins the current store -- splitting one logical recovery into a read
-// against one store and a repair write into a different one whenever a
-// SetBlobStore swap lands in between.
-//
-// Proves the fix end-to-end: install a second, empty store between the read
-// and the repair, and confirm the repaired offset lands in the store the
-// caller was actually pinned to (the one the block lookup used, and the only
-// one that has the producer block data at all), not the newly-installed one.
+// TestRepairUtxoBlobWritesThroughCallersPinnedStore verifies recovery reads
+// and repairs the caller's pinned blob store. A store swap between the block
+// read and repair must not redirect the write to the replacement store.
+// The test installs an empty store after the read and checks the repair stays
+// in the originally pinned store.
 func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)

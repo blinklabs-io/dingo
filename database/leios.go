@@ -62,7 +62,7 @@ func (d *Database) SetLeiosEBManifest(
 // become silently unreachable after an upgrade: that format could only ever
 // hold one occurrence per hash, and its value carries that occurrence's slot
 // as an 8-byte big-endian prefix, which must match the requested slot before
-// the legacy record is trusted (review).
+// the legacy record is trusted.
 func (d *Database) GetLeiosEBManifest(
 	hash []byte,
 	slot uint64,
@@ -91,8 +91,7 @@ func (d *Database) GetLeiosEBManifest(
 	if legacyErr != nil {
 		// A real failure reading the legacy record (storage, network,
 		// auth) must not be hidden behind the exact-key not-found error;
-		// only "the legacy record doesn't exist either" collapses to that
-		// (review).
+		// only "the legacy record doesn't exist either" collapses to that.
 		if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
 			return nil, legacyErr
 		}
@@ -215,8 +214,7 @@ func (d *Database) SetLeiosEBTxs(
 // GetLeiosEBManifest), gated on the legacy "em" record's embedded slot
 // matching: the legacy format paired one "em" and one "et" record per hash
 // (only one occurrence was ever trackable), so once that pairing is
-// confirmed to be this occurrence, its "et" value is safe to use too (cubic
-// review).
+// confirmed to be this occurrence, its "et" value is safe to use too.
 func (d *Database) GetLeiosEBTxs(
 	hash []byte,
 	slot uint64,
@@ -243,7 +241,7 @@ func (d *Database) GetLeiosEBTxs(
 		if legacyErr != nil {
 			// See GetLeiosEBManifest: a real failure reading the legacy
 			// manifest must not be hidden behind the exact-key not-found
-			// error (review).
+			// error.
 			if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
 				return nil, legacyErr
 			}

@@ -1136,9 +1136,9 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "genesis hash")
 }
 
-// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a review
-// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
-// (derived from ConsensusData.Epoch) are independent fields.
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin verifies that an
+// EBB's block number (Difficulty.Value) and slot (derived from
+// ConsensusData.Epoch) are independent fields.
 // chain.firstBlockNumberValid only constrains the former, and
 // validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
 // Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to

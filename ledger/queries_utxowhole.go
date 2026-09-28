@@ -185,7 +185,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// using errors.Is(err, database.ErrTxnPanic) to distinguish "the
 	// worker's transaction machinery panicked" from an ordinary resolve
 	// failure must see the same sentinel regardless of which
-	// implementation answered the query (review).
+	// implementation answered the query.
 	resolveRow := func(txn *database.Txn, ref database.UtxoRef) (r resolved) {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -272,7 +272,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 			// select picks uniformly at random between ready cases rather
 			// than preferring done -- so the abort was not actually
 			// guaranteed to stop feeding promptly, only increasingly
-			// likely to over repeated iterations (review). A
+			// likely to over repeated iterations. A
 			// non-blocking check up front gives done priority; the second
 			// select still catches the remaining narrow window where done
 			// closes between this check and the send.
