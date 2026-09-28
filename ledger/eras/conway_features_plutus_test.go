@@ -62,20 +62,24 @@ func TestConwayFeaturesRuleAllowsUnneededPlutusV1V2(t *testing.T) {
 	}
 }
 
-func TestConwayFeaturesRuleEnforcesPV11PlutusV3ReferenceInputDisjointness(
+func TestConwayFeaturesRuleDoesNotEnforcePV11ReferenceInputOverlap(
 	t *testing.T,
 ) {
 	t.Parallel()
 	input := newTestInput(0x83, 0)
 	tx := newConwayFeaturesTestTx(input)
 	tx.referenceInputs = []lcommon.TransactionInput{input}
+	state := newMockLedgerState()
+	state.addUtxo(input, testAddressOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       newTestKeyAddress(t),
+	})
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 			Major: lcommon.ProtocolVersionVanRossem,
 		},
 	}
-	err := conwayFeaturesRule(t)(tx, 0, newMockLedgerState(), pp)
-	require.ErrorContains(t, err, "is also a regular input")
+	require.NoError(t, conwayFeaturesRule(t)(tx, 0, state, pp))
 }
 
 func TestConwayScriptPurposeUsesActiveProtocolMajor(t *testing.T) {

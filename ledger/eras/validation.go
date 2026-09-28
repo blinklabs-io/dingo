@@ -25,7 +25,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -409,47 +408,6 @@ func validateUnknownVoters(
 			}
 		default:
 			return conway.UnknownVoterError{Voter: *voter}
-		}
-	}
-	return nil
-}
-
-func validateDijkstraPlutusV3ReferenceInputs(
-	tx lcommon.Transaction,
-	_ uint64,
-	_ lcommon.LedgerState,
-	pp lcommon.ProtocolParameters,
-) error {
-	protocolMajor := protocolMajorVersion(pp)
-	if tx == nil || protocolMajor < lcommon.ProtocolVersionVanRossem {
-		return nil
-	}
-	if err := script.ValidatePlutusV3ReferenceInputs(tx, protocolMajor); err != nil {
-		return conway.ScriptContextConstructionError{Err: err}
-	}
-	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
-	if !ok {
-		return nil
-	}
-	for _, subTx := range dijkstraTx.Body.TxSubTransactions.Items() {
-		body := &subTx.Body
-		type inputKey struct {
-			id    lcommon.Blake2b256
-			index uint32
-		}
-		inputs := make(map[inputKey]struct{}, len(body.Inputs()))
-		for _, input := range body.Inputs() {
-			inputs[inputKey{id: input.Id(), index: input.Index()}] = struct{}{}
-		}
-		for _, input := range body.ReferenceInputs() {
-			if _, exists := inputs[inputKey{
-				id: input.Id(), index: input.Index(),
-			}]; exists {
-				return conway.ScriptContextConstructionError{Err: fmt.Errorf(
-					"plutus V3 reference input %s is also a regular input",
-					input.String(),
-				)}
-			}
 		}
 	}
 	return nil
