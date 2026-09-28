@@ -737,6 +737,66 @@ func TestLeiosAnnouncementLocalStateFailuresDoNotPenalizePeer(t *testing.T) {
 	}
 }
 
+func TestDeferredLeiosAnnouncementDoesNotPenalizePeer(t *testing.T) {
+	t.Parallel()
+
+	probe := newTestOuroborosWithLeiosDB(t)
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	header, err := decodeLeiosAnnouncementHeader(raw)
+	require.NoError(t, err)
+	deferredErr := probe.ledgerState.ValidateChainSelectionHeaderCrypto(header)
+	require.Error(t, deferredErr)
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 10,
+		slotTime:    time.Now().Add(-time.Minute),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+		err:         deferredErr,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	for range leiosInvalidAnnouncementLimit {
+		err := o.acceptLeiosAnnouncement(raw, "peer-a")
+		require.Error(t, err)
+		require.True(t, ledger.IsHeaderVerificationDeferred(err))
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+	}
+	require.Len(t, o.leiosDeferredAnnouncements, 1)
+
+	invalid := errors.New("invalid announcement")
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid))
+	}
+	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid), invalid)
+}
+
+func TestAheadOfCurrentSlotLeiosAnnouncementStillPenalizesPeer(t *testing.T) {
+	t.Parallel()
+
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 0,
+		slotTime:    time.Now().Add(-time.Minute),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	for range leiosInvalidAnnouncementLimit - 1 {
+		err := o.acceptLeiosAnnouncement(raw, "peer-a")
+		require.ErrorContains(t, err, "ahead of current slot")
+		require.NotErrorIs(t, err, errLeiosAnnouncementLocalState)
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+	}
+	err := o.acceptLeiosAnnouncement(raw, "peer-a")
+	require.ErrorContains(t, err, "ahead of current slot")
+	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", err), err)
+}
+
 var errLeiosEndorserBlockNotCached = errors.New(
 	"leios endorser block not cached",
 )

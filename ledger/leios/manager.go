@@ -1725,6 +1725,7 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 		return false, nil
 	}
 	switch m.voteVerificationBudget.Admit(connKey, now) {
+	case ratewindow.Admitted:
 	case ratewindow.ProcessBudgetExceeded:
 		m.mu.Unlock()
 		return false, errVoteVerificationProcessBudget

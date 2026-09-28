@@ -276,19 +276,19 @@ type peerHeaderHistoryCandidate struct {
 
 type peerHeaderHistoryCandidateHeap []*peerHeaderHistoryCandidate
 
-func (h peerHeaderHistoryCandidateHeap) Len() int { return len(h) }
+func (h *peerHeaderHistoryCandidateHeap) Len() int { return len(*h) }
 
-func (h peerHeaderHistoryCandidateHeap) Less(i, j int) bool {
-	if h[i].sequence != h[j].sequence {
-		return h[i].sequence < h[j].sequence
+func (h *peerHeaderHistoryCandidateHeap) Less(i, j int) bool {
+	if (*h)[i].sequence != (*h)[j].sequence {
+		return (*h)[i].sequence < (*h)[j].sequence
 	}
-	return h[i].historyKey < h[j].historyKey
+	return (*h)[i].historyKey < (*h)[j].historyKey
 }
 
-func (h peerHeaderHistoryCandidateHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-	h[i].index = i
-	h[j].index = j
+func (h *peerHeaderHistoryCandidateHeap) Swap(i, j int) {
+	(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+	(*h)[i].index = i
+	(*h)[j].index = j
 }
 
 func (h *peerHeaderHistoryCandidateHeap) Push(value any) {
