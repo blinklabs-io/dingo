@@ -288,32 +288,45 @@ func CheckProtocolParams(
 	), nil
 }
 
-// StakeMismatch is one pool's active-stake disagreement between Dingo and
-// Koios for an epoch, as absolute lovelace amounts.
+// StakeMismatch is an active-stake disagreement between Dingo and Koios for
+// an epoch, as absolute lovelace amounts. It covers two shapes: one pool's
+// stake (PoolIDBech32 set) and the epoch-wide total (PoolIDBech32 empty,
+// Reason ReasonTotalActiveStakeMismatch -- see compareTotalActiveStake).
 type StakeMismatch struct {
+	// PoolIDBech32 is empty only for the epoch-wide total comparison, which
+	// knows a pool is missing but not which one.
 	PoolIDBech32 string
 	DingoStake   uint64
 	// KoiosStake is Koios's literal decimal string, kept exact -- "" when
-	// Koios has no pool_history row for this pool/epoch at all (Reason
-	// explains why that itself counts as a mismatch here).
+	// Koios has no pool_history row for this pool/epoch at all, and for
+	// ReasonNoKoiosActiveStake (Reason explains why either still counts as
+	// a mismatch here).
 	KoiosStake string
-	// DiffLovelace is the exact signed difference (Dingo - Koios), in
-	// whole lovelace. Meaningless (left 0) when Reason is set: those cases
-	// have no numeric Koios value to diff against.
+	// DiffLovelace is the exact signed difference (Dingo - Koios), in whole
+	// lovelace. Left 0 for every Reason that has no numeric Koios value to
+	// diff against, which is all of them EXCEPT
+	// ReasonTotalActiveStakeMismatch: that one is an ordinary numeric
+	// disagreement and carries both a Reason and a real difference, because
+	// it needs the Reason to say the sum diverged rather than one pool.
 	DiffLovelace int64
-	// Reason is non-empty only for the two cases that are not a numeric
-	// disagreement: "no koios row for nonzero dingo stake" or "unparseable
-	// koios active_stake value". Empty for an ordinary numeric mismatch.
+	// Reason is empty for an ordinary per-pool numeric mismatch, and
+	// otherwise one of:
+	//   - "no koios pool_history row for nonzero dingo stake"
+	//   - "unparseable koios active_stake value" (KoiosFault)
+	//   - "stake difference too large to represent ..."
+	//   - ReasonTotalActiveStakeMismatch (numeric; see DiffLovelace)
+	//   - ReasonNoKoiosActiveStake (KoiosFault)
 	Reason string
-	// KoiosFault is true only for the "unparseable koios active_stake
-	// value" case: a comparison Koios's own data made untrustworthy, not a
-	// real Dingo/Koios disagreement -- matching koiosparity.StatusError's
-	// treatment of a Koios-side fetch failure, and unlike the "no koios row
-	// for nonzero dingo stake" case (KoiosFault false), which is a genuine
-	// divergence. A caller counting real mismatches must exclude this case
-	// the same way it already excludes a StakeErr; a caller comparing on
-	// Reason's literal string instead would silently miscount if this
-	// doc-comment's wording ever changed.
+	// KoiosFault is true for the cases Koios's own data made untrustworthy
+	// rather than a real Dingo/Koios disagreement: an unparseable
+	// active_stake value, and ReasonNoKoiosActiveStake. It matches
+	// koiosparity.StatusError's treatment of a Koios-side fetch failure,
+	// and is deliberately false for "no koios pool_history row for nonzero
+	// dingo stake" and for the overflow case, both of which are genuine
+	// divergences. A caller counting real mismatches must exclude
+	// KoiosFault the same way it already excludes a StakeErr; a caller
+	// comparing on Reason's literal string instead would silently miscount
+	// if any wording above ever changed.
 	KoiosFault bool
 }
 
@@ -610,6 +623,10 @@ const ReasonTotalActiveStakeMismatch = "dingo pool stakes do not sum to koios ac
 // KoiosFault, so a caller counting real divergences skips it the same way it
 // skips an unparseable value -- but it is still reported, because a check
 // that could not run must not look like one that ran and found nothing.
+//
+// Never used for an epoch koiosparity.IsPreStakingEpoch accepts: Koios's
+// null is permanent and correct there, so those epochs are skipped outright
+// rather than reported.
 const ReasonNoKoiosActiveStake = "koios reported no active_stake for the epoch"
 
 // koiosActiveStakeForEpoch returns Koios's epoch-wide active_stake as its
@@ -694,6 +711,13 @@ func compareTotalActiveStake(
 	}
 
 	if koiosTotal == "" {
+		if koiosparity.IsPreStakingEpoch(epoch) {
+			// Koios returns active_stake=null here permanently, because no
+			// valid "go" stake snapshot exists yet -- an epoch with nothing
+			// to compare, not a fault. Reporting it as one would make the
+			// first two epochs of every from-genesis replay look degraded.
+			return nil, nil
+		}
 		return &StakeMismatch{
 			DingoStake: got,
 			Reason:     ReasonNoKoiosActiveStake,

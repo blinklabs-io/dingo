@@ -16,6 +16,7 @@ package nodeparity
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -190,10 +191,12 @@ func TestCompareTotalActiveStakeReturnsAFetchError(t *testing.T) {
 }
 
 // TestCompareTotalActiveStakeFlagsAMissingKoiosTotal covers the other
-// unrunnable case: Koios answers, but with no active_stake for the epoch.
-// That is a missing reference rather than a transport failure, so it is a
-// KoiosFault mismatch rather than an error -- still visible, still excluded
-// from the divergence count.
+// unrunnable case: Koios answers, but with no active_stake for an epoch that
+// should have one. That is a missing reference rather than a transport
+// failure, so it is a KoiosFault mismatch rather than an error -- still
+// visible, still excluded from the divergence count. Contrast
+// TestCompareTotalActiveStakeSkipsPreStakingEpochs, where the same null is
+// correct and must not be reported.
 func TestCompareTotalActiveStakeFlagsAMissingKoiosTotal(t *testing.T) {
 	t.Parallel()
 	const network = "preview"
@@ -270,4 +273,65 @@ func TestCompareTotalActiveStakeDoesNotClobberCachedEpochInfo(t *testing.T) {
 		"the observer's epoch end time must survive this check")
 	require.Equal(t, "777", after.TotalRewards,
 		"the observer's reward columns must survive this check")
+}
+
+// TestCompareTotalActiveStakeSkipsPreStakingEpochs walks the boundary
+// koiosparity.IsPreStakingEpoch draws, from both sides.
+//
+// Koios returns active_stake=null for epochs 0 and 1 permanently and
+// correctly: the "go" stake snapshot an epoch's active stake is computed
+// from is captured two epochs earlier, so it does not exist until epoch 2.
+// internal/koiosparity has treated those as legitimate pre-staking epochs
+// since it learned to cache a PreStaking marker for them, and from-genesis
+// starts at genesis, so folding them into ReasonNoKoiosActiveStake would
+// make the first two stake checks of every healthy replay report a fault.
+//
+// Above the boundary the same null means Koios has not finished processing
+// the epoch, or something is wrong upstream -- there it must still be
+// reported, or this check goes quiet exactly when the reference is broken.
+func TestCompareTotalActiveStakeSkipsPreStakingEpochs(t *testing.T) {
+	t.Parallel()
+	const network = "preview"
+
+	for _, tc := range []struct {
+		name      string
+		epoch     uint64
+		wantFault bool
+	}{
+		{"epoch 0 predates any stake snapshot", 0, false},
+		{"epoch 1 is the last pre-staking epoch", 1, false},
+		{"epoch 2 is the first epoch that must have one", 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Echo the requested epoch: KoiosClient rejects a reply whose
+			// epoch_no does not match what it asked for.
+			koiosURL, _ := countingKoiosServer(t,
+				func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprintf(w,
+						`[{"epoch_no":%s,"active_stake":null}]`,
+						r.URL.Query().Get("_epoch_no"))
+				})
+			koios, err := NewKoiosClient(network, "", koiosURL, true, true)
+			require.NoError(t, err)
+
+			got, err := compareTotalActiveStake(
+				context.Background(), koios, nil, network, tc.epoch,
+				[]poolStake{{bech32: "pool1aaa", stake: 100}},
+			)
+			require.NoError(t, err)
+			if !tc.wantFault {
+				require.Nil(t, got,
+					"a pre-staking epoch has nothing to compare and must not "+
+						"be reported as a Koios fault")
+				return
+			}
+			require.NotNil(t, got,
+				"above the pre-staking boundary a null active_stake is a "+
+					"real reference failure and must stay visible")
+			require.Equal(t, ReasonNoKoiosActiveStake, got.Reason)
+			require.True(t, got.KoiosFault)
+		})
+	}
 }
