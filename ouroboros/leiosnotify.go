@@ -111,6 +111,10 @@ var errLeiosAnnouncementValidationBudget = errors.New(
 	"leios announcement validation budget exhausted",
 )
 
+var errLeiosAnnouncementLocalState = errors.New(
+	"local leios announcement state unavailable",
+)
+
 func (o *Ouroboros) recordInvalidLeiosAnnouncement(
 	connectionID string,
 	err error,
@@ -713,6 +717,17 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 			"component", "network",
 			"protocol", "leios-notify",
 			"connection_id", connectionID,
+		)
+		return nil
+	}
+	if ledger.IsHeaderVerificationDeferred(err) ||
+		errors.Is(err, errLeiosAnnouncementLocalState) {
+		o.config.Logger.Debug(
+			"dropping leios announcement while local validation state is unavailable",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", connectionID,
+			"error", err,
 		)
 		return nil
 	}
@@ -1687,8 +1702,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	deferVerification bool,
 ) error {
 	if isNilInterface(o.leiosAnnouncementLedger) {
-		return errors.New(
-			"cannot accept leios announcement without announcement ledger",
+		return fmt.Errorf(
+			"%w: cannot accept leios announcement without announcement ledger",
+			errLeiosAnnouncementLocalState,
 		)
 	}
 	// raw is the header bytes a LeiosNotify peer put on the wire, decoded on
@@ -1723,7 +1739,8 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
 	if slotErr != nil {
 		return fmt.Errorf(
-			"read current slot for announcement validation: %w",
+			"%w: read current slot for announcement validation: %w",
+			errLeiosAnnouncementLocalState,
 			slotErr,
 		)
 	}
@@ -1738,7 +1755,11 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		header.SlotNumber(),
 	)
 	if timeErr != nil {
-		return fmt.Errorf("read announcement slot time: %w", timeErr)
+		return fmt.Errorf(
+			"%w: read announcement slot time: %w",
+			errLeiosAnnouncementLocalState,
+			timeErr,
+		)
 	}
 	age := time.Since(announcementStart)
 	if age < 0 {

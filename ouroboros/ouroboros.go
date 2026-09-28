@@ -679,8 +679,20 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 // all recognised the same way a client connecting to this listener would
 // resolve them. Anything else (including a wildcard bind like "0.0.0.0",
 // which resolves to the unspecified address, not a loopback one) is
-// untrusted, and gets gouroboros' own anti-DoS defaults instead.
+// untrusted, and gets gouroboros' own anti-DoS defaults instead. When the
+// caller supplies a bound Listener, its Addr is authoritative; ListenAddress
+// is used only when the connection manager will bind the listener itself.
 func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
+	if l.Listener != nil {
+		switch addr := l.Listener.Addr().(type) {
+		case *net.TCPAddr:
+			return addr.IP != nil && addr.IP.IsLoopback()
+		case *net.UnixAddr:
+			return true
+		default:
+			return false
+		}
+	}
 	if l.ListenNetwork == "unix" {
 		return true
 	}
@@ -726,7 +738,7 @@ func (o *Ouroboros) ConfigureListeners(
 			// review). A resolution failure here is left for
 			// startListener's own bind to report -- isTrustedNtCListener
 			// treats it as untrusted either way.
-			if l.ListenNetwork == "tcp" {
+			if l.Listener == nil && l.ListenNetwork == "tcp" {
 				if addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress); err == nil {
 					l.ListenAddress = addr.String()
 				}

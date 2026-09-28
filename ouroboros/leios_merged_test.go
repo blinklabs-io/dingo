@@ -49,8 +49,10 @@ import (
 )
 
 type fakeLeiosAnnouncementLedger struct {
-	currentSlot uint64
-	slotTime    time.Time
+	currentSlot    uint64
+	currentSlotErr error
+	slotTime       time.Time
+	slotTimeErr    error
 	// slotTimeFunc, when set, overrides slotTime with a per-slot mapping --
 	// e.g. so a test can make one slot's binding read as expired while
 	// another's does not. Every other caller leaves it nil and gets the
@@ -63,12 +65,15 @@ type fakeLeiosAnnouncementLedger struct {
 }
 
 func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
-	return f.currentSlot, nil
+	return f.currentSlot, f.currentSlotErr
 }
 
 func (f *fakeLeiosAnnouncementLedger) SlotToTime(
 	slot uint64,
 ) (time.Time, error) {
+	if f.slotTimeErr != nil {
+		return time.Time{}, f.slotTimeErr
+	}
 	if f.slotTimeFunc != nil {
 		return f.slotTimeFunc(slot), nil
 	}
@@ -672,6 +677,64 @@ func TestLeiosAnnouncementValidationCapacityDoesNotCountAsPeerMisbehavior(
 		o.handleInvalidLeiosAnnouncement("honest-peer", invalid),
 		invalid,
 	)
+}
+
+func TestLeiosAnnouncementLocalStateFailuresDoNotPenalizePeer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(*fakeLeiosAnnouncementLedger, error)
+	}{
+		{
+			name: "current slot unavailable",
+			setup: func(l *fakeLeiosAnnouncementLedger, err error) {
+				l.currentSlotErr = err
+			},
+		},
+		{
+			name: "slot time unavailable",
+			setup: func(l *fakeLeiosAnnouncementLedger, err error) {
+				l.slotTimeErr = err
+			},
+		},
+	}
+
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			localErr := errors.New("local ledger state unavailable")
+			announcementLedger := &fakeLeiosAnnouncementLedger{
+				currentSlot: 10,
+				slotTime:    time.Now().Add(-time.Minute),
+				staleness:   ledger.LeiosAnnouncementFreshOCIN,
+			}
+			tt.setup(announcementLedger, localErr)
+			o := newOuroboros(OuroborosConfig{
+				EnableLeios:             true,
+				LeiosAnnouncementLedger: announcementLedger,
+			})
+
+			for range leiosInvalidAnnouncementLimit {
+				err := o.acceptLeiosAnnouncement(raw, "peer-a")
+				require.ErrorIs(t, err, errLeiosAnnouncementLocalState)
+				require.ErrorIs(t, err, localErr)
+				require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+			}
+
+			invalid := errors.New("invalid announcement")
+			for range leiosInvalidAnnouncementLimit - 1 {
+				require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid))
+			}
+			require.ErrorIs(
+				t,
+				o.handleInvalidLeiosAnnouncement("peer-a", invalid),
+				invalid,
+			)
+		})
+	}
 }
 
 var errLeiosEndorserBlockNotCached = errors.New(

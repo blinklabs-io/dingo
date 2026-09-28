@@ -4886,6 +4886,15 @@ decode error, on the leader's own path as well as every waiter's. A later
 identical delivery still fails fast from the cached failure instead of
 decoding (and therefore panicking) again. See dingo #3511.
 
+Successful decoding does not mean ledger processing accepted the block.
+`blockfetchClientBlockRaw` publishes the original bytes in
+`BlockfetchEvent.RawBlock` with the decoded block and its type. If asynchronous
+ledger processing rejects that block, `LedgerState` calls
+`RejectBlockDecodeCacheFunc` with the type and raw bytes; node wiring passes
+those values to `Ouroboros.InvalidateBlockDecodeCache`, which removes the entry
+for the same `(blockType, raw bytes)` key. This keeps the shared cache aligned
+with downstream rejection before another peer's delivery is handled.
+
 A waiting caller's decode outcome is delivered directly through its wait
 channel rather than by re-reading the shared entry map after waking: the
 entry it is waiting on can be evicted by unrelated churn (many other keys
