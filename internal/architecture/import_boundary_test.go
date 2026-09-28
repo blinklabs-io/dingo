@@ -263,7 +263,10 @@ func goFilesBelow(repoRoot, dir string) ([]string, error) {
 				}
 				return nil
 			}
-			if strings.HasSuffix(entry.Name(), ".go") {
+			// Integration tests may compose packages from both sides of a
+			// production boundary; the rule guards runtime dependencies.
+			if strings.HasSuffix(entry.Name(), ".go") &&
+				!strings.HasSuffix(entry.Name(), "_test.go") {
 				files = append(files, path)
 			}
 			return nil
