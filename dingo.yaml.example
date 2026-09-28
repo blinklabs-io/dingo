@@ -30,6 +30,9 @@ plugins:
       config:
         # Optional SQLite data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
+        # Full VACUUM can pause SQLite writers. It is disabled by default;
+        # set an interval in seconds only when that maintenance pause is acceptable.
+        # vacuumIntervalSeconds: 86400
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
     #   provider: "postgres"
@@ -330,10 +333,29 @@ tokenRegistry:
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BYTES
   # CLI: --token-registry-max-bytes
   maxBytes: 0
+  # Cap on all decompressed tar content. 0 uses the default (2GB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES
+  # CLI: --token-registry-max-decompressed-bytes
+  maxDecompressedBytes: 0
   # Cap on a single registry mapping document. 0 uses the default (4MB).
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ENTRY_BYTES
   # CLI: --token-registry-max-entry-bytes
   maxEntryBytes: 0
+  # Cap on all tar entries, including non-mapping files. 0 uses the default
+  # (100000).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES
+  # CLI: --token-registry-max-archive-entries
+  maxArchiveEntries: 0
+  # Cap on parsed mappings and database row-upsert work. 0 uses the default
+  # (50000).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES
+  # CLI: --token-registry-max-accepted-entries
+  maxAcceptedEntries: 0
+  # Cap on retained mapping payload in each database batch. 0 uses the
+  # default (64MB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES
+  # CLI: --token-registry-max-batch-bytes
+  maxBatchBytes: 0
   # Persist base64 token logos. Logos are roughly 90% of registry bytes and
   # most consumers only need name/ticker/decimals, so this is off by default.
   # Can be overridden with DINGO_TOKEN_REGISTRY_STORE_LOGOS
@@ -381,6 +403,12 @@ koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP
   # CLI: --koios-parity-allow-insecure-http
   allowInsecureHttp: false
+  # Allow a private, loopback, or special-use baseUrl. Leave false for the
+  # default outbound request guard; set true only for an intentionally local
+  # or private self-hosted Koios deployment.
+  # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES
+  # CLI: --koios-parity-allow-private-addresses
+  allowPrivateAddresses: false
   # Stop/cancel the node on the first Koios/tool error or non-pass parity
   # result instead of logging it and continuing normal operation. An epoch
   # whose only significant mismatches are reference_lag (Koios has not caught

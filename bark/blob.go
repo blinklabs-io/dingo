@@ -524,10 +524,17 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
-	era, err := blockEraFromHeader(decoded, uint(blockType))
-	if err != nil {
-		return nil, types.BlockMetadata{}, err
-	}
+	// The claimed type is the era the bytes were just decoded and hashed under.
+	// It is not re-derived from the header: the protocol major a header
+	// announces is its producer's hard-fork readiness, which runs ahead of the
+	// era at a boundary, so gledger.DetermineBlockType classifies a genuine
+	// block there as another era or as none. A claim that does not match the
+	// bytes fails decode, the body-hash check, or the hash check in
+	// verifyArchiveBlock; a layout-compatible adjacent era decodes the same
+	// bytes to the same hash, so the bytes are still the requested block and
+	// only the recorded type follows the claim, the residual
+	// internal/blockverify.Hash also accepts.
+	era := uint(blockType)
 	if err := assertBodyFullyAuthenticated(era); err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
@@ -566,11 +573,6 @@ var (
 	ErrArchiveMetadataMismatch = errors.New(
 		"bark: archive metadata contradicts the block",
 	)
-	// ErrArchiveBlockTypeMismatch reports a block whose era, derived from its
-	// own header, is not the era the archive claimed.
-	ErrArchiveBlockTypeMismatch = errors.New(
-		"bark: archive block era does not match the block header",
-	)
 	// ErrArchiveBlockNotFullyAuthenticated reports a block whose body cannot
 	// be bound to its header in full, so the archive could alter the
 	// unauthenticated part without changing anything checked here.
@@ -605,50 +607,6 @@ func assertBodyFullyAuthenticated(blockType uint) error {
 	return nil
 }
 
-// blockEraFromHeader derives a block's era from its own header rather than
-// from the era the archive nominated.
-//
-// This is needed because the hash does not pin the era for Shelley and later:
-// those hashes cover the header alone, and adjacent eras share its layout, so
-// one set of bytes decodes under several eras with an identical hash and slot.
-// Byron is the exception — its hash is taken over the block type byte followed
-// by the header, so the era is already bound by the hash check and there is
-// nothing further to derive.
-func blockEraFromHeader(
-	decoded gledger.Block,
-	claimed uint,
-) (uint, error) {
-	if claimed == gledger.BlockTypeByronEbb ||
-		claimed == gledger.BlockTypeByronMain {
-		return claimed, nil
-	}
-	header := decoded.Header()
-	if header == nil {
-		return 0, fmt.Errorf(
-			"%w: block has no header to derive the era from",
-			ErrArchiveBlockTypeMismatch,
-		)
-	}
-	derived, err := gledger.DetermineBlockType(header.Cbor())
-	if err != nil {
-		// Fail closed. An era that cannot be derived cannot be checked, and
-		// falling back to the archive's claim would hand era selection back to
-		// it. A block this node cannot classify is one it could not process
-		// anyway, so refusing costs nothing it could otherwise have used.
-		return 0, fmt.Errorf(
-			"%w: deriving era from header: %w",
-			ErrArchiveBlockTypeMismatch, err,
-		)
-	}
-	if derived != claimed {
-		return 0, fmt.Errorf(
-			"%w: header is era %d, archive claimed %d",
-			ErrArchiveBlockTypeMismatch, derived, claimed,
-		)
-	}
-	return derived, nil
-}
-
 // verifyArchiveBlock establishes locally that the bytes the archive returned
 // really are the block that was requested. Bark chooses both the download URL
 // and the response body, so it can only be trusted to store blocks, not to
@@ -656,9 +614,9 @@ func blockEraFromHeader(
 // caller sees the data.
 //
 // The block type carried in the archive response is a decode hint only. A
-// wrong type either fails to decode or yields a different block hash, and
-// both outcomes are rejected below, so it cannot be used to smuggle in
-// substitute bytes. Decoding runs with validation enabled, so a block whose
+// wrong type fails to decode or yields a different block hash, and both are
+// rejected below; a layout-compatible adjacent era decodes the same bytes to
+// the same hash. Either way it cannot be used to smuggle in substitute bytes. Decoding runs with validation enabled, so a block whose
 // header is genuine but whose body was swapped fails the body-hash check.
 func verifyArchiveBlock(
 	blockType uint,

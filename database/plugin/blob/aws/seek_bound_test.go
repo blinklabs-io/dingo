@@ -31,6 +31,7 @@ type fakeS3List struct {
 	mu         sync.Mutex
 	keys       []string // full object keys, sorted
 	startAfter []string // one entry per ListObjectsV2 request
+	continued  []string // continuation-token, positionally matching startAfter
 	returned   int      // total keys returned across all requests
 }
 
@@ -43,6 +44,7 @@ func (f *fakeS3List) handler(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.startAfter = append(f.startAfter, q.Get("start-after"))
+	f.continued = append(f.continued, q.Get("continuation-token"))
 	f.mu.Unlock()
 
 	var out []string
@@ -126,11 +128,12 @@ func TestS3SeekBoundsListServerSide(t *testing.T) {
 
 	seek := []byte(fmt.Sprintf("bi%06d", total/2))
 	it := &s3StreamIterator{store: store, prefix: []byte("bi")}
-	it.reset(seek)
-	if it.err != nil {
-		t.Fatalf("seek: %v", it.err)
-	}
-	if !it.valid {
+	it.Seek(seek)
+	// The listing is issued on the first read, not by Seek itself.
+	if !it.Valid() {
+		if it.err != nil {
+			t.Fatalf("seek: %v", it.err)
+		}
 		t.Fatal("seek landed on no key")
 	}
 	if got := it.key; got != string(seek) {

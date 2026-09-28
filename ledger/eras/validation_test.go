@@ -664,7 +664,7 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 	require.Len(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		len(gdijkstra.UtxoValidationRules),
+		len(gdijkstra.UtxoValidationRules)-1,
 	)
 	plutusIndex := requireRuleIdResolvesToFunc(
 		t,
@@ -673,12 +673,11 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		lcommon.UtxoValidationRulePlutusScripts,
 		"dijkstra.UtxoValidatePlutusScripts",
 	)
-	requireIndexedRulesReplaceRuleIndex(
+	requireIndexedRulesDropRuleIndex(
 		t,
 		dijkstraPhase1UtxoValidationRules,
 		plutusIndex,
-		validateDijkstraPlutusV3ReferenceInputs,
-		"Dijkstra validation must enforce PV11 Plutus V3 reference-input disjointness",
+		"Dijkstra phase-1 rules must defer Plutus script execution to the phase-2 validator",
 	)
 	requireIndexedRulesReplaceRuleIndex(
 		t,

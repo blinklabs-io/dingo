@@ -153,7 +153,7 @@ func TestRunFromGenesis_EpochNoFailureDoesNotHangSession(t *testing.T) {
 
 	koiosSrv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(koiosSrv.Close)
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	logs := newLogCollector()
@@ -229,7 +229,7 @@ func TestRunFromGenesis_EpochNoFailureDoesNotSkipEpoch(t *testing.T) {
 
 	koiosSrv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(koiosSrv.Close)
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	logs := newLogCollector()
