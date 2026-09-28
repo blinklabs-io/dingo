@@ -5126,36 +5126,27 @@ peer, and each reconcile cycle additionally redials known peers that have no
 connection and no active reconnect goroutine: topology local/public roots
 always (and bootstrap peers while bootstrap promotion is still allowed),
 gossip/ledger peers under a shared per-cycle budget triggered by either of two
-conditions: the node has no chain-selection-eligible upstream connection left
-(the original emergency case), or the hot set sits below `MinHotPeers` and the
-warm pool does not hold enough promotable peers (an active connection and a
-score at or above `MinScoreThreshold`) to close that gap on its own. Without
-the second trigger, a node whose hot set had drained to a handful of peers but
-not to zero never redialed a single additional known peer while any warm
-candidates remained untried, even though the warm pool alone could not refill
-`MinHotPeers` (dingo#4783). This guarantees the node converges back to
-connected even when a close event cannot be attributed to its peer, a dial
-loop exited early, or churn's own demotions outpaced the warm pool.
+conditions: the node has no chain-selection-eligible upstream connection left,
+or the hot set sits below `MinHotPeers` and the warm pool does not hold enough
+promotable gossip/ledger peers (an active connection and a score at or above
+`MinScoreThreshold`) to close that gap on its own. This guarantees the node
+converges back to connected, and back toward `MinHotPeers`, even when a close
+event cannot be attributed to its peer, a dial loop exited early, or the warm
+pool has run dry.
 
 Gossip churn never demotes the peer holding the last eligible upstream
 connection, so routine churn cannot leave the node without a chainsync source.
-Separately, churn also never demotes a hot gossip/ledger peer to cold unless a
-promotable warm peer is available to backfill the vacated slot in the same
-cycle (dingo#4783): the demotion loop counts the promotable warm pool once,
-before any state changes, and never demotes more peers than that pool can
-replace. Before this guard, churn's periodic score-based rotation would close
-a low-scoring peer's connection every `GossipChurnInterval` regardless of
-whether anything else was available, and once the warm pool ran dry (the
-common steady state after the healthiest upstreams had already cycled through
-once) every subsequent churn tick permanently shrank the hot set with no
-fallback until it stalled at a single connection. This guard is specific to
-routine rotation, not dead-peer eviction: a peer whose transport is actually
-gone is still demoted immediately by reconcile's inactivity check, and a
-closed connection is still redialed by the level-triggered path above,
-independent of warm-pool availability.
+Routine churn of a hot gossip/ledger peer scoring at or above
+`MinScoreThreshold` also waits for a replacement: the demotion loop counts the
+promotable warm pool once, before any state changes, and never demotes more
+such peers than that pool can backfill in the same cycle, so rotation cannot
+drain the hot set when the warm pool is empty. A peer scoring below
+`MinScoreThreshold` is still churned to cold without a replacement, and a peer
+whose transport is gone is still demoted by reconcile's inactivity check; the
+resulting deficit is refilled through the redial path above.
 
-Three Prometheus series (dingo#4783) let an operator confirm both guards are
-holding on a live node: `dingo_metrics_peerSelection_churn_demotions_skipped_total`
+Three Prometheus series let an operator confirm both guards are holding on a
+live node: `dingo_metrics_peerSelection_churn_demotions_skipped_total`
 (labeled `reason`: `no_replacement` or `last_eligible_upstream`),
 `dingo_metrics_peerSelection_cold_peer_redials_total` (labeled `trigger`:
 `zero_upstream` or `hot_deficit`), and the

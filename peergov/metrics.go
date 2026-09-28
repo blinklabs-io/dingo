@@ -61,9 +61,7 @@ type peerGovernorMetrics struct {
 	// Temperature observability
 	peerPromotions *prometheus.CounterVec // transitions toward hot, labels: from, to
 	peerDemotions  *prometheus.CounterVec // transitions toward cold, labels: from, to
-	// Churn-without-replacement observability (dingo#4783): validates that
-	// gossip churn no longer empties the hot set and that cold known peers
-	// get redialed before the pool collapses.
+	// Hot-set refill observability
 	churnDemotionsSkippedByReason *prometheus.CounterVec // labels: reason
 	coldPeerRedialsByTrigger      *prometheus.CounterVec // labels: trigger
 	hotSetDeficit                 prometheus.Gauge       // MinHotPeers - current hot count, floored at 0

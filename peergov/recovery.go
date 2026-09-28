@@ -57,15 +57,11 @@ func (p *PeerGovernor) hotSetDeficitLocked() int {
 // redialCandidatesLocked returns known peers that should get a new
 // outbound connection attempt. Topology peers are always redialed: they
 // are operator-configured and must converge back to connected.
-// Gossip/ledger peers are redialed under budget in two situations: the
-// node has no eligible upstream connection at all (the original
-// emergency case), or the hot set sits below MinHotPeers and the warm
-// pool does not hold enough promotable peers to close that gap on its
-// own. Without the second trigger, a node whose hot set had drained to a
-// handful of peers (but not zero) never dialed a single additional known
-// peer until every warm candidate was already exhausted, even though
-// plenty of cold known peers remained available. Must be called with
-// p.mu held.
+// Gossip/ledger peers are redialed under a per-cycle budget when the
+// node has no eligible upstream connection, or when the hot set is below
+// MinHotPeers and the promotable warm pool cannot close that gap on its
+// own. Outside those cases churn retires them as designed. Must be
+// called with p.mu held.
 func (p *PeerGovernor) redialCandidatesLocked() []*Peer {
 	var candidates []*Peer
 	eligibleUpstreams := p.countEligibleUpstreamsLocked()

@@ -3639,6 +3639,63 @@ func TestPeerGovernor_GossipChurn_NoWarmReplacement_LeavesHotCountUnchanged(
 	)
 }
 
+// A hot peer scoring below MinScoreThreshold is still churned to cold
+// when the warm pool is empty. Holding it hot until a replacement appears
+// would keep it forever once the hot set is at MinHotPeers, because the
+// redial deficit trigger never fires and no replacement is ever dialed.
+func TestPeerGovernor_GossipChurn_BelowThresholdDemotesWithoutReplacement(
+	t *testing.T,
+) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		PromRegistry:       reg,
+		MinHotPeers:        2,
+		GossipChurnPercent: 0.2,
+		MinScoreThreshold:  0.3,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address:          "gossip1:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateHot,
+			PerformanceScore: 0.9,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateHot,
+			PerformanceScore: 0.1,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+	}
+
+	pg.gossipChurn()
+
+	assert.Equal(t, PeerStateHot, pg.peers[0].State)
+	assert.NotNil(t, pg.peers[0].Connection)
+	assert.Equal(
+		t,
+		PeerStateCold,
+		pg.peers[1].State,
+		"a below-threshold peer must be churned even with no warm replacement",
+	)
+	assert.Nil(t, pg.peers[1].Connection)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			pg.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+				"no_replacement",
+			),
+		),
+	)
+}
+
 func TestPeerGovernor_PublicRootChurn_DemotesToWarm(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
