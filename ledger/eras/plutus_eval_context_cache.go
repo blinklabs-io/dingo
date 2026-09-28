@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/binary"
+	"errors"
 	"sync"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -70,6 +71,10 @@ type plutusEvalContextEntry struct {
 	ctx  *cek.EvalContext
 	err  error
 }
+
+var errPlutusEvalContextBuildPanicked = errors.New(
+	"plutus evaluation context construction panicked",
+)
 
 // newEvalContextFunc is a test seam: production always resolves to
 // cek.NewEvalContext. Tests substitute a counting wrapper to prove
@@ -139,6 +144,9 @@ func (c *PlutusEvalContextCache) get(
 	}
 	c.mu.Unlock()
 	entry.once.Do(func() {
+		// sync.Once marks the entry done even when construction panics; the
+		// sentinel keeps later callers from reading a nil context as success.
+		entry.err = errPlutusEvalContextBuildPanicked
 		entry.ctx, entry.err = newEvalContextFunc(
 			version,
 			protoVersion,

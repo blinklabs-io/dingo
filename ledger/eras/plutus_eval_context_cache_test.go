@@ -634,3 +634,36 @@ func TestPlutusEvalContextCacheKeyDistinguishesListLength(t *testing.T) {
 	assert.Equal(t, int64(2), calls.Load())
 	assert.NotSame(t, short, long)
 }
+
+// TestPlutusEvalContextCacheEntryAfterPanicReturnsError proves a
+// construction that panics does not leave an entry reporting success with a
+// nil context: sync.Once marks the entry done even when its function panics,
+// so every later caller for the key must see an error.
+//
+// Not t.Parallel: swaps the package-level newEvalContextFunc seam.
+func TestPlutusEvalContextCacheEntryAfterPanicReturnsError(t *testing.T) {
+	orig := newEvalContextFunc
+	t.Cleanup(func() { newEvalContextFunc = orig })
+	newEvalContextFunc = func(
+		lang.LanguageVersion,
+		cek.ProtoVersion,
+		[]int64,
+	) (*cek.EvalContext, error) {
+		panic("construction failed")
+	}
+	cache := NewPlutusEvalContextCache()
+	protoVersion := cek.ProtoVersion{Major: 10, Minor: 0}
+	costModel := []int64{1, 2, 3}
+
+	require.Panics(t, func() {
+		_, _ = cache.get(lang.LanguageVersionV1, protoVersion, costModel, false)
+	})
+	ctx, err := cache.get(
+		lang.LanguageVersionV1,
+		protoVersion,
+		costModel,
+		false,
+	)
+	require.Error(t, err)
+	assert.Nil(t, ctx)
+}
