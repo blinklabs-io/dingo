@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -352,6 +353,18 @@ func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
 		)
 	}
 	slotTime, err := ls.slotClock.SlotToTime(block.SlotNumber())
+	if err != nil && errors.Is(err, hardfork.ErrPastHorizon) {
+		// The applied ledger has not reached this header's epoch yet, which
+		// is a local lag, not a peer fault. Defer as the Praos path does, so
+		// chainsync does not recycle the peer at every epoch boundary.
+		return fmt.Errorf(
+			"%w for header at slot %d: %w: %w",
+			errByronPBFTCurrentSlotUnavailable,
+			block.SlotNumber(),
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf(
 			"%w for header at slot %d: %w",

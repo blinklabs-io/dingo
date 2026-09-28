@@ -989,6 +989,35 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 	)
 }
 
+// TestByronPBFTCurrentSlotPastHorizonIsDeferred: a header past the known epoch
+// horizon (from-genesis sync reaching epoch 1 before its epoch is applied) is
+// not a peer fault. Reporting it as a hard failure recycles every peer at the
+// first epoch boundary.
+func TestByronPBFTCurrentSlotPastHorizonIsDeferred(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.slotClock = NewSlotClock(
+		pastHorizonSlotTimeProvider{
+			SlotTimeProvider: newMockSlotTimeProvider(
+				time.Now().Add(-100*time.Second),
+				time.Second,
+				100,
+			),
+			rejectedSlot: 21600,
+		},
+		DefaultSlotClockConfig(),
+	)
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+
+	err := ls.validateByronPBFTCurrentSlot(ebb)
+	require.ErrorIs(t, err, errByronPBFTCurrentSlotUnavailable)
+	require.True(t, IsHeaderVerificationDeferred(err))
+}
+
 func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
 	t.Parallel()
 
