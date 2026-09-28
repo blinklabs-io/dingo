@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/binary"
 	"io"
@@ -39,6 +40,26 @@ import (
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNegativeLeaderRewardApplicationRespectsExpiredAccountGuard(t *testing.T) {
+	t.Parallel()
+	credential, err := rewards.NewCredential(0, bytes.Repeat([]byte{0x41}, rewards.CredentialHashSize))
+	require.NoError(t, err)
+	negative := []rewards.NegativeLeaderReward{{
+		Credential: credential,
+		Amount:     10,
+		Spendable:  true,
+	}}
+	require.ErrorIs(
+		t,
+		negativeLeaderRewardApplicationError(negative, nil),
+		rewards.ErrNegativeLeaderReward,
+	)
+	guarded := map[string]struct{}{
+		models.NewStakeCredentialRef(credential.Tag, credential.Hash[:]).MapKey(): {},
+	}
+	require.NoError(t, negativeLeaderRewardApplicationError(negative, guarded))
+}
 
 func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	t.Parallel()

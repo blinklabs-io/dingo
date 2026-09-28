@@ -2466,8 +2466,16 @@ func TestCalculateAllowsPledgeLeverageAcrossReferenceDomain(t *testing.T) {
 }
 
 func TestCalculatePledgeLeverageBelowOne(t *testing.T) {
-	result := leveragePoolResult(t, 100, 100, true, big.NewRat(1, 2))
-	require.NotNil(t, result.PoolRewards[0])
+	pots, snapshot, params := negativeLeaderRewardSnapshot(true)
+	result, err := Calculate(pots, snapshot, params)
+	require.NoError(t, err)
+	require.Len(t, result.NegativeLeaderRewards, 1)
+	require.Equal(t, testPoolID(1), result.NegativeLeaderRewards[0].PoolID)
+	require.Positive(t, result.NegativeLeaderRewards[0].Amount)
+	require.True(t, result.NegativeLeaderRewards[0].Spendable)
+	require.Zero(t, result.PoolRewards[0].OptimalReward)
+	require.Zero(t, result.PoolRewards[0].PoolReward)
+	require.Equal(t, uint64(2_038_395), result.PoolRewards[0].LeaderRewardDeficit)
 }
 
 func TestCalculateRejectsNegativePledgeLeverage(t *testing.T) {

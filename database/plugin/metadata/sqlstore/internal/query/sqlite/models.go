@@ -393,6 +393,7 @@ type RewardPoolOutput struct {
 	OptimalReward       string
 	TotalReward         string
 	LeaderReward        string
+	LeaderRewardDeficit string
 	MemberRewardTotal   string
 	OwnerStake          string
 	Undistributed       string

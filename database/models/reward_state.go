@@ -165,6 +165,8 @@ type RewardPoolOutput struct {
 	OptimalReward       types.Uint64
 	TotalReward         types.Uint64
 	LeaderReward        types.Uint64
+	// LeaderRewardDeficit preserves the magnitude of a negative leader reward.
+	LeaderRewardDeficit types.Uint64
 	MemberRewardTotal   types.Uint64
 	OwnerStake          types.Uint64
 	Undistributed       types.Uint64

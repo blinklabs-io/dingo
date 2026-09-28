@@ -531,17 +531,6 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
-	// Checked before anything is written: cardano-ledger fails applying an
-	// update that owes a registered account a negative reward.
-	if err := rewards.NegativeLeaderRewardError(
-		app.negativeLeaderRewards,
-	); err != nil {
-		return fmt.Errorf(
-			"stake rewards for snapshot epoch %d: %w",
-			app.epochs.snapshot,
-			err,
-		)
-	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
 	if err := saveReconstructedRewardStakeInputs(meta, metaTxn, app); err != nil {
@@ -580,6 +569,19 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	}
 	if applyGuardedFlagToAccountOutputs(app) {
 		app.outputsUpdated = true
+	}
+	// A negative leader reward halts ledger application only when its account
+	// would receive that reward. The inactivity guard suppresses the credit,
+	// so apply the same eligibility decision before enforcing the halt.
+	if err := negativeLeaderRewardApplicationError(
+		app.negativeLeaderRewards,
+		app.guardedRewardCredentials,
+	); err != nil {
+		return fmt.Errorf(
+			"stake rewards for snapshot epoch %d: %w",
+			app.epochs.snapshot,
+			err,
+		)
 	}
 
 	if !app.precomputed || app.outputsUpdated {
@@ -656,6 +658,27 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"reward_efficiency", rewardEfficiencyLogValue(app.rewardEfficiency),
 	)
 	return nil
+}
+
+func negativeLeaderRewardApplicationError(
+	negative []rewards.NegativeLeaderReward,
+	guarded map[string]struct{},
+) error {
+	if len(guarded) == 0 {
+		return rewards.NegativeLeaderRewardError(negative)
+	}
+	applicable := make([]rewards.NegativeLeaderReward, 0, len(negative))
+	for _, reward := range negative {
+		ref := models.NewStakeCredentialRef(
+			reward.Credential.Tag,
+			reward.Credential.Hash[:],
+		)
+		if _, isGuarded := guarded[ref.MapKey()]; isGuarded {
+			continue
+		}
+		applicable = append(applicable, reward)
+	}
+	return rewards.NegativeLeaderRewardError(applicable)
 }
 
 // guardedExpiredRewardCredentials returns the set of credited reward-account
@@ -4358,6 +4381,7 @@ func rewardPoolOutputs(
 			OptimalReward:       types.Uint64(reward.OptimalReward),
 			TotalReward:         types.Uint64(reward.PoolReward),
 			LeaderReward:        types.Uint64(reward.LeaderReward),
+			LeaderRewardDeficit: types.Uint64(reward.LeaderRewardDeficit),
 			MemberRewardTotal:   types.Uint64(reward.MemberRewardTotal),
 			OwnerStake:          types.Uint64(reward.OwnerStake),
 			Undistributed:       types.Uint64(reward.Undistributed),

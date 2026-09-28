@@ -13049,9 +13049,12 @@ Owed to a registered one, the update cannot be applied, because
 cardano-ledger's `compactCoinOrError` fails that boundary: `applyStakeRewards`
 returns an `errHaltLedgerPipeline` error wrapping
 `rewards.ErrNegativeLeaderReward`, before writing anything, and calls
-`FatalErrorFunc`. The reward output tables hold only non-negative amounts, so
-the asynchronous precompute skips such a round and reuse of persisted outputs
-rejects it; the boundary always calculates it fresh.
+`FatalErrorFunc`. The CIP-0163 account-inactivity guard suppresses that halt
+when it also suppresses crediting the expired reward account. Per-pool history
+stores the negative magnitude in `reward_pool_output.leader_reward_deficit`,
+while the unsigned reward fields remain zero. The asynchronous precompute
+skips such a round and reuse of persisted outputs rejects it; the boundary
+always calculates it fresh.
 
 After an epoch-transition event, ledger can precompute the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. Calculation runs

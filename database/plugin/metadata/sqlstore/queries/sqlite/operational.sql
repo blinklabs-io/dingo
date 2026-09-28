@@ -616,14 +616,16 @@ DELETE FROM reward_stake_input WHERE epoch = ?;
 -- name: SaveRewardPoolOutput :one
 INSERT INTO reward_pool_output (
     apparent_performance, pool_key_hash, epoch, optimal_reward,
-    total_reward, leader_reward, member_reward_total, owner_stake,
+    total_reward, leader_reward, leader_reward_deficit,
+    member_reward_total, owner_stake,
     undistributed, unspendable, captured_slot, boundary_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
     apparent_performance = excluded.apparent_performance,
     optimal_reward = excluded.optimal_reward,
     total_reward = excluded.total_reward,
     leader_reward = excluded.leader_reward,
+    leader_reward_deficit = excluded.leader_reward_deficit,
     member_reward_total = excluded.member_reward_total,
     owner_stake = excluded.owner_stake,
     undistributed = excluded.undistributed,
@@ -634,7 +636,8 @@ RETURNING id;
 
 -- name: GetRewardPoolOutputs :many
 SELECT apparent_performance, pool_key_hash, id, epoch, optimal_reward,
-       total_reward, leader_reward, member_reward_total, owner_stake,
+       total_reward, leader_reward, leader_reward_deficit,
+       member_reward_total, owner_stake,
        undistributed, unspendable, captured_slot, boundary_slot
 FROM reward_pool_output
 WHERE epoch = ?
