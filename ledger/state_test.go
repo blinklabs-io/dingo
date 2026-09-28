@@ -5630,10 +5630,25 @@ func TestUpstreamSyncStatusReachableStates(t *testing.T) {
 			"pre-existing sync gate refuses this slot before the stale-tip "+
 			"gate runs, so no stale-tip branch may be written for it",
 	)
-
 	upstreamTip, upstreamLive := ls.UpstreamSyncTip()
 	assert.True(t, upstreamLive)
 	assert.Zero(t, upstreamTip.BlockNumber)
+
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId: conn,
+		SyncTarget: ochainsync.Tip{
+			Point:       ocommon.NewPoint(319, nil),
+			BlockNumber: 320,
+		},
+		SyncTargetTrusted: true,
+	})
+	target, active = ls.UpstreamSyncStatus()
+	assert.Equal(t, uint64(319), target)
+	assert.True(t, active)
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Equal(t, uint64(320), upstreamTip.BlockNumber)
+	assert.Equal(t, uint64(319), upstreamTip.Point.Slot)
 
 	// No live upstream -- (0, false).
 	live = false
