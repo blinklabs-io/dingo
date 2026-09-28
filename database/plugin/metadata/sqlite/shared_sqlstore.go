@@ -154,8 +154,8 @@ const checkpointBusyTimeout = 0 * time.Millisecond
 //
 // TRUNCATE, not the safer-sounding RESTART, is deliberate: checkpointInterval's
 // doc comment above shows RESTART does not shrink the file at all, so it
-// cannot make dingo_database_sql_wal_bytes move. If the bounded wait above is
-// exceeded, PRAGMA wal_checkpoint reports busy=1 with a partial checkpointed
+// cannot make dingo_database_sql_wal_bytes move. If a reader or writer holds
+// a lock, PRAGMA wal_checkpoint reports busy=1 with a partial checkpointed
 // count rather than an error -- logged at Warn so a persistently blocked
 // checkpoint (rather than a single slow tick) is visible to an operator, and
 // left for the next tick to retry rather than retried in a loop here.

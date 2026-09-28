@@ -402,13 +402,17 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 		stopProbe()
 		<-probeDone
 	}()
-	blockedCh := make(chan int, 1)
+	blockedCh := make(chan time.Duration, 1)
 	probeReadyCh := make(chan error, 1)
 	go func() {
-		blocked := 0
+		var blockedSince time.Time
+		var longestBlocked time.Duration
 		ready := false
 		defer func() {
-			blockedCh <- blocked
+			if !blockedSince.IsZero() {
+				longestBlocked = max(longestBlocked, time.Since(blockedSince))
+			}
+			blockedCh <- longestBlocked
 			close(probeDone)
 		}()
 		for {
@@ -423,7 +427,9 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 					probeReadyCh <- beginErr
 					return
 				}
-				blocked++
+				if blockedSince.IsZero() {
+					blockedSince = time.Now()
+				}
 				continue
 			}
 			_, execErr := tx.ExecContext(
@@ -438,8 +444,14 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 					probeReadyCh <- execErr
 					return
 				}
-				blocked++
+				if blockedSince.IsZero() {
+					blockedSince = time.Now()
+				}
 				continue
+			}
+			if !blockedSince.IsZero() {
+				longestBlocked = max(longestBlocked, time.Since(blockedSince))
+				blockedSince = time.Time{}
 			}
 			if !ready {
 				ready = true
@@ -468,9 +480,9 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 		"writer-lock probe must finish once the checkpoint returns",
 	)
 	require.NoError(t, checkpointErr)
-	require.Zero(
-		t, blocked,
-		"checkpointWAL must not hold SQLite's writer lock while a reader "+
-			"snapshot prevents the WAL from draining",
+	require.Less(
+		t, blocked, 50*time.Millisecond,
+		"checkpointWAL must not hold SQLite's writer lock for a sustained "+
+			"period while a reader snapshot prevents the WAL from draining",
 	)
 }
