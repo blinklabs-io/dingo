@@ -571,6 +571,68 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
+func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
+	t.Parallel()
+	const (
+		rewardSnapshotEpoch = uint64(1)
+		newEpoch            = rewardSnapshotEpoch + 3
+		capturedSlot        = uint64(200)
+		boundarySlot        = uint64(1_200)
+		poolCount           = 6
+		delegatorsPerPool   = 3
+	)
+	ls, db := seedMultiPoolRewardPrecomputeFixture(
+		t, poolCount, delegatorsPerPool, 7,
+	)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	ls.config.DelegatorInactivityEnabled = true
+	ls.config.DelegatorInactivity = 5
+
+	oldRound, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		newEpoch, capturedSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	for {
+		done, stepErr := ls.stakeRewardPrecomputeChunkStep(oldRound)
+		require.NoError(t, stepErr)
+		if done {
+			break
+		}
+	}
+	oldCursor, err := loadRewardPrecomputeCursor(
+		db.Metadata(), nil, rewardSnapshotEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, oldCursor)
+	require.True(t, oldCursor.Done)
+
+	// A restart may retain this database and cursor while changing the CIP-0163
+	// inactivity window.
+	ls.config.DelegatorInactivity = 6
+	newRound, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		newEpoch, capturedSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEqual(t, oldCursor.InputFingerprint, newRound.inputFingerprint)
+	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
+		db.Metadata(), nil, newRound,
+	)
+	require.NoError(t, err)
+	require.Nil(t, cursor, "changed guard settings must invalidate the completed cursor")
+	require.Zero(t, startIndex)
+
+	done, err := ls.stakeRewardPrecomputeChunkStep(newRound)
+	require.NoError(t, err)
+	require.False(t, done, "changed guard settings must restart Pass 2")
+	poolOutputs, err := db.Metadata().GetRewardPoolOutputs(
+		rewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, poolOutputs, 2, "restarting must discard the prior completed outputs")
+}
+
 // TestChunkedRewardPrecomputeRestartsOnGenerationChange proves the other
 // half of "repairable": a rollback that bumps rewardInputGeneration between
 // two chunks must not let the next chunk keep extending the abandoned run,

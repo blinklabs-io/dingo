@@ -985,9 +985,9 @@ func writeOptionalUint64Fingerprint(h io.Writer, v *types.Uint64) {
 	fmt.Fprintf(h, "%d;", uint64(*v))
 }
 
-// rewardPrecomputeInputFingerprint identifies every pool-level input Pass 1
-// and Pass 2 read for round: the ADA pots, the reward snapshot, the pool
-// inputs, the reward parameters, the block counts and the prefilter slot.
+// rewardPrecomputeInputFingerprint identifies every input Pass 1 and Pass 2
+// read for round: the ADA pots, reward snapshot, pool inputs, reward
+// parameters and operator reward settings, block counts, and prefilter slot.
 // Per-credential stake inputs are frozen with the snapshot, whose nonce and
 // totals are part of it. reward_ada_pots.rewards is excluded because the
 // precompute itself writes it.
@@ -996,7 +996,7 @@ func (ls *LedgerState) rewardPrecomputeInputFingerprint(
 ) string {
 	h := sha256.New()
 	fmt.Fprintf(
-		h, "v1;%d;%d;%d;%d;%d;%t;",
+		h, "v2;%d;%d;%d;%d;%d;%t;",
 		round.newEpoch, round.boundarySlot, round.epochs.snapshot,
 		round.epochs.performance, round.epochs.pots, round.epochs.bootstrap,
 	)
@@ -1036,10 +1036,11 @@ func (ls *LedgerState) rewardPrecomputeInputFingerprint(
 		writeRatFingerprint(h, r)
 	}
 	fmt.Fprintf(
-		h, "params;%d;%d;%d;%d;%t;%t;%t;",
+		h, "params;%d;%d;%d;%d;%t;%t;%t;%d;",
 		params.OptimalPoolCount, params.EpochLength, params.MaxLovelaceSupply,
 		params.ProtocolMajorVersion, params.PledgeLeverageEnabled,
 		params.FullPotRewardsEnabled, ls.config.DelegatorInactivityEnabled,
+		ls.config.DelegatorInactivity,
 	)
 	pools := make([]string, 0, len(round.blockCounts))
 	for pool := range round.blockCounts {
