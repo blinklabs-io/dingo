@@ -2346,14 +2346,29 @@ func (a *NodeAdapter) Account(
 	}
 
 	db := a.ledgerState.Database()
-	account, err := db.GetAccountByCredential(
-		credentialTag,
-		stakeKey,
-		true,
-		nil,
-	)
-	if err != nil {
+	var account *models.Account
+	var pendingReward uint64
+	readTxn := db.Transaction(false)
+	if err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		account, err = db.GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			txn,
+		)
+		if err != nil {
+			return err
+		}
+		pendingReward, err = a.ledgerState.PendingRewardCredit(
+			txn, credentialTag, stakeKey,
+		)
+		return err
+	}); err != nil {
 		return AccountInfo{}, err
+	}
+	if account == nil {
+		return AccountInfo{}, models.ErrAccountNotFound
 	}
 	controlledAmount, err := a.ledgerState.Database().
 		GetControlledAmountByCredential(credentialTag, stakeKey, nil)
@@ -2411,7 +2426,7 @@ func (a *NodeAdapter) Account(
 		)
 	}
 
-	reward := strconv.FormatUint(uint64(account.Reward), 10)
+	reward := strconv.FormatUint(uint64(account.Reward)+pendingReward, 10)
 	return AccountInfo{
 		StakeAddress:       stakeAddress,
 		Active:             delegating,

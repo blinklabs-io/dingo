@@ -17,6 +17,7 @@
 package ledger
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
@@ -32,6 +33,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
@@ -208,6 +211,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, 4, 1_200)
 	}))
+	settleRewardCredits(t, ls)
 	account, err := db.GetAccountByCredential(0, member, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
@@ -271,6 +275,36 @@ func openSQLiteRewardRaceBackend(
 	return db, raw, "sqlite"
 }
 
+// premigrateRewardRaceBackend migrates a fresh schema under a lock keyed to
+// that schema. The provider's migration lock is one server-wide key with a 30s
+// wait, so tests migrating fresh schemas in parallel, in this package or any
+// other, time out behind each other; with the schema already current the
+// provider holds that lock only for its version check.
+func premigrateRewardRaceBackend(
+	t *testing.T,
+	raw *sql.DB,
+	dialect sqlstore.Dialect,
+	registry func() ([]migrations.Migration, error),
+	namespace string,
+) {
+	t.Helper()
+	versions, err := registry()
+	require.NoError(t, err)
+	digest := sha256.Sum256([]byte(namespace))
+	runner := migrations.Runner{
+		DB:       raw,
+		Dialect:  dialect.Name(),
+		Registry: versions,
+		Locker: migrations.NewAdvisoryLocker(
+			dialect.Name(),
+			int64(binary.BigEndian.Uint64(digest[:8])),
+			30*time.Second,
+		),
+		Rebind: dialect.Rebind,
+	}
+	require.NoError(t, runner.Run(t.Context()))
+}
+
 func openPostgresRewardRaceBackend(
 	t *testing.T,
 ) (*database.Database, *sql.DB, string) {
@@ -313,6 +347,12 @@ func openPostgresRewardRaceBackend(
 		_ = admin.Close()
 	})
 	scoped := storagetest.PostgresDSNWithSearchPath(dsn, schema)
+	raw, err := sql.Open("pgx", scoped)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	premigrateRewardRaceBackend(
+		t, raw, sqlstore.PostgresDialect(), migrations.PostgresRegistry, schema,
+	)
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
@@ -324,9 +364,6 @@ func openPostgresRewardRaceBackend(
 		},
 	})
 	require.NoError(t, err)
-	raw, err := sql.Open("pgx", scoped)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = raw.Close() })
 	return db, raw, "postgres"
 }
 
@@ -364,6 +401,12 @@ func openMySQLRewardRaceBackend(
 	parsed, err := mysqldriver.ParseDSN(rootDSN)
 	require.NoError(t, err)
 	parsed.DBName = dbName
+	raw, err := sql.Open("mysql", parsed.FormatDSN())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	premigrateRewardRaceBackend(
+		t, raw, sqlstore.MySQLDialect(), migrations.MySQLRegistry, dbName,
+	)
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: filepath.Join(t.TempDir(), "blob"),
@@ -375,9 +418,6 @@ func openMySQLRewardRaceBackend(
 		},
 	})
 	require.NoError(t, err)
-	raw, err := sql.Open("mysql", parsed.FormatDSN())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = raw.Close() })
 	return db, raw, "mysql"
 }
 

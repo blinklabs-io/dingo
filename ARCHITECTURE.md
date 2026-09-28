@@ -13420,89 +13420,152 @@ Because it changes reward amounts and therefore ADA pots and reward accounts, it
 must be enabled only on a network where every node also enables it (a devnet or
 custom network); enabling it off-consensus forks the node.
 
-After an epoch-transition event, ledger can precompute the next delayed reward
-update into `reward_pool_output` and `reward_account_output`. Calculation runs
-in a read-only transaction; a separate short write transaction re-reads the
-owning `RewardSnapshot` and persists only if its captured/boundary slots and
-content still match, no rollback generation spanning performance blocks, ADA
-pots, protocol state, and account certificate history changed, and no non-empty
-result was concurrently persisted or applied. If retention pruned the owning
-snapshot's per-credential `reward_stake_input` rows, the read phase reconstructs
-and reconciles them without writing, then carries them in the computed
-`stakeRewardApplication`; only the guarded short write phase persists those
-rows with the outputs and ADA-pot update. The synchronous boundary path saves
-the same reconstructed rows atomically in its existing rollover transaction.
-Equal-stake reconciliation uses pool hash, credential tag, and staking key as a
-total tie-break, so metadata iteration order cannot change the recovered reward
-basis. Completion is inferred from the
-persisted `reward_ada_pots.rewards` total plus the output-row set rather than an
-explicit marker, so an epoch whose total reward pot is legitimately zero carries
-no distinct completion sentinel and is re-derived idempotently by the precompute
-and boundary paths instead of being short-circuited; that recomputation is
-deterministic and reproduces the same empty result, so it costs only redundant
-work, never correctness. A rollback or authoritative snapshot replacement
-therefore drops stale work. Every rollback deletes the in-progress epoch's
-precomputed outputs, whose boundary slot lies ahead of any rollback point, and
-its generation bump discards the in-flight calculation. A rollback whose
-truncation commits clears pending transitions and prefilter retries from the
-abandoned chain and queues the surviving epoch again after its tip, epoch
-state, and reward-input generation are restored. That includes a rollback
-whose durable tip-floor check fails afterwards and escalates to
-`FatalErrorFunc`: its epoch state has already reloaded, so the replacement
-is valid. The replacement captures the applied tip, so a pre-Babbage round
-already past its prefilter slot does not defer back to the epoch's start. A
-committed rollback whose in-memory reload fails queues nothing, because its
-epoch state may be stale; it escalates to `FatalErrorFunc`, and the restart
-queues the epoch from `Start`. A rollback whose transaction fails restores the
-queued transition and prefilter retry, re-stamping the retry with the new
-generation, and queues the current epoch when nothing was queued; after
-`Close` it restores nothing.
-Prefilter retries carry their calculation's generation, preventing an old
-calculation from reinstalling a retry after rollback. The precompute write
-phase holds `rewardPrecomputeWriteMu` from its guard through commit and the
-rollback bracket takes it for the generation bump, so a write that passed the
-guard commits before the rollback's truncation starts and is deleted by it;
-SQLite's single writer already gives that order, while Postgres and MySQL
-would otherwise commit the stale write after the delete. A no-op rollback
-leaves queued work untouched. The boundary retains its authoritative fallback.
-Pre-Babbage precomputation is deferred until applied block
-progress reaches the RUPD prefilter slot, which queues a retry using the actual
-captured slot; later eras can precompute immediately.
-`LedgerState.Start` queues the same work once for the epoch already in progress
-(`queueStartupRewardPrecompute`), because the epoch-transition event cannot fire
-for an epoch that began before the process did. Without that catch-up, a node
-started mid-epoch reaches its next boundary with no precompute and
-`applyStakeRewards` recalculates the whole round inline, inside the
-epoch-rollover write transaction on the block-processing goroutine — the exact
-serialization the async path exists to avoid. The catch-up is idempotent: an
-existing precompute is detected and skipped, and a node still syncing defers on
-the RUPD prefilter slot as above.
-The EventBus callback only queues this work. One background calculation runs at
-a time, and epoch transitions received while it runs are coalesced to the newest
-pending event. This prevents the minutes-long calculation from blocking
-subscriber drain during bulk-sync epoch bursts while avoiding obsolete
-intermediate calculations.
+After an epoch-transition event, ledger precomputes the next delayed reward
+update into `reward_pool_output` and `reward_account_output`. The calculation
+is split into two passes (`ledger/rewards.CalculateBaseRewards`,
+`ledger/rewards.ApplyPoolMemberRewards`): Pass 1 computes every pool's base (or,
+under CIP-0163 full-pot rewards, apportioned) reward from `reward_pool_input`
+rows alone; Pass 2 splits a pool's member reward across its own delegators and
+depends on no other pool. Pass 1 runs once per precompute attempt, in a
+read-only transaction. Pass 2 runs a bounded batch of pools at a time
+(`rewardPrecomputeChunkPools`, default 100), each batch in its own write
+transaction that re-reads the owning `RewardSnapshot` and proceeds only if it
+still matches, no rollback generation changed since Pass 1 ran, and no epoch
+boundary has claimed the round (`rewardPrecomputeFence`, bumped under
+`rewardPrecomputeWriteMu` before the boundary transaction opens). Each chunk
+also sets the CIP-0163 `Guarded` flag from witness history at the snapshot's
+captured slot, and records each output's `Spendable` flag from account
+registration when it runs.
 
-The application engine verifies the frozen input bundle and
-requires an exact pool output set, valid leader reward accounts, complete
-account outputs, application-boundary output slots, and totals that fit the
-available reward pot. It re-derives each persisted pool reward — the pool total
-and the leader reward — from the frozen inputs using the canonical per-pool
-arithmetic (`rewards.CalculatePoolReward`) fed by the snapshot pool inputs, the
-performance-epoch block counts, and the reward globals, and rejects any pool
-output whose stored total or leader reward diverges. This is what ties the
-per-account checks back to the inputs: those checks re-derive every member amount
-from `MemberReward(pool total, cost, margin, member stake, delegated stake)` and
-pin every leader amount to the pool output's stored leader reward, so without the
-pool-level re-derivation a stale or corrupted pool output paired with account
-outputs consistent with it would pass every aggregate check and be credited
-unverified. With both in place, a reward redistributed among the members of a
-single pool (which preserves the per-pool and per-type totals the aggregate
-checks verify), or a pool output whose reward does not match the inputs, is
-rejected and recalculated rather than credited to the wrong accounts.
-Recalculation replaces the full output set so a result with fewer rows cannot
-retain stale rewards. Reward output rows are keyed by snapshot epoch: snapshot
-`S` corresponds to earned epoch `S+1` and spendable epoch `S+3`.
+A resumable cursor (`sync_state`, key
+`dingo:stake-reward:precompute-cursor:<snapshot epoch>`) records the round's
+input fingerprint, the last committed pool and the running effective and
+unspendable totals. The input fingerprint hashes every pool-level input the
+passes read: the ADA pots, the reward snapshot, the pool inputs, the reward
+parameters, the block counts and the prefilter slot. A later run -- after a
+restart, or after a rollback bumped the generation -- resumes from the cursor
+while the fingerprint matches and every pool the cursor claims still has its
+output row, and otherwise clears the epoch's outputs and starts over. The last
+chunk reconciles the totals against the available pot, sets
+`reward_ada_pots.rewards`, and marks the cursor done with a fingerprint of the
+finished pool outputs; a finished round with a matching input and output
+fingerprint is accepted without recomputation. A rollback's reward-state sweep
+deletes reward outputs by captured slot: an output depends only on inputs
+captured at or before that slot, so a rollback that stays above it leaves the
+precomputed round in place. If retention pruned the owning snapshot's
+`reward_stake_input` rows, the first chunk of a fresh run reconstructs and
+persists them once.
+
+A rollback whose truncation commits clears pending transitions and prefilter
+retries from the abandoned chain and queues the surviving epoch again after its
+tip, epoch state, and reward-input generation are restored. That includes a
+rollback whose durable tip-floor check fails afterwards and escalates to
+`FatalErrorFunc`: its epoch state has already reloaded, so the replacement is
+valid. The replacement captures the applied tip, so a pre-Babbage round already
+past its prefilter slot does not defer back to the epoch's start. A committed
+rollback whose in-memory reload fails queues nothing, because its epoch state
+may be stale; it escalates to `FatalErrorFunc`, and the restart queues the epoch
+from `Start`. A rollback whose transaction fails restores the queued transition
+and prefilter retry, re-stamping the retry with the new generation, and queues
+the current epoch when nothing was queued; after `Close` it restores nothing.
+Prefilter retries carry their calculation's generation, preventing an old
+calculation from reinstalling a retry after rollback. Each chunk's write holds
+`rewardPrecomputeWriteMu` from its guard through commit and the rollback
+bracket takes it for the generation bump, so a write that passed the guard
+commits before the rollback's truncation starts and is deleted by it; SQLite's
+single writer already gives that order, while Postgres and MySQL would
+otherwise commit the stale write after the delete. A no-op rollback leaves
+queued work untouched. Pre-Babbage precomputation is deferred until applied
+block progress reaches the RUPD prefilter slot, which queues a retry using the
+actual captured slot; later eras can precompute immediately. Pre-Allegra
+rounds (`ProtocolMajorVersion < 3`) and the two bootstrap rounds use the
+single-pass calculation (`calculateStakeRewardApplication`), because a
+pre-Allegra credential earning from several pools is paid once, which needs the
+whole pool set at once. `LedgerState.Start` queues the same work once for the
+epoch already in progress (`queueStartupRewardPrecompute`), because the
+epoch-transition event cannot fire for an epoch that began before the process
+did. The EventBus callback only queues this work. One background calculation
+runs at a time, and epoch transitions received while it runs are coalesced to
+the newest pending event.
+
+At the boundary, `applyStakeRewards` resolves the round's Pass 1 from
+pool-level rows in the boundary transaction and takes the application from the
+per-pool precompute (`boundaryStakeRewardApplication`). A finished round is
+accepted from its fingerprints; an unfinished one is completed from its cursor
+inside the boundary transaction, reusing every chunk the background run
+committed. A precompute with no cursor is accepted after the full verification
+of `precomputedStakeRewardApplication`, which re-derives every pool and member
+reward from the frozen inputs. The boundary then re-reads registration only for
+the credentials whose `Spendable` flag can be stale -- those with a
+registration or deregistration certificate between the round's pots capture
+and the boundary, and those a rollback restored
+(`RestoreAccountStateAtSlot` records them) -- corrects their outputs and the
+pool outputs' unspendable totals, and moves the reserves and treasury from the
+corrected cursor totals. It does not read the round's account outputs.
+
+The round's account credits are not written to account rows. The boundary
+records the round as credited (`RewardCreditRound` in `sync_state`), and the
+round's `reward_account_output` rows with `spendable = TRUE`,
+`guarded = FALSE` and `folded = FALSE` are the credits: a credential's balance
+is `account.reward` plus those rows across every credited round. Every balance
+reader uses that definition. The store adds the rows where it reads balances
+in aggregate: the SNAP-point stake read (`GetLiveStakeInputsForPools`), DRep
+voting power (`GetDRepVotingPower*`) and the historical stake reconstruction
+(local state query stake distribution, `GetStakeByPoolsAtSlot`,
+`GetEpochBoundaryStakeByPools`, the persist-time snapshot fallback and the
+stake-input rebuild), for rounds applied at or before the slot read. Ledger
+adds them for one credential in `LedgerView.RewardAccountBalance`, the local
+state query reward accounts and the Blockfrost account endpoint
+(`PendingRewardCredit`, read in the same transaction as the account row).
+
+A credential's credits are folded into its account only where its stored
+balance changes: a transaction withdrawing from it first writes them with the
+journal rows and `reward_live_stake` refresh an eager boundary writes
+(`foldRewardCreditsForWithdrawals`, `AddAccountRewardsByCredential`) and marks
+the rows `folded` in the same transaction (`FoldRewardAccountOutputs`), so no
+reader counts a credit twice. A rollback below the boundary removes the round
+and clears `folded` on its surviving outputs in the transaction that reverts
+the folded credits' journal rows. Core-mode retention keeps a credited round's
+unfolded rows. A precompute for a credited round does nothing, and replacing a
+credited round's outputs is refused: they are balances, and rewritten rows
+would count folded credits again.
+
+The mark snapshot's per-credential reward basis (`reward_stake_input`) is first
+read by the reward round two epochs later, so the authoritative capture stages
+those rows (`snapshot.Manager.SetDeferRewardStakeInputs`,
+`TakeDeferredRewardStakeInputs`) and ledger writes them after the boundary
+commits, in bounded batches under `rewardPrecomputeWriteMu`
+(`queueDeferredRewardStakeInputs`). The boundary transaction records the
+snapshot epoch as pending (`dingo:stake-reward:stake-inputs-pending`) and the
+last batch clears it. Every reader of `reward_stake_input` calls
+`ensureRewardStakeInputsReady` first: while this process is still writing the
+rows the round waits; a pending entry with no writer is completed from the
+historical reconstruction the retention path uses, checked against the
+snapshot's persisted pool inputs.
+
+The application engine for a precompute without a cursor verifies the frozen
+input bundle and requires an exact pool output set, valid leader reward
+accounts, complete account outputs, application-boundary output slots, and
+totals that fit the available reward pot. It re-derives each persisted pool
+reward from the frozen inputs using the canonical per-pool arithmetic
+(`rewards.CalculatePoolReward`) and every member amount from
+`MemberReward(pool total, cost, margin, member stake, delegated stake)`, so a
+reward redistributed among the members of a single pool, or a pool output whose
+reward does not match the inputs, is rejected and recomputed. Reward output rows
+are keyed by snapshot epoch: snapshot `S` corresponds to earned epoch `S+1` and
+spendable epoch `S+3`.
+
+`dingo_ledger_epoch_rollover_duration_seconds` times the whole epoch-boundary
+transaction, and `dingo_ledger_epoch_rollover_phase_duration_seconds{phase}`
+each of its phases (`reward_apply`, `mir`, `snap`, `spo_state_resolve`,
+`pparam_updates`, `pool_reap`, `inactivity_activation`, `governance`,
+`donations`, `hardfork`, `save_pots`, `epoch_record`, `snap_persist`), which are
+also logged at Debug as `epoch rollover phase`. Each pipeline restart for
+`errRestartLedgerPipeline` is logged at Info with its `consecutive_no_progress`
+count. `BenchmarkEpochBoundaryMainnetShape` runs the whole boundary on a
+mainnet-shaped ledger (1,309,350 delegators, 2,676 pools, 1,053 DReps, 40
+proposals) with the precompute complete, partial and missing, and reports every
+phase.
 
 ### Rollback Support
 

@@ -1345,9 +1345,29 @@ func (s *Store) GetLiveStakeInputsForPools(
 		)
 	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
+	// reward_stake carries account.reward; a credited round's unfolded
+	// credits are the rest of the balance.
+	stakeExpr := "rls.total_stake"
+	hasPending, err := s.HasPendingRewardCreditRounds(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
+	}
+	if hasPending {
+		pendingExpr := s.pendingRewardCreditSubquery(
+			"rls.credential_tag", "rls.staking_key",
+		)
+		stakeExpr = "CAST(rls.total_stake AS " + s.pendingCreditCastType() +
+			") + " + pendingExpr
+	}
 	chunkSize := s.dialect.ParameterLimit()
 	if expiryEpoch > 0 {
 		chunkSize--
+	}
+	if chunkSize <= 0 {
+		return nil, fmt.Errorf(
+			"GetLiveStakeInputsForPools: dialect parameter limit %d cannot fit query filters",
+			s.dialect.ParameterLimit(),
+		)
 	}
 	ret := make([]*models.RewardStakeInput, 0)
 	for start := 0; start < len(poolKeyHashes); start += chunkSize {
@@ -1372,7 +1392,7 @@ LEFT JOIN account acct
 		}
 		query := `
 SELECT rls.pool_key_hash, rls.staking_key, rls.credential_tag,
-       rls.total_stake
+       ` + stakeExpr + `
 FROM reward_live_stake rls` + join + `
 WHERE rls.pool_key_hash IN (` + bindPlaceholders(len(chunk)) + `)
   AND rls.registered = TRUE` + expiry + `

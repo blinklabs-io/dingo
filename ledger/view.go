@@ -923,7 +923,16 @@ func (lv *LedgerView) RewardAccountBalance(
 	if account == nil {
 		return nil, nil
 	}
-	balance := uint64(account.Reward)
+	pending, err := lv.ls.pendingRewardCredit(
+		lv.txn, credentialTag, cred.Credential[:],
+	)
+	if err != nil {
+		return nil, err
+	}
+	balance, overflow := addRewardUint64(uint64(account.Reward), pending)
+	if overflow {
+		return nil, errors.New("reward account balance overflow")
+	}
 	return &balance, nil
 }
 
