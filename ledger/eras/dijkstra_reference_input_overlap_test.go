@@ -1,0 +1,403 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package eras
+
+import (
+	"crypto/ed25519"
+	"math/big"
+	"testing"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/common/script"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/data"
+	"github.com/blinklabs-io/plutigo/lang"
+	"github.com/blinklabs-io/plutigo/syn"
+	"github.com/stretchr/testify/require"
+)
+
+func TestValidateTxDijkstraAllowsSpendReferenceOverlapWithoutPlutus(t *testing.T) {
+	t.Parallel()
+	input := shelley.NewShelleyTransactionInput(
+		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee44",
+		0,
+	)
+	const balance = uint64(10_000_000)
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{input},
+			),
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{input},
+				false,
+			),
+			TxFee: balance,
+		},
+		TxIsValid: true,
+	}
+	state := newMockLedgerState()
+	state.addUtxo(input, newTestOutput(balance))
+	protocolParams := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize: 16_384,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+		},
+	}
+
+	require.NoError(t, ValidateTxDijkstra(tx, 0, state, protocolParams))
+}
+
+func TestValidateTxDijkstraAllowsSubtransactionSpendReferenceOverlapWithoutPlutus(
+	t *testing.T,
+) {
+	t.Parallel()
+	input := shelley.NewShelleyTransactionInput(
+		"c228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee55",
+		0,
+	)
+	const balance = uint64(10_000_000)
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{
+					shelley.NewShelleyTransactionInput(
+						"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
+						0,
+					),
+				},
+			),
+			TxOutputs: []gdijkstra.DijkstraTransactionOutput{{
+				Output: babbage.BabbageTransactionOutput{
+					OutputAddress: newTestKeyAddress(t),
+					OutputAmount:  mary.MaryTransactionOutputValue{Amount: balance},
+				},
+			}},
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{{
+					Body: gdijkstra.DijkstraSubTransactionBody{
+						TxInputs: conway.NewConwayTransactionInputSet(
+							[]shelley.ShelleyTransactionInput{input},
+						),
+						TxOutputs: []gdijkstra.DijkstraTransactionOutput{{
+							Output: babbage.BabbageTransactionOutput{
+								OutputAddress: newTestKeyAddress(t),
+								OutputAmount:  mary.MaryTransactionOutputValue{Amount: balance},
+							},
+						}},
+						TxReferenceInputs: cbor.NewSetType(
+							[]shelley.ShelleyTransactionInput{input},
+							false,
+						),
+					},
+				}},
+				false,
+			),
+		},
+		TxIsValid: true,
+	}
+	state := newMockLedgerState()
+	state.addUtxo(
+		tx.Body.TxInputs.Items()[0],
+		newTestOutput(balance),
+	)
+	state.addUtxo(input, newTestOutput(balance))
+	protocolParams := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize:    16_384,
+			MaxValueSize: 5_000,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+		},
+	}
+
+	require.NoError(t, ValidateTxDijkstra(tx, 0, state, protocolParams))
+}
+
+func TestValidateTxDijkstraAllowsSpendReferenceOverlapForPlutusV1AndV2(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		version lang.LanguageVersion
+	}{
+		{name: "PlutusV1", version: lang.LanguageVersionV1},
+		{name: "PlutusV2", version: lang.LanguageVersionV2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			plutusScript := dijkstraReferenceOverlapScript(t, tc.version)
+			tx, state, params := newDijkstraReferenceOverlapScriptTx(
+				t,
+				plutusScript,
+				false,
+			)
+			// The deliberately failing script must match the invalid flag. A
+			// context overlap error is not a successful phase-2 failure.
+			require.NoError(t, ValidateTxDijkstra(tx, 0, state, params))
+		})
+	}
+}
+
+func TestValidateTxDijkstraRejectsSpendReferenceOverlapForPlutusV3(
+	t *testing.T,
+) {
+	t.Parallel()
+	plutusScript := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV3,
+	)
+	tx, state, params := newDijkstraReferenceOverlapScriptTx(
+		t,
+		plutusScript,
+		true,
+	)
+	require.Len(t, tx.Inputs(), 1)
+	require.Len(t, tx.ReferenceInputs(), 1)
+	require.Equal(t, tx.Inputs()[0].String(), tx.ReferenceInputs()[0].String())
+	require.ErrorContains(
+		t,
+		script.ValidatePlutusV3ReferenceInputs(
+			tx,
+			params.ProtocolVersion.Major,
+		),
+		"is also a regular input",
+	)
+	err := gdijkstra.UtxoValidatePlutusScripts(tx, 0, state, params)
+	require.ErrorContains(t, err, "is also a regular input")
+	require.ErrorContains(t, ValidateTxDijkstra(tx, 0, state, params), "is also a regular input")
+}
+
+type referenceOverlapScriptOutput struct {
+	testAddressScriptOutput
+	datumHash *lcommon.Blake2b256
+}
+
+func (o referenceOverlapScriptOutput) DatumHash() *lcommon.Blake2b256 {
+	return o.datumHash
+}
+
+func dijkstraReferenceOverlapScript(
+	t *testing.T,
+	version lang.LanguageVersion,
+) lcommon.Script {
+	t.Helper()
+	scriptBytes := referenceOverlapFailingScriptBytes(t, version)
+	switch version {
+	case lang.LanguageVersionV1:
+		return lcommon.PlutusV1Script(scriptBytes)
+	case lang.LanguageVersionV2:
+		return lcommon.PlutusV2Script(scriptBytes)
+	case lang.LanguageVersionV3:
+		return lcommon.PlutusV3Script(scriptBytes)
+	default:
+		t.Fatalf("unsupported overlap test language version %v", version)
+		return nil
+	}
+}
+
+func newDijkstraReferenceOverlapScriptTx(
+	t *testing.T,
+	plutusScript lcommon.Script,
+	valid bool,
+) (*gdijkstra.DijkstraTransaction, *mockLedgerState, *gdijkstra.DijkstraProtocolParameters) {
+	t.Helper()
+	input := shelley.NewShelleyTransactionInput(
+		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee66",
+		0,
+	)
+	collateralInput := shelley.NewShelleyTransactionInput(
+		"e228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee77",
+		0,
+	)
+	// Keep the input IDs valid, fixed-length hashes. The script/context behavior
+	// under test does not depend on their values.
+	datum, datumHash := referenceOverlapDatum(t)
+	seed := make([]byte, ed25519.SeedSize)
+	seed[0] = 0x77
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	paymentHash := lcommon.Blake2b224Hash(publicKey)
+	collateralAddress, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash[:],
+		nil,
+	)
+	require.NoError(t, err)
+	state := newMockLedgerState()
+	state.networkId = uint(lcommon.AddressNetworkTestnet)
+	state.addUtxo(input, referenceOverlapScriptOutput{
+		testAddressScriptOutput: testAddressScriptOutput{
+			testOutput: newTestOutput(10_000_000),
+			addr:       newTestScriptAddress(t, plutusScript),
+		},
+		datumHash: &datumHash,
+	})
+	state.addUtxo(collateralInput, testAddressOutput{
+		testOutput: newTestOutput(3_000_000),
+		addr:       collateralAddress,
+	})
+	witnessSet := gdijkstra.DijkstraTransactionWitnessSet{
+		WsPlutusData: cbor.NewSetType([]lcommon.Datum{datum}, false),
+		WsRedeemers: gdijkstra.DijkstraRedeemers{
+			Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+				{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
+					Data:    datum,
+					ExUnits: lcommon.ExUnits{Steps: 1_000_000, Memory: 1_000_000},
+				},
+			},
+		},
+	}
+	var languageID uint
+	switch script := plutusScript.(type) {
+	case lcommon.PlutusV1Script:
+		languageID = 0
+		witnessSet.WsPlutusV1Scripts = cbor.NewSetType(
+			[]lcommon.PlutusV1Script{script},
+			false,
+		)
+	case lcommon.PlutusV2Script:
+		languageID = 1
+		witnessSet.WsPlutusV2Scripts = cbor.NewSetType(
+			[]lcommon.PlutusV2Script{script},
+			false,
+		)
+	case lcommon.PlutusV3Script:
+		languageID = 2
+		witnessSet.WsPlutusV3Scripts = cbor.NewSetType(
+			[]lcommon.PlutusV3Script{script},
+			false,
+		)
+	default:
+		t.Fatalf("unsupported overlap test script %T", plutusScript)
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{input},
+			),
+			TxOutputs: []gdijkstra.DijkstraTransactionOutput{{
+				Output: babbage.BabbageTransactionOutput{
+					OutputAddress: newTestKeyAddress(t),
+					OutputAmount:  mary.MaryTransactionOutputValue{Amount: 8_000_000},
+				},
+			}},
+			TxFee: 2_000_000,
+			TxCollateral: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{collateralInput},
+				false,
+			),
+			TxTotalCollateral: 3_000_000,
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{input},
+				false,
+			),
+		},
+		WitnessSet: witnessSet,
+		TxIsValid:  valid,
+	}
+	params := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+			MaxTxSize:            16_384,
+			MaxValueSize:         5_000,
+			MaxTxExUnits:         lcommon.ExUnits{Steps: 1_000_000, Memory: 1_000_000},
+			CollateralPercentage: 150,
+			MaxCollateralInputs:  3,
+			ExecutionCosts: lcommon.ExUnitPrice{
+				MemPrice:  &cbor.Rat{Rat: big.NewRat(1, 1)},
+				StepPrice: &cbor.Rat{Rat: big.NewRat(1, 1)},
+			},
+			CostModels: map[uint][]int64{
+				0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+				2: defaultMachineCostModel(t, lang.LanguageVersionV3),
+			},
+		},
+		MaxRefScriptSizePerTx: 100_000,
+	}
+	redeemersCbor, err := cbor.Encode(tx.WitnessSet.WsRedeemers.Redeemers)
+	require.NoError(t, err)
+	tx.WitnessSet.WsRedeemers.SetCbor(redeemersCbor)
+	datumsCbor, err := cbor.Encode(tx.WitnessSet.WsPlutusData.Items())
+	require.NoError(t, err)
+	tx.WitnessSet.WsPlutusData.SetCbor(datumsCbor)
+	langViewsCbor, err := lcommon.EncodeLangViews(
+		map[uint]struct{}{languageID: {}},
+		params.CostModels,
+	)
+	require.NoError(t, err)
+	scriptData := append(redeemersCbor, datumsCbor...)
+	scriptData = append(scriptData, langViewsCbor...)
+	scriptDataHash := lcommon.Blake2b256Hash(scriptData)
+	tx.Body.TxScriptDataHash = &scriptDataHash
+	bodyCbor, err := cbor.Encode(tx.Body)
+	require.NoError(t, err)
+	tx.Body.SetCbor(bodyCbor)
+	txHash := tx.Hash()
+	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+		[]lcommon.VkeyWitness{{
+			Vkey:      publicKey,
+			Signature: ed25519.Sign(privateKey, txHash[:]),
+		}},
+		false,
+	)
+
+	return tx, state, params
+}
+
+func referenceOverlapDatum(t *testing.T) (lcommon.Datum, lcommon.Blake2b256) {
+	t.Helper()
+	datumBytes, err := data.Encode(data.NewInteger(big.NewInt(42)))
+	require.NoError(t, err)
+	var datum lcommon.Datum
+	_, err = cbor.Decode(datumBytes, &datum)
+	require.NoError(t, err)
+	return datum, datum.Hash()
+}
+
+func referenceOverlapFailingScriptBytes(
+	t *testing.T,
+	version lang.LanguageVersion,
+) []byte {
+	t.Helper()
+	program := &syn.Program[syn.DeBruijn]{
+		Version: version,
+		Term: &syn.Lambda[syn.DeBruijn]{
+			Body: &syn.Lambda[syn.DeBruijn]{
+				Body: &syn.Lambda[syn.DeBruijn]{
+					Body: &syn.Error{},
+				},
+			},
+		},
+	}
+	flatProgram, err := syn.Encode(program)
+	require.NoError(t, err)
+	scriptBytes, err := cbor.Encode(flatProgram)
+	require.NoError(t, err)
+	return scriptBytes
+}

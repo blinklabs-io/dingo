@@ -340,6 +340,12 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	if err := script.ValidatePlutusV3ReferenceInputs(
+		tx,
+		protocolMajorVersion(pp),
+	); err != nil {
+		return conway.ScriptContextConstructionError{Err: err}
+	}
 	view, err := script.NewTxScriptView(tx, ls)
 	if err != nil {
 		if isInputResolutionError(err) {
@@ -1155,14 +1161,6 @@ func (c *txInfoCache) v2() (script.TxInfoV2, error) {
 
 func (c *txInfoCache) v3() (script.TxInfoV3, error) {
 	if !c.txInfoV3Built {
-		if err := script.ValidatePlutusV3ReferenceInputs(
-			c.tx,
-			c.protocolMajor,
-		); err != nil {
-			return script.TxInfoV3{}, conway.ScriptContextConstructionError{
-				Err: err,
-			}
-		}
 		txInfo, err := script.NewTxInfoV3FromTransaction(
 			c.ls,
 			c.tx,
