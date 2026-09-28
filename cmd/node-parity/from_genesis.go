@@ -116,12 +116,15 @@ type fromGenesisCounters struct {
 }
 
 // recordDivergence increments the same divergenceTotal{field} series a
-// check/watch cycle uses. A mismatch is a mismatch regardless of which
-// subcommand found it, so a dashboard built on divergenceTotal alone sees
-// from-genesis findings too.
+// check/watch cycle uses, tagged reference=koios so a responder reading
+// NodeParityDivergence knows which oracle disagreed. A cardano-node
+// divergence is a consensus question; a Koios one can equally be that
+// oracle's own data, so sending someone to the wrong side wastes the first
+// and most valuable minutes of an incident.
 func (c *fromGenesisCounters) recordDivergence(field string) {
 	if c.metrics != nil {
-		c.metrics.divergenceTotal.WithLabelValues(field).Inc()
+		c.metrics.divergenceTotal.
+			WithLabelValues(field, ReferenceKoios).Inc()
 	}
 }
 
@@ -141,9 +144,10 @@ func (c *fromGenesisCounters) recordEpoch(
 	logger *slog.Logger,
 ) {
 	c.epochsChecked++
-	if c.metrics != nil {
-		c.metrics.checksTotal.Inc()
-	}
+	// Snapshot the verified counters so the completed-cycle decision at
+	// the end of this function reads "did any check reach a trustworthy
+	// verdict in THIS epoch", not "has one ever".
+	verifiedBefore := c.ppVerified + c.stakeVerified + c.utxoVerified
 
 	logger.Debug("epoch timing",
 		"epoch", r.Epoch,
@@ -250,6 +254,19 @@ func (c *fromGenesisCounters) recordEpoch(
 		c.utxoVerified++
 		logger.Info("utxo set match",
 			"epoch", r.Epoch, "ref_count", r.UTxORefCount)
+	}
+
+	// checksTotal counts COMPLETED cycles, which is why checksSkippedTotal
+	// exists separately -- see its doc comment in metrics.go. An epoch
+	// whose every check was untrusted completed nothing, so incrementing
+	// here unconditionally would fold a wholly-degraded epoch in as a
+	// false "matched" and inflate the denominator
+	// NodeParityNotChecking reasons about. Counting it only when at least
+	// one check reached a trustworthy verdict keeps that contract, while
+	// still counting an epoch where some checks ran and others did not.
+	verdictReached := c.ppVerified+c.stakeVerified+c.utxoVerified > verifiedBefore
+	if verdictReached && c.metrics != nil {
+		c.metrics.checksTotal.Inc()
 	}
 }
 
@@ -414,13 +431,18 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		)
 	}
 
-	// Serving metrics is opt-in through --metrics-addr, the same flag and
-	// default port watch uses, so a from-genesis run can be scraped by the
-	// same Prometheus job and alerted on by the same rules. Left nil when
-	// the flag is empty, which keeps a plain one-shot run free of a
-	// listening socket.
+	// Serving metrics is opt-in, and opt-in has to mean the operator
+	// actually passed --metrics-addr: the flag defaults to
+	// defaultMetricsAddr (":9464"), so testing it against "" would be true
+	// on every run and bind a socket nobody asked for -- failing the whole
+	// run when that port is already taken, which for a multi-day
+	// from-genesis replay is a poor trade for metrics the operator did not
+	// request. watch can lean on the default because serving metrics is
+	// part of what a long-lived watcher is for; a one-shot replay is
+	// different. Flags().Changed reports explicit use, including
+	// "--metrics-addr=" to mean off.
 	var counters fromGenesisCounters
-	if globalFlags.metricsAddr != "" {
+	if cmd.Flags().Changed("metrics-addr") && globalFlags.metricsAddr != "" {
 		counters.metrics = newParityMetrics(network)
 		metricsServer, err := serveMetrics(globalFlags.metricsAddr, logger)
 		if err != nil {

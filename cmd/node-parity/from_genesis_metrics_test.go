@@ -62,7 +62,7 @@ func TestRecordEpochRecordsDivergenceMetrics(t *testing.T) {
 
 		require.Equal(t, 1, c.ppMismatches)
 		require.InDelta(t, 1.0, testutil.ToFloat64(
-			m.divergenceTotal.WithLabelValues("protocol_params"),
+			m.divergenceTotal.WithLabelValues("protocol_params", ReferenceKoios),
 		), 0.001, "a protocol-params divergence must move divergenceTotal")
 	})
 
@@ -80,7 +80,7 @@ func TestRecordEpochRecordsDivergenceMetrics(t *testing.T) {
 
 		require.Equal(t, 1, c.stakeMismatches)
 		require.InDelta(t, 1.0, testutil.ToFloat64(
-			m.divergenceTotal.WithLabelValues("stake_distribution"),
+			m.divergenceTotal.WithLabelValues("stake_distribution", ReferenceKoios),
 		), 0.001, "a stake divergence must move divergenceTotal")
 	})
 
@@ -95,7 +95,7 @@ func TestRecordEpochRecordsDivergenceMetrics(t *testing.T) {
 
 		require.Equal(t, 1, c.utxoMismatches)
 		require.InDelta(t, 1.0, testutil.ToFloat64(
-			m.divergenceTotal.WithLabelValues("utxo"),
+			m.divergenceTotal.WithLabelValues("utxo", ReferenceKoios),
 		), 0.001, "a UTxO divergence must move divergenceTotal")
 	})
 }
@@ -124,7 +124,7 @@ func TestRecordEpochRecordsSkipMetrics(t *testing.T) {
 			m.checksSkippedTotal.WithLabelValues(reason),
 		), 0.001, "an untrusted %s check must count as skipped", reason)
 		require.InDelta(t, 0.0, testutil.ToFloat64(
-			m.divergenceTotal.WithLabelValues(reason),
+			m.divergenceTotal.WithLabelValues(reason, ReferenceKoios),
 		), 0.001, "an untrusted %s check must NOT count as a divergence", reason)
 	}
 }
@@ -166,4 +166,58 @@ func TestRecordEpochWithoutMetricsDoesNotPanic(t *testing.T) {
 
 	require.Equal(t, 1, c.utxoMismatches)
 	require.Equal(t, 1, c.stakeMismatches)
+}
+
+// TestRecordEpochDoesNotCountAWhollyIncompleteEpoch pins CodeRabbit's
+// finding on #4771: checksTotal counts COMPLETED cycles (see its doc
+// comment in metrics.go), so an epoch whose every check was untrusted
+// completed nothing and must not be folded in as a false "matched" -- that
+// would inflate the denominator NodeParityNotChecking reasons about, making
+// a wholly-degraded run look like a working one.
+func TestRecordEpochDoesNotCountAWhollyIncompleteEpoch(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.DiscardHandler)
+	c, m := countersWithMetrics(t)
+
+	// Every check untrusted: nothing completed.
+	c.recordEpoch(nodeparity.EpochResult{
+		Epoch:             700,
+		ProtocolParamsErr: errors.New("koios unreachable"),
+		StakeErr:          errors.New("koios unreachable"),
+		UTxOAttempted:     true,
+		UTxOErr:           errors.New("tx_info fetch failed"),
+	}, logger)
+	require.InDelta(t, 0.0, testutil.ToFloat64(m.checksTotal), 0.001,
+		"an epoch with no trustworthy verdict must not count as a completed cycle")
+
+	// A partially-degraded epoch still completed something, so it counts.
+	c.recordEpoch(nodeparity.EpochResult{
+		Epoch:         701,
+		StakeErr:      errors.New("koios unreachable"),
+		UTxOAttempted: true,
+	}, logger)
+	require.InDelta(t, 1.0, testutil.ToFloat64(m.checksTotal), 0.001,
+		"an epoch where at least one check reached a verdict must count")
+}
+
+// TestRecordDivergenceIdentifiesKoiosAsTheReference pins the other half of
+// that review: from-genesis compares against Koios, not cardano-node, and a
+// responder reading NodeParityDivergence has to know which oracle
+// disagreed. Without the label the alert sends them to the wrong side.
+func TestRecordDivergenceIdentifiesKoiosAsTheReference(t *testing.T) {
+	t.Parallel()
+	c, m := countersWithMetrics(t)
+
+	c.recordEpoch(nodeparity.EpochResult{
+		Epoch:         702,
+		UTxOAttempted: true,
+		UTxOMissing:   []string{"txin#0"},
+	}, slog.New(slog.DiscardHandler))
+
+	require.InDelta(t, 1.0, testutil.ToFloat64(
+		m.divergenceTotal.WithLabelValues("utxo", ReferenceKoios),
+	), 0.001, "a from-genesis divergence must be tagged reference=koios")
+	require.InDelta(t, 0.0, testutil.ToFloat64(
+		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode),
+	), 0.001, "it must not be attributed to cardano-node")
 }

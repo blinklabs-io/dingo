@@ -32,6 +32,16 @@ import (
 // label sets are deliberately small and closed: never a pool ID, tx hash,
 // or TxIn label, which would make cardinality unbounded by the size of the
 // chain being watched.
+// ReferenceCardanoNode and ReferenceKoios are divergenceTotal's "reference"
+// label values: which oracle Dingo's ledger state was compared against.
+// check/watch compare against a live cardano-node; from-genesis compares
+// against Koios, because cardano-node cannot fill the reference role for a
+// from-genesis replay (see from_genesis.go's command doc).
+const (
+	ReferenceCardanoNode = "cardano_node"
+	ReferenceKoios       = "koios"
+)
+
 type parityMetrics struct {
 	// checksTotal counts completed cycles (matched or diverged); skipped
 	// cycles are counted separately by checksSkippedTotal rather than
@@ -42,6 +52,12 @@ type parityMetrics struct {
 	checksSkippedTotal *prometheus.CounterVec
 	// divergenceTotal's "field" is closed to the three fields
 	// nodeparity.Diff reports: protocol_params, stake_distribution, utxo.
+	// Its "reference" says which oracle Dingo was compared against --
+	// cardano_node for check/watch, koios for from-genesis. Without it a
+	// responder reading NodeParityDivergence cannot tell which side to go
+	// look at, and the two references fail in very different ways: a
+	// cardano-node disagreement is a consensus question, a Koios one can
+	// equally be that oracle's own data.
 	divergenceTotal *prometheus.CounterVec
 	// checkErrorsTotal counts Check calls that failed outright (a dial or
 	// query error), as opposed to a completed cycle that found a
@@ -100,8 +116,8 @@ func newParityMetricsIn(
 	}, []string{"reason"})
 	divergenceTotal := factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "node_parity_divergence_total",
-		Help: "Ledger-state divergences found between dingo and cardano-node, by field.",
-	}, []string{"field"})
+		Help: "Ledger-state divergences found between dingo and its reference oracle, by field and reference.",
+	}, []string{"field", "reference"})
 	// A CounterVec exposes no series at all for a label value until
 	// something increments it. NodeParityNotChecking's alert expression
 	// sums rate(checks_skipped_total) into rate(checks_total): if no skip
@@ -117,7 +133,9 @@ func newParityMetricsIn(
 		checksSkippedTotal.WithLabelValues(reason)
 	}
 	for _, field := range []string{"protocol_params", "stake_distribution", "utxo"} {
-		divergenceTotal.WithLabelValues(field)
+		for _, ref := range []string{ReferenceCardanoNode, ReferenceKoios} {
+			divergenceTotal.WithLabelValues(field, ref)
+		}
 	}
 	fullCheckTriggersTotal := factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "node_parity_full_check_triggers_total",
@@ -171,13 +189,13 @@ func (m *parityMetrics) recordCheckError() {
 func (m *parityMetrics) recordCheck(diff nodeparity.Diff) {
 	m.checksTotal.Inc()
 	if diff.ProtocolParamsDiff != "" {
-		m.divergenceTotal.WithLabelValues("protocol_params").Inc()
+		m.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.StakeDistribution) > 0 {
-		m.divergenceTotal.WithLabelValues("stake_distribution").Inc()
+		m.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.UTxO) > 0 {
-		m.divergenceTotal.WithLabelValues("utxo").Inc()
+		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode).Inc()
 	}
 }
 
@@ -199,13 +217,13 @@ func (m *parityMetrics) recordIncrementalBlock(diff nodeparity.Diff) {
 	}
 	m.incrementalMismatchTotal.Inc()
 	if diff.ProtocolParamsDiff != "" {
-		m.divergenceTotal.WithLabelValues("protocol_params").Inc()
+		m.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.StakeDistribution) > 0 {
-		m.divergenceTotal.WithLabelValues("stake_distribution").Inc()
+		m.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode).Inc()
 	}
 	if len(diff.UTxO) > 0 {
-		m.divergenceTotal.WithLabelValues("utxo").Inc()
+		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode).Inc()
 	}
 }
 
