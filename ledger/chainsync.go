@@ -2686,11 +2686,16 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// rollback a peer chose (issue #3766).
 			ls.config.Logger.Error(
 				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"connection_id", e.ConnectionId.String(),
-				"error", err,
+				"component",
+				"ledger",
+				"slot",
+				e.Point.Slot,
+				"hash",
+				hex.EncodeToString(e.Point.Hash),
+				"connection_id",
+				e.ConnectionId.String(),
+				"error",
+				err,
 				"hint",
 				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
 			)
@@ -4566,10 +4571,14 @@ func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
 			if retryErr := ls.restartQueuedBlockfetchAfterForkLocked(*activeConnId, pending); retryErr == nil {
 				ls.config.Logger.Info(
 					"retried blockfetch restart after fork extension on the current active connection",
-					"component", "ledger",
-					"failed_connection_id", failedConnId.String(),
-					"active_connection_id", activeConnId.String(),
-					"error", restartErr,
+					"component",
+					"ledger",
+					"failed_connection_id",
+					failedConnId.String(),
+					"active_connection_id",
+					activeConnId.String(),
+					"error",
+					restartErr,
 				)
 				return
 			}
@@ -4577,9 +4586,12 @@ func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
 	}
 	ls.config.Logger.Warn(
 		"failed to start blockfetch after fork extension, dropping queued headers and requesting chainsync re-sync",
-		"component", "ledger",
-		"error", restartErr,
-		"connection_id", failedConnId.String(),
+		"component",
+		"ledger",
+		"error",
+		restartErr,
+		"connection_id",
+		failedConnId.String(),
 	)
 	ls.clearQueuedHeaders()
 	ls.requestChainsyncResync(
@@ -7054,6 +7066,7 @@ func (ls *LedgerState) processEpochRollover(
 				PrevEpoch:               currentEpoch.EpochId,
 				NewEpoch:                currentEpoch.EpochId + 1,
 				BoundarySlot:            epochStartSlot,
+				PrevEpochStartSlot:      currentEpoch.StartSlot,
 				PParams:                 newPParams,
 				UpdateFn:                currentEra.PParamsUpdateFunc,
 				ConwayGenesis:           conwayGenesis,
