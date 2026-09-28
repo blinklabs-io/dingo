@@ -60,6 +60,10 @@ const (
 // run strict VRF/KES verification at chainsync-header time.
 type headerOnlyBlock struct {
 	header ledger.BlockHeader
+	// peerRelative marks a header verified before it is queued on the local
+	// header chain (peer announcements, chain selection), so "first block of
+	// the chain" is not decidable from local state.
+	peerRelative bool
 }
 
 var (
@@ -166,7 +170,7 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 		return errors.New("nil block header")
 	}
 	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
-		headerOnlyBlock{header: header},
+		headerOnlyBlock{header: header, peerRelative: true},
 		false,
 		false,
 	)
@@ -221,7 +225,7 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 		return errors.New("nil block header")
 	}
 	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
-		headerOnlyBlock{header: header},
+		headerOnlyBlock{header: header, peerRelative: true},
 		false,
 		true,
 	)

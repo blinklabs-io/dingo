@@ -1275,6 +1275,141 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 	require.ErrorContains(t, err, "genesis hash")
 }
 
+// queueByronOriginEbbHeader queues a genesis-anchored epoch 0 EBB header on
+// the chain's header queue without applying any block, the state chainsync
+// leaves behind while it batches headers ahead of blockfetch.
+func queueByronOriginEbbHeader(
+	t *testing.T,
+	primaryChain *chain.Chain,
+	genesisHash lcommon.Blake2b256,
+) *byron.ByronEpochBoundaryBlockHeader {
+	t.Helper()
+	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{PrevBlock: genesisHash}
+	require.NoError(t, primaryChain.AddBlockHeader(ebbHeader))
+	require.Equal(t, 1, primaryChain.HeaderCount())
+	// Only headers are queued: the primary chain tip is still origin.
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+	return ebbHeader
+}
+
+// TestValidateByronPBFTHeaderAcceptsMainBlockAfterQueuedOriginEbb covers a
+// from-genesis sync: chainsync verifies each header before blockfetch applies
+// any block, so the main block after the first EBB is verified while the
+// primary tip is still origin. It chains onto the queued EBB and is not the
+// first block of the chain.
+func TestValidateByronPBFTHeaderAcceptsMainBlockAfterQueuedOriginEbb(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	ebbHeader := queueByronOriginEbbHeader(t, primaryChain, genesisHash)
+
+	mainBlock := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{
+			PrevBlock: ebbHeader.Hash(),
+		},
+	}
+
+	// The unsigned header still fails PBFT verification, but past the
+	// first-block gate.
+	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "epoch-boundary block")
+	require.NotContains(t, err.Error(), "first block")
+}
+
+// TestValidateByronPBFTHeaderKeepsAnchorForQueuedOriginEbb confirms the queued
+// first EBB is still the first block when blockfetch verifies it again: it
+// keeps its epoch 0 and genesis-hash checks.
+func TestValidateByronPBFTHeaderKeepsAnchorForQueuedOriginEbb(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	ebbHeader := queueByronOriginEbbHeader(t, primaryChain, genesisHash)
+	require.NoError(
+		t,
+		ls.validateByronPBFTHeaderCrypto(
+			&byron.ByronEpochBoundaryBlock{BlockHeader: ebbHeader},
+		),
+	)
+
+	badHeader := &byron.ByronEpochBoundaryBlockHeader{
+		PrevBlock: lcommon.Blake2b256Hash([]byte("wrong prev hash")),
+	}
+	err := ls.validateByronPBFTHeaderCrypto(
+		&byron.ByronEpochBoundaryBlock{BlockHeader: badHeader},
+	)
+	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderRejectsMainBlockAfterRollbackDropsQueuedEbb
+// confirms a rollback to origin drops the queued EBB, so a main block is the
+// first block of the chain again and is rejected.
+func TestValidateByronPBFTHeaderRejectsMainBlockAfterRollbackDropsQueuedEbb(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	ebbHeader := queueByronOriginEbbHeader(t, primaryChain, genesisHash)
+	require.NoError(t, primaryChain.RollbackUnbounded(ocommon.Point{}))
+	require.Zero(t, primaryChain.HeaderCount())
+
+	mainBlock := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{
+			PrevBlock: ebbHeader.Hash(),
+		},
+	}
+	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	require.ErrorContains(t, err, "epoch-boundary block")
+}
+
+// TestValidateChainSelectionHeaderCryptoSkipsByronFirstBlockGate covers the
+// peer-relative ingress path: a peer's headers are verified before they reach
+// the local header queue (the ChainsyncEvent that queues the EBB is delivered
+// asynchronously), so neither the primary tip nor the queue can say whether a
+// peer's header is the chain's first. The gate must not fire there; the ledger
+// header-queue path still enforces it.
+func TestValidateChainSelectionHeaderCryptoSkipsByronFirstBlockGate(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	require.Zero(t, primaryChain.HeaderCount())
+	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{PrevBlock: genesisHash}
+	mainHeader := &byron.ByronMainBlockHeader{PrevBlock: ebbHeader.Hash()}
+
+	err := ls.ValidateChainSelectionHeaderCrypto(mainHeader)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "epoch-boundary block")
+	err = ls.ValidateBlockHeaderCrypto(mainHeader)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "epoch-boundary block")
+
+	// The ledger's own header-queue verification keeps the gate.
+	err = ls.verifyBlockHeaderOnlyCrypto(mainHeader)
+	require.ErrorContains(t, err, "epoch-boundary block")
+}
+
 // TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
 // validator with typed-nil headers, the shape a Byron block type can carry
 // in process. It must return an error rather than read through the header.

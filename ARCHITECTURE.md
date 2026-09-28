@@ -506,6 +506,16 @@ sequenceDiagram
     LS->>DB: clear rollback undo outbox after truncation commits
 ```
 
+Byron PBFT header validation decides "first block of a from-genesis chain"
+against the queued header chain (`chain.IsFirstOnHeaderChain`), not the primary
+tip: headers are verified and queued before blockfetch applies any block, so
+the primary tip is still origin for the whole first batch. Only the first
+queued header at an origin primary tip must be an epoch-0 EBB anchored to the
+configured Byron genesis hash. A rollback to origin drops the queue, so the
+rule applies again. Headers verified before they reach the queue (chain
+selection ingress, `ValidateBlockHeaderCrypto`) are peer-relative and skip
+the rule, since the EBB's own queueing event is delivered asynchronously.
+
 An admitted ChainSync rollback atomically refreshes the tracked client's
 cursor, advertised tip, activity, and syncing status before chain selection
 observes it and before the ledger apply gate runs. This bookkeeping does not
