@@ -390,7 +390,11 @@ func buildEndorserBlockBlob(
 		levels := TransactionLevelsForApply(tx)
 		for _, level := range levels {
 			bodyCbor := level.Cbor()
-			if len(bodyCbor) == 0 && len(levels) == 1 {
+			// A transaction without sub-transactions is returned directly by
+			// TransactionLevelsForApply, so Cbor() is its complete envelope.
+			// Store the body range, matching BlockIndexer.TxOffsets and the
+			// transaction hash, just as we do for each adapted batch level.
+			if len(levels) == 1 {
 				bodyCbor = bodyCbors[i]
 			}
 			off, length, err := writeRange(bodyCbor)
