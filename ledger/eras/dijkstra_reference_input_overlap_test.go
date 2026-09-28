@@ -134,6 +134,193 @@ func TestValidateTxDijkstraAllowsSubtransactionSpendReferenceOverlapWithoutPlutu
 	require.NoError(t, ValidateTxDijkstra(tx, 0, state, protocolParams))
 }
 
+func newDijkstraBatchChildControlFixture(
+	t *testing.T,
+) (*gdijkstra.DijkstraTransaction, *mockLedgerState, *gdijkstra.DijkstraProtocolParameters, shelley.ShelleyTransactionInput) {
+	t.Helper()
+	const balance = uint64(10_000_000)
+	topInput := shelley.NewShelleyTransactionInput(
+		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11",
+		0,
+	)
+	childInput := shelley.NewShelleyTransactionInput(
+		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
+		0,
+	)
+	output := gdijkstra.DijkstraTransactionOutput{
+		Output: babbage.BabbageTransactionOutput{
+			OutputAddress: newTestKeyAddress(t),
+			OutputAmount:  mary.MaryTransactionOutputValue{Amount: balance},
+		},
+	}
+	firstChild := gdijkstra.DijkstraSubTransaction{
+		Body: gdijkstra.DijkstraSubTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{childInput},
+			),
+			TxOutputs: []gdijkstra.DijkstraTransactionOutput{output},
+		},
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{topInput},
+			),
+			TxOutputs: []gdijkstra.DijkstraTransactionOutput{output},
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{firstChild},
+				true,
+			),
+		},
+		TxIsValid: true,
+	}
+	state := newMockLedgerState()
+	state.addUtxo(topInput, newTestOutput(balance))
+	state.addUtxo(childInput, newTestOutput(balance))
+	protocolParams := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize:    16_384,
+			MaxValueSize: 5_000,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+		},
+	}
+	return tx, state, protocolParams, childInput
+}
+
+func TestValidateTxDijkstraAllowsSiblingSpendAndReferenceOfOriginalInput(
+	t *testing.T,
+) {
+	t.Parallel()
+	tx, state, protocolParams, childInput := newDijkstraBatchChildControlFixture(t)
+	subTransactions := tx.Body.TxSubTransactions.Items()
+	require.Len(t, subTransactions, 1)
+	secondInput := shelley.NewShelleyTransactionInput(
+		"c228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee33",
+		0,
+	)
+	state.addUtxo(secondInput, newTestOutput(10_000_000))
+	subTransactions = append(subTransactions, gdijkstra.DijkstraSubTransaction{
+		Body: gdijkstra.DijkstraSubTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{secondInput},
+			),
+			TxOutputs: []gdijkstra.DijkstraTransactionOutput{{
+				Output: babbage.BabbageTransactionOutput{
+					OutputAddress: newTestKeyAddress(t),
+					OutputAmount:  mary.MaryTransactionOutputValue{Amount: 10_000_000},
+				},
+			}},
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{childInput},
+				false,
+			),
+		},
+	})
+	tx.Body.TxSubTransactions = cbor.NewSetType(subTransactions, true)
+
+	require.NoError(t, ValidateTxDijkstra(tx, 0, state, protocolParams))
+}
+
+func TestValidateTxDijkstraRejectsChildOutputChaining(t *testing.T) {
+	t.Parallel()
+	t.Run("spend", func(t *testing.T) {
+		tx, state, protocolParams, _ := newDijkstraBatchChildControlFixture(t)
+		firstChild := tx.Body.TxSubTransactions.Items()[0]
+		firstBodyCbor, err := cbor.Encode(firstChild.Body)
+		require.NoError(t, err)
+		firstChild.Body.SetCbor(firstBodyCbor)
+		producedInput := shelley.ShelleyTransactionInput{
+			TxId:        firstChild.Body.Id(),
+			OutputIndex: 0,
+		}
+		secondChild := gdijkstra.DijkstraSubTransaction{
+			Body: gdijkstra.DijkstraSubTransactionBody{
+				TxInputs: conway.NewConwayTransactionInputSet(
+					[]shelley.ShelleyTransactionInput{producedInput},
+				),
+				TxOutputs: firstChild.Body.TxOutputs,
+			},
+		}
+		tx.Body.TxSubTransactions = cbor.NewSetType(
+			[]gdijkstra.DijkstraSubTransaction{firstChild, secondChild},
+			true,
+		)
+
+		err = ValidateTxDijkstra(tx, 0, state, protocolParams)
+		var badInputs shelley.BadInputsUtxoError
+		require.ErrorAs(t, err, &badInputs)
+	})
+	t.Run("reference", func(t *testing.T) {
+		tx, state, protocolParams, _ := newDijkstraBatchChildControlFixture(t)
+		firstChild := tx.Body.TxSubTransactions.Items()[0]
+		firstBodyCbor, err := cbor.Encode(firstChild.Body)
+		require.NoError(t, err)
+		firstChild.Body.SetCbor(firstBodyCbor)
+		producedInput := shelley.ShelleyTransactionInput{
+			TxId:        firstChild.Body.Id(),
+			OutputIndex: 0,
+		}
+		secondInput := shelley.NewShelleyTransactionInput(
+			"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee44",
+			0,
+		)
+		state.addUtxo(secondInput, newTestOutput(10_000_000))
+		secondChild := gdijkstra.DijkstraSubTransaction{
+			Body: gdijkstra.DijkstraSubTransactionBody{
+				TxInputs: conway.NewConwayTransactionInputSet(
+					[]shelley.ShelleyTransactionInput{secondInput},
+				),
+				TxOutputs: []gdijkstra.DijkstraTransactionOutput{{
+					Output: babbage.BabbageTransactionOutput{
+						OutputAddress: newTestKeyAddress(t),
+						OutputAmount:  mary.MaryTransactionOutputValue{Amount: 10_000_000},
+					},
+				}},
+				TxReferenceInputs: cbor.NewSetType(
+					[]shelley.ShelleyTransactionInput{producedInput},
+					false,
+				),
+			},
+		}
+		tx.Body.TxSubTransactions = cbor.NewSetType(
+			[]gdijkstra.DijkstraSubTransaction{firstChild, secondChild},
+			true,
+		)
+
+		err = ValidateTxDijkstra(tx, 0, state, protocolParams)
+		var referenceErr lcommon.ReferenceInputResolutionError
+		require.ErrorAs(t, err, &referenceErr)
+	})
+}
+
+func TestValidateTxDijkstraRejectsDoubleSpendAcrossValidChildren(t *testing.T) {
+	t.Parallel()
+	tx, state, protocolParams, childInput := newDijkstraBatchChildControlFixture(t)
+	firstChild := tx.Body.TxSubTransactions.Items()[0]
+	secondBody := gdijkstra.DijkstraSubTransactionBody{
+		TxInputs: conway.NewConwayTransactionInputSet(
+			[]shelley.ShelleyTransactionInput{childInput},
+		),
+		TxOutputs: firstChild.Body.TxOutputs,
+		Ttl:       1,
+	}
+	tx.Body.TxSubTransactions = cbor.NewSetType(
+		[]gdijkstra.DijkstraSubTransaction{
+			firstChild,
+			{Body: secondBody},
+		},
+		true,
+	)
+	tx.TxIsValid = true
+
+	err := ValidateTxDijkstra(tx, 0, state, protocolParams)
+	var duplicateErr shelley.DuplicateInputError
+	require.ErrorAs(t, err, &duplicateErr)
+	require.Equal(t, "regular", duplicateErr.InputType)
+}
+
 func TestValidateTxDijkstraAllowsSpendReferenceOverlapForPlutusV1AndV2(
 	t *testing.T,
 ) {
@@ -189,6 +376,140 @@ func TestValidateTxDijkstraRejectsSpendReferenceOverlapForPlutusV3(
 	require.ErrorContains(t, ValidateTxDijkstra(tx, 0, state, params), "is also a regular input")
 }
 
+func TestValidateTxDijkstraRejectsSpendReferenceOverlapForPlutusV4(
+	t *testing.T,
+) {
+	t.Parallel()
+	plutusScript := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV4,
+	)
+	tx, state, params := newDijkstraReferenceOverlapScriptTx(
+		t,
+		plutusScript,
+		true,
+	)
+
+	err := ValidateTxDijkstra(tx, 0, state, params)
+	var contextErr conway.ScriptContextConstructionError
+	require.ErrorAs(t, err, &contextErr)
+	require.ErrorContains(t, err, "plutus V4 reference input")
+	require.ErrorContains(t, err, "is also a regular input")
+}
+
+func TestValidateTxDijkstraIgnoresUnusedPlutusV4ReferenceScriptForSpendReferenceOverlap(
+	t *testing.T,
+) {
+	t.Parallel()
+	plutusScript := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV1,
+	)
+	tx, state, params := newDijkstraReferenceOverlapScriptTx(
+		t,
+		plutusScript,
+		false,
+	)
+	v4Script := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV4,
+	).(lcommon.PlutusV4Script)
+	unusedV4Input := shelley.NewShelleyTransactionInput(
+		"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
+		0,
+	)
+	state.addUtxo(unusedV4Input, testAddressScriptOutput{
+		testOutput: newTestOutput(1_000_000),
+		addr:       newTestKeyAddress(t),
+		scriptRef:  v4Script,
+	})
+	tx.Body.TxReferenceInputs = cbor.NewSetType(
+		[]shelley.ShelleyTransactionInput{
+			tx.Body.TxInputs.Items()[0],
+			unusedV4Input,
+		},
+		false,
+	)
+	tx.Body.SetCbor(nil)
+	bodyCbor, err := cbor.Encode(tx.Body)
+	require.NoError(t, err)
+	tx.Body.SetCbor(bodyCbor)
+	seed := make([]byte, ed25519.SeedSize)
+	seed[0] = 0x77
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	txHash := tx.Hash()
+	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+		[]lcommon.VkeyWitness{{
+			Vkey:      publicKey,
+			Signature: ed25519.Sign(privateKey, txHash[:]),
+		}},
+		false,
+	)
+
+	require.NoError(t, ValidateTxDijkstra(tx, 0, state, params))
+}
+
+func TestValidateDijkstraPlutusV4ReferenceOverlapChecksSubtransactions(
+	t *testing.T,
+) {
+	t.Parallel()
+	v4Script := dijkstraReferenceOverlapScript(
+		t,
+		lang.LanguageVersionV4,
+	).(lcommon.PlutusV4Script)
+	input := shelley.NewShelleyTransactionInput(
+		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee66",
+		0,
+	)
+	datum, datumHash := referenceOverlapDatum(t)
+	state := newMockLedgerState()
+	state.networkId = uint(lcommon.AddressNetworkTestnet)
+	state.addUtxo(input, referenceOverlapScriptOutput{
+		testAddressScriptOutput: testAddressScriptOutput{
+			testOutput: newTestOutput(10_000_000),
+			addr:       newTestScriptAddress(t, v4Script),
+			scriptRef:  v4Script,
+		},
+		datumHash: &datumHash,
+	})
+	subTransaction := gdijkstra.DijkstraSubTransaction{
+		Body: gdijkstra.DijkstraSubTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{input},
+			),
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{input},
+				false,
+			),
+		},
+		WitnessSet: gdijkstra.DijkstraTransactionWitnessSet{
+			WsPlutusData: cbor.NewSetType([]lcommon.Datum{datum}, false),
+			WsRedeemers: gdijkstra.DijkstraRedeemers{
+				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+					{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
+						Data:    datum,
+						ExUnits: lcommon.ExUnits{Steps: 1_000_000, Memory: 1_000_000},
+					},
+				},
+			},
+		},
+	}
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{subTransaction},
+				false,
+			),
+		},
+	}
+
+	err := validateDijkstraPlutusV4ReferenceInputOverlap(tx, state)
+	var contextErr conway.ScriptContextConstructionError
+	require.ErrorAs(t, err, &contextErr)
+	require.ErrorContains(t, err, "plutus V4 reference input")
+}
+
 type referenceOverlapScriptOutput struct {
 	testAddressScriptOutput
 	datumHash *lcommon.Blake2b256
@@ -211,6 +532,8 @@ func dijkstraReferenceOverlapScript(
 		return lcommon.PlutusV2Script(scriptBytes)
 	case lang.LanguageVersionV3:
 		return lcommon.PlutusV3Script(scriptBytes)
+	case lang.LanguageVersionV4:
+		return lcommon.PlutusV4Script(scriptBytes)
 	default:
 		t.Fatalf("unsupported overlap test language version %v", version)
 		return nil
@@ -248,15 +571,20 @@ func newDijkstraReferenceOverlapScriptTx(
 	require.NoError(t, err)
 	state := newMockLedgerState()
 	state.networkId = uint(lcommon.AddressNetworkTestnet)
+	var referenceScript lcommon.Script
+	if v4Script, ok := plutusScript.(lcommon.PlutusV4Script); ok {
+		referenceScript = v4Script
+	}
 	state.addUtxo(input, referenceOverlapScriptOutput{
 		testAddressScriptOutput: testAddressScriptOutput{
 			testOutput: newTestOutput(10_000_000),
 			addr:       newTestScriptAddress(t, plutusScript),
+			scriptRef:  referenceScript,
 		},
 		datumHash: &datumHash,
 	})
 	state.addUtxo(collateralInput, testAddressOutput{
-		testOutput: newTestOutput(3_000_000),
+		testOutput: newTestOutput(3_100_000),
 		addr:       collateralAddress,
 	})
 	witnessSet := gdijkstra.DijkstraTransactionWitnessSet{
@@ -290,6 +618,8 @@ func newDijkstraReferenceOverlapScriptTx(
 			[]lcommon.PlutusV3Script{script},
 			false,
 		)
+	case lcommon.PlutusV4Script:
+		languageID = 3
 	default:
 		t.Fatalf("unsupported overlap test script %T", plutusScript)
 	}
@@ -301,15 +631,15 @@ func newDijkstraReferenceOverlapScriptTx(
 			TxOutputs: []gdijkstra.DijkstraTransactionOutput{{
 				Output: babbage.BabbageTransactionOutput{
 					OutputAddress: newTestKeyAddress(t),
-					OutputAmount:  mary.MaryTransactionOutputValue{Amount: 8_000_000},
+					OutputAmount:  mary.MaryTransactionOutputValue{Amount: 7_999_000},
 				},
 			}},
-			TxFee: 2_000_000,
+			TxFee: 2_001_000,
 			TxCollateral: cbor.NewSetType(
 				[]shelley.ShelleyTransactionInput{collateralInput},
 				false,
 			),
-			TxTotalCollateral: 3_000_000,
+			TxTotalCollateral: 3_100_000,
 			TxReferenceInputs: cbor.NewSetType(
 				[]shelley.ShelleyTransactionInput{input},
 				false,
@@ -320,6 +650,7 @@ func newDijkstraReferenceOverlapScriptTx(
 	}
 	params := &gdijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MinFeeRefScriptCostPerByte: &cbor.Rat{Rat: big.NewRat(1, 1)},
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 				Major: gdijkstra.MinProtocolVersionDijkstra,
 			},
@@ -336,9 +667,14 @@ func newDijkstraReferenceOverlapScriptTx(
 				0: defaultMachineCostModel(t, lang.LanguageVersionV1),
 				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
 				2: defaultMachineCostModel(t, lang.LanguageVersionV3),
+				3: defaultMachineCostModel(t, lang.LanguageVersionV4),
 			},
 		},
 		MaxRefScriptSizePerTx: 100_000,
+		RefScriptCostStride:   25_600,
+		RefScriptCostMultiplier: &cbor.Rat{
+			Rat: big.NewRat(6, 5),
+		},
 	}
 	redeemersCbor, err := cbor.Encode(tx.WitnessSet.WsRedeemers.Redeemers)
 	require.NoError(t, err)
@@ -385,15 +721,21 @@ func referenceOverlapFailingScriptBytes(
 	version lang.LanguageVersion,
 ) []byte {
 	t.Helper()
+	uplcVersion := version
+	if version == lang.LanguageVersionV3 || version == lang.LanguageVersionV4 {
+		uplcVersion = [3]uint32{1, 1, 0}
+	}
+	var body syn.Term[syn.DeBruijn] = &syn.Error{}
+	argumentCount := 3
+	if version == lang.LanguageVersionV4 {
+		argumentCount = 1
+	}
+	for range argumentCount {
+		body = &syn.Lambda[syn.DeBruijn]{Body: body}
+	}
 	program := &syn.Program[syn.DeBruijn]{
-		Version: version,
-		Term: &syn.Lambda[syn.DeBruijn]{
-			Body: &syn.Lambda[syn.DeBruijn]{
-				Body: &syn.Lambda[syn.DeBruijn]{
-					Body: &syn.Error{},
-				},
-			},
-		},
+		Version: uplcVersion,
+		Term:    body,
 	}
 	flatProgram, err := syn.Encode(program)
 	require.NoError(t, err)
