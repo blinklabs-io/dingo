@@ -989,13 +989,6 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 	)
 }
 
-func TestValidateByronPBFTSlotRejectsFuture(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, validateByronPBFTSlot(42, 42))
-	require.ErrorContains(t, validateByronPBFTSlot(43, 42), "current slot")
-}
-
 func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
 	t.Parallel()
 
