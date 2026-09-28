@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -302,6 +303,12 @@ func clonePeerChainTip(peerTip *PeerChainTip) *PeerChainTip {
 		result.observedTipHistory = make([]ochainsync.Tip, len(peerTip.observedTipHistory))
 		for i, tip := range peerTip.observedTipHistory {
 			result.observedTipHistory[i] = cloneObservedTip(tip)
+		}
+	}
+	if len(peerTip.admittedTipHistory) > 0 {
+		result.admittedTipHistory = make([]ocommon.Point, len(peerTip.admittedTipHistory))
+		for i, point := range peerTip.admittedTipHistory {
+			result.admittedTipHistory[i] = clonePoint(point)
 		}
 	}
 	return &result
@@ -753,6 +760,7 @@ func (cs *ChainSelector) PreparePeerTipAdmission(
 		return false
 	}
 	var accepted bool
+	commitImmediately := false
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
@@ -801,9 +809,28 @@ func (cs *ChainSelector) PreparePeerTipAdmission(
 			pending = pending[len(pending)-maxPendingPeerTipAdmissions:]
 		}
 		cs.pendingPeerTips[update.ConnectionId] = pending
+		commitImmediately = cs.admittedPeerTipPointLocked(update)
 		accepted = true
 	}()
+	if accepted && commitImmediately {
+		cs.commitPeerTipAdmission(update, true, &update)
+	}
 	return accepted
+}
+
+func (cs *ChainSelector) admittedPeerTipPointLocked(
+	update PeerTipUpdateEvent,
+) bool {
+	point := update.ObservedTip.Point
+	for _, peerTip := range cs.peerTips {
+		for _, admittedPoint := range peerTip.admittedTipHistory {
+			if admittedPoint.Slot == point.Slot &&
+				bytes.Equal(admittedPoint.Hash, point.Hash) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (cs *ChainSelector) latestPeerTipCandidateLocked(
@@ -891,14 +918,67 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 	update PeerTipUpdateEvent,
 ) bool {
 	if update.AdmissionID == 0 {
-		return cs.updatePeerTipObservedPraosView(
+		accepted := cs.updatePeerTipObservedPraosView(
 			update.ConnectionId,
 			update.Tip,
 			update.ObservedTip,
 			update.VRFOutput,
 			update.PraosView,
 		)
+		if !accepted {
+			return false
+		}
+		cs.mutex.Lock()
+		peerTip := cs.peerTips[update.ConnectionId]
+		point := update.ObservedTip.Point
+		if peerTip != nil && peerTip.ObservedTip.Point.Slot == point.Slot &&
+			bytes.Equal(peerTip.ObservedTip.Point.Hash, point.Hash) {
+			peerTip.recordAdmittedTipPoint(point, maxPendingPeerTipAdmissions)
+		}
+		cs.mutex.Unlock()
+		cs.commitMatchingPeerTipAdmissions(update)
+		return true
 	}
+	if !cs.commitPeerTipAdmission(update, false, nil) {
+		return false
+	}
+	cs.mutex.RLock()
+	pointStillAdmitted := cs.admittedPeerTipPointLocked(update)
+	cs.mutex.RUnlock()
+	if pointStillAdmitted {
+		cs.commitMatchingPeerTipAdmissions(update)
+	}
+	return true
+}
+
+func (cs *ChainSelector) commitMatchingPeerTipAdmissions(
+	admitted PeerTipUpdateEvent,
+) {
+	var candidates []PeerTipUpdateEvent
+	func() {
+		cs.mutex.RLock()
+		defer cs.mutex.RUnlock()
+		for _, pending := range cs.pendingPeerTips {
+			for _, candidate := range pending {
+				point := candidate.update.ObservedTip.Point
+				admittedPoint := admitted.ObservedTip.Point
+				if point.Slot == admittedPoint.Slot &&
+					bytes.Equal(point.Hash, admittedPoint.Hash) {
+					candidates = append(candidates, candidate.update)
+				}
+			}
+		}
+	}()
+	for _, candidate := range candidates {
+		cs.commitPeerTipAdmission(candidate, true, &admitted)
+	}
+}
+
+func (cs *ChainSelector) commitPeerTipAdmission(
+	update PeerTipUpdateEvent,
+	requireStaged bool,
+	witness *PeerTipUpdateEvent,
+) bool {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(update.ConnectionId) {
 		return false
@@ -909,6 +989,9 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		if witness != nil && !cs.admittedPeerTipPointLocked(*witness) {
+			return
+		}
 		if update.AdmissionID <= cs.committedPeerTips[update.ConnectionId] {
 			accepted = true
 			return
@@ -931,6 +1014,10 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 				}
 			}
 			cs.applyPeerTipAdmissionUpdateLocked(peerTip, candidate.update)
+			peerTip.recordAdmittedTipPoint(
+				candidate.update.ObservedTip.Point,
+				maxPendingPeerTipAdmissions,
+			)
 			cs.peerTips[update.ConnectionId] = peerTip
 			cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
 			if i == len(pending)-1 {
@@ -972,6 +1059,9 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 		)
 	}
 	if !accepted {
+		if requireStaged {
+			return false
+		}
 		accepted = cs.updatePeerTipObservedPraosView(
 			update.ConnectionId,
 			update.Tip,
@@ -983,6 +1073,12 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 			cs.mutex.Lock()
 			if update.AdmissionID > cs.committedPeerTips[update.ConnectionId] {
 				cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
+			}
+			peerTip := cs.peerTips[update.ConnectionId]
+			point := update.ObservedTip.Point
+			if peerTip != nil && peerTip.ObservedTip.Point.Slot == point.Slot &&
+				bytes.Equal(peerTip.ObservedTip.Point.Hash, point.Hash) {
+				peerTip.recordAdmittedTipPoint(point, maxPendingPeerTipAdmissions)
 			}
 			cs.mutex.Unlock()
 		}

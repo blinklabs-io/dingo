@@ -157,6 +157,88 @@ func TestHandlePeerRollbackClearsPendingTipAdmissions(t *testing.T) {
 	assert.Equal(t, rollbackTip, cs.GetPeerTip(connId).Tip)
 }
 
+func TestCommitPeerTipAdmissionPromotesMatchingPeerCandidates(t *testing.T) {
+	t.Parallel()
+
+	firstConn := newTestConnectionId(23)
+	secondConn := newTestConnectionId(24)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	acceptedPoint := ocommon.Point{Slot: 101, Hash: []byte("accepted-header")}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200, Hash: []byte("remote-tip")},
+		BlockNumber: 200,
+	}
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(localTip)
+
+	first := PeerTipUpdateEvent{
+		ConnectionId: firstConn,
+		AdmissionID:  1,
+		Tip:          advertisedTip,
+		ObservedTip:  ochainsync.Tip{Point: acceptedPoint, BlockNumber: 101},
+	}
+	second := first
+	second.ConnectionId = secondConn
+	second.AdmissionID = 1
+	require.True(t, cs.PreparePeerTipAdmission(first))
+	require.True(t, cs.PreparePeerTipAdmission(second),
+		"the duplicate peer candidate remains staged until the point is admitted")
+	assert.Nil(t, cs.GetPeerTip(secondConn))
+
+	require.True(t, cs.CommitPeerTipAdmission(first))
+	for _, connId := range []ouroboros.ConnectionId{firstConn, secondConn} {
+		peerTip := cs.GetPeerTip(connId)
+		require.NotNil(t, peerTip)
+		assert.Equal(t, acceptedPoint, peerTip.SelectionTip().Point,
+			"an admitted shared point should advance every peer that delivered it")
+	}
+	assert.NotContains(t, cs.pendingPeerTips, secondConn)
+	assert.NotContains(t, cs.pendingPeerTipFrontiers, secondConn)
+}
+
+func TestPreparePeerTipAdmissionPromotesPreviouslyAdmittedPoint(t *testing.T) {
+	t.Parallel()
+
+	firstConn := newTestConnectionId(25)
+	secondConn := newTestConnectionId(26)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	acceptedPoint := ocommon.Point{Slot: 101, Hash: []byte("accepted-header")}
+	update := PeerTipUpdateEvent{
+		ConnectionId: firstConn,
+		AdmissionID:  1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 200, Hash: []byte("remote-tip")},
+			BlockNumber: 200,
+		},
+		ObservedTip: ochainsync.Tip{Point: acceptedPoint, BlockNumber: 101},
+	}
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(localTip)
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	require.True(t, cs.CommitPeerTipAdmission(update))
+
+	update.ConnectionId = secondConn
+	update.AdmissionID = 1
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	peerTip := cs.GetPeerTip(secondConn)
+	require.NotNil(t, peerTip,
+		"a late duplicate should be admitted from the already committed chain history")
+	assert.Equal(t, acceptedPoint, peerTip.SelectionTip().Point)
+	assert.NotContains(t, cs.pendingPeerTips, secondConn)
+}
+
 func TestHandlePeerRollbackDoesNotPromoteAdvertisedTipBeforeHeaderAdmission(
 	t *testing.T,
 ) {
