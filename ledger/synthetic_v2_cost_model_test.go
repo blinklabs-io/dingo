@@ -716,7 +716,7 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 }
 
 // TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams
-// covers blinklabs-io/dingo#3825's PR review (CodeRabbit round): the
+// covers blinklabs-io/dingo#3825's PR review: the
 // synthetic-cost-model marker must be written in the SAME database
 // transaction as the pparams update it describes, not committed
 // separately afterward. If they were in different transactions, a crash

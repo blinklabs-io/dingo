@@ -1914,7 +1914,7 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 // interrupted, so that goroutine (and the worker still running the stuck
 // operation under it) would keep running for the operation's full remaining
 // duration after Shutdown times out and returns, merely relocating the
-// leaked goroutine cubic-dev-ai flagged on PR #3782 rather than removing it.
+// leaked goroutine identified in review on PR #3782 rather than removing it.
 // The current implementation tracks in-flight operations with a
 // mutex-guarded counter and a drained channel Shutdown selects directly, so
 // no goroutine is ever spawned by the timeout path.

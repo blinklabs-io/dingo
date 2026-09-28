@@ -1075,7 +1075,7 @@ func (o *Ouroboros) restoreLeiosVerifiedEbSlot() {
 // external vote/pipeline/persistence handlers, and running those under a
 // mutex shared by every concurrent announcement would stall them all for the
 // duration of a slow handler, or deadlock one that re-enters announcement
-// recording (cubic review). Callers with nothing else held (the backfill
+// recording (review). Callers with nothing else held (the backfill
 // paths in leios_backfill.go) can just call the closure immediately.
 func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 	ebHash []byte,

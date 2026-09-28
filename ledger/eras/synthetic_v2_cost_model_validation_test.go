@@ -343,7 +343,7 @@ func TestEvaluateTxConwayRejectsPlutusV2WhenSynthetic(t *testing.T) {
 }
 
 // TestValidateTxConwayRejectsPlutusV2WhenSyntheticEvenIfDeclaredInvalid
-// covers a gap CodeRabbit flagged in review: validatePlutusOutcome
+// covers a gap found in review: validatePlutusOutcome
 // (ledger/eras/validation.go) treats a failed script as the expected,
 // acceptable outcome for a transaction declared invalid -- but only when
 // the phase-2 error is a conway.PlutusScriptFailedError specifically.

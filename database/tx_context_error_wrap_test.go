@@ -97,7 +97,7 @@ func (e *erroringMetadata) SetTransactionBatched(
 // or the errors.Is chain, this test fails loudly. If a production message
 // drifts (e.g. "batch idx" → "batch index"), this test fails loudly.
 //
-// (Addresses PR #2982 coderabbit review: prior version constructed
+// (Addresses PR #2982: prior version constructed
 // fmt.Errorf calls that mirrored the production strings, so drift in the
 // production strings could not be detected.)
 func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {

@@ -326,7 +326,7 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 // Txn (t.Blob() == nil) but needs blob access for a rare fallback path --
 // currently only ResolveUtxoCborWithRecovery's call into
 // utxoRecoveryBlockForTx/recoverUtxoCbor, which fetches the producing
-// block's raw CBOR from the blob store (cubic review: this case was
+// block's raw CBOR from the blob store (review: this case was
 // previously left with no blob handle at all, so BlockByPointTxn returned
 // ErrNilTxn instead of reconstructing the CBOR).
 //
@@ -344,7 +344,7 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 // aug.metadataTxn, on the other hand, *is* borrowed from t -- the mirror
 // image of withMetadataForRecovery's borrowed blobTxn, marked
 // sharedMetadata for the identical reason: Commit/rollback must not act
-// on a metadata handle this Txn doesn't own (cubic review: an earlier
+// on a metadata handle this Txn doesn't own (review: an earlier
 // version of this function left sharedMetadata unset, so releasing aug
 // rolled back -- and so finished -- t's own metadata transaction,
 // discarding a write-capable caller's uncommitted metadata as a side
@@ -833,7 +833,7 @@ func (t *Txn) Commit() error {
 	// Commit metadata transaction. Guarded by !t.sharedMetadata for the
 	// same ownership reason as the blob-commit guard above: committing a
 	// borrowed metadataTxn here would commit its owner's transaction out
-	// from under it (cubic review; withBlobForRecovery).
+	// from under it (review; withBlobForRecovery).
 	if t.metadataTxn != nil && !t.sharedMetadata {
 		if err := t.metadataTxn.Commit(); err != nil {
 			_ = t.metadataTxn.Rollback()

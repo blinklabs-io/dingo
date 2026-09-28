@@ -1488,7 +1488,7 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 	require.Empty(t, retiring)
 }
 
-// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
+// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the
 // review finding on ledgerstate/utxo.go: the indefinite-length UTxO map's
 // running entry-count check can only reject entry `limit`+1 after earlier
 // batches have already been streamed to the UTxO callback and committed to

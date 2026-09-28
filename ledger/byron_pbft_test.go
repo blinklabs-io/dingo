@@ -1136,7 +1136,7 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "genesis hash")
 }
 
-// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a review
 // finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
 // (derived from ConsensusData.Epoch) are independent fields.
 // chain.firstBlockNumberValid only constrains the former, and

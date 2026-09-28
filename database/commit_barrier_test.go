@@ -333,7 +333,7 @@ func (c *controlledCtx) setErr(err error) {
 }
 
 // TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace guards
-// against a real race cubic-dev-ai flagged in review: lockContext's
+// against a race identified in review: lockContext's
 // reader-drain loop can be woken either by ctx being cancelled or by the
 // last reader releasing, and those two events can land at essentially
 // the same instant. If the reader-release case wins that race, the

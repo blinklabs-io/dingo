@@ -180,7 +180,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 }
 
 // TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery is the
-// regression test for a cubic review finding on PR #4084: the mirror image
+// regression test for a review finding on PR #4084: the mirror image
 // of the blob-only case above. A metadata-only Txn (Blob() == nil) hitting
 // a missing blob was passed straight into recoverUtxoCbor with no blob
 // handle at all, so utxoRecoveryBlockForTx's block lookup
@@ -255,7 +255,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 }
 
 // TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
-// is the regression test for a cubic review finding on PR #4084:
+// is the regression test for a review finding on PR #4084:
 // withBlobForRecovery copied t.readWrite into aug.readWrite, so a
 // write-capable metadata-only caller made aug's freshly-opened blobTxn
 // write-capable too. repairUtxoBlob then took its "use the caller's own
@@ -441,7 +441,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 }
 
 // TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTxn
-// is the regression test for a cubic review finding on PR #4084:
+// is the regression test for a review finding on PR #4084:
 // withBlobForRecovery's aug borrows the caller's metadataTxn (the mirror
 // image of withMetadataForRecovery's borrowed blobTxn) but an earlier
 // version left sharedMetadata unset. Releasing aug after recovery then
@@ -451,7 +451,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 // uncommitted metadata writes to that premature rollback, but this
 // test's caller (metadataOnlyTxn) is read-only and writes nothing through
 // it, so it does not exercise that loss -- only the narrower property
-// below (cubic review: an earlier version of this comment described the
+// below (review: an earlier version of this comment described the
 // write-loss case as if this test's read-only setup demonstrated it).
 //
 // Proves the caller's own metadata handle is still usable after recovery

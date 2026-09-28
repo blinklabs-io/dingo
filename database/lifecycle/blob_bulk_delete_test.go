@@ -317,7 +317,7 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 }
 
 // TestDeleteBlocksAfterSkipsSparseGapWithoutPerIDLookups guards against
-// cubic-dev-ai finding #2: the original loop probed every numeric ID in
+// review finding #2: the original loop probed every numeric ID in
 // (afterID, tipID] one at a time (via db.BlockByIndex, one blob Get per
 // ID), so a Mithril-bootstrap-style sparse gap of unimported IDs turned a
 // small deletion into one remote lookup per absent ID -- for a
@@ -863,7 +863,7 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 }
 
 // TestDeleteBlocksAfterHonestlyReportsProgressOnCloudLikeMidBatchFailureAndResumeIsSafe
-// guards against cubic-dev-ai finding #1: for a cloud-backed blob store
+// guards against review finding #1: for a cloud-backed blob store
 // (GCS/S3), individual Delete calls are not rollback-able -- once issued,
 // they are permanent regardless of what happens to the rest of the batch
 // afterward (see gcsTxn/s3Txn's Commit/Rollback, both no-ops). The

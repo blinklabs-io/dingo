@@ -238,7 +238,7 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 		"a recovered worker panic must be identifiable via "+
 			"errors.Is(err, database.ErrTxnPanic), matching the "+
 			"sequential implementation's Txn.Do recovery contract "+
-			"(cubic review)",
+			"(review)",
 	)
 }
 
@@ -253,7 +253,7 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 // Every seeded row is otherwise identical and independently resolvable
 // (no single row is "the" unrecoverable one): whichever row a worker
 // happens to reach first fails immediately, and every row reached after
-// that is slow but succeeds. This is deliberate, per a cubic review
+// that is slow but succeeds. This is deliberate, per a review
 // finding on an earlier version of this test that keyed the failure to a
 // specific seeded row: IterateLiveUtxos issues its live-row scan with no
 // ORDER BY, so which row a database iteration visits first is
@@ -299,7 +299,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 		// internal done channel, so nothing here depends on decode
 		// speed or on a hand-tuned sleep duration that could silently
 		// stop covering this if utxoWholeResolveWorkers or decode cost
-		// ever changed (cubic review).
+		// ever changed (review).
 		<-release
 		decodedCount.Add(1)
 		return decodeUtxoWholeCbor(ref, cborBytes)

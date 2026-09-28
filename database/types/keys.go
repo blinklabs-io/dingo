@@ -186,7 +186,7 @@ func LeiosEBTxsKey(hash []byte, slot uint64) []byte {
 // now part of the key). Superseded by LeiosEBManifestKey; kept only so a
 // node upgrading from before the key format changed can still read data
 // persisted under the old format instead of it becoming silently
-// unreachable (cubic review).
+// unreachable (review).
 func LegacyLeiosEBManifestKey(hash []byte) []byte {
 	key := make([]byte, 0, len(LeiosEBManifestKeyPrefix)+len(hash))
 	key = append(key, LeiosEBManifestKeyPrefix...)

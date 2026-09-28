@@ -1341,8 +1341,8 @@ func (t *swapDirOnDownloadCompleteTransport) RoundTrip(
 }
 
 // TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload is the
-// regression test for the residual TOCTOU CodeRabbit and a human reviewer
-// flagged on PR #3303: DownloadSnapshot's own directory hardening protects
+// regression test for the residual TOCTOU issue raised on PR #3303:
+// DownloadSnapshot's own directory hardening protects
 // the download itself, but fetchImmutableArchive used to reopen the
 // downloaded archive by joining archiveDir -- a bare path -- with the
 // filename for extraction, and again to remove it afterward. Swapping

@@ -4841,7 +4841,7 @@ func TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity(
 }
 
 // TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable
-// covers a CodeRabbit finding on this PR: when CommitteeStateAvailable
+// covers a review finding on this PR: when CommitteeStateAvailable
 // reports false (e.g. a genesis committee member Dingo does not persist,
 // blinklabs-io/dingo#3785), every certificate for that credential takes the
 // non-authoritative continue branch. That branch must still consult and

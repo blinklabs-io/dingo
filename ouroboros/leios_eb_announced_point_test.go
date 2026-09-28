@@ -96,7 +96,7 @@ func recordTestLeiosAnnouncement(
 // error-returning twin, for use from a worker goroutine: require's t.FailNow
 // is documented as unsafe to call from any goroutine other than the one
 // running the test function, so a concurrent caller must collect the error
-// and assert on it back on the test goroutine instead (cubic review).
+// and assert on it back on the test goroutine instead (review).
 func recordTestLeiosAnnouncementNoFail(o *Ouroboros, headerRaw []byte) error {
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
 	if err != nil {
@@ -699,7 +699,7 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 	// Collected here rather than asserted inside the goroutines below: require
 	// (and t.FailNow, which it calls on failure) is documented as unsafe to
 	// invoke from any goroutine other than the one running the test function
-	// (cubic review).
+	// (review).
 	announceErrs := make([]error, n)
 	var wg sync.WaitGroup
 	wg.Add(2 * n)
@@ -1061,7 +1061,7 @@ func (l *lockProbingVoteHandler) HandleEndorserBlock(
 // that lock would then deadlock. The goroutine here is bounded by a timeout
 // so a regression shows up as a clean test failure rather than a hung test
 // binary; recordTestLeiosAnnouncementNoFail (not recordTestLeiosAnnouncement)
-// keeps require calls off that goroutine (cubic review).
+// keeps require calls off that goroutine (review).
 func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 	t *testing.T,
 ) {

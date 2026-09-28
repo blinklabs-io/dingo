@@ -113,7 +113,7 @@ func TestReplacedConnectionCloseDoesNotPublishStaleEvent(t *testing.T) {
 }
 
 // TestSameDirectionCollisionNotifiesEvictedConnection reproduces a gap a
-// CodeRabbit review of issue #3508's fix identified: a connection evicted by
+// automated review of issue #3508's fix identified: a connection evicted by
 // a same-direction ConnectionId collision is closed directly by
 // addConnectionImpl, so its own error-watcher goroutine never observes a
 // live ErrorChan send -- and even if it did, RemoveConnection would already

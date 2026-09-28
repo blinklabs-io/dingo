@@ -182,7 +182,7 @@ func decodeDijkstraParamUpdateFromRawFields(
 }
 
 // TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14
-// is the CodeRabbit-flagged case on PR #4699: a decoded ParamUpdate whose
+// is the review-flagged case on PR #4699: a decoded ParamUpdate whose
 // raw CBOR carries key 14 with an explicit null value decodes ProtocolVersion
 // to the same nil the field takes when key 14 is absent entirely, so the
 // decoded-pointer check alone cannot reject it. The reference rejects a
