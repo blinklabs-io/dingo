@@ -12643,20 +12643,23 @@ func (ls *LedgerState) withTxValidationSession(
 			delta := NewLedgerDelta(point, eraID, blockNumber)
 			delta.addTransaction(tx, index)
 			defer delta.Release()
-			txHash := tx.Hash().Bytes()
-			var txHashArray [32]byte
-			copy(txHashArray[:], txHash)
 			offset := database.CborOffset{BlockSlot: point.Slot}
 			copy(offset.BlockHash[:], point.Hash)
 			utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
-			for _, utxo := range tx.Produced() {
-				utxoOffsets[database.UtxoRef{
-					TxId:      txHashArray,
-					OutputIdx: utxo.Id.Index(),
-				}] = offset
+			txOffsets := make(map[[32]byte]database.CborOffset)
+			for _, level := range TransactionLevelsForApply(tx) {
+				var levelHash [32]byte
+				copy(levelHash[:], level.Hash().Bytes())
+				txOffsets[levelHash] = offset
+				for _, utxo := range level.Produced() {
+					utxoOffsets[database.UtxoRef{
+						TxId:      levelHash,
+						OutputIdx: utxo.Id.Index(),
+					}] = offset
+				}
 			}
 			delta.Offsets = &database.BlockIngestionResult{
-				TxOffsets:   map[[32]byte]database.CborOffset{txHashArray: offset},
+				TxOffsets:   txOffsets,
 				UtxoOffsets: utxoOffsets,
 			}
 			return delta.applyWithoutRecordingDonations(ls, txn)

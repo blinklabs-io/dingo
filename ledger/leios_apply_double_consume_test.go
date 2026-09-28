@@ -87,6 +87,46 @@ func leiosApplyTestTxFromBody(
 	return cbor.RawMessage(txCbor), tx
 }
 
+func TestBuildEndorserBlockBlobIndexesDijkstraBatchLevels(t *testing.T) {
+	t.Parallel()
+
+	tx := &dijkstra.DijkstraTransaction{
+		Body: dijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]dijkstra.DijkstraSubTransaction{{
+					Body: dijkstra.DijkstraSubTransactionBody{},
+				}},
+				true,
+			),
+		},
+		TxIsValid: true,
+	}
+	txCbor, err := tx.MarshalCBOR()
+	require.NoError(t, err)
+	tx, err = dijkstra.NewDijkstraTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	levels := TransactionLevelsForApply(tx)
+	require.Len(t, levels, 2)
+
+	blob, offsets, err := buildEndorserBlockBlob(
+		[]lcommon.Transaction{tx},
+		[][]byte{txCbor},
+		42,
+		[32]byte(bytes.Repeat([]byte{0x42}, 32)),
+	)
+	require.NoError(t, err)
+	require.Len(t, offsets.TxOffsets, len(levels))
+	for _, level := range levels {
+		var hash [32]byte
+		copy(hash[:], level.Hash().Bytes())
+		offset, ok := offsets.TxOffsets[hash]
+		require.True(t, ok)
+		end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
+		require.LessOrEqual(t, end, uint64(len(blob)))
+		require.Equal(t, level.Cbor(), blob[offset.ByteOffset:end])
+	}
+}
+
 // leiosApplyTestApplyEndorserBlock applies one endorser block in its own
 // database transaction, mirroring how ledgerProcessBlock applies the certified
 // closure ahead of the ranking block's own transactions.
