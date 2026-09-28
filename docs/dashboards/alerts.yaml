@@ -29,8 +29,13 @@ groups:
           description: "Node {{ $labels.instance }} on {{ $labels.network }}: zero outgoing connections for 5+ minutes. Node cannot sync."
 
   # node-parity (blinklabs-io/dingo#1900): cross-node ledger-state
-  # comparison against a reference cardano-node. See cmd/node-parity and
-  # docs/dashboards/prometheus.yaml's node-parity/cardano-node-reference jobs.
+  # comparison. check/watch compare against a reference cardano-node;
+  # from-genesis compares a replay against Koios. The two run at very
+  # different cadences -- a check per block against an epoch that can take
+  # tens of minutes -- so their liveness rules are separate below, and the
+  # counters they read are separate too (see cmd/node-parity/metrics.go).
+  # See docs/dashboards/prometheus.yaml's node-parity and
+  # cardano-node-reference jobs.
   - name: node-parity
     rules:
       - alert: NodeParityDivergence
@@ -93,6 +98,17 @@ groups:
           description: "Prometheus has not been able to scrape {{ $labels.instance }} (job node-parity) for 5+ minutes."
 
       - alert: NodeParityNotChecking
+        # check/watch only. from-genesis registers none of the three
+        # counters below (it has its own -- see
+        # NodeParityFromGenesisStalled), so this expression finds no series
+        # for a from-genesis instance and cannot fire against one. That is
+        # deliberate: from-genesis records one epoch every few minutes to
+        # hours, growing with the UTxO set it reconstructs, and folding it
+        # into a rule whose window is sized for block cadence reported a
+        # healthy replay as stuck. Measured on a preview replay, the
+        # per-epoch gap reached a 10.5 min median by epoch 1100 against the
+        # 15 min this rule tolerates.
+        #
         # watch is block-triggered (a check fires the moment either node's
         # tip changes), with --fallback-interval (default 2m) as a backstop
         # if a watcher's subscription silently stalls -- so real activity
@@ -151,3 +167,52 @@ groups:
         annotations:
           summary: "node-parity checks are failing on {{ $labels.network }}"
           description: "{{ $labels.instance }} (job node-parity) has logged check errors (dial or query failures) for 5+ minutes -- verify --dingo-addr/--cardano-addr and that both nodes are reachable."
+
+      - alert: NodeParityFromGenesisStalled
+        # from-genesis's liveness signal, deliberately separate from
+        # NodeParityNotChecking: one epoch is minutes to hours of work, not
+        # one block. Sums epochs that reached a verdict with checks that
+        # could not run, for the same reason the watch rule sums its three
+        # counters -- a stretch where Koios is unreachable is degraded, not
+        # dead, and must not look identical to a stopped replay.
+        #
+        # The [2h] window is sized for the slow end of a real replay rather
+        # than its median. A preview replay measured a 4.8 min median epoch
+        # gap overall and 10.5 min past epoch 1100, rising with the UTxO
+        # set; 2h leaves room for that growth and for preprod, at the cost
+        # of taking that long to notice a genuine stall. A replay is a
+        # multi-day job, so that trade favours not crying wolf.
+        expr: |
+          (
+            rate(node_parity_epochs_total{network=~".+"}[2h])
+            + sum without (field) (rate(node_parity_epoch_checks_incomplete_total{network=~".+"}[2h]))
+          ) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity from-genesis has stopped advancing on {{ $labels.network }}"
+          description: "{{ $labels.instance }} (job node-parity) has recorded no from-genesis epoch, verified or incomplete, in the last 2 hours -- the replay is stalled rather than merely slow."
+
+      - alert: NodeParityFromGenesisNotVerifying
+        # The gap this closes: before from-genesis had its own counters, an
+        # unavailable reference incremented the skip counter, which the
+        # liveness rule read as healthy activity, while check_errors_total
+        # -- which from-genesis never touches -- stayed flat. A permanently
+        # unreachable Koios therefore produced no divergence alert and no
+        # error alert, and the run looked fine while verifying nothing.
+        #
+        # Requires BOTH halves: checks are being attempted and failing, and
+        # no epoch has reached a verdict in the same window. Either alone is
+        # ordinary -- isolated Koios 504s are routine on a long replay, and
+        # a quiet window with no incompletes is just a slow epoch.
+        expr: |
+          sum without (field) (rate(node_parity_epoch_checks_incomplete_total{network=~".+"}[2h])) > 0
+          and
+          rate(node_parity_epochs_total{network=~".+"}[2h]) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity from-genesis is verifying nothing on {{ $labels.network }}"
+          description: "{{ $labels.instance }} (job node-parity) is still attempting from-genesis checks but none has reached a trustworthy verdict in 2 hours -- most likely the Koios reference is unavailable, so the replay is advancing without validating anything."

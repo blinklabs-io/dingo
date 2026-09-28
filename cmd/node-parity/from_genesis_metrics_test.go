@@ -29,10 +29,12 @@ import (
 // countersWithMetrics returns a fromGenesisCounters wired to a metrics set
 // registered into a private registry, so each test asserts on its own
 // series rather than on process-global state.
-func countersWithMetrics(t *testing.T) (*fromGenesisCounters, *parityMetrics) {
+func countersWithMetrics(
+	t *testing.T,
+) (*fromGenesisCounters, *fromGenesisMetrics) {
 	t.Helper()
 	reg := prometheus.NewRegistry()
-	m := newParityMetricsIn("preview", reg)
+	m := newFromGenesisMetricsIn("preview", reg)
 	return &fromGenesisCounters{metrics: m}, m
 }
 
@@ -100,11 +102,11 @@ func TestRecordEpochRecordsDivergenceMetrics(t *testing.T) {
 	})
 }
 
-// TestRecordEpochRecordsSkipMetrics pins that a check which could not be
-// trusted lands in checksSkippedTotal rather than divergenceTotal. The
-// distinction is the point: "Koios was unreachable" and "Dingo answered the
-// wrong value" must not page identically.
-func TestRecordEpochRecordsSkipMetrics(t *testing.T) {
+// TestRecordEpochRecordsIncompleteMetrics pins that a check which could not
+// be trusted lands in epochChecksIncompleteTotal{field} rather than
+// divergenceTotal. The distinction is the point: "Koios was unreachable" and
+// "Dingo answered the wrong value" must not page identically.
+func TestRecordEpochRecordsIncompleteMetrics(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.DiscardHandler)
 	c, m := countersWithMetrics(t)
@@ -117,21 +119,19 @@ func TestRecordEpochRecordsSkipMetrics(t *testing.T) {
 		UTxOErr:           errors.New("tx_info fetch failed"),
 	}, logger)
 
-	for _, reason := range []string{
-		"protocol_params", "stake_distribution", "utxo",
-	} {
+	for _, field := range fromGenesisFields {
 		require.InDelta(t, 1.0, testutil.ToFloat64(
-			m.checksSkippedTotal.WithLabelValues(reason),
-		), 0.001, "an untrusted %s check must count as skipped", reason)
+			m.epochChecksIncompleteTotal.WithLabelValues(field),
+		), 0.001, "an untrusted %s check must count as incomplete", field)
 		require.InDelta(t, 0.0, testutil.ToFloat64(
-			m.divergenceTotal.WithLabelValues(reason, ReferenceKoios),
-		), 0.001, "an untrusted %s check must NOT count as a divergence", reason)
+			m.divergenceTotal.WithLabelValues(field, ReferenceKoios),
+		), 0.001, "an untrusted %s check must NOT count as a divergence", field)
 	}
 }
 
-// TestRecordEpochCountsEveryEpoch pins that checksTotal advances once per
-// epoch regardless of verdict, so NodeParityNotChecking can tell a stalled
-// run from a quiet one.
+// TestRecordEpochCountsEveryEpoch pins that epochsTotal advances once per
+// epoch that reached a verdict, so a liveness rule can tell a stalled replay
+// from a quiet one.
 func TestRecordEpochCountsEveryEpoch(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.DiscardHandler)
@@ -144,7 +144,7 @@ func TestRecordEpochCountsEveryEpoch(t *testing.T) {
 	}
 
 	require.Equal(t, 3, c.epochsChecked)
-	require.InDelta(t, 3.0, testutil.ToFloat64(m.checksTotal), 0.001)
+	require.InDelta(t, 3.0, testutil.ToFloat64(m.epochsTotal), 0.001)
 }
 
 // TestRecordEpochWithoutMetricsDoesNotPanic pins the nil-metrics path: a
@@ -169,11 +169,10 @@ func TestRecordEpochWithoutMetricsDoesNotPanic(t *testing.T) {
 }
 
 // TestRecordEpochDoesNotCountAWhollyIncompleteEpoch pins CodeRabbit's
-// finding on #4771: checksTotal counts COMPLETED cycles (see its doc
-// comment in metrics.go), so an epoch whose every check was untrusted
-// completed nothing and must not be folded in as a false "matched" -- that
-// would inflate the denominator NodeParityNotChecking reasons about, making
-// a wholly-degraded run look like a working one.
+// finding on #4771: an epoch whose every check was untrusted verified
+// nothing, so folding it into epochsTotal would inflate the count an
+// operator reads as "epochs actually validated" and make a wholly-degraded
+// run look like a working one.
 func TestRecordEpochDoesNotCountAWhollyIncompleteEpoch(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.DiscardHandler)
@@ -187,8 +186,8 @@ func TestRecordEpochDoesNotCountAWhollyIncompleteEpoch(t *testing.T) {
 		UTxOAttempted:     true,
 		UTxOErr:           errors.New("tx_info fetch failed"),
 	}, logger)
-	require.InDelta(t, 0.0, testutil.ToFloat64(m.checksTotal), 0.001,
-		"an epoch with no trustworthy verdict must not count as a completed cycle")
+	require.InDelta(t, 0.0, testutil.ToFloat64(m.epochsTotal), 0.001,
+		"an epoch with no trustworthy verdict must not count as validated")
 
 	// A partially-degraded epoch still completed something, so it counts.
 	c.recordEpoch(nodeparity.EpochResult{
@@ -196,7 +195,7 @@ func TestRecordEpochDoesNotCountAWhollyIncompleteEpoch(t *testing.T) {
 		StakeErr:      errors.New("koios unreachable"),
 		UTxOAttempted: true,
 	}, logger)
-	require.InDelta(t, 1.0, testutil.ToFloat64(m.checksTotal), 0.001,
+	require.InDelta(t, 1.0, testutil.ToFloat64(m.epochsTotal), 0.001,
 		"an epoch where at least one check reached a verdict must count")
 }
 
@@ -220,4 +219,68 @@ func TestRecordDivergenceIdentifiesKoiosAsTheReference(t *testing.T) {
 	require.InDelta(t, 0.0, testutil.ToFloat64(
 		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode),
 	), 0.001, "it must not be attributed to cardano-node")
+}
+
+// TestFromGenesisMetricsRegistersNoWatchCounters is the regression test for
+// the review finding on #4771 that from-genesis would false-alert.
+//
+// NodeParityNotChecking fires when checks_total, checks_skipped_total and
+// check_errors_total are all flat for 10 minutes. from-genesis records one
+// epoch every few minutes to hours -- measured at a 10.5 min median past
+// preview epoch 1100 and rising with the UTxO set -- so as long as it shares
+// those series, a healthy replay reads as a dead tool. Exposing them at a
+// constant zero is just as bad as incrementing them too slowly, since a zero
+// series is exactly what that rule matches on.
+//
+// Reverting from-genesis to newParityMetricsIn fails this test on the first
+// forbidden name.
+func TestFromGenesisMetricsRegistersNoWatchCounters(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	newFromGenesisMetricsIn("preview", reg)
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	got := make(map[string]bool, len(families))
+	for _, f := range families {
+		got[f.GetName()] = true
+	}
+
+	for _, name := range []string{
+		"node_parity_checks_total",
+		"node_parity_checks_skipped_total",
+		"node_parity_check_errors_total",
+	} {
+		require.False(t, got[name],
+			"from-genesis must not register %s: NodeParityNotChecking is "+
+				"sized for watch's per-block cadence and would fire on a "+
+				"healthy replay", name)
+	}
+	for _, name := range []string{
+		"node_parity_epochs_total",
+		"node_parity_epoch_checks_incomplete_total",
+		"node_parity_divergence_total",
+	} {
+		require.True(t, got[name], "from-genesis must register %s", name)
+	}
+}
+
+// TestFromGenesisMetricsPreMaterializesZeroSeries pins that every field
+// label exists from process start. A CounterVec exposes no series until
+// something increments it, and NodeParityFromGenesisNotVerifying joins two
+// vectors with "and" -- a label missing from either side drops the whole
+// comparison, so an alert on a never-yet-incremented field could never fire.
+func TestFromGenesisMetricsPreMaterializesZeroSeries(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := newFromGenesisMetricsIn("preview", reg)
+
+	for _, field := range fromGenesisFields {
+		require.InDelta(t, 0.0, testutil.ToFloat64(
+			m.epochChecksIncompleteTotal.WithLabelValues(field),
+		), 0.001, "%s must expose a zero sample before anything increments it", field)
+		require.InDelta(t, 0.0, testutil.ToFloat64(
+			m.divergenceTotal.WithLabelValues(field, ReferenceKoios),
+		), 0.001, "%s divergence must expose a zero sample too", field)
+	}
 }

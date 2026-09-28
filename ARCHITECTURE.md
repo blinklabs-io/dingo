@@ -10848,12 +10848,43 @@ responds would otherwise leave `Check` (and so `watch`'s shutdown) blocked
 indefinitely. `internal/nodeparity/watch.go`'s `watchSession` applies the
 same pattern independently for its own persistent ChainSync connections.
 
-**Metrics:** `node_parity_checks_total`, `node_parity_checks_skipped_total{reason}`
+**Metrics:** `check`/`watch` and `from-genesis` register separate counter
+sets, because they measure different things at cadences three orders of
+magnitude apart -- a check per block against an epoch that can take tens of
+minutes. Sharing one set made `NodeParityNotChecking`, whose window is sized
+for block cadence, report a healthy replay as a stalled tool: a preview
+replay's per-epoch gap reached a 10.5 min median by epoch 1100, against the
+15 min that rule tolerates, and rises with the UTxO set being reconstructed.
+`from-genesis` therefore registers none of `checks_total`,
+`checks_skipped_total` or `check_errors_total` -- not even at zero, since a
+zero series is what that rule matches on -- and has its own liveness rules,
+`NodeParityFromGenesisStalled` and `NodeParityFromGenesisNotVerifying`.
+
+`from-genesis` records `node_parity_epochs_total` (epochs where at least one
+check reached a trustworthy verdict; an epoch whose every check was untrusted
+verified nothing and is not counted) and
+`node_parity_epoch_checks_incomplete_total{field}` (`field`:
+`protocol_params`/`stake_distribution`/`utxo` -- a check that could not be
+trusted, most often the Koios reference being unavailable). The second is
+deliberately not `checks_skipped_total`: that metric's `reason` means a whole
+cycle discarded by the tip sandwich, which `from-genesis` has no equivalent
+of, and folding per-field failures into it both broke the label's contract
+and counted one degraded epoch as up to three discarded cycles.
+`NodeParityFromGenesisNotVerifying` pairs the two -- checks being attempted
+and failing while no epoch reaches a verdict -- which is the case a
+permanently unreachable Koios produces and which previously raised no alert
+at all.
+
+`check`/`watch` register `node_parity_checks_total`,
+`node_parity_checks_skipped_total{reason}`
 (`reason`: `tip_mismatch`),
 `node_parity_divergence_total{field,reference}` (`field`: `protocol_params`/
 `stake_distribution`/`utxo`; `reference`: `cardano_node` for `check`/`watch`,
 `koios` for `from-genesis`, so an alert names the oracle that disagreed
-rather than assuming cardano-node), and `node_parity_check_errors_total` (a Check
+rather than assuming cardano-node -- this one series is shared by both
+counter sets on purpose, since a divergence is a divergence whichever mode
+found it and the alert rules key on this name), and
+`node_parity_check_errors_total` (a Check
 call that failed outright -- a dial or query error -- as opposed to a
 completed or skipped cycle; counted separately so a persistently
 misconfigured address, which never increments the other two counters

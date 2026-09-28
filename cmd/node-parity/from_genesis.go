@@ -112,7 +112,7 @@ type fromGenesisCounters struct {
 	// node_parity_divergence_total -- could never see a from-genesis run.
 	// Recording here rather than at the call site keeps the counter and
 	// the metric incrementing from the same branch, so they cannot drift.
-	metrics *parityMetrics
+	metrics *fromGenesisMetrics
 }
 
 // recordDivergence increments the same divergenceTotal{field} series a
@@ -128,13 +128,15 @@ func (c *fromGenesisCounters) recordDivergence(field string) {
 	}
 }
 
-// recordIncomplete increments checksSkippedTotal{reason} for a check that
-// could not be trusted. Kept distinct from a divergence: "Koios was
+// recordIncomplete increments epochChecksIncompleteTotal{field} for a check
+// that could not be trusted. Kept distinct from a divergence: "Koios was
 // unreachable" and "Dingo answered the wrong value" are very different
-// things to page someone about.
-func (c *fromGenesisCounters) recordIncomplete(reason string) {
+// things to page someone about. It is also deliberately not check/watch's
+// checks_skipped_total, whose "reason" means a discarded cycle -- see
+// fromGenesisMetrics' doc comment.
+func (c *fromGenesisCounters) recordIncomplete(field string) {
 	if c.metrics != nil {
-		c.metrics.recordSkip(reason)
+		c.metrics.epochChecksIncompleteTotal.WithLabelValues(field).Inc()
 	}
 }
 
@@ -256,17 +258,16 @@ func (c *fromGenesisCounters) recordEpoch(
 			"epoch", r.Epoch, "ref_count", r.UTxORefCount)
 	}
 
-	// checksTotal counts COMPLETED cycles, which is why checksSkippedTotal
-	// exists separately -- see its doc comment in metrics.go. An epoch
-	// whose every check was untrusted completed nothing, so incrementing
-	// here unconditionally would fold a wholly-degraded epoch in as a
-	// false "matched" and inflate the denominator
-	// NodeParityNotChecking reasons about. Counting it only when at least
-	// one check reached a trustworthy verdict keeps that contract, while
-	// still counting an epoch where some checks ran and others did not.
+	// An epoch whose every check was untrusted verified nothing, so
+	// incrementing unconditionally would fold a wholly-degraded epoch in
+	// as a real one and inflate the count an operator reads as "epochs
+	// actually validated" -- while epochChecksIncompleteTotal, which did
+	// move, is the series that says what went wrong. Counting only when at
+	// least one check reached a trustworthy verdict keeps both honest, and
+	// still counts an epoch where some checks ran and others did not.
 	verdictReached := c.ppVerified+c.stakeVerified+c.utxoVerified > verifiedBefore
 	if verdictReached && c.metrics != nil {
-		c.metrics.checksTotal.Inc()
+		c.metrics.epochsTotal.Inc()
 	}
 }
 
@@ -443,7 +444,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	// "--metrics-addr=" to mean off.
 	var counters fromGenesisCounters
 	if cmd.Flags().Changed("metrics-addr") && globalFlags.metricsAddr != "" {
-		counters.metrics = newParityMetrics(network)
+		counters.metrics = newFromGenesisMetrics(network)
 		metricsServer, err := serveMetrics(globalFlags.metricsAddr, logger)
 		if err != nil {
 			return err

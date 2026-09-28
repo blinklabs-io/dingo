@@ -178,6 +178,94 @@ func (m *parityMetrics) recordSkip(reason string) {
 	m.checksSkippedTotal.WithLabelValues(reason).Inc()
 }
 
+// fromGenesisFields are the three checks a from-genesis epoch runs, and the
+// only values epochChecksIncompleteTotal's "field" label takes. Same three
+// names divergenceTotal's "field" uses, so one dashboard can put "diverged"
+// and "could not run" side by side for the same check.
+var fromGenesisFields = []string{
+	"protocol_params", "stake_distribution", "utxo",
+}
+
+// fromGenesisMetrics is from-genesis's own counter set, deliberately NOT
+// parityMetrics. The two subcommands measure different things at different
+// cadences, and sharing one set made both wrong:
+//
+//   - checks_total counts check/watch cycles, which fire per block. A
+//     from-genesis epoch takes minutes to hours, growing with the UTxO set
+//     it has to reconstruct, so folding epochs into that counter made a
+//     healthy replay look stalled to NodeParityNotChecking, whose window is
+//     sized for block cadence.
+//   - checks_skipped_total's "reason" is closed to the tip-sandwich failure
+//     mode, and a discarded cycle is a whole cycle. from-genesis has no tip
+//     sandwich and fails per field, so putting field names in that label
+//     both broke the label's contract and counted one degraded epoch as up
+//     to three skipped "cycles".
+//
+// Registering a separate set also keeps a from-genesis process from
+// exposing a permanently-zero checks_total, which NodeParityNotChecking
+// would read as a dead tool.
+type fromGenesisMetrics struct {
+	// epochsTotal counts epochs where at least one of the three checks
+	// reached a trustworthy verdict. An epoch whose every check was
+	// untrusted verified nothing, so counting it here would inflate the
+	// denominator an operator reads as "epochs actually validated".
+	epochsTotal prometheus.Counter
+	// epochChecksIncompleteTotal counts checks that could not be trusted,
+	// by field -- most often Koios being unreachable or rate-limited.
+	// Distinct from a divergence: "the reference was unavailable" and
+	// "Dingo answered the wrong value" are very different pages.
+	epochChecksIncompleteTotal *prometheus.CounterVec
+	// divergenceTotal is the same series check/watch use, tagged
+	// reference=koios. Shared on purpose: a divergence is a divergence
+	// whichever mode found it, and the alert rules key on this name.
+	divergenceTotal *prometheus.CounterVec
+}
+
+// newFromGenesisMetrics registers from-genesis's counters under a registry
+// wrapped with a "network" const label, exactly as newParityMetrics does for
+// check/watch.
+func newFromGenesisMetrics(network string) *fromGenesisMetrics {
+	return newFromGenesisMetricsIn(network, prometheus.DefaultRegisterer)
+}
+
+// newFromGenesisMetricsIn is newFromGenesisMetrics with the registerer
+// injectable, for the same reason newParityMetricsIn has one: the
+// process-wide default allows a metric name to be registered only once.
+func newFromGenesisMetricsIn(
+	network string, base prometheus.Registerer,
+) *fromGenesisMetrics {
+	registry := prometheus.WrapRegistererWith(
+		prometheus.Labels{"network": network},
+		base,
+	)
+	factory := promauto.With(registry)
+	incomplete := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "node_parity_epoch_checks_incomplete_total",
+		Help: "from-genesis epoch checks that could not be trusted (most often the Koios reference being unavailable), by field.",
+	}, []string{"field"})
+	divergenceTotal := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "node_parity_divergence_total",
+		Help: "Ledger-state divergences found between dingo and its reference oracle, by field and reference.",
+	}, []string{"field", "reference"})
+	// Pre-materialize, for the reason newParityMetricsIn documents at
+	// length: a CounterVec exposes no series until something increments
+	// it, and an alert expression combining two vectors drops any series
+	// missing from either side, so an alert on a never-yet-incremented
+	// label could never fire.
+	for _, field := range fromGenesisFields {
+		incomplete.WithLabelValues(field)
+		divergenceTotal.WithLabelValues(field, ReferenceKoios)
+	}
+	return &fromGenesisMetrics{
+		epochsTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "node_parity_epochs_total",
+			Help: "from-genesis epochs where at least one check reached a trustworthy verdict.",
+		}),
+		epochChecksIncompleteTotal: incomplete,
+		divergenceTotal:            divergenceTotal,
+	}
+}
+
 // recordCheckError increments checkErrorsTotal for a Check call that failed
 // outright (a dial or query error).
 func (m *parityMetrics) recordCheckError() {
