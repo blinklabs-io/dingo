@@ -153,8 +153,12 @@ func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 }
 
+// NextSlotTime reports a boundary that is still ahead, which is what a
+// healthy clock reports for a leader forging inside its own slot. Handing
+// back the current instant would instead mean the slot has already closed,
+// and endorser-block production is skipped for a closed slot.
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
-	return time.Now(), nil
+	return time.Now().Add(time.Second), nil
 }
 
 // ChainTipHash satisfies the optional ChainTipHashProvider. It returns
@@ -1636,9 +1640,9 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
 			require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
-			// Twice: once to resolve the parent the certificate is
-			// selected for, once to re-check it has not moved before the
-			// block is built against it.
+			// Twice: once to resolve the certificate's parent, then again
+			// before the build to ensure endorser-block production did not
+			// move that parent. See buildBlockForSlot.
 			require.Equal(t, 2, parent.calls)
 			// CertifiedEndorserBlockTxHashes must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not

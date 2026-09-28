@@ -841,6 +841,55 @@ LIMIT 1`,
 	return &member, err
 }
 
+// GetCommitteeHotAuthorizationsSince filters before ranking: a cold
+// credential's latest authorization is at or after minSlot exactly when its
+// latest authorization among rows at or after minSlot is, so the added_slot
+// index bounds the scan to the window without changing the answer.
+func (s *Store) GetCommitteeHotAuthorizationsSince(
+	minSlot uint64,
+	txn types.Txn,
+) ([]*models.AuthCommitteeHot, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT cold_credential_tag, cold_credential, hot_credential_tag,
+       host_credential, id, certificate_id, added_slot
+FROM (
+    SELECT cold_credential_tag, cold_credential, hot_credential_tag,
+           host_credential, id, certificate_id, added_slot,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential_tag, cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM auth_committee_hot
+    WHERE added_slot >= ?
+) auth
+WHERE auth.rn = 1`, minSlot)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.AuthCommitteeHot{}
+	for rows.Next() {
+		var member models.AuthCommitteeHot
+		if err := rows.Scan(
+			&member.ColdCredentialTag,
+			&member.ColdCredential,
+			&member.HotCredentialTag,
+			&member.HotCredential,
+			&member.ID,
+			&member.CertificateID,
+			&member.AddedSlot,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, &member)
+	}
+	return ret, rows.Err()
+}
+
 func (s *Store) GetActiveCommitteeMembers(
 	txn types.Txn,
 ) ([]*models.AuthCommitteeHot, error) {

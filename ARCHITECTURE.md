@@ -1660,6 +1660,22 @@ cross-component notifications. Synchronous state queries still use direct
 method calls, callbacks, or narrow interfaces injected by the node composition
 layer.
 
+Node-owned subscriptions classify delivery explicitly. State consumers of
+one-shot connection, peer-selection, and chainsync transitions use
+`Node.subscribeRequiredEvent`, which blocks publishers while a callback queue is
+full so ordinary back-pressure cannot silently detach the consumer. Use this
+only when the event has no safe replay or full-state resynchronization; such a
+consumer can back-pressure its publishers until it drains or the bus shuts
+down. A required handler must not synchronously publish to an EventBus path
+whose delivery can wait on that handler's subscriber; this can exhaust the
+shared async workers while the handler waits for queue capacity. Move follow-up
+publication out of that callback or keep the subscriber detachable until the
+cycle is removed. The chain-fork logger is intentionally detachable because it
+only emits diagnostics. Every node-owned callback registration must use
+`subscribeRequiredEvent`, `subscribeDetachableEvent`, or a specialized helper
+with an explicit policy at its wiring site; required consumers need blocking
+delivery or an explicit recovery/resubscription path.
+
 ```
 Publisher ---publish---> EventBus ---deliver---> Subscribers
                             |
@@ -2341,13 +2357,20 @@ unlike a remote metadata server lookup.
 
 The sync streams a gzipped tarball of the registry repository, parses each
 `mappings/*.json` document with `ParseTokenRegistryEntry`, and upserts entries
-into `token_registry_entry` in batches of 500. Nothing is written to disk and
-no more than one mapping plus one batch is held at a time, so peak memory is
-independent of registry size: the roughly 240MB compressed / 316MB uncompressed
-mainnet registry, about 8,000 mappings, syncs within single-digit MB of heap
-growth. A mapping that fails to parse is skipped and counted rather than
-failing the snapshot, since one bad file out of thousands should not cost the
-whole sync.
+into `token_registry_entry` in batches of at most 500. The compressed response,
+aggregate decompressed tar stream, archive-header count, accepted mapping count,
+single mapping, and retained batch payload each have independent limits. All
+tar content counts against the expansion budget, including directories and
+non-mapping files, and the accepted-entry limit also bounds row-upsert work.
+Operators may lower the four aggregate limits with
+`tokenRegistry.maxDecompressedBytes`, `maxArchiveEntries`,
+`maxAcceptedEntries`, and `maxBatchBytes`; zero selects the defaults and
+negative values fail configuration validation.
+Parsed entries are written to a bounded, process-local temporary staging file;
+no more than one mapping is retained during ingestion. A mapping that fails to
+parse is skipped and counted rather than failing the snapshot, since one bad
+file out of thousands should not cost the whole sync. Exhausting any aggregate
+limit rejects the artifact and removes the staging file.
 
 Re-downloading that artifact on every interval would be indefensible, so the
 sync records the HTTP entity tag of the last successfully applied snapshot in
@@ -2394,18 +2417,12 @@ exactly the subjects the new snapshot dropped. Each snapshot takes the later of
 the wall clock and the recorded stamp, so the sequence stays strictly
 increasing across process boundaries.
 
-The three values are written with separate calls, so a crash can land between
-them, and the write order is what makes the surviving state safe rather than a
-transaction spanning it. The stamp goes first, *before* the rows it stamps, so
-that "recorded stamp ≥ the table's highest stamp" holds at every instant: a
-crash mid-apply leaves the stamp ahead of the table, and the next snapshot is
-then guaranteed a strictly greater stamp and prunes what the interrupted one
-left behind. Recording it afterwards would leave the table ahead of the stamp,
-which is the unsafe direction. The tag then goes before the identity, because
-the identity is the gate — the tag is replayed only when the recorded identity
-matches — so a crash between them leaves the gate shut and the next run
-re-applies in full, rather than leaving it open over a tag that was never
-updated. The snapshot stamp is truncated to a
+The stamp, all row-upsert batches, reconciliation prune, entity tag, and source
+identity are applied through one metadata transaction. Until commit, API
+readers continue to see the previous complete snapshot. An expansion limit,
+entry limit, store error, state error, cancellation, or commit failure rolls
+the transaction back, so neither rows nor validator state advance. The
+snapshot stamp is truncated to a
 whole second, because MySQL's `datetime` column carries no fractional seconds:
 an unrounded stamp would be stored rounded while the prune compared against
 the original, deleting the very snapshot just written. Stamps are also forced
@@ -2416,16 +2433,12 @@ snapshot dropped. Turning `storeLogos` off
 needs no special handling: the upsert overwrites every property column, so the
 next snapshot clears previously stored logos.
 
-Batches are committed as they fill rather than as one transaction, so a
-failure partway through a snapshot leaves earlier batches applied. That is a
-deliberate trade: wrapping roughly 8,000 upserts in a single transaction would
-hold the metadata store's write lock across the whole download and parse,
-stalling block indexing on a node that is also following the chain, to buy
-atomicity for a best-effort cache consensus never reads. The partial state is
-safe and transient — every row written is the registry's current value for
-that subject, so some subjects are fresher than others but none are wrong, and
-because neither the prune nor the ETag advances on a failed snapshot, the next
-run re-applies the whole thing and reconciles.
+Only after download, decompression, parsing, and staging complete does the sync
+open the metadata transaction. It replays the staged entries in bounded
+batches, prunes, records state, commits, and removes the staging file. This
+keeps network and archive-processing latency outside SQLite's global writer
+lock and outside the write transaction on PostgreSQL and MySQL, without
+exposing partial rows.
 
 Snapshot application is serialized end to end. `SyncOnce` is exported and the
 worker loop calls it, so two applications can overlap; interleaved snapshots
@@ -2802,6 +2815,15 @@ This path can't refuse to run those later stops the way
 of skipping the fix entirely: a `Run()`-scoped `ledgerStateDrainConfirmed`
 flag, set false by the `ledgerState.Close` stop on a non-nil error, makes
 the `db.Close`/`pluginHost.Stop` stops log and skip rather than run.
+The same rollback also constrains *where* a stop is registered, not just
+what it does: `cleanupFailedStartup` cancels `n.ctx` but joins only the
+stops already on `started`, so a component's stop belongs immediately
+after its start returns, ahead of anything else that can fail.
+`Run()`'s block-producer step uses `startBlockProducer` from
+`node_forging.go`. Its stop is registered immediately after credential
+validation, which may start the KES agent loop, and before ledger checks,
+forger startup, or Leios voting can fail. The nil-guarded stop closes the KES
+agent and joins any started forger and election workers.
 `handleChainSwitchEvent` is one of the
 "closure over `n` itself, self-healing" handlers `Run()`'s subscriber-ID
 doc comment describes as needing no tracked subscription — correct, since
@@ -3777,17 +3799,25 @@ The `LedgerView` interface provides query access to ledger state:
   state rather than an omitted provider. Authority comes from persisted
   committee history (including soft-deleted members) or an explicitly empty
   Conway genesis committee, not merely from database reachability.
-  `CommitteeCredentialMember` resolves both seated members and members
-  proposed by active `UpdateCommittee`
-  actions. Proposed members retain the latest persisted authorization or
-  term-scoped permanent resignation, including a resignation with no earlier
-  authorization. Each membership carries a `term_start_slot`; explicit removal
-  followed by re-election creates a fresh term without discarding the prior
-  term's rollback history, and an explicit presence bit preserves a valid
-  slot-zero term start. An enacted `UpdateCommittee` that re-elects a member it
-  does not remove is a renewal and keeps that member's existing
-  `term_start_slot`, so a continuing member's hot-key authorization and its
-  resignation both survive the renewal (issue #4584). Hot-voter resolution accepts any matching exact tagged
+  `CommitteeCredentialMember` resolves a seated member, or else a potential
+  future member: a credential that any active `UpdateCommittee` proposal adds,
+  whatever other proposals do with it (GOVCERT `isPotentialFutureMember`). A
+  seated member's resignation stands while it is seated, even while a pending
+  proposal would re-elect it. A credential that is not seated holds committee
+  state only for the current epoch: its authorization and resignation count
+  only when recorded at or after the view's pinned epoch start, because
+  cardano-ledger drops the committee state of every non-member at each epoch
+  boundary (EPOCH `updateCommitteeState`). This pruning is applied when the
+  state is read, so rollback needs no restore of its own. Each membership
+  carries a `term_start_slot`; explicit removal followed by re-election creates
+  a fresh term without discarding the prior term's rollback history, and an
+  explicit presence bit preserves a valid slot-zero term start. A fresh term
+  starts at the later of the proposal's slot and the first slot of the epoch
+  the enactment boundary closes, since certificates recorded before that were
+  dropped at that epoch's own boundary. An enacted `UpdateCommittee` that
+  re-elects a member it does not remove is a renewal and keeps that member's
+  existing `term_start_slot`, so a continuing member's hot-key authorization
+  and its resignation both survive the renewal (issue #4584). Hot-voter resolution accepts any matching exact tagged
   authorization whose member is active at the pinned epoch; expiry is
   inclusive. The legacy hash-only `CommitteeMember` and
   `CommitteeMembers` methods omit ambiguous same-hash key/script identities
@@ -3806,7 +3836,28 @@ The `LedgerView` interface provides query access to ledger state:
   hash-only committee certificate and voter rules when that capability is
   present. Cold authorization/resignation certificates and hot committee votes
   therefore match the complete tagged credential; other ledger-state
-  implementations retain the upstream compatibility path.
+  implementations retain the upstream compatibility path. The voter rule
+  resolves DRep, stake-pool and committee hot voters against the certificate
+  state after the transaction's own certificates, as cardano-ledger's GOV does
+  with `certStateAfterCERTS`; Dijkstra sub-transactions are applied in order
+  before the top-level transaction. A committee hot credential is known while
+  any cold credential authorizes it, so resigning or re-authorizing one cold
+  credential does not unseat another that shares the hot credential.
+- Conway and Dijkstra transaction validation run the gOuroboros committee
+  voting rules: committee votes on `NoConfidence` and `UpdateCommittee` actions
+  are rejected at every Conway protocol version, and from PV11 each committee
+  hot voter must be authorized by a cold credential of the enacted committee.
+  Earlier protocol versions still accept an authorized member who is not
+  elected. `LedgerView` supplies `common.CommitteeVotingState` for the PV11
+  rule: `CommitteeHotCredentialColdCredentials` returns every cold credential
+  currently authorizing the exact tagged hot credential, seated or not and
+  omitting resigned members, and `CommitteeCredentialIsElected` reports seated
+  membership, which includes expired members and excludes pending proposals.
+- `CommitteeHotCredentialMember` prefers a seated member. A cold credential
+  that is not seated authorizes a hot credential only when its latest
+  authorization was recorded in the view's pinned epoch and no resignation
+  followed it, because cardano-ledger drops such committee state at every
+  epoch boundary.
 - Every transaction-validation composition pins committee proposal resolution
   to the same epoch, protocol parameters, consensus generation, and SQL
   transaction used by the rest of that validation. This includes direct and
@@ -4172,7 +4223,7 @@ chain/manager lock cycle used by chain creation. Iterator and reconciliation
 paths already hold the manager lock, so they call the locked index helper
 directly rather than re-entering the manager lock.
 
-#### Retained block cache and the rollback-target invariant
+### Retained block cache and the rollback-target invariant
 
 `ChainManager.removeBlockByIndex` deletes a rolled-back block's row but first
 puts the block into the manager's LRU block cache, because ephemeral fork
@@ -6111,6 +6162,13 @@ Both halves of sigma come from the same Mark row set for the same snapshot epoch
    changing the queued headers.
 8. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
+When the applied tip already holds a rival block at the leader slot, the
+forger can build an equal-slot alternative only with a persisted forge fence,
+the rival's predecessor from chain context, an `AlternativeBlockBuilder`, and
+a sibling adopter.
+The default builder omits mempool transactions and Leios data from that
+alternative; the sibling adopter lets chain selection decide whether it wins.
+
 Step 5's transaction selection runs inside `LedgerState.WithTxValidationSession`
 (the same mechanism the mempool backend rebuilds use above): one pinned ledger
 generation, one validation reference slot, and one repeatable-read transaction
@@ -6131,6 +6189,261 @@ parent slot. Immediately before signing, the builder checks the parent again
 inside `Chain.WithTip`, which holds the primary chain mutex through header
 encoding and KES signing. External tip providers without that callback retain
 the final best-effort tip check; local chain admission remains authoritative.
+
+Neither rejection costs the leader slot. A candidate rejected by the snapshot
+check or the parent-tip check is re-selected inside the same slot, against the
+state the publication produced, until the slot's remaining time falls below
+`ForgeSelectionRetryMargin` or `ForgeSelectionMaxRetries` attempts have been
+made. When no attempt can complete, the forger builds a transaction-free block
+for the slot rather than abandoning it: a pool's reward for a slot does not
+depend on what its block carries, so an empty block is worth the whole slot.
+An ordinary extension carries Leios data only after resolving it against the
+parent that will be used; an equal-slot alternative omits Leios data. The
+fallback needs a `BlockBuilder` that accepts the empty-body constraint; an
+embedder's builder that does not simply loses the slot as before.
+
+Every build attempt for a slot -- the first, each retry, and the fallback --
+re-reads both tips and decides the slot again with the same function the
+pre-selection gates used at entry (`evaluateTipGates`, applied through
+`tipGatesRefuseSlot`), so the two decisions cannot drift apart. The entry gates
+decide the slot from evidence read before leader selection, and Leios
+endorser-block production, the KES step and each selection pass all run after
+it; a retry or the fallback runs precisely because the primary chain tip moved
+during selection, so that is the one window in which the ledger-applied tip and
+the primary chain tip are guaranteed to have moved apart, and the applied tip
+alone says nothing about it. The re-check therefore applies every gate
+described below against fresh readings of both tips, in the order the entry
+gates take them: a parent slot (the greater of the two tips) past the forged
+slot declines it without building; a primary chain tip already holding an
+unapplied block at the slot is counted as `unapplied_rival_at_leader_slot`;
+an applied tip that has fallen more than `forgeSyncToleranceSlots` behind the
+network refuses on `dingo_forge_sync_skip_total`; `primary_tip_behind_applied`,
+`primary_tip_hash_diverged`, `slot_gap` and the opt-in staleness bounds refuse
+as they do at entry, counted on `dingo_forge_stale_tip_skip_total`; and last,
+an applied tip at the slot is counted once as a slot battle. When the chain
+context, durable forge fence and builder support it, the re-check refreshes
+the rival's predecessor context and builds an alternative; otherwise it
+declines the slot. The order is what makes the counters agree: entry acts on a
+stale tip after the leader check and only then on the slot battle, so a reading
+that trips both -- an applied tip at the forged slot with a diverged or behind
+primary chain tip -- must count as a stale tip here too.
+
+The upstream-sync gate is re-applied for the same reason the others are, and
+its input is the one that can move BACKWARDS: the applied tip. A rollback
+during selection leaves a node that was inside `forgeSyncToleranceSlots` at
+entry outside it by the time the retry or the transaction-free fallback
+builds, so deciding that gate once at entry let exactly the block it exists to
+prevent reach the wire, with `dingo_forge_sync_skip_total` flat. The two
+inputs that are not re-read are the corroborated endorser-block slot and the
+upstream sync reading, which are network evidence taken once per forge cycle
+and carried to each attempt; the sync gate and the staleness bounds are still
+re-decided against that carried pair and each attempt's freshly read tip. Without the re-check the forger would compute a
+VRF proof and KES-sign a block whose parent slot is not below its own, and
+nothing local rejects that before diffusion: `Chain.AddLocalBlock` checks only
+prev-hash and block-number contiguity, so the block is admitted and broadcast
+to peers, and the slot-order check (`ledger.validateBlockOrder`) runs only
+later, from `ledgerProcessBlock`, when the ledger applies the block.
+
+`dingo_forge_selection_fallback_total` reports how slots whose selection was
+aborted ended, by `result`: `retried` when a later attempt in the same slot
+produced the adopted block, `empty` when the transaction-free fallback did,
+and `lost` when the slot produced no block at all. The first two are counted
+after local adoption rather than after the build, so a block that
+self-validation dropped or `AddBlock` rejected counts as `lost`.
+
+This vector covers aborted slots that reached a build, not every aborted slot.
+An abort whose re-check is then refused by the tip gates above produces no
+block and is counted on none of the three results -- refusing before building
+is not a fallback outcome, and reporting one would credit or blame a path that
+never ran. Those slots are accounted for as the refusals they are, on
+`dingo_metrics_slotBattlesTotal_int`, `dingo_forge_stale_tip_skip_total` or
+`dingo_forge_sync_skip_total` according to which gate refused them -- with one
+exception. A parent slot past the forged slot refuses on
+`errChainTipAheadOfSlot` and moves none of those three. What records it there
+is `cardano_node_metrics_Forge_could_not_forge_int`, which
+`checkAndForgeProduction` increments for every failed build before it asks
+whether the failure was a tip-gate refusal.
+`TestForgeRefusesTheFallbackWhenThePrimaryTipPassesTheForgedSlot` pins that
+reading: no fallback result, no slot battle, no stale-tip skip.
+
+That holds only when the chain passes the slot DURING block production. The
+same condition met at entry -- `tipAheadOfSlot` in the pre-selection gates --
+logs the skip and returns without moving any counter, so a slot lost to a
+chain that has left it looks different depending on when it left, and an
+operator has to know which of the two to expect:
+
+- The chain passes the slot during production. Leadership is already proven,
+  so `Forge_about_to_lead` and `Forge_node_is_leader` have both moved;
+  `could_not_forge` moves with the refusal and the three gate counters stay
+  flat. This is the shape to expect on a producer whose leader gate clears
+  seconds into its own slot, holds a selection pass open past the end of it,
+  and finds the chain beyond the slot when the retry or the fallback re-checks
+  -- the trace in issue #3985.
+- The chain is already past the slot at entry. This gate runs before the
+  leader check, so `Forge_about_to_lead` moves and nothing else does: not
+  `node_is_leader`, not `node_not_leader`, not `could_not_forge`, and none of
+  the three gate counters. The only signature is that shape -- a leader check
+  with no leader-check counter after it -- and the gate's log line, which
+  `logGateSkip` raises from Debug to Warn with `leader_slot=true` when the VRF
+  schedule says the slot was one this node was to lead. A parent slot more
+  than `forgeStaleGapThresholdSlots` past the clock is logged at Error with
+  the same marker instead, as a probable genesis mismatch.
+
+The second case is also the routine one on a node whose clock trails the
+network: a peer's block for slot N arrives while this node's slot clock still
+reads N-1, and the gate refuses a slot that was almost certainly never this
+node's to lead.
+
+That asymmetry is deliberate, and it is not the entry/re-check split the
+per-attempt re-check exists to remove. It is the line `could_not_forge` is
+drawn on for the tip gates, and the intent behind it is that the counter
+report lost blocks rather than leader checks. Every tip-gate refusal after
+`checkLeaderSafe` increments it -- the stale-tip refusal, the slot battle, and
+the credential refusals that can fire during selection (a reload, a KES
+revalidation, the KES evolution) -- because `about_to_lead` has already moved
+and `node_is_leader` never will, and the cardano-node parity counters stop
+balancing on a lost leader slot otherwise. Of the five entry tip gates the
+three that refuse before the leader check -- parent slot past the slot,
+unapplied block at the slot, and the upstream-sync skip -- do not, because
+leadership has not been established there. Every build attempt is
+post-leader-check by construction, which is why all five re-check refusals
+increment it. Making the entry side match would make `could_not_forge` count
+leader CHECKS rather than lost blocks, overstating them by roughly the
+reciprocal of the active slot coefficient: the same mistake
+`dingo_forge_stale_tip_skip_total` was corrected for once already, by moving
+its gate below the leader check.
+
+The leader check is not the line itself, though, and the counter is not an
+exceptionless record of slots this node was established to lead. Four
+refusals in `checkAndForgeProduction` increment it BEFORE `checkLeaderSafe`:
+
+- the slot battle lost under the forge fence, where the durable fence proves
+  this node led the slot and forged it on an earlier pass, so leadership is
+  established by the fence rather than by the leader check; and
+- the three forging-key validity gates, which run before Praos leader
+  selection so that no VRF proof and no KES signature is computed with a key
+  that cannot sign -- the KES protocol lifetime failing validation, the
+  operational certificate not yet valid for the current KES period, and the
+  operational certificate expired.
+
+Those three change how the counter has to be read, and not only in the
+bookkeeping. `checkAndForgeProduction` runs once per slot from the forging
+loop, so while the forging keys are invalid the gates refuse -- and increment
+-- on EVERY slot that reaches them, not once per leader slot. That is the
+overstatement the paragraph above argues the design avoids, and it is larger
+than the figure that paragraph names: one increment per slot against one per
+leader slot is a factor of about 1/(sigma*f) for a pool holding an active
+stake fraction sigma, of which the reciprocal of the active slot coefficient
+is only the sigma = 1 bound. It also lands on the failure an operator is most
+likely to be reading this counter to diagnose: an expired operational
+certificate does not raise `could_not_forge` from zero to this pool's handful
+of lost slots per epoch, it raises it to one per slot. So
+`could_not_forge` is a lost-block count only while the forging keys are valid.
+While they are not, the diagnosis is on the gauges the same code path sets
+every slot before it refuses -- `cardano_node_metrics_currentKESPeriod_int`
+against `cardano_node_metrics_operationalCertificateStartKESPeriod_int` and
+`cardano_node_metrics_operationalCertificateExpiryKESPeriod_int`, and
+`cardano_node_metrics_remainingKESPeriods_int` -- and on the Error log lines
+those three refusals write, which name the cause directly.
+
+For reference, the counter's cardano-node analogue does not treat the three
+gates alike, and what it does differs per gate rather than across the set.
+Each entry below was read off the source on both sides rather than inferred
+from its neighbours. The ouroboros-consensus files are
+`Ouroboros/Consensus/Block/Forging.hs`,
+`Ouroboros/Consensus/Protocol/Praos.hs`,
+`Ouroboros/Consensus/Protocol/Ledger/HotKey.hs`,
+`Ouroboros/Consensus/Shelley/Node/Praos.hs` and
+`Ouroboros/Consensus/NodeKernel/Forge.hs`; the metric names come from
+cardano-node's `Cardano/Node/Tracing/Tracers/Consensus.hs`.
+
+- Operational certificate NOT YET VALID (`kesPeriod < opCertStart`): same
+  condition, same series, different frequency. `praosCheckCanForge` throws
+  `PraosCannotForgeKeyNotUsableYet` on exactly this predicate -- the KES start
+  period after the wall-clock period -- `getIsLeaderProof` traces that as
+  `TraceNodeCannotForge`, and `asMetrics` maps that event to the
+  `Forge.could-not-forge` counter. `checkShouldForge` reaches `checkCanForge`
+  only in its `Just isLeader` branch, so cardano-node moves the counter once
+  per leader slot where Dingo moves it once per slot. Parity here means
+  keeping the increment on this counter and fixing only how often it fires.
+  Dropping it, or moving it to a counter of its own, would break a parity that
+  currently holds.
+- Operational certificate EXPIRED (`kesPeriod >= opCertExpiry`): different
+  series, same frequency. Consensus catches this one before the leader check
+  rather than after it. `updateForgeState` for a Praos block is
+  `HotKey.evolve` at the wall-clock period; `evolveKey` finds the target period
+  `AfterKESEnd`, poisons the key and returns `UpdateFailed`, so
+  `checkShouldForge` returns `ForgeStateUpdateError` and never evaluates
+  `checkCanForge` -- which is what the note on
+  `PraosCannotForgeKeyNotUsableYet` means when it says the opposite case is
+  caught in `updateForgeState`. That traces as `TraceForgeStateUpdateError`,
+  whose metrics are `Forge.StateUpdateError` set to the slot plus the KES
+  gauges, with `currentKESPeriod` and `remainingKESPeriods` driven to 0 --
+  never `Forge.could-not-forge`. A poisoned key fails every later evolution,
+  so cardano-node reports this on every slot as well. Parity here means the
+  opposite of the entry above: leave the per-slot frequency alone and take the
+  condition off `could_not_forge`, onto the state-update signal. Dingo already
+  sets those same KES gauges on this path every slot; it is the counter that
+  is extra.
+- KES protocol lifetime NOT VALIDATED: no analogue on either series.
+  `PraosCannotForge` has exactly one constructor, so no condition other than
+  not-yet-valid reaches `TraceNodeCannotForge` under Praos, and the states
+  behind this gate -- credentials not loaded, operational certificate not
+  validated, a zero maximum-evolutions or expiry period -- are ones a
+  cardano-node producer does not carry into its forging loop, since its
+  `HotKey` is built from a validated certificate before `BlockForging` exists.
+  The nearest reachable equivalent, a KES range of zero length, lands on the
+  `AfterKESEnd` update-error path above. Parity says nothing about how often
+  to report this one, only that `could_not_forge` is the wrong place for it.
+
+Two things follow, and they are narrower than the shorthand used earlier in
+this section. Only one of the three gates counts on a series its namesake does
+not count on at all; one is counted by the namesake on the same series and
+differs from it in frequency alone; one has no namesake. And the per-slot
+inflation described above is an accurate account of what an operator sees on
+all three, but it is a parity divergence for only one of them -- the
+not-yet-valid gate -- because the other two are not on the namesake's counter
+in the first place. Whether to act on any of this is a behaviour question, not
+a documentation one, and is deliberately left out of this PR; if it is taken
+up it is three separate changes rather than one rule applied three times.
+
+A separate schedule-driven counter would close the gap from the other side --
+the shape `unapplied_rival_at_leader_slot` uses for the one other
+pre-leader-check refusal that can swallow a scheduled leader slot -- and the
+schedule lookup it would be taken from is already made here, for the log
+level. It is not added here. It would not make the two paths agree either,
+since the re-check records the same reading on `could_not_forge` instead, and
+which vector it belongs on is a metrics question of its own:
+`dingo_forge_stale_tip_skip_total` reports this node's two views of its own
+chain disagreeing, or its ledger trailing the network, and a chain past the
+slot clock is neither.
+
+A slot the chain took from us is not a forge this node lost, and
+`{result="lost"}` should not absorb it: read the fallback vector, the three
+gate counters and `could_not_forge` together when asking what an aborted
+selection cost, and for a slot the chain had already left before the leader
+check ran, the gate's `leader_slot=true` log line is the only record there is.
+
+Selection is bounded by the chain moving, not by the clock, unless an operator
+asks otherwise. `ForgeSelectionDeadlineMargin` is off by default; setting it
+stops a selection pass at the end of the slot less that margin and forges what
+has been selected so far, trading a fuller block for one finished inside its
+slot. It is deliberately separate from `ForgeSelectionRetryMargin`, which
+decides only whether another attempt is worth starting and never shortens a
+pass. Within a pass, a candidate is screened against the block-body budget
+before it is re-validated -- re-validation is the expensive step by orders of
+magnitude -- and the exact encoded-body check runs after re-validation, so only
+a transaction the block could actually have carried can end the pass.
+
+Each leader slot that reaches block production emits one `forge timing` log
+line, whatever becomes of it. It carries the slot, the `leader_check` and
+`pre_build` intervals, the `build` duration and the number of build
+`attempts`, the `tx_count`, an `outcome` of `forged`, `empty`, or `lost`, and
+an `adopted` boolean. `outcome` describes what production produced and
+`adopted` whether it reached the chain, so a block dropped by self-validation
+or rejected by `AddBlock` reads as `outcome=forged, adopted=false` rather than
+as a success. Reconstructing those intervals from block timestamps after the
+fact is the only reason a lost slot previously took a field trace to diagnose.
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 
@@ -6502,6 +6815,8 @@ it during a forge attempt.
 Steps 3, 6, and 7 each call into a pluggable interface (`LeaderChecker`, `BlockValidator`, `BlockBroadcaster`) that the node wires up at composition time, so a panic inside one of those implementations is contained rather than propagating out of `checkAndForgeProduction` — which would otherwise crash the forger's producer-loop goroutine, and with it the process, since nothing else recovers a goroutine panic in Go. Each callback is invoked through a `*Safe` wrapper (`checkLeaderSafe`, `validateForgedBlockSafe`, `addBlockSafe`) that recovers and converts a panic into the same outcome as that phase's ordinary failure path — "not leader" for selection, a validation failure for validation, an `AddBlock` error for publication — so worker accounting (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and shutdown behavior are unaffected, and the next forge cycle proceeds normally. Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and logged with a stack trace. The `blockForged` observer callback (step 7) already recovered its own panics separately, since observability hooks are expected to be best-effort.
 
 When Dijkstra/Leios is active, `DefaultBlockBuilder` emits the Musashi prototype's 12-field Dijkstra header body for every forged Dijkstra ranking block: the standard Praos/Babbage fields plus `leios_certified` and `leios_announcement`. A locally forged endorser block is announced in the same-slot ranking block's `leios_announcement` as `[eb_hash, eb_size]`; `eb_size` is rejected before header construction if it exceeds the CDDL `uint .size 4` bound. If the pipeline has a certified, non-equivocated EB inside its inclusion window whose hash matches the parent ranking block's `LeiosAnnouncement`, the forger also populates the prototype `DijkstraLeiosCertificate` body field and sets `leios_certified=true`. Prototype-2026w29 permits that CertRB to carry the new same-slot announcement as well as the certificate for its parent's EB. Before constructing the new EB, the forger reads the certified EB's manifest and filters those transaction hashes from its mempool view, matching the prototype's post-certificate rebase without mutating the live mempool before block adoption; if the certified closure is unavailable, it safely forges the certificate-only RB. The certified EB is marked embedded only after the CertRB is adopted locally.
+
+Endorser-block transaction selection is bounded by the slot it belongs to. Every candidate costs a full ledger re-validation, and the endorser block's hash is committed into the ranking-block header, so an unbounded pass over a deep mempool spends seconds of the slot before the block that extends the chain can even be signed. Selection therefore stops at the slot's end minus `forgeEbSelectionReserve` (`DINGO_FORGE_EB_SELECTION_RESERVE`, `--forge-eb-selection-reserve`, default 300ms), which is what ranking-block assembly, signing, adoption and broadcast get; the reserve never takes more than half of the time actually remaining, so a network whose slots are shorter than it still leaves selection a budget. A slot whose window has already closed produces no endorser block at all (`dingo_metrics_leios_forge_eb_skipped_total{reason="slot_expired"}`): selecting then would only delay the ranking block that would have announced it. When the slot clock cannot place the forge in its slot, the same reserve is used as a fixed fallback budget rather than leaving the pass unbounded. Truncated passes are logged and counted (`dingo_forge_eb_selection_truncated_total`), and `forgeEbMaxTxRefs` / `forgeEbMaxBytes` (default 20000 references, 24 MiB; an explicit 0 disables either) cap the manifest and the memory its construction reserves, as backstops behind the deadline.
 
 #### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
@@ -13452,6 +13767,14 @@ which already treats `ErrPastHorizon` as unavailable state rather than peer
 fault. Judging the recorded arrival rather than the later handler time means
 local decode, EventBus, or scheduler delay cannot make an invalid early header
 appear timely.
+
+This admission rule includes Byron main headers and epoch-boundary headers;
+its two-second allowance is measured in wall-clock time even for Byron's
+20-second slots. The subsequent PBFT guard compares slot onset directly with
+wall-clock time and requires the slot to have begun. It does not add the
+allowance a second time at application, and rejects even the epoch-zero EBB
+before system start. Historical Byron validation therefore needs only the
+header's known slot onset, not a forecast of the present wall-clock slot.
 
 `blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
 it does not forecast, mutate the cache, or rebuild `HardForkSummary` per
