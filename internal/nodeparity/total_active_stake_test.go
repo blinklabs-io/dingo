@@ -17,6 +17,7 @@ package nodeparity
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -79,9 +80,10 @@ func TestCompareTotalActiveStakeDetectsADroppedPool(t *testing.T) {
 }
 
 // TestCompareTotalActiveStakeQuietWhenTotalsAgree pins the other half: this
-// check must not fire on a healthy epoch. Measured against 1,317 cached
-// Preview epochs, Dingo's per-pool sum equals Koios's active_stake exactly,
-// so any tolerance here would only hide a real divergence.
+// check must not fire on a healthy epoch. Measured across 1,321 cached
+// Preview epochs (2-1322), Koios's own per-pool active_stake values sum to
+// its epoch_info active_stake exactly, with no rounding slack anywhere, so
+// any tolerance here would only hide a real divergence.
 func TestCompareTotalActiveStakeQuietWhenTotalsAgree(t *testing.T) {
 	t.Parallel()
 	const network = "preview"
@@ -113,4 +115,39 @@ func TestCompareTotalActiveStakeStaysQuietOnAnUnusableKoiosValue(t *testing.T) {
 	require.Nil(t, compareTotalActiveStake(
 		context.Background(), nil, cache, network, epoch, reported,
 	), "an unusable Koios value is not a Dingo divergence")
+}
+
+// TestCompareTotalActiveStakeWorksWithoutACache pins that --koios-cache-path
+// is genuinely optional for this check. A cacheless run fetches epoch_info
+// live instead, at the cost of one request per epoch; it must not silently
+// skip the comparison, which would leave a no-cache run blind to exactly the
+// missing-pool case this exists to catch.
+func TestCompareTotalActiveStakeWorksWithoutACache(t *testing.T) {
+	t.Parallel()
+	const network = "preview"
+	const epoch = 995
+
+	koiosURL, reqCount := countingKoiosServer(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"epoch_no":995,"active_stake":"600"}]`))
+		})
+	koios, err := NewKoiosClient(network, "", koiosURL, true, true)
+	require.NoError(t, err)
+
+	reported := []poolStake{
+		{bech32: "pool1aaa", stake: 100},
+		{bech32: "pool1bbb", stake: 200},
+		// 300 missing.
+	}
+
+	got := compareTotalActiveStake(
+		context.Background(), koios, nil, network, epoch, reported,
+	)
+	require.NotNil(t, got,
+		"a nil cache must still compare, not silently skip the check")
+	require.Equal(t, ReasonTotalActiveStakeMismatch, got.Reason)
+	require.Equal(t, int64(-300), got.DiffLovelace)
+	require.Equal(t, int32(1), reqCount.Load(),
+		"exactly one epoch_info request when there is no cache to read")
 }
