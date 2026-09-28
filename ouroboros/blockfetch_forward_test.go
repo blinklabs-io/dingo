@@ -19,12 +19,14 @@ import (
 	"time"
 
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
+	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -166,14 +168,14 @@ func TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer(t *testing.T) {
 	// second is still queued behind it. Neither has reached the ledger.
 	wantBytes := float64(len(blocks[0].Cbor()) + len(blocks[1].Cbor()))
 	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(o.blockfetchMetrics.inFlightBlocks) == 2
+		return promtestutil.ToFloat64(o.blockfetchMetrics.inFlightBlocks) == 2
 	}, blockfetchForwardTestBound, 5*time.Millisecond,
 		"expected 2 blockfetch events in flight",
 	)
 	require.Equal(
 		t,
 		wantBytes,
-		testutil.ToFloat64(o.blockfetchMetrics.inFlightBytes),
+		promtestutil.ToFloat64(o.blockfetchMetrics.inFlightBytes),
 		"in-flight bytes must account for both undelivered blocks",
 	)
 
@@ -202,7 +204,9 @@ func TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer(t *testing.T) {
 	require.Eventually(
 		t,
 		func() bool {
-			return testutil.ToFloat64(o.blockfetchMetrics.inFlightBlocks) == 0
+			return promtestutil.ToFloat64(
+				o.blockfetchMetrics.inFlightBlocks,
+			) == 0
 		},
 		blockfetchForwardTestBound,
 		5*time.Millisecond,
@@ -211,7 +215,87 @@ func TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer(t *testing.T) {
 	require.Equal(
 		t,
 		float64(0),
-		testutil.ToFloat64(o.blockfetchMetrics.inFlightBytes),
+		promtestutil.ToFloat64(o.blockfetchMetrics.inFlightBytes),
 		"in-flight bytes must drain to zero alongside the blocks",
 	)
+}
+
+// TestBlockfetchForwardKeepsPerConnectionOrderUnderStall covers the
+// BatchDone half of the forward queue: blockfetchClientRangeDone must also
+// return while the ledger.blockfetch consumer is stalled, and once it drains
+// each connection's BatchDone must arrive after every Block that connection
+// queued before it, with two connections forwarding concurrently.
+func TestBlockfetchForwardKeepsPerConnectionOrderUnderStall(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { stopEventBusBounded(t, bus) })
+	// Buffer 1, not drained until every callback has returned: the first
+	// forwarded event fills it and every later Publish blocks.
+	_, ch := bus.SubscribeWithBufferPolicy(
+		ledger.BlockfetchEventType,
+		1,
+		event.SubscriberBackpressureBlock,
+	)
+	o := newOuroboros(OuroborosConfig{
+		EventBus:     bus,
+		PromRegistry: prometheus.NewRegistry(),
+	})
+
+	blocks, err := testfixtures.GenerateConwayChain(2)
+	require.NoError(t, err)
+	conns := []ouroboros_conn.ConnectionId{
+		testConnIdWithPort(4001),
+		testConnIdWithPort(4002),
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		for _, block := range blocks {
+			for _, connId := range conns {
+				ctx := blockfetch.CallbackContext{
+					ConnectionId: connId,
+					RequestId:    1,
+				}
+				_ = o.blockfetchClientBlock(ctx, uint(block.Type()), block)
+			}
+		}
+		for _, connId := range conns {
+			ctx := blockfetch.CallbackContext{
+				ConnectionId: connId,
+				RequestId:    1,
+			}
+			_ = o.blockfetchClientRangeDone(ctx, nil)
+		}
+	}()
+	testutil.RequireReceive(
+		t,
+		returned,
+		blockfetchForwardTestBound,
+		"blockfetch callbacks blocked on a stalled ledger.blockfetch consumer",
+	)
+
+	got := make(map[string][]bool)
+	for range len(conns) * (len(blocks) + 1) {
+		evt := testutil.RequireReceive(
+			t,
+			ch,
+			blockfetchForwardTestBound,
+			"forwarded blockfetch event",
+		)
+		e, ok := evt.Data.(ledger.BlockfetchEvent)
+		require.True(t, ok)
+		key := e.ConnectionId.String()
+		got[key] = append(got[key], e.BatchDone)
+	}
+	for _, connId := range conns {
+		require.Equal(
+			t,
+			[]bool{false, false, true},
+			got[connId.String()],
+			"connection %s: BatchDone must follow its own blocks",
+			connId.String(),
+		)
+	}
 }
