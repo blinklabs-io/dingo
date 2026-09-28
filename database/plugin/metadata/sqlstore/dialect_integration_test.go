@@ -58,6 +58,22 @@ func newPostgresIntegrationSchema(t *testing.T) (string, string) {
 	return postgresDSNWithSearchPath(t, dsn, schema), schema
 }
 
+func TestPostgresPParamUpdateOrdering(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testPParamUpdateOrdering(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLPParamUpdateOrdering(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testPParamUpdateOrdering(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestMySQLSQLStoreIntegration(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	testSQLStoreIntegration(t, "mysql", dsn, "mysql", database)

@@ -973,6 +973,37 @@ WHERE pool_key_hash = ? AND slot > ?`,
 	return uint64(sequence), count > 0, err
 }
 
+// PoolOpCertSequencesExistAtSlot reports whether any pool_opcert_sequence row
+// is recorded at exactly slot, served from idx_pool_opcert_sequence_slot.
+func (s *Store) PoolOpCertSequencesExistAtSlot(
+	slot uint64,
+	txn types.Txn,
+) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return false, err
+	}
+	var one int64
+	err = db.QueryRowContext(ctx, `
+SELECT 1
+FROM pool_opcert_sequence
+WHERE slot = ?
+LIMIT 1`,
+		slotValue,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	poolKeyHash lcommon.PoolKeyHash,
 	slot uint64,

@@ -66,6 +66,10 @@ func maryPParamsWithExtraEntropy(
 	t.Helper()
 	pp := &mary.MaryProtocolParameters{
 		ProtocolMajor: 4,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
 	}
 	if len(entropy) == lcommon.Blake2b256Size {
 		pp.ExtraEntropy.Type = lcommon.NonceTypeNonce

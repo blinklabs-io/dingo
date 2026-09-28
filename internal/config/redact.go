@@ -168,6 +168,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.AccountChunkSize",
 	"KoiosParity.Accounts",
 	"KoiosParity.AllowInsecureHTTP",
+	"KoiosParity.AllowPrivateAddresses",
 	"KoiosParity.CachePath",
 	"KoiosParity.Enabled",
 	"KoiosParity.GraceHours",

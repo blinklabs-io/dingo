@@ -282,6 +282,10 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		Rho:              rat(),
 		Tau:              rat(),
 		Decentralization: rat(),
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
 	}
 	ls := &LedgerState{
 		db:             db,
