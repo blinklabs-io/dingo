@@ -657,7 +657,39 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber + 1
 	err := validateInboundBlockEnvelope(ebb, nil, nil, parent)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not match parent block number")
+	require.Contains(t, err.Error(), "does not match expected block number")
+}
+
+func TestValidateBlockOrderByronEbbAfterEbbIncrementsNumberAndSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent := envelopeParent{
+		slot:        byron.ByronSlotsPerEpoch,
+		blockNumber: 7,
+		byronEbb:    true,
+	}
+	newEbb := func(epoch, blockNumber uint64) *byron.ByronEpochBoundaryBlock {
+		ebb := &byron.ByronEpochBoundaryBlock{
+			BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
+		}
+		ebb.BlockHeader.ConsensusData.Epoch = epoch
+		ebb.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+		return ebb
+	}
+
+	require.NoError(t, validateBlockOrder(newEbb(2, 8), parent))
+	require.ErrorContains(
+		t,
+		validateBlockOrder(newEbb(1, 8), parent),
+		"does not follow parent slot",
+	)
+	require.ErrorContains(
+		t,
+		validateBlockOrder(newEbb(2, 7), parent),
+		"does not match expected block number",
+	)
 }
 
 // TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs

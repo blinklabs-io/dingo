@@ -743,7 +743,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"ForgeAppliedTipStalenessSlots",
 		"forge-applied-tip-staleness-slots",
-		"wall-clock staleness bound; overrides forge sync tolerance without an upstream target and adds an optional bound when one exists",
+		"maximum slot lag for the applied tip when a corroborated upstream target exists (0 disables)",
 	),
 	uint64Flag(
 		"ForgeEndorserBlockStalenessSlots",

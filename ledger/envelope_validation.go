@@ -213,16 +213,21 @@ func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
 	}
 	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
 	if isEbb {
-		if block.BlockNumber() != parent.blockNumber {
+		expectedBlockNumber := parent.blockNumber
+		if parent.byronEbb {
+			expectedBlockNumber++
+		}
+		if block.BlockNumber() != expectedBlockNumber {
 			return fmt.Errorf(
-				"byron EBB block number %d does not match parent block number %d",
+				"byron EBB block number %d does not match expected block number %d",
 				block.BlockNumber(),
-				parent.blockNumber,
+				expectedBlockNumber,
 			)
 		}
-		if block.SlotNumber() < parent.slot {
+		if block.SlotNumber() < parent.slot ||
+			(parent.byronEbb && block.SlotNumber() == parent.slot) {
 			return fmt.Errorf(
-				"byron EBB slot %d precedes parent slot %d",
+				"byron EBB slot %d does not follow parent slot %d",
 				block.SlotNumber(),
 				parent.slot,
 			)

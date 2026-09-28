@@ -802,10 +802,10 @@ type Config struct {
 	// a HEADER is admitted, so the two differ by the inter-block gap during
 	// ordinary operation. Set it well above the expected gap for the network.
 	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots"      envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
-	// ForgeAppliedTipStalenessSlots optionally bounds the wall-clock age of
-	// newestKnown when a corroborated upstream target is available. A missing
-	// target is not evidence that the network is ahead, so the bound is ignored
-	// in that state. Zero disables the bound.
+	// ForgeAppliedTipStalenessSlots optionally bounds the current slot's lag
+	// behind newestKnown when a corroborated upstream target is available. A
+	// missing target is not evidence that the network is ahead, so the bound is
+	// ignored in that state. Zero disables the bound.
 	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots"    envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
 	// ForgeEndorserBlockStalenessSlots bounds how far a corroborated Leios
 	// endorser block may lead the ledger-applied tip before forging is
