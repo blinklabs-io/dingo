@@ -17,6 +17,7 @@ package cardano
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -259,7 +260,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 			return err
 		}
 		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := conway.NewConwayGenesisFromFile(conwayGenesisPath)
+		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -549,9 +550,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := conway.NewConwayGenesisFromReader(
-			bytes.NewReader(conwayGenesisBytes),
-		)
+		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -680,7 +679,11 @@ func (c *CardanoNodeConfig) ConwayGenesis() *conway.ConwayGenesis {
 // LoadConwayGenesisFromReader loads a Conway genesis config from an io.Reader
 // This is useful mostly for tests
 func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
-	conwayGenesis, err := conway.NewConwayGenesisFromReader(r)
+	conwayGenesisBytes, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 	if err != nil {
 		return err
 	}
@@ -793,6 +796,52 @@ func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
 		return nil, err
 	}
 	return renderByronCanonicalHash(parsed), nil
+}
+
+// loadConwayGenesisFromBytes parses a Conway genesis, tolerating members that
+// cardano-node's lenient JSON parser ignores but gouroboros's strict decoder
+// rejects: the top-level genDelegs and the legacy committee.quorum, both
+// present in Vector Testnet's genesis. Dingo consumes neither. quorum is
+// stripped only beside threshold. Any other unknown member is still rejected.
+func loadConwayGenesisFromBytes(
+	genesisBytes []byte,
+) (conway.ConwayGenesis, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(genesisBytes, &doc); err != nil {
+		return conway.ConwayGenesis{}, err
+	}
+	stripped := false
+	if _, ok := doc["genDelegs"]; ok {
+		delete(doc, "genDelegs")
+		stripped = true
+	}
+	if rawCommittee, ok := doc["committee"]; ok {
+		var committee map[string]json.RawMessage
+		if err := json.Unmarshal(rawCommittee, &committee); err == nil {
+			// cardano-ledger requires threshold and ignores quorum; stripping a
+			// lone quorum would decode to a nil threshold and silently fall
+			// back to the default committee quorum.
+			_, hasQuorum := committee["quorum"]
+			_, hasThreshold := committee["threshold"]
+			if hasQuorum && hasThreshold {
+				delete(committee, "quorum")
+				out, err := json.Marshal(committee)
+				if err != nil {
+					return conway.ConwayGenesis{}, err
+				}
+				doc["committee"] = out
+				stripped = true
+			}
+		}
+	}
+	if stripped {
+		out, err := json.Marshal(doc)
+		if err != nil {
+			return conway.ConwayGenesis{}, err
+		}
+		genesisBytes = out
+	}
+	return conway.NewConwayGenesisFromReader(bytes.NewReader(genesisBytes))
 }
 
 // loadByronGenesisFromBytes decodes a Byron genesis document into the
