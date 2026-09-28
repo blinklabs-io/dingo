@@ -506,6 +506,15 @@ sequenceDiagram
     LS->>DB: clear rollback undo outbox after truncation commits
 ```
 
+While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
+peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are
+queued. The header handler and the chain-switch handoff
+(`handoffPipelineOnSwitchLocked`) apply the same predicate, so a switch below
+the minimum keeps accumulating; the selected peer's next header re-evaluates
+it. Near the tip, or when the new peer has no known sync target, a switch
+starts BlockFetch immediately. An in-flight batch from another connection is
+never cancelled by a switch.
+
 An admitted ChainSync rollback atomically refreshes the tracked client's
 cursor, advertised tip, activity, and syncing status before chain selection
 observes it and before the ledger apply gate runs. This bookkeeping does not
