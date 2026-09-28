@@ -96,7 +96,7 @@ func recordTestLeiosAnnouncement(
 // error-returning twin, for use from a worker goroutine: require's t.FailNow
 // is documented as unsafe to call from any goroutine other than the one
 // running the test function, so a concurrent caller must collect the error
-// and assert on it back on the test goroutine instead (cubic review).
+// and assert on it back on the test goroutine instead.
 func recordTestLeiosAnnouncementNoFail(o *Ouroboros, headerRaw []byte) error {
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
 	if err != nil {
@@ -156,7 +156,9 @@ func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
 	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	// This test covers announcement lock ordering; the injected validation
+	// gate is tested separately.
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	announceTestEndorserBlock(
 		t,
 		o,
@@ -264,10 +266,8 @@ func TestStoreLeiosEndorserBlockAcceptsAnnouncedPointAndIsIdempotent(
 // covers cross-connection arrival order for two live occurrences of the same
 // hash: whichever connection's offer is stored first, a later offer for the
 // same hash at a different, independently announced slot is accepted as its
-// own occurrence rather than rejected, and neither disturbs the other
-// (wolf31o2 review; issue #3513). Table-driven over both arrival orders --
-// cubic's review flagged that only testing point-then-second would leave a
-// regression specific to the reverse order undetected.
+// own occurrence rather than rejected, and neither disturbs the other.
+// The test covers both arrival orders so either occurrence can arrive first.
 func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOfOrder(
 	t *testing.T,
 ) {
@@ -341,9 +341,23 @@ func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOf
 func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 41)
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(41, lcommon.Blake2b256Hash(blockRaw).Bytes())
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	ledger := &fakeLeiosAnnouncementLedger{}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ledger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	votes := &fakeLeiosVoteHandler{}
 	o.leiosVotes = votes
 
@@ -374,8 +388,77 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.slotVerified)
-	require.Len(t, votes.ebs, 1)
+	require.Empty(t, votes.ebs)
+
+	// The manifest references one transaction, while the first offer carried
+	// only the manifest. Supplying the transaction completes the cache and
+	// starts the semantic validation gate.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	require.Eventually(t, func() bool {
+		votes.mu.Lock()
+		defer votes.mu.Unlock()
+		return len(votes.ebs) == 1
+	}, time.Second, time.Millisecond)
+	votes.mu.Lock()
+	defer votes.mu.Unlock()
 	require.Equal(t, point.Slot, votes.ebs[0].slot)
+}
+
+func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
+	t.Parallel()
+
+	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	ref := lcommon.LeiosTransactionReference{
+		TransactionHash: lcommon.Blake2b256Hash(txRaw),
+		TransactionSize: uint16(len(txRaw)),
+	}
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(41, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	ledger := &fakeLeiosAnnouncementLedger{
+		txValidationErr: errors.New("ledger-invalid endorser-block transaction"),
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: ledger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	votes := &fakeLeiosVoteHandler{}
+	o.leiosVotes = votes
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStorePeerOffered,
+	))
+	announceTestEndorserBlock(
+		t,
+		o,
+		point.Slot,
+		testEbHash(point),
+		len(blockRaw),
+	)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStorePeerOffered,
+	))
+	o.leiosValidationWG.Wait()
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(t, data.slotVerified)
+	require.Equal(t, leiosEBValidationInvalid, data.semanticValidationStatus)
+	require.Empty(t, votes.ebs,
+		"a hash- and size-valid endorser block with a ledger-invalid transaction must not be voted on")
 }
 
 // TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified is the
@@ -396,7 +479,7 @@ func TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified(
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 41)
 	fabricated := ocommon.Point{Slot: 42, Hash: point.Hash}
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	votes := &fakeLeiosVoteHandler{}
 	o.leiosVotes = votes
 
@@ -613,8 +696,7 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 
 	// Collected here rather than asserted inside the goroutines below: require
 	// (and t.FailNow, which it calls on failure) is documented as unsafe to
-	// invoke from any goroutine other than the one running the test function
-	// (cubic review).
+	// invoke from any goroutine other than the one running the test function.
 	announceErrs := make([]error, n)
 	var wg sync.WaitGroup
 	wg.Add(2 * n)
@@ -968,22 +1050,22 @@ func (l *lockProbingVoteHandler) HandleEndorserBlock(
 	l.fakeLeiosVoteHandler.HandleEndorserBlock(slot, ebHash)
 }
 
-// TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock is the
-// regression for the cubic P2 finding: bindLeiosEndorserBlockSlot's promotion
+// TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock verifies
+// bindLeiosEndorserBlockSlot's promotion
 // used to publish (vote emission, pipeline observation, persistence enqueue)
 // while recordLeiosAnnouncement still held leiosAnnouncementsMu, a lock
 // shared by every concurrent announcement. A vote handler that itself needs
 // that lock would then deadlock. The goroutine here is bounded by a timeout
 // so a regression shows up as a clean test failure rather than a hung test
 // binary; recordTestLeiosAnnouncementNoFail (not recordTestLeiosAnnouncement)
-// keeps require calls off that goroutine (cubic review).
+// keeps require calls off that goroutine.
 func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 250)
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	votes := &lockProbingVoteHandler{
 		fakeLeiosVoteHandler: &fakeLeiosVoteHandler{},
 		o:                    o,

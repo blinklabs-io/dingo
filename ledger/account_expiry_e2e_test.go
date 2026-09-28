@@ -358,6 +358,7 @@ func runDelegatorInactivityLifecycleScenario(
 			delegatorInactivityE2EBoundarySlot,
 		)
 	}))
+	settleRewardCredits(t, ls)
 
 	rewardOwner, err := db.GetAccountByCredential(0, leaderCred, true, nil)
 	require.NoError(t, err)

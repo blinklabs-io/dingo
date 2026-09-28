@@ -566,8 +566,7 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 // re-testing membership AFTER it and RE-PERSISTING the marker for any key that
 // came back, rather than by holding the lock across the delete. Re-persisting
 // is idempotent (SetSyncState of the same key/value) and runs with no lock
-// held, so it closes the window without reintroducing the lock inversion
-// (issue #3717 review / cubic P1: re-admission after the live check).
+// held, so it closes the window without reintroducing the lock inversion.
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
 		return nil
@@ -846,6 +845,8 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
+	blockfetchEventID := ls.metrics.beginBlockfetchEvent()
+	defer ls.metrics.endBlockfetchEvent(blockfetchEventID)
 	// Registered before the mutex is taken so defer's LIFO order runs it
 	// after the unlock. RecoverAfterLocalRollback nests this mutex inside
 	// chainsyncMutex, so publishing while holding it deadlocks the same
@@ -884,7 +885,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 			)
 		}
 	} else if e.Block != nil {
-		if err := ls.handleEventBlockfetchBlockDeferred(e, &pending); err != nil {
+		if err := ls.handleEventBlockfetchBlockDeferredWhileLocked(
+			e,
+			&pending,
+		); err != nil {
 			if strings.Contains(
 				err.Error(),
 				"block header crypto verification failed",
@@ -2681,11 +2685,16 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// rollback a peer chose (issue #3766).
 			ls.config.Logger.Error(
 				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"connection_id", e.ConnectionId.String(),
-				"error", err,
+				"component",
+				"ledger",
+				"slot",
+				e.Point.Slot,
+				"hash",
+				hex.EncodeToString(e.Point.Hash),
+				"connection_id",
+				e.ConnectionId.String(),
+				"error",
+				err,
 				"hint",
 				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
 			)
@@ -4249,14 +4258,17 @@ func (ls *LedgerState) tryResolveFork(
 	return true, nil
 }
 
-// handleEventBlockfetchBlockDeferred is handleEventBlockfetchBlock that threads
-// the caller's pendingPublishes queue into flushPendingBlockfetchBlocksDeferred,
-// so chain.update events emitted while chainsyncBlockfetchMutex is held are
-// published only after it is released. A nil pubs preserves the standalone
-// immediate-publish behaviour for test callers.
-func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
+func (ls *LedgerState) handleEventBlockfetchBlockDeferredWhileLocked(
 	e BlockfetchEvent,
 	pubs *pendingPublishes,
+) error {
+	return ls.handleEventBlockfetchBlockDeferredInternal(e, pubs, true)
+}
+
+func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
+	e BlockfetchEvent,
+	pubs *pendingPublishes,
+	blockfetchMutexHeld bool,
 ) error {
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
@@ -4265,14 +4277,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	if ls.chainsyncBlockfetchReadyChan == nil {
 		return nil
 	}
-	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
-		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
-		return nil
-	}
-	fromPrimary := sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId)
-	fromShadow := connIdKey(ls.shadowBlockfetchConnId) != "" &&
-		sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId)
-	if !fromPrimary && !fromShadow {
+	if !ls.blockfetchEventCurrent(e) {
 		return nil
 	}
 	// Deduplicate: if the other peer already delivered this block,
@@ -4336,9 +4341,33 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 		if verifyErr != nil {
 			if IsHeaderVerificationDeferred(verifyErr) {
 				ls.markDeferredHeaderValidation(e.Point)
-				if err := ls.persistDeferredHeaderValidation(e.Point, nil); err != nil {
+				persist := func() error {
+					return ls.persistDeferredHeaderValidation(e.Point, nil)
+				}
+				var persistErr error
+				if blockfetchMutexHeld {
+					persistErr = ls.withBlockfetchMutexReleased(persist)
+				} else {
+					persistErr = persist()
+				}
+				if persistErr != nil {
 					ls.clearDeferredHeaderValidation(e.Point)
-					return err
+					return persistErr
+				}
+				if blockfetchMutexHeld && !ls.blockfetchEventCurrent(e) {
+					ls.clearDeferredHeaderValidation(e.Point)
+					if ls.db != nil && ls.db.Metadata() != nil {
+						if err := ls.withBlockfetchMutexReleased(
+							func() error {
+								return ls.deleteDeferredMarkerUnlessReadmitted(
+									headerValidationPointKey(e.Point),
+								)
+							},
+						); err != nil {
+							return err
+						}
+					}
+					return nil
 				}
 				ls.config.Logger.Debug(
 					"deferring stateful block header verification until ledger apply",
@@ -4377,6 +4406,27 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 		ls.chainsyncBlockfetchTimeoutTimer.Reset(blockfetchBusyTimeout)
 	}
 	return nil
+}
+
+func (ls *LedgerState) blockfetchEventCurrent(e BlockfetchEvent) bool {
+	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
+		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
+		return false
+	}
+	return sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) ||
+		(connIdKey(ls.shadowBlockfetchConnId) != "" &&
+			sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId))
+}
+
+// withBlockfetchMutexReleased runs a metadata operation without holding the
+// lock shared with chainsync handlers. Its caller must hold the mutex, and it
+// always returns with the mutex held again.
+func (ls *LedgerState) withBlockfetchMutexReleased(
+	fn func() error,
+) error {
+	ls.chainsyncBlockfetchMutex.Unlock()
+	defer ls.chainsyncBlockfetchMutex.Lock()
+	return fn()
 }
 
 func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {
@@ -4520,10 +4570,14 @@ func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
 			if retryErr := ls.restartQueuedBlockfetchAfterForkLocked(*activeConnId, pending); retryErr == nil {
 				ls.config.Logger.Info(
 					"retried blockfetch restart after fork extension on the current active connection",
-					"component", "ledger",
-					"failed_connection_id", failedConnId.String(),
-					"active_connection_id", activeConnId.String(),
-					"error", restartErr,
+					"component",
+					"ledger",
+					"failed_connection_id",
+					failedConnId.String(),
+					"active_connection_id",
+					activeConnId.String(),
+					"error",
+					restartErr,
 				)
 				return
 			}
@@ -4531,9 +4585,12 @@ func (ls *LedgerState) recoverBlockfetchRestartFailureLocked(
 	}
 	ls.config.Logger.Warn(
 		"failed to start blockfetch after fork extension, dropping queued headers and requesting chainsync re-sync",
-		"component", "ledger",
-		"error", restartErr,
-		"connection_id", failedConnId.String(),
+		"component",
+		"ledger",
+		"error",
+		restartErr,
+		"connection_id",
+		failedConnId.String(),
 	)
 	ls.clearQueuedHeaders()
 	ls.requestChainsyncResync(
@@ -6843,8 +6900,12 @@ func (ls *LedgerState) processEpochRollover(
 	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
-	if err := ls.applyStakeRewards(
-		txn, currentEpoch.EpochId+1, epochStartSlot,
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "reward_apply", func() error {
+			return ls.applyStakeRewards(
+				txn, currentEpoch.EpochId+1, epochStartSlot,
+			)
+		},
 	); err != nil {
 		return nil, fmt.Errorf("apply stake rewards: %w", err)
 	}
@@ -6859,8 +6920,12 @@ func (ls *LedgerState) processEpochRollover(
 	// precedes both SNAP and POOLREAP: its credits are part of the mark snapshot
 	// and its pot movements are visible to POOLREAP, governance and the ADA-pot
 	// capture below.
-	if err := ls.applyMIRCerts(
-		txn, currentEpoch.StartSlot, epochStartSlot, currentEpoch.EraId,
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "mir", func() error {
+			return ls.applyMIRCerts(
+				txn, currentEpoch.StartSlot, epochStartSlot, currentEpoch.EraId,
+			)
+		},
 	); err != nil {
 		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
@@ -6873,8 +6938,12 @@ func (ls *LedgerState) processEpochRollover(
 	// before any of them — while the snapshot row is written at the end of the
 	// rollover where the new epoch record and the post-enactment protocol
 	// version exist.
-	if err := ls.captureEpochBoundarySnapshotStake(
-		txn, currentEpoch, epochStartSlot,
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "snap", func() error {
+			return ls.captureEpochBoundarySnapshotStake(
+				txn, currentEpoch, epochStartSlot,
+			)
+		},
 	); err != nil {
 		return nil, err
 	}
@@ -6891,10 +6960,16 @@ func (ls *LedgerState) processEpochRollover(
 	// it. A hard failure here aborts the rollover rather than letting
 	// governance silently fall back to reading the not-yet-written row and
 	// see zero SPO stake for every gated action at every boundary.
-	currentBoundarySPOState, err := ls.currentBoundarySPOStakeState(
-		txn, currentEpoch, epochStartSlot,
-	)
-	if err != nil {
+	var currentBoundarySPOState *governance.SPOVotingState
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "spo_state_resolve", func() error {
+			var err error
+			currentBoundarySPOState, err = ls.currentBoundarySPOStakeState(
+				txn, currentEpoch, epochStartSlot,
+			)
+			return err
+		},
+	); err != nil {
 		return nil, fmt.Errorf("resolve current-boundary SPO stake: %w", err)
 	}
 
@@ -6902,18 +6977,25 @@ func (ls *LedgerState) processEpochRollover(
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
 	}
-	newPParams, plutusV2CostModelWritten, err := ls.db.ComputeAndApplyPParamUpdates(
-		epochStartSlot,
-		currentEpoch.EpochId+1, // Target epoch for updates
-		currentEra.Id,
-		updateQuorum,
-		ownedPParams,
-		currentEra.DecodePParamsUpdateFunc,
-		currentEra.PParamsUpdateFunc,
-		currentEra.ParamUpdateHasPlutusV2CostModelFunc,
-		txn,
-	)
-	if err != nil {
+	var newPParams lcommon.ProtocolParameters
+	var plutusV2CostModelWritten bool
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "pparam_updates", func() error {
+			var err error
+			newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
+				epochStartSlot,
+				currentEpoch.EpochId+1, // Target epoch for updates
+				currentEra.Id,
+				updateQuorum,
+				ownedPParams,
+				currentEra.DecodePParamsUpdateFunc,
+				currentEra.PParamsUpdateFunc,
+				currentEra.ParamUpdateHasPlutusV2CostModelFunc,
+				txn,
+			)
+			return err
+		},
+	); err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
 	}
 	if plutusV2CostModelWritten {
@@ -6938,8 +7020,12 @@ func (ls *LedgerState) processEpochRollover(
 	// any deposit that lands in the treasury (unregistered/inactive reward
 	// account) is visible to the withdrawals checked in
 	// governance.ProcessEpoch below.
-	if err := ls.applyPoolRetirements(
-		txn, currentEpoch.EpochId+1, epochStartSlot,
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "pool_reap", func() error {
+			return ls.applyPoolRetirements(
+				txn, currentEpoch.EpochId+1, epochStartSlot,
+			)
+		},
 	); err != nil {
 		return nil, fmt.Errorf("apply pool retirements: %w", err)
 	}
@@ -6949,8 +7035,12 @@ func (ls *LedgerState) processEpochRollover(
 	// receives the same full window starting at the activation boundary. The
 	// new epoch row is persisted later in this transaction; the stamp and
 	// durable marker still commit or roll back atomically with it.
-	if err := ls.activateDelegatorInactivityIfNeeded(
-		txn, currentEpoch.EpochId+1,
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "inactivity_activation", func() error {
+			return ls.activateDelegatorInactivityIfNeeded(
+				txn, currentEpoch.EpochId+1,
+			)
+		},
 	); err != nil {
 		return nil, fmt.Errorf("activate delegator inactivity: %w", err)
 	}
@@ -6964,29 +7054,47 @@ func (ls *LedgerState) processEpochRollover(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
-	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
-		DB:                      ls.db,
-		Txn:                     txn,
-		Logger:                  ls.config.Logger,
-		PrevEpoch:               currentEpoch.EpochId,
-		NewEpoch:                currentEpoch.EpochId + 1,
-		BoundarySlot:            epochStartSlot,
-		PParams:                 newPParams,
-		UpdateFn:                currentEra.PParamsUpdateFunc,
-		ConwayGenesis:           conwayGenesis,
-		DelegatorInactivityOn:   ls.config.DelegatorInactivityEnabled,
-		CurrentBoundarySPOState: currentBoundarySPOState,
-	})
-	if err != nil {
+	var govOut *governance.EpochOutput
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "governance", func() error {
+			var err error
+			govOut, err = governance.ProcessEpoch(&governance.EpochInput{
+				DB:                      ls.db,
+				Txn:                     txn,
+				Logger:                  ls.config.Logger,
+				PrevEpoch:               currentEpoch.EpochId,
+				NewEpoch:                currentEpoch.EpochId + 1,
+				BoundarySlot:            epochStartSlot,
+				PrevEpochStartSlot:      currentEpoch.StartSlot,
+				PParams:                 newPParams,
+				UpdateFn:                currentEra.PParamsUpdateFunc,
+				ConwayGenesis:           conwayGenesis,
+				DelegatorInactivityOn:   ls.config.DelegatorInactivityEnabled,
+				CurrentBoundarySPOState: currentBoundarySPOState,
+			})
+			return err
+		},
+	); err != nil {
 		return nil, fmt.Errorf("process governance epoch: %w", err)
+	}
+	if govOut == nil {
+		// governance.ProcessEpoch never returns (nil, nil); this is
+		// unreachable in practice, but timeRolloverPhase's closure
+		// indirection loses that invariant for static analysis, so check it
+		// explicitly rather than dereference below.
+		return nil, errors.New("process governance epoch: nil output")
 	}
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
 	// treasury withdrawals (handled in governance.ProcessEpoch above), so a
 	// withdrawal is checked against the pre-donation treasury and the donation
 	// is reflected for subsequent epochs' accounting.
-	if err := ls.applyEpochDonations(
-		txn, currentEpoch.EpochId, epochStartSlot,
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "donations", func() error {
+			return ls.applyEpochDonations(
+				txn, currentEpoch.EpochId, epochStartSlot,
+			)
+		},
 	); err != nil {
 		return nil, fmt.Errorf("apply epoch donations: %w", err)
 	}
@@ -7092,8 +7200,12 @@ func (ls *LedgerState) processEpochRollover(
 		// (pv2→pv3) that carry a state rewrite. See cardano-ledger
 		// Conway/Rules/HardFork.hs and Allegra/Translation.hs.
 		if oldVer.Major != newVer.Major {
-			if err := ls.applyIntraEraHardForkRule(
-				txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
+			if err := ls.timeRolloverPhase(
+				currentEpoch.EpochId+1, "hardfork", func() error {
+					return ls.applyIntraEraHardForkRule(
+						txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
+					)
+				},
 			); err != nil {
 				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
 			}
@@ -7105,16 +7217,20 @@ func (ls *LedgerState) processEpochRollover(
 	// governance withdrawals, donations, and any AVVM-removal reserves top-up).
 	// This row seeds the delayed reward calculation for a later epoch, so it
 	// must observe the fully settled pots for the ended epoch.
-	if err := ls.saveRewardAdaPotsForEpoch(
-		txn,
-		currentEpoch.EpochId+1,
-		currentEpoch,
-		epochStartSlot,
+	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "save_pots", func() error {
+			return ls.saveRewardAdaPotsForEpoch(
+				txn,
+				currentEpoch.EpochId+1,
+				currentEpoch,
+				epochStartSlot,
+			)
+		},
 	); err != nil {
 		return nil, fmt.Errorf("save reward ADA pots: %w", err)
 	}
 
-	// Create next epoch record
+	epochRecordStart := time.Now()
 	epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
 		ls.config.CardanoNodeConfig,
 	)
@@ -7176,6 +7292,10 @@ func (ls *LedgerState) processEpochRollover(
 		"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 		"component", "ledger",
 	)
+	ls.observeRolloverPhase(
+		currentEpoch.EpochId+1, "epoch_record", time.Since(epochRecordStart),
+		nil,
+	)
 
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
@@ -7185,8 +7305,10 @@ func (ls *LedgerState) processEpochRollover(
 	// produced the era and protocol parameters the new epoch actually runs at.
 	if deferBoundarySnapshot {
 		result.BoundarySnapshotDeferred = true
-	} else if err := ls.captureEpochBoundarySnapshot(
-		txn, currentEpoch, result,
+	} else if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "snap_persist", func() error {
+			return ls.captureEpochBoundarySnapshot(txn, currentEpoch, result)
+		},
 	); err != nil {
 		return nil, err
 	}
@@ -7366,7 +7488,12 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 		)
 		return nil
 	}
-	if err := hook(txn, evt); err != nil {
+	err := hook(txn, evt)
+	if err == nil {
+		err = ls.takeDeferredRewardStakeInputs(txn)
+	}
+	if err != nil {
+		ls.discardDeferredRewardStakeInputs(txn)
 		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
 			return fmt.Errorf(
 				"roll back epoch-boundary snapshot savepoint (capture error: %w): %w",

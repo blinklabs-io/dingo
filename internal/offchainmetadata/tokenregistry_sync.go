@@ -19,12 +19,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -37,6 +39,7 @@ import (
 )
 
 const (
+	maxInt64 = int64(^uint64(0) >> 1)
 	// The sync_state keys below describe the snapshot currently *in the
 	// table*, not a per-source cache. There is one token_registry_entry
 	// table, so there is one set of state, and all three move together on a
@@ -86,12 +89,21 @@ const (
 	// registry sits near 240MB; the headroom here absorbs growth without
 	// letting a hostile or misconfigured source stream forever.
 	defaultTokenRegistryMaxBytes int64 = 768 << 20
+	// defaultTokenRegistryMaxDecompressedBytes bounds gzip expansion and all
+	// tar content, including files the registry parser does not recognize.
+	defaultTokenRegistryMaxDecompressedBytes int64 = 2 << 30
 	// defaultTokenRegistryMaxEntryBytes caps a single mapping document. Real
 	// mappings run to tens of kilobytes, dominated by base64 logos.
-	defaultTokenRegistryMaxEntryBytes    int64 = 4 << 20
-	defaultTokenRegistryMaxExpandedBytes int64 = 1 << 30
-	defaultTokenRegistryMaxMappings            = 100_000
-	defaultTokenRegistryMaxRetainedBytes int64 = 512 << 20
+	defaultTokenRegistryMaxEntryBytes int64 = 4 << 20
+	// The archive and accepted-entry limits bound header parsing and database
+	// work independently of byte limits. The public registries contain fewer
+	// than 10,000 mappings.
+	defaultTokenRegistryMaxArchiveEntries  = 100_000
+	defaultTokenRegistryMaxAcceptedEntries = 50_000
+	// Payload strings dominate retained batch memory. This permits the normal
+	// 500-entry batch while bounding logo-heavy batches independently of the
+	// per-mapping limit.
+	defaultTokenRegistryMaxBatchBytes int64 = 64 << 20
 	// tokenRegistryBatchSize bounds how many parsed entries are held before
 	// being flushed to the store, keeping peak memory independent of the
 	// roughly 8,000 mappings in the mainnet registry.
@@ -106,6 +118,7 @@ const (
 
 // TokenRegistryStore is the persistence surface the registry sync needs.
 type TokenRegistryStore interface {
+	Transaction(ctx context.Context) types.Txn
 	UpsertTokenRegistryEntries(
 		ctx context.Context,
 		entries []models.TokenRegistryEntry,
@@ -119,10 +132,6 @@ type TokenRegistryStore interface {
 	) (int, error)
 	GetSyncState(key string, txn types.Txn) (string, error)
 	SetSyncState(key, value string, txn types.Txn) error
-}
-
-type tokenRegistryTransactionalStore interface {
-	Transaction(context.Context) types.Txn
 }
 
 // TokenRegistryConfig configures the CIP-26 token registry sync. Zero values
@@ -143,12 +152,17 @@ type TokenRegistryConfig struct {
 	UserAgent      string
 	Interval       time.Duration
 	RequestTimeout time.Duration
-	// MaxBytes caps the compressed download; MaxEntryBytes caps one mapping.
-	MaxBytes         int64
-	MaxEntryBytes    int64
-	MaxExpandedBytes int64
-	MaxMappings      int
-	MaxRetainedBytes int64
+	// MaxBytes caps the compressed download; MaxDecompressedBytes caps all
+	// expanded tar content; MaxEntryBytes caps one mapping. MaxArchiveEntries
+	// counts every tar header, while MaxAcceptedEntries bounds parsed rows and
+	// therefore row-upsert operations. MaxBatchBytes caps retained property
+	// payload between database flushes.
+	MaxBytes             int64
+	MaxDecompressedBytes int64
+	MaxEntryBytes        int64
+	MaxArchiveEntries    int
+	MaxAcceptedEntries   int
+	MaxBatchBytes        int64
 	// StoreLogos opts into persisting base64 logo payloads, which are
 	// roughly 90% of registry bytes. Off by default.
 	StoreLogos bool
@@ -165,22 +179,24 @@ type TokenRegistryConfig struct {
 // complete registry, so unlike per-asset lookups against a remote metadata
 // server it reveals nothing about which assets a user holds.
 type TokenRegistrySync struct {
-	logger           *slog.Logger
-	store            TokenRegistryStore
-	client           *http.Client
-	sourceURL        string
-	userAgent        string
-	interval         time.Duration
-	maxBytes         int64
-	maxEntryBytes    int64
-	maxExpandedBytes int64
-	maxMappings      int
-	maxRetainedBytes int64
-	storeLogos       bool
-	allowPrivate     bool
-	now              func() time.Time
-	lastSyncedAt     time.Time
-	mu               sync.Mutex
+	logger               *slog.Logger
+	store                TokenRegistryStore
+	client               *http.Client
+	sourceURL            string
+	userAgent            string
+	interval             time.Duration
+	maxBytes             int64
+	maxDecompressedBytes int64
+	maxEntryBytes        int64
+	maxArchiveEntries    int
+	maxAcceptedEntries   int
+	maxBatchBytes        int64
+	storeLogos           bool
+	allowPrivate         bool
+	removeStageFile      func(string) error
+	now                  func() time.Time
+	lastSyncedAt         time.Time
+	mu                   sync.Mutex
 	// syncSlot serializes whole snapshot applications. It is a buffered
 	// channel rather than a mutex so the wait can be abandoned on context
 	// cancellation: an external SyncOnce call holds its own uncancelled
@@ -247,34 +263,40 @@ func NewTokenRegistrySync(
 	if maxEntryBytes <= 0 {
 		maxEntryBytes = defaultTokenRegistryMaxEntryBytes
 	}
-	maxExpandedBytes := cfg.MaxExpandedBytes
-	if maxExpandedBytes <= 0 {
-		maxExpandedBytes = defaultTokenRegistryMaxExpandedBytes
+	maxDecompressedBytes := cfg.MaxDecompressedBytes
+	if maxDecompressedBytes <= 0 {
+		maxDecompressedBytes = defaultTokenRegistryMaxDecompressedBytes
 	}
-	maxMappings := cfg.MaxMappings
-	if maxMappings <= 0 {
-		maxMappings = defaultTokenRegistryMaxMappings
+	maxArchiveEntries := cfg.MaxArchiveEntries
+	if maxArchiveEntries <= 0 {
+		maxArchiveEntries = defaultTokenRegistryMaxArchiveEntries
 	}
-	maxRetainedBytes := cfg.MaxRetainedBytes
-	if maxRetainedBytes <= 0 {
-		maxRetainedBytes = defaultTokenRegistryMaxRetainedBytes
+	maxAcceptedEntries := cfg.MaxAcceptedEntries
+	if maxAcceptedEntries <= 0 {
+		maxAcceptedEntries = defaultTokenRegistryMaxAcceptedEntries
+	}
+	maxBatchBytes := cfg.MaxBatchBytes
+	if maxBatchBytes <= 0 {
+		maxBatchBytes = defaultTokenRegistryMaxBatchBytes
 	}
 	return &TokenRegistrySync{
-		logger:           logger,
-		store:            cfg.Store,
-		client:           client,
-		sourceURL:        sourceURL,
-		userAgent:        userAgent,
-		interval:         interval,
-		maxBytes:         maxBytes,
-		maxEntryBytes:    maxEntryBytes,
-		maxExpandedBytes: maxExpandedBytes,
-		maxMappings:      maxMappings,
-		maxRetainedBytes: maxRetainedBytes,
-		storeLogos:       cfg.StoreLogos,
-		allowPrivate:     cfg.AllowPrivateAddresses,
-		now:              time.Now,
-		syncSlot:         make(chan struct{}, 1),
+		logger:               logger,
+		store:                cfg.Store,
+		client:               client,
+		sourceURL:            sourceURL,
+		userAgent:            userAgent,
+		interval:             interval,
+		maxBytes:             maxBytes,
+		maxDecompressedBytes: maxDecompressedBytes,
+		maxEntryBytes:        maxEntryBytes,
+		maxArchiveEntries:    maxArchiveEntries,
+		maxAcceptedEntries:   maxAcceptedEntries,
+		maxBatchBytes:        maxBatchBytes,
+		storeLogos:           cfg.StoreLogos,
+		allowPrivate:         cfg.AllowPrivateAddresses,
+		removeStageFile:      os.Remove,
+		now:                  time.Now,
+		syncSlot:             make(chan struct{}, 1),
 	}, nil
 }
 
@@ -450,7 +472,9 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 // 304 and costs one request with no body. The tag is recorded only after the
 // whole snapshot has been applied, so an interrupted sync retries in full
 // rather than recording progress it did not make.
-func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
+func (s *TokenRegistrySync) SyncOnce(
+	ctx context.Context,
+) (written int, retErr error) {
 	// Serialized end to end, and abandonable. SyncOnce is exported and the
 	// worker loop calls it, so two applications can overlap; interleaved
 	// snapshots would let an older one finish last, overwrite the newer
@@ -549,59 +573,77 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 			resp.StatusCode,
 		)
 	}
-	// One stamp for the whole snapshot: every row it carries gets this
-	// value, so anything older afterwards is a subject the snapshot did not
-	// carry. Taken before the first write so no row can predate it.
-	// Truncated to a whole second because MySQL's `datetime` column holds
-	// no fractional seconds. A sub-second stamp would be stored rounded
-	// while the prune below compared against the unrounded value, so every
-	// row the snapshot had just written would look older than the cutoff
-	// and be deleted. Truncating at the source makes the written value and
-	// the cutoff identical on SQLite, PostgreSQL, and MySQL alike.
-	syncedAt := s.nextSyncStamp(persistedStamp)
-	// Persisted before the rows it stamps, so that "recorded stamp >= the
-	// table's highest stamp" holds at every instant. The three state values
-	// are written with separate calls and a crash can land between them;
-	// this ordering makes the surviving state err in the safe direction,
-	// because the next snapshot is then guaranteed a strictly greater stamp
-	// and prunes whatever an interrupted one left behind. Recording it after
-	// the apply would leave the table ahead of the stamp, and a restart
-	// inside the same second would reuse it.
-	if err := s.store.SetSyncState(
-		tokenRegistryStampKey,
-		syncedAt.UTC().Format(time.RFC3339Nano),
-		nil,
-	); err != nil {
-		// Advancing the stamp is what keeps reconciliation correct, so
-		// unlike the tag and identity this failure aborts before any row is
-		// written rather than proceeding with a stamp nothing recorded.
-		return 0, fmt.Errorf("record token registry sync stamp: %w", err)
-	}
-	written, mappings, skipped, err := s.applySnapshot(
-		ctx,
-		resp.Body,
-		syncedAt,
-	)
+	stage, err := s.stageSnapshot(ctx, resp.Body)
 	if err != nil {
-		return written, err
+		return 0, err
 	}
+	defer func() {
+		cleanupErr := stage.close(s.removeStageFile)
+		if cleanupErr == nil {
+			return
+		}
+		if retErr != nil {
+			s.logger.Warn(
+				"cleaning token registry staging file failed after sync error",
+				"error", cleanupErr,
+			)
+			return
+		}
+		written = 0
+		retErr = fmt.Errorf(
+			"clean token registry staging file: %w",
+			cleanupErr,
+		)
+	}()
 	// An archive carrying no mapping files at all is not evidence that the
 	// registry is empty -- it is what an upstream layout change, a
 	// truncated artifact, or a mirror serving the wrong repository looks
 	// like. Pruning against it would reconcile the whole table to nothing,
 	// and recording its ETag would make that stick until the artifact
 	// changed again. Keep what we have, retry next interval, and say so.
-	//
-	// The discriminator is the mapping-file count, not the entry count: an
-	// archive that does carry mappings which all turn out to be unusable is
-	// a real (if odd) empty registry, and must still reconcile.
-	if mappings == 0 {
+	if stage.mappings == 0 {
 		s.logger.Warn(
 			"token registry snapshot contained no usable mappings; keeping existing entries and retrying next interval",
 			"url",
 			registryLogURL(s.sourceURL),
 		)
 		return 0, nil
+	}
+
+	// Artifact ingestion is complete before the metadata transaction begins.
+	// This keeps network and parsing latency outside SQLite's writer lock and
+	// outside the corresponding write transaction on every SQL backend.
+	// One stamp for the whole snapshot: every row it carries gets this
+	// value, so anything older afterwards is a subject the snapshot did not
+	// carry. Truncation keeps MySQL's `datetime` value equal to the prune
+	// cutoff on every backend.
+	syncedAt := s.nextSyncStamp(persistedStamp)
+	txn := s.store.Transaction(ctx)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = txn.Rollback()
+		}
+	}()
+	// The stamp, rows, reconciliation, and validator state describe one
+	// public snapshot and therefore share one metadata transaction. A limit,
+	// parse, store, or commit failure leaves the previously served snapshot
+	// and all of its state intact.
+	if err := s.store.SetSyncState(
+		tokenRegistryStampKey,
+		syncedAt.UTC().Format(time.RFC3339Nano),
+		txn,
+	); err != nil {
+		return 0, fmt.Errorf("record token registry sync stamp: %w", err)
+	}
+	written, err = s.applyStagedSnapshot(
+		ctx,
+		stage,
+		syncedAt,
+		txn,
+	)
+	if err != nil {
+		return 0, err
 	}
 	// A skipped mapping is indistinguishable from an absent one at prune
 	// time: neither re-stamps its row. Reconciling anyway would let a
@@ -610,14 +652,19 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	// skips are rare (all 7,970 mainnet mappings parse), so a later clean
 	// snapshot reconciles, and the warning makes a persistent one visible
 	// rather than silently destructive.
-	if skipped > 0 {
+	if stage.skipped > 0 {
 		s.logger.Warn(
 			"token registry snapshot had unusable mappings; deferring reconciliation so their stored metadata is not retired",
 			"skipped",
-			skipped,
+			stage.skipped,
 			"url",
 			registryLogURL(s.sourceURL),
 		)
+		if err := txn.Commit(); err != nil {
+			return 0, fmt.Errorf("commit token registry snapshot: %w", err)
+		}
+		committed = true
+		s.lastSyncedAt = syncedAt
 		return written, nil
 	}
 	// The snapshot applied in full and carried something, so it is
@@ -629,26 +676,51 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	pruned, err := s.store.PruneTokenRegistryEntriesBefore(
 		ctx,
 		syncedAt,
-		nil,
+		txn,
 	)
 	if err != nil {
-		return written, fmt.Errorf(
+		return 0, fmt.Errorf(
 			"prune stale token registry entries: %w",
 			err,
 		)
 	}
+	// The snapshot is applied, so the recorded state now describes the
+	// table. All three move together: recording the tag without the identity
+	// would let a later switch-back replay it against the wrong contents.
+	etag := strings.TrimSpace(resp.Header.Get("ETag"))
+	if etag != "" {
+		if err := s.store.SetSyncState(
+			TokenRegistrySyncStateKey,
+			etag,
+			txn,
+		); err != nil {
+			return 0, fmt.Errorf(
+				"record token registry entity tag: %w",
+				err,
+			)
+		}
+	}
+	if err := s.store.SetSyncState(
+		tokenRegistrySnapshotIDKey,
+		identity,
+		txn,
+	); err != nil {
+		return 0, fmt.Errorf(
+			"record token registry snapshot identity: %w",
+			err,
+		)
+	}
+	if err := txn.Commit(); err != nil {
+		return 0, fmt.Errorf("commit token registry snapshot: %w", err)
+	}
+	committed = true
+	s.lastSyncedAt = syncedAt
 	if pruned > 0 {
 		s.logger.Info(
 			"token registry entries retired",
 			"count", pruned,
 		)
 	}
-	// The snapshot is applied, so the recorded state now describes the
-	// table. All three move together: recording the tag without the identity
-	// would let a later switch-back replay it against the wrong contents.
-	// Failures here are logged rather than returned -- the data is already
-	// correct, and the cost is a redundant download next interval.
-	s.recordSyncState(strings.TrimSpace(resp.Header.Get("ETag")), identity)
 	return written, nil
 }
 
@@ -682,49 +754,6 @@ func (s *TokenRegistrySync) readPersistedStamp() (time.Time, error) {
 	return stamp.UTC(), nil
 }
 
-// recordSyncState persists what the table now holds, tag first and identity
-// last.
-//
-// The order is load-bearing. The identity is the gate: the tag is only ever
-// replayed when the recorded identity matches the current one. Writing the
-// gate first would mean a crash between the two left it open over a tag that
-// was never updated, authorizing a 304 against contents the tag does not
-// describe. Writing it last means such a crash leaves the gate shut and the
-// next run re-applies in full, which is merely wasteful.
-//
-// The stamp is not written here; it is recorded before the apply. Failures are
-// logged rather than returned -- the rows are already correct, and the cost is
-// a redundant download next interval.
-func (s *TokenRegistrySync) recordSyncState(etag string, identity string) {
-	// A source that serves no validator simply gets no conditional request
-	// next time; do not clobber a usable stored tag with "".
-	if etag != "" {
-		if err := s.store.SetSyncState(
-			TokenRegistrySyncStateKey,
-			etag,
-			nil,
-		); err != nil {
-			s.logger.Warn(
-				"recording token registry entity tag failed",
-				"error", err,
-			)
-			// Without the tag recorded, opening the gate would authorize
-			// replaying a stale one. Leave it shut.
-			return
-		}
-	}
-	if err := s.store.SetSyncState(
-		tokenRegistrySnapshotIDKey,
-		identity,
-		nil,
-	); err != nil {
-		s.logger.Warn(
-			"recording token registry snapshot identity failed",
-			"error", err,
-		)
-	}
-}
-
 // nextSyncStamp returns the stamp for a snapshot: truncated to a whole second
 // (see the note on MySQL's fractionless `datetime` below) and strictly
 // greater than the previous snapshot's.
@@ -738,8 +767,9 @@ func (s *TokenRegistrySync) recordSyncState(etag string, identity string) {
 // MySQL's `datetime` column carries no fractional seconds, so an unrounded
 // stamp would be stored rounded while the prune compared the original, making
 // every row the snapshot had just written look stale.
-// Called only from SyncOnce, which holds the sync slot, so the stamp
-// sequence needs no lock of its own.
+// Called only from SyncOnce, which holds the sync slot. lastSyncedAt advances
+// only after the transaction commits, so a rejected snapshot cannot move even
+// the process-local high-water mark.
 func (s *TokenRegistrySync) nextSyncStamp(persisted time.Time) time.Time {
 	stamp := s.now().UTC().Truncate(time.Second)
 	// The floor is the later of what this process last used and what the
@@ -752,67 +782,259 @@ func (s *TokenRegistrySync) nextSyncStamp(persisted time.Time) time.Time {
 	if !floor.IsZero() && !stamp.After(floor) {
 		stamp = floor.Add(time.Second)
 	}
-	s.lastSyncedAt = stamp
 	return stamp
 }
 
-// applySnapshot streams a gzipped tar of the registry, parsing mappings/*.json
-// one entry at a time and flushing them to the store in batches. Nothing is
-// written to disk and no more than one mapping plus one batch is held in
-// memory, so peak usage is independent of the roughly 8,000-file registry.
+type tokenRegistryStage struct {
+	file     *os.File
+	mappings int
+	skipped  int
+}
+
+// tokenRegistryStageEntry is the private, ephemeral representation written to
+// the staging file. Keep it limited to fields the metadata upsert consumes and
+// tag every field explicitly so the format does not depend on Go field names.
+type tokenRegistryStageEntry struct {
+	Decimals    *int   `json:"decimals,omitempty"`
+	Subject     string `json:"subject"`
+	Name        string `json:"name,omitempty"`
+	Ticker      string `json:"ticker,omitempty"`
+	Description string `json:"description,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Logo        string `json:"logo,omitempty"`
+}
+
+func newTokenRegistryStageEntry(
+	entry *models.TokenRegistryEntry,
+) tokenRegistryStageEntry {
+	return tokenRegistryStageEntry{
+		Decimals:    entry.Decimals,
+		Subject:     entry.Subject,
+		Name:        entry.Name,
+		Ticker:      entry.Ticker,
+		Description: entry.Description,
+		URL:         entry.URL,
+		Logo:        entry.Logo,
+	}
+}
+
+func (entry tokenRegistryStageEntry) model() models.TokenRegistryEntry {
+	return models.TokenRegistryEntry{
+		Decimals:    entry.Decimals,
+		Subject:     entry.Subject,
+		Name:        entry.Name,
+		Ticker:      entry.Ticker,
+		Description: entry.Description,
+		URL:         entry.URL,
+		Logo:        entry.Logo,
+	}
+}
+
+func (s *tokenRegistryStage) close(remove func(string) error) error {
+	name := s.file.Name()
+	return errors.Join(s.file.Close(), remove(name))
+}
+
+// stageSnapshot streams and validates the remote archive into a bounded local
+// staging file. Network, decompression, and parsing all finish before the
+// final metadata transaction begins; only parsed entries are staged, and both
+// their count and encoded bytes are bounded.
 //
 // A mapping that fails to parse is skipped rather than failing the snapshot:
 // one bad file out of thousands should not cost the whole sync.
-//
-// Batches are committed as they fill rather than as one transaction, so a
-// failure partway through leaves earlier batches applied. That is deliberate.
-// Wrapping ~8,000 upserts in a single transaction would hold the metadata
-// store's write lock for the whole download and parse, stalling block
-// indexing on a node that is also following the chain -- a real cost, to buy
-// atomicity for a best-effort cache that consensus never reads.
-//
-// The partial state is safe and transient. Every row written is the registry's
-// current published value for that subject, so a half-applied snapshot leaves
-// some subjects fresher than others but none wrong. Nothing already served is
-// lost: the prune runs only on a completed snapshot, and the ETag advances
-// only then, so the next run re-applies the whole snapshot and reconciles.
-// TestTokenRegistrySyncFailureAfterBatchFlushPreservesServedEntries and
-// TestTokenRegistrySyncRecoversAfterPartialSnapshot pin both halves.
-func (s *TokenRegistrySync) applySnapshot(
+func (s *TokenRegistrySync) stageSnapshot(
 	ctx context.Context,
 	body io.Reader,
-	syncedAt time.Time,
-) (written int, mappings int, skipped int, err error) {
-	var txn types.Txn
-	if transactional, ok := s.store.(tokenRegistryTransactionalStore); ok {
-		txn = transactional.Transaction(ctx)
-		defer func() {
-			if err != nil {
-				_ = txn.Rollback()
-			}
-		}()
+) (_ *tokenRegistryStage, retErr error) {
+	compressed := &countingReader{
+		reader: limitReaderPast(body, s.maxBytes),
 	}
-	limited := io.LimitReader(body, s.maxBytes+1)
-	counter := &countingReader{reader: limited}
-	gzipReader, err := gzip.NewReader(counter)
+	gzipReader, err := gzip.NewReader(compressed)
 	if err != nil {
-		if counter.read > s.maxBytes {
-			return 0, mappings, skipped, fmt.Errorf(
+		if compressed.read > s.maxBytes {
+			return nil, fmt.Errorf(
 				"token registry snapshot exceeds %d bytes",
 				s.maxBytes,
 			)
 		}
-		return 0, mappings, skipped, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"open token registry snapshot: %w",
 			err,
 		)
 	}
 	defer func() { _ = gzipReader.Close() }()
 
-	expanded := &countingReader{reader: gzipReader}
-	tarReader := tar.NewReader(expanded)
+	decompressed := &countingReader{
+		reader: limitReaderPast(gzipReader, s.maxDecompressedBytes),
+	}
+	tarReader := tar.NewReader(decompressed)
+	stageFile, err := os.CreateTemp("", "dingo-token-registry-*")
+	if err != nil {
+		return nil, fmt.Errorf("create token registry staging file: %w", err)
+	}
+	stage := &tokenRegistryStage{file: stageFile}
+	defer func() {
+		if retErr != nil {
+			if cleanupErr := stage.close(s.removeStageFile); cleanupErr != nil {
+				s.logger.Warn(
+					"cleaning token registry staging file failed after ingestion error",
+					"error", cleanupErr,
+				)
+			}
+		}
+	}()
+	var stagedBytes int64
+	archiveEntries := 0
+	acceptedEntries := 0
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			if decompressed.read > s.maxDecompressedBytes {
+				return nil, fmt.Errorf(
+					"token registry snapshot exceeds %d decompressed bytes",
+					s.maxDecompressedBytes,
+				)
+			}
+			if compressed.read > s.maxBytes {
+				return nil, fmt.Errorf(
+					"token registry snapshot exceeds %d bytes",
+					s.maxBytes,
+				)
+			}
+			return nil, fmt.Errorf(
+				"read token registry snapshot: %w",
+				err,
+			)
+		}
+		archiveEntries++
+		if archiveEntries > s.maxArchiveEntries {
+			return nil, fmt.Errorf(
+				"token registry snapshot exceeds %d archive entries",
+				s.maxArchiveEntries,
+			)
+		}
+		if !isTokenRegistryMapping(header) {
+			continue
+		}
+		// Counted before any per-entry filtering, so this reflects the
+		// archive's shape rather than the data's usefulness.
+		stage.mappings++
+		if header.Size > s.maxEntryBytes {
+			stage.skipped++
+			s.logger.Debug(
+				"token registry mapping too large",
+				"name", header.Name,
+				"size", header.Size,
+			)
+			continue
+		}
+		raw, err := readLimited(tarReader, s.maxEntryBytes)
+		if err != nil {
+			stage.skipped++
+			s.logger.Debug(
+				"reading token registry mapping failed",
+				"name", header.Name,
+				"error", err,
+			)
+			continue
+		}
+		entry, err := ParseTokenRegistryEntry(raw)
+		if err != nil {
+			stage.skipped++
+			s.logger.Debug(
+				"parsing token registry mapping failed",
+				"name", header.Name,
+				"error", err,
+			)
+			continue
+		}
+		if !s.storeLogos {
+			entry.Logo = ""
+		}
+		if entry.IsEmpty() {
+			continue
+		}
+		acceptedEntries++
+		if acceptedEntries > s.maxAcceptedEntries {
+			return nil, fmt.Errorf(
+				"token registry snapshot exceeds %d accepted mappings",
+				s.maxAcceptedEntries,
+			)
+		}
+		entryBytes := tokenRegistryEntryRetainedBytes(entry)
+		if entryBytes > s.maxBatchBytes {
+			stage.skipped++
+			s.logger.Debug(
+				"token registry mapping exceeds retained batch limit",
+				"name", header.Name,
+				"size", entryBytes,
+				"limit", s.maxBatchBytes,
+			)
+			continue
+		}
+		encoded, err := json.Marshal(newTokenRegistryStageEntry(entry))
+		if err != nil {
+			return nil, fmt.Errorf("stage token registry mapping: %w", err)
+		}
+		encoded = append(encoded, '\n')
+		if int64(len(encoded)) > s.maxDecompressedBytes-stagedBytes {
+			return nil, fmt.Errorf(
+				"token registry staging exceeds %d bytes",
+				s.maxDecompressedBytes,
+			)
+		}
+		if _, err := stage.file.Write(encoded); err != nil {
+			return nil, fmt.Errorf("write token registry staging file: %w", err)
+		}
+		stagedBytes += int64(len(encoded))
+	}
+	if _, err := io.Copy(io.Discard, decompressed); err != nil {
+		return nil, fmt.Errorf(
+			"read token registry snapshot: %w",
+			err,
+		)
+	}
+	if decompressed.read > s.maxDecompressedBytes {
+		return nil, fmt.Errorf(
+			"token registry snapshot exceeds %d decompressed bytes",
+			s.maxDecompressedBytes,
+		)
+	}
+	if compressed.read > s.maxBytes {
+		return nil, fmt.Errorf(
+			"token registry snapshot exceeds %d bytes",
+			s.maxBytes,
+		)
+	}
+	if stage.skipped > 0 {
+		s.logger.Info(
+			"token registry mappings skipped",
+			"count", stage.skipped,
+		)
+	}
+	if _, err := stage.file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewind token registry staging file: %w", err)
+	}
+	return stage, nil
+}
+
+// applyStagedSnapshot replays validated staged rows in bounded batches inside
+// the caller's transaction.
+func (s *TokenRegistrySync) applyStagedSnapshot(
+	ctx context.Context,
+	stage *tokenRegistryStage,
+	syncedAt time.Time,
+	txn types.Txn,
+) (written int, retErr error) {
+	decoder := json.NewDecoder(stage.file)
 	batch := make([]models.TokenRegistryEntry, 0, tokenRegistryBatchSize)
-	retainedBytes := int64(0)
+	var batchBytes int64
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -828,108 +1050,68 @@ func (s *TokenRegistrySync) applySnapshot(
 		}
 		written += count
 		batch = batch[:0]
+		batchBytes = 0
 		return nil
 	}
 	for {
-		if ctx.Err() != nil {
-			return written, mappings, skipped, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return 0, err
 		}
-		if expanded.read > s.maxExpandedBytes {
-			return written, mappings, skipped, fmt.Errorf("token registry snapshot exceeds %d expanded bytes", s.maxExpandedBytes)
-		}
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
+		var stagedEntry tokenRegistryStageEntry
+		if err := decoder.Decode(&stagedEntry); errors.Is(err, io.EOF) {
 			break
+		} else if err != nil {
+			return 0, fmt.Errorf("read token registry staging file: %w", err)
 		}
-		if err != nil {
-			if counter.read > s.maxBytes {
-				return written, mappings, skipped, fmt.Errorf(
-					"token registry snapshot exceeds %d bytes",
-					s.maxBytes,
-				)
-			}
-			return written, mappings, skipped, fmt.Errorf(
-				"read token registry snapshot: %w",
-				err,
+		entry := stagedEntry.model()
+		entryBytes := tokenRegistryEntryRetainedBytes(&entry)
+		if entryBytes > s.maxBatchBytes {
+			return 0, fmt.Errorf(
+				"token registry mapping %q retains %d bytes, exceeding batch limit %d",
+				entry.Subject,
+				entryBytes,
+				s.maxBatchBytes,
 			)
 		}
-		if !isTokenRegistryMapping(header) {
-			continue
-		}
-		// Counted before any per-entry filtering, so this reflects the
-		// archive's shape rather than the data's usefulness.
-		mappings++
-		if mappings > s.maxMappings {
-			return written, mappings, skipped, fmt.Errorf("token registry snapshot exceeds %d mappings", s.maxMappings)
-		}
-		if header.Size > s.maxEntryBytes {
-			skipped++
-			s.logger.Debug(
-				"token registry mapping too large",
-				"name", header.Name,
-				"size", header.Size,
-			)
-			continue
-		}
-		raw, err := readLimited(tarReader, s.maxEntryBytes)
-		if err != nil {
-			skipped++
-			s.logger.Debug(
-				"reading token registry mapping failed",
-				"name", header.Name,
-				"error", err,
-			)
-			continue
-		}
-		entry, err := ParseTokenRegistryEntry(raw)
-		if err != nil {
-			skipped++
-			s.logger.Debug(
-				"parsing token registry mapping failed",
-				"name", header.Name,
-				"error", err,
-			)
-			continue
-		}
-		if !s.storeLogos {
-			entry.Logo = ""
-		}
-		retainedBytes += int64(len(raw))
-		if retainedBytes > s.maxRetainedBytes {
-			return written, mappings, skipped, fmt.Errorf("token registry snapshot exceeds %d retained bytes", s.maxRetainedBytes)
-		}
-		if entry.IsEmpty() {
-			continue
-		}
-		batch = append(batch, *entry)
-		if len(batch) >= tokenRegistryBatchSize {
+		if len(batch) > 0 &&
+			(len(batch) >= tokenRegistryBatchSize ||
+				batchBytes+entryBytes > s.maxBatchBytes) {
 			if err := flush(); err != nil {
-				return written, mappings, skipped, err
+				return 0, err
 			}
 		}
+		batch = append(batch, entry)
+		batchBytes += entryBytes
 	}
 	if err := flush(); err != nil {
-		return written, mappings, skipped, err
+		return 0, err
 	}
-	if counter.read > s.maxBytes {
-		return written, mappings, skipped, fmt.Errorf(
-			"token registry snapshot exceeds %d bytes",
-			s.maxBytes,
-		)
+	return written, nil
+}
+
+// limitReaderPast permits one byte beyond limit so callers can distinguish an
+// exhausted budget from a stream whose length is exactly the limit. Saturating
+// at MaxInt64 avoids wrapping a caller-supplied maximum into a negative limit.
+func limitReaderPast(reader io.Reader, limit int64) io.Reader {
+	if limit < maxInt64 {
+		limit++
 	}
-	if txn != nil {
-		if err := txn.Commit(); err != nil {
-			return written, mappings, skipped, fmt.Errorf("commit token registry snapshot: %w", err)
-		}
-		txn = nil
-	}
-	if skipped > 0 {
-		s.logger.Info(
-			"token registry mappings skipped",
-			"count", skipped,
-		)
-	}
-	return written, mappings, skipped, nil
+	return io.LimitReader(reader, limit)
+}
+
+// tokenRegistryEntryRetainedBytes counts the property payload kept alive by a
+// batch. The batch's fixed struct storage is independently bounded by
+// tokenRegistryBatchSize; this byte limit targets the variable-size strings
+// that can otherwise turn a small entry count into a large allocation.
+func tokenRegistryEntryRetainedBytes(entry *models.TokenRegistryEntry) int64 {
+	return int64(
+		len(entry.Subject) +
+			len(entry.Name) +
+			len(entry.Ticker) +
+			len(entry.Description) +
+			len(entry.URL) +
+			len(entry.Logo),
+	)
 }
 
 // isTokenRegistryMapping reports whether a tar entry is a registry mapping.

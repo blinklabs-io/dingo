@@ -399,18 +399,24 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 		WitnessKeys: witnessKeys,
 	}
 
-	txBytes, txID, err := BuildPayment(params)
+	buildPayment := BuildPayment
+	eraID := conwayEraID
+	if p.cfg.TransactionEra == "dijkstra" {
+		buildPayment = BuildDijkstraPayment
+		eraID = dijkstraEraID
+	}
+	txBytes, txID, err := buildPayment(params)
 	if err != nil {
 		p.logger.Error("build payment failed", "err", err)
 		p.wallet.ReturnUTxOs(inputs)
 		return false
 	}
 
-	submitErr := client.SubmitTx(conwayEraID, txBytes)
+	submitErr := client.SubmitTx(eraID, txBytes)
 	entry := TxLog{
 		TxID:      txID,
 		TxType:    "payment",
-		EraID:     conwayEraID,
+		EraID:     eraID,
 		NodeAddr:  client.Addr(),
 		BatchSize: batchSize,
 	}

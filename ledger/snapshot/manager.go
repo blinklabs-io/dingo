@@ -61,6 +61,13 @@ type Manager struct {
 	// existing pruning behavior when the observer is disabled (dingo #4188).
 	rewardAccountOutputRetentionUnbounded bool
 
+	// deferRewardStakeInputs makes the authoritative boundary capture stage
+	// the per-credential reward inputs for its caller to write after the
+	// boundary commits, instead of writing them inside the boundary
+	// transaction; see TakeDeferredRewardStakeInputs.
+	deferRewardStakeInputs bool
+	deferredStakeInputs    *DeferredRewardStakeInputs
+
 	mu             sync.RWMutex
 	running        bool
 	stopping       bool
@@ -223,6 +230,39 @@ func NewManager(
 		eventBus: eventBus,
 		logger:   logger,
 	}
+}
+
+// DeferredRewardStakeInputs is the per-credential reward basis of one mark
+// snapshot that CaptureEpochBoundarySnapshot staged instead of writing.
+type DeferredRewardStakeInputs struct {
+	txn          *database.Txn
+	Epoch        uint64
+	BoundarySlot uint64
+	Inputs       []*models.RewardStakeInput
+}
+
+// SetDeferRewardStakeInputs makes the authoritative boundary capture stage its
+// reward_stake_input rows for TakeDeferredRewardStakeInputs rather than write
+// them in the boundary transaction. The caller must then write them.
+func (m *Manager) SetDeferRewardStakeInputs(enabled bool) {
+	m.mu.Lock()
+	m.deferRewardStakeInputs = enabled
+	m.mu.Unlock()
+}
+
+// TakeDeferredRewardStakeInputs returns, and clears, the reward inputs the
+// capture staged in txn. ok is false when that capture staged none.
+func (m *Manager) TakeDeferredRewardStakeInputs(
+	txn *database.Txn,
+) (*DeferredRewardStakeInputs, bool) {
+	m.mu.Lock()
+	deferred := m.deferredStakeInputs
+	m.deferredStakeInputs = nil
+	m.mu.Unlock()
+	if deferred == nil || deferred.txn != txn {
+		return nil, false
+	}
+	return deferred, true
 }
 
 // SetDelegatorInactivity mirrors the CIP-0163 reward-account inactivity gate
@@ -801,7 +841,10 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		}
 	}
 
-	if err := m.saveSnapshotInTxn(
+	m.mu.RLock()
+	deferStakeInputs := m.deferRewardStakeInputs
+	m.mu.RUnlock()
+	if err := m.saveSnapshotInTxnDeferring(
 		evt.NewEpoch,
 		"mark",
 		distribution,
@@ -814,6 +857,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		// any provisional rows a fallback (event-driven) capture already
 		// wrote for this epoch.
 		false,
+		deferStakeInputs,
 		txn,
 	); err != nil {
 		if m.metrics != nil {

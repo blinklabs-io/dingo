@@ -664,7 +664,7 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 	require.Len(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		len(gdijkstra.UtxoValidationRules),
+		len(gdijkstra.UtxoValidationRules)-1,
 	)
 	plutusIndex := requireRuleIdResolvesToFunc(
 		t,
@@ -673,12 +673,11 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		lcommon.UtxoValidationRulePlutusScripts,
 		"dijkstra.UtxoValidatePlutusScripts",
 	)
-	requireIndexedRulesReplaceRuleIndex(
+	requireIndexedRulesDropRuleIndex(
 		t,
 		dijkstraPhase1UtxoValidationRules,
 		plutusIndex,
-		validateDijkstraPlutusV3ReferenceInputs,
-		"Dijkstra validation must enforce PV11 Plutus V3 reference-input disjointness",
+		"Dijkstra phase-1 rules must defer Plutus script execution to the phase-2 validator",
 	)
 	requireIndexedRulesReplaceRuleIndex(
 		t,
@@ -4842,9 +4841,9 @@ func TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity(
 }
 
 // TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable
-// covers a CodeRabbit finding on this PR: when CommitteeStateAvailable
-// reports false (e.g. a genesis committee member Dingo does not persist,
-// blinklabs-io/dingo#3785), every certificate for that credential takes the
+// verifies that when CommitteeStateAvailable reports false (for example, a
+// genesis committee member is not persisted), every certificate for that
+// credential takes the
 // non-authoritative continue branch. That branch must still consult and
 // update resignedInTx, or a resign-then-resign or resign-then-authorize
 // sequence in one transaction passes uninspected because neither

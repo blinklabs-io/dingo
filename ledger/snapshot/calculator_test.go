@@ -354,6 +354,10 @@ func TestCalculateStakeDistribution_NonZeroStake(t *testing.T) {
 		},
 	}, 500)
 
+	// A registered pool with no delegators remains a committee candidate.
+	poolCHash := []byte("poolC_12345678901234567890AB")
+	seedPoolAndDelegations(t, db, poolCHash, nil, 500)
+
 	// Calculate stake distribution at slot 1000
 	calc := NewCalculator(db)
 	dist, err := calc.CalculateStakeDistribution(context.Background(), 1000)
@@ -364,14 +368,16 @@ func TestCalculateStakeDistribution_NonZeroStake(t *testing.T) {
 		"CRITICAL: TotalStake must not be zero when delegations exist")
 
 	// Verify total pools
-	require.Equal(t, uint64(2), dist.TotalPools,
-		"expected 2 active pools")
+	require.Equal(t, uint64(3), dist.TotalPools,
+		"expected all 3 active pools, including the zero-stake pool")
 
 	// Verify per-pool stakes
 	var poolAKey lcommon.PoolKeyHash
 	copy(poolAKey[:], poolAHash)
 	var poolBKey lcommon.PoolKeyHash
 	copy(poolBKey[:], poolBHash)
+	var poolCKey lcommon.PoolKeyHash
+	copy(poolCKey[:], poolCHash)
 
 	// Pool A: Alice (5M + 3M) + Bob (10M) = 18M lovelace
 	require.Equal(t, uint64(18000000), dist.PoolStakes[poolAKey],
@@ -380,6 +386,9 @@ func TestCalculateStakeDistribution_NonZeroStake(t *testing.T) {
 	// Pool B: Carol (20M) = 20M lovelace
 	require.Equal(t, uint64(20000000), dist.PoolStakes[poolBKey],
 		"pool B stake should be Carol's UTxO")
+	require.Contains(t, dist.PoolStakes, poolCKey)
+	require.Zero(t, dist.PoolStakes[poolCKey],
+		"pool C should remain a zero-stake candidate")
 
 	// Total: 18M + 20M = 38M
 	require.Equal(t, uint64(38000000), dist.TotalStake,
@@ -553,7 +562,13 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 	dist, err = calc.CalculateStakeDistribution(context.Background(), 650)
 	require.NoError(t, err)
 	require.Zero(t, dist.TotalStake)
-	require.Empty(t, dist.PoolStakes)
+	// Both registrations are still active at this slot. The pools remain in
+	// the leader-election distribution with zero stake, while the re-registered
+	// credential contributes neither stake nor a delegator count.
+	require.Equal(t, uint64(2), dist.TotalPools)
+	require.Equal(t, uint64(0), dist.PoolStakes[poolAKey])
+	require.Equal(t, uint64(0), dist.PoolStakes[poolBKey])
+	require.Empty(t, dist.DelegatorCount)
 }
 
 // TestCalculateStakeDistribution_HistoricalUtxoLiveness verifies that stake

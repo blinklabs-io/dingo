@@ -32,8 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func boolPtr(b bool) *bool { return &b }
-
 // TestKoiosTxInfoItem_DecodesCollateralAndValidity pins the decode against
 // the real response shape. A top-level "valid_contract" key does not exist
 // in /tx_info at all, and collateral_output's asset_list is a string; a
@@ -132,8 +130,8 @@ func TestKoiosTxInfoItem_ConsumedProduced(t *testing.T) {
 	t.Run("valid_contract true is valid", func(t *testing.T) {
 		item := body
 		item.PlutusContracts = []KoiosTxInfoPlutusContract{
-			{ValidContract: boolPtr(true)},
-			{ValidContract: boolPtr(true)},
+			{ValidContract: new(true)},
+			{ValidContract: new(true)},
 		}
 		assert.True(t, item.IsValid())
 		assert.Equal(t, item.Inputs, item.Consumed())
@@ -152,7 +150,7 @@ func TestKoiosTxInfoItem_ConsumedProduced(t *testing.T) {
 	t.Run("valid_contract false consumes collateral", func(t *testing.T) {
 		item := body
 		item.PlutusContracts = []KoiosTxInfoPlutusContract{
-			{ValidContract: boolPtr(false)},
+			{ValidContract: new(false)},
 		}
 		assert.False(t, item.IsValid())
 		assert.Equal(t, item.CollateralInputs, item.Consumed())
@@ -164,7 +162,7 @@ func TestKoiosTxInfoItem_ConsumedProduced(t *testing.T) {
 		item := body
 		item.CollateralOutput = nil
 		item.PlutusContracts = []KoiosTxInfoPlutusContract{
-			{ValidContract: boolPtr(false)},
+			{ValidContract: new(false)},
 		}
 		assert.False(t, item.IsValid())
 		assert.Empty(t, item.Produced())
