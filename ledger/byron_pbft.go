@@ -336,7 +336,13 @@ func (ls *LedgerState) validateByronGenesisAnchor(
 }
 
 func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
-	currentSlot, err := ls.CurrentSlot()
+	if ls.slotClock == nil {
+		return fmt.Errorf(
+			"%w: slot clock not initialized",
+			errByronPBFTCurrentSlotUnavailable,
+		)
+	}
+	slotTime, err := ls.slotClock.SlotToTime(block.SlotNumber())
 	if err != nil {
 		return fmt.Errorf(
 			"%w for header at slot %d: %w",
@@ -345,8 +351,17 @@ func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
 			err,
 		)
 	}
-	if err := validateByronPBFTSlot(block.SlotNumber(), currentSlot); err != nil {
-		return err
+	// The peer admission gate retains headers within the clock-skew allowance
+	// until onset. This final guard must not apply that allowance again: doing
+	// so would let a future header advance ledger state before its slot starts.
+	// Compare onset directly, including slot zero before system start, without
+	// requiring a forecast of the current wall-clock slot during catch-up.
+	if now := ls.slotClock.nowFunc(); slotTime.After(now) {
+		return fmt.Errorf(
+			"byron PBFT block slot %d is after current slot: slot onset is %s in the future",
+			block.SlotNumber(),
+			slotTime.Sub(now),
+		)
 	}
 	return nil
 }
@@ -363,17 +378,6 @@ func classifyByronPBFTApplyError(
 		}
 	}
 	return err
-}
-
-func validateByronPBFTSlot(blockSlot, currentSlot uint64) error {
-	if blockSlot > currentSlot {
-		return fmt.Errorf(
-			"byron PBFT block slot %d is after current slot %d",
-			blockSlot,
-			currentSlot,
-		)
-	}
-	return nil
 }
 
 func batchContainsByronBlocks(blocks []ledger.Block) bool {

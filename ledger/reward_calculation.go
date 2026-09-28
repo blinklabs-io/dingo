@@ -16,8 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -46,7 +44,7 @@ import (
 )
 
 // The rollover stack consumes the application entry points below.
-const stakeRewardSourcePrefix = "dingo:stake-reward:"
+const stakeRewardSourcePrefix = models.StakeRewardSourcePrefix
 
 func (ls *LedgerState) applyStakeRewards(
 	txn *database.Txn,
@@ -85,30 +83,288 @@ func (ls *LedgerState) applyStakeRewards(
 			return nil
 		}
 	}
-	app, ok, err := ls.precomputedStakeRewardApplication(
-		txn,
-		newEpoch,
-		boundarySlot,
+	app, ok, err := ls.boundaryStakeRewardApplication(
+		txn, newEpoch, boundarySlot,
 	)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		app, ok, err = ls.calculateStakeRewardApplication(
-			txn,
-			newEpoch,
-			boundarySlot,
-			boundarySlot,
-			true,
-		)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return nil
-		}
+		return nil
 	}
 	return ls.applyStakeRewardApplication(txn, app, boundarySlot)
+}
+
+// boundaryStakeRewardApplication resolves the reward round a boundary
+// applies. A round the per-pool precompute can split is taken from that
+// precompute: a finished one is accepted from pool-level reads, and an
+// unfinished one is completed from its cursor inside txn, reusing every chunk
+// the background run already committed. Rounds it cannot split -- the
+// bootstrap rounds and pre-Allegra rounds -- and rounds whose inputs are
+// missing use the single-pass calculation, which also reports a skipped
+// round.
+func (ls *LedgerState) boundaryStakeRewardApplication(
+	txn *database.Txn,
+	newEpoch uint64,
+	boundarySlot uint64,
+) (*stakeRewardApplication, bool, error) {
+	round, ok, err := ls.resolveStakeRewardPrecomputeRoundInTxn(
+		txn, newEpoch, boundarySlot, boundarySlot, false,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok || round == nil {
+		app, ok, err := ls.precomputedStakeRewardApplication(
+			txn, newEpoch, boundarySlot,
+		)
+		if err != nil || ok {
+			return app, ok, err
+		}
+		return ls.calculateStakeRewardApplication(
+			txn, newEpoch, boundarySlot, boundarySlot, true,
+		)
+	}
+	meta := ls.db.Metadata()
+	cursor, _, err := ls.resumableRewardPrecomputeCursor(
+		meta, txn.Metadata(), round,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if cursor == nil {
+		// A precompute written before the per-pool cursor existed carries
+		// no fingerprint; accept it when its rows still verify.
+		app, ok, err := ls.precomputedStakeRewardApplication(
+			txn, newEpoch, boundarySlot,
+		)
+		if err != nil || ok {
+			return app, ok, err
+		}
+	}
+	resumedFrom := 0
+	if cursor != nil {
+		resumedFrom = cursor.CompletedPools
+	}
+	done, err := ls.stakeRewardPrecomputeChunksInTxn(txn, round, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	if !done {
+		return nil, false, fmt.Errorf(
+			"complete reward round for epoch %d: chunks did not finish",
+			round.epochs.snapshot,
+		)
+	}
+	if resumedFrom < len(round.poolInputs) {
+		ls.config.Logger.Info(
+			"completed stake reward precompute at the epoch boundary",
+			"component", "ledger",
+			"reward_snapshot_epoch", round.epochs.snapshot,
+			"pools_completed_in_background", resumedFrom,
+			"pool_count", len(round.poolInputs),
+		)
+	}
+	return ls.chunkedStakeRewardApplication(txn, round, boundarySlot)
+}
+
+// chunkedStakeRewardApplication builds the application for a finished
+// per-pool round from its cursor totals and pool outputs, without reading its
+// account outputs. Each output's Spendable flag was read when its chunk ran,
+// at or after the round's pots were captured; only credentials whose
+// registration may have changed since -- those with a registration
+// certificate from then to the boundary, and those a rollback restored --
+// are re-read, and their outputs and the totals corrected.
+func (ls *LedgerState) chunkedStakeRewardApplication(
+	txn *database.Txn,
+	round *stakeRewardPrecomputeRound,
+	boundarySlot uint64,
+) (*stakeRewardApplication, bool, error) {
+	meta := ls.db.Metadata()
+	metaTxn := txn.Metadata()
+	cursor, err := loadRewardPrecomputeCursor(
+		meta, metaTxn, round.epochs.snapshot,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if cursor == nil || !cursor.Done {
+		return nil, false, fmt.Errorf(
+			"reward round for epoch %d has no finished cursor",
+			round.epochs.snapshot,
+		)
+	}
+	poolOutputs, err := meta.GetRewardPoolOutputs(round.epochs.snapshot, metaTxn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"get reward pool outputs for epoch %d: %w",
+			round.epochs.snapshot, err,
+		)
+	}
+	effective, unspendable, err := ls.recheckRoundEligibility(
+		txn, round, boundarySlot, poolOutputs,
+		cursor.EffectiveRewards, cursor.UnspendableRewards,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	pparams, _, _, err := ls.rewardParameters(
+		txn, round.epochs.performance, round.epochs.pots, round.pots,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	availableRewards, err := rewardAvailableRewards(
+		round.totals.TotalRewardPot, round.params,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	accounted, overflow := addRewardUint64(effective, unspendable)
+	if overflow || accounted > availableRewards {
+		return nil, false, fmt.Errorf(
+			"precomputed rewards exceed available pot: effective=%d unspendable=%d available=%d",
+			effective, unspendable, availableRewards,
+		)
+	}
+	snapshot := round.rewardSnapshot
+	return &stakeRewardApplication{
+		epochs:                   round.epochs,
+		pparams:                  pparams,
+		params:                   round.params,
+		pots:                     round.pots,
+		poolOutputs:              poolOutputs,
+		totalRewardPot:           round.totals.TotalRewardPot,
+		availableRewards:         availableRewards,
+		effectiveRewards:         effective,
+		unspendable:              unspendable,
+		undistributed:            availableRewards - accounted,
+		totalsFinal:              true,
+		deferCredits:             true,
+		totalCirculation:         round.totals.TotalCirculation,
+		totalBlocks:              round.totalBlocks,
+		rewardEfficiency:         round.totals.Efficiency,
+		precomputed:              true,
+		snapshotCapturedSlot:     snapshot.CapturedSlot,
+		snapshotBoundarySlot:     snapshot.BoundarySlot,
+		snapshotEpochNonce:       snapshot.EpochNonce,
+		snapshotTotalActiveStake: snapshot.TotalActiveStake,
+		snapshotTotalPoolCount:   snapshot.TotalPoolCount,
+		snapshotTotalDelegators:  snapshot.TotalDelegators,
+		snapshotProtocolVersion:  snapshot.ProtocolVersion,
+	}, true, nil
+}
+
+// recheckRoundEligibility re-reads registration for the credentials whose
+// outputs' Spendable flags may be stale, persists every corrected output and
+// pool output, and returns the corrected effective and unspendable totals.
+func (ls *LedgerState) recheckRoundEligibility(
+	txn *database.Txn,
+	round *stakeRewardPrecomputeRound,
+	boundarySlot uint64,
+	poolOutputs []*models.RewardPoolOutput,
+	effective, unspendable uint64,
+) (uint64, uint64, error) {
+	meta := ls.db.Metadata()
+	metaTxn := txn.Metadata()
+	changed, err := meta.GetStakeCredentialsWithRegistrationEvents(
+		round.pots.CapturedSlot, boundarySlot, metaTxn,
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	restored, err := meta.TakeRewardEligibilityRecheck(metaTxn)
+	if err != nil {
+		return 0, 0, err
+	}
+	refs := make([]models.StakeCredentialRef, 0, len(changed)+len(restored))
+	seen := make(map[string]struct{}, len(changed)+len(restored))
+	for _, ref := range append(changed, restored...) {
+		if _, ok := seen[ref.MapKey()]; ok {
+			continue
+		}
+		seen[ref.MapKey()] = struct{}{}
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
+		return effective, unspendable, nil
+	}
+	active, err := meta.GetAccountsByCredential(refs, false, metaTxn)
+	if err != nil {
+		return 0, 0, fmt.Errorf("get reward account eligibility: %w", err)
+	}
+	poolByKey := make(map[string]*models.RewardPoolOutput, len(poolOutputs))
+	for _, output := range poolOutputs {
+		poolByKey[string(output.PoolKeyHash)] = output
+	}
+	var changedOutputs []*models.RewardAccountOutput
+	changedPools := make(map[string]*models.RewardPoolOutput)
+	for _, ref := range refs {
+		outputs, err := meta.GetRewardAccountOutputsForEligibility(
+			[]uint64{round.epochs.snapshot}, ref.Tag, ref.Key, metaTxn,
+		)
+		if err != nil {
+			return 0, 0, err
+		}
+		_, spendable := active[ref.MapKey()]
+		for _, output := range outputs {
+			if output.Guarded || output.Spendable == spendable {
+				continue
+			}
+			amount := uint64(output.Amount)
+			pool := poolByKey[string(output.PoolKeyHash)]
+			if pool == nil {
+				return 0, 0, fmt.Errorf(
+					"reward output for pool %x has no pool output",
+					output.PoolKeyHash,
+				)
+			}
+			if spendable {
+				if unspendable < amount || uint64(pool.Unspendable) < amount {
+					return 0, 0, fmt.Errorf(
+						"unspendable total below output %d", amount,
+					)
+				}
+				unspendable -= amount
+				pool.Unspendable -= types.Uint64(amount)
+				if effective, err = addRewardTotalChecked(
+					effective, amount,
+				); err != nil {
+					return 0, 0, err
+				}
+			} else {
+				if effective < amount {
+					return 0, 0, fmt.Errorf(
+						"effective total below output %d", amount,
+					)
+				}
+				effective -= amount
+				pool.Unspendable += types.Uint64(amount)
+				if unspendable, err = addRewardTotalChecked(
+					unspendable, amount,
+				); err != nil {
+					return 0, 0, err
+				}
+			}
+			output.Spendable = spendable
+			changedOutputs = append(changedOutputs, output)
+			changedPools[string(pool.PoolKeyHash)] = pool
+		}
+	}
+	if len(changedOutputs) == 0 {
+		return effective, unspendable, nil
+	}
+	if err := meta.SaveRewardAccountOutputs(changedOutputs, metaTxn); err != nil {
+		return 0, 0, fmt.Errorf("save rechecked reward outputs: %w", err)
+	}
+	pools := make([]*models.RewardPoolOutput, 0, len(changedPools))
+	for _, pool := range changedPools {
+		pools = append(pools, pool)
+	}
+	if err := meta.SaveRewardPoolOutputs(pools, metaTxn); err != nil {
+		return 0, 0, fmt.Errorf("save rechecked reward pool outputs: %w", err)
+	}
+	return effective, unspendable, nil
 }
 
 type stakeRewardApplication struct {
@@ -131,6 +387,12 @@ type stakeRewardApplication struct {
 	unspendable              uint64
 	precomputed              bool
 	outputsUpdated           bool
+	// totalsFinal marks effectiveRewards, unspendable and undistributed as
+	// already derived, for an application that carries no account outputs.
+	totalsFinal bool
+	// deferCredits leaves the round's account credits to the pending-round
+	// fold (reward_credit_pending.go) instead of the boundary transaction.
+	deferCredits bool
 	// totalCirculation, totalBlocks and rewardEfficiency record the global
 	// reward-round inputs that scale every pool's reward by the same factor,
 	// so a uniform network-wide shortfall can be attributed to the input that
@@ -223,6 +485,12 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	rewardSnapshotEpoch := epochs.snapshot
 	performanceEpoch := epochs.performance
 	potsEpoch := epochs.pots
+	if err := ls.ensureRewardStakeInputsReady(txn, rewardSnapshotEpoch); err != nil {
+		if errors.Is(err, errRewardStakeInputsNotReady) && !reportSkips {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
 
@@ -494,6 +762,9 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
+	if app.deferCredits {
+		return ls.applyDeferredStakeRewardRound(txn, app, boundarySlot)
+	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
 	if err := saveReconstructedRewardStakeInputs(meta, metaTxn, app); err != nil {
@@ -540,6 +811,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		}
 	}
 
+	credits := make([]models.AccountRewardCredit, 0, len(app.accountOutputs))
 	for _, output := range app.accountOutputs {
 		reward, err := rewardFromAccountOutput(output)
 		if err != nil {
@@ -551,21 +823,18 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		if rewardOutputGuarded(app, output) {
 			continue
 		}
-		if err := ls.db.AddAccountRewardByCredential(
-			reward.Credential.Tag,
-			reward.Credential.Hash[:],
-			reward.Amount,
-			boundarySlot,
-			stakeRewardSourceHash(app.epochs.snapshot, reward),
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"credit stake reward epoch %d credential %x: %w",
-				app.epochs.snapshot,
-				reward.Credential.Hash,
-				err,
-			)
-		}
+		credits = append(credits, models.AccountRewardCredit{
+			CredentialTag: reward.Credential.Tag,
+			StakingKey:    reward.Credential.Hash[:],
+			Amount:        reward.Amount,
+			Slot:          boundarySlot,
+			SourceHash:    stakeRewardSourceHash(app.epochs.snapshot, reward),
+		})
+	}
+	if err := ls.db.AddAccountRewardsByCredential(credits, txn); err != nil {
+		return fmt.Errorf(
+			"credit stake rewards epoch %d: %w", app.epochs.snapshot, err,
+		)
 	}
 
 	reserves, treasury, err := stakeRewardUpdatedPots(app)
@@ -593,6 +862,61 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"pots_epoch", app.epochs.pots,
 		"performance_pparams_type", fmt.Sprintf("%T", app.pparams),
 		"precomputed", app.precomputed,
+		"total_reward_pot", app.totalRewardPot,
+		"available_rewards", app.availableRewards,
+		"effective_rewards", app.effectiveRewards,
+		"undistributed_rewards", app.undistributed,
+		"unspendable_rewards", app.unspendable,
+		"reserves", uint64(app.pots.Reserves),
+		"fees", uint64(app.pots.Fees),
+		"total_active_stake", uint64(app.snapshotTotalActiveStake),
+		"total_circulation", app.totalCirculation,
+		"total_blocks", app.totalBlocks,
+		"reward_efficiency", rewardEfficiencyLogValue(app.rewardEfficiency),
+	)
+	return nil
+}
+
+// applyDeferredStakeRewardRound applies a per-pool round's pot movement at the
+// boundary and records the round as pending; its account credits are written
+// after the boundary commits. The outputs' Guarded flags were set by the
+// chunks from the snapshot's captured slot, which no later block changes.
+func (ls *LedgerState) applyDeferredStakeRewardRound(
+	txn *database.Txn,
+	app *stakeRewardApplication,
+	boundarySlot uint64,
+) error {
+	meta := ls.db.Metadata()
+	metaTxn := txn.Metadata()
+	reserves, treasury, err := stakeRewardUpdatedPots(app)
+	if err != nil {
+		return err
+	}
+	if err := meta.SetNetworkState(
+		treasury, reserves, boundarySlot, metaTxn,
+	); err != nil {
+		return fmt.Errorf("set network state after stake rewards: %w", err)
+	}
+	app.pots.Rewards = types.Uint64(app.totalRewardPot)
+	if err := meta.SaveRewardAdaPots(app.pots, metaTxn); err != nil {
+		return fmt.Errorf("update reward ADA pots: %w", err)
+	}
+	round := models.RewardCreditRound{
+		SnapshotEpoch: app.epochs.snapshot,
+		BoundarySlot:  boundarySlot,
+	}
+	if err := registerAppliedRewardCreditRound(meta, metaTxn, round); err != nil {
+		return fmt.Errorf("register pending reward credits: %w", err)
+	}
+	ls.config.Logger.Info(
+		"applied stake rewards",
+		"component", "ledger",
+		"reward_snapshot_epoch", app.epochs.snapshot,
+		"performance_epoch", app.epochs.performance,
+		"pots_epoch", app.epochs.pots,
+		"performance_pparams_type", fmt.Sprintf("%T", app.pparams),
+		"precomputed", app.precomputed,
+		"credits_pending", true,
 		"total_reward_pot", app.totalRewardPot,
 		"available_rewards", app.availableRewards,
 		"effective_rewards", app.effectiveRewards,
@@ -790,6 +1114,12 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	}
 	if pots == nil || pots.Rewards == 0 {
 		return nil, false, nil
+	}
+	if err := ls.ensureRewardStakeInputsReady(txn, epochs.snapshot); err != nil {
+		if errors.Is(err, errRewardStakeInputsNotReady) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
 	// A bootstrap calculation has no durable output rows with which to
 	// validate the precompute against rollbacks. Always recalculate it at its
@@ -2152,10 +2482,29 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 	newEpoch := evt.NewEpoch + 1
 	capturedSlot := evt.BoundarySlot
 
-	// Read phase: compute (but do not persist) the reward application. This
-	// is the expensive part -- it scans every pool/stake reward input for
-	// the mark snapshot epoch -- so it runs in a read-only transaction,
-	// which SQLite can serve concurrently with block-application writes.
+	handled, err := ls.runChunkedStakeRewardPrecomputeRound(
+		newEpoch,
+		capturedSlot,
+		applicationBoundarySlot,
+	)
+	if err != nil || handled {
+		return err
+	}
+	return ls.precomputeStakeRewardsSinglePass(
+		newEpoch, capturedSlot, applicationBoundarySlot,
+	)
+}
+
+// precomputeStakeRewardsSinglePass precomputes a round the per-pool
+// precompute does not split -- a pre-Allegra or bootstrap round -- with the
+// single-pass calculation, in a read-only transaction, then persists it in a
+// short write transaction after re-checking its snapshot and rollback
+// generation under rewardPrecomputeWriteMu.
+func (ls *LedgerState) precomputeStakeRewardsSinglePass(
+	newEpoch uint64,
+	capturedSlot uint64,
+	applicationBoundarySlot uint64,
+) error {
 	var app *stakeRewardApplication
 	readTxn := ls.db.Transaction(false)
 	if err := readTxn.Do(func(txn *database.Txn) error {
@@ -2174,23 +2523,14 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 		return err
 	}
 	if app == nil {
-		// Either a valid precomputed application already exists, or there
-		// is nothing to compute yet (missing snapshot/pots/prefilter slot
-		// not reached). Nothing to write.
 		return nil
 	}
-
-	// Write phase: re-verify the calculation is still valid, then persist.
-	// This holds the single SQLite writer only for a guard check plus a
-	// handful of upserts, not for the calculation above. The lock spans
-	// guard through commit; see rewardPrecomputeWriteMu.
 	ls.rewardPrecomputeWriteMu.Lock()
 	defer ls.rewardPrecomputeWriteMu.Unlock()
 	writeTxn := ls.db.Transaction(true)
 	return writeTxn.Do(func(txn *database.Txn) error {
 		meta := ls.db.Metadata()
 		metaTxn := txn.Metadata()
-
 		if _, alreadyApplied, err := ls.precomputedStakeRewardApplication(
 			txn,
 			newEpoch,
@@ -2198,41 +2538,15 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 		); err != nil {
 			return err
 		} else if alreadyApplied {
-			ls.config.Logger.Debug(
-				"dropping precomputed stake rewards: already written",
-				"component", "ledger",
-				"reward_snapshot_epoch", app.epochs.snapshot,
-				"application_epoch", newEpoch,
-				"captured_slot", capturedSlot,
-				"boundary_slot", applicationBoundarySlot,
-			)
 			return nil
 		}
-
 		guardOK, err := stakeRewardPrecomputeSnapshotGuardOK(meta, metaTxn, app)
-		if err != nil {
+		if err != nil || !guardOK {
 			return err
-		}
-		if !guardOK {
-			ls.config.Logger.Debug(
-				"dropping precomputed stake rewards: calculation inputs changed",
-				"component",
-				"ledger",
-				"reward_snapshot_epoch",
-				app.epochs.snapshot,
-				"application_epoch",
-				newEpoch,
-				"captured_slot",
-				capturedSlot,
-				"boundary_slot",
-				applicationBoundarySlot,
-			)
-			return nil
 		}
 		if ls.rewardPrecomputeBeforeSaveHook != nil {
 			ls.rewardPrecomputeBeforeSaveHook()
 		}
-
 		return ls.saveStakeRewardPrecompute(
 			meta,
 			metaTxn,
@@ -2250,7 +2564,13 @@ func (ls *LedgerState) precomputeStakeRewardsAfterEpochTransition(
 // and account certificate history; the row comparison additionally detects a
 // direct replacement of the owning Mark snapshot. A mismatch means the
 // application must be dropped rather than persisted; the synchronous boundary
-// path recomputes authoritatively when it runs.
+// path recomputes authoritatively when it runs. The chunked precompute
+// (rewardPrecomputeSnapshotUnchanged) applies the same row comparison per
+// chunk instead of once at the end of a single write phase, so it does not
+// call this directly, but this remains the guard precomputeStakeRewards
+// exercises and its dedicated tests pin.
+//
+//nolint:unused // Used by tests
 func stakeRewardPrecomputeSnapshotGuardOK(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -2295,7 +2615,12 @@ func stakeRewardPrecomputeSnapshotGuardOK(
 // precomputeStakeRewardsCalculate performs the read-only portion of stake
 // reward precomputation: checking whether a valid precomputed application
 // already exists for newEpoch and, if not, computing one. It issues no
-// writes and is safe to run inside a read-only transaction.
+// writes and is safe to run inside a read-only transaction. Called by
+// precomputeStakeRewards (the single-transaction variant) and its tests; the
+// production chunked path computes the same shape per pool batch instead
+// (resolveStakeRewardPrecomputeRound, stakeRewardPrecomputeChunkStep).
+//
+//nolint:unused // Used by tests
 func (ls *LedgerState) precomputeStakeRewardsCalculate(
 	txn *database.Txn,
 	newEpoch uint64,
@@ -2334,7 +2659,12 @@ func (ls *LedgerState) precomputeStakeRewardsCalculate(
 
 // saveStakeRewardPrecompute persists a computed stakeRewardApplication as a
 // precompute result: the reward output rows plus the updated RewardAdaPots
-// rewards total. Callers must run it inside a write transaction.
+// rewards total. Callers must run it inside a write transaction. Called by
+// precomputeStakeRewards and its tests; the production chunked path persists
+// the same two things per pool batch instead
+// (stakeRewardPrecomputeChunkStep, finishStakeRewardPrecomputeLocked).
+//
+//nolint:unused // Used by tests
 func (ls *LedgerState) saveStakeRewardPrecompute(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -2394,12 +2724,14 @@ func saveReconstructedRewardStakeInputs(
 
 // precomputeStakeRewards computes and immediately persists stake rewards for
 // newEpoch within the given transaction. It is kept for callers that already
-// hold a single read-write transaction spanning both phases; the async
-// EventBus path (precomputeStakeRewardsAfterEpochTransition) instead splits
-// the same two steps (precomputeStakeRewardsCalculate,
-// saveStakeRewardPrecompute) across separate read-only and write
-// transactions so it never holds SQLite's single writer for the full
-// calculation.
+// hold a single read-write transaction spanning both phases and for the
+// dedicated tests of precomputeStakeRewardsCalculate/
+// stakeRewardPrecomputeSnapshotGuardOK/saveStakeRewardPrecompute; the
+// production async EventBus path
+// (precomputeStakeRewardsAfterEpochTransition) instead runs
+// runChunkedStakeRewardPrecomputeRound, which chunks the same read-then-guarded-
+// write shape across many short transactions (see
+// stakeRewardPrecomputeChunkStep) rather than one of each.
 //
 //nolint:unused // Used by tests
 func (ls *LedgerState) precomputeStakeRewards(
@@ -2440,6 +2772,19 @@ func saveStakeRewardOutputs(
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
+	credited, err := meta.HasAppliedRewardCreditRound(
+		app.epochs.snapshot,
+		metaTxn,
+	)
+	if err != nil {
+		return err
+	}
+	if credited {
+		return fmt.Errorf(
+			"reward outputs for epoch %d are a credited round",
+			app.epochs.snapshot,
+		)
+	}
 	if err := meta.DeleteRewardOutputsForEpoch(app.epochs.snapshot, metaTxn); err != nil {
 		return fmt.Errorf(
 			"replace reward outputs for epoch %d: %w",
@@ -2459,6 +2804,9 @@ func saveStakeRewardOutputs(
 func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
 	if app == nil || app.pots == nil {
 		return errors.New("missing stake reward application")
+	}
+	if app.totalsFinal {
+		return nil
 	}
 	totalRewardPot := app.totalRewardPot
 	fees := uint64(app.pots.Fees)
@@ -4547,16 +4895,13 @@ func stakeRewardSourceHash(
 	epoch uint64,
 	reward rewards.AccountReward,
 ) []byte {
-	h := sha256.New()
-	h.Write([]byte(stakeRewardSourcePrefix)) //nolint:errcheck
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], epoch)
-	h.Write(buf[:])                        //nolint:errcheck
-	h.Write(reward.PoolID[:])              //nolint:errcheck
-	h.Write([]byte{reward.Credential.Tag}) //nolint:errcheck
-	h.Write(reward.Credential.Hash[:])     //nolint:errcheck
-	h.Write([]byte(reward.Type))           //nolint:errcheck
-	return h.Sum(nil)
+	return models.StakeRewardSourceHash(
+		epoch,
+		reward.PoolID[:],
+		reward.Credential.Tag,
+		reward.Credential.Hash[:],
+		string(reward.Type),
+	)
 }
 
 // rewardEfficiencyLogValue renders eta for the applied-rewards log line.

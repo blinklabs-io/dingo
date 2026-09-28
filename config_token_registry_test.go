@@ -39,7 +39,11 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 				RequestTimeout:        9 * time.Minute,
 				UserAgent:             "custom-agent/9",
 				MaxBytes:              123,
+				MaxDecompressedBytes:  456,
 				MaxEntryBytes:         45,
+				MaxArchiveEntries:     67,
+				MaxAcceptedEntries:    34,
+				MaxBatchBytes:         89,
 				StoreLogos:            true,
 				AllowPrivateAddresses: true,
 			},
@@ -58,7 +62,11 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	require.Equal(t, 9*time.Minute, cfg.tokenRegistry.RequestTimeout)
 	require.Equal(t, "custom-agent/9", cfg.tokenRegistry.UserAgent)
 	require.Equal(t, int64(123), cfg.tokenRegistry.MaxBytes)
+	require.Equal(t, int64(456), cfg.tokenRegistry.MaxDecompressedBytes)
 	require.Equal(t, int64(45), cfg.tokenRegistry.MaxEntryBytes)
+	require.Equal(t, 67, cfg.tokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 34, cfg.tokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(89), cfg.tokenRegistry.MaxBatchBytes)
 	require.True(t, cfg.tokenRegistry.StoreLogos)
 	require.True(t, cfg.tokenRegistry.AllowPrivateAddresses)
 }
@@ -84,13 +92,21 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 	client := &http.Client{}
 
 	cfg := NewConfig(WithTokenRegistryConfig(TokenRegistryConfig{
-		Enabled:    true,
-		HTTPClient: client,
-		UserAgent:  "programmatic/1",
+		Enabled:              true,
+		HTTPClient:           client,
+		UserAgent:            "programmatic/1",
+		MaxDecompressedBytes: 456,
+		MaxArchiveEntries:    67,
+		MaxAcceptedEntries:   34,
+		MaxBatchBytes:        89,
 	}))
 
 	require.Same(t, client, cfg.tokenRegistry.HTTPClient)
 	require.True(t, cfg.tokenRegistry.Enabled)
 	require.Equal(t, "programmatic/1", cfg.tokenRegistry.UserAgent)
 	require.Equal(t, "programmatic/1", cfg.TokenRegistry().UserAgent)
+	require.Equal(t, int64(456), cfg.TokenRegistry().MaxDecompressedBytes)
+	require.Equal(t, 67, cfg.TokenRegistry().MaxArchiveEntries)
+	require.Equal(t, 34, cfg.TokenRegistry().MaxAcceptedEntries)
+	require.Equal(t, int64(89), cfg.TokenRegistry().MaxBatchBytes)
 }

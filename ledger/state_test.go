@@ -1913,8 +1913,8 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 // a sync.WaitGroup to a timeout-selectable channel: WaitGroup.Wait can't be
 // interrupted, so that goroutine (and the worker still running the stuck
 // operation under it) would keep running for the operation's full remaining
-// duration after Shutdown times out and returns, merely relocating the
-// leaked goroutine cubic-dev-ai flagged on PR #3782 rather than removing it.
+// duration after Shutdown times out and returns. The timeout must wait for
+// in-flight operations to drain without leaving a goroutine behind.
 // The current implementation tracks in-flight operations with a
 // mutex-guarded counter and a drained channel Shutdown selects directly, so
 // no goroutine is ever spawned by the timeout path.

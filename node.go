@@ -927,6 +927,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
 	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
 	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
 	// that row is not durably written until the hook above runs, later in
@@ -1666,62 +1667,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
-		creds, err := n.validateBlockProducerStartup()
+		var err error
+		started, err = n.startBlockProducer(n.ctx, started)
 		if err != nil {
-			return fmt.Errorf(
-				"block producer startup validation failed: %w",
-				err,
-			)
-		}
-		// Registered before the checks below, not after the forger is
-		// built: validateBlockProducerStartup may have dialled a KES agent
-		// and started its serve-key loop, and every step between here and
-		// the end of this block can fail. Registering afterwards left that
-		// client and its background loop outside the rollback stack. Every
-		// stop in the closure is nil-guarded, so it is safe this early.
-		started = append(started, func() {
-			if n.blockForger != nil {
-				n.blockForger.Stop()
-			}
-			n.closeKESAgentClient()
-			if n.leaderElection != nil {
-				logErrIfNotNil(
-					n.config.logger,
-					"failed to stop leader election during cleanup",
-					n.leaderElection.Stop(),
-				)
-			}
-		})
-		// Cross-check loaded credentials against ledger state. Mismatch
-		// against on-chain pool registration is fatal; "not yet
-		// registered" is a warning so operators can stage credentials
-		// before submitting the registration cert.
-		if err := n.validateBlockProducerLedger(creds); err != nil {
-			return fmt.Errorf(
-				"block producer credentials failed ledger check: %w",
-				err,
-			)
-		}
-		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
-		if err := n.initBlockForger(n.ctx, creds); err != nil {
-			return fmt.Errorf("failed to initialize block forger: %w", err)
-		}
-		// Enable Leios vote emission when a vote signing key is
-		// configured (experimental, leios mode only)
-		if err := n.enableLeiosVoting(creds); err != nil {
-			return fmt.Errorf("failed to enable leios voting: %w", err)
-		}
-		// Wire forger's slot tracker into ledger state for slot
-		// battle detection. The forger is created after the ledger
-		// state, so we use the late-binding setter.
-		if n.blockForger != nil {
-			n.ledgerState.SetForgedBlockChecker(
-				n.blockForger.SlotTracker(),
-			)
-			n.ledgerState.SetForgingEnabled(true)
-			n.ledgerState.SetSlotBattleRecorder(
-				n.blockForger,
-			)
+			return err
 		}
 	}
 
@@ -2401,7 +2350,11 @@ func (n *Node) newTokenRegistrySync() (
 			Interval:              n.config.tokenRegistry.Interval,
 			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
 			MaxBytes:              n.config.tokenRegistry.MaxBytes,
+			MaxDecompressedBytes:  n.config.tokenRegistry.MaxDecompressedBytes,
 			MaxEntryBytes:         n.config.tokenRegistry.MaxEntryBytes,
+			MaxArchiveEntries:     n.config.tokenRegistry.MaxArchiveEntries,
+			MaxAcceptedEntries:    n.config.tokenRegistry.MaxAcceptedEntries,
+			MaxBatchBytes:         n.config.tokenRegistry.MaxBatchBytes,
 			StoreLogos:            n.config.tokenRegistry.StoreLogos,
 			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
 		},
@@ -2451,4 +2404,25 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
 	}
 	return chainsyncCfg
+}
+
+// wireDeferredRewardStakeInputs lets the authoritative boundary capture leave
+// the snapshot's per-credential reward inputs to the ledger's background
+// writer instead of writing them inside the boundary transaction.
+func wireDeferredRewardStakeInputs(
+	ls *ledger.LedgerState,
+	mgr *snapshot.Manager,
+) {
+	ls.SetEpochBoundaryDeferredStakeInputsHook(
+		func(
+			txn *database.Txn,
+		) (uint64, uint64, []*models.RewardStakeInput, bool) {
+			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
+			if !ok {
+				return 0, 0, nil, false
+			}
+			return deferred.Epoch, deferred.BoundarySlot, deferred.Inputs, true
+		},
+	)
+	mgr.SetDeferRewardStakeInputs(true)
 }
