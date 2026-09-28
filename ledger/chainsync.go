@@ -60,6 +60,15 @@ const (
 	// stays comfortably above this client's own usage.
 	BlockfetchBatchSize = 500
 
+	// BlockfetchMaxRangeBytes bounds the estimated wire size of a single
+	// BlockFetch range this client requests, so a run of large blocks (15-20
+	// MB per 500 blocks on heavy Preview epochs) is split across ranges
+	// instead of forming one oversized request. A single block larger than
+	// this still forms a range of its own. See
+	// chain.Chain.HeaderRangeAfterBytes and the peer connection's in-flight
+	// byte budget, which is sized as a multiple of this value.
+	BlockfetchMaxRangeBytes = 8 << 20
+
 	// When we're still meaningfully behind tip, wait for a header runway
 	// before starting blockfetch so each batch amortises peer round-trip
 	// and protocol overhead over many blocks instead of trickling 1-8
@@ -4994,13 +5003,14 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
-	// claimedHeaders is how many queued headers this dispatch covers --
-	// HeaderRangeAfter(0, ...) is equivalent to HeaderRange(...) for start/end
-	// but also reports the count, which the pipelining prefetch below needs
-	// to skip past this batch's own claimed range.
-	headerStart, headerEnd, claimedHeaders := ls.chain.HeaderRangeAfter(
+	// claimedHeaders is how many queued headers this dispatch covers: the
+	// window is cut by count and by BlockfetchMaxRangeBytes, and the
+	// pipelining prefetch below needs the count to skip past this batch's own
+	// claimed range.
+	headerStart, headerEnd, claimedHeaders := ls.chain.HeaderRangeAfterBytes(
 		0,
 		BlockfetchBatchSize,
+		BlockfetchMaxRangeBytes,
 	)
 	// Tag the batch with the rollback generation current at request time.
 	// The blocks it delivers are only valid for the chain segment these

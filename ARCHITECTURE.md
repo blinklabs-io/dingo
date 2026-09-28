@@ -828,6 +828,24 @@ wall-clock time since the oldest active BlockFetch handler began, including
 handlers queued on the mutex or waiting on metadata storage; zero means no
 BlockFetch handler is active.
 
+A block-fetch range is cut by estimated bytes as well as by
+`BlockfetchBatchSize`: `chain.Chain.HeaderRangeAfterBytes` ends the window
+before the queued header that would take its estimated wire size past
+`ledger.BlockfetchMaxRangeBytes` (8 MiB), and a single larger header forms a
+range of its own. At dispatch, `LedgerState.BlockfetchRangeExpectedBytes` sums
+the same estimate over the range's queued headers (header CBOR length, the
+header's block body size, and the `MsgBlock`, era-wrapper and mux segment
+framing) and `BlockfetchClientRequestRange` sends it as
+`RangeRequest.ExpectedBytes`. Byron headers carry no body size, and a header no
+longer queued after a rollback or eviction cannot be summed, so a range holding
+either is sent with no estimate rather than a partial sum, and gouroboros
+charges it one default block. The lookup takes only the chain's read lock, so
+it runs outside `chainsyncBlockfetchMutex` like the request itself. Each
+connection's in-flight budget is `WithMaxInFlightBytes(3 *
+BlockfetchMaxRangeBytes)`: the active range, its prefetched successor, and one
+range of slack for estimate error. Left at gouroboros' default (100 x 88 KiB)
+it would admit one full-size range at a time and end pipelining.
+
 A batch is fetched for the header queue that existed when it was requested, so
 `LedgerState` binds each batch to a chain-rollback generation, bumped before
 every primary-chain rollback and restored when validation refuses one, so a
