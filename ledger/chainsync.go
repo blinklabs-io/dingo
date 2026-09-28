@@ -1440,6 +1440,10 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 				"header_count", headerCount,
 				"minimum_header_count", minBatchHeaders,
 			)
+			// No batch is in flight to own the queue, so the selected peer
+			// must; otherwise any peer's non-fitting header is processed
+			// and clears it instead of being buffered.
+			ls.headerPipelineConnId = newConnId
 			if hasBufferedHeadersForNewConn {
 				return newConnId, nil
 			}

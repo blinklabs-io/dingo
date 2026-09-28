@@ -2813,3 +2813,63 @@ func TestHandoffPipelineOnSwitchStartsImmediatelyWithoutPeerTarget(
 		"an unknown peer target keeps the immediate start",
 	)
 }
+
+// A switch that defers blockfetch leaves queued headers with no in-flight
+// batch, so the header pipeline owner is the only thing keeping another
+// peer's non-fitting header from clearing the queue.
+func TestHandoffPipelineOnSwitchAccumulatingKeepsQueueOwned(t *testing.T) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 2)
+	oldConn := testChainsyncConnId(6410, 3001)
+	newConn := testChainsyncConnId(6410, 3002)
+	otherConn := testChainsyncConnId(6410, 3003)
+	farTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1_000_000, Hash: []byte("far")},
+		BlockNumber: 50_000,
+	}
+	ls := &LedgerState{
+		chain:                testChain,
+		headerPipelineConnId: oldConn,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerSyncTargetFunc: func(
+				ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return farTip, true
+			},
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				t.Error("blockfetch must not start below the minimum batch")
+				return 1, nil
+			},
+		},
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	_, err := ls.handoffPipelineOnSwitchLocked(newConn, nil)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+
+	forkHash := lcommon.NewBlake2b256([]byte("other-fork-hdr"))
+	buffered := ls.shouldBufferHeaderEvent(ChainsyncEvent{
+		ConnectionId: otherConn,
+		BlockHeader: mockHeader{
+			hash:        forkHash,
+			prevHash:    lcommon.NewBlake2b256([]byte("other-fork-parent")),
+			blockNumber: 3,
+			slot:        3,
+		},
+		Point: ocommon.NewPoint(3, forkHash.Bytes()),
+		Tip:   farTip,
+	})
+	assert.True(
+		t,
+		buffered,
+		"a non-fitting header from another peer must be buffered, not processed against the queue",
+	)
+	assert.Equal(t, newConn, ls.headerPipelineConnId)
+	assert.Equal(t, 2, ls.chain.HeaderCount())
+}

@@ -511,7 +511,8 @@ peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are
 queued. The header handler and the chain-switch handoff
 (`handoffPipelineOnSwitchLocked`) apply the same predicate, so a switch below
 the minimum keeps accumulating; the selected peer's next header re-evaluates
-it. Near the tip, or when the new peer has no known sync target, a switch
+it. While accumulating, the selected peer owns the queued headers, so another
+peer's header that does not extend them is buffered rather than clearing them. Near the tip, or when the new peer has no known sync target, a switch
 starts BlockFetch immediately. An in-flight batch from another connection is
 never cancelled by a switch.
 
