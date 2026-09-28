@@ -59,7 +59,7 @@ groups:
           severity: warning
         annotations:
           summary: "node-parity found ledger-state divergence on {{ $labels.network }}"
-          description: "node-parity ({{ $labels.instance }}) reported a {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} in the last hour."
+          description: "node-parity ({{ $labels.instance }}) reported a {{ $labels.field }} divergence between dingo and {{ $labels.reference }} on {{ $labels.network }} in the last hour."
 
       - alert: NodeParityRepeatedDivergence
         # A single divergence is common-enough noise (see NodeParityDivergence
@@ -81,7 +81,7 @@ groups:
           severity: critical
         annotations:
           summary: "node-parity found repeated ledger-state divergence on {{ $labels.network }}"
-          description: "node-parity ({{ $labels.instance }}) reported more than one {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} within the last hour -- unlikely to be transient noise."
+          description: "node-parity ({{ $labels.instance }}) reported more than one {{ $labels.field }} divergence between dingo and {{ $labels.reference }} on {{ $labels.network }} within the last hour -- unlikely to be transient noise."
 
       - alert: NodeParityDown
         expr: up{job="node-parity"} == 0

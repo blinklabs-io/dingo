@@ -10850,8 +10850,10 @@ same pattern independently for its own persistent ChainSync connections.
 
 **Metrics:** `node_parity_checks_total`, `node_parity_checks_skipped_total{reason}`
 (`reason`: `tip_mismatch`),
-`node_parity_divergence_total{field}` (`field`: `protocol_params`/
-`stake_distribution`/`utxo`), and `node_parity_check_errors_total` (a Check
+`node_parity_divergence_total{field,reference}` (`field`: `protocol_params`/
+`stake_distribution`/`utxo`; `reference`: `cardano_node` for `check`/`watch`,
+`koios` for `from-genesis`, so an alert names the oracle that disagreed
+rather than assuming cardano-node), and `node_parity_check_errors_total` (a Check
 call that failed outright -- a dial or query error -- as opposed to a
 completed or skipped cycle; counted separately so a persistently
 misconfigured address, which never increments the other two counters
