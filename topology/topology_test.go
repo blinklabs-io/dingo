@@ -37,7 +37,12 @@ var topologyTests = []topologyTestDefinition{
 {
   "localRoots": [
     {
-      "accessPoints": [],
+			"accessPoints": [
+				{
+					"address": "127.0.0.1",
+					"port": 3001
+				}
+			],
       "advertise": false,
       "valency": 1
     }
@@ -68,9 +73,14 @@ var topologyTests = []topologyTestDefinition{
 		expectedObject: &topology.TopologyConfig{
 			LocalRoots: []topology.TopologyConfigP2PLocalRoot{
 				{
-					AccessPoints: []topology.TopologyConfigP2PAccessPoint{},
-					Advertise:    false,
-					Valency:      1,
+					AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+						{
+							Address: "127.0.0.1",
+							Port:    3001,
+						},
+					},
+					Advertise: false,
+					Valency:   1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -115,7 +125,12 @@ var topologyTests = []topologyTestDefinition{
   ],
   "localRoots": [
     {
-      "accessPoints": [],
+			"accessPoints": [
+				{
+					"address": "127.0.0.1",
+					"port": 3001
+				}
+			],
       "advertise": false,
       "trustable": false,
       "valency": 1
@@ -133,10 +148,15 @@ var topologyTests = []topologyTestDefinition{
 		expectedObject: &topology.TopologyConfig{
 			LocalRoots: []topology.TopologyConfigP2PLocalRoot{
 				{
-					AccessPoints: []topology.TopologyConfigP2PAccessPoint{},
-					Advertise:    false,
-					Trustable:    false,
-					Valency:      1,
+					AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+						{
+							Address: "127.0.0.1",
+							Port:    3001,
+						},
+					},
+					Advertise: false,
+					Trustable: false,
+					Valency:   1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -223,7 +243,7 @@ func TestNewTopologyConfigFromFile_LoadsPeerSnapshot(t *testing.T) {
   "NetworkMagic": 1,
   "NodeToClientVersion": 23,
   "Point": {
-    "blockPointHash": "abc",
+    "blockPointHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "blockPointSlot": 42
   },
   "bigLedgerPools": [
@@ -252,6 +272,7 @@ func TestNewTopologyConfigFromFile_LoadsPeerSnapshot(t *testing.T) {
 		},
 		cfg.PeerSnapshot.RelayAccessPoints(),
 	)
+	require.NoError(t, cfg.PeerSnapshot.Validate(1))
 }
 
 func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
@@ -273,7 +294,7 @@ func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
   "NetworkMagic": 2,
   "NodeToClientVersion": 23,
   "Point": {
-    "blockPointHash": "def",
+    "blockPointHash": "def0000000000000000000000000000000000000000000000000000000000000",
     "blockPointSlot": 77
   },
   "bigLedgerPools": [
@@ -296,6 +317,7 @@ func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
 	require.NotNil(t, cfg.PeerSnapshot)
 	require.Equal(t, uint64(77), cfg.PeerSnapshot.Point.BlockPointSlot)
 	require.True(t, cfg.PeerSnapshot.HasRelays())
+	require.NoError(t, cfg.PeerSnapshot.Validate(2))
 }
 
 func TestNewTopologyConfigFromFile_NotFound(t *testing.T) {
@@ -316,4 +338,469 @@ func TestNewTopologyConfigFromReader_OversizedInput(t *testing.T) {
 		err.Error(),
 		"topology file exceeds maximum size",
 	)
+}
+
+func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		wantErr string
+	}{
+		{
+			name: "local root empty address",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "", "port": 3001}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].accessPoints[0].address must not be empty",
+		},
+		{
+			name: "local root port lower bound",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 0}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].accessPoints[0].port must be in range 1-65535",
+		},
+		{
+			name: "local root port upper bound",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 65536}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].accessPoints[0].port must be in range 1-65535",
+		},
+		{
+			name: "local root warm valency exceeds valency",
+			json: `{
+  "localRoots": [
+    {
+					"accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+					"valency": 1,
+					"warmValency": 2
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
+		},
+		{
+			name: "local root valency exceeds access points",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+      "valency": 2
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].valency must be <= len(localRoots[0].accessPoints)",
+		},
+		{
+			name: "public root empty address",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "", "port": 3001}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].accessPoints[0].address must not be empty",
+		},
+		{
+			name: "public root invalid port",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "public.example.com", "port": 65536}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].accessPoints[0].port must be in range 1-65535",
+		},
+		{
+			name: "public root warm valency exceeds valency",
+			json: `{
+  "publicRoots": [
+    {
+					"accessPoints": [{"address": "public.example.com", "port": 3001}],
+					"valency": 1,
+					"warmValency": 2
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
+		},
+		{
+			name: "public root valency exceeds access points",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "public.example.com", "port": 3001}],
+      "valency": 2
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].valency must be <= len(publicRoots[0].accessPoints)",
+		},
+		{
+			name: "bootstrap peer empty address",
+			json: `{
+  "bootstrapPeers": [
+    {"address": "", "port": 3001}
+  ]
+}`,
+			wantErr: "bootstrapPeers[0].address must not be empty",
+		},
+		{
+			name: "bootstrap peer invalid port",
+			json: `{
+  "bootstrapPeers": [
+    {"address": "bootstrap.example.com", "port": 0}
+  ]
+}`,
+			wantErr: "bootstrapPeers[0].port must be in range 1-65535",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := topology.NewTopologyConfigFromReader(
+				strings.NewReader(test.json),
+			)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), test.wantErr)
+		})
+	}
+}
+
+func TestNewTopologyConfigFromReader_AllowsEmptyAccessPointsWithValency(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [],
+			"valency": 1
+		}
+	],
+	"publicRoots": [
+		{
+			"accessPoints": [],
+			"valency": 1
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
+}
+
+func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [
+				{"address": "127.0.0.1", "port": 3001},
+				{"address": "127.0.0.2", "port": 3001}
+			],
+			"valency": 2,
+			"warmValency": 1
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
+}
+
+func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveValency(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [
+				{"address": "127.0.0.1", "port": 3001}
+			],
+			"valency": 1,
+			"warmValency": 2
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= localRoots[0].valency")
+}
+
+func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPort(
+	t *testing.T,
+) {
+	jsonData := `{
+	"NetworkMagic": 1,
+	"NodeToClientVersion": 23,
+	"Point": {"blockPointHash": "` + strings.Repeat("ab", 32) + `", "blockPointSlot": 1},
+	"allLedgerPools": [
+		{
+			"relays": [
+				{"address": "relay.example.com"}
+			]
+		}
+	]
+}`
+
+	cfg, err := topology.NewPeerSnapshotConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
+	// SRV relay mode (no port) is not supported; Validate must reject it even
+	// though plain JSON decoding succeeds. Use a valid point hash so the
+	// error actually comes from the relay port check, not from point
+	// validation.
+	err = cfg.Validate(1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SRV relay mode is not supported")
+}
+
+// TestPeerSnapshotConfigValidate verifies that snapshot identity, format,
+// point, pool mode, and relay endpoints are accepted or rejected together.
+func TestPeerSnapshotConfigValidate(t *testing.T) {
+	valid := func() topology.PeerSnapshotConfig {
+		return topology.PeerSnapshotConfig{
+			NetworkMagic:        2,
+			NodeToClientVersion: 23,
+			Point: topology.PeerSnapshotPoint{
+				BlockPointHash: "d6792f8031323804b7ac44a67747de78ed70fd307bb5ffddc5147844d9363b30",
+				BlockPointSlot: 0,
+			},
+			BigLedgerPools: []topology.PeerSnapshotLedgerPool{{
+				Relays: []topology.TopologyConfigP2PAccessPoint{{
+					Address: "relay.example.com",
+					Port:    1,
+				}},
+			}},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*topology.PeerSnapshotConfig)
+		wantErr string
+	}{
+		{name: "valid minimum TCP port and slot zero"},
+		{
+			name: "valid maximum TCP port and all-pool mode",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.AllLedgerPools = s.BigLedgerPools
+				s.AllLedgerPools[0].Relays[0].Port = 65535
+				s.BigLedgerPools = nil
+			},
+		},
+		{
+			name: "network mismatch",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NetworkMagic = 1
+			},
+			wantErr: "does not match configured network magic",
+		},
+		{
+			name: "missing network",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NetworkMagic = 0
+			},
+			wantErr: "network magic must be specified",
+		},
+		{
+			name: "unsupported legacy version",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NodeToClientVersion = 2
+			},
+			wantErr: "unsupported node-to-client version 2",
+		},
+		{
+			name: "missing version",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NodeToClientVersion = 0
+			},
+			wantErr: "unsupported node-to-client version 0",
+		},
+		{
+			name: "short point hash",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.Point.BlockPointHash = "00"
+			},
+			wantErr: "64 hexadecimal characters",
+		},
+		{
+			name: "non-hex point hash",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.Point.BlockPointHash = strings.Repeat("z", 64)
+			},
+			wantErr: "is not hexadecimal",
+		},
+		{
+			name: "mixed pool modes",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.AllLedgerPools = []topology.PeerSnapshotLedgerPool{{
+					Relays: []topology.TopologyConfigP2PAccessPoint{{
+						Address: "other.example.com",
+						Port:    3001,
+					}},
+				}}
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "no pool mode",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools = nil
+			},
+			wantErr: "contains no ledger pools",
+		},
+		{
+			name: "pool without relays",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays = nil
+			},
+			wantErr: "contains no relays",
+		},
+		{
+			name: "empty relay address",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = ""
+			},
+			wantErr: "address must not be empty",
+		},
+		{
+			name: "unsupported SRV relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Port = 0
+			},
+			wantErr: "SRV relay mode is not supported",
+		},
+		{
+			name: "port above TCP range",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Port = 65536
+			},
+			wantErr: "outside the TCP port range",
+		},
+		{
+			name: "unspecified IPv4 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "0.0.0.0"
+			},
+			wantErr: "is not a relay endpoint",
+		},
+		{
+			name: "unspecified IPv6 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "::"
+			},
+			wantErr: "is not a relay endpoint",
+		},
+		{
+			name: "valid IPv4 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "192.0.2.1"
+			},
+		},
+		{
+			name: "malformed IPv4 is not a hostname",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "192.0.2.999"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "valid IPv6 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "2001:db8::1"
+			},
+		},
+		{
+			name: "valid fully-qualified hostname",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay.example.com."
+			},
+		},
+		{
+			name: "valid hostname with numeric label",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "123.relay.example.com"
+			},
+		},
+		{
+			name: "valid all-numeric hostname is not IPv4-shaped",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "12345"
+			},
+		},
+		{
+			name: "hostname includes port",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay.example:3001"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "bracketed IPv6",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "[2001:db8::1]"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "whitespace hostname",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = " relay.example.com "
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "hostname with empty label",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay..example.com"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "hostname label exceeds boundary",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address =
+					strings.Repeat("a", 64) + ".example.com"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "hostname has invalid character",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay_name.example.com"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := valid()
+			if tt.mutate != nil {
+				tt.mutate(&snapshot)
+			}
+			err := snapshot.Validate(2)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }

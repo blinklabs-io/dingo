@@ -1,0 +1,578 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package dingo
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"errors"
+	"log/slog"
+	"math/big"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type startupLeiosStakeProvider struct{}
+
+func (startupLeiosStakeProvider) GetStakeDistribution(
+	uint64,
+) (map[string]uint64, uint64, error) {
+	return map[string]uint64{}, 0, nil
+}
+
+type startupLeiosEpochProvider struct{}
+
+func (startupLeiosEpochProvider) CurrentEpoch() uint64 {
+	return 5
+}
+
+func (startupLeiosEpochProvider) EpochForSlot(uint64) (uint64, error) {
+	return 5, nil
+}
+
+type startupLeiosParamsProvider struct{}
+
+func (startupLeiosParamsProvider) LeiosCommitteeParameters(uint64) (
+	uint16,
+	*big.Rat,
+	error,
+) {
+	return 900, big.NewRat(3, 4), nil
+}
+
+type startupLeiosKeyProvider struct{}
+
+func (startupLeiosKeyProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	return map[string]*lcommon.LeiosKey{}, nil
+}
+
+type startupBlockingFirstLeiosKeyProvider struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	calls       int
+}
+
+func newStartupBlockingFirstLeiosKeyProvider() *startupBlockingFirstLeiosKeyProvider {
+	return &startupBlockingFirstLeiosKeyProvider{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (p *startupBlockingFirstLeiosKeyProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	p.mu.Unlock()
+	if first {
+		p.enteredOnce.Do(func() { close(p.entered) })
+		<-p.release
+	}
+	return map[string]*lcommon.LeiosKey{}, nil
+}
+
+func (p *startupBlockingFirstLeiosKeyProvider) releaseFirstLookup() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
+type startupLeiosReplayProvider struct {
+	mu        sync.Mutex
+	recovered bool
+	keyCalls  int
+	poolHash  string
+	key       *lcommon.LeiosKey
+}
+
+func (p *startupLeiosReplayProvider) GetStakeDistribution(
+	uint64,
+) (map[string]uint64, uint64, error) {
+	return map[string]uint64{p.poolHash: 100}, 100, nil
+}
+
+func (p *startupLeiosReplayProvider) LeiosCommitteeParameters(uint64) (
+	uint16,
+	*big.Rat,
+	error,
+) {
+	return 1, big.NewRat(3, 4), nil
+}
+
+func (p *startupLeiosReplayProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.keyCalls++
+	if !p.recovered && p.keyCalls > 1 {
+		return nil, errors.New("committee keys temporarily unavailable")
+	}
+	return map[string]*lcommon.LeiosKey{p.poolHash: p.key}, nil
+}
+
+func (p *startupLeiosReplayProvider) recover() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.recovered = true
+}
+
+func TestLeiosCommitteeParamsFromPParamsUsesDijkstraFields(t *testing.T) {
+	t.Parallel()
+
+	pp := &gdijkstra.DijkstraProtocolParameters{
+		LeiosCommitteeSize:        900,
+		LeiosQuorumStakeThreshold: &cbor.Rat{Rat: big.NewRat(3, 4)},
+	}
+	size, tau, err := leiosCommitteeParamsFromPParams(pp)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(900), size)
+	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 4)))
+}
+
+func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	for _, committeeSize := range []uint16{17, 23} {
+		poolThreshold := testLeiosPParamRat()
+		drepThreshold := testLeiosPParamRat()
+		pp := &gdijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				A0:                         &cbor.Rat{Rat: big.NewRat(0, 1)},
+				Rho:                        &cbor.Rat{Rat: big.NewRat(1, 10)},
+				Tau:                        &cbor.Rat{Rat: big.NewRat(1, 10)},
+				MinFeeRefScriptCostPerByte: &cbor.Rat{Rat: big.NewRat(1, 1)},
+				PoolVotingThresholds: conway.PoolVotingThresholds{
+					MotionNoConfidence:    poolThreshold,
+					CommitteeNormal:       poolThreshold,
+					CommitteeNoConfidence: poolThreshold,
+					HardForkInitiation:    poolThreshold,
+					PpSecurityGroup:       poolThreshold,
+				},
+				DRepVotingThresholds: conway.DRepVotingThresholds{
+					MotionNoConfidence:    drepThreshold,
+					CommitteeNormal:       drepThreshold,
+					CommitteeNoConfidence: drepThreshold,
+					UpdateToConstitution:  drepThreshold,
+					HardForkInitiation:    drepThreshold,
+					PpNetworkGroup:        drepThreshold,
+					PpEconomicGroup:       drepThreshold,
+					PpTechnicalGroup:      drepThreshold,
+					PpGovGroup:            drepThreshold,
+					TreasuryWithdrawal:    drepThreshold,
+				},
+			},
+			RefScriptCostMultiplier:   &cbor.Rat{Rat: big.NewRat(1, 1)},
+			MaxPledgeLeverage:         &cbor.Rat{Rat: big.NewRat(1, 1)},
+			MinPoolMargin:             &cbor.Rat{Rat: big.NewRat(0, 1)},
+			LeiosCommitteeSize:        committeeSize,
+			LeiosQuorumStakeThreshold: &cbor.Rat{Rat: big.NewRat(3, 4)},
+			CommitteeStakeCoverage:    &cbor.Rat{Rat: big.NewRat(1, 1)},
+			QuorumStakeThreshold:      &cbor.Rat{Rat: big.NewRat(1, 1)},
+		}
+		raw, marshalErr := pp.MarshalCBOR()
+		require.NoError(t, marshalErr)
+		require.NoError(t, db.SetPParams(
+			raw,
+			uint64(committeeSize),
+			uint64(committeeSize),
+			uint(gdijkstra.EraIdDijkstra),
+			nil,
+		))
+	}
+	txn := db.MetadataTxn(false)
+	defer txn.Rollback()
+
+	pp, err := leiosDijkstraPParamsForSnapshot(db, 9, txn)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(17), pp.LeiosCommitteeSize)
+
+	pp, err = leiosDijkstraPParamsForSnapshot(db, 23, txn)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(23), pp.LeiosCommitteeSize)
+}
+
+func testLeiosPParamRat() cbor.Rat {
+	return cbor.Rat{Rat: big.NewRat(1, 2)}
+}
+
+func TestLeiosCommitteeParamsFromPParamsRejectsMissingValues(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{})
+	require.ErrorContains(t, err, "committee size")
+	_, _, err = leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{
+		LeiosCommitteeSize: 900,
+	})
+	require.ErrorContains(t, err, "quorum stake threshold is missing")
+}
+
+func TestLeiosCommitteeParamsFromPParamsRejectsInvalidQuorum(t *testing.T) {
+	t.Parallel()
+
+	for _, threshold := range []*big.Rat{
+		big.NewRat(-1, 10),
+		big.NewRat(11, 10),
+	} {
+		_, _, err := leiosCommitteeParamsFromPParams(
+			&gdijkstra.DijkstraProtocolParameters{
+				LeiosCommitteeSize:        900,
+				LeiosQuorumStakeThreshold: &cbor.Rat{Rat: threshold},
+			},
+		)
+		require.ErrorIs(t, err, leios.ErrInvalidQuorumStakeThreshold)
+	}
+}
+
+func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
+	t.Parallel()
+
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
+	creds := forging.NewPoolCredentials()
+	require.NoError(
+		t,
+		creds.LoadFromFiles(vrfPath, kesPath, opcertPath),
+	)
+
+	voteKeyPath := filepath.Join(t.TempDir(), "leios-vote.skey")
+	require.NoError(
+		t,
+		os.WriteFile(
+			voteKeyPath,
+			[]byte(
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			),
+			0o600,
+		),
+	)
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	eventBus := event.NewEventBus(nil, logger)
+	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+		Logger:         logger,
+		EventBus:       eventBus,
+		StakeProvider:  startupLeiosStakeProvider{},
+		EpochProvider:  startupLeiosEpochProvider{},
+		ParamsProvider: startupLeiosParamsProvider{},
+		KeyProvider:    startupLeiosKeyProvider{},
+	})
+	require.NoError(t, err)
+
+	n := &Node{
+		config: Config{
+			logger:                  logger,
+			blockProducer:           true,
+			leiosVoteSigningKeyFile: voteKeyPath,
+		},
+		leiosVoteManager: voteManager,
+	}
+
+	require.NoError(
+		t,
+		n.enableLeiosVoting(creds),
+		"startup must continue while the on-chain registration is behind the local tip",
+	)
+	assert.Contains(
+		t,
+		logs.String(),
+		"leios voting deferred until the configured key is available in the on-chain snapshot",
+	)
+	assert.NotContains(
+		t,
+		logs.String(),
+		"leios voting activation preparation failed",
+	)
+}
+
+func TestEnableLeiosVotingReportsSupersededConfiguration(t *testing.T) {
+	t.Parallel()
+
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
+	creds := forging.NewPoolCredentials()
+	require.NoError(
+		t,
+		creds.LoadFromFiles(vrfPath, kesPath, opcertPath),
+	)
+
+	voteKeyPath := filepath.Join(t.TempDir(), "leios-vote.skey")
+	require.NoError(
+		t,
+		os.WriteFile(
+			voteKeyPath,
+			[]byte(
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			),
+			0o600,
+		),
+	)
+	key, err := leios.LoadVoteSigningKeyFile(voteKeyPath)
+	require.NoError(t, err)
+
+	provider := newStartupBlockingFirstLeiosKeyProvider()
+	defer provider.releaseFirstLookup()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+		Logger:         logger,
+		EventBus:       event.NewEventBus(nil, logger),
+		StakeProvider:  startupLeiosStakeProvider{},
+		EpochProvider:  startupLeiosEpochProvider{},
+		ParamsProvider: startupLeiosParamsProvider{},
+		KeyProvider:    provider,
+	})
+	require.NoError(t, err)
+
+	n := &Node{
+		config: Config{
+			logger:                  logger,
+			blockProducer:           true,
+			leiosVoteSigningKeyFile: voteKeyPath,
+		},
+		leiosVoteManager: voteManager,
+	}
+	startupResultCh := make(chan error, 1)
+	go func() {
+		startupResultCh <- n.enableLeiosVoting(creds)
+	}()
+	testutil.RequireReceive(
+		t,
+		provider.entered,
+		2*time.Second,
+		"startup voting key lookup",
+	)
+
+	poolID := creds.GetPoolID()
+	var replacementPool lcommon.PoolKeyHash
+	replacementPool[0] = 0xff
+	require.NotEqual(t, poolID[:], replacementPool[:])
+	replacementStatus, err := voteManager.ConfigureVoting(replacementPool, key)
+	require.NoError(t, err)
+	require.Equal(t, leios.VotingConfigurationAwaitingKey, replacementStatus)
+
+	provider.releaseFirstLookup()
+	require.NoError(
+		t,
+		testutil.RequireReceive(
+			t,
+			startupResultCh,
+			2*time.Second,
+			"superseded startup voting configuration",
+		),
+	)
+	assert.Contains(
+		t,
+		logs.String(),
+		"leios voting configuration was superseded by a newer configuration or retry",
+	)
+	assert.NotContains(
+		t,
+		logs.String(),
+		"deferred until the configured key is available",
+	)
+}
+
+func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
+	t.Parallel()
+
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
+	creds := forging.NewPoolCredentials()
+	require.NoError(
+		t,
+		creds.LoadFromFiles(vrfPath, kesPath, opcertPath),
+	)
+
+	voteKeyPath := filepath.Join(t.TempDir(), "leios-vote.skey")
+	require.NoError(
+		t,
+		os.WriteFile(
+			voteKeyPath,
+			[]byte(
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			),
+			0o600,
+		),
+	)
+	key, err := leios.LoadVoteSigningKeyFile(voteKeyPath)
+	require.NoError(t, err)
+	proof, err := leios.SignLeiosKeyProofOfPossession(key)
+	require.NoError(t, err)
+
+	poolID := creds.GetPoolID()
+	provider := &startupLeiosReplayProvider{
+		poolHash: hex.EncodeToString(poolID[:]),
+		key: &lcommon.LeiosKey{
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	eventBus := event.NewEventBus(nil, logger)
+	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+		Logger:         logger,
+		EventBus:       eventBus,
+		StakeProvider:  provider,
+		EpochProvider:  startupLeiosEpochProvider{},
+		ParamsProvider: provider,
+		KeyProvider:    provider,
+	})
+	require.NoError(t, err)
+	require.NoError(t, voteManager.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, voteManager.Stop()) })
+
+	subID, emittedCh := eventBus.Subscribe(leios.VoteEmittedEventType)
+	defer eventBus.Unsubscribe(leios.VoteEmittedEventType, subID)
+	ebHash := lcommon.NewBlake2b256([]byte("startup-replay-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("startup-replay-rb"))
+	voteManager.HandleEndorserBlock(501, ebHash)
+	voteManager.ObserveAnnouncement(501, rbHash, ebHash)
+
+	n := &Node{
+		config: Config{
+			logger:                  logger,
+			blockProducer:           true,
+			leiosVoteSigningKeyFile: voteKeyPath,
+		},
+		leiosVoteManager: voteManager,
+	}
+	require.NoError(
+		t,
+		n.enableLeiosVoting(creds),
+		"transient replay preparation must not abort node startup",
+	)
+	assert.Contains(
+		t,
+		logs.String(),
+		"leios voting activation preparation failed",
+	)
+	assert.NotContains(
+		t,
+		logs.String(),
+		"deferred until the configured key is available",
+	)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"voting must remain disabled after replay preparation fails",
+	)
+
+	provider.recover()
+	eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: 5},
+		),
+	)
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"announcement replay after startup provider recovery",
+	)
+	emitted, ok := emittedEvent.Data.(leios.VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"recovered announcement must be replayed exactly once",
+	)
+}
+
+// TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles guards a
+// real bug: initLeiosVoteManager's VoteEmittedEventType subscription used
+// to discard its subscriber ID, and this function runs again on every live
+// database Restore/Truncate reinit for a Dijkstra/Leios-enabled node — but
+// the EventBus itself is never recreated across that cycle. Without
+// unsubscribing the previous cycle's handler first (mirroring the three
+// other Node subscriber-ID fields this exact quiesce function already
+// tracks for the identical reason), each cycle left one more permanently
+// active subscription behind, so a single emitted vote got enqueued (and
+// would be diffused to peers) once per accumulated cycle instead of once.
+//
+// Runs initLeiosVoteManager, then the real quiesceForLiveLifecycleOp
+// (which now unsubscribes leiosVoteEmittedSubId), three times in a row —
+// simulating three live Restore/Truncate cycles — then publishes exactly
+// one VoteEmittedEvent and asserts exactly one vote is queued for
+// diffusion, not three.
+func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	n, _ := newLiveLifecycleTestNode(t, 1)
+
+	const cycles = 3
+	for range cycles {
+		require.NoError(t, n.initLeiosVoteManager(context.Background()))
+		require.NoError(t, n.quiesceForLiveLifecycleOp(context.Background()))
+	}
+	// The last cycle's quiesce stopped leiosVoteManager without a
+	// subsequent reinit rebuilding it; re-create it once more so a
+	// handler is actually live to receive the event published below,
+	// matching the shape of a real live-lifecycle op (quiesce always
+	// pairs with a reinit that calls initLeiosVoteManager again).
+	require.NoError(t, n.initLeiosVoteManager(context.Background()))
+
+	require.Zero(t, n.ouroboros().LeiosVoteEnqueueCount())
+	n.eventBus.Publish(leios.VoteEmittedEventType, event.NewEvent(
+		leios.VoteEmittedEventType,
+		leios.VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{}},
+	))
+
+	// A single require.Eventually asserting the exact count (not >= 1)
+	// both waits for delivery and stays red if a stale, over-counted
+	// subscription pushes the count past 1: EventBus dispatches every
+	// live subscriber for one Publish call around the same time, so if a
+	// duplicate delivery were going to happen, it already would have by
+	// the time any poll first observes the count reaching 1 -- no
+	// additional settle-time sleep is needed to catch it.
+	require.Eventually(t, func() bool {
+		return n.ouroboros().LeiosVoteEnqueueCount() == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"exactly one vote must be enqueued for the single published event, "+
+			"not once per accumulated live-lifecycle cycle")
+}

@@ -17,3 +17,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/examples/dingo-gov-lens"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/examples/dingo-blockfrost-explorer"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/examples/dingo-sundae-preview"
+    schedule:
+      interval: "weekly"

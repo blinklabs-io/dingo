@@ -15,13 +15,17 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,7 +33,147 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
+func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	blocks := []models.Block{
+		{
+			ID:     initialBlockIndex,
+			Slot:   10,
+			Hash:   bytes.Repeat([]byte{0x01}, 32),
+			Number: 1,
+			Type:   1,
+			Cbor:   []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1,
+			Slot:     20,
+			Hash:     bytes.Repeat([]byte{0x02}, 32),
+			PrevHash: bytes.Repeat([]byte{0x01}, 32),
+			Number:   2,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1_000_000,
+			Slot:     30,
+			Hash:     bytes.Repeat([]byte{0x03}, 32),
+			PrevHash: bytes.Repeat([]byte{0x02}, 32),
+			Number:   3,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1_000_001,
+			Slot:     40,
+			Hash:     bytes.Repeat([]byte{0x04}, 32),
+			PrevHash: bytes.Repeat([]byte{0x03}, 32),
+			Number:   4,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := NewManager(db, nil)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+	require.Equal(t, blocks[len(blocks)-1].Slot, c.Tip().Point.Slot)
+
+	iter, err := c.FromPoint(
+		ocommon.NewPoint(blocks[1].Slot, blocks[1].Hash),
+		false,
+	)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	next, err := iter.Next(false)
+	require.NoError(t, err)
+	require.Equal(t, blocks[2].Slot, next.Point.Slot)
+	require.Equal(t, blocks[2].Hash, next.Point.Hash)
+
+	next, err = iter.Next(false)
+	require.NoError(t, err)
+	require.Equal(t, blocks[3].Slot, next.Point.Slot)
+	require.Equal(t, blocks[3].Hash, next.Point.Hash)
+
+	next, err = iter.Next(false)
+	require.Nil(t, next)
+	require.ErrorIs(t, err, ErrIteratorChainTip)
+}
+
+func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	ledgerTipHash := bytes.Repeat([]byte{0x02}, 32)
+	blocks := []models.Block{
+		{
+			ID:     initialBlockIndex,
+			Slot:   10,
+			Hash:   bytes.Repeat([]byte{0x01}, 32),
+			Number: 1,
+			Type:   1,
+			Cbor:   []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1,
+			Slot:     20,
+			Hash:     ledgerTipHash,
+			PrevHash: bytes.Repeat([]byte{0x01}, 32),
+			Number:   2,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 3,
+			Slot:     30,
+			Hash:     bytes.Repeat([]byte{0x03}, 32),
+			PrevHash: bytes.Repeat([]byte{0xff}, 32),
+			Number:   3,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := NewManager(db, nil)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+
+	iter, err := c.FromPoint(
+		ocommon.NewPoint(blocks[1].Slot, ledgerTipHash),
+		false,
+	)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	next, err := iter.Next(false)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrIteratorChainTip)
+	require.False(t, next != nil && next.Point.Slot == blocks[2].Slot)
+}
+
 func TestIteratorCancelRemovesFromChain(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
@@ -67,6 +211,8 @@ func TestIteratorCancelRemovesFromChain(t *testing.T) {
 }
 
 func TestIteratorCancelMultiple(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
@@ -109,6 +255,8 @@ func TestIteratorCancelMultiple(t *testing.T) {
 }
 
 func TestIteratorCancelIdempotent(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
@@ -134,6 +282,8 @@ func TestIteratorCancelIdempotent(t *testing.T) {
 // TestIteratorParentContextCancelUnblocksNext verifies that a blocking
 // iterator created with a parent context exits when that parent is canceled.
 func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
 	require.NoError(t, err)
@@ -191,6 +341,8 @@ func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
 // overflow the goroutine stack. The iterative loop fix makes
 // this safe regardless of wake-up count.
 func TestIterNextSpuriousWakeups(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
 	require.NoError(t, err)
@@ -279,6 +431,8 @@ func TestIterNextSpuriousWakeups(t *testing.T) {
 }
 
 func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
 	require.NoError(t, err)
@@ -318,15 +472,10 @@ func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
 		return true
 	}, 2*time.Second, "iterator should hold chain lock at tip")
 
-	blockFixture, err := mockfixtures.NewHarness(
-		mockfixtures.HarnessConfig{},
-	).Fixture(
-		"ouroboros-consensus/ouroboros-consensus-cardano/" +
-			"golden/cardano/CardanoNodeToNodeVersion2/Block_Conway",
-	)
+	blocks, err := testfixtures.GenerateConwayChain(1)
 	require.NoError(t, err)
-	block, err := blockFixture.DecodeLedgerBlock()
-	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
 	blockHash := block.Hash().Bytes()
 
 	go func() {

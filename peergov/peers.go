@@ -15,8 +15,11 @@
 package peergov
 
 import (
+	"context"
 	"errors"
+	"math/rand/v2"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -33,6 +36,24 @@ const defaultMinPeerListCap = 200
 var ErrPeerListFull = errors.New("peer list at capacity")
 
 var lookupIP = net.LookupIP
+
+// lookupIPAddr resolves a hostname to its IP records while honoring the
+// provided context, so a hung or slow resolver cannot block the caller past
+// the context deadline or a governor shutdown. Unlike the bare net.LookupIP
+// used by resolveAddress, this path runs on the hot outbound-dial loop and
+// must never wedge the peer governor. It is a package var so tests can inject
+// a deterministic, host-independent resolver.
+var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, len(addrs))
+	for i := range addrs {
+		ips[i] = addrs[i].IP
+	}
+	return ips, nil
+}
 
 // maxPeerListSize returns the hard cap for the total number of peers.
 // This prevents unbounded growth between reconciliation cycles.
@@ -60,13 +81,14 @@ func (p *PeerGovernor) GetPeers() []Peer {
 }
 
 // ErrUnroutableAddress is returned when a peer address resolves to a
-// non-routable IP (private, loopback, link-local, multicast, or
-// unspecified).
+// non-routable or reserved/documentation-only IP (private, loopback,
+// link-local, multicast, or unspecified).
 var ErrUnroutableAddress = errors.New("unroutable peer address")
 
 // isRoutableAddr checks whether the host portion of an address is a
 // publicly-routable unicast IP. It returns false for private (RFC 1918 /
-// RFC 4193), loopback, link-local, multicast, and unspecified addresses.
+// RFC 4193), loopback, link-local, multicast, unspecified, and
+// documentation-only addresses.
 // If the host is not a valid IP (e.g. unresolved hostname), it is
 // considered routable so that DNS-based topology peers still work.
 func isRoutableAddr(address string) bool {
@@ -80,10 +102,100 @@ func isRoutableAddr(address string) bool {
 		// Not an IP literal (hostname) — allow it
 		return true
 	}
+	return IsRoutableIP(ip)
+}
+
+// unreachablePrefixes are ranges that net.IP's own class predicates report as
+// global unicast but that cannot be a peer we meant to dial. net.IP.IsPrivate
+// covers only RFC 1918 and RFC 4193, so each of these otherwise reads as
+// routable. Every entry is marked "Globally Reachable: False" in the IANA
+// special-purpose address registries.
+//
+// Note that IsUnspecified matches only 0.0.0.0 itself, so the rest of
+// 0.0.0.0/8 needs the prefix.
+//
+// Neighbouring ranges that IANA marks globally reachable are deliberately
+// absent and pinned as accepted in TestIsRoutableIP: AS112 (192.31.196.0/24,
+// 2001:4:112::/48), AMT (192.52.193.0/24, 2001:3::/32), and NAT64
+// (64:ff9b::/96). This list has grown twice under review, which is the
+// argument in #3792 for expressing the policy as an allowlist of globally
+// routable space instead of a denylist of reserved ranges.
+//
+// RFC 6598 shared address space is the one that matters: a carrier routes it
+// internally, so dialing an advertised 100.64.0.0/10 address can reach another
+// subscriber's host rather than failing.
+//
+// The others are rejected as whole blocks. That is deliberate rather than an
+// assumption that every address in them is dark: IANA marks two /32s inside
+// 192.0.0.0/24 as globally reachable — 192.0.0.9 (Port Control Protocol
+// anycast, RFC 7723) and 192.0.0.10 (TURN anycast, RFC 8155). Neither is a
+// Cardano relay, so a peer offering one is misconfigured or probing, and the
+// block is rejected whole rather than carved up for two anycast services we
+// would never dial.
+//
+// RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are documentation-only,
+// so they are not valid network peer candidates even though they are useful
+// in tests and documentation. They are rejected here rather than consuming a
+// peer-list slot and causing a failed dial.
+var unreachablePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 TEST-NET-1
+	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
+	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
+	netip.MustParsePrefix(
+		"192.0.0.0/24",
+	), // RFC 6890 IETF protocol assignments
+	netip.MustParsePrefix(
+		"192.88.99.0/24",
+	), // RFC 7526 deprecated 6to4 anycast
+	netip.MustParsePrefix("198.18.0.0/15"), // RFC 2544 benchmarking
+	netip.MustParsePrefix(
+		"240.0.0.0/4",
+	), // RFC 1112 reserved, incl. broadcast
+	netip.MustParsePrefix("64:ff9b:1::/48"), // RFC 8215 local-use translation
+	netip.MustParsePrefix("100::/64"),       // RFC 6666 discard-only
+	netip.MustParsePrefix("2001:2::/48"),    // RFC 5180 benchmarking
+	// The two ORCHID blocks abut and are excluded for different reasons, so
+	// neither prefix may be widened to cover the other. 2001:10::/28 is the
+	// deprecated ORCHID allocation, terminated 2014-03. 2001:20::/28 is listed
+	// Globally Reachable in the IANA IPv6 Special-Purpose Address Registry, but
+	// RFC 7343 states an ORCHID "should not appear in actual IPv6 headers" and
+	// is routable only at an overlay level, so it is an endpoint identifier
+	// rather than a locator and can never be dialled as a peer.
+	netip.MustParsePrefix("2001:10::/28"),  // RFC 4843 ORCHID, deprecated
+	netip.MustParsePrefix("2001:20::/28"),  // RFC 7343 ORCHIDv2
+	netip.MustParsePrefix("2001:db8::/32"), // RFC 3849 documentation
+}
+
+// IsRoutableIP reports whether an IP address is usable as a peer candidate
+// learned from the network. It is the single definition of the routability
+// policy applied to gossip, ledger, and peer-sharing candidates, so callers
+// that already hold a net.IP do not restate the address classes.
+//
+// An IP that is neither 4 nor 16 bytes is rejected: the net.IP class
+// predicates all report false for another length, so an unchecked value would
+// otherwise be treated as routable.
+func IsRoutableIP(ip net.IP) bool {
+	if ip == nil || ip.To16() == nil {
+		return false
+	}
 	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
 		ip.IsUnspecified() {
 		return false
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	// Unmap so an IPv4-mapped IPv6 address is matched against the IPv4
+	// prefixes rather than silently missing every one of them.
+	addr = addr.Unmap()
+	for _, prefix := range unreachablePrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
 	}
 	return true
 }
@@ -180,8 +292,24 @@ func (p *PeerGovernor) AddPeer(
 	// are enabled before spawning. Topology peers added before
 	// Start() are covered by startOutboundConnections(); this
 	// handles peers added at runtime (e.g., gossip).
+	//
+	// The spawn itself must happen inside this same critical section,
+	// not after unlocking: Stop() closes and nils p.stopCh while
+	// holding p.mu, then unlocks and calls p.wg.Wait() with the lock
+	// released. Reading p.stopCh here and only calling
+	// spawnOutboundConnection (which does p.wg.Go, registering this
+	// dial with that same WaitGroup) after unlocking would leave a
+	// window where Stop's Wait() observes the WaitGroup counter back
+	// at zero and returns before this goroutine is ever registered --
+	// letting Stop return while a dial it should have drained is still
+	// about to start. Spawning while still holding p.mu forces Stop's
+	// stopCh-clearing critical section (and therefore its Wait) to
+	// happen strictly after this dial is already counted.
 	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound &&
 		source != PeerSourceInboundConn
+	if shouldConnect {
+		p.spawnOutboundConnectionLocked(newPeer)
+	}
 	evt = &pendingEvent{
 		PeerAddedEventType,
 		PeerStateChangeEvent{Address: address, Reason: reason},
@@ -190,13 +318,6 @@ func (p *PeerGovernor) AddPeer(
 
 	// Publish event outside of lock to avoid deadlock
 	p.publishEvent(evt.eventType, evt.data)
-
-	// Spawn an outbound connection goroutine for the new peer.
-	// Without this, peers added after startup stay cold
-	// indefinitely.
-	if shouldConnect {
-		go p.createOutboundConnection(newPeer)
-	}
 	return nil
 }
 
@@ -254,6 +375,363 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 
 	// Use first resolved IP for normalization
 	return net.JoinHostPort(ips[0].String(), port)
+}
+
+// resolveLedgerDiscoveryAddress resolves a ledger relay hostname at initial
+// discovery time, filtering the resolved records to the locally-supported
+// address families before picking one. The lookup is bounded and honors ctx;
+// this function must NOT be called while holding locks.
+//
+// It is ledger-specific rather than a change to resolveAddress (shared by
+// every peer source — topology, gossip, inbound, TestPeer/DenyPeer lookups)
+// because the record chosen here matters far more than it does for those
+// other sources: resolveLedgerDialTarget's fast path reuses whatever ends up
+// in NormalizedAddress unchanged and dials it for the rest of the peer's
+// lifetime, whereas every other source re-resolves (and re-filters via
+// resolveDialAddress) on every dial attempt. Without this, a v4-only host
+// could pin a ledger peer to an unreachable AAAA record forever, since
+// there is no later attempt to self-correct the family.
+//
+// Behavior otherwise matches resolveAddress: an IP literal is normalized
+// unchanged, and a resolution failure or empty result falls back to the
+// lowercased hostname so the peer is still added (with routability decided
+// downstream) rather than dropped.
+func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
+	ctx context.Context,
+	address string,
+) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return strings.ToLower(address)
+	}
+
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return net.JoinHostPort(ip.String(), port)
+	}
+
+	lowerHost := strings.ToLower(host)
+	// A hostname that just failed to resolve is not retried until its
+	// negative-cache entry expires. Discovery re-offers the whole relay set
+	// every round, so without this a dead hostname costs a lookup (and, for
+	// a timing-out resolver, dialDNSResolveTimeout of the discovery loop) on
+	// every round for as long as the pool keeps publishing it.
+	if p.negativeDNSCached(lowerHost) {
+		return net.JoinHostPort(lowerHost, port)
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
+	if err != nil || len(ips) == 0 {
+		// Debug, not Warn: a pool publishing a dead relay hostname is a fact
+		// about the chain, not a fault in this node, and there is no
+		// operator action it implies.
+		p.config.Logger.Debug(
+			"failed to resolve ledger relay hostname",
+			"address", address,
+			"host", host,
+			"error", err,
+		)
+		// A cancellation from the caller's context says nothing about the
+		// hostname, only about this node's shutdown, so it must not poison
+		// the cache. A lookup that hit dialDNSResolveTimeout is a real
+		// resolution failure and is cached like any other.
+		if ctx.Err() == nil {
+			p.recordNegativeDNS(lowerHost)
+		}
+		return net.JoinHostPort(lowerHost, port)
+	}
+
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
+	return net.JoinHostPort(ips[0].String(), port)
+}
+
+// negativeDNSCached reports whether host has an unexpired negative-cache
+// entry, deleting the entry when it has expired. Deleting on read is what
+// lets a hostname that starts resolving again recover: the next lookup runs
+// for real, and a success simply writes nothing back.
+func (p *PeerGovernor) negativeDNSCached(host string) bool {
+	p.negativeDNSMu.Lock()
+	defer p.negativeDNSMu.Unlock()
+	expiry, ok := p.negativeDNS[host]
+	if !ok {
+		return false
+	}
+	if time.Now().Before(expiry) {
+		return true
+	}
+	delete(p.negativeDNS, host)
+	return false
+}
+
+// recordNegativeDNS caches a resolution failure for host. The cache is
+// bounded: expired entries are swept first, and if that does not free a slot
+// the entry closest to expiry is evicted, so untrusted on-chain relay
+// hostnames cannot grow the map without limit.
+func (p *PeerGovernor) recordNegativeDNS(host string) {
+	now := time.Now()
+	p.negativeDNSMu.Lock()
+	defer p.negativeDNSMu.Unlock()
+	if _, ok := p.negativeDNS[host]; !ok &&
+		len(p.negativeDNS) >= negativeDNSCacheMaxEntries {
+		for cached, expiry := range p.negativeDNS {
+			if !now.Before(expiry) {
+				delete(p.negativeDNS, cached)
+			}
+		}
+		if len(p.negativeDNS) >= negativeDNSCacheMaxEntries {
+			var oldestHost string
+			var oldestExpiry time.Time
+			for cached, expiry := range p.negativeDNS {
+				if oldestHost == "" || expiry.Before(oldestExpiry) {
+					oldestHost, oldestExpiry = cached, expiry
+				}
+			}
+			delete(p.negativeDNS, oldestHost)
+		}
+	}
+	p.negativeDNS[host] = now.Add(negativeDNSCacheTTL)
+}
+
+// resolveDialAddress returns the concrete transport target to dial for an
+// outbound connection attempt against the given peer address.
+//
+// For IP-literal addresses it returns the address unchanged: there is
+// nothing to resolve and behavior is identical to callers that dial the
+// address directly.
+//
+// For hostname-based addresses it performs a FRESH DNS resolution on every
+// call and returns a single, randomly-selected resolved IP:port. This
+// spreads repeated (re)connect attempts across every record the hostname
+// currently resolves to — e.g. all backends behind a load-balancer
+// hostname — instead of pinning to whichever address the dialer happens to
+// try first. A stuck or unhealthy backend is therefore escaped on the next
+// attempt without a process restart.
+//
+// Peer identity and deduplication are intentionally unaffected: callers
+// keep using the stable peer.Address / peer.NormalizedAddress for all
+// bookkeeping (dedup, deny lists, reconnect lookup, peer sharing). Only the
+// transport dial target rotates per attempt.
+//
+// On resolution failure (or a malformed address) it falls back to the
+// original address so the dialer can resolve the hostname itself,
+// preserving prior behavior.
+//
+// The DNS lookup is bounded by dialDNSResolveTimeout and tied to the passed
+// context, so a hung or slow resolver cannot block the outbound-dial loop and
+// a governor shutdown cancels an in-flight resolution promptly. It performs a
+// blocking DNS lookup for hostnames and must NOT be called while holding p.mu.
+func (p *PeerGovernor) resolveDialAddress(
+	ctx context.Context,
+	address string,
+) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	// IP literals dial exactly as before: no re-resolution, no rotation.
+	if net.ParseIP(host) != nil {
+		return address
+	}
+	// Bound the fresh resolution so a hung or slow resolver cannot wedge the
+	// dial loop, and cancel it if the governor is shutting down.
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
+	if err != nil || len(ips) == 0 {
+		// Can't resolve (or timed out); let the dialer resolve the hostname
+		// itself so behavior matches the pre-spread code path.
+		return address
+	}
+	// Filter the resolved records to the address families the local host can
+	// actually route to, so a single-stack host never wastes a dial (and a
+	// backoff cycle) on an unreachable family — e.g. an IPv6 record on a
+	// v4-only host. The primary goal remains spreading across load-balancer
+	// backends; this just keeps that spread inside the reachable families.
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
+	// Spread the dial across all currently-returned (reachable) records.
+	// Random selection is stateless and, unlike a shared round-robin counter,
+	// does not synchronize the fleet onto a single backend; a congested or
+	// half-dead backend is escaped on the next attempt.
+	ip := ips[rand.IntN(len(ips))] //nolint:gosec // load-balancing spread, not security-sensitive
+	return net.JoinHostPort(ip.String(), port)
+}
+
+// resolveLedgerDialTarget returns the concrete IP:port to dial for a
+// ledger-discovered pool relay peer, locking that choice onto the peer so
+// every subsequent dial attempt reuses the same resolved IP instead of
+// asking DNS again.
+//
+// Ledger relay hostnames are supplied by pool operators via on-chain stake
+// pool registration — input outside the node's control. If the routability
+// check performed when the relay was discovered (isRoutableAddr, via
+// resolveAddress in addLedgerPeer) and the actual dial each triggered their
+// own DNS lookup, a malicious or compromised authoritative DNS server could
+// answer the discovery-time lookup with a public IP (passing the check) and
+// a later lookup with an internal address (the one actually dialed) — a DNS
+// rebind that would cause the node to TCP-probe internal addresses.
+// Resolving exactly once and always dialing that resolved IP closes the
+// gap.
+//
+// peer.NormalizedAddress already holds the IP resolved at discovery time in
+// the common case, so this returns it unchanged. If that earlier resolution
+// failed and NormalizedAddress is still a hostname, a single fresh
+// resolution is performed here, filtered to the locally-supported address
+// families (so the record locked in for the rest of this peer's lifetime is
+// actually dialable, not an arbitrary first record), checked for
+// routability, and — on success — written back to peer.NormalizedAddress
+// under p.mu so it is locked in for this and every future reconnect
+// attempt. It must NOT be called while holding p.mu.
+func (p *PeerGovernor) resolveLedgerDialTarget(
+	ctx context.Context,
+	peer *Peer,
+) (string, error) {
+	host, port, err := net.SplitHostPort(peer.NormalizedAddress)
+	if err != nil {
+		return "", err
+	}
+	if net.ParseIP(host) != nil {
+		// Resolved and locked in at discovery time.
+		return peer.NormalizedAddress, nil
+	}
+
+	// Discovery-time resolution didn't produce an IP (e.g. it failed and
+	// fell back to the lowercased hostname). Resolve once now, bounded so a
+	// hung or slow resolver cannot wedge the dial loop.
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(ips) == 0 {
+		return "", errors.New("no addresses returned for ledger relay hostname")
+	}
+	// Filter to the address families this host can actually dial before
+	// picking the one record that gets locked in forever; an unfiltered
+	// pick could permanently pin the peer to an unreachable family (e.g. an
+	// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
+	// re-resolution would otherwise self-correct on the next try.
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
+	resolved := net.JoinHostPort(ips[0].String(), port)
+	if !isRoutableAddr(resolved) {
+		return "", ErrUnroutableAddress
+	}
+
+	p.mu.Lock()
+	idx := p.peerIndexByAddress(peer.NormalizedAddress)
+	if idx != -1 && p.peers[idx] != nil {
+		// Guard against colliding with a distinct peer entry that already
+		// owns this resolved address (e.g. a gossip/topology peer for the
+		// same relay, or another ledger hostname that happens to resolve
+		// here). Two peers sharing NormalizedAddress breaks
+		// peerIndexByAddress's assumption that it uniquely identifies a
+		// peer, which can misdirect this peer's connection bookkeeping onto
+		// the other entry. Skip the lock-in in that case; this peer simply
+		// re-resolves (still routability-checked before every dial) on its
+		// next attempt instead of corrupting peer identity.
+		if collidingIdx := p.peerIndexByAddress(resolved); collidingIdx == -1 ||
+			collidingIdx == idx {
+			p.peers[idx].NormalizedAddress = resolved
+		}
+	}
+	p.mu.Unlock()
+
+	return resolved, nil
+}
+
+// localAddrFamilies detects which IP families the local host can route to.
+// It is a package var so tests can inject a deterministic result independent
+// of the host's real network interfaces.
+var localAddrFamilies = detectLocalAddrFamilies
+
+// detectLocalAddrFamilies reports whether the local host has at least one
+// non-loopback, non-link-local global-unicast IPv4 and/or IPv6 address, i.e.
+// which families it can plausibly originate traffic on. On any error it
+// reports (false, false), which the callers treat as "inconclusive" and fall
+// back to the full record set rather than filtering.
+func detectLocalAddrFamilies() (hasV4, hasV6 bool) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false, false
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		default:
+			continue
+		}
+		// Skip loopback/link-local and anything that is not a usable global
+		// unicast address; those do not indicate real routability. (Private
+		// RFC1918 / RFC4193 addresses are global-unicast and count, since a
+		// host on such a network can route that family.)
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			!ip.IsGlobalUnicast() {
+			continue
+		}
+		if ip.To4() != nil {
+			hasV4 = true
+		} else {
+			hasV6 = true
+		}
+	}
+	return hasV4, hasV6
+}
+
+// supportedDialFamilies returns the local host's routable IP families,
+// cached briefly to avoid a per-dial interface-scan syscall storm while still
+// picking up later interface or routing changes.
+func (p *PeerGovernor) supportedDialFamilies() (hasV4, hasV6 bool) {
+	now := time.Now()
+	p.dialFamilyMu.RLock()
+	if !p.dialFamilyCheckedAt.IsZero() &&
+		now.Sub(p.dialFamilyCheckedAt) < dialFamilyCacheTTL {
+		hasV4, hasV6 = p.dialFamilyHasV4, p.dialFamilyHasV6
+		p.dialFamilyMu.RUnlock()
+		return hasV4, hasV6
+	}
+	p.dialFamilyMu.RUnlock()
+
+	p.dialFamilyMu.Lock()
+	defer p.dialFamilyMu.Unlock()
+	now = time.Now()
+	if !p.dialFamilyCheckedAt.IsZero() &&
+		now.Sub(p.dialFamilyCheckedAt) < dialFamilyCacheTTL {
+		return p.dialFamilyHasV4, p.dialFamilyHasV6
+	}
+	p.dialFamilyHasV4, p.dialFamilyHasV6 = localAddrFamilies()
+	p.dialFamilyCheckedAt = now
+	return p.dialFamilyHasV4, p.dialFamilyHasV6
+}
+
+// filterDialFamilies returns the subset of ips whose address family the host
+// supports. SAFETY FALLBACK: if detection was inconclusive (neither family
+// supported) or nothing matches a supported family, it returns the original
+// ips unchanged so a peer is never stranded by over-filtering.
+func filterDialFamilies(ips []net.IP, hasV4, hasV6 bool) []net.IP {
+	if !hasV4 && !hasV6 {
+		// Detection inconclusive — do not filter.
+		return ips
+	}
+	filtered := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if (ip.To4() != nil && hasV4) || (ip.To4() == nil && hasV6) {
+			filtered = append(filtered, ip)
+		}
+	}
+	if len(filtered) == 0 {
+		// No record matches a supported family; never strand the peer.
+		return ips
+	}
+	return filtered
 }
 
 func (p *PeerGovernor) publishEvent(eventType event.EventType, data any) {
@@ -352,7 +830,10 @@ func (p *PeerGovernor) resolveInboundIdentity(
 		}
 		if peer.Address == remoteAddr ||
 			peer.NormalizedAddress == normalizedRemoteAddr {
-			return i, topologyGroupIDForPeer(peer, p.isTopologyPeer(peer.Source))
+			return i, topologyGroupIDForPeer(
+				peer,
+				p.isTopologyPeer(peer.Source),
+			)
 		}
 	}
 	// Rule 2: unambiguous topology-host match.

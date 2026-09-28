@@ -20,13 +20,53 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
+
+var networkMagicFieldPattern = regexp.MustCompile(
+	`\bunNetworkMagic\s*=\s*([0-9]+)\b`,
+)
+
+// isPermanentNetworkMagicMismatch reports whether err is a typed handshake
+// refusal whose Haskell version-data rendering proves the two peers use
+// different network magic values. Other version-data mismatches remain
+// transient because diffusion mode, peer sharing, and query mode can be
+// negotiated without changing networks.
+func isPermanentNetworkMagicMismatch(err error) bool {
+	var refusedErr *handshake.RefusedError
+	if !errors.As(err, &refusedErr) ||
+		!strings.Contains(
+			strings.ToLower(refusedErr.Message),
+			"version data mismatch",
+		) {
+		return false
+	}
+	matches := networkMagicFieldPattern.FindAllStringSubmatch(
+		refusedErr.Message,
+		-1,
+	)
+	if len(matches) != 2 {
+		return false
+	}
+	left, err := strconv.ParseUint(matches[0][1], 10, 32)
+	if err != nil {
+		return false
+	}
+	right, err := strconv.ParseUint(matches[1][1], 10, 32)
+	if err != nil {
+		return false
+	}
+	return left != right
+}
 
 func isConnectionCancellationError(err error) bool {
 	if err == nil {
@@ -46,15 +86,40 @@ func isExpectedNetworkDialError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// ENETUNREACH and EAFNOSUPPORT are siblings of the cases below: on a
+	// host with no IPv6 route, every AAAA relay record the ledger publishes
+	// produces one. They are facts about local reachability, not node
+	// faults, and logging them at ERROR buries the genuine ones. Matched by
+	// errno first, like isAddrInUseError, so a wrapped *os.SyscallError is
+	// classified without depending on the message text. The errno and
+	// message forms below both target Unix-like platforms, matching the
+	// existing classifiers in this file; Windows reports these as WSA codes
+	// with different message text and is not covered.
+	if errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EAFNOSUPPORT) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such host") ||
+	return strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(
+			msg,
+			"address family not supported by protocol family",
+		) ||
+		strings.Contains(msg, "no such host") ||
 		strings.Contains(msg, "server misbehaving") ||
 		strings.Contains(msg, "connect: connection refused") ||
 		strings.Contains(msg, "no route to host") ||
 		strings.Contains(msg, "i/o timeout") ||
 		strings.Contains(msg, "cannot assign requested address") ||
 		strings.Contains(msg, "version data mismatch") ||
-		strings.Contains(msg, "timeout waiting on transition")
+		strings.Contains(msg, "timeout waiting on transition") ||
+		// gouroboros reports a crossing duplicate connection pruned during
+		// the handshake (duplex connection-manager dedup) as an EOF-wrapped
+		// "connection shutdown initiated". This happens routinely when a peer
+		// dials us while we dial it; the surviving duplex connection carries
+		// diffusion both ways, so it is expected rather than a dial failure.
+		(errors.Is(err, io.EOF) &&
+			strings.Contains(msg, "connection shutdown initiated"))
 }
 
 // shortLivedReconnectDelay returns the exponential backoff rung for the
@@ -69,6 +134,18 @@ func shortLivedReconnectDelay(count uint32) time.Duration {
 		}
 	}
 	return delay
+}
+
+// countHotPeersLocked returns the number of peers currently in the hot state.
+// Callers must hold p.mu.
+func (p *PeerGovernor) countHotPeersLocked() int {
+	n := 0
+	for _, peer := range p.peers {
+		if peer != nil && peer.State == PeerStateHot {
+			n++
+		}
+	}
+	return n
 }
 
 // isAddrInUseError returns true if the error is a "cannot assign
@@ -125,12 +202,42 @@ func (p *PeerGovernor) startOutboundConnections() {
 
 	for _, tmpPeer := range peers {
 		if tmpPeer != nil {
-			go p.createOutboundConnection(tmpPeer)
+			p.spawnOutboundConnection(tmpPeer)
 		}
 	}
 }
 
-func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
+// spawnOutboundConnection serializes work registration with Stop. Callers
+// already holding p.mu use spawnOutboundConnectionLocked instead.
+func (p *PeerGovernor) spawnOutboundConnection(peer *Peer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spawnOutboundConnectionLocked(peer)
+}
+
+func (p *PeerGovernor) spawnOutboundConnectionLocked(peer *Peer) {
+	if peer == nil || p.stopCh == nil {
+		return
+	}
+	idx := p.peerIndexByAddress(peer.NormalizedAddress)
+	if idx == -1 || p.peers[idx] == nil || p.peers[idx].Reconnecting {
+		return
+	}
+	// Reserve the reconnect slot while still holding p.mu. Connection-close
+	// events can arrive more quickly than the new goroutine is scheduled; if
+	// the goroutine sets Reconnecting itself, every queued duplicate event can
+	// launch another dial before the first one runs.
+	reconnectPeer := p.peers[idx]
+	reconnectPeer.Reconnecting = true
+	p.wg.Go(func() {
+		p.createOutboundConnection(reconnectPeer, true)
+	})
+}
+
+func (p *PeerGovernor) createOutboundConnection(
+	peer *Peer,
+	reserved bool,
+) {
 	if peer == nil {
 		return
 	}
@@ -144,7 +251,14 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		return
 	}
 	currentPeer := p.peers[idx]
+	if reserved && currentPeer != peer {
+		p.mu.Unlock()
+		return
+	}
 	if p.isPeerDeniedLocked(currentPeer) {
+		if reserved {
+			currentPeer.Reconnecting = false
+		}
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: peer denied, skipping connection attempts",
@@ -152,7 +266,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		)
 		return
 	}
-	if currentPeer.Reconnecting {
+	if currentPeer.Reconnecting && !reserved {
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: reconnect goroutine already active, skipping",
@@ -166,6 +280,9 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	// the close signal.
 	stopCh := p.stopCh
 	if stopCh == nil {
+		if reserved {
+			currentPeer.Reconnecting = false
+		}
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: peer governor stopped, skipping connection attempts",
@@ -242,9 +359,12 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: inbound reusable topology connections already satisfy valency, suppressing outbound attempts",
-				"address", peer.Address,
-				"group", currentPeer.GroupID,
-				"valency", currentPeer.Valency,
+				"address",
+				peer.Address,
+				"group",
+				currentPeer.GroupID,
+				"valency",
+				currentPeer.Valency,
 			)
 			return
 		}
@@ -256,7 +376,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: peer already connected via reusable duplex connection, stopping outbound attempts",
-				"address", peer.Address,
+				"address",
+				peer.Address,
 			)
 			return
 		}
@@ -275,7 +396,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
 			p.config.Logger.Info(
 				"outbound: inbound from same peer address exists before negotiation completes, waiting",
-				"address", peer.Address,
+				"address",
+				peer.Address,
 			)
 			select {
 			case <-stopCh:
@@ -285,10 +407,33 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			continue
 		}
 
-		conn, err := p.config.ConnManager.CreateOutboundConn(
-			p.ctx,
-			peer.Address,
-		)
+		// Determine the dial target for this attempt. Ledger-discovered
+		// pool relays are resolved once and locked to that IP (see
+		// resolveLedgerDialTarget): their hostname is attacker-supplied via
+		// on-chain stake pool registration, so re-resolving it at dial time
+		// would let a malicious DNS server pass the routability check with
+		// one IP and dial an internal one with another (DNS rebind). Every
+		// other source re-resolves on each attempt and rotates the dial
+		// target across all resolved records so load spreads across
+		// load-balancer backends and a stuck/unhealthy backend is escaped
+		// without a process restart; those hostnames are operator- or
+		// protocol-controlled, not attacker-supplied. IP-literal peers are
+		// returned unchanged either way. Peer identity/dedup is keyed on
+		// peer.Address / NormalizedAddress and is unaffected.
+		var dialTarget string
+		var err error
+		if peer.Source == PeerSourceP2PLedger {
+			dialTarget, err = p.resolveLedgerDialTarget(p.ctx, peer)
+		} else {
+			dialTarget = p.resolveDialAddress(p.ctx, peer.Address)
+		}
+		var conn *ouroboros.Connection
+		if err == nil {
+			conn, err = p.config.ConnManager.CreateOutboundConn(
+				p.ctx,
+				dialTarget,
+			)
+		}
 		if err == nil {
 			connId := conn.Id()
 			p.mu.Lock()
@@ -298,7 +443,12 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			if peerIdx == -1 {
 				p.mu.Unlock()
 				// Peer was removed while connecting, close connection
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"outbound: error closing connection for removed peer",
+					"address", peer.Address,
+				)
 				p.config.Logger.Debug(
 					"outbound: peer removed during connection, closing",
 					"address", peer.Address,
@@ -309,7 +459,12 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			currentPeer := p.peers[peerIdx]
 			if p.isPeerDeniedLocked(currentPeer) {
 				p.mu.Unlock()
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"outbound: error closing connection for denied peer",
+					"address", peer.Address,
+				)
 				p.config.Logger.Debug(
 					"outbound: peer denied during connection, closing",
 					"address", peer.Address,
@@ -319,6 +474,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			oldSource := currentPeer.Source
 			oldConn := clonePeerConnection(currentPeer.Connection)
 			currentPeer.ConnectedAt = time.Now()
+			currentPeer.EverConnected = true
 			currentPeer.setConnection(conn, true)
 			p.recordPeerStateChange(currentPeer.State, PeerStateWarm)
 			currentPeer.State = PeerStateWarm
@@ -352,7 +508,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			if p.ctx.Err() != nil {
 				p.config.Logger.Debug(
 					"outbound: connection attempt canceled, governor context done",
-					"address", peer.Address,
+					"address",
+					peer.Address,
 				)
 				return
 			}
@@ -390,6 +547,9 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			}
 			continue
 		}
+		if p.denyNetworkMagicMismatch(peer, dialTarget, err) {
+			return
+		}
 		failMsg := fmt.Sprintf(
 			"outbound: failed to establish connection to %s: %s",
 			peer.Address,
@@ -413,10 +573,13 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			p.mu.Unlock()
 			if !currentPeerConnKnown &&
 				p.config.ConnManager != nil &&
-				p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
+				p.config.ConnManager.HasInboundPeerAddress(
+					peer.NormalizedAddress,
+				) {
 				p.config.Logger.Info(
 					"outbound: dial failed while exact inbound peer address is still negotiating, waiting",
-					"address", peer.Address,
+					"address",
+					peer.Address,
 				)
 				continue
 			}
@@ -448,6 +611,43 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		peerSource := currentPeer.Source
 		peerAddress := currentPeer.Address
 		peerNormalizedAddress := currentPeer.NormalizedAddress
+		// Discovered (peer-share gossip, ledger) and public-root peers that
+		// have never successfully connected are dropped after a failed dial
+		// rather than retried indefinitely: a peer we cannot reach even once
+		// is almost certainly unreachable, and redialing it forever wastes
+		// dial capacity. Exceptions that keep their existing retry behavior:
+		//   - local-root and bootstrap peers (operator-configured, trusted);
+		//   - any peer that connected at least once (a transient loss is
+		//     worth recovering);
+		//   - when the node has no eligible upstream left, these peers are the
+		//     only leads back onto the network, so they are kept and
+		//     emergency-redialed rather than dropped (avoids self-stranding,
+		//     matching redialCandidatesLocked's emergency budget).
+		if p.shouldDropNeverConnectedPeerAfterDialFailureLocked(currentPeer) {
+			p.denyList[peerNormalizedAddress] = time.Now().Add(
+				p.config.DenyDuration,
+			)
+			p.peers = append(p.peers[:peerIdx], p.peers[peerIdx+1:]...)
+			p.updatePeerMetrics()
+			p.mu.Unlock()
+			p.config.Logger.Info(
+				"outbound: dropping never-connected discovered/public-root peer after failed connection",
+				"address",
+				peerAddress,
+				"source",
+				peerSource.String(),
+				"deny_duration",
+				p.config.DenyDuration,
+			)
+			p.publishEvent(
+				PeerRemovedEventType,
+				PeerStateChangeEvent{
+					Address: peerAddress,
+					Reason:  "never-connected discovered or public-root peer",
+				},
+			)
+			return
+		}
 		if !p.isTopologyPeer(peerSource) &&
 			reconnectCount > p.config.MaxReconnectFailureThreshold {
 			// Fail fast for non-topology peers. Waiting for the long
@@ -505,6 +705,21 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	}
 }
 
+// shouldDropNeverConnectedPeerAfterDialFailureLocked reports whether a failed
+// outbound dial should retire the peer instead of retrying. Must be called with
+// p.mu held.
+func (p *PeerGovernor) shouldDropNeverConnectedPeerAfterDialFailureLocked(
+	peer *Peer,
+) bool {
+	if peer == nil ||
+		peer.EverConnected ||
+		peer.hasClientConnection() ||
+		!dropIfNeverConnected(peer.Source) {
+		return false
+	}
+	return p.countEligibleUpstreamsLocked() > 0
+}
+
 func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	e, ok := evt.Data.(connmanager.InboundConnectionEvent)
 	if !ok {
@@ -551,7 +766,13 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 					"address", address,
 					"connection_id", connId.String(),
 				)
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing denied inbound peer connection",
+					"address", address,
+					"connection_id", connId.String(),
+				)
 			}
 		}
 		return
@@ -631,6 +852,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			tmpPeer.InboundDuplex = inboundIsClient
 		}
 	}
+	if tmpPeer.hasClientConnection() || tmpPeer.InboundDuplex {
+		tmpPeer.EverConnected = true
+	}
 	// Reset outbound backoff when an inbound connection from a
 	// topology peer succeeds. The inbound proves the peer is
 	// reachable, so if it drops later, the outbound should retry
@@ -704,7 +928,9 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// Reset burst when reconnects are no longer clustered inside the
 			// inbound cooldown window.
 			if !peer.LastInboundDisconnect.IsZero() &&
-				connClosedAt.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
+				connClosedAt.Sub(
+					peer.LastInboundDisconnect,
+				) >= p.config.InboundCooldown {
 				peer.InboundShortLivedCount = 0
 			}
 			if !peer.InboundConnectedAt.IsZero() &&
@@ -738,10 +964,14 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				if connDur < 0 {
 					p.config.Logger.Warn(
 						"connection close timestamp predates connection start, clamping duration",
-						"address", peer.Address,
-						"connected_at", peer.ConnectedAt,
-						"closed_at", connClosedAt,
-						"raw_duration", connDur,
+						"address",
+						peer.Address,
+						"connected_at",
+						peer.ConnectedAt,
+						"closed_at",
+						connClosedAt,
+						"raw_duration",
+						connDur,
 					)
 					connDur = 0
 				}
@@ -768,12 +998,28 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 							peer.ReconnectDelay = maxReconnectDelay
 						}
 					}
-					p.config.Logger.Warn(
-						"short-lived connection detected, applying backoff",
-						"address", peer.Address,
-						"connection_duration", connDur,
-						"next_delay", peer.ReconnectDelay,
-					)
+					// When the hot pool is critically low, cap the backoff so we
+					// keep reconnecting to known peers instead of locking them
+					// out for minutes and collapsing to a single stalled
+					// upstream. On a network of few flaky relays every session
+					// is short-lived, so the escalating backoff would otherwise
+					// erode the pool to one. See issue #2765.
+					if peer.ReconnectDelay > emergencyReconnectDelay &&
+						p.countHotPeersLocked() <= criticalHotPeerThreshold {
+						peer.ReconnectDelay = emergencyReconnectDelay
+						p.config.Logger.Warn(
+							"hot peer pool critically low; capping reconnect backoff to replenish faster",
+							"address", peer.Address,
+							"capped_delay", peer.ReconnectDelay,
+						)
+					} else {
+						p.config.Logger.Warn(
+							"short-lived connection detected, applying backoff",
+							"address", peer.Address,
+							"connection_duration", connDur,
+							"next_delay", peer.ReconnectDelay,
+						)
+					}
 				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection
@@ -788,7 +1034,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// here would cause the goroutine to see it as already
 			// active and immediately return.
 			if !peer.Reconnecting {
-				go p.createOutboundConnection(peer)
+				p.spawnOutboundConnectionLocked(peer)
 			}
 		}
 	}
@@ -811,7 +1057,12 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	defer p.mu.Unlock()
 	expiry := time.Now().Add(duration)
 	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
-		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
+		p.addPeerDenyKeysLocked(
+			p.peers[idx],
+			expiry,
+			normalized,
+			hostnameNormalized,
+		)
 	} else if idx := p.peerIndexByConnectionRemoteAddressLocked(
 		normalized,
 		hostnameNormalized,
@@ -850,6 +1101,14 @@ func (p *PeerGovernor) IsDenied(address string) bool {
 // isDeniedLocked checks if a peer is on the deny list.
 // This method assumes the mutex is already held by the caller.
 func (p *PeerGovernor) isDeniedLocked(address string) bool {
+	if expiry, exists := p.networkMismatchDenyList[address]; exists {
+		if time.Now().After(expiry) {
+			// Expired, remove from the network-mismatch deny list.
+			delete(p.networkMismatchDenyList, address)
+		} else {
+			return true
+		}
+	}
 	expiry, exists := p.denyList[address]
 	if !exists {
 		return false
@@ -860,6 +1119,99 @@ func (p *PeerGovernor) isDeniedLocked(address string) bool {
 		return false
 	}
 	return true
+}
+
+// denyNetworkMagicMismatch records an address-scoped denial for a peer that
+// proved it belongs to another Cardano network. The denial is bounded by
+// NetworkMismatchDenyDuration (much longer than the ordinary DenyDuration,
+// since this signal is far stronger than a generic dial failure) rather than
+// held indefinitely, and is held only in PeerGovernor memory, so it also
+// clears early on a node restart.
+func (p *PeerGovernor) denyNetworkMagicMismatch(
+	peer *Peer,
+	dialTarget string,
+	err error,
+) bool {
+	if !isPermanentNetworkMagicMismatch(err) {
+		return false
+	}
+
+	p.mu.Lock()
+	if p.networkMismatchDenyList == nil {
+		p.networkMismatchDenyList = make(map[string]time.Time)
+	}
+	expiry := time.Now().Add(p.config.NetworkMismatchDenyDuration)
+	// The peer can be removed or replaced while its dial and handshake run.
+	// Record the immutable attempt identity first so that a stale completion
+	// still suppresses rediscovery of the proven wrong-network address.
+	p.addNetworkMismatchDenyKeysLocked(
+		peer,
+		expiry,
+		connmanager.NormalizePeerAddr(dialTarget),
+		p.normalizeAddress(dialTarget),
+	)
+	peerAddress := dialTarget
+	peerSource := PeerSource(PeerSourceUnknown)
+	if peer != nil {
+		peerAddress = peer.Address
+		peerSource = peer.Source
+	}
+	peerIdx := -1
+	if peer != nil {
+		peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
+	}
+	removed := false
+	if peerIdx != -1 && p.peers[peerIdx] != nil {
+		currentPeer := p.peers[peerIdx]
+		p.addNetworkMismatchDenyKeysLocked(currentPeer, expiry)
+		peerAddress = currentPeer.Address
+		peerSource = currentPeer.Source
+		removed = dropIfNeverConnected(peerSource)
+		if removed {
+			p.peers = append(p.peers[:peerIdx], p.peers[peerIdx+1:]...)
+			p.updatePeerMetrics()
+		}
+	}
+	p.mu.Unlock()
+
+	p.config.Logger.Info(
+		"outbound: denying peer on a different Cardano network",
+		"address", peerAddress,
+		"source", peerSource.String(),
+		"error", err,
+		"deny_duration", p.config.NetworkMismatchDenyDuration,
+	)
+	if removed {
+		p.publishEvent(
+			PeerRemovedEventType,
+			PeerStateChangeEvent{
+				Address: peerAddress,
+				Reason:  "network magic mismatch",
+			},
+		)
+	}
+	return true
+}
+
+func (p *PeerGovernor) addNetworkMismatchDenyKeysLocked(
+	peer *Peer,
+	expiry time.Time,
+	addresses ...string,
+) {
+	for _, address := range addresses {
+		if address != "" {
+			p.networkMismatchDenyList[address] = expiry
+		}
+	}
+	if peer == nil {
+		return
+	}
+	if peer.NormalizedAddress != "" {
+		p.networkMismatchDenyList[peer.NormalizedAddress] = expiry
+	}
+	if peer.Address != "" {
+		p.networkMismatchDenyList[p.normalizeAddress(peer.Address)] = expiry
+	}
 }
 
 func (p *PeerGovernor) peerIndexByConnectionRemoteAddressLocked(
@@ -878,7 +1230,8 @@ func (p *PeerGovernor) peerIndexByConnectionRemoteAddressLocked(
 			if address == "" {
 				continue
 			}
-			if address == remoteNormalized || address == remoteHostnameNormalized {
+			if address == remoteNormalized ||
+				address == remoteHostnameNormalized {
 				return i
 			}
 		}
@@ -939,6 +1292,21 @@ func (p *PeerGovernor) cleanupDenyList() {
 	}
 }
 
+// cleanupNetworkMismatchDenyList removes expired entries from the
+// network-mismatch deny list. Kept separate from cleanupDenyList so the two
+// lifecycles (ordinary dial-failure denials vs. proven wrong-network
+// denials, bounded by two different, independently configured durations)
+// stay independently readable and testable.
+// This method assumes the mutex is already held by the caller.
+func (p *PeerGovernor) cleanupNetworkMismatchDenyList() {
+	now := time.Now()
+	for address, expiry := range p.networkMismatchDenyList {
+		if now.After(expiry) {
+			delete(p.networkMismatchDenyList, address)
+		}
+	}
+}
+
 // TestPeer tests a peer's suitability by attempting a connection and verifying
 // the Ouroboros protocol handshake succeeds. Returns true if the peer is
 // suitable, false otherwise. Results are cached to avoid excessive testing.
@@ -995,8 +1363,10 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 		if err != nil {
 			testErr = err
 		} else {
-			// Connection succeeded, close it since this is just a test
-			conn.Close()
+			// Connection succeeded, close it since this is just a test.
+			// Reachability is already established by the successful dial,
+			// so a close error here carries no diagnostic value.
+			_ = conn.Close()
 		}
 	} else {
 		testErr = errors.New("no test function or connection manager configured")
@@ -1006,16 +1376,24 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Re-find peer in case slice changed
+	// Re-find peer in case slice changed, but only accept it if it is the
+	// exact entry (same pointer) this call started with, not merely the
+	// same address. reconcile's isStaleTestOnlyPeerLocked can prune a
+	// stale-but-not-yet-recooled TestPeer-only entry concurrently with a
+	// slow, outside-lock re-test still running against it (started before
+	// the entry aged past TestCooldown), and a real peer can be admitted at
+	// the same address in the interim — that is the whole point of pruning
+	// it. Matching by address alone would let this call's result and
+	// deny-list side effects land on that unrelated, newly admitted peer
+	// instead of the probe entry it actually tested.
 	idx := p.peerIndexByAddress(normalized)
-	if idx == -1 {
-		// Peer was removed during test, nothing to update
+	if idx == -1 || p.peers[idx] != peer {
+		// Peer was removed, or replaced by a different peer, during the test.
 		if testErr != nil {
 			return false, testErr
 		}
 		return true, nil
 	}
-	peer = p.peers[idx]
 
 	peer.LastTestTime = time.Now()
 	if testErr != nil {

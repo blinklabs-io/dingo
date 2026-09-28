@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"bytes"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -24,13 +25,49 @@ import (
 
 // PeerChainTip tracks the chain tip reported by a specific peer.
 type PeerChainTip struct {
-	ConnectionId  ouroboros.ConnectionId
-	Tip           ochainsync.Tip
-	ObservedTip   ochainsync.Tip
-	VRFOutput     []byte // VRF output from tip block for tie-breaking
-	PraosView     PraosTiebreakerView
-	LastUpdated   time.Time
-	observedSlots []uint64
+	ConnectionId ouroboros.ConnectionId
+	// Tip is the remote peer's advertised chain tip. It is untrusted and may
+	// be far ahead of the headers the peer has actually delivered.
+	Tip ochainsync.Tip
+	// ObservedTip is the latest header locally delivered by this peer. Chain
+	// comparison and handoff decisions use this frontier.
+	ObservedTip ochainsync.Tip
+	// observedTipSet distinguishes a delivered origin/rollback frontier from
+	// legacy callers that did not provide ObservedTip and need Tip as fallback.
+	observedTipSet bool
+	// awaitingFirstHeader marks an entry created from a chainsync rollback for
+	// a connection the selector was not tracking (the post-FindIntersect
+	// MsgRollBackward on a fresh or recycled connection). Such a peer has
+	// confirmed an intersection but has not delivered a header yet, so its
+	// ObservedTip carries the confirmed intersection point with block number 0.
+	// That zero means "nothing delivered yet", NOT "this peer is at block 0",
+	// and the two behind-filters in isPeerSelectableLocked would otherwise read
+	// it as a peer implausibly far behind and skip it until its next
+	// MsgRollForward. Cleared by the first delivered header.
+	awaitingFirstHeader bool
+	VRFOutput           []byte // VRF output from tip block for tie-breaking
+	PraosView           PraosTiebreakerView
+	LastUpdated         time.Time
+	// observedSlots is the recent observed slot frontier used for Genesis
+	// density. observedPoints is the same frontier with block hashes, used
+	// for Genesis corroboration (detecting whether other peers report the
+	// same blocks). The two slices are maintained in lockstep: index i of
+	// observedPoints is the (slot, hash) for observedSlots[i].
+	observedSlots      []uint64
+	observedPoints     []ocommon.Point
+	observedTipHistory []ochainsync.Tip
+	// nowFn is the owning ChainSelector's clock, so LastUpdated and IsStale
+	// share one time source with the selector. Nil for a PeerChainTip built
+	// by NewPeerChainTip, which then uses time.Now.
+	nowFn func() time.Time
+}
+
+// now returns nowFn(), or time.Now when nowFn is unset.
+func (p *PeerChainTip) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
 }
 
 // NewPeerChainTip creates a new PeerChainTip with the given connection ID,
@@ -41,16 +78,51 @@ func NewPeerChainTip(
 	vrfOutput []byte,
 ) *PeerChainTip {
 	return &PeerChainTip{
-		ConnectionId: connId,
-		Tip:          tip,
-		ObservedTip:  tip,
-		VRFOutput:    vrfOutput,
+		ConnectionId:   connId,
+		Tip:            tip,
+		ObservedTip:    tip,
+		observedTipSet: true,
+		VRFOutput:      vrfOutput,
 		PraosView: PraosTiebreakerViewFromTip(
 			tip,
 			vrfOutput,
 			PraosTiebreakerConfigUnknown(),
 		),
 		LastUpdated: time.Now(),
+	}
+}
+
+// newPeerChainTipFromRollback creates the tracked tip for a peer that reported
+// a chainsync rollback while the selector had no entry for its connection. The
+// canonical case is the post-FindIntersect MsgRollBackward that a server sends
+// on a fresh connection: it is the only chainsync traffic until the next block
+// is minted, so a peer whose entry was dropped by a connection recycle would
+// otherwise stay invisible to chain selection for a whole block interval.
+//
+// The entry deliberately records only what the exchange proved:
+//   - Tip is the peer's advertised tip, untrusted exactly as on roll forward.
+//   - ObservedTip is the intersection point the peer confirmed it holds, with
+//     block number 0 because no header has been delivered. It is never the
+//     advertised tip (mirroring ApplyRollback, which refuses that promotion).
+//   - No observed slot/point frontier is recorded, so the peer contributes no
+//     Genesis density and cannot corroborate another peer until it delivers
+//     headers.
+//
+// awaitingFirstHeader marks the zero block number as "unknown" rather than
+// "behind"; the first delivered header clears it and the peer is compared on
+// its real frontier from then on.
+func newPeerChainTipFromRollback(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) *PeerChainTip {
+	return &PeerChainTip{
+		ConnectionId:        connId,
+		Tip:                 tip,
+		ObservedTip:         ochainsync.Tip{Point: clonePoint(point)},
+		observedTipSet:      true,
+		awaitingFirstHeader: true,
+		LastUpdated:         time.Now(),
 	}
 }
 
@@ -92,9 +164,11 @@ func (p *PeerChainTip) UpdateTipWithObservedPraosView(
 ) {
 	p.Tip = tip
 	p.ObservedTip = observedTip
+	p.observedTipSet = true
+	p.awaitingFirstHeader = false
 	p.VRFOutput = vrfOutput
 	p.PraosView = praosView
-	p.LastUpdated = time.Now()
+	p.LastUpdated = p.now()
 }
 
 // ApplyRollback trims observed history at the rollback point and refreshes the
@@ -106,13 +180,43 @@ func (p *PeerChainTip) ApplyRollback(
 	if p == nil {
 		return
 	}
+	previousObservedTip := p.ObservedTip
 	p.Tip = tip
-	p.ObservedTip = tip
+	p.ObservedTip = ochainsync.Tip{Point: clonePoint(point)}
+	p.observedTipSet = true
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		p.observedTipHistory = nil
+	} else {
+		found := false
+		if previousObservedTip.Point.Slot == point.Slot &&
+			bytes.Equal(previousObservedTip.Point.Hash, point.Hash) {
+			p.ObservedTip = cloneObservedTip(previousObservedTip)
+			found = true
+		}
+		for i := len(p.observedTipHistory) - 1; !found && i >= 0; i-- {
+			historyTip := p.observedTipHistory[i]
+			if historyTip.Point.Slot == point.Slot &&
+				bytes.Equal(historyTip.Point.Hash, point.Hash) {
+				p.ObservedTip = cloneObservedTip(historyTip)
+				p.observedTipHistory = p.observedTipHistory[:i+1]
+				found = true
+				break
+			}
+		}
+		if !found {
+			// RollBackward carries only a point, not its block number. If the
+			// point is outside the bounded delivered-header history, retain the
+			// point with a conservative zero block number instead of promoting
+			// the peer's untrusted advertised tip.
+			p.observedTipHistory = nil
+		}
+	}
 	p.VRFOutput = nil
 	p.PraosView = PraosTiebreakerView{}
-	p.LastUpdated = time.Now()
+	p.LastUpdated = p.now()
 	if point.Slot == 0 || len(p.observedSlots) == 0 {
 		p.observedSlots = nil
+		p.observedPoints = nil
 		return
 	}
 
@@ -123,17 +227,80 @@ func (p *PeerChainTip) ApplyRollback(
 	}
 	if keepUntil == 0 {
 		p.observedSlots = nil
+		p.observedPoints = nil
 		return
 	}
 	p.observedSlots = p.observedSlots[:keepUntil]
+	p.trimObservedPointsTo(keepUntil)
 }
 
-func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {
+// recordObservedTipHistory retains enough delivered tips to restore the exact
+// observed frontier on a protocol rollback. maxEntries is expressed in blocks;
+// callers retain k+1 entries so any valid rollback within k can be resolved.
+func (p *PeerChainTip) recordObservedTipHistory(
+	tip ochainsync.Tip,
+	maxEntries uint64,
+) {
 	if p == nil {
 		return
 	}
+	if maxEntries == 0 {
+		maxEntries = 1
+	}
+	p.observedTipSet = true
+	if tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 {
+		p.observedTipHistory = nil
+		return
+	}
+	for len(p.observedTipHistory) > 0 &&
+		p.observedTipHistory[len(p.observedTipHistory)-1].Point.Slot >=
+			tip.Point.Slot {
+		p.observedTipHistory = p.observedTipHistory[:len(p.observedTipHistory)-1]
+	}
+	p.observedTipHistory = append(
+		p.observedTipHistory,
+		cloneObservedTip(tip),
+	)
+	// #nosec G115 -- a slice length is non-negative and always fits uint64.
+	for maxEntries > 0 &&
+		uint64(len(p.observedTipHistory)) > maxEntries {
+		p.observedTipHistory = p.observedTipHistory[1:]
+	}
+}
+
+// trimObservedPointsTo keeps observedPoints aligned with observedSlots after a
+// slot-frontier trim. observedPoints may be shorter than observedSlots for
+// peers whose frontier predates hash tracking; only trim when it is at least
+// as long.
+func (p *PeerChainTip) trimObservedPointsTo(keepUntil int) {
+	if keepUntil <= len(p.observedPoints) {
+		p.observedPoints = p.observedPoints[:keepUntil]
+	}
+}
+
+// recordObservedPoint records a (slot, hash) point into the observed frontier
+// used for Genesis density (observedSlots, always maintained in Genesis) and
+// corroboration (observedPoints, the block hashes), keeping the two in lockstep
+// and bounded to the density window.
+//
+// trackHashes gates the hash frontier: it is stored only while Genesis
+// corroboration is active. When false the hash frontier is dropped, so normal
+// Praos operation does not retain per-peer window-length hash history.
+func (p *PeerChainTip) recordObservedPoint(
+	point ocommon.Point,
+	window uint64,
+	trackHashes bool,
+) {
+	if p == nil {
+		return
+	}
+	if !trackHashes {
+		p.observedPoints = nil
+	}
+	slot := point.Slot
 	if slot == 0 {
 		p.observedSlots = nil
+		p.observedPoints = nil
 		return
 	}
 
@@ -143,15 +310,29 @@ func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {
 	for len(p.observedSlots) > 0 &&
 		p.observedSlots[len(p.observedSlots)-1] > slot {
 		p.observedSlots = p.observedSlots[:len(p.observedSlots)-1]
+		if trackHashes {
+			p.trimObservedPointsTo(len(p.observedSlots))
+		}
 	}
-	if len(p.observedSlots) == 0 ||
-		p.observedSlots[len(p.observedSlots)-1] < slot {
+	switch {
+	case len(p.observedSlots) == 0 ||
+		p.observedSlots[len(p.observedSlots)-1] < slot:
 		p.observedSlots = append(p.observedSlots, slot)
+		if trackHashes {
+			p.observedPoints = append(p.observedPoints, clonePoint(point))
+		}
+	case trackHashes && len(p.observedPoints) == len(p.observedSlots):
+		// Same slot re-reported: keep the latest hash so corroboration
+		// compares against the current frontier block.
+		p.observedPoints[len(p.observedPoints)-1] = clonePoint(point)
 	}
 
 	if window == 0 {
 		if len(p.observedSlots) > 1 {
 			p.observedSlots = p.observedSlots[len(p.observedSlots)-1:]
+		}
+		if len(p.observedPoints) > 1 {
+			p.observedPoints = p.observedPoints[len(p.observedPoints)-1:]
 		}
 		return
 	}
@@ -169,7 +350,117 @@ func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {
 	}
 	if pruneIdx > 0 {
 		p.observedSlots = p.observedSlots[pruneIdx:]
+		if pruneIdx <= len(p.observedPoints) {
+			p.observedPoints = p.observedPoints[pruneIdx:]
+		} else {
+			p.observedPoints = nil
+		}
 	}
+}
+
+// clonePoint returns a copy of point with its own hash backing array so the
+// stored frontier does not alias the caller's chainsync buffers.
+func clonePoint(point ocommon.Point) ocommon.Point {
+	if len(point.Hash) == 0 {
+		return ocommon.Point{Slot: point.Slot}
+	}
+	hash := make([]byte, len(point.Hash))
+	copy(hash, point.Hash)
+	return ocommon.Point{Slot: point.Slot, Hash: hash}
+}
+
+func cloneObservedTip(tip ochainsync.Tip) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       clonePoint(tip.Point),
+		BlockNumber: tip.BlockNumber,
+	}
+}
+
+// cloneObservedPoints deep-copies an observed-point frontier, including each
+// point's hash backing array, for use by the selector's deep-copy getters.
+func cloneObservedPoints(points []ocommon.Point) []ocommon.Point {
+	if len(points) == 0 {
+		return nil
+	}
+	out := make([]ocommon.Point, len(points))
+	for i, pt := range points {
+		out[i] = clonePoint(pt)
+	}
+	return out
+}
+
+// observedHistoryConflictsAt reports whether this peer's recorded delivered
+// header history contains a DIFFERENT block at point's slot.
+//
+// It is deliberately one-sided. A false result means "no contradiction found",
+// which includes the common case where the slot is outside the retained
+// history window (k+1 delivered tips) and therefore cannot be checked at all.
+// Only a true result is evidence, and it is evidence of divergence: the two
+// peers delivered conflicting blocks at the same slot, so they are not serving
+// the same chain regardless of what they advertise.
+func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
+	if p == nil || len(point.Hash) == 0 {
+		return false
+	}
+	for _, historyTip := range p.observedTipHistory {
+		if historyTip.Point.Slot != point.Slot {
+			continue
+		}
+		return !bytes.Equal(historyTip.Point.Hash, point.Hash)
+	}
+	return false
+}
+
+// confirmsRecentChain reports whether witness confirms this peer's (candidate's)
+// chain across the window range they overlap. It is true when, for every block
+// the witness observed within the candidate's frontier slot range, the candidate
+// observed the identical (slot, hash) block, AND they share at least one such
+// block. In other words the witness's chain, as far as it reaches into the
+// candidate's window, is a prefix/subset of the candidate's chain.
+//
+// This is deliberately stronger than "share any common point": a fast source
+// that shares only an old ancestor and then diverges for every later block is
+// NOT confirmed, because the witness observed recent blocks the candidate did
+// not (or a conflicting hash at the same slot). A witness whose frontier does
+// not overlap the candidate's window at all cannot confirm it (returns false),
+// so corroboration fails closed — the candidate then stalls rather than being
+// followed uncorroborated.
+//
+// Both frontiers are kept in strictly-ascending slot order; this is a
+// two-pointer scan. It relies on the observed frontier being populated per
+// header (dense) during chainsync, so two peers on the same chain share every
+// block in their overlap.
+func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
+	if p == nil || witness == nil ||
+		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
+		return false
+	}
+	candidate := p.observedPoints
+	lo := candidate[0].Slot
+	hi := candidate[len(candidate)-1].Slot
+	i := 0
+	hadMatch := false
+	for _, w := range witness.observedPoints {
+		if w.Slot < lo {
+			continue
+		}
+		if w.Slot > hi {
+			break
+		}
+		for i < len(candidate) && candidate[i].Slot < w.Slot {
+			i++
+		}
+		if i < len(candidate) && candidate[i].Slot == w.Slot &&
+			len(w.Hash) > 0 && bytes.Equal(candidate[i].Hash, w.Hash) {
+			hadMatch = true
+			continue
+		}
+		// The witness observed a block within the candidate's range that the
+		// candidate does not have (or a conflicting hash at the same slot):
+		// they are on different chains, so this witness does not confirm.
+		return false
+	}
+	return hadMatch
 }
 
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {
@@ -204,20 +495,44 @@ func (p *PeerChainTip) SelectionTip() ochainsync.Tip {
 	if p == nil {
 		return ochainsync.Tip{}
 	}
-	if p.ObservedTip.BlockNumber > 0 || p.ObservedTip.Point.Slot > 0 ||
+	if p.observedTipSet || p.ObservedTip.BlockNumber > 0 ||
+		p.ObservedTip.Point.Slot > 0 ||
 		len(p.ObservedTip.Point.Hash) > 0 {
 		return p.ObservedTip
 	}
 	return p.Tip
 }
 
+// AwaitingFirstHeader reports whether chain selection registered this peer
+// from a chainsync rollback (newPeerChainTipFromRollback, the post-FindIntersect
+// MsgRollBackward on a connection it was not tracking) and the peer has not
+// delivered a header since. For such a peer SelectionTip is the point its
+// session intersected at, carrying no block number, and it does not move until
+// the peer's first RollForward arrives: it is evidence of the intersection and
+// nothing else. Callers that reason about how far a peer has got need to tell
+// that apart from a delivered frontier.
+//
+// It reads the awaitingFirstHeader flag rather than testing for a zero
+// delivered block number, because the two are not the same property. A tracked
+// peer that has delivered headers and then rolls back to a point outside its
+// retained delivered-header history is also left with a zero block number
+// (ApplyRollback keeps the point and cannot recover a block number for it),
+// but it has delivered headers on this connection and is not awaiting its
+// first one. So is a peer whose delivered frontier genuinely is origin.
+func (p *PeerChainTip) AwaitingFirstHeader() bool {
+	if p == nil {
+		return false
+	}
+	return p.awaitingFirstHeader
+}
+
 // Touch marks the peer as recently active without changing its advertised tip.
 func (p *PeerChainTip) Touch() {
-	p.LastUpdated = time.Now()
+	p.LastUpdated = p.now()
 }
 
 // IsStale returns true if the peer's tip hasn't been updated within the given
 // duration.
 func (p *PeerChainTip) IsStale(threshold time.Duration) bool {
-	return time.Since(p.LastUpdated) > threshold
+	return p.now().Sub(p.LastUpdated) > threshold
 }

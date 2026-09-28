@@ -1,0 +1,473 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"errors"
+	"fmt"
+	"reflect"
+
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+)
+
+type envelopeParent struct {
+	slot        uint64
+	blockNumber uint64
+	origin      bool
+	byronEbb    bool
+	// eraId is meaningful only when eraKnown: a persisted tip whose block type
+	// was not loaded, or is not recognised, leaves the era rule unchecked.
+	eraId    uint8
+	eraKnown bool
+}
+
+// envelopeParentFromTip reconstructs the envelope metadata for a persisted
+// chain tip. A Tip contains only the point and block number, so callers must
+// provide the stored block type to preserve the Byron EBB exception across
+// ledger-processing batches.
+func envelopeParentFromTip(
+	slot uint64,
+	blockNumber uint64,
+	hash []byte,
+	blockType uint,
+	blockTypeLoaded bool,
+) envelopeParent {
+	origin := len(hash) == 0
+	parent := envelopeParent{
+		slot:        slot,
+		blockNumber: blockNumber,
+		origin:      origin,
+		byronEbb: !origin && blockTypeLoaded &&
+			blockType == uint(gledger.BlockTypeByronEbb),
+	}
+	if !origin && blockTypeLoaded {
+		parent.eraId, parent.eraKnown = chain.EraIdForBlockType(blockType)
+	}
+	return parent
+}
+
+func envelopeParentFromBlock(block gledger.Block) envelopeParent {
+	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	return envelopeParent{
+		slot:        block.SlotNumber(),
+		blockNumber: block.BlockNumber(),
+		byronEbb:    isEbb,
+		eraId:       block.Era().Id,
+		eraKnown:    true,
+	}
+}
+
+// validateInboundBlockEnvelope runs the consensus envelope checks that must
+// pass before header crypto and body validation accept an inbound block.
+func validateInboundBlockEnvelope(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+	nodeConfig *cardano.CardanoNodeConfig,
+	parent envelopeParent,
+) error {
+	if block == nil {
+		return errors.New("validate inbound block envelope: nil block")
+	}
+	if err := validateByronEbbPlacement(block); err != nil {
+		return err
+	}
+	if isNilBlockHeader(block.Header()) {
+		return errors.New("validate inbound block envelope: nil block header")
+	}
+	if err := validateBlockOrder(block, parent); err != nil {
+		return err
+	}
+	if block.Era().Id == byron.EraIdByron {
+		// Byron does not carry the Shelley-style body-size field, but its
+		// header carries a separate proof over every body payload. Verify it
+		// before admitting the block so a genuine header cannot be paired with
+		// a substituted body.
+		// Decoded inbound blocks preserve their complete CBOR. Synthetic
+		// blocks used by callers that do not carry wire bytes cannot provide a
+		// body proof to verify and are handled by the normal structural path.
+		if len(block.Cbor()) == 0 {
+			return nil
+		}
+		switch byronBlock := block.(type) {
+		case *byron.ByronMainBlock:
+			if err := byronBlock.ValidateBodyProof(); err != nil {
+				return fmt.Errorf("validate Byron main block body proof: %w", err)
+			}
+		case *byron.ByronEpochBoundaryBlock:
+			if err := byronBlock.ValidateBodyProof(); err != nil {
+				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
+			}
+		default:
+			return nil
+		}
+		return validateByronBlockSizes(block, nodeConfig)
+	}
+	if err := validateBlockSizes(block, pparams); err != nil {
+		return err
+	}
+	return validateBlockExUnits(block, pparams)
+}
+
+// validateBlockExUnits enforces the aggregate execution-unit budget for all
+// transactions in an inbound block. Per-transaction validation checks
+// MaxTxExUnits, but the protocol also bounds the sum at MaxBlockExUnits.
+// This runs before ledger deltas are created or applied.
+func validateBlockExUnits(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+) error {
+	limits, ok := protocolBlockLimits(pparams)
+	if !ok {
+		// Byron through Mary have no Plutus execution-unit budget.
+		return nil
+	}
+	if !limits.hasMaxBlockExUnits {
+		return nil
+	}
+	var total lcommon.ExUnits
+	for index, tx := range block.Transactions() {
+		declared, err := eras.DeclaredExUnits(tx)
+		if err != nil {
+			return fmt.Errorf(
+				"transaction %d declared execution units: %w",
+				index,
+				err,
+			)
+		}
+		total, err = eras.SafeAddExUnits(total, declared)
+		if err != nil {
+			return fmt.Errorf("block declared execution units: %w", err)
+		}
+		if total.Memory > limits.maxBlockExUnits.Memory ||
+			total.Steps > limits.maxBlockExUnits.Steps {
+			return fmt.Errorf(
+				"block declared execution units %d memory/%d steps exceed maxBlockExUnits %d memory/%d steps",
+				total.Memory,
+				total.Steps,
+				limits.maxBlockExUnits.Memory,
+				limits.maxBlockExUnits.Steps,
+			)
+		}
+	}
+	return nil
+}
+
+func isNilBlockHeader(header lcommon.BlockHeader) bool {
+	if header == nil {
+		return true
+	}
+	value := reflect.ValueOf(header)
+	kind := value.Kind()
+	if kind == reflect.Chan ||
+		kind == reflect.Func ||
+		kind == reflect.Interface ||
+		kind == reflect.Map ||
+		kind == reflect.Pointer ||
+		kind == reflect.Slice {
+		return value.IsNil()
+	}
+	return false
+}
+
+// validateBlockOrder checks that a block follows its parent by block number
+// and slot. Byron's envelope rules are asymmetric around epoch boundary blocks
+// (the expectedNextBlockNo and minimumNextSlotNo tables of the Byron
+// consensus envelope):
+//
+//	parent   block    block number   slot
+//	regular  regular  parent + 1     later
+//	regular  EBB      parent         later
+//	EBB      regular  parent + 1     same or later
+//	EBB      EBB      parent + 1     later
+//
+// A regular block may share an EBB parent's slot only within Byron.
+func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
+	if parent.origin {
+		return nil
+	}
+	if parent.eraKnown {
+		if err := chain.CheckEraOrder(
+			block.Era().Id,
+			parent.eraId,
+		); err != nil {
+			return fmt.Errorf(
+				"block at slot %d: %w",
+				block.SlotNumber(),
+				err,
+			)
+		}
+	}
+	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	expectedBlockNumber := parent.blockNumber + 1
+	if isEbb && !parent.byronEbb {
+		expectedBlockNumber = parent.blockNumber
+	}
+	if block.BlockNumber() != expectedBlockNumber {
+		if isEbb {
+			return fmt.Errorf(
+				"byron EBB block number %d does not match expected block number %d",
+				block.BlockNumber(),
+				expectedBlockNumber,
+			)
+		}
+		return fmt.Errorf(
+			"block number %d does not follow parent block number %d",
+			block.BlockNumber(),
+			parent.blockNumber,
+		)
+	}
+	if !isEbb && parent.byronEbb &&
+		block.Era().Id == byron.EraIdByron &&
+		block.SlotNumber() == parent.slot {
+		return nil
+	}
+	if block.SlotNumber() <= parent.slot {
+		if isEbb {
+			return fmt.Errorf(
+				"byron EBB slot %d does not follow parent slot %d",
+				block.SlotNumber(),
+				parent.slot,
+			)
+		}
+		return fmt.Errorf(
+			"block slot %d does not follow parent slot %d",
+			block.SlotNumber(),
+			parent.slot,
+		)
+	}
+	return nil
+}
+
+// validateByronEbbPlacement rejects Byron epoch boundary blocks outside their
+// declared epoch boundary slot, while ignoring non-EBB blocks.
+func validateByronEbbPlacement(block gledger.Block) error {
+	ebb, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	if !isEbb {
+		return nil
+	}
+	if ebb.BlockHeader == nil {
+		return errors.New("byron EBB has nil header")
+	}
+	slot := ebb.SlotNumber()
+	if slot%byron.ByronSlotsPerEpoch != 0 {
+		return fmt.Errorf(
+			"byron EBB slot %d is not an epoch boundary slot",
+			slot,
+		)
+	}
+	expectedSlot := ebb.BlockHeader.ConsensusData.Epoch * byron.ByronSlotsPerEpoch
+	if slot != expectedSlot {
+		return fmt.Errorf(
+			"byron EBB slot %d does not match epoch %d boundary slot %d",
+			slot,
+			ebb.BlockHeader.ConsensusData.Epoch,
+			expectedSlot,
+		)
+	}
+	return nil
+}
+
+// validateBlockSizes enforces maxBlockHeaderSize and maxBlockBodySize for
+// Shelley-and-later inbound blocks using protocol parameter limits.
+func validateBlockSizes(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+) error {
+	limits, ok := protocolBlockLimits(pparams)
+	if !ok {
+		return fmt.Errorf(
+			"block size validation unsupported for protocol parameters %T",
+			pparams,
+		)
+	}
+	headerCbor := block.Header().Cbor()
+	if uint64(len(headerCbor)) > limits.maxHeaderSize {
+		return fmt.Errorf(
+			"block header size %d exceeds maxBlockHeaderSize %d",
+			len(headerCbor),
+			limits.maxHeaderSize,
+		)
+	}
+	actualBodySize, err := serializedBlockBodySize(block)
+	if err != nil {
+		return err
+	}
+	declaredBodySize := block.BlockBodySize()
+	if declaredBodySize != actualBodySize {
+		return fmt.Errorf(
+			"block body size mismatch: header declares %d, actual size is %d",
+			declaredBodySize,
+			actualBodySize,
+		)
+	}
+	if actualBodySize > limits.maxBodySize {
+		return fmt.Errorf(
+			"block body size %d exceeds maxBlockBodySize %d",
+			actualBodySize,
+			limits.maxBodySize,
+		)
+	}
+	return nil
+}
+
+// validateByronBlockSizes enforces the limits carried by Byron genesis. Byron
+// does not put a body-size declaration in its header, so the encoded block
+// size is the value checked against maxBlockSize.
+func validateByronBlockSizes(
+	block gledger.Block,
+	config *cardano.CardanoNodeConfig,
+) error {
+	if config == nil || config.ByronGenesis() == nil {
+		return errors.New("byron genesis is required for block size validation")
+	}
+	genesis := config.ByronGenesis()
+	version := genesis.BlockVersionData
+	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
+		return errors.New("byron genesis has invalid block size limits")
+	}
+	if uint64(len(block.Header().Cbor())) > uint64(version.MaxHeaderSize) {
+		return fmt.Errorf(
+			"byron block header size %d exceeds maxHeaderSize %d",
+			len(block.Header().Cbor()), version.MaxHeaderSize,
+		)
+	}
+	if uint64(len(block.Cbor())) > uint64(version.MaxBlockSize) {
+		return fmt.Errorf(
+			"byron block size %d exceeds maxBlockSize %d",
+			len(block.Cbor()), version.MaxBlockSize,
+		)
+	}
+	return nil
+}
+
+// serializedBlockBodySize measures the serialized body portion of block CBOR
+// using the same era-specific field layout that the header declaration covers.
+func serializedBlockBodySize(block gledger.Block) (uint64, error) {
+	blockCbor := block.Cbor()
+	if len(blockCbor) == 0 {
+		return 0, fmt.Errorf(
+			"block at slot %d has no CBOR for body size validation",
+			block.SlotNumber(),
+		)
+	}
+	var fields []cbor.RawMessage
+	if _, err := cbor.Decode(blockCbor, &fields); err != nil {
+		return 0, fmt.Errorf(
+			"decode block CBOR for body size validation: %w",
+			err,
+		)
+	}
+	if len(fields) < 2 {
+		return 0, fmt.Errorf(
+			"block CBOR has %d fields, expected at least header and body",
+			len(fields),
+		)
+	}
+	if block.Era().Id == dijkstra.EraIdDijkstra {
+		return uint64(len(fields[1])), nil
+	}
+	var size uint64
+	for _, field := range fields[1:] {
+		size += uint64(len(field))
+	}
+	return size, nil
+}
+
+type blockProtocolLimits struct {
+	maxBodySize        uint64
+	maxHeaderSize      uint64
+	maxBlockExUnits    lcommon.ExUnits
+	hasMaxBlockExUnits bool
+}
+
+// protocolBlockLimits extracts the inbound block limits for a protocol era.
+// Keeping the era mapping here ensures size and execution-unit validation use
+// the same protocol-parameter type coverage.
+func protocolBlockLimits(
+	pparams lcommon.ProtocolParameters,
+) (blockProtocolLimits, bool) {
+	switch pp := pparams.(type) {
+	case *shelley.ShelleyProtocolParameters:
+		if pp == nil {
+			return blockProtocolLimits{}, false
+		}
+		return blockProtocolLimits{
+			maxBodySize:   uint64(pp.MaxBlockBodySize),
+			maxHeaderSize: uint64(pp.MaxBlockHeaderSize),
+		}, true
+	case *mary.MaryProtocolParameters:
+		if pp == nil {
+			return blockProtocolLimits{}, false
+		}
+		return blockProtocolLimits{
+			maxBodySize:   uint64(pp.MaxBlockBodySize),
+			maxHeaderSize: uint64(pp.MaxBlockHeaderSize),
+		}, true
+	case *alonzo.AlonzoProtocolParameters:
+		if pp == nil {
+			return blockProtocolLimits{}, false
+		}
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
+	case *babbage.BabbageProtocolParameters:
+		if pp == nil {
+			return blockProtocolLimits{}, false
+		}
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
+	case *conway.ConwayProtocolParameters:
+		if pp == nil {
+			return blockProtocolLimits{}, false
+		}
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
+	case *dijkstra.DijkstraProtocolParameters:
+		if pp == nil {
+			return blockProtocolLimits{}, false
+		}
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
+	default:
+		return blockProtocolLimits{}, false
+	}
+}

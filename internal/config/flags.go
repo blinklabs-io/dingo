@@ -36,7 +36,7 @@ const (
 type flagSpec struct {
 	field    string
 	name     string
-	register func(*pflag.FlagSet)
+	register func(*pflag.FlagSet, *Config)
 	apply    func(*pflag.FlagSet, *Config) error
 }
 
@@ -44,137 +44,908 @@ type flagSpec struct {
 // Ordering controls --help output and error reporting precedence.
 var flagSpecs = []flagSpec{
 	// Core
-	stringFlag("BlobPlugin", "blob", "b", "blob store plugin to use, 'list' to show available"),
-	stringFlag("MetadataPlugin", "metadata", "m", "metadata store plugin to use, 'list' to show available"),
-	stringFlag("DatabasePath", "data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)"),
+	stringFlag(
+		"Plugins.Storage.Blob.Provider",
+		"blob",
+		"b",
+		"blob store provider",
+	),
+	stringFlag(
+		"Plugins.Storage.Metadata.Provider",
+		"metadata",
+		"m",
+		"metadata store provider",
+	),
+	stringFlag("Plugins.Mempool.Provider", "mempool", "", "mempool provider"),
+	stringFlag(
+		"DatabasePath",
+		"data-dir",
+		"",
+		"data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)",
+	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
-	transformStringFlag("RunMode", "run-mode", "run mode: serve, load, dev, or leios", normalizeRunMode),
-	transformStringFlag("StartEra", "start-era", "experimental start era: dijkstra", normalizeStartEra),
-	transformStringFlag("StorageMode", "storage-mode", `storage mode: "core" (minimal) or "api" (full indexing)`, normalizeStorageMode),
-	stringFlag("CardanoConfig", "cardano-config", "", "path to Cardano config file"),
+	transformStringFlag(
+		"RunMode",
+		"run-mode",
+		"run mode: serve, load, dev, or leios",
+		normalizeRunMode,
+	),
+	transformStringFlag(
+		"StartEra",
+		"start-era",
+		"experimental start era: dijkstra",
+		normalizeStartEra,
+	),
+	transformStringFlag(
+		"StorageMode",
+		"storage-mode",
+		`storage mode: "core" (minimal) or "api" (full indexing)`,
+		normalizeStorageMode,
+	),
+	stringFlag(
+		"CardanoConfig",
+		"cardano-config",
+		"",
+		"path to Cardano config file",
+	),
 	stringFlag("Topology", "topology", "", "path to topology file"),
-	stringFlag("ShutdownTimeout", "shutdown-timeout", "", "graceful shutdown timeout"),
-	stringFlag("LedgerCatchupTimeout", "ledger-catchup-timeout", "", "ledger catch-up timeout for load mode"),
-	stringFlag("TlsCertFilePath", "tls-cert-file-path", "", "path to TLS certificate file"),
-	stringFlag("TlsKeyFilePath", "tls-key-file-path", "", "path to TLS private key file"),
-	stringFlag("ImmutableDbPath", "immutable-db-path", "", "path to ImmutableDB for load mode"),
+	stringFlag(
+		"ShutdownTimeout",
+		"shutdown-timeout",
+		"",
+		"graceful shutdown timeout",
+	),
+	stringFlag(
+		"LedgerCatchupTimeout",
+		"ledger-catchup-timeout",
+		"",
+		"ledger catch-up timeout for load mode",
+	),
+	stringFlag(
+		"TlsCertFilePath",
+		"tls-cert-file-path",
+		"",
+		"path to TLS certificate file",
+	),
+	stringFlag(
+		"TlsKeyFilePath",
+		"tls-key-file-path",
+		"",
+		"path to TLS private key file",
+	),
+	stringFlag(
+		"ImmutableDbPath",
+		"immutable-db-path",
+		"",
+		"path to ImmutableDB for load mode",
+	),
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
-	boolFlag("ValidateHistorical", "validate-historical", "validate historical blocks"),
+	boolFlag(
+		"ValidateHistorical",
+		"validate-historical",
+		"validate historical blocks",
+	),
+	boolFlag(
+		"StrictUtxoValidation",
+		"strict-utxo-validation",
+		"error instead of skipping when a consumed UTxO past the Mithril sync boundary cannot be found or recovered",
+	),
+	boolFlag(
+		"SkipRewardLiveStakeBackfillCheck",
+		"skip-reward-live-stake-backfill-check",
+		"skip the reward_live_stake startup consistency check (advanced/diagnostic use only, unsafe to leave enabled permanently)",
+	),
+	boolFlag(
+		"Tracing",
+		"tracing",
+		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	boolFlag(
+		"TracingStdout",
+		"tracing-stdout",
+		"export traces to stdout instead of OTLP (requires --tracing; for debugging)",
+	),
 
 	// Networking
-	validatedStringFlag("Network", "network", "n", "Cardano network name (e.g. preview, preprod, mainnet)", ValidateNetworkName),
+	// An explicitly empty --network is allowed: Validate() enforces
+	// that network or networkMagic is set, so a magic-only invocation
+	// can clear a configured network name.
+	validatedStringFlag(
+		"Network",
+		"network",
+		"n",
+		"Cardano network name (e.g. preview, preprod, mainnet)",
+		func(v string) error {
+			if v == "" {
+				return nil
+			}
+			return ValidateNetworkName(v)
+		},
+	),
 	uint32Flag("NetworkMagic", "network-magic", "network magic override"),
 	uintFlag("RelayPort", "port", "relay/NtN port"),
-	stringFlag("PrivateBindAddr", "private-bind-addr", "", "private bind address"),
+	stringFlag(
+		"PrivateBindAddr",
+		"private-bind-addr",
+		"",
+		"private bind address",
+	),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
+	stringFlag(
+		"DebugBindAddr",
+		"debug-bind-addr",
+		"",
+		"pprof bind address (wildcard exposure requires an explicit override)",
+	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
-	boolPtrFlag("PeerSharing", "peer-sharing", "enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers; false for block producers)"),
+	uintFlag(
+		"HealthPort",
+		"health-port",
+		"liveness/readiness probe port (0 = disabled)",
+	),
+	uintFlag(
+		"HealthReadyGapSlots",
+		"health-ready-gap-slots",
+		"slots the chain tip may trail the wall clock and still be ready",
+	),
+	boolPtrFlag(
+		"PeerSharing",
+		"peer-sharing",
+		"enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers; false for block producers)",
+	),
 
 	// APIs
-	uintFlag("UtxorpcPort", "utxorpc-port", "UTxO RPC API port"),
-	uintFlag("BlockfrostPort", "blockfrost-port", "Blockfrost-compatible API port"),
-	uintFlag("MeshPort", "mesh-port", "Mesh API port"),
-	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
-	durationFlag("OffchainMetadata.Interval", "offchain-metadata-interval", "off-chain metadata fetch interval (0 = default)"),
-	durationFlag("OffchainMetadata.RequestTimeout", "offchain-metadata-request-timeout", "off-chain metadata HTTP request timeout (0 = default)"),
-	stringFlag("OffchainMetadata.UserAgent", "offchain-metadata-user-agent", "", "off-chain metadata HTTP user agent (empty = default)"),
-	stringFlag("OffchainMetadata.IPFSGatewayURL", "offchain-metadata-ipfs-gateway-url", "", "IPFS gateway URL for off-chain metadata (empty = default)"),
-	intFlag("OffchainMetadata.BatchSize", "offchain-metadata-batch-size", "off-chain metadata rows to claim per pass (0 = default)"),
-	int64Flag("OffchainMetadata.MaxBytes", "offchain-metadata-max-bytes", "off-chain metadata max response bytes (0 = default)"),
-	boolFlag("OffchainMetadata.AllowPrivateAddresses", "offchain-metadata-allow-private-addresses", "allow off-chain metadata fetches to private, loopback, and link-local addresses"),
+	stringFlag(
+		"Plugins.API.Utxorpc.Provider",
+		"utxorpc-provider",
+		"",
+		"UTxO RPC API provider",
+	),
+	stringFlag(
+		"Plugins.API.Blockfrost.Provider",
+		"blockfrost-provider",
+		"",
+		"Blockfrost API provider",
+	),
+	stringFlag(
+		"Plugins.API.Mesh.Provider",
+		"mesh-provider",
+		"",
+		"Mesh API provider",
+	),
+	stringSliceFlag(
+		"CORSAllowedOrigins",
+		"cors-allowed-origins",
+		"CORS allowed origins for API servers",
+	),
+
+	// API security (shared TLS defaults for every selected
+	// plugins.api.* provider; see internal/apiconfig and
+	// ARCHITECTURE.md's "API security" section). Explicit
+	// plugins.api.<name>.config.tls fields override these per
+	// provider.
+	stringPtrFlag(
+		"API.TLS.Mode",
+		"api-tls-mode",
+		`shared API TLS mode: "disabled" or "server" (unset: inherit provider setting, else disabled)`,
+	),
+	stringPtrFlag(
+		"API.TLS.CertFilePath",
+		"api-tls-cert-file-path",
+		"shared API TLS certificate file path",
+	),
+	stringPtrFlag(
+		"API.TLS.KeyFilePath",
+		"api-tls-key-file-path",
+		"shared API TLS private key file path",
+	),
+	durationFlag(
+		"OffchainMetadata.Interval",
+		"offchain-metadata-interval",
+		"off-chain metadata fetch interval (0 = default)",
+	),
+	durationFlag(
+		"OffchainMetadata.RequestTimeout",
+		"offchain-metadata-request-timeout",
+		"off-chain metadata HTTP request timeout (0 = default)",
+	),
+	stringFlag(
+		"OffchainMetadata.UserAgent",
+		"offchain-metadata-user-agent",
+		"",
+		"off-chain metadata HTTP user agent (empty = default)",
+	),
+	stringFlag(
+		"OffchainMetadata.IPFSGatewayURL",
+		"offchain-metadata-ipfs-gateway-url",
+		"",
+		"IPFS gateway URL for off-chain metadata (empty = default)",
+	),
+	intFlag(
+		"OffchainMetadata.BatchSize",
+		"offchain-metadata-batch-size",
+		"off-chain metadata rows to claim per pass (0 = default)",
+	),
+	int64Flag(
+		"OffchainMetadata.MaxBytes",
+		"offchain-metadata-max-bytes",
+		"off-chain metadata max response bytes (0 = default)",
+	),
+	boolFlag(
+		"OffchainMetadata.AllowPrivateAddresses",
+		"offchain-metadata-allow-private-addresses",
+		"allow off-chain metadata fetches to private, loopback, and link-local addresses",
+	),
+	boolFlag(
+		"TokenRegistry.Enabled",
+		"token-registry-enabled",
+		`enable the CIP-26 token registry sync (requires storageMode "api")`,
+	),
+	stringFlag(
+		"TokenRegistry.SourceURL",
+		"token-registry-source-url",
+		"",
+		"CIP-26 token registry tarball URL (empty = select by network)",
+	),
+	durationFlag(
+		"TokenRegistry.Interval",
+		"token-registry-interval",
+		"CIP-26 token registry sync interval (0 = default)",
+	),
+	durationFlag(
+		"TokenRegistry.RequestTimeout",
+		"token-registry-request-timeout",
+		"CIP-26 token registry download timeout (0 = default)",
+	),
+	stringFlag(
+		"TokenRegistry.UserAgent",
+		"token-registry-user-agent",
+		"",
+		"CIP-26 token registry HTTP user agent (empty = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxBytes",
+		"token-registry-max-bytes",
+		"CIP-26 token registry max compressed download bytes (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxDecompressedBytes",
+		"token-registry-max-decompressed-bytes",
+		"CIP-26 token registry max expanded archive bytes (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxEntryBytes",
+		"token-registry-max-entry-bytes",
+		"CIP-26 token registry max bytes per mapping (0 = default)",
+	),
+	intFlag(
+		"TokenRegistry.MaxArchiveEntries",
+		"token-registry-max-archive-entries",
+		"CIP-26 token registry max archive entries (0 = default)",
+	),
+	intFlag(
+		"TokenRegistry.MaxAcceptedEntries",
+		"token-registry-max-accepted-entries",
+		"CIP-26 token registry max accepted mappings (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxBatchBytes",
+		"token-registry-max-batch-bytes",
+		"CIP-26 token registry max retained batch bytes (0 = default)",
+	),
+	boolFlag(
+		"TokenRegistry.StoreLogos",
+		"token-registry-store-logos",
+		"persist CIP-26 token registry logos (roughly 90% of registry bytes)",
+	),
+	boolFlag(
+		"TokenRegistry.AllowPrivateAddresses",
+		"token-registry-allow-private-addresses",
+		"allow token registry sync from private, loopback, and link-local addresses",
+	),
+	boolFlag(
+		"Midnight.Enabled",
+		"midnight-enabled",
+		`enable the Midnight indexer (requires storageMode "api")`,
+	),
+	boolFlag(
+		"Midnight.ServerEnabled",
+		"midnight-server-enabled",
+		`enable the Midnight gRPC server (requires storageMode "api")`,
+	),
+	boolFlag(
+		"Midnight.ReflectionEnabled",
+		"midnight-reflection-enabled",
+		"enable Midnight gRPC reflection",
+	),
+	uintFlag(
+		"Midnight.Port",
+		"midnight-port",
+		"Midnight gRPC port (must be non-zero when the server is enabled)",
+	),
+	stringFlag(
+		"Midnight.Host",
+		"midnight-host",
+		"",
+		"Midnight gRPC listen address",
+	),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
+	stringSliceFlag(
+		"BarkBlockDownloadHosts",
+		"bark-block-download-hosts",
+		"allowed HTTPS hostnames for Bark block downloads",
+	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
+	stringFlag(
+		"BarkHost",
+		"bark-host",
+		"",
+		"Bark RPC listen address (defaults to loopback-only when the database lifecycle service is enabled, all interfaces otherwise)",
+	),
+	stringFlag(
+		"BarkClientCAFilePath",
+		"bark-client-ca-file-path",
+		"",
+		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+	),
+	stringSliceFlag(
+		"BarkOperatorCertificateFingerprints",
+		"bark-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
+	),
 
 	// History expiry
-	boolFlag("HistoryExpiry.Enabled", "history-expiry-enabled", "enable local immutable block history expiry"),
-	durationFlag("HistoryExpiry.Frequency", "history-expiry-frequency", "history expiry scan frequency"),
+	boolFlag(
+		"HistoryExpiry.Enabled",
+		"history-expiry-enabled",
+		"enable local immutable block history expiry",
+	),
+	durationFlag(
+		"HistoryExpiry.Frequency",
+		"history-expiry-frequency",
+		"history expiry scan frequency",
+	),
 
-	// Mempool
-	int64Flag("MempoolCapacity", "mempool-capacity", "mempool max bytes"),
-	float64Flag("EvictionWatermark", "eviction-watermark", "mempool eviction watermark"),
-	float64Flag("RejectionWatermark", "rejection-watermark", "mempool rejection watermark"),
+	// Koios reward-parity observer (dingo #3098; one-off validation aid, not a
+	// permanent subsystem)
+	boolFlag(
+		"KoiosParity.Enabled",
+		"koios-parity-enabled",
+		"validate closed-epoch reward state against Koios reference data as the node advances",
+	),
+	stringFlag(
+		"KoiosParity.Network",
+		"koios-parity-network",
+		"",
+		"Koios network to validate against: preview or preprod (default: node's own --network)",
+	),
+	stringFlag(
+		"KoiosParity.CachePath",
+		"koios-parity-cache-path",
+		"",
+		"Koios reference cache.db path (default: {data-dir}/.koios/cache.db)",
+	),
+	stringFlag(
+		"KoiosParity.APIKey",
+		"koios-parity-api-key",
+		"",
+		"Koios Bearer token for rate-limited access",
+	),
+	stringFlag(
+		"KoiosParity.BaseURL",
+		"koios-parity-base-url",
+		"",
+		"Koios v1 API root override for a self-hosted instance (default: the public host for --koios-parity-network)",
+	),
+	boolFlag(
+		"KoiosParity.AllowInsecureHTTP",
+		"koios-parity-allow-insecure-http",
+		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
+	),
+	boolFlag(
+		"KoiosParity.AllowPrivateAddresses",
+		"koios-parity-allow-private-addresses",
+		"allow a private, loopback, or special-use "+
+			"--koios-parity-base-url (intentional private deployments only)",
+	),
+	boolFlag(
+		"KoiosParity.Strict",
+		"koios-parity-strict",
+		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result never stops the node)",
+	),
+	intFlag(
+		"KoiosParity.GraceHours",
+		"koios-parity-grace-hours",
+		"hours after an epoch closes during which a missing Dingo-side row is treated as sync lag, not a failure",
+	),
+	boolFlag(
+		"KoiosParity.Accounts",
+		"koios-parity-accounts",
+		"also validate #3097 per-account exact reward parity for every epoch (default: true)",
+	),
+	intFlag(
+		"KoiosParity.AccountChunkSize",
+		"koios-parity-account-chunk-size",
+		"max stake addresses per /account_reward_history request (0 = package default, 100)",
+	),
+	intFlag(
+		"KoiosParity.AccountChunkMaxBytes",
+		"koios-parity-account-chunk-max-bytes",
+		"max encoded body size per /account_reward_history request (0 = package default, 4KiB)",
+	),
 
 	// Peer governance
-	intFlag("TargetNumberOfKnownPeers", "target-known-peers", "target number of known peers"),
-	intFlag("TargetNumberOfEstablishedPeers", "target-established-peers", "target number of established peers"),
-	intFlag("TargetNumberOfActivePeers", "target-active-peers", "target number of active peers"),
-	intFlag("ActivePeersTopologyQuota", "active-peers-topology-quota", "active peers topology source quota"),
-	intFlag("ActivePeersGossipQuota", "active-peers-gossip-quota", "active peers gossip source quota"),
-	intFlag("ActivePeersLedgerQuota", "active-peers-ledger-quota", "active peers ledger source quota"),
+	intFlag(
+		"TargetNumberOfKnownPeers",
+		"target-known-peers",
+		"target number of known peers",
+	),
+	intFlag(
+		"TargetNumberOfEstablishedPeers",
+		"target-established-peers",
+		"target number of established peers",
+	),
+	intFlag(
+		"TargetNumberOfActivePeers",
+		"target-active-peers",
+		"target number of active peers",
+	),
+	intFlag(
+		"TargetNumberOfRootPeers",
+		"target-root-peers",
+		"target number of root peers",
+	),
+	intFlag(
+		"ActivePeersTopologyQuota",
+		"active-peers-topology-quota",
+		"active peers topology source quota",
+	),
+	intFlag(
+		"ActivePeersGossipQuota",
+		"active-peers-gossip-quota",
+		"active peers gossip source quota",
+	),
+	intFlag(
+		"ActivePeersLedgerQuota",
+		"active-peers-ledger-quota",
+		"active peers ledger source quota",
+	),
 	intFlag("MinHotPeers", "min-hot-peers", "minimum hot peers"),
-	durationFlag("ReconcileInterval", "reconcile-interval", "peer governor reconcile interval"),
-	durationFlag("InactivityTimeout", "inactivity-timeout", "peer governor inactivity timeout"),
-	intFlag("InboundWarmTarget", "inbound-warm-target", "inbound warm peer target"),
+	durationFlag(
+		"ReconcileInterval",
+		"reconcile-interval",
+		"peer governor reconcile interval",
+	),
+	durationFlag(
+		"InactivityTimeout",
+		"inactivity-timeout",
+		"peer governor inactivity timeout",
+	),
+	intFlag(
+		"InboundWarmTarget",
+		"inbound-warm-target",
+		"inbound warm peer target",
+	),
 	intFlag("InboundHotQuota", "inbound-hot-quota", "inbound hot peer quota"),
-	durationFlag("InboundMinTenure", "inbound-min-tenure", "minimum inbound tenure before hot promotion"),
-	float64Flag("InboundHotScoreThreshold", "inbound-hot-score-threshold", "minimum inbound score for hot promotion"),
-	durationFlag("InboundPruneAfter", "inbound-prune-after", "inbound prune grace duration"),
-	boolFlag("InboundDuplexOnlyForHot", "inbound-duplex-only-for-hot", "restrict duplex inbound handling to hot peers"),
-	durationFlag("InboundCooldown", "inbound-cooldown", "inbound governance cooldown duration"),
-	intFlag("MaxConnectionsPerIP", "max-connections-per-ip", "max simultaneous connections per IP"),
+	durationFlag(
+		"InboundMinTenure",
+		"inbound-min-tenure",
+		"minimum inbound tenure before hot promotion",
+	),
+	float64Flag(
+		"InboundHotScoreThreshold",
+		"inbound-hot-score-threshold",
+		"minimum inbound score for hot promotion",
+	),
+	durationFlag(
+		"InboundPruneAfter",
+		"inbound-prune-after",
+		"inbound prune grace duration",
+	),
+	boolFlag(
+		"InboundDuplexOnlyForHot",
+		"inbound-duplex-only-for-hot",
+		"restrict duplex inbound handling to hot peers",
+	),
+	durationFlag(
+		"InboundCooldown",
+		"inbound-cooldown",
+		"inbound governance cooldown duration",
+	),
+	intFlag(
+		"MaxConnectionsPerIP",
+		"max-connections-per-ip",
+		"max simultaneous connections per IP",
+	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
+	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag(
+		"MaxNtCConnectionsPerIP",
+		"max-ntc-connections-per-ip",
+		"max node-to-client connections per IP",
+	),
 
 	// Cache
-	intFlag("Cache.HotUtxoEntries", "cache-hot-utxo-entries", "hot UTxO cache entry limit"),
-	intFlag("Cache.HotTxEntries", "cache-hot-tx-entries", "hot TX cache entry limit"),
-	int64Flag("Cache.HotTxMaxBytes", "cache-hot-tx-max-bytes", "hot TX cache max bytes"),
-	intFlag("Cache.BlockLRUEntries", "cache-block-lru-entries", "block LRU cache entry limit"),
-	intFlag("Cache.WarmupBlocks", "cache-warmup-blocks", "cache warmup block count"),
-	boolFlag("Cache.WarmupSync", "cache-warmup-sync", "wait for cache warmup before serving"),
+	intFlag(
+		"Cache.HotUtxoEntries",
+		"cache-hot-utxo-entries",
+		"hot UTxO cache entry limit",
+	),
+	intFlag(
+		"Cache.HotTxEntries",
+		"cache-hot-tx-entries",
+		"hot TX cache entry limit",
+	),
+	int64Flag(
+		"Cache.HotTxMaxBytes",
+		"cache-hot-tx-max-bytes",
+		"hot TX cache max bytes",
+	),
+	intFlag(
+		"Cache.BlockLRUEntries",
+		"cache-block-lru-entries",
+		"block LRU cache entry limit",
+	),
+	intFlag(
+		"Cache.WarmupBlocks",
+		"cache-warmup-blocks",
+		"cache warmup block count",
+	),
+	boolFlag(
+		"Cache.WarmupSync",
+		"cache-warmup-sync",
+		"wait for cache warmup before serving",
+	),
 
 	// Chainsync
-	intFlag("Chainsync.MaxClients", "chainsync-max-clients", "max chainsync clients"),
-	stringFlag("Chainsync.StallTimeout", "chainsync-stall-timeout", "", "chainsync stall timeout"),
+	intFlag(
+		"Chainsync.MaxClients",
+		"chainsync-max-clients",
+		"max chainsync clients",
+	),
+	stringFlag(
+		"Chainsync.StallTimeout",
+		"chainsync-stall-timeout",
+		"",
+		"chainsync stall timeout",
+	),
+	stringFlag(
+		"Chainsync.Strategy",
+		"chainsync-strategy",
+		"",
+		"chainsync header sync strategy (primary|parallel|round-robin)",
+	),
 
 	// Genesis bootstrap
-	boolFlag("GenesisBootstrap.Enabled", "genesis-bootstrap-enabled", "enable Genesis bootstrap mode when starting from origin"),
-	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)"),
-	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
+	boolFlag(
+		"GenesisBootstrap.Enabled",
+		"genesis-bootstrap-enabled",
+		"enable Genesis bootstrap mode when starting from origin",
+	),
+	uint64Flag(
+		"GenesisBootstrap.WindowSlots",
+		"genesis-bootstrap-window-slots",
+		"Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)",
+	),
+	intFlag(
+		"GenesisBootstrap.PromotionMinDiversityGroups",
+		"genesis-bootstrap-promotion-min-diversity-groups",
+		"minimum diversity groups preferred during Genesis bootstrap peer promotion",
+	),
+	intFlag(
+		"GenesisBootstrap.CorroborationPeers",
+		"genesis-bootstrap-corroboration-peers",
+		"independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)",
+	),
+	boolFlag(
+		"GenesisBootstrap.LimitOnPatienceEnabled",
+		"genesis-bootstrap-limit-on-patience-enabled",
+		"disconnect ChainSync peers that deliver advertised progress too slowly during Genesis sync",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceCapacity",
+		"genesis-bootstrap-limit-on-patience-capacity",
+		"Genesis Limit on Patience bucket capacity in tokens (0 uses the default of 1000)",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceRate",
+		"genesis-bootstrap-limit-on-patience-rate",
+		"Genesis Limit on Patience leak rate in tokens per second (0 uses the default of 5)",
+	),
 
 	// Logging
-	transformStringFlag("Logging.Format", "logging-format", "log output format: text (default) or json", normalizeLoggingValue),
-	transformStringFlag("Logging.Level", "logging-level", "log level: debug, info (default), warn, or error", normalizeLoggingValue),
+	transformStringFlag(
+		"Logging.Format",
+		"logging-format",
+		"log output format: text (default) or json",
+		normalizeLoggingValue,
+	),
+	transformStringFlag(
+		"Logging.Level",
+		"logging-level",
+		"log level: debug, info (default), warn, or error",
+		normalizeLoggingValue,
+	),
 
 	// Database workers and API backfill
-	intFlag("DatabaseWorkers", "db-workers", "database worker pool worker count"),
-	intFlag("DatabaseQueueSize", "db-queue-size", "database worker pool task queue size"),
-	intFlag("BackfillBatchSize", "backfill-batch-size", "API-mode metadata backfill block batch size"),
+	intFlag(
+		"DatabaseWorkers",
+		"db-workers",
+		"database worker pool worker count",
+	),
+	intFlag(
+		"DatabaseQueueSize",
+		"db-queue-size",
+		"database worker pool task queue size",
+	),
+	intFlag(
+		"BackfillBatchSize",
+		"backfill-batch-size",
+		"API-mode metadata backfill block batch size",
+	),
+	boolFlag(
+		"BlockPipelineEnabled",
+		"block-pipeline-enabled",
+		"decode blocks in the chainsync replay loop with a parallel worker pool instead of serially (not consensus-affecting; default off)",
+	),
+	boolFlag(
+		"BlockPipelineValidateEnabled",
+		"block-pipeline-validate-enabled",
+		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
+	),
 
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
-	stringFlag("ShelleyVRFKey", "shelley-vrf-key", "", "path to Shelley VRF signing key"),
-	stringFlag("ShelleyKESKey", "shelley-kes-key", "", "path to Shelley KES signing key"),
-	stringFlag("ShelleyOperationalCertificate", "shelley-opcert", "", "path to Shelley operational certificate"),
-	uint64Flag("SlotsPerKESPeriod", "slots-per-kes-period", "slots per KES period"),
-	uint64Flag("MaxKESEvolutions", "max-kes-evolutions", "maximum KES evolutions before certificate rotation"),
-	uint64Flag("ForgeSyncToleranceSlots", "forge-sync-tolerance-slots", "max slots behind tip before skipping block forging"),
-	uint64Flag("ForgeStaleGapThresholdSlots", "forge-stale-gap-threshold-slots", "slot gap threshold for stale slot clock alerts"),
+	stringFlag(
+		"ShelleyVRFKey",
+		"shelley-vrf-key",
+		"",
+		"path to Shelley VRF signing key",
+	),
+	stringFlag(
+		"ShelleyKESKey",
+		"shelley-kes-key",
+		"",
+		"path to Shelley KES signing key",
+	),
+	stringFlag(
+		"ShelleyOperationalCertificate",
+		"shelley-opcert",
+		"",
+		"path to Shelley operational certificate",
+	),
+	stringFlag(
+		"ShelleyKESAgentSocket",
+		"shelley-kes-agent-socket",
+		"",
+		"path to a bursa KES agent service socket; sources the KES signing key from the agent instead of --shelley-kes-key (VRF key and opcert flags still apply)",
+	),
+	stringFlag(
+		"ShelleyKESAgentMode",
+		"shelley-kes-agent-mode",
+		"",
+		"KES agent service mode: serve-key (default) or sign",
+	),
+	durationFlag(
+		"ShelleyKESAgentSignTimeout",
+		"shelley-kes-agent-sign-timeout",
+		"timeout for one sign-mode KES agent round trip; must stay below a slot (0 uses the 500ms default)",
+	),
+	uint64Flag(
+		"SlotsPerKESPeriod",
+		"slots-per-kes-period",
+		"slots per KES period",
+	),
+	uint64Flag(
+		"MaxKESEvolutions",
+		"max-kes-evolutions",
+		"maximum KES evolutions before certificate rotation",
+	),
+	uint64Flag(
+		"ForgeSyncToleranceSlots",
+		"forge-sync-tolerance-slots",
+		"max slots behind tip before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeStaleGapThresholdSlots",
+		"forge-stale-gap-threshold-slots",
+		"slot gap threshold for stale slot clock alerts",
+	),
+	uint64Flag(
+		"ForgePrimaryChainTipToleranceSlots",
+		"forge-primary-chain-tip-tolerance-slots",
+		"max slots the ledger-applied tip may trail this node's own primary chain tip (chain.Tip()) before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeUpstreamStalenessSlots",
+		"forge-upstream-staleness-slots",
+		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeAppliedTipStalenessSlots",
+		"forge-applied-tip-staleness-slots",
+		"max slots the newest block this node holds may be older than the current slot before skipping block forging (0 disables)",
+	),
+	uint64Flag(
+		"ForgeEndorserBlockStalenessSlots",
+		"forge-endorser-block-staleness-slots",
+		"max slots a corroborated Leios endorser block may lead the ledger-applied tip before skipping block forging (0 disables)",
+	),
+	durationFlag(
+		"ForgeEBSelectionReserve",
+		"forge-eb-selection-reserve",
+		"slot time reserved for ranking-block assembly after Leios endorser-block selection",
+	),
+	uint64PtrFlag(
+		"ForgeEBMaxTxRefs",
+		"forge-eb-max-tx-refs",
+		"maximum transaction references in a forged Leios endorser block (0 = unlimited)",
+	),
+	uint64PtrFlag(
+		"ForgeEBMaxBytes",
+		"forge-eb-max-bytes",
+		"maximum total referenced transaction bytes in a forged Leios endorser block (0 = unlimited)",
+	),
+	boolFlag(
+		"ValidateForgedBlock",
+		"validate-forged-block",
+		"validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)",
+	),
+
+	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
+	uintFlag(
+		"MinPoolMargin",
+		"min-pool-margin",
+		"CIP-23 minimum pool margin in basis points [0,10000] (150 = 1.5%); 0 disables (enable only where every node also enables it)",
+	),
+	// CIP-0163 full-pot reward distribution (consensus-affecting; default off)
+	boolFlag(
+		"FullPotRewardsEnabled",
+		"full-pot-rewards-enabled",
+		"enable CIP-0163 full-pot reward distribution (custom networks only unless explicitly unsafe)",
+	),
+	boolFlag(
+		"UnsafeFullPotRewardsOnStandardNetworks",
+		"unsafe-full-pot-rewards-on-standard-networks",
+		"allow CIP-0163 full-pot rewards on predefined standard networks; consensus-breaking unless the network has adopted it",
+	),
+	// CIP-0163 reward-account inactivity expiry (consensus-affecting; default off)
+	boolFlag(
+		"DelegatorInactivityEnabled",
+		"delegator-inactivity-enabled",
+		"enable CIP-0163 reward-account inactivity expiry (only where every node also enables it)",
+	),
+	uint64Flag(
+		"DelegatorInactivity",
+		"delegator-inactivity",
+		"CIP-0163 inactivity window in epochs, in [1,10000] (used when delegator-inactivity-enabled)",
+	),
+
+	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
+	boolFlag(
+		"PledgeLeverageEnabled",
+		"pledge-leverage-enabled",
+		"enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)",
+	),
+	uintFlag(
+		"PledgeLeverage",
+		"pledge-leverage",
+		"CIP-50 max pledge leverage L in [1,10000] (used when pledge-leverage-enabled)",
+	),
 
 	// Leios voting (experimental)
-	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to hex-encoded BLS12-381 Leios vote signing key"),
-	stringToStringFlag("LeiosVoterPublicKeys", "leios-voter-public-keys", "Leios voter public key registry: pool key hash hex=public key hex"),
-
+	stringFlag(
+		"LeiosVoteSigningKeyFile",
+		"leios-vote-signing-key-file",
+		"",
+		"path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar",
+	),
 	// Mithril
-	boolFlag("Mithril.Enabled", "mithril-enabled", "enable Mithril integration"),
-	stringFlag("Mithril.AggregatorURL", "mithril-aggregator-url", "", "Mithril aggregator URL override"),
-	stringFlag("Mithril.Backend", "mithril-backend", "", "Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)"),
-	stringFlag("Mithril.DownloadDir", "mithril-download-dir", "", "Mithril snapshot download directory"),
-	stringFlag("Mithril.DownloadIdleTimeout", "mithril-download-idle-timeout", "", "Mithril snapshot download idle timeout"),
-	intFlag("Mithril.DownloadMaxIdleRetries", "mithril-download-max-idle-retries", "Mithril snapshot download idle retries without progress"),
-	boolFlag("Mithril.CleanupAfterLoad", "mithril-cleanup-after-load", "cleanup Mithril files after load"),
-	boolFlag("Mithril.VerifyCertificates", "mithril-verify-certs", "verify Mithril certificate chains"),
+	boolFlag(
+		"Mithril.Enabled",
+		"mithril-enabled",
+		"enable Mithril integration",
+	),
+	stringFlag(
+		"Mithril.AggregatorURL",
+		"mithril-aggregator-url",
+		"",
+		"Mithril aggregator URL override",
+	),
+	stringFlag(
+		"Mithril.Backend",
+		"mithril-backend",
+		"",
+		"Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)",
+	),
+	stringFlag(
+		"Mithril.PinnedDigest",
+		"mithril-pinned-digest",
+		"",
+		"Mithril artifact identity for a fresh bootstrap: v1 snapshot digest or v2 Cardano database artifact hash",
+	),
+	stringFlag(
+		"Mithril.DownloadDir",
+		"mithril-download-dir",
+		"",
+		"Mithril snapshot download directory",
+	),
+	stringFlag(
+		"Mithril.DownloadIdleTimeout",
+		"mithril-download-idle-timeout",
+		"",
+		"Mithril snapshot download idle timeout",
+	),
+	intFlag(
+		"Mithril.DownloadMaxIdleRetries",
+		"mithril-download-max-idle-retries",
+		"Mithril snapshot download idle retries without progress",
+	),
+	boolFlag(
+		"Mithril.CleanupAfterLoad",
+		"mithril-cleanup-after-load",
+		"cleanup Mithril files after load",
+	),
+	boolFlag(
+		"Mithril.VerifyCertificates",
+		"mithril-verify-certs",
+		"verify Mithril certificate chains",
+	),
+	boolFlag(
+		"Mithril.AllowInsecureHTTP",
+		"mithril-allow-insecure-http",
+		"allow plain-HTTP Mithril aggregator/artifact URLs (local dev/test only)",
+	),
+
+	// Database lifecycle (snapshot/restore/truncate)
+	boolFlag(
+		"DatabaseLifecycle.SnapshotEnabled",
+		"db-snapshot-enabled",
+		"capture automatic database snapshots at epoch boundaries",
+	),
+	stringFlag(
+		"DatabaseLifecycle.SnapshotDir",
+		"db-snapshot-dir",
+		"",
+		"local filesystem directory for automatic database snapshots",
+	),
+	stringFlag(
+		"DatabaseLifecycle.SnapshotCloudDestination",
+		"db-snapshot-cloud-destination",
+		"",
+		"optional cloud destination to additionally mirror every snapshot to (s3://bucket/prefix or gcs://bucket/prefix); requires the dingo_extra_plugins build tag",
+	),
+	stringFlag(
+		"DatabaseLifecycle.SnapshotCloudDestinationPrefix",
+		"db-snapshot-cloud-destination-prefix",
+		"",
+		"additional path segment appended to the cloud destination before each snapshot's ID; set to a distinct value per node when multiple nodes share one cloud destination",
+	),
+	intFlag(
+		"DatabaseLifecycle.SnapshotRetention",
+		"db-snapshot-retention",
+		"number of automatic snapshots to retain (0 = keep all)",
+	),
+	intFlag(
+		"DatabaseLifecycle.SnapshotEveryNEpochs",
+		"db-snapshot-every-n-epochs",
+		"capture an automatic snapshot every N epoch boundaries",
+	),
 }
 
 // RegisterFlags registers persistent CLI flags for every Config field.
 func RegisterFlags(cmd *cobra.Command) {
 	flags := cmd.PersistentFlags()
 	flags.SortFlags = false
+	// One snapshot for the whole loop. GetConfig deep-copies, so calling it
+	// per flag would deep-clone the config once per registered flag.
+	defaults := GetConfig()
 	for _, spec := range flagSpecs {
-		spec.register(flags)
+		spec.register(flags, defaults)
 	}
 }
 
@@ -182,15 +953,29 @@ func RegisterFlags(cmd *cobra.Command) {
 // not pass are ignored so YAML and env-var values survive.
 func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	flags := cmd.Root().PersistentFlags()
+	previousNetwork := cfg.Network
 	for _, spec := range flagSpecs {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
+		// Only gated fields, per provenance's documented contract: this loop
+		// walks every registered flag, and recording the rest would fill the
+		// map with entries nothing reads.
+		if flags.Changed(spec.name) && isGatedField(spec.field) {
+			cfg.recordProvenance(spec.field, SourceFlag)
+		}
 	}
-	globalConfig = cfg
-	if _, err := LoadTopologyConfig(); err != nil {
-		return fmt.Errorf("loading topology after flags: %w", err)
+	if cfg.Network != previousNetwork {
+		clearMidnightNetworkDefaults(cfg, previousNetwork)
 	}
+	applyMidnightNetworkDefaults(cfg)
+	configMu.Lock()
+	globalConfig = cloneConfig(cfg)
+	configMu.Unlock()
+	// Topology is not resolved here: Network and Topology are final at
+	// this point, but the merged configuration has not been validated
+	// yet, so cmd/dingo loads topology once after ApplyDefaults and
+	// Validate.
 	return nil
 }
 
@@ -202,8 +987,10 @@ func fieldByPath(v reflect.Value, path string) reflect.Value {
 	return v
 }
 
-func defaultValue(field string) reflect.Value {
-	return fieldByPath(reflect.ValueOf(globalConfig).Elem(), field)
+// defaultValue reads a field's default from the snapshot the caller took, so
+// flag registration does not clone the config once per flag.
+func defaultValue(defaults *Config, field string) reflect.Value {
+	return fieldByPath(reflect.ValueOf(defaults).Elem(), field)
 }
 
 func targetValue(cfg *Config, field string) reflect.Value {
@@ -214,8 +1001,8 @@ func stringFlag(field, name, shorthand, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			def := defaultValue(field).String()
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			def := defaultValue(defaults, field).String()
 			if shorthand != "" {
 				f.StringP(name, shorthand, def, help)
 				return
@@ -240,8 +1027,8 @@ func stringSliceFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			def := defaultValue(field).Interface().([]string)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			def := defaultValue(defaults, field).Interface().([]string)
 			f.StringSlice(name, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
@@ -249,29 +1036,6 @@ func stringSliceFlag(field, name, help string) flagSpec {
 				return nil
 			}
 			v, err := f.GetStringSlice(name)
-			if err != nil {
-				return err
-			}
-			targetValue(cfg, field).Set(reflect.ValueOf(v))
-			return nil
-		},
-	}
-}
-
-func stringToStringFlag(field, name, help string) flagSpec {
-	return flagSpec{
-		field: field,
-		name:  name,
-		register: func(f *pflag.FlagSet) {
-			def, _ := defaultValue(field).
-				Interface().(map[string]string)
-			f.StringToString(name, def, help)
-		},
-		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
-			v, err := f.GetStringToString(name)
 			if err != nil {
 				return err
 			}
@@ -333,8 +1097,8 @@ func boolFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Bool(name, defaultValue(field).Bool(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Bool(name, defaultValue(defaults, field).Bool(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -358,7 +1122,7 @@ func boolPtrFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
+		register: func(f *pflag.FlagSet, defaults *Config) {
 			f.Bool(name, false, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
@@ -375,12 +1139,40 @@ func boolPtrFlag(field, name, help string) flagSpec {
 	}
 }
 
+// stringPtrFlag binds a CLI flag to a *string field. The pointer
+// distinguishes "operator did not set this" (nil, inherit from a broader
+// scope or fall back to a disabled default) from an explicit value --
+// needed for the api.tls policy fields (internal/apiconfig),
+// where an explicit "disabled" is meaningfully different from never
+// setting a mode at all. We only write to the field when the flag was
+// explicitly passed, matching boolPtrFlag's own contract.
+func stringPtrFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.String(name, "", help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetString(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			return nil
+		},
+	}
+}
+
 func intFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Int(name, int(defaultValue(field).Int()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Int(name, int(defaultValue(defaults, field).Int()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -400,8 +1192,8 @@ func int64Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Int64(name, defaultValue(field).Int(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Int64(name, defaultValue(defaults, field).Int(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -421,8 +1213,8 @@ func uintFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Uint(name, uint(defaultValue(field).Uint()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -444,8 +1236,8 @@ func uint32Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Uint(name, uint(defaultValue(field).Uint()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -467,12 +1259,45 @@ func uint32Flag(field, name, help string) flagSpec {
 	}
 }
 
+// uint64PtrFlag binds a CLI flag to a *uint64 field. The pointer keeps an
+// explicit 0 -- which disables the cap it controls -- distinct from never
+// passing the flag at all, which takes the default. Only an explicitly
+// passed flag writes to the field, matching boolPtrFlag's contract.
+func uint64PtrFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			// Report the value that omitting the flag actually
+			// produces, not the zero value of the pointer. The
+			// Changed check below still lets an explicit 0 through
+			// to disable the cap.
+			var def uint64
+			if v := defaultValue(defaults, field); !v.IsNil() {
+				def = v.Elem().Uint()
+			}
+			f.Uint64(name, def, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetUint64(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			return nil
+		},
+	}
+}
+
 func uint64Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Uint64(name, defaultValue(field).Uint(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Uint64(name, defaultValue(defaults, field).Uint(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -492,8 +1317,8 @@ func float64Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Float64(name, defaultValue(field).Float(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Float64(name, defaultValue(defaults, field).Float(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -513,8 +1338,12 @@ func durationFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Duration(name, time.Duration(defaultValue(field).Int()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Duration(
+				name,
+				time.Duration(defaultValue(defaults, field).Int()),
+				help,
+			)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {

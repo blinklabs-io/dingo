@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,21 +21,20 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"golang.org/x/crypto/blake2b"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
@@ -118,15 +117,31 @@ var (
 		},
 	}
 	dbConfig = &database.Config{
-		Logger:         nil,
-		PromRegistry:   nil,
-		DataDir:        "",
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		Logger:       nil,
+		PromRegistry: nil,
+		DataDir:      "",
 	}
 )
 
+// blocksFromOrigin returns testBlocks renumbered to start at block number 0,
+// which a chain emptied back to origin requires of its first block (see the
+// origin continuity check in chain.go). Hashes, slots and prev hashes are
+// unchanged, so the sequence stays contiguous; testBlocks itself keeps its
+// original numbering because a chain that has never been mutated is not
+// anchored and accepts it.
+func blocksFromOrigin() []*MockBlock {
+	out := make([]*MockBlock, 0, len(testBlocks))
+	for i, testBlock := range testBlocks {
+		renumbered := *testBlock
+		renumbered.MockBlockNumber = uint64(i)
+		out = append(out, &renumbered)
+	}
+	return out
+}
+
 func TestChainBasic(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -227,7 +242,145 @@ func TestChainBasic(t *testing.T) {
 	}
 }
 
+func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, dbConfig)
+	if err != nil {
+		t.Fatalf("unexpected error creating database: %s", err)
+	}
+	defer dbtest.CloseDatabase(db)
+
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	if err := c.AddBlock(testBlocks[0], nil); err != nil {
+		t.Fatalf("unexpected error adding block 0: %s", err)
+	}
+	if err := c.AddBlock(testBlocks[1], nil); err != nil {
+		t.Fatalf("unexpected error adding block 1: %s", err)
+	}
+
+	forkHash := decodeHex(testHashPrefix + "00ff")
+	if err := db.BlockCreate(models.Block{
+		ID:       99,
+		Slot:     30,
+		Hash:     forkHash,
+		PrevHash: decodeHex(testBlocks[0].MockHash),
+		Cbor:     []byte{0x80},
+		Number:   99,
+		Type:     uint(testBlocks[1].Type()), //nolint:gosec
+	}, nil); err != nil {
+		t.Fatalf("unexpected error adding fork block blob: %s", err)
+	}
+	rawBlock, err := database.BlockBeforeSlot(db, 40)
+	if err != nil {
+		t.Fatalf("unexpected error looking up raw block before slot: %s", err)
+	}
+	if !bytes.Equal(rawBlock.Hash, forkHash) {
+		t.Fatalf("raw lookup did not expose fork block: got %x", rawBlock.Hash)
+	}
+
+	block, err := c.BlockBeforeSlot(40)
+	if err != nil {
+		t.Fatalf(
+			"unexpected error looking up canonical block before slot: %s",
+			err,
+		)
+	}
+	if got, want := block.Slot, testBlocks[1].MockSlot; got != want {
+		t.Fatalf("unexpected canonical block slot: got %d, want %d", got, want)
+	}
+	if got, want := hex.EncodeToString(block.Hash), testBlocks[1].MockHash; got != want {
+		t.Fatalf("unexpected canonical block hash: got %s, want %s", got, want)
+	}
+}
+
+// TestChainBlockBeforeSlotBinarySearchBoundaries exercises the binary-search
+// boundary logic across a multi-block chain (testBlocks have slots 0, 20, 40,
+// 60, 80, 100): below all, at a block slot, between blocks, and above the tip.
+// It guards the #2771 change from the linear backward walk to a binary search.
+func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, dbConfig)
+	if err != nil {
+		t.Fatalf("unexpected error creating database: %s", err)
+	}
+	defer dbtest.CloseDatabase(db)
+
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for i, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block %d: %s", i, err)
+		}
+	}
+
+	testCases := []struct {
+		name      string
+		slot      uint64
+		wantFound bool
+		wantSlot  uint64
+	}{
+		{name: "below all blocks", slot: 0, wantFound: false},
+		{name: "just above genesis", slot: 1, wantFound: true, wantSlot: 0},
+		{
+			name:      "at a block slot returns the prior block",
+			slot:      20,
+			wantFound: true,
+			wantSlot:  0,
+		},
+		{
+			name:      "just above a block slot",
+			slot:      21,
+			wantFound: true,
+			wantSlot:  20,
+		},
+		{name: "between blocks", slot: 55, wantFound: true, wantSlot: 40},
+		{name: "just above the tip", slot: 101, wantFound: true, wantSlot: 100},
+		{
+			name:      "far above the tip",
+			slot:      100_000,
+			wantFound: true,
+			wantSlot:  100,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			block, err := c.BlockBeforeSlot(tc.slot)
+			if !tc.wantFound {
+				if !errors.Is(err, models.ErrBlockNotFound) {
+					t.Fatalf(
+						"slot %d: expected ErrBlockNotFound, got slot=%d err=%v",
+						tc.slot,
+						block.Slot,
+						err,
+					)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("slot %d: unexpected error: %s", tc.slot, err)
+			}
+			if block.Slot != tc.wantSlot {
+				t.Fatalf(
+					"slot %d: got block slot %d, want %d",
+					tc.slot, block.Slot, tc.wantSlot,
+				)
+			}
+		})
+	}
+}
+
 func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -280,7 +433,10 @@ func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
 		expectedIdx--
 	}
 	// Subsequent calls should keep returning ErrIteratorChainOrigin.
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after exhaustion, got %v",
 			err,
@@ -289,6 +445,8 @@ func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromTipNonInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -325,6 +483,8 @@ func TestChainIteratorReverseFromTipNonInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromMiddleInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -361,7 +521,10 @@ func TestChainIteratorReverseFromMiddleInclusive(t *testing.T) {
 			)
 		}
 	}
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after exhaustion, got %v",
 			err,
@@ -370,6 +533,8 @@ func TestChainIteratorReverseFromMiddleInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromOrigin(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -385,7 +550,10 @@ func TestChainIteratorReverseFromOrigin(t *testing.T) {
 		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
 	}
 	defer iter.Cancel()
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"reverse from origin should return ErrIteratorChainOrigin immediately, got %v",
 			err,
@@ -394,6 +562,8 @@ func TestChainIteratorReverseFromOrigin(t *testing.T) {
 }
 
 func TestChainIteratorReverseFromGenesisNonInclusive(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -414,7 +584,10 @@ func TestChainIteratorReverseFromGenesisNonInclusive(t *testing.T) {
 	}
 	defer iter.Cancel()
 	// The genesis block has no predecessor; non-inclusive must terminate.
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"non-inclusive reverse from genesis: expected ErrIteratorChainOrigin, got %v",
 			err,
@@ -423,6 +596,8 @@ func TestChainIteratorReverseFromGenesisNonInclusive(t *testing.T) {
 }
 
 func TestChainIteratorReverseBlockingTerminatesAtOrigin(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -464,6 +639,8 @@ func TestChainIteratorReverseBlockingTerminatesAtOrigin(t *testing.T) {
 }
 
 func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := chain.NewManager(nil, eventBus)
 	if err != nil {
@@ -526,7 +703,8 @@ func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
 		if err != nil {
 			t.Fatalf(
 				"unexpected error continuing reverse after rollback at idx %d: %s",
-				i, err,
+				i,
+				err,
 			)
 		}
 		gotHash := hex.EncodeToString(next.Block.Hash)
@@ -538,7 +716,10 @@ func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
 			)
 		}
 	}
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after post-rollback exhaustion, got %v",
 			err,
@@ -554,6 +735,8 @@ func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
 // index 0 (pre-genesis), so the clamp must trigger when rollbackBlockIndex
 // is 0 as well.
 func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := chain.NewManager(nil, eventBus)
 	if err != nil {
@@ -582,7 +765,10 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 		t.Fatalf("unexpected rollback error: %s", err)
 	}
 	// The iterator must terminate at origin — chain is empty.
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after rollback to origin, got %v",
 			err,
@@ -591,14 +777,21 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 	// Regrow the chain. With clamping, the iterator stays terminated.
 	// Without the fix, blockByIndex at the old (stale) tip index would
 	// hand out the regrown chain's block of the same index.
-	for _, testBlock := range testBlocks {
+	//
+	// The regrown chain is numbered from 0 because a chain emptied back to
+	// origin only accepts block number 0 as its first block; see
+	// blocksFromOrigin and the origin continuity check in chain.go.
+	for _, testBlock := range blocksFromOrigin() {
 		if err := c.AddBlock(testBlock, nil); err != nil {
 			t.Fatalf(
 				"unexpected error re-adding block to chain: %s", err,
 			)
 		}
 	}
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"reverse iterator must stay terminated after chain regrowth; got %v",
 			err,
@@ -606,44 +799,91 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 	}
 }
 
-func TestHandleBlockProposedEventAddsBlockAndAcks(t *testing.T) {
+func TestAddLocalBlockIgnoresAndClearsPendingPeerHeaders(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
 	c := cm.PrimaryChain()
-	ack := make(chan error, 1)
+	for _, testBlock := range testBlocks[:3] {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	if err := c.AddBlockHeader(testBlocks[3]); err != nil {
+		t.Fatalf("unexpected error adding peer header: %s", err)
+	}
+	localBlock := &MockBlock{
+		MockBlockNumber: testBlocks[3].MockBlockNumber,
+		MockSlot:        testBlocks[3].MockSlot + 1,
+		MockHash:        testHashPrefix + "00ff",
+		MockPrevHash:    testBlocks[2].MockHash,
+	}
 
-	c.HandleBlockProposedEvent(
-		event.NewEvent(
-			chain.BlockProposedEventType,
-			chain.BlockProposedEvent{
-				Block: testBlocks[0],
-				Ack:   ack,
-			},
-		),
-	)
-
-	if err := testutil.RequireReceive(
-		t,
-		ack,
-		time.Second,
-		"block proposal ack",
-	); err != nil {
-		t.Fatalf("unexpected block proposal error: %s", err)
+	if err := c.AddLocalBlock(localBlock); err != nil {
+		t.Fatalf("unexpected error adding local block: %s", err)
 	}
 	tip := c.Tip()
-	if tip.Point.Slot != testBlocks[0].MockSlot ||
-		!bytes.Equal(tip.Point.Hash, testBlocks[0].Hash().Bytes()) {
+	if tip.Point.Slot != localBlock.MockSlot ||
+		!bytes.Equal(tip.Point.Hash, localBlock.Hash().Bytes()) {
 		t.Fatalf(
-			"unexpected tip after block proposal: %d.%x",
+			"unexpected tip after local block: %d.%x",
 			tip.Point.Slot,
 			tip.Point.Hash,
 		)
 	}
+	if got := c.HeaderCount(); got != 0 {
+		t.Fatalf("expected local block to clear pending headers, got %d", got)
+	}
+}
+
+func TestAddLocalBlockRejectsStaleParentAndPreservesPendingHeaders(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks[:3] {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	if err := c.AddBlockHeader(testBlocks[3]); err != nil {
+		t.Fatalf("unexpected error adding peer header: %s", err)
+	}
+	staleBlock := &MockBlock{
+		MockBlockNumber: testBlocks[3].MockBlockNumber,
+		MockSlot:        testBlocks[3].MockSlot + 1,
+		MockHash:        testHashPrefix + "00fe",
+		MockPrevHash:    testBlocks[1].MockHash,
+	}
+
+	err = c.AddLocalBlock(staleBlock)
+	var staleErr chain.BlockNotFitChainTipError
+	if !errors.As(err, &staleErr) {
+		t.Fatalf("expected stale parent error, got %v", err)
+	}
+	if got := c.HeaderCount(); got != 1 {
+		t.Fatalf(
+			"expected rejected block to preserve pending header, got %d",
+			got,
+		)
+	}
+	tip := c.Tip()
+	if !bytes.Equal(tip.Point.Hash, testBlocks[2].Hash().Bytes()) {
+		t.Fatalf("rejected local block changed tip to %x", tip.Point.Hash)
+	}
 }
 
 func TestChainRollback(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -743,7 +983,103 @@ func TestChainRollback(t *testing.T) {
 	}
 }
 
+// TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin covers a real,
+// hash-bearing rollback target at slot 0. Origin is Slot==0 AND an empty
+// Hash (ocommon.NewPointOrigin); a rollback point gating only on
+// `point.Slot > 0` treats any slot-0 target as origin regardless of its
+// hash, silently discarding a real block's hash and truncating the whole
+// chain instead of the requested single block.
+func TestChainRollbackToSlotZeroBlockDoesNotCollapseToOrigin(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, len(testBlocks))
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// A drained iterator must also treat the retained slot-zero block as
+	// a real, already-delivered block rather than origin: repositioning
+	// on Slot alone re-emits it as if it had never been seen.
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("unexpected error draining chain iterator: %s", err)
+		}
+	}
+	// testBlocks[0] sits at slot 0 but is a real, hash-bearing block, not
+	// the origin sentinel.
+	slotZeroBlock := testBlocks[0]
+	rollbackPoint := ocommon.Point{
+		Slot: slotZeroBlock.SlotNumber(),
+		Hash: slotZeroBlock.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("unexpected error rolling back to slot-zero block: %s", err)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != rollbackPoint.Slot ||
+		!bytes.Equal(tip.Point.Hash, rollbackPoint.Hash) {
+		t.Fatalf(
+			"rollback to slot-zero block collapsed to origin: got tip %d.%x, wanted %d.%x",
+			tip.Point.Slot,
+			tip.Point.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
+		)
+	}
+	// The slot-zero block itself must survive the rollback: only the
+	// blocks after it should have been pruned.
+	if _, err := db.BlockByIndex(1, nil); err != nil {
+		t.Fatalf(
+			"expected the slot-zero block to remain after rollback: %s",
+			err,
+		)
+	}
+	// The iterator must observe a rollback marker for the slot-zero
+	// block, having already delivered it once as a normal block.
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error calling chain iterator next: %s", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf(
+			"expected a rollback marker from the chain iterator, got: %#v",
+			next,
+		)
+	}
+	if next.Point.Slot != rollbackPoint.Slot ||
+		!bytes.Equal(next.Point.Hash, rollbackPoint.Hash) {
+		t.Fatalf(
+			"iterator rollback point mismatch: got %d.%x, wanted %d.%x",
+			next.Point.Slot, next.Point.Hash,
+			rollbackPoint.Slot, rollbackPoint.Hash,
+		)
+	}
+	// The next call must reach the (now retained) chain tip rather than
+	// re-deliver the slot-zero block a second time.
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		t.Fatalf(
+			"expected ErrIteratorChainTip after the retained slot-zero "+
+				"block, got: %v",
+			err,
+		)
+	}
+}
+
 func TestChainHeaderRange(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -788,7 +1124,194 @@ func TestChainHeaderRange(t *testing.T) {
 	}
 }
 
+// TestChainHeaderRangeNonPositiveCount ensures HeaderRange returns zero-value
+// points instead of panicking on an out-of-range slice index when count is
+// zero or negative (issue #3531).
+func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
+	t.Parallel()
+
+	for _, count := range []int{0, -1, -1000} {
+		t.Run(fmt.Sprintf("count=%d", count), func(t *testing.T) {
+			cm, err := chain.NewManager(nil, nil)
+			if err != nil {
+				t.Fatalf("unexpected error creating chain manager: %s", err)
+			}
+			c := cm.PrimaryChain()
+			for _, testBlock := range testBlocks {
+				if err := c.AddBlockHeader(testBlock); err != nil {
+					t.Fatalf(
+						"unexpected error adding header to chain: %s",
+						err,
+					)
+				}
+			}
+			start, end := c.HeaderRange(count)
+			if start.Slot != 0 || len(start.Hash) != 0 {
+				t.Fatalf(
+					"expected zero-value start point for count=%d, got %#v",
+					count,
+					start,
+				)
+			}
+			if end.Slot != 0 || len(end.Hash) != 0 {
+				t.Fatalf(
+					"expected zero-value end point for count=%d, got %#v",
+					count,
+					end,
+				)
+			}
+		})
+	}
+}
+
+// TestChainRollbackInvalidHeaderTargetPreservesQueue rolls back to a point
+// that falls between two queued headers and matches neither. The rollback
+// must fail without deleting any of the queued headers that a naive scan
+// would have already pruned by the time it discovers the target is invalid
+// (issue #3531).
+func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	// Queue headers at slots 60, 80, 100.
+	queuedBlocks := testBlocks[3:]
+	for _, testBlock := range queuedBlocks {
+		if err := c.AddBlockHeader(testBlock); err != nil {
+			t.Fatalf("unexpected error adding header to chain: %s", err)
+		}
+	}
+	beforeStart, beforeEnd := c.HeaderRange(len(queuedBlocks))
+
+	// Slot 70 falls strictly between the queued headers at 60 and 80 and
+	// matches neither, so it is not a valid rollback target.
+	invalidPoint := ocommon.Point{Slot: 70, Hash: []byte("not-a-real-hash")}
+	err = c.Rollback(invalidPoint)
+	if !errors.Is(err, models.ErrBlockNotFound) {
+		t.Fatalf(
+			"expected models.ErrBlockNotFound rolling back to an invalid target, got: %v",
+			err,
+		)
+	}
+
+	afterStart, afterEnd := c.HeaderRange(len(queuedBlocks))
+	if afterStart.Slot != beforeStart.Slot ||
+		!bytes.Equal(afterStart.Hash, beforeStart.Hash) ||
+		afterEnd.Slot != beforeEnd.Slot ||
+		!bytes.Equal(afterEnd.Hash, beforeEnd.Hash) {
+		t.Fatalf(
+			"queued headers were mutated by a failed rollback: before=(%#v,%#v) after=(%#v,%#v)",
+			beforeStart,
+			beforeEnd,
+			afterStart,
+			afterEnd,
+		)
+	}
+}
+
+// TestChainRollbackToQueuedHeaderSucceeds rolls back to a point that exactly
+// matches a queued header. Only the headers after the matched one should be
+// discarded; the matched header itself stays queued and the chain tip moves
+// to it (issue #3531).
+func TestChainRollbackToQueuedHeaderSucceeds(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	// Queue headers at slots 60, 80, 100.
+	queuedBlocks := testBlocks[3:]
+	for _, testBlock := range queuedBlocks {
+		if err := c.AddBlockHeader(testBlock); err != nil {
+			t.Fatalf("unexpected error adding header to chain: %s", err)
+		}
+	}
+	rollbackBlock := queuedBlocks[1] // slot 80
+	rollbackPoint := ocommon.Point{
+		Slot: rollbackBlock.SlotNumber(),
+		Hash: rollbackBlock.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("unexpected error rolling back to queued header: %s", err)
+	}
+	// The header at slot 100 must be pruned; slots 60 and 80 remain queued.
+	start, end := c.HeaderRange(2)
+	firstBlock := queuedBlocks[0]
+	if start.Slot != firstBlock.SlotNumber() ||
+		string(start.Hash) != string(firstBlock.Hash().Bytes()) {
+		t.Fatalf(
+			"did not get expected start point after rollback: got %d.%x, wanted %d.%s",
+			start.Slot,
+			start.Hash,
+			firstBlock.SlotNumber(),
+			firstBlock.Hash().String(),
+		)
+	}
+	if end.Slot != rollbackPoint.Slot ||
+		string(end.Hash) != string(rollbackPoint.Hash) {
+		t.Fatalf(
+			"did not get expected end point after rollback: got %d.%x, wanted %d.%x",
+			end.Slot,
+			end.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
+		)
+	}
+	// The queued header at the rollback point is retained (only headers
+	// after it are pruned), so the header tip now names that point.
+	headerTip := c.HeaderTip()
+	if headerTip.Point.Slot != rollbackPoint.Slot ||
+		string(headerTip.Point.Hash) != string(rollbackPoint.Hash) {
+		t.Fatalf(
+			"header tip does not match rollback point: got %d.%x, wanted %d.%x",
+			headerTip.Point.Slot,
+			headerTip.Point.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
+		)
+	}
+}
+
+func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	header := testBlocks[0]
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+
+	if err := c.AddBlockHeader(header); err != nil {
+		t.Fatalf("unexpected error adding header to chain: %s", err)
+	}
+	if !c.FirstHeaderMatchesPoint(point) {
+		t.Fatal("expected first header to match point")
+	}
+	if c.FirstVerifiedHeaderMatchesPoint(point) {
+		t.Fatal("unverified header must not satisfy verified match")
+	}
+
+	c.ClearHeaders()
+	if err := c.AddVerifiedBlockHeader(header); err != nil {
+		t.Fatalf("unexpected error adding verified header to chain: %s", err)
+	}
+	if !c.FirstVerifiedHeaderMatchesPoint(point) {
+		t.Fatal("verified header should satisfy verified match")
+	}
+}
+
 func TestChainHeaderBlock(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -816,6 +1339,8 @@ func TestChainHeaderBlock(t *testing.T) {
 }
 
 func TestChainHeaderWrongBlock(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -857,6 +1382,8 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 }
 
 func TestChainHeaderRollback(t *testing.T) {
+	t.Parallel()
+
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -915,6 +1442,8 @@ func mustSetLedger(t *testing.T, cm *chain.ChainManager, securityParam int) {
 }
 
 func TestSetLedgerRejectsNonPositiveSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -962,6 +1491,8 @@ func makeLinkedHeaders(
 }
 
 func TestHeaderQueueLimitDefault(t *testing.T) {
+	t.Parallel()
+
 	// K=1 yields max(2, DefaultMaxQueuedHeaders) == DefaultMaxQueuedHeaders
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -1005,6 +1536,8 @@ func TestHeaderQueueLimitDefault(t *testing.T) {
 }
 
 func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	// securityParam must be large enough that sp*2 exceeds
 	// DefaultMaxQueuedHeaders, otherwise the default floor applies.
 	securityParam := chain.DefaultMaxQueuedHeaders/2 + 1
@@ -1050,6 +1583,8 @@ func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
 }
 
 func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
+	t.Parallel()
+
 	securityParam := 10
 	expectedLimit := securityParam * 2
 
@@ -1082,6 +1617,8 @@ func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
 }
 
 func TestChainFromIntersect(t *testing.T) {
+	t.Parallel()
+
 	testForkPointIndex := 2
 	testIntersectPoints := []ocommon.Point{
 		{
@@ -1089,7 +1626,7 @@ func TestChainFromIntersect(t *testing.T) {
 			Slot: testBlocks[testForkPointIndex].MockSlot,
 		},
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
@@ -1120,6 +1657,8 @@ func TestChainFromIntersect(t *testing.T) {
 }
 
 func TestRecentPointsNoDatabase(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager with no database. Blocks are stored
 	// in memory only. RecentPoints must return the in-memory
 	// chain points even though there is no blob store.
@@ -1207,7 +1746,105 @@ func TestRecentPointsNoDatabase(t *testing.T) {
 	}
 }
 
+func TestPointAtDepthNoDatabase(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, block := range testBlocks[:4] {
+		if err := c.AddBlock(block, nil); err != nil {
+			t.Fatalf("unexpected error adding block: %s", err)
+		}
+	}
+
+	tip, found, err := c.PointAtDepth(0)
+	if err != nil {
+		t.Fatalf("unexpected tip lookup error: %s", err)
+	}
+	if !found || !reflect.DeepEqual(tip, blockPoint(testBlocks[3])) {
+		t.Fatalf("unexpected tip point: found=%t point=%v", found, tip)
+	}
+
+	point, found, err := c.PointAtDepth(2)
+	if err != nil {
+		t.Fatalf("unexpected depth lookup error: %s", err)
+	}
+	if !found || !reflect.DeepEqual(point, blockPoint(testBlocks[1])) {
+		t.Fatalf("unexpected depth-2 point: found=%t point=%v", found, point)
+	}
+
+	_, found, err = c.PointAtDepth(4)
+	if err != nil {
+		t.Fatalf("unexpected origin lookup error: %s", err)
+	}
+	if found {
+		t.Fatal("a chain shorter than k must have origin as its immutable tip")
+	}
+}
+
+func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	primary := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := primary.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding test block: %s", err)
+		}
+	}
+
+	point := blockPoint(testBlocks[2])
+	fork, err := cm.NewChain(point)
+	if err != nil {
+		t.Fatalf("unexpected error creating fork: %s", err)
+	}
+
+	const iterations = 250
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		defer errMu.Unlock()
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_ = fork.RecentPoints(8)
+			_ = fork.IntersectPoints(8)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_, err := cm.NewChain(point)
+			recordErr(err)
+		}
+	}()
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("unexpected concurrent fork creation error: %s", firstErr)
+	}
+}
+
 func TestRecentPointsWithDatabase(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager with a real database. RecentPoints
 	// should still return the correct in-memory tip even though
 	// block storage goes through the blob store.
@@ -1262,6 +1899,8 @@ func TestRecentPointsWithDatabase(t *testing.T) {
 }
 
 func TestIntersectPointsIncludesOlderSamples(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1333,31 +1972,23 @@ func TestIntersectPointsIncludesOlderSamples(t *testing.T) {
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	cfg := &database.Config{
-		DataDir:        t.TempDir(),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		DataDir: t.TempDir(),
 	}
-	db, err := database.New(cfg)
+	db, err := dbtest.NewDatabase(t, cfg)
 	if err != nil {
 		t.Fatalf(
 			"unexpected error creating database: %s",
 			err,
 		)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 	return db
 }
 
-// generateTestChain builds `count` Conway blocks that chain together via
-// PrevHash and survive a CBOR round-trip — that is, after re-decoding
-// each block's stored Cbor() via ledger.NewBlockFromCbor (the path used
-// by models.Block.Decode in chain.reconcile), the decoded block's
-// Hash() and PrevHash() match what the generator originally produced.
-//
-// The first block's PrevHash is set to prevHash. Each block's slot is
-// startSlot + i*slotIncrement; block numbers run startBlockNumber..+count-1.
-// All blocks have empty transactions/witnesses/auxiliary/invalid sets,
-// so they share the same block body hash.
+// generateTestChain builds count Conway blocks that chain together via
+// PrevHash with CBOR-stable encodings, delegating to the shared ouroboros-mock
+// fixture generator. It fails the test on error so call sites keep their
+// existing positional form.
 func generateTestChain(
 	t testing.TB,
 	startBlockNumber uint64,
@@ -1366,138 +1997,18 @@ func generateTestChain(
 	count int,
 ) []ledger.Block {
 	t.Helper()
-	if count <= 0 {
-		return []ledger.Block{}
-	}
-	// All generated blocks have identical empty bodies, so the four
-	// component CBORs and the resulting block body hash are constant.
-	emptyTxsCbor, err := cbor.Encode([]ledger.ConwayTransactionBody{})
-	if err != nil {
-		t.Fatalf("encode empty tx bodies: %s", err)
-	}
-	emptyWitsCbor, err := cbor.Encode([]ledger.ConwayTransactionWitnessSet{})
-	if err != nil {
-		t.Fatalf("encode empty witnesses: %s", err)
-	}
-	emptyAuxCbor, err := cbor.Encode(common.TransactionMetadataSet{})
-	if err != nil {
-		t.Fatalf("encode empty metadata set: %s", err)
-	}
-	emptyInvalidCbor, err := cbor.Encode([]uint{})
-	if err != nil {
-		t.Fatalf("encode empty invalid txs: %s", err)
-	}
-	bodyHash := computeBlockBodyHash(
-		emptyTxsCbor, emptyWitsCbor, emptyAuxCbor, emptyInvalidCbor,
+	blocks, err := fixtures.GenerateConwayChain(
+		startBlockNumber, prevHash, startSlot, slotIncrement, count,
 	)
-	blocks := make([]ledger.Block, 0, count)
-	currentPrev := prevHash
-	for i := range count {
-		body := babbage.BabbageBlockHeaderBody{
-			BlockNumber: startBlockNumber + uint64(i),
-			Slot:        startSlot + uint64(i)*slotIncrement,
-			PrevHash:    currentPrev,
-			IssuerVkey:  common.IssuerVkey{},
-			VrfKey:      make([]byte, 32),
-			VrfResult: common.VrfResult{
-				Output: make([]byte, 64),
-				Proof:  make([]byte, 80),
-			},
-			BlockBodySize: 0,
-			BlockBodyHash: bodyHash,
-			OpCert: babbage.BabbageOpCert{
-				HotVkey:   make([]byte, 32),
-				Signature: make([]byte, 64),
-			},
-			ProtoVersion: babbage.BabbageProtoVersion{Major: 9, Minor: 0},
-		}
-		block := &ledger.ConwayBlock{
-			BlockHeader: &ledger.ConwayBlockHeader{
-				BabbageBlockHeader: ledger.BabbageBlockHeader{
-					Body:      body,
-					Signature: make([]byte, 64),
-				},
-			},
-		}
-		blockCbor, err := cbor.Encode(block)
-		if err != nil {
-			t.Fatalf("encode block %d: %s", i, err)
-		}
-		// Re-decode so the returned block carries the canonical Cbor()
-		// the reconcile path will observe, and so Hash() reads from the
-		// post-round-trip header bytes.
-		decoded, err := conway.NewConwayBlockFromCbor(blockCbor)
-		if err != nil {
-			t.Fatalf("decode generated block %d: %s", i, err)
-		}
-		if !bytes.Equal(decoded.Cbor(), blockCbor) {
-			t.Fatalf("block %d Cbor mismatch after round-trip", i)
-		}
-		blocks = append(blocks, decoded)
-		currentPrev = decoded.Hash()
+	if err != nil {
+		t.Fatalf("generate test chain: %s", err)
 	}
 	return blocks
 }
 
-// computeBlockBodyHash returns blake2b256(blake2b256(p[0]) || ...) which
-// matches common.ValidateBlockBodyHash's expected derivation.
-func computeBlockBodyHash(parts ...[]byte) common.Blake2b256 {
-	var combined []byte
-	for _, p := range parts {
-		h := blake2b.Sum256(p)
-		combined = append(combined, h[:]...)
-	}
-	h := blake2b.Sum256(combined)
-	return common.NewBlake2b256(h[:])
-}
-
-func TestGenerateTestChainRoundTrip(t *testing.T) {
-	var origin common.Blake2b256
-	gen := generateTestChain(t, 1, origin, 0, 20, 5)
-	if len(gen) != 5 {
-		t.Fatalf("expected 5 blocks, got %d", len(gen))
-	}
-	for i, b := range gen {
-		decoded, err := ledger.NewBlockFromCbor(uint(b.Type()), b.Cbor())
-		if err != nil {
-			t.Fatalf("block %d decode failed: %s", i, err)
-		}
-		if decoded.Hash() != b.Hash() {
-			t.Fatalf(
-				"block %d hash changed after round-trip: %s -> %s",
-				i, b.Hash(), decoded.Hash(),
-			)
-		}
-		if decoded.PrevHash() != b.PrevHash() {
-			t.Fatalf(
-				"block %d prev hash changed after round-trip: %s -> %s",
-				i, b.PrevHash(), decoded.PrevHash(),
-			)
-		}
-		if decoded.BlockNumber() != uint64(i+1) {
-			t.Fatalf(
-				"block %d unexpected block number %d",
-				i, decoded.BlockNumber(),
-			)
-		}
-		if decoded.SlotNumber() != uint64(i)*20 {
-			t.Fatalf(
-				"block %d unexpected slot %d",
-				i, decoded.SlotNumber(),
-			)
-		}
-	}
-	for i := 1; i < len(gen); i++ {
-		if gen[i].PrevHash() != gen[i-1].Hash() {
-			t.Fatalf(
-				"chain link mismatch at index %d: prev=%s, want=%s",
-				i, gen[i].PrevHash(), gen[i-1].Hash(),
-			)
-		}
-	}
-}
-
 func TestChainRollbackExceedsSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1551,7 +2062,75 @@ func TestChainRollbackExceedsSecurityParam(t *testing.T) {
 	}
 }
 
+// TestChainRollbackPreservesQueuedHeadersOnOverKRejection covers a
+// no-state-change-on-rejection gap: rollbackLocked used to delete queued
+// headers above the rollback point before computing and enforcing the
+// security-parameter bound, so a rollback correctly rejected for exceeding
+// K still discarded active chainsync header progress. An over-K rewind must
+// leave the header queue exactly as it was, the same as it leaves the
+// persisted chain untouched.
+func TestChainRollbackPreservesQueuedHeadersOnOverKRejection(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// K=2, rolling back 3 blocks (from index 5 to index 2) exceeds it.
+	mustSetLedger(t, cm, 2)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	queuedHeaders := []*MockBlock{
+		{
+			MockBlockNumber: 7,
+			MockSlot:        120,
+			MockHash:        testHashPrefix + "0007",
+			MockPrevHash:    testHashPrefix + "0006",
+		},
+		{
+			MockBlockNumber: 8,
+			MockSlot:        140,
+			MockHash:        testHashPrefix + "0008",
+			MockPrevHash:    testHashPrefix + "0007",
+		},
+	}
+	for _, header := range queuedHeaders {
+		if err := c.AddBlockHeader(header); err != nil {
+			t.Fatalf("unexpected error adding header to chain: %s", err)
+		}
+	}
+	if c.HeaderCount() != len(queuedHeaders) {
+		t.Fatalf(
+			"expected %d queued headers before rollback, got %d",
+			len(queuedHeaders), c.HeaderCount(),
+		)
+	}
+	shallowBlock := testBlocks[2]
+	deepRollbackPoint := ocommon.Point{
+		Slot: shallowBlock.SlotNumber(),
+		Hash: shallowBlock.Hash().Bytes(),
+	}
+	err = c.Rollback(deepRollbackPoint)
+	if !errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf("expected ErrRollbackExceedsSecurityParam, got: %s", err)
+	}
+	if c.HeaderCount() != len(queuedHeaders) {
+		t.Fatalf(
+			"queued headers must survive a rejected rollback: got %d, wanted %d",
+			c.HeaderCount(),
+			len(queuedHeaders),
+		)
+	}
+}
+
 func TestChainRollbackWithinSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1600,6 +2179,8 @@ func TestChainRollbackWithinSecurityParam(t *testing.T) {
 }
 
 func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1608,6 +2189,7 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 			err,
 		)
 	}
+	mustSetLedger(t, cm, len(testBlocks))
 	c := cm.PrimaryChain()
 	for _, testBlock := range testBlocks {
 		if err := c.AddBlock(testBlock, nil); err != nil {
@@ -1649,7 +2231,10 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 		}
 	}
 	for idx := uint64(4); idx <= 6; idx++ {
-		if _, err := db.BlockByIndex(idx, nil); !errors.Is(err, models.ErrBlockNotFound) {
+		if _, err := db.BlockByIndex(idx, nil); !errors.Is(
+			err,
+			models.ErrBlockNotFound,
+		) {
 			t.Fatalf(
 				"expected block index %d to be pruned after rewind, got: %v",
 				idx,
@@ -1659,7 +2244,231 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 	}
 }
 
+// TestRewindPrimaryChainToPointRejectsOverLimitRewind covers issue #3516's
+// rollback-depth bound: RewindPrimaryChainToPoint must reject a rewind whose
+// depth exceeds the configured security parameter K, and must leave the
+// chain and every block it holds untouched when it does, so NtC clients stay
+// consistent after a rejected rewind.
+func TestRewindPrimaryChainToPointRejectsOverLimitRewind(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// K=2, but rewinding to testBlocks[2] removes 3 blocks (indexes 4-6).
+	mustSetLedger(t, cm, 2)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	err = cm.RewindPrimaryChainToPoint(rewindPoint)
+	if err == nil {
+		t.Fatal(
+			"expected rewind to be rejected when depth exceeds security param",
+		)
+	}
+	if !errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf("expected ErrRollbackExceedsSecurityParam, got: %s", err)
+	}
+	// The rejected rewind must not have touched the chain tip or deleted
+	// any block.
+	tip := c.Tip()
+	lastBlock := testBlocks[len(testBlocks)-1]
+	if tip.Point.Slot != lastBlock.SlotNumber() {
+		t.Fatalf(
+			"chain tip should be unchanged after rejected rewind: got slot %d, expected %d",
+			tip.Point.Slot,
+			lastBlock.SlotNumber(),
+		)
+	}
+	for idx := uint64(1); idx <= uint64(len(testBlocks)); idx++ {
+		if _, err := db.BlockByIndex(idx, nil); err != nil {
+			t.Fatalf(
+				"expected block index %d to remain after rejected rewind: %s",
+				idx,
+				err,
+			)
+		}
+	}
+}
+
+// TestRewindPrimaryChainToPointSignalsRollback covers the other half of
+// issue #3516: a rewind within the security parameter must publish
+// ChainRollbackEvent exactly once and wake/mark any chain iterator with the
+// rollback, the same signal downstream NtC consumers rely on for a live
+// Chain.Rollback.
+func TestRewindPrimaryChainToPointSignalsRollback(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := chain.NewManager(db, eventBus)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, len(testBlocks))
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// Drain the iterator to the tip before rewinding.
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("unexpected error draining chain iterator: %s", err)
+		}
+	}
+	rollbackEvents := make(chan chain.ChainRollbackEvent, 10)
+	eventBus.SubscribeFunc(
+		chain.ChainUpdateEventType,
+		func(evt event.Event) {
+			if rb, ok := evt.Data.(chain.ChainRollbackEvent); ok {
+				rollbackEvents <- rb
+			}
+		},
+	)
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	if err := cm.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+		t.Fatalf("unexpected error rewinding primary chain: %s", err)
+	}
+	// The iterator must observe a rollback marker for the rewind point.
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error calling chain iterator next: %s", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf(
+			"expected a rollback marker from the chain iterator, got: %#v",
+			next,
+		)
+	}
+	if next.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(next.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"iterator rollback point mismatch: got %d.%x, wanted %d.%x",
+			next.Point.Slot,
+			next.Point.Hash,
+			rewindPoint.Slot,
+			rewindPoint.Hash,
+		)
+	}
+	// Exactly one ChainRollbackEvent must have been published, for the
+	// rewind point actually reached.
+	evt := testutil.RequireReceive(
+		t, rollbackEvents, time.Second,
+		"expected ChainRollbackEvent after rewind",
+	)
+	if evt.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(evt.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"rollback event point mismatch: got %d.%x, wanted %d.%x",
+			evt.Point.Slot,
+			evt.Point.Hash,
+			rewindPoint.Slot,
+			rewindPoint.Hash,
+		)
+	}
+	testutil.RequireNoReceive(
+		t, rollbackEvents, 50*time.Millisecond,
+		"expected exactly one rollback event",
+	)
+}
+
+// TestRewindPrimaryChainToPointConcurrentRewinds exercises concurrent
+// callers rewinding the same persistent primary chain to the same point.
+// Racing to different points is expected to leave the loser observing that
+// its target is no longer on the chain (the earlier caller already pruned
+// it) — that is the existing not-on-chain contract, not a #3516 concern.
+// What #3516 requires here is that every concurrent caller targeting the
+// same still-resolvable point gets the same outcome (an idempotent success)
+// with no corruption or deadlock; run with -race to catch any lock-ordering
+// regression reintroduced around the shared rollback path.
+func TestRewindPrimaryChainToPointConcurrentRewinds(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, len(testBlocks))
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			// Every goroutine targets the same, still-resolvable point,
+			// so every call must succeed whether it performs the rewind
+			// or observes it already done.
+			if err := cm.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+				t.Errorf(
+					"unexpected error from concurrent rewind to %d.%x: %s",
+					rewindPoint.Slot, rewindPoint.Hash, err,
+				)
+			}
+		})
+	}
+	wg.Wait()
+	tip := c.Tip()
+	if tip.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(tip.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"chain tip after concurrent rewinds: got %d.%x, wanted %d.%x",
+			tip.Point.Slot, tip.Point.Hash,
+			rewindPoint.Slot, rewindPoint.Hash,
+		)
+	}
+	for idx := uint64(1); idx <= uint64(len(testBlocks)-3); idx++ {
+		if _, err := db.BlockByIndex(idx, nil); err != nil {
+			t.Fatalf(
+				"expected block index %d to remain after rewind: %s",
+				idx, err,
+			)
+		}
+	}
+	for idx := uint64(len(testBlocks) - 2); idx <= uint64(len(testBlocks)); idx++ {
+		if _, err := db.BlockByIndex(idx, nil); !errors.Is(
+			err, models.ErrBlockNotFound,
+		) {
+			t.Fatalf(
+				"expected block index %d to be pruned after rewind, got: %v",
+				idx, err,
+			)
+		}
+	}
+}
+
 func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1690,9 +2499,63 @@ func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
 	}
 }
 
+// TestChainRollbackUnboundedSkipsSecurityParamCheck covers issue #3516's
+// review: RewindPrimaryChainAtStartup (backed by Chain.RollbackUnbounded)
+// must succeed with no security parameter configured at all, since
+// NewLedgerState reconciles the primary chain against the ledger's own
+// applied tip before node.go's ChainManager.SetLedger has run. Routing that
+// startup reconciliation through the bounded Rollback/RewindPrimaryChainToPoint
+// path instead would fail node startup outright over a local, already-durable
+// divergence that has nothing to do with an untrusted peer.
+func TestChainRollbackUnboundedSkipsSecurityParamCheck(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	if cm.SecurityParamConfigured() {
+		t.Fatal(
+			"expected security parameter to be unconfigured before SetLedger",
+		)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// This rewind removes 3 blocks (index 6 down to index 3), which would
+	// be rejected by a bounded rollback under a small K -- but no K is
+	// configured at all here, and RollbackUnbounded must not care.
+	rewindBlock := testBlocks[2]
+	rewindPoint := ocommon.Point{
+		Slot: rewindBlock.SlotNumber(),
+		Hash: rewindBlock.Hash().Bytes(),
+	}
+	if err := c.RollbackUnbounded(rewindPoint); err != nil {
+		t.Fatalf(
+			"unexpected error from unbounded rollback with K unconfigured: %s",
+			err,
+		)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != rewindPoint.Slot ||
+		!bytes.Equal(tip.Point.Hash, rewindPoint.Hash) {
+		t.Fatalf(
+			"chain tip after unbounded rollback: got %d.%x, wanted %d.%x",
+			tip.Point.Slot, tip.Point.Hash,
+			rewindPoint.Slot, rewindPoint.Hash,
+		)
+	}
+}
+
 func TestChainRollbackEphemeralChainNotRestricted(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1771,6 +2634,8 @@ func TestChainRollbackEphemeralChainNotRestricted(
 }
 
 func TestChainFork(t *testing.T) {
+	t.Parallel()
+
 	testForkPointIndex := 2
 	testIntersectPoints := []ocommon.Point{
 		{
@@ -1798,7 +2663,7 @@ func TestChainFork(t *testing.T) {
 			MockPrevHash:    testHashPrefix + "00a5",
 		},
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
@@ -1932,6 +2797,8 @@ func TestChainFork(t *testing.T) {
 // retained in the LRU cache to re-anchor the fork against the shorter
 // primary chain.
 func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1951,7 +2818,11 @@ func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
 
 	const forkIdx = 2 // primary block 3 (0-based index 2)
 	if len(primaryBlocks) <= forkIdx {
-		t.Fatalf("expected at least %d primary blocks, got %d", forkIdx+1, len(primaryBlocks))
+		t.Fatalf(
+			"expected at least %d primary blocks, got %d",
+			forkIdx+1,
+			len(primaryBlocks),
+		)
 	}
 	forkPoint := ocommon.Point{
 		Slot: primaryBlocks[forkIdx].SlotNumber(),
@@ -2042,6 +2913,8 @@ func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
 //     point followed by ErrIteratorChainTip;
 //   - a fresh iterator from origin delivers exactly P1, P2, P3.
 func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2060,7 +2933,11 @@ func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
 
 	const forkIdx = 2 // primary block 3
 	if len(primaryBlocks) <= forkIdx {
-		t.Fatalf("expected at least %d primary blocks, got %d", forkIdx+1, len(primaryBlocks))
+		t.Fatalf(
+			"expected at least %d primary blocks, got %d",
+			forkIdx+1,
+			len(primaryBlocks),
+		)
 	}
 	forkPoint := ocommon.Point{
 		Slot: primaryBlocks[forkIdx].SlotNumber(),
@@ -2153,7 +3030,10 @@ func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
 		)
 	}
 	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
-		t.Fatalf("expected ErrIteratorChainTip after rollback signal, got: %v", err)
+		t.Fatalf(
+			"expected ErrIteratorChainTip after rollback signal, got: %v",
+			err,
+		)
 	}
 
 	// A fresh iterator should now reach exactly the rolled-back fork
@@ -2207,6 +3087,8 @@ func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
 // retained primary prefix plus that fork's divergent tail. Rolling
 // back fork A then leaves fork B's view unchanged.
 func TestChainMultipleNonPrimaryChainsIndependentRollback(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2311,7 +3193,10 @@ func TestChainMultipleNonPrimaryChainsIndependentRollback(t *testing.T) {
 				)
 			}
 		}
-		if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		if _, err := iter.Next(false); !errors.Is(
+			err,
+			chain.ErrIteratorChainTip,
+		) {
 			t.Fatalf(
 				"%s expected ErrIteratorChainTip, got: %v",
 				name, err,
@@ -2372,6 +3257,8 @@ func TestChainMultipleNonPrimaryChainsIndependentRollback(t *testing.T) {
 // lastCommonBlockIndex to P2 while preserving P3 as the fork's
 // in-memory tip; otherwise iteration silently truncates at P2.
 func TestChainReconcileEmptyForkPreservesOrphanedTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2444,6 +3331,8 @@ func TestChainReconcileEmptyForkPreservesOrphanedTip(t *testing.T) {
 // TestIteratorNonInclusiveStartPoint verifies that an iterator created with
 // inclusive=false skips the start block and begins at the block after it.
 func TestIteratorNonInclusiveStartPoint(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -2493,6 +3382,8 @@ func TestIteratorNonInclusiveStartPoint(t *testing.T) {
 // when the iterator is at tip and unblocks with the new block once a block is
 // added to the chain.
 func TestIteratorBlockingNextDeliversBlock(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -2564,6 +3455,8 @@ func TestIteratorBlockingNextDeliversBlock(t *testing.T) {
 // a rollback signal, subsequent Next() calls deliver blocks after the rollback
 // point.
 func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
+	t.Parallel()
+
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -2613,6 +3506,23 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 			rollbackPoint.Slot, rollbackPoint.Hash,
 		)
 	}
+	if len(next.RollbackBlocks) != len(testBlocks)-2 {
+		t.Fatalf(
+			"rollback payload length: got %d, want %d",
+			len(next.RollbackBlocks), len(testBlocks)-2,
+		)
+	}
+	for idx, block := range testBlocks[2:] {
+		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
+		if got.Slot != block.SlotNumber() ||
+			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
+			t.Fatalf(
+				"rollback payload %d: got %d.%x, want %d.%x",
+				idx, got.Slot, got.Hash,
+				block.SlotNumber(), block.Hash().Bytes(),
+			)
+		}
+	}
 
 	// After the rollback signal the chain is at testBlocks[1].
 	// Add testBlocks[2] back onto the chain.
@@ -2638,5 +3548,92 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 	// Should be at tip again.
 	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
 		t.Fatalf("expected ErrIteratorChainTip, got: %v", err)
+	}
+}
+
+func TestIteratorCoalescedRollbackDoesNotIncludeUndeliveredBlocks(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	c := cm.PrimaryChain()
+	for _, b := range testBlocks {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock: %v", err)
+		}
+	}
+
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("FromPoint: %v", err)
+	}
+	defer iter.Cancel()
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("draining: %v", err)
+		}
+	}
+
+	firstTarget := ocommon.NewPoint(
+		testBlocks[3].SlotNumber(), testBlocks[3].Hash().Bytes(),
+	)
+	if err := c.Rollback(firstTarget); err != nil {
+		t.Fatalf("first Rollback: %v", err)
+	}
+	// Regrow a distinct suffix before the iterator consumes its pending marker.
+	// The regrown suffix was not delivered after the first marker and must not
+	// be duplicated, while the blocks below that marker were delivered earlier
+	// and must remain in the undo payload.
+	regrown := []*MockBlock{
+		{
+			MockBlockNumber: 5,
+			MockSlot:        70,
+			MockHash:        testHashPrefix + "00a5",
+			MockPrevHash:    testHashPrefix + "0004",
+		},
+		{
+			MockBlockNumber: 6,
+			MockSlot:        90,
+			MockHash:        testHashPrefix + "00a6",
+			MockPrevHash:    testHashPrefix + "00a5",
+		},
+	}
+	for _, b := range regrown {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("regrow: %v", err)
+		}
+	}
+	secondTarget := ocommon.NewPoint(
+		testBlocks[1].SlotNumber(), testBlocks[1].Hash().Bytes(),
+	)
+	if err := c.Rollback(secondTarget); err != nil {
+		t.Fatalf("second Rollback: %v", err)
+	}
+
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("Next (coalesced rollback): %v", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf("expected rollback result, got: %+v", next)
+	}
+	if !reflect.DeepEqual(next.Point, secondTarget) {
+		t.Fatalf("rollback point: got %+v, want %+v", next.Point, secondTarget)
+	}
+	if len(next.RollbackBlocks) != 4 {
+		t.Fatalf("rollback payload length: got %d, want 4", len(next.RollbackBlocks))
+	}
+	for idx, block := range testBlocks[2:6] {
+		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
+		if got.Slot != block.SlotNumber() ||
+			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
+			t.Fatalf(
+				"rollback payload %d: got %d.%x, want %d.%x",
+				idx, got.Slot, got.Hash,
+				block.SlotNumber(), block.Hash().Bytes(),
+			)
+		}
 	}
 }

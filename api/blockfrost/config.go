@@ -14,6 +14,8 @@
 
 package blockfrost
 
+import "github.com/blinklabs-io/dingo/internal/apiconfig"
+
 // BlockfrostConfig holds configuration for the Blockfrost
 // API server.
 type BlockfrostConfig struct {
@@ -23,4 +25,5 @@ type BlockfrostConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
+	TLS                apiconfig.EffectiveTLS
 }

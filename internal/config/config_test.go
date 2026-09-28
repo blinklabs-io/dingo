@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,69 +15,142 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/topology"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func resetGlobalConfig() {
+	midnightYAMLFields = nil
 	globalConfig = &Config{
-		// MempoolCapacity left as the zero sentinel; LoadConfig fills
-		// it in from RunMode after CLI/env/YAML processing.
-		MempoolCapacity:             0,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
-		BindAddr:                    "0.0.0.0",
-		CardanoConfig:               "", // Will be set dynamically based on network
-		DatabasePath:                ".dingo",
-		SocketPath:                  "dingo.socket",
-		IntersectTip:                false,
-		ValidateHistorical:          false,
-		Network:                     "preview",
-		MetricsPort:                 12798,
-		PrivateBindAddr:             "127.0.0.1",
-		PrivatePort:                 3002,
-		RelayPort:                   3001,
-		UtxorpcPort:                 9090,
-		CORSAllowedOrigins:          []string{"*"},
-		BlockfrostPort:              3000,
-		MeshPort:                    8080,
-		Topology:                    "",
-		TlsCertFilePath:             "",
-		TlsKeyFilePath:              "",
-		BlobPlugin:                  DefaultBlobPlugin,
-		MetadataPlugin:              DefaultMetadataPlugin,
-		RunMode:                     RunModeServe,
-		StartEra:                    StartEraDefault,
-		ImmutableDbPath:             "",
-		ShutdownTimeout:             DefaultShutdownTimeout,
-		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:             5,
-		DatabaseQueueSize:           50,
-		BackfillBatchSize:           100,
-		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
-		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		Plugins:                            defaultPluginsConfig(),
+		BindAddr:                           "0.0.0.0",
+		CardanoConfig:                      "", // Will be set dynamically based on network
+		DatabasePath:                       ".dingo",
+		SocketPath:                         "dingo.socket",
+		IntersectTip:                       false,
+		ValidateHistorical:                 true,
+		StrictUtxoValidation:               true,
+		Network:                            "preview",
+		MetricsPort:                        12798,
+		HealthPort:                         DefaultHealthPort,
+		HealthReadyGapSlots:                DefaultHealthReadyGapSlots,
+		DebugBindAddr:                      DefaultDebugBindAddr,
+		PrivateBindAddr:                    "127.0.0.1",
+		PrivatePort:                        3002,
+		RelayPort:                          3001,
+		CORSAllowedOrigins:                 []string{"*"},
+		Topology:                           "",
+		TlsCertFilePath:                    "",
+		TlsKeyFilePath:                     "",
+		RunMode:                            RunModeServe,
+		StartEra:                           StartEraDefault,
+		ImmutableDbPath:                    "",
+		ShutdownTimeout:                    DefaultShutdownTimeout,
+		LedgerCatchupTimeout:               DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:                    5,
+		DatabaseQueueSize:                  50,
+		BackfillBatchSize:                  100,
+		GenesisBootstrap:                   DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:                      DefaultHistoryExpiryConfig(),
+		KoiosParity:                        DefaultKoiosParityConfig(),
+		Midnight:                           DefaultMidnightConfig(),
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		ForgeEBMaxTxRefs:                   forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:                    forgeEBCapDefault(DefaultForgeEBMaxBytes),
+		ForgeEBSelectionReserve:            DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
+		// Fail closed: mirrors newDefaultConfig's own ValidateForgedBlock
+		// default (issue #3528) so this test-only reset does not silently
+		// diverge from what an operator actually gets. Unlike the several
+		// fields above left at their zero value on purpose (StorageMode,
+		// Cache, Chainsync, SlotsPerKESPeriod, ...), so tests can observe
+		// their own fill-in-if-empty defaulting logic in isolation,
+		// ValidateForgedBlock's production default is an unconditional
+		// literal with no separate fill-in step to test around.
+		ValidateForgedBlock: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
 
+func unsetDebugBindAddrEnv(t *testing.T) {
+	t.Helper()
+	// Preserve the caller's environment while ensuring config tests that
+	// exercise defaults or YAML precedence do not inherit this override.
+	t.Setenv("DINGO_DEBUG_BIND_ADDR", "")
+	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
+}
+
+// unsetForgeGateEnv clears the forge-gate overrides so tests that assert the
+// built-in defaults cannot inherit a value from the caller's environment.
+// LoadConfig runs envconfig AFTER the YAML merge, so an exported
+// DINGO_FORGE_* variable silently overrides both the fixture and the default,
+// and the assertion then fails for a reason unrelated to the code under test.
+//
+// Both spellings of every forge-gate knob are cleared. LoadConfig calls
+// envconfig.Process("cardano", cfg), so the name envconfig looks up FIRST is
+// the prefixed CARDANO_DINGO_... form; the bare DINGO_... name in the
+// envconfig struct tag is only the alt name it falls back to. Guarding one
+// spelling leaves the other able to override the value under test.
+func unsetForgeGateEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
+		"CARDANO_DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
+		"DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
+		"CARDANO_DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
+		"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
+		"CARDANO_DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
+		"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
+		"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
+		"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
+	} {
+		// t.Setenv registers the restore; Unsetenv then removes it for the
+		// duration of the test, which is what envconfig must not see.
+		t.Setenv(k, "")
+		require.NoError(t, os.Unsetenv(k))
+	}
+}
+
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 	yamlContent := `
-badgerCacheSize: 8388608
-mempoolCapacity: 2097152
+plugins:
+  mempool:
+    provider: fifo
+    config:
+      capacity: 2097152
+      evictionWatermark: 0.90
+      rejectionWatermark: 0.95
+  api:
+    utxorpc:
+      provider: builtin
+      config:
+        port: 9940
 bindAddr: "127.0.0.1"
 cardanoConfig: "./cardano/preview/config.json"
 databasePath: ".dingo"
@@ -88,7 +161,6 @@ metricsPort: 8088
 privateBindAddr: "127.0.0.1"
 privatePort: 8000
 relayPort: 4000
-utxorpcPort: 9940
 databaseWorkers: 11
 databaseQueueSize: 77
 backfillBatchSize: 200
@@ -102,6 +174,19 @@ genesisBootstrap:
   enabled: false
   windowSlots: 4321
   promotionMinDiversityGroups: 4
+midnight:
+  port: 50052
+  host: "127.0.0.1"
+  cnightPolicyId: "policy1"
+  cnightAssetName: "434e49474854"
+  mappingValidatorAddress: "addr_mapping"
+  authTokenAssetName: "auth"
+  committeeCandidateAddress: "addr_candidate"
+  technicalCommitteeAddress: "addr_technical"
+  technicalCommitteePolicyId: "policy_technical"
+  councilAddress: "addr_council"
+  councilPolicyId: "policy_council"
+  permissionedCandidatePolicy: "policy_permissioned"
 mithril:
   enabled: false
   aggregatorUrl: "https://mithril.example.net"
@@ -117,6 +202,9 @@ mithril:
 
 	t.Setenv("DINGO_FORGE_SYNC_TOLERANCE_SLOTS", "321")
 	t.Setenv("DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS", "654")
+	t.Setenv("DINGO_FORGE_EB_MAX_TX_REFS", "777")
+	t.Setenv("DINGO_FORGE_EB_MAX_BYTES", "888888")
+	t.Setenv("DINGO_FORGE_EB_SELECTION_RESERVE", "750ms")
 
 	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
 	if err != nil {
@@ -124,30 +212,32 @@ mithril:
 	}
 	defer os.Remove(tmpFile)
 
+	expectedPlugins := defaultPluginsConfig()
+	expectedPlugins.Mempool.Config["capacity"] = 2097152
+	expectedPlugins.Mempool.Config["evictionWatermark"] = 0.90
+	expectedPlugins.Mempool.Config["rejectionWatermark"] = 0.95
+	expectedPlugins.API.Utxorpc.Config["port"] = 9940
 	expected := &Config{
-		MempoolCapacity:      2097152,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
+		Plugins:              expectedPlugins,
 		BindAddr:             "127.0.0.1",
 		CardanoConfig:        "./cardano/preview/config.json",
 		DatabasePath:         ".dingo",
 		SocketPath:           "env.socket",
 		IntersectTip:         true,
-		ValidateHistorical:   false,
+		ValidateHistorical:   true,
+		StrictUtxoValidation: true,
 		Network:              "preview",
 		MetricsPort:          8088,
+		HealthPort:           DefaultHealthPort,
+		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
+		DebugBindAddr:        DefaultDebugBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          8000,
 		RelayPort:            4000,
-		UtxorpcPort:          9940, // explicit override from YAML
 		CORSAllowedOrigins:   []string{"*"},
-		BlockfrostPort:       3000, // default
-		MeshPort:             8080, // default
 		Topology:             "",
 		TlsCertFilePath:      "cert1.pem",
 		TlsKeyFilePath:       "key1.pem",
-		BlobPlugin:           DefaultBlobPlugin,
-		MetadataPlugin:       DefaultMetadataPlugin,
 		RunMode:              RunModeServe,
 		StartEra:             StartEraDefault,
 		ImmutableDbPath:      "/tmp/immutable",
@@ -160,10 +250,39 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
+			// Unset in the file, so the default survives.
+			LimitOnPatienceEnabled: true,
 		},
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
+		HistoryExpiry: DefaultHistoryExpiryConfig(),
+		KoiosParity:   DefaultKoiosParityConfig(),
+		Midnight: MidnightConfig{
+			Port:                        50052,
+			Host:                        "127.0.0.1",
+			CNightPolicyID:              "policy1",
+			CNightAssetName:             "434e49474854",
+			MappingValidatorAddress:     "addr_mapping",
+			AuthTokenAssetName:          "auth",
+			CommitteeCandidateAddress:   "addr_candidate",
+			TechnicalCommitteeAddress:   "addr_technical",
+			TechnicalCommitteePolicyID:  "policy_technical",
+			CouncilAddress:              "addr_council",
+			CouncilPolicyID:             "policy_council",
+			PermissionedCandidatePolicy: "policy_permissioned",
+		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
+		// These come from the globalConfig clone seeded by resetGlobalConfig,
+		// not from ApplyDefaults: this test never calls it, and LoadConfig
+		// only parses and merges. Both staleness bounds are 0 there because
+		// 0 means "disabled" for them rather than "unset".
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		ValidateForgedBlock:                true,
+		ForgeEBMaxTxRefs:                   forgeEBCapDefault(777),
+		ForgeEBMaxBytes:                    forgeEBCapDefault(888888),
+		ForgeEBSelectionReserve:            750 * time.Millisecond,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -188,52 +307,99 @@ mithril:
 		)
 	}
 }
+
+func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
+	if got := defaultPluginsConfig().Mempool.Provider; got != "fifo" {
+		t.Fatalf("default mempool provider = %q, want fifo", got)
+	}
+}
+
+func TestLoad_DAGMempoolProvider(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dag-mempool.yaml")
+	if err := os.WriteFile(
+		tmpFile,
+		[]byte("plugins:\n  mempool:\n    provider: dag\n"),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Plugins.Mempool.Provider; got != "dag" {
+		t.Fatalf("mempool provider = %q, want dag", got)
+	}
+}
+
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
+	// LoadConfig only parses and merges; derived defaults (runMode,
+	// mempool capacity, watermarks) are filled in afterwards
+	cfg.ApplyDefaults()
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		MempoolCapacity:             1048576,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
-		BindAddr:                    "0.0.0.0",
-		CardanoConfig:               "", // Resolved by consumers using cfg.Network
-		DatabasePath:                ".dingo",
-		SocketPath:                  "dingo.socket",
-		IntersectTip:                false,
-		ValidateHistorical:          false,
-		Network:                     "preview",
-		MetricsPort:                 12798,
-		PrivateBindAddr:             "127.0.0.1",
-		PrivatePort:                 3002,
-		RelayPort:                   3001,
-		UtxorpcPort:                 9090,
-		CORSAllowedOrigins:          []string{"*"},
-		BlockfrostPort:              3000,
-		MeshPort:                    8080,
-		Topology:                    "",
-		TlsCertFilePath:             "",
-		TlsKeyFilePath:              "",
-		BlobPlugin:                  DefaultBlobPlugin,
-		MetadataPlugin:              DefaultMetadataPlugin,
-		RunMode:                     RunModeServe,
-		StartEra:                    StartEraDefault,
-		ImmutableDbPath:             "",
-		ShutdownTimeout:             DefaultShutdownTimeout,
-		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:             5,
-		DatabaseQueueSize:           50,
-		BackfillBatchSize:           100,
-		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
-		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		Plugins: func() PluginsConfig {
+			plugins := defaultPluginsConfig()
+			plugins.Mempool.Config["capacity"] = int64(1048576)
+			return plugins
+		}(),
+		BindAddr:             "0.0.0.0",
+		CardanoConfig:        "", // Resolved by consumers using cfg.Network
+		DatabasePath:         ".dingo",
+		SocketPath:           "dingo.socket",
+		IntersectTip:         false,
+		ValidateHistorical:   true,
+		StrictUtxoValidation: true,
+		Network:              "preview",
+		MetricsPort:          12798,
+		HealthPort:           DefaultHealthPort,
+		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
+		DebugBindAddr:        DefaultDebugBindAddr,
+		PrivateBindAddr:      "127.0.0.1",
+		PrivatePort:          3002,
+		RelayPort:            3001,
+		CORSAllowedOrigins:   []string{"*"},
+		Topology:             "",
+		TlsCertFilePath:      "",
+		TlsKeyFilePath:       "",
+		RunMode:              RunModeServe,
+		StartEra:             StartEraDefault,
+		ImmutableDbPath:      "",
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:      5,
+		DatabaseQueueSize:    50,
+		BackfillBatchSize:    100,
+		GenesisBootstrap:     DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:        DefaultHistoryExpiryConfig(),
+		KoiosParity:          DefaultKoiosParityConfig(),
+		Midnight: func() MidnightConfig {
+			m := midnightNetworkDefaults["preview"]
+			m.Port = DefaultMidnightConfig().Port
+			m.Host = DefaultMidnightConfig().Host
+			return m
+		}(),
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		ValidateForgedBlock:                true,
+		ForgeEBMaxTxRefs:                   forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:                    forgeEBCapDefault(DefaultForgeEBMaxBytes),
+		ForgeEBSelectionReserve:            DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -290,6 +456,7 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 		"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS",
 		"6",
 	)
+	t.Setenv("DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS", "3")
 
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -309,6 +476,12 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 		t.Fatalf(
 			"expected GenesisBootstrap.PromotionMinDiversityGroups to be 6, got %d",
 			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+		)
+	}
+	if cfg.GenesisBootstrap.CorroborationPeers != 3 {
+		t.Fatalf(
+			"expected GenesisBootstrap.CorroborationPeers to be 3, got %d",
+			cfg.GenesisBootstrap.CorroborationPeers,
 		)
 	}
 }
@@ -339,6 +512,50 @@ historyExpiry:
 		t.Fatalf(
 			"expected HistoryExpiry.Frequency to be 15m, got %s",
 			cfg.HistoryExpiry.Frequency,
+		)
+	}
+}
+
+func TestLoad_ChainsyncStrategyConfig(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	yamlContent := `
+chainsync:
+  strategy: parallel
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "chainsync-strategy.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Chainsync.Strategy != "parallel" {
+		t.Fatalf(
+			"expected Chainsync.Strategy to be parallel, got %q",
+			cfg.Chainsync.Strategy,
+		)
+	}
+}
+
+func TestLoad_ChainsyncStrategyEnvVar(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	t.Setenv("DINGO_CHAINSYNC_STRATEGY", "round-robin")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Chainsync.Strategy != "round-robin" {
+		t.Fatalf(
+			"expected Chainsync.Strategy to be round-robin, got %q",
+			cfg.Chainsync.Strategy,
 		)
 	}
 }
@@ -524,6 +741,11 @@ func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 		t.Errorf("expected RelayPort to be 3001, got %d", cfg.RelayPort)
 	}
 
+	// Topology is resolved separately from LoadConfig, once the merged
+	// configuration is final (see cmd/dingo)
+	if _, err := LoadTopologyConfig(); err != nil {
+		t.Fatalf("failed to load topology: %v", err)
+	}
 	topologyConfig := GetTopologyConfig()
 	if topologyConfig.PeerSnapshotFile != "peer-snapshot.json" {
 		t.Fatalf(
@@ -609,7 +831,13 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_WatermarkValidation(t *testing.T) {
+// TestWatermarkDefaultingAndValidation covers the post-merge pipeline
+// for the mempool watermarks: ApplyDefaults fills unset values while
+// preserving an explicit zero eviction watermark, and validate rejects
+// out-of-range values. LoadConfig itself no longer
+// judges watermark values, so a CLI flag can still override a bad YAML
+// value before validation.
+func TestWatermarkDefaultingAndValidation(t *testing.T) {
 	tests := []struct {
 		name       string
 		eviction   float64
@@ -618,13 +846,13 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 		errContain string
 	}{
 		{
-			name:      "defaults when both zero",
+			name:      "defaults rejection when both zero",
 			eviction:  0,
 			rejection: 0,
 			wantErr:   false,
 		},
 		{
-			name:      "default eviction when zero with explicit rejection",
+			name:      "preserves disabled eviction with explicit rejection",
 			eviction:  0,
 			rejection: 0.95,
 			wantErr:   false,
@@ -643,7 +871,13 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 		},
 		{
 			name:      "rejection at exactly 1.0",
-			eviction:  0.90,
+			eviction:  0.5,
+			rejection: 1.0,
+			wantErr:   false,
+		},
+		{
+			name:      "eviction disabled",
+			eviction:  0.0,
 			rejection: 1.0,
 			wantErr:   false,
 		},
@@ -652,28 +886,28 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 			eviction:   -0.1,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:       "rejection negative",
-			eviction:   0.90,
+			eviction:   0.0,
 			rejection:  -0.5,
 			wantErr:    true,
-			errContain: "invalid rejectionWatermark",
+			errContain: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name:       "eviction above 1",
 			eviction:   1.5,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:       "rejection above 1",
 			eviction:   0.90,
 			rejection:  1.1,
 			wantErr:    true,
-			errContain: "invalid rejectionWatermark",
+			errContain: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name:       "eviction equals rejection",
@@ -694,18 +928,23 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 			eviction:   1.0,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetGlobalConfig()
-			globalConfig.EvictionWatermark = tt.eviction
-			globalConfig.RejectionWatermark = tt.rejection
+			globalConfig.Plugins.Mempool.Config["evictionWatermark"] = tt.eviction
+			globalConfig.Plugins.Mempool.Config["rejectionWatermark"] = tt.rejection
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			cfg.ApplyDefaults()
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf(
@@ -734,6 +973,20 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsPreservesExplicitEvictionDisable(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.Plugins.Mempool.Config["evictionWatermark"] = 0.0
+	globalConfig.Plugins.Mempool.Config["rejectionWatermark"] = 1.0
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	_, evictionWatermark, rejectionWatermark := cfg.MempoolSettings()
+	assert.Zero(t, evictionWatermark)
+	assert.Equal(t, 1.0, rejectionWatermark)
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
 func TestLoad_DatabaseSection(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
@@ -759,24 +1012,85 @@ database:
 	}
 	defer os.Remove(tmpFile)
 
-	cfg, err := LoadConfig(tmpFile)
-	if err != nil {
-		t.Fatalf("failed to load config: %v", err)
-	}
-
-	if cfg.BlobPlugin != "badger" {
-		t.Errorf("expected BlobPlugin to be 'badger', got %q", cfg.BlobPlugin)
-	}
-
-	if cfg.MetadataPlugin != "sqlite" {
-		t.Errorf(
-			"expected MetadataPlugin to be 'sqlite', got %q",
-			cfg.MetadataPlugin,
-		)
+	_, err = LoadConfig(tmpFile)
+	if err == nil ||
+		!strings.Contains(err.Error(), "field database not found") {
+		t.Fatalf("expected legacy database section rejection, got %v", err)
 	}
 }
 
-func TestLoadConfig_NetworkNameValidation(t *testing.T) {
+// Database plugin config must fail loudly when YAML values have the wrong shape.
+// These cases guard against silently falling back to zero-value plugin config.
+func TestLoad_DatabaseSectionInvalidPluginConfigTypes(t *testing.T) {
+	tests := []struct {
+		name       string
+		yaml       string
+		errContain string
+	}{
+		{
+			name: "blob plugin selector is not string",
+			yaml: `
+database:
+  blob:
+    plugin: 123
+`,
+			errContain: "field database not found",
+		},
+		{
+			name: "metadata plugin selector is not string",
+			yaml: `
+database:
+  metadata:
+    plugin: true
+`,
+			errContain: "field database not found",
+		},
+		{
+			name: "blob plugin config is not map",
+			yaml: `
+database:
+  blob:
+    plugin: "badger"
+    badger: "/tmp/badger"
+`,
+			errContain: "field database not found",
+		},
+		{
+			name: "metadata plugin config is not map",
+			yaml: `
+database:
+  metadata:
+    plugin: "sqlite"
+    sqlite: "/tmp/test.db"
+`,
+			errContain: "field database not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetGlobalConfig()
+			tmpDir := t.TempDir()
+			tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+			if err := os.WriteFile(tmpFile, []byte(tt.yaml), 0644); err != nil {
+				t.Fatalf("failed to write config file: %v", err)
+			}
+
+			_, err := LoadConfig(tmpFile)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.errContain)
+			}
+			if !strings.Contains(err.Error(), tt.errContain) {
+				t.Fatalf(
+					"error %q should contain %q",
+					err.Error(),
+					tt.errContain,
+				)
+			}
+		})
+	}
+}
+
+func TestNetworkNameValidation(t *testing.T) {
 	validTests := []struct {
 		name    string
 		network string
@@ -800,6 +1114,13 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 		{
 			name:    "underscore name",
 			network: "test_net",
+		},
+		{
+			// An empty network must load: Validate() enforces that
+			// network or networkMagic is set, so a networkMagic-only
+			// configuration is legal at the LoadConfig layer.
+			name:    "empty network for magic-only configs",
+			network: "",
 		},
 	}
 
@@ -865,10 +1186,6 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			network: ".hidden",
 		},
 		{
-			name:    "empty string",
-			network: "",
-		},
-		{
 			name:    "hyphen prefix",
 			network: "-bad",
 		},
@@ -884,7 +1201,14 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			globalConfig.Network = tt.network
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			// LoadConfig only parses and merges; a CLI flag may still
+			// replace the network name, so the traversal guard runs in
+			// validate on the final value.
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if err == nil {
 				t.Fatal(
 					"expected error for invalid network name, got nil",
@@ -902,12 +1226,51 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_NetworkMagicOnly is a regression test for the
+// networkMagic-without-network contract: a YAML config with an empty
+// network and a custom networkMagic must survive both LoadConfig and
+// validation, since Validate() accepts either network or networkMagic.
+func TestLoadConfig_NetworkMagicOnly(t *testing.T) {
+	resetGlobalConfig()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+	yamlContent := "network: \"\"\nnetworkMagic: 42\n"
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Network != "" {
+		t.Errorf("Network = %q, want empty", cfg.Network)
+	}
+	if cfg.NetworkMagic != 42 {
+		t.Errorf("NetworkMagic = %d, want 42", cfg.NetworkMagic)
+	}
+	if err := cfg.validate(cfg.RunMode, minUnprivilegedPort); err != nil {
+		t.Errorf("validation rejected magic-only config: %v", err)
+	}
+}
+
 func TestLoad_APIPorts(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
-blockfrostPort: 8080
-utxorpcPort: 9090
-meshPort: 8081
+plugins:
+  api:
+    blockfrost:
+      provider: builtin
+      config:
+        port: 8080
+    utxorpc:
+      provider: builtin
+      config:
+        port: 9090
+    mesh:
+      provider: builtin
+      config:
+        port: 8081
 network: "preview"
 `
 
@@ -924,23 +1287,85 @@ network: "preview"
 		t.Fatalf("failed to load config: %v", err)
 	}
 
-	if cfg.BlockfrostPort != 8080 {
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 8080 {
 		t.Errorf(
-			"expected BlockfrostPort to be 8080, got %d",
-			cfg.BlockfrostPort,
+			"expected Blockfrost port to be 8080, got %d",
+			port,
 		)
 	}
-	if cfg.UtxorpcPort != 9090 {
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
-			"expected UtxorpcPort to be 9090, got %d",
-			cfg.UtxorpcPort,
+			"expected Utxorpc port to be 9090, got %d",
+			port,
 		)
 	}
-	if cfg.MeshPort != 8081 {
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8081 {
 		t.Errorf(
-			"expected MeshPort to be 8081, got %d",
-			cfg.MeshPort,
+			"expected Mesh port to be 8081, got %d",
+			port,
 		)
+	}
+}
+
+func TestLoad_APIPortCompatibilityEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCKFROST_PORT", "3100")
+	t.Setenv("DINGO_MESH_PORT", "8181")
+	t.Setenv("DINGO_UTXORPC_PORT", "9191")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 3100 {
+		t.Fatalf("Blockfrost port = %d, want 3100", port)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8181 {
+		t.Fatalf("Mesh port = %d, want 8181", port)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9191 {
+		t.Fatalf("Utxorpc port = %d, want 9191", port)
+	}
+}
+
+func TestLoad_CanonicalAPIPortEnvironmentOverridesCompatibility(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_UTXORPC_PORT", "9191")
+	t.Setenv("DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT", "9292")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9292 {
+		t.Fatalf("Utxorpc port = %d, want canonical value 9292", port)
+	}
+}
+
+func TestLoad_InvalidAPIPortCompatibilityEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_UTXORPC_PORT", "not-a-port")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	_, err := LoadConfig(configFile)
+	if err == nil || !strings.Contains(err.Error(), "DINGO_UTXORPC_PORT") {
+		t.Fatalf("expected invalid compatibility port error, got %v", err)
 	}
 }
 
@@ -952,22 +1377,336 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.BlockfrostPort != 3000 {
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 3000 {
 		t.Errorf(
 			"expected BlockfrostPort default to be 3000, got %d",
-			cfg.BlockfrostPort,
+			port,
 		)
 	}
-	if cfg.UtxorpcPort != 9090 {
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
 			"expected UtxorpcPort default to be 9090, got %d",
-			cfg.UtxorpcPort,
+			port,
 		)
 	}
-	if cfg.MeshPort != 8080 {
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8080 {
 		t.Errorf(
 			"expected MeshPort default to be 8080, got %d",
-			cfg.MeshPort,
+			port,
+		)
+	}
+}
+
+func TestLoad_MidnightConfig(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+midnight:
+  enabled: true
+  serverEnabled: true
+  reflectionEnabled: true
+  port: 50060
+  host: "127.0.0.2"
+  cnightPolicyId: "cnight-policy"
+  cnightAssetName: "434e49474854"
+  mappingValidatorAddress: "addr_mapping"
+  authTokenAssetName: "auth-token"
+  committeeCandidateAddress: "addr_candidate"
+  technicalCommitteeAddress: "addr_technical"
+  technicalCommitteePolicyId: "technical-policy"
+  councilAddress: "addr_council"
+  councilPolicyId: "council-policy"
+  permissionedCandidatePolicy: "permissioned-policy"
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-midnight.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	expected := MidnightConfig{
+		Enabled:                     true,
+		ServerEnabled:               true,
+		ReflectionEnabled:           true,
+		Port:                        50060,
+		Host:                        "127.0.0.2",
+		CNightPolicyID:              "cnight-policy",
+		CNightAssetName:             "434e49474854",
+		MappingValidatorAddress:     "addr_mapping",
+		AuthTokenAssetName:          "auth-token",
+		CommitteeCandidateAddress:   "addr_candidate",
+		TechnicalCommitteeAddress:   "addr_technical",
+		TechnicalCommitteePolicyID:  "technical-policy",
+		CouncilAddress:              "addr_council",
+		CouncilPolicyID:             "council-policy",
+		PermissionedCandidatePolicy: "permissioned-policy",
+	}
+	if cfg.Midnight != expected {
+		t.Fatalf(
+			"expected Midnight config %+v, got %+v",
+			expected,
+			cfg.Midnight,
+		)
+	}
+}
+
+func TestLoad_MidnightEnvOverridesYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_PORT", "50070")
+	t.Setenv("DINGO_MIDNIGHT_HOST", "127.0.0.3")
+	yamlContent := `
+midnight:
+  port: 50060
+  host: "127.0.0.2"
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-midnight-env.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Midnight.Port != 50070 {
+		t.Fatalf("expected env midnight port 50070, got %d", cfg.Midnight.Port)
+	}
+	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled {
+		t.Fatalf(
+			"expected environment to enable Midnight server policy: %+v",
+			cfg.Midnight,
+		)
+	}
+	if cfg.Midnight.Host != "127.0.0.3" {
+		t.Fatalf(
+			"expected env midnight host 127.0.0.3, got %q",
+			cfg.Midnight.Host,
+		)
+	}
+}
+
+func TestLoad_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_MIDNIGHT_CNIGHT_POLICY_ID", "env-policy")
+	t.Setenv("DINGO_MIDNIGHT_MAPPING_VALIDATOR_ADDRESS", "env-address")
+	yamlContent := `
+midnight:
+  cnightPolicyId: "yaml-policy"
+  mappingValidatorAddress: "yaml-address"
+network: "preprod"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-midnight-yaml-only.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Midnight.CNightPolicyID != "yaml-policy" {
+		t.Fatalf(
+			"expected YAML cnight policy to win, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.MappingValidatorAddress != "yaml-address" {
+		t.Fatalf(
+			"expected YAML mapping validator address to win, got %q",
+			cfg.Midnight.MappingValidatorAddress,
+		)
+	}
+}
+
+func TestLoad_MidnightNetworkDefaults(t *testing.T) {
+	tests := []struct {
+		network  string
+		expected MidnightConfig
+	}{
+		{
+			network:  "mainnet",
+			expected: midnightNetworkDefaults["mainnet"],
+		},
+		{
+			network:  "preview",
+			expected: midnightNetworkDefaults["preview"],
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.network, func(t *testing.T) {
+			resetGlobalConfig()
+			yamlContent := "network: \"" + tc.network + "\"\n"
+			tmpDir := t.TempDir()
+			tmpFile := filepath.Join(tmpDir, "dingo.yaml")
+			if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := LoadConfig(tmpFile)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			got := cfg.Midnight
+			// Port and Host come from DefaultMidnightConfig, not network defaults.
+			got.Port = 0
+			got.Host = ""
+			want := tc.expected
+			want.Port = 0
+			want.Host = ""
+			if got != want {
+				t.Fatalf(
+					"network %q: expected %+v, got %+v",
+					tc.network,
+					want,
+					got,
+				)
+			}
+		})
+	}
+}
+
+func TestLoad_MidnightExplicitOverridesNetworkDefault(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+network: "preview"
+midnight:
+  cnightPolicyId: "explicit-override"
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Midnight.CNightPolicyID != "explicit-override" {
+		t.Fatalf(
+			"expected explicit override, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	// Other fields should still get the network default.
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["preview"].CouncilPolicyID {
+		t.Fatalf(
+			"expected network default for CouncilPolicyID, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
+}
+
+// TestReapplyMidnightNetworkDefaults_ResumedNetwork exercises the exported
+// wrapper settingsresolve.Apply calls directly: a caller that changes
+// cfg.Network after LoadConfig/ApplyFlags have already derived Midnight
+// defaults for the old network must see every network-derived constant
+// move to the new network once ReapplyMidnightNetworkDefaults runs.
+func TestReapplyMidnightNetworkDefaults_ResumedNetwork(t *testing.T) {
+	resetGlobalConfig()
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Fatalf("expected initial network preview, got %q", cfg.Network)
+	}
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["preview"].CNightPolicyID {
+		t.Fatalf(
+			"expected preview Midnight default before resume, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	// preview sets CommitteeCandidateAddress but mainnet does not, so this
+	// also proves the stale preview value is cleared, not just left
+	// alongside a filled-in mainnet value.
+	if cfg.Midnight.CommitteeCandidateAddress == "" {
+		t.Fatal(
+			"expected preview Midnight default to set CommitteeCandidateAddress",
+		)
+	}
+
+	previousNetwork := cfg.Network
+	cfg.Network = "mainnet" // simulates a caller resuming Network late
+	ReapplyMidnightNetworkDefaults(cfg, previousNetwork)
+
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["mainnet"].CNightPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight policy default after resume, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight council policy default after resume, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
+	if cfg.Midnight.CommitteeCandidateAddress != "" {
+		t.Fatalf(
+			"expected stale preview CommitteeCandidateAddress to be cleared, got %q",
+			cfg.Midnight.CommitteeCandidateAddress,
+		)
+	}
+}
+
+// TestReapplyMidnightNetworkDefaults_PreservesExplicitYAML mirrors
+// TestApplyFlags_NetworkOverridePreservesExplicitMidnightYAML, but exercises
+// ReapplyMidnightNetworkDefaults directly rather than through ApplyFlags:
+// an operator-set Midnight field must survive a resumed network change even
+// when its value happens to equal the previous network's default (the
+// coincidental case clearMidnightNetworkDefaults must not clear).
+func TestReapplyMidnightNetworkDefaults_PreservesExplicitYAML(t *testing.T) {
+	resetGlobalConfig()
+	previewPolicy := midnightNetworkDefaults["preview"].CNightPolicyID
+	yamlContent := `
+network: "preview"
+midnight:
+  cnightPolicyId: "` + previewPolicy + `"
+`
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	previousNetwork := cfg.Network
+	cfg.Network = "mainnet" // simulates a caller resuming Network late
+	ReapplyMidnightNetworkDefaults(cfg, previousNetwork)
+
+	if cfg.Midnight.CNightPolicyID != previewPolicy {
+		t.Fatalf(
+			"expected explicit Midnight YAML policy to be preserved, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected remaining Midnight defaults to switch to mainnet, got %q",
+			cfg.Midnight.CouncilPolicyID,
 		)
 	}
 }
@@ -1052,7 +1791,10 @@ func TestLoad_StorageModeDefault(t *testing.T) {
 	}
 
 	if cfg.StorageMode != "" {
-		t.Errorf("expected StorageMode default to be empty, got %q", cfg.StorageMode)
+		t.Errorf(
+			"expected StorageMode default to be empty, got %q",
+			cfg.StorageMode,
+		)
 	}
 }
 
@@ -1076,12 +1818,12 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 		},
 		{
 			name:     "explicit value wins under leios",
-			yaml:     "runMode: \"leios\"\nmempoolCapacity: 5242880\n",
+			yaml:     "runMode: \"leios\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
 		},
 		{
 			name:     "explicit value wins under serve",
-			yaml:     "runMode: \"serve\"\nmempoolCapacity: 5242880\n",
+			yaml:     "runMode: \"serve\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
 		},
 	}
@@ -1097,10 +1839,12 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadConfig: %v", err)
 			}
-			if cfg.MempoolCapacity != tc.expected {
+			cfg.ApplyDefaults()
+			capacity, _, _ := cfg.MempoolSettings()
+			if capacity != tc.expected {
 				t.Errorf(
 					"MempoolCapacity: got %d, want %d",
-					cfg.MempoolCapacity, tc.expected,
+					capacity, tc.expected,
 				)
 			}
 		})
@@ -1114,8 +1858,6 @@ func TestLoad_WithLeiosVotingConfig(t *testing.T) {
 runMode: "leios"
 network: "preview"
 leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
-leiosVoterPublicKeys:
-  "aabbcc": "ddeeff"
 `
 
 	tmpDir := t.TempDir()
@@ -1137,19 +1879,12 @@ leiosVoterPublicKeys:
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
-	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
-		t.Errorf(
-			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
-			cfg.LeiosVoterPublicKeys,
-		)
-	}
 }
 
 func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 	resetGlobalConfig()
 
 	t.Setenv("DINGO_LEIOS_VOTE_SIGNING_KEY_FILE", "/env/leios-vote.skey")
-	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
 
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -1162,10 +1897,218 @@ func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
-	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
-		t.Errorf(
-			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
-			cfg.LeiosVoterPublicKeys,
-		)
+}
+
+func TestLoad_RejectsRetiredLeiosVoterPublicKeysYAML(t *testing.T) {
+	resetGlobalConfig()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "retired-leios-voter-keys.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(`
+runMode: "leios"
+leiosVoterPublicKeys:
+  "aabbcc": "ddeeff"
+`), 0o600))
+
+	_, err := LoadConfig(tmpFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "field leiosVoterPublicKeys not found")
+}
+
+func TestLoad_RejectsRetiredLeiosVoterPublicKeysEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
+
+	_, err := LoadConfig("")
+	require.Error(t, err)
+	assert.Contains(
+		t,
+		err.Error(),
+		"DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported",
+	)
+}
+
+// GetConfig hands out snapshots, so nested plugin config values must be
+// duplicated. Copying only the top level would let a caller mutate a nested
+// mapping or sequence that globalConfig and every other snapshot still share.
+func TestClonePluginSelectionDeepCopiesNestedValues(t *testing.T) {
+	nestedMap := map[string]any{"inner": "original"}
+	nestedSlice := []any{"first"}
+	deeper := map[string]any{"list": []any{map[string]any{"k": "v"}}}
+	selection := hostplugin.Selection{
+		Provider: "builtin",
+		Config: map[string]any{
+			"scalar": 1,
+			"map":    nestedMap,
+			"slice":  nestedSlice,
+			"deep":   deeper,
+		},
 	}
+
+	clone := clonePluginSelection(selection)
+
+	// Mutating the clone must not reach the original.
+	clone.Config["map"].(map[string]any)["inner"] = "mutated"
+	clone.Config["slice"].([]any)[0] = "mutated"
+	clone.Config["deep"].(map[string]any)["list"].([]any)[0].(map[string]any)["k"] = "mutated"
+
+	assert.Equal(t, "original", nestedMap["inner"],
+		"nested map must not be shared with the clone")
+	assert.Equal(t, "first", nestedSlice[0],
+		"nested slice must not be shared with the clone")
+	assert.Equal(
+		t,
+		"v",
+		deeper["list"].([]any)[0].(map[string]any)["k"],
+		"deeply nested values must not be shared with the clone",
+	)
+	assert.Equal(t, 1, clone.Config["scalar"])
+}
+
+// A yaml.v2-style map[any]any value is deep-copied as well.
+func TestDeepCopyPluginValueHandlesInterfaceKeyedMaps(t *testing.T) {
+	original := map[any]any{"key": map[any]any{"inner": "original"}}
+
+	clone, ok := deepCopyPluginValue(original).(map[any]any)
+	require.True(t, ok)
+	inner, ok := clone["key"].(map[any]any)
+	require.True(t, ok)
+	inner["inner"] = "mutated"
+
+	assert.Equal(
+		t,
+		"original",
+		original["key"].(map[any]any)["inner"],
+	)
+}
+
+// GetConfig must not return a snapshot that shares nested plugin config values
+// with globalConfig.
+func TestGetConfigSnapshotDoesNotShareNestedPluginConfig(t *testing.T) {
+	configMu.Lock()
+	prev := globalConfig
+	globalConfig = cloneConfig(prev)
+	globalConfig.Plugins.Mempool.Config = map[string]any{
+		"nested": map[string]any{"inner": "original"},
+	}
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		globalConfig = prev
+		configMu.Unlock()
+	})
+
+	snapshot := GetConfig()
+	require.NotNil(t, snapshot)
+	nested, ok := snapshot.Plugins.Mempool.Config["nested"].(map[string]any)
+	require.True(t, ok)
+	nested["inner"] = "mutated"
+
+	configMu.RLock()
+	defer configMu.RUnlock()
+	assert.Equal(
+		t,
+		"original",
+		globalConfig.Plugins.Mempool.Config["nested"].(map[string]any)["inner"],
+		"mutating a snapshot must not reach globalConfig",
+	)
+}
+
+// exampleConfigPath returns the path to the repo's bundled
+// dingo.yaml.example, independent of the working directory the test binary
+// runs from.
+func exampleConfigPath() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(
+		filepath.Dir(thisFile),
+		"..",
+		"..",
+		"dingo.yaml.example",
+	)
+}
+
+// TestLoad_ExampleConfigParses guards against regressions like #3169, where
+// a single mis-indented line in dingo.yaml.example (the default config
+// shipped to operators) produced a YAML syntax error on startup with no
+// indication of which field was affected. Any change to dingo.yaml.example
+// must keep it loadable as-is.
+func TestLoad_ExampleConfigParses(t *testing.T) {
+	resetGlobalConfig()
+
+	path := exampleConfigPath()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("dingo.yaml.example not found at %s: %v", path, err)
+	}
+
+	cfg, err := LoadConfig(path)
+	require.NoError(
+		t,
+		err,
+		"dingo.yaml.example must parse cleanly as shipped",
+	)
+	require.NotNil(t, cfg)
+}
+
+// TestLoad_ParseErrorIncludesConfigFilePath guards the error-message
+// behavior introduced alongside TestLoad_ExampleConfigParses: every parse
+// failure path in LoadConfig must name the resolved config file so a
+// regression that drops configFile from one of the error wraps is caught.
+func TestLoad_ParseErrorIncludesConfigFilePath(t *testing.T) {
+	t.Run("invalid YAML syntax", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-syntax.yaml")
+		yamlContent := "network: mainnet\n  badIndent: true\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section decode error", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-wrapped-decode.yaml")
+		yamlContent := `
+config:
+  network: mainnet
+  unknownField: true
+`
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section is nil", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "nil-config-section.yaml")
+		yamlContent := "config:\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		expected := fmt.Sprintf(
+			"config section in %s must be a mapping",
+			tmpFile,
+		)
+		assert.Equal(t, expected, err.Error())
+	})
 }

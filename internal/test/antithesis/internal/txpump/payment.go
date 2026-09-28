@@ -21,11 +21,15 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
-// conwayEraID is the Conway era ID (6) used in the LocalTxSubmission
-// MsgSubmitTx message. Babbage is era 5; Conway is era 6.
-const conwayEraID uint16 = 6
+const (
+	// Babbage is era 5, Conway is era 6, and Dijkstra is era 7.
+	conwayEraID   uint16 = 6
+	dijkstraEraID uint16 = 7
+)
 
 // MinFee is a fixed minimum fee applied to every transaction.  In a real node
 // the fee is computed precisely; here we use a conservative constant so that
@@ -56,11 +60,11 @@ type txBodyOutput struct {
 // txBody maps to the Conway transaction body (CBOR map).
 // Only the fields needed for a simple payment are populated.
 //
-// Key 0 = inputs  (set of transaction inputs)
+// Key 0 = inputs  (CBOR tag-258 set of transaction inputs)
 // Key 1 = outputs (array of transaction outputs)
 // Key 2 = fee
 type txBody struct {
-	Inputs  []txBodyInput  `cbor:"0,keyasint"`
+	Inputs  cbor.Set       `cbor:"0,keyasint"`
 	Outputs []txBodyOutput `cbor:"1,keyasint"`
 	Fee     uint64         `cbor:"2,keyasint"`
 }
@@ -96,21 +100,27 @@ type PaymentParams struct {
 
 	// Change is the lovelace amount to return to ChangeAddr.
 	Change uint64
+
+	// WitnessKeys holds the Ed25519 signing keys to include as VKey witnesses.
+	// When non-empty, the transaction body is signed and witnesses are included.
+	WitnessKeys []*UTxOKey
 }
 
 // BuildPayment constructs a minimal CBOR-encoded Conway transaction from the
-// provided payment parameters.  The transaction has no witnesses so it will be
-// rejected by any node that validates signatures, but it exercises the
-// submission path end-to-end for testing purposes.
-func BuildPayment(p PaymentParams) ([]byte, error) {
+// provided payment parameters.  Returns the encoded transaction and the
+// Cardano transaction ID (blake2b-256 of the serialised transaction body),
+// which is the hash a node will use to identify outputs of this transaction.
+func BuildPayment(p PaymentParams) (txBytes []byte, txID string, err error) {
 	if len(p.Inputs) == 0 {
-		return nil, errors.New("payment: at least one input required")
+		return nil, "", errors.New("payment: at least one input required")
 	}
 	if len(p.ToAddr) == 0 {
-		return nil, errors.New("payment: recipient address must not be empty")
+		return nil, "", errors.New(
+			"payment: recipient address must not be empty",
+		)
 	}
 	if p.SendAmount < minSendAmount {
-		return nil, fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"payment: send amount %d is below minimum %d",
 			p.SendAmount, minSendAmount,
 		)
@@ -119,27 +129,27 @@ func BuildPayment(p PaymentParams) ([]byte, error) {
 	inputs := make([]txBodyInput, 0, len(p.Inputs))
 	var totalInput uint64
 	for _, u := range p.Inputs {
-		hashBytes, err := hex.DecodeString(u.TxHash)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"payment: invalid tx hash %q: %w", u.TxHash, err,
+		hashBytes, decErr := hex.DecodeString(u.TxHash)
+		if decErr != nil {
+			return nil, "", fmt.Errorf(
+				"payment: invalid tx hash %q: %w", u.TxHash, decErr,
 			)
 		}
 		if len(hashBytes) != 32 {
-			return nil, fmt.Errorf(
+			return nil, "", fmt.Errorf(
 				"payment: tx hash %q must be exactly 32 bytes, got %d",
 				u.TxHash, len(hashBytes),
 			)
 		}
 		inputs = append(inputs, txBodyInput{Hash: hashBytes, Idx: u.Index})
 		if u.Amount > math.MaxUint64-totalInput {
-			return nil, errors.New("payment: total input overflow")
+			return nil, "", errors.New("payment: total input overflow")
 		}
 		totalInput += u.Amount
 	}
 
 	if p.Change > 0 && len(p.ChangeAddr) == 0 {
-		return nil, errors.New(
+		return nil, "", errors.New(
 			"payment: non-zero change requires a change address",
 		)
 	}
@@ -155,37 +165,105 @@ func BuildPayment(p PaymentParams) ([]byte, error) {
 	}
 	expectedTotal := p.SendAmount
 	if p.Change > math.MaxUint64-expectedTotal {
-		return nil, errors.New("payment: outputs total overflow")
+		return nil, "", errors.New("payment: outputs total overflow")
 	}
 	expectedTotal += p.Change
 	if MinFee > math.MaxUint64-expectedTotal {
-		return nil, errors.New("payment: outputs plus fee overflow")
+		return nil, "", errors.New("payment: outputs plus fee overflow")
 	}
 	expectedTotal += MinFee
 	if totalInput != expectedTotal {
-		return nil, fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"payment: inputs total %d does not equal outputs+fee %d",
 			totalInput,
 			expectedTotal,
 		)
 	}
 
+	inputSet := make(cbor.Set, len(inputs))
+	for i, inp := range inputs {
+		inputSet[i] = inp
+	}
 	body := txBody{
-		Inputs:  inputs,
+		Inputs:  inputSet,
 		Outputs: outputs,
 		Fee:     MinFee,
 	}
 
+	// Always encode the body so we can compute the Cardano transaction ID
+	// (blake2b-256 of the serialised body) and optionally sign it.
+	bodyBytes, encErr := cbor.Encode(body)
+	if encErr != nil {
+		return nil, "", fmt.Errorf("payment: body encoding failed: %w", encErr)
+	}
+	txID = common.Blake2b256Hash(bodyBytes).String()
+
+	var witness map[any]any
+	if len(p.WitnessKeys) > 0 {
+		witness = BuildWitnessMap(bodyBytes, p.WitnessKeys...)
+	} else {
+		witness = map[any]any{}
+	}
+
 	tx := conwayTx{
 		Body:    body,
-		Witness: map[any]any{},
+		Witness: witness,
 		IsValid: true,
 		AuxData: nil,
 	}
 
-	txBytes, err := cbor.Encode(tx)
+	txBytes, err = cbor.Encode(tx)
 	if err != nil {
-		return nil, fmt.Errorf("payment: CBOR encoding failed: %w", err)
+		return nil, "", fmt.Errorf("payment: CBOR encoding failed: %w", err)
 	}
-	return txBytes, nil
+	return txBytes, txID, nil
+}
+
+// BuildDijkstraPayment builds a Dijkstra transaction from the same minimal
+// payment body and witnesses as BuildPayment. Dijkstra transactions omit
+// Conway's isValid element from their top-level CBOR array.
+func BuildDijkstraPayment(p PaymentParams) ([]byte, string, error) {
+	conwayTxBytes, txID, err := BuildPayment(p)
+	if err != nil {
+		return nil, "", err
+	}
+	var conwayParts []cbor.RawMessage
+	if _, err := cbor.Decode(conwayTxBytes, &conwayParts); err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Conway transaction decode failed: %w", err,
+		)
+	}
+	if len(conwayParts) != 4 {
+		return nil, "", fmt.Errorf(
+			"payment: expected 4 Conway transaction elements, got %d",
+			len(conwayParts),
+		)
+	}
+
+	var tx dijkstra.DijkstraTransaction
+	if _, err := cbor.Decode(conwayParts[0], &tx.Body); err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra body decode failed: %w", err,
+		)
+	}
+	if _, err := cbor.Decode(conwayParts[1], &tx.WitnessSet); err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra witness decode failed: %w", err,
+		)
+	}
+	tx.TxIsValid = true
+	txBytes, err := cbor.Encode(&tx)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra transaction encoding failed: %w", err,
+		)
+	}
+	if got := tx.Id().String(); got != txID {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra transaction ID %s differs from body ID %s",
+			got,
+			txID,
+		)
+	}
+	return txBytes, txID, nil
 }

@@ -40,9 +40,8 @@ type VerifiedVote struct {
 // aggregated -- including an unverified signature would silently produce a
 // certificate that fails verification.
 //
-// NOTE: the Dijkstra block's leios_cert slot is an empty placeholder in
-// gouroboros v0.180.0, so certificates built here are not yet embedded in
-// blocks; this is the aggregation path for when the CDDL lands.
+// NOTE: certificates built here are not yet embedded in forged blocks; this is
+// the aggregation path consumed by future forge-loop certificate integration.
 func BuildEbCertificate(
 	slotNo uint64,
 	ebHash lcommon.Blake2b256,
@@ -104,6 +103,13 @@ func BuildEbCertificate(
 // signature. sigChecked reports whether the signature was verified; it is
 // false when one or more signer public keys are unknown (lenient mode,
 // pending CIP-0164 key registration).
+//
+// Callers: sigChecked=false means "quorum met, signature not confirmed,"
+// not "invalid" -- but nothing here enforces that a caller checks it. This
+// function has no production caller today, so getting that distinction
+// wrong currently costs nothing; the first one added should either use a
+// named result type or treat !sigChecked as a hard failure explicitly,
+// since a bool return is easy to drop on the floor.
 func ValidateEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	committee *Committee,
@@ -164,6 +170,80 @@ func ValidateEbCertificate(
 	if err := VerifyAggregateSignature(
 		signerPubs,
 		msg,
+		cert.AggregatedSignature,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ValidatePrototypeEbCertificate validates a Musashi prototype certificate.
+// Prototype vote signatures cover the announcing ranking-block hash rather
+// than the legacy slot-plus-EB-hash message. Like ValidateEbCertificate,
+// sigChecked reports whether the aggregate signature was verified; it is
+// false when one or more signers have no resolvable key (a keyless
+// committee seat, or a key registered on-chain that this call was not
+// given -- registry here is deliberately limited to private-harness keys,
+// not the on-chain resolution VoteManager performs). See
+// ValidateEbCertificate's doc comment for the same caveat about callers
+// needing to check sigChecked -- nothing here enforces that they do.
+func ValidatePrototypeEbCertificate(
+	cert *lcommon.LeiosEbCertificate,
+	announcingRbHash lcommon.Blake2b256,
+	committee *Committee,
+	quorumStakeThreshold *big.Rat,
+	registry *VoterRegistry,
+) (sigChecked bool, err error) {
+	if cert == nil {
+		return false, errors.New("nil certificate")
+	}
+	if committee == nil {
+		return false, errors.New("nil committee")
+	}
+	if err := cert.Validate(committee.Size()); err != nil {
+		return false, err
+	}
+	var signerStake uint64
+	signerPubs := make([]*bls12381.G2Affine, 0, len(committee.Members))
+	allKeysKnown := true
+	for _, member := range committee.Members {
+		if !cert.Signer(member.VoterId) {
+			continue
+		}
+		signerStake += member.Stake
+		var pub *bls12381.G2Affine
+		if registry != nil {
+			pub, _ = registry.PublicKeyFor(member.PoolKeyHash)
+		}
+		if pub == nil {
+			allKeysKnown = false
+			continue
+		}
+		signerPubs = append(signerPubs, pub)
+	}
+	quorumMet, err := MeetsStakeQuorum(
+		signerStake,
+		committee.TotalActiveStake,
+		quorumStakeThreshold,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !quorumMet {
+		return false, fmt.Errorf(
+			"%w: signer stake %d of total active stake %d below threshold %s",
+			ErrQuorumNotMet,
+			signerStake,
+			committee.TotalActiveStake,
+			quorumStakeThreshold.String(),
+		)
+	}
+	if !allKeysKnown {
+		return false, nil
+	}
+	if err := VerifyAggregateSignature(
+		signerPubs,
+		PrototypeVoteMessageBytes(announcingRbHash),
 		cert.AggregatedSignature,
 	); err != nil {
 		return false, err

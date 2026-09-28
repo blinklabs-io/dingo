@@ -16,24 +16,16 @@ package models
 
 type PParams struct {
 	Cbor      []byte
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"index"`
+	ID        uint
+	AddedSlot uint64
 	Epoch     uint64
 	EraId     uint
-}
-
-func (PParams) TableName() string {
-	return "pparams"
 }
 
 type PParamUpdate struct {
 	GenesisHash []byte
 	Cbor        []byte
-	ID          uint   `gorm:"primarykey"`
-	AddedSlot   uint64 `gorm:"index"`
+	ID          uint
+	AddedSlot   uint64
 	Epoch       uint64
-}
-
-func (PParamUpdate) TableName() string {
-	return "pparam_update"
 }

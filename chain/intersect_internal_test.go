@@ -23,18 +23,19 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
-	db, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 
 	persistedBlock := models.Block{
 		ID:     initialBlockIndex,
@@ -65,13 +66,13 @@ func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
 }
 
 func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
-	db, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 
 	var prevHash []byte
 	for slot := uint64(1); slot <= 40; slot++ {

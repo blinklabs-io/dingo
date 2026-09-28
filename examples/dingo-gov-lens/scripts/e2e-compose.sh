@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${ROOT_DIR}"
+EXAMPLES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${EXAMPLES_DIR}"
 
 POSTGRES_DB="${POSTGRES_DB:-dingo_metadata}"
 POSTGRES_USER="${POSTGRES_USER:-dingo}"
-APP_PORT="${APP_PORT:-8088}"
+GOV_LENS_PORT="${GOV_LENS_PORT:-${APP_PORT:-8088}}"
 
 # dingo waits for the one-shot dingo-sync job to complete successfully before
 # starting `dingo serve`, so a single `up` brings the whole stack up in order.
-docker compose up -d
+docker compose up -d postgres dingo-sync dingo gov-lens
 
 for _ in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" >/tmp/dingo-gov-lens-status.json; then
+  if curl -fsS "http://127.0.0.1:${GOV_LENS_PORT}/api/status" >/tmp/dingo-gov-lens-status.json; then
     break
   fi
   sleep 2
 done
 
-curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" | jq .
+curl -fsS "http://127.0.0.1:${GOV_LENS_PORT}/api/status" | jq .
 
 docker compose exec -T postgres psql \
   --username "${POSTGRES_USER}" \

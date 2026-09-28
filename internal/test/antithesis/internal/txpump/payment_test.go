@@ -15,8 +15,13 @@
 package txpump
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,16 +53,52 @@ func validParams() PaymentParams {
 }
 
 func TestBuildPayment_Success(t *testing.T) {
-	txBytes, err := BuildPayment(validParams())
+	txBytes, _, err := BuildPayment(validParams())
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes, "encoded transaction should not be empty")
 	requireConwayDecode(t, txBytes)
 }
 
+func TestBuildDijkstraPayment_RoundTripsAsDijkstra(t *testing.T) {
+	seed := bytes.Repeat([]byte{0x42}, ed25519.SeedSize)
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	params := validParams()
+	params.WitnessKeys = []*UTxOKey{{
+		VKey:    privateKey.Public().(ed25519.PublicKey),
+		SKey:    seed,
+		Address: sampleAddr,
+	}}
+
+	txBytes, txID, err := BuildDijkstraPayment(params)
+	require.NoError(t, err)
+
+	var tx dijkstra.DijkstraTransaction
+	_, err = cbor.Decode(txBytes, &tx)
+	require.NoError(t, err)
+	require.Equal(t, txID, tx.Id().String())
+	require.Len(t, tx.Produced(), 2)
+	witnesses := tx.WitnessSet.VkeyWitnesses.Items()
+	require.Len(t, witnesses, 1)
+	bodyHash := tx.Id()
+	assert.True(
+		t,
+		ed25519.Verify(
+			witnesses[0].Vkey,
+			bodyHash[:],
+			witnesses[0].Signature,
+		),
+		"Dijkstra body hash must retain the signed Conway-compatible body bytes",
+	)
+
+	parsed, err := ledger.NewTransactionFromCbor(uint(dijkstraEraID), txBytes)
+	require.NoError(t, err)
+	require.Equal(t, txID, parsed.Hash().String())
+}
+
 func TestBuildPayment_NoInputs(t *testing.T) {
 	p := validParams()
 	p.Inputs = nil
-	_, err := BuildPayment(p)
+	_, _, err := BuildPayment(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "input")
 }
@@ -65,7 +106,7 @@ func TestBuildPayment_NoInputs(t *testing.T) {
 func TestBuildPayment_EmptyToAddr(t *testing.T) {
 	p := validParams()
 	p.ToAddr = nil
-	_, err := BuildPayment(p)
+	_, _, err := BuildPayment(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "address")
 }
@@ -73,7 +114,7 @@ func TestBuildPayment_EmptyToAddr(t *testing.T) {
 func TestBuildPayment_SendAmountBelowMinimum(t *testing.T) {
 	p := validParams()
 	p.SendAmount = minSendAmount - 1
-	_, err := BuildPayment(p)
+	_, _, err := BuildPayment(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "minimum")
 }
@@ -81,7 +122,7 @@ func TestBuildPayment_SendAmountBelowMinimum(t *testing.T) {
 func TestBuildPayment_InvalidTxHash(t *testing.T) {
 	p := validParams()
 	p.Inputs[0].TxHash = "not-hex!"
-	_, err := BuildPayment(p)
+	_, _, err := BuildPayment(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tx hash")
 }
@@ -91,7 +132,7 @@ func TestBuildPayment_NoChange(t *testing.T) {
 	p := validParams()
 	p.SendAmount = 9_800_000
 	p.Change = 0
-	txBytes, err := BuildPayment(p)
+	txBytes, _, err := BuildPayment(p)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
 	requireConwayDecode(t, txBytes)
@@ -100,11 +141,12 @@ func TestBuildPayment_NoChange(t *testing.T) {
 func TestBuildPayment_IsDeterministic(t *testing.T) {
 	// Two calls with identical params must produce identical bytes.
 	p := validParams()
-	a, err := BuildPayment(p)
+	a, aID, err := BuildPayment(p)
 	require.NoError(t, err)
-	b, err := BuildPayment(p)
+	b, bID, err := BuildPayment(p)
 	require.NoError(t, err)
 	assert.Equal(t, a, b, "BuildPayment must be deterministic")
+	assert.Equal(t, aID, bID, "TxID must be deterministic")
 }
 
 func TestBuildPayment_MultipleInputs(t *testing.T) {
@@ -118,7 +160,7 @@ func TestBuildPayment_MultipleInputs(t *testing.T) {
 		SendAmount: 5_000_000,
 		Change:     800_000,
 	}
-	txBytes, err := BuildPayment(p)
+	txBytes, _, err := BuildPayment(p)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
 	requireConwayDecode(t, txBytes)
@@ -128,7 +170,7 @@ func TestBuildPayment_MismatchedTotals(t *testing.T) {
 	p := validParams()
 	p.Change = 4_700_000
 
-	_, err := BuildPayment(p)
+	_, _, err := BuildPayment(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not equal outputs+fee")
 }

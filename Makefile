@@ -5,6 +5,10 @@ ROOT_DIR=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 # worktrees so sibling checkouts do not affect formatting or rebuild inputs.
 GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name '*.go' -print)
 
+# Gather every Go module directory. Nested modules have their own go.mod and
+# are therefore outside the root module's ./..., so they need their own run.
+GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.claude' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
+
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 
@@ -19,6 +23,11 @@ PROTOC_ARCH=$(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch_64,$(if $(filter x86
 PROTOC_DIR=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH)
 PROTOC_ZIP=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH).zip
 PROTOC=$(PROTOC_DIR)/bin/protoc
+SQLC_VERSION=v1.31.1
+SQLC=go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+# The scanner floats along with the advisory database it reads; a pin parks a
+# new advisory behind a stale version instead of forcing it to be fixed.
+GOVULNCHECK=go run golang.org/x/vuln/cmd/govulncheck@latest
 PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
 PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
 PROTOC_SHA256_linux_aarch_64=4a802ed23d70f7bad7eb19e5a3e724b3aa967250d572cadfd537c1ba939aee6a
@@ -29,8 +38,17 @@ PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
+BUILD_TAGS ?= dingo_extra_plugins
+CGO_ENABLED ?= 0
+GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# Cover all blinklabs-io modules dingo depends on (gouroboros, plutigo, bursa,
+# bark, ouroboros-mock, ...) without descending into third-party/stdlib deps.
+NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
+# Generated sqlc and protobuf packages are validated by their generators;
+# run modernize only against hand-written packages to avoid generator drift.
+MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help mod-tidy clean format golines lint proto test bench test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -39,15 +57,15 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # Build target
-build: $(BINARIES) ## Build the dingo binary
+build: $(BINARIES) ## Run mod-tidy, then build every command binary
 
 # Builds and installs binary in ~/.local/bin
-install: build ## Install binary to ~/.local/bin
+install: build ## Run build, then install the binaries to ~/.local/bin
 	mkdir -p $(HOME)/.local/bin
 	mv $(BINARIES) $(HOME)/.local/bin
 
-uninstall: ## Remove installed binary from ~/.local/bin
-	rm -f $(HOME)/.local/bin/$(BINARIES)
+uninstall: ## Remove installed binaries from ~/.local/bin
+	rm -f $(addprefix $(HOME)/.local/bin/,$(BINARIES))
 
 mod-tidy: ## Run go mod tidy
 	# Needed to fetch new dependencies and add them to go.mod
@@ -56,16 +74,36 @@ mod-tidy: ## Run go mod tidy
 clean: ## Remove compiled binaries
 	rm -f $(BINARIES)
 
-format: mod-tidy ## Format code and tidy go.mod
+format: mod-tidy ## Run mod-tidy, then format code
 	go fmt ./...
 	gofmt -s -w $(GO_FILES)
 
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
-lint: ## Run linters (golangci-lint + modernize)
-	golangci-lint run ./...
-	modernize ./...
+# golangci-lint covers one module per run. The loop reaches every nested
+# module. CI runs the same scopes in the `lint` jobs of
+# .github/workflows/go-test.yml and .github/workflows/publish.yml;
+# internal/docsparity's
+# TestLintCoversEveryGoModule fails until every go.mod has a step in both.
+lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
+	@for dir in $(GO_MODULE_DIRS); do \
+		echo "golangci-lint run ./... ($$dir)"; \
+		(cd $$dir && golangci-lint run ./...) || exit 1; \
+	done
+	# Test fixtures establish preconditions with testify assertions that nilaway
+	# cannot track across calls; analyze production code here.
+	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
+	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
+
+import-boundaries: ## Check reviewed package import boundaries
+	go test ./internal/architecture
+
+docs-parity: ## Check docs against go.mod, the Makefile, the DevNet compose file, and the Koios coverage matrix
+	go test ./internal/docsparity
+
+config-parity: ## Fail if the embedded network configs drift from docker-cardano-configs
+	./bin/config-parity.sh
 
 proto: $(PROTOC) ## Generate Go code from protobuf definitions
 	go build -o $(TOOLS_BIN)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
@@ -80,6 +118,15 @@ proto: $(PROTOC) ## Generate Go code from protobuf definitions
 		--go-grpc_opt=Mmidnight/proto/midnight_state.proto=$(GOMODULE)/midnight \
 		$(ROOT_DIR)/midnight/proto/midnight_state.proto
 
+sql: ## Generate typed database/sql queries with pinned sqlc
+	$(SQLC) generate
+
+sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
+	git diff --exit-code -- database/plugin/metadata/sqlstore/internal/query
+
+govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
+	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
+
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
 	test -n "$(PROTOC_SHA256)"
@@ -91,33 +138,56 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
-test: mod-tidy ## Run tests with race detection
-	go test -v -race ./...
+# -timeout matches the race-enabled CI jobs (go-test.yml's go-test (Linux,
+# race) and publish.yml's release gate) so a local run and CI cannot disagree
+# about which slow package is a hang. ./ledger alone runs 9-13 minutes here.
+test: mod-tidy ## Run mod-tidy, then all tests with race detection
+	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
 
-bench: mod-tidy ## Run benchmarks
-	go test -run=^$$ -bench=. -benchmem ./...
+test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
+	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .
 
-test-load: build ## Load test data into a fresh database
+bench: mod-tidy ## Run mod-tidy, then benchmarks
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
+
+bench-ci: mod-tidy ## Run mod-tidy, then the curated CI benchmark suite (count=10) plus a GOMAXPROCS lock-contention sweep
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockProcessingThroughput|BlockProcessingThroughputPredecoded|BlockBatchProcessingThroughput|RawBlockBatchProcessingThroughput|VerifyBlockHeader|TransactionValidation|ChainSyncFromGenesis|RealBlockProcessing|EraTransitionPerformanceRealData|TestLoad|BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipFlushOnlyPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchVerifiedHeaderDispatch|BlockfetchClientBlockMetrics|UpdateConnectionMetrics|HasInboundPeerAddress|Reconcile|PublishSubscribers|BlockMemoryUsage|HotCacheGet|HotCachePut|HotCacheGetMiss|BlockLRUCacheGet|BlockLRUCachePut|TieredCacheHotHit|CachedBlockExtract|CborOffsetEncode|CborOffsetDecode|StorageModeIngest|StorageModeIngestSteadyState)$$' -benchmem -count=10 -timeout=90m ./...
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockLRUParallelReadHeavy|BlockLRUParallelBalanced|BlockLRUParallelReadOnly|HotCacheParallelGet|TryReserveInboundSlotParallel|ConcurrentQueries|TipSnapshotReadOnly|TipSnapshotReadUnderWriter)$$' -benchmem -count=10 -cpu=1,4,8,16 -timeout=30m ./...
+
+bench-mempool-revalidation: ## Benchmark FIFO admission during normal and degenerate rebuilds
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkFIFO(AdmissionNoRevalidation|Revalidation)$$' -benchmem ./mempool
+
+bench-mempool: ## Compare FIFO and DAG mempool providers under concurrent load
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=^BenchmarkMempoolPlugins -benchmem ./mempool
+
+bench-mempool-normal: ## Compare FIFO and DAG under the normal load matrix
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=^BenchmarkMempoolPlugins$$ -benchmem ./mempool
+
+bench-mempool-degenerate: ## Compare FIFO and DAG under degenerate workloads
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=^BenchmarkMempoolPluginsDegenerate$$ -benchmem ./mempool
+
+test-load: build ## Run build, then load test data into a fresh database
 	rm -rf .dingo
-	./dingo load database/immutable/testdata
+	./internal/test/load/run-tests.sh
 
-test-load-log: build ## Load test data and capture log output
+test-load-log: build ## Run build, then load test data and capture log output
 	rm -rf .dingo dingo.log
 	./dingo load database/immutable/testdata 2>&1 | tee dingo.log
 
-test-load-profile: build ## Load test data with CPU/memory profiling
+test-load-profile: build ## Run build, then load test data with CPU/memory profiling
 	rm -rf .dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
 
-test-devnet: ## Run devnet integration tests
+test-devnet: ## Run the default all-Dingo DevNet integration tests
 	./internal/test/devnet/run-tests.sh
 
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
 $(BINARIES): mod-tidy $(GO_FILES)
-	CGO_ENABLED=0 \
+	CGO_ENABLED=$(CGO_ENABLED) \
 	go build \
+		$(GO_TAG_FLAGS) \
 		$(GO_LDFLAGS) \
 		-o $(@)$(if $(filter windows,$(GOOS)),.exe,)  \
 		./cmd/$(@)

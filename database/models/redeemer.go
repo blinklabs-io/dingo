@@ -17,14 +17,10 @@ package models
 // Redeemer represents a redeemer in the witness set
 type Redeemer struct {
 	Data          []byte
-	ID            uint `gorm:"primaryKey"`
-	TransactionID uint `gorm:"index"`
+	ID            uint
+	TransactionID uint
 	ExUnitsMemory uint64
 	ExUnitsCPU    uint64
-	Index         uint32 `gorm:"index"`
-	Tag           uint8  `gorm:"index"`
-}
-
-func (Redeemer) TableName() string {
-	return "redeemer"
+	Index         uint32
+	Tag           uint8
 }

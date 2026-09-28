@@ -19,8 +19,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // Pump orchestrates the main transaction-generation loop.
@@ -31,6 +35,11 @@ type Pump struct {
 	txlog        *TxLogger
 	genesisTime  time.Time
 	plutusLocked []UTxO
+	// Hooks keep Run orchestration tests independent of a live node.
+	dialPrimaryFn func() (*NodeClient, error)
+	runBatchFn    func(context.Context, *NodeClient, int) int
+	cooldownFn    func(context.Context) bool
+	intRangeFn    func(int, int) int
 }
 
 // NewPump creates a new Pump from the provided Config.
@@ -58,10 +67,30 @@ func NewPump(
 //  3. Submits the batch, one transaction at a time.
 //  4. Waits a random cooldown in [CooldownMin, CooldownMax] milliseconds.
 func (p *Pump) Run(ctx context.Context) error {
+	var startupTimer *time.Timer
+	var startup <-chan time.Time
+	if p.cfg.StartupTimeout > 0 {
+		startupTimer = time.NewTimer(p.cfg.StartupTimeout)
+		defer startupTimer.Stop()
+		startup = startupTimer.C
+	}
+	ready := false
+	// A healthy node can accept an N2C connection before the network's
+	// configured system start. Keep the first submission behind the genesis
+	// boundary so an accepted pre-genesis transaction is not later discarded
+	// when forging and ledger revalidation begin.
+	if err := p.waitForGenesis(ctx, startup); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-startup:
+			return fmt.Errorf(
+				"txpump readiness timeout after %s: no transaction was successfully submitted",
+				p.cfg.StartupTimeout,
+			)
 		default:
 		}
 
@@ -88,8 +117,52 @@ func (p *Pump) Run(ctx context.Context) error {
 			}
 		}
 
-		p.runBatch(ctx, client, batchSize)
+		ids := p.wallet.PendingIDs()
+		addresses := p.wallet.SigningAddresses()
+		if len(addresses) > 0 {
+			snapshot, presence, reconcileErr := client.ReconcileWallet(
+				addresses,
+				ids,
+			)
+			if reconcileErr != nil {
+				p.logger.Warn(
+					"wallet reconciliation failed; retaining wallet state",
+					"err",
+					reconcileErr,
+				)
+				client.Close() //nolint:errcheck // best-effort close
+				if !p.cooldown(ctx) {
+					return ctx.Err()
+				}
+				continue
+			}
+			p.wallet.ReconcileSnapshot(snapshot, presence)
+		}
+		submitted := p.runBatch(ctx, client, batchSize)
 		client.Close() //nolint:errcheck // best-effort close
+		if submitted > 0 && !ready {
+			ready = true
+			stopStartupTimeout(&startupTimer, &startup)
+			p.logger.Info(
+				"txpump ready",
+				"workload_types", p.cfg.Types,
+				"submitted", submitted,
+			)
+			if p.txlog != nil {
+				if logErr := p.txlog.Log(TxLog{
+					Event:         "ready",
+					Status:        "ready",
+					NodeAddr:      client.Addr(),
+					WorkloadTypes: append([]string(nil), p.cfg.Types...),
+				}); logErr != nil {
+					p.logger.Error(
+						"txlog readiness write failed",
+						"err",
+						logErr,
+					)
+				}
+			}
+		}
 
 		if !p.cooldown(ctx) {
 			return ctx.Err()
@@ -97,8 +170,48 @@ func (p *Pump) Run(ctx context.Context) error {
 	}
 }
 
+// waitForGenesis blocks transaction generation until the configured network
+// start. The startup deadline remains active while waiting, so a bad runtime
+// genesis timestamp fails readiness instead of leaving txpump hung forever.
+func (p *Pump) waitForGenesis(
+	ctx context.Context,
+	startup <-chan time.Time,
+) error {
+	delay := time.Until(p.genesisTime)
+	if delay <= 0 {
+		return nil
+	}
+	p.logger.Info("waiting for genesis start", "delay", delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-startup:
+		return fmt.Errorf(
+			"txpump readiness timeout after %s: genesis has not started",
+			p.cfg.StartupTimeout,
+		)
+	case <-timer.C:
+		return nil
+	}
+}
+
+// stopStartupTimeout disables the readiness deadline after the first
+// successful submission. The deadline only protects the pre-ready phase.
+func stopStartupTimeout(timer **time.Timer, deadline *<-chan time.Time) {
+	if *timer != nil {
+		(*timer).Stop()
+		*timer = nil
+	}
+	*deadline = nil
+}
+
 // dialPrimary connects to the primary node address.
 func (p *Pump) dialPrimary() (*NodeClient, error) {
+	if p.dialPrimaryFn != nil {
+		return p.dialPrimaryFn()
+	}
 	return NewNodeClient(p.cfg.NodeAddr, p.cfg.NetworkMagic, p.logger)
 }
 
@@ -155,12 +268,16 @@ func enabledTypes(
 	return enabled
 }
 
-// currentSlot returns the number of 1-second slots elapsed since the Pump was
-// created.  Using elapsed time (rather than Unix epoch seconds) ensures that
-// the slot counter starts near 0 and epoch gating works correctly for devnet
-// testing, where epochs are only 500 slots long.
+// currentSlot returns the number of 1-second slots elapsed since genesis.
+// Using elapsed time (rather than Unix epoch seconds) ensures that the slot
+// counter starts near 0 and epoch gating works correctly for devnet testing,
+// where epochs are only 500 slots long. Before genesis, report slot 0 rather
+// than converting a negative duration to a near-MaxUint64 slot.
 func (p *Pump) currentSlot() uint64 {
 	elapsed := time.Since(p.genesisTime)
+	if elapsed <= 0 {
+		return 0
+	}
 	return uint64(elapsed.Seconds())
 }
 
@@ -169,31 +286,43 @@ func (p *Pump) runBatch(
 	ctx context.Context,
 	client *NodeClient,
 	batchSize int,
-) {
+) int {
+	if p.runBatchFn != nil {
+		return p.runBatchFn(ctx, client, batchSize)
+	}
 	slot := p.currentSlot()
 	epoch := p.epochFromSlot(slot)
 	active := enabledTypes(p.cfg.Types, epoch, p.cfg.delegationEnabled())
 	if len(active) == 0 {
-		return
+		return 0
 	}
 
+	submitted := 0
 	for i := 0; i < batchSize; i++ {
 		select {
 		case <-ctx.Done():
-			return
+			return submitted
 		default:
 		}
 
 		txType := active[IntRange(0, len(active)-1)]
 		switch txType {
 		case "payment":
-			p.submitPayment(client, batchSize)
+			if p.submitPayment(client, batchSize) {
+				submitted++
+			}
 		case "delegation":
-			p.submitDelegation(client, batchSize)
+			if p.submitDelegation(client, batchSize) {
+				submitted++
+			}
 		case "governance":
-			p.submitGovernance(client, batchSize)
+			if p.submitGovernance(client, batchSize) {
+				submitted++
+			}
 		case "plutus":
-			p.submitPlutus(client, batchSize)
+			if p.submitPlutus(client, batchSize) {
+				submitted++
+			}
 		default:
 			p.logger.Warn(
 				"unknown tx type in config, skipping",
@@ -201,28 +330,32 @@ func (p *Pump) runBatch(
 			)
 		}
 	}
+	return submitted
 }
 
 // submitPayment builds and submits a single payment transaction.
-func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
+func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 	// Determine a send amount between minSendAmount and half the wallet balance
 	// (leaving room for fees and change).  Fall back to minSendAmount when the
 	// balance is very small.
 	balance := p.wallet.Balance()
 	maxSend := balance / 2
 	if maxSend < minSendAmount+MinFee {
-		p.logger.Warn(
+		p.logger.Debug(
 			"wallet balance too low for payment, skipping",
 			"balance_lovelace", balance,
 		)
-		return
+		return false
 	}
 
 	upper := maxSend - MinFee
 	if upper < minSendAmount {
 		upper = minSendAmount
 	}
-	sendAmount := uint64(IntRange(int(minSendAmount), int(upper))) //nolint:gosec // IntRange always returns non-negative
+	// IntRange returns a value in [minSendAmount, upper], both of which are
+	// positive here, so the result is always non-negative.
+	//nolint:gosec
+	sendAmount := uint64(IntRange(int(minSendAmount), int(upper)))
 
 	required := sendAmount + MinFee
 	inputs, change, err := p.wallet.SelectCoins(required)
@@ -232,36 +365,58 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			"required_lovelace", required,
 			"err", err,
 		)
-		return
+		return false
 	}
 
-	// Use the first input's address as a stand-in for both recipient and
-	// change.  In a real scenario these would come from key derivation.
-	// For Antithesis testing the address just needs to be syntactically valid.
+	// Collect a witness key for every distinct signing key among the inputs.
+	// SelectCoins may return UTxOs from different genesis keys; each one needs
+	// its own VKey witness or the transaction will be rejected.
+	var signingKey *UTxOKey
+	witnessKeys := make([]*UTxOKey, 0, len(inputs))
+	seenWitnessKeys := make(map[*UTxOKey]struct{}, len(inputs))
+	for _, u := range inputs {
+		if u.SigningKey != nil {
+			if signingKey == nil {
+				signingKey = u.SigningKey
+			}
+			if _, ok := seenWitnessKeys[u.SigningKey]; !ok {
+				witnessKeys = append(witnessKeys, u.SigningKey)
+				seenWitnessKeys[u.SigningKey] = struct{}{}
+			}
+		}
+	}
 	addr := deterministicAddr(inputs[0].TxHash)
+	if signingKey != nil {
+		addr = signingKey.Address
+	}
 
 	params := PaymentParams{
-		Inputs:     inputs,
-		ToAddr:     addr,
-		ChangeAddr: addr,
-		SendAmount: sendAmount,
-		Change:     change,
+		Inputs:      inputs,
+		ToAddr:      addr,
+		ChangeAddr:  addr,
+		SendAmount:  sendAmount,
+		Change:      change,
+		WitnessKeys: witnessKeys,
 	}
 
-	txBytes, err := BuildPayment(params)
+	buildPayment := BuildPayment
+	eraID := conwayEraID
+	if p.cfg.TransactionEra == "dijkstra" {
+		buildPayment = BuildDijkstraPayment
+		eraID = dijkstraEraID
+	}
+	txBytes, txID, err := buildPayment(params)
 	if err != nil {
 		p.logger.Error("build payment failed", "err", err)
 		p.wallet.ReturnUTxOs(inputs)
-		return
+		return false
 	}
 
-	txID := deriveTestTxID(txBytes)
-
-	submitErr := client.SubmitTx(conwayEraID, txBytes)
+	submitErr := client.SubmitTx(eraID, txBytes)
 	entry := TxLog{
 		TxID:      txID,
 		TxType:    "payment",
-		EraID:     conwayEraID,
+		EraID:     eraID,
 		NodeAddr:  client.Addr(),
 		BatchSize: batchSize,
 	}
@@ -273,8 +428,8 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			"tx_id", txID,
 			"err", submitErr,
 		)
-		// Return inputs so future batches can reuse them.
-		p.wallet.ReturnUTxOs(inputs)
+		// Do not retry the rejected transaction. Reconciliation may restore
+		// still-unspent inputs for a later, independently constructed payment.
 	} else {
 		entry.Status = "submitted"
 		p.logger.Info(
@@ -282,10 +437,21 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			"tx_id", txID,
 			"send_lovelace", sendAmount,
 		)
-		// Return change output to wallet so future transactions can spend it.
-		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 1, Amount: change})
+		// Quarantine submitted outputs for the configured confirmation window
+		// so an early fork cannot invalidate an immediate dependency chain.
+		confirmationDelay := p.cfg.confirmationDelay()
+		outputs := make([]UTxO, 0, 2)
+		if signingKey != nil {
+			outputs = append(outputs, UTxO{TxHash: txID, Index: 0, Amount: sendAmount, SigningKey: signingKey})
 		}
+		if change > 0 {
+			changeUTxO := UTxO{TxHash: txID, Index: 1, Amount: change}
+			if signingKey != nil {
+				changeUTxO.SigningKey = signingKey
+			}
+			outputs = append(outputs, changeUTxO)
+		}
+		p.wallet.RecordAccepted(txID, inputs, outputs, confirmationDelay)
 	}
 
 	if p.txlog != nil {
@@ -293,30 +459,29 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 // submitDelegation builds and submits a single stake-delegation transaction.
-func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
+func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 	if !p.cfg.delegationEnabled() {
-		return
+		return false
 	}
 	stakeKeyHash, err := decodeConfiguredHash(
 		"TXPUMP_DELEGATION_STAKE_KEY_HASH",
 		p.cfg.DelegationStakeKeyHash,
-		28,
 	)
 	if err != nil {
 		p.logger.Error("invalid delegation stake key hash", "err", err)
-		return
+		return false
 	}
 	poolKeyHash, err := decodeConfiguredHash(
 		"TXPUMP_DELEGATION_POOL_KEY_HASH",
 		p.cfg.DelegationPoolKeyHash,
-		28,
 	)
 	if err != nil {
 		p.logger.Error("invalid delegation pool key hash", "err", err)
-		return
+		return false
 	}
 
 	required := MinFee
@@ -327,16 +492,22 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
 			"required_lovelace", required,
 			"err", err,
 		)
-		return
+		return false
 	}
 
-	changeAddr := deterministicAddr(inputs[0].TxHash)
+	changeAddr := controlledChangeAddr(inputs)
 
-	txBytes, err := BuildDelegationTx(inputs, stakeKeyHash, poolKeyHash, MinFee, changeAddr)
+	txBytes, err := BuildDelegationTx(
+		inputs,
+		stakeKeyHash,
+		poolKeyHash,
+		MinFee,
+		changeAddr,
+	)
 	if err != nil {
 		p.logger.Error("build delegation failed", "err", err)
 		p.wallet.ReturnUTxOs(inputs)
-		return
+		return false
 	}
 
 	txID := deriveTestTxID(txBytes)
@@ -356,22 +527,23 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
 	} else {
 		entry.Status = "submitted"
 		p.logger.Info("delegation tx submitted", "tx_id", txID)
-		// Return the change output to the wallet so future transactions can
-		// spend it.
+		var outputs []UTxO
 		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: change})
+			outputs = []UTxO{{TxHash: txID, Index: 0, Amount: change}}
 		}
+		p.wallet.RecordAccepted(txID, inputs, outputs, p.cfg.confirmationDelay())
 	}
 	if p.txlog != nil {
 		if logErr := p.txlog.Log(entry); logErr != nil {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 // submitGovernance builds and submits either a DRep registration or a vote
 // transaction (chosen randomly).
-func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
+func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 	// Decide the type first so we can compute the correct coin selection.
 	// DRep registration needs fee + deposit; votes only need the fee.
 	var txKind string
@@ -396,13 +568,13 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
 			"kind", txKind,
 			"err", err,
 		)
-		return
+		return false
 	}
 
 	raw, _ := hex.DecodeString(inputs[0].TxHash)
 	drepKeyHash := make([]byte, 28)
 	copy(drepKeyHash, raw)
-	changeAddr := deterministicAddr(inputs[0].TxHash)
+	changeAddr := controlledChangeAddr(inputs)
 
 	var txBytes []byte
 	var buildErr error
@@ -420,9 +592,15 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
 	}
 
 	if buildErr != nil {
-		p.logger.Error("build governance tx failed", "kind", txKind, "err", buildErr)
+		p.logger.Error(
+			"build governance tx failed",
+			"kind",
+			txKind,
+			"err",
+			buildErr,
+		)
 		p.wallet.ReturnUTxOs(inputs)
-		return
+		return false
 	}
 
 	txID := deriveTestTxID(txBytes)
@@ -447,25 +625,30 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
 	} else {
 		entry.Status = "submitted"
 		p.logger.Info("governance tx submitted", "kind", txKind, "tx_id", txID)
-		// Return the change output to the wallet so future transactions can
-		// spend it.
+		var outputs []UTxO
 		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: change})
+			outputs = []UTxO{{TxHash: txID, Index: 0, Amount: change}}
 		}
+		p.wallet.RecordAccepted(txID, inputs, outputs, p.cfg.confirmationDelay())
 	}
 	if p.txlog != nil {
 		if logErr := p.txlog.Log(entry); logErr != nil {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 // submitPlutus builds and submits either a Plutus lock or unlock transaction
 // (chosen randomly).
-func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
+func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 	txKind := "plutus_lock"
 	var lockedInput UTxO
-	if len(p.plutusLocked) > 0 && IntRange(0, 1) == 1 {
+	choose := IntRange
+	if p.intRangeFn != nil {
+		choose = p.intRangeFn
+	}
+	if len(p.plutusLocked) > 0 && choose(0, 1) == 1 {
 		txKind = "plutus_unlock"
 		var ok bool
 		lockedInput, ok = p.takeLockedPlutusUTxO()
@@ -489,7 +672,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 				"required_lovelace", required,
 				"err", err,
 			)
-			return
+			return false
 		}
 	} else {
 		inputs = []UTxO{lockedInput}
@@ -502,7 +685,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 				"fee", MinFee,
 			)
 			p.addLockedPlutusUTxO(lockedInput)
-			return
+			return false
 		}
 		change = lockedInput.Amount - MinFee
 	}
@@ -510,7 +693,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 	script := alwaysSucceedsScript()
 	h := sha256.Sum256(script)
 	scriptHash := h[:28]
-	changeAddr := deterministicAddr(inputs[0].TxHash)
+	changeAddr := controlledChangeAddr(inputs)
 
 	var txBytes []byte
 	var buildErr error
@@ -526,13 +709,19 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 	}
 
 	if buildErr != nil {
-		p.logger.Error("build plutus tx failed", "kind", txKind, "err", buildErr)
+		p.logger.Error(
+			"build plutus tx failed",
+			"kind",
+			txKind,
+			"err",
+			buildErr,
+		)
 		if txKind == "plutus_lock" {
 			p.wallet.ReturnUTxOs(inputs)
 		} else {
 			p.addLockedPlutusUTxO(lockedInput)
 		}
-		return
+		return false
 	}
 
 	txID := deriveTestTxID(txBytes)
@@ -562,47 +751,69 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 		entry.Status = "submitted"
 		p.logger.Info("plutus tx submitted", "kind", txKind, "tx_id", txID)
 		if txKind == "plutus_lock" {
-			p.addLockedPlutusUTxO(UTxO{
+			p.addLockedPlutusUTxOAfter(p.cfg.confirmationDelay(), UTxO{
 				TxHash: txID,
 				Index:  0,
 				Amount: minSendAmount,
+				// Keep the wallet-controlled address with the script output so
+				// an unsigned unlock can return its change to the same wallet.
+				address: append([]byte(nil), changeAddr...),
 			})
 		}
 		// Return the change output to the wallet so future transactions can
 		// spend it. For plutus_lock the script output is at index 0 and
 		// change is at index 1. For plutus_unlock change is at index 0.
+		var outputs []UTxO
 		if change > 0 {
 			changeIdx := uint32(0)
 			if txKind == "plutus_lock" {
 				changeIdx = 1
 			}
-			p.wallet.Add(UTxO{TxHash: txID, Index: changeIdx, Amount: change})
+			outputs = []UTxO{{TxHash: txID, Index: changeIdx, Amount: change}}
 		}
+		p.wallet.RecordAccepted(txID, inputs, outputs, p.cfg.confirmationDelay())
 	}
 	if p.txlog != nil {
 		if logErr := p.txlog.Log(entry); logErr != nil {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 func (p *Pump) addLockedPlutusUTxO(utxo UTxO) {
 	p.plutusLocked = append(p.plutusLocked, utxo)
 }
 
-func (p *Pump) takeLockedPlutusUTxO() (UTxO, bool) {
-	if len(p.plutusLocked) == 0 {
-		return UTxO{}, false
+func (p *Pump) addLockedPlutusUTxOAfter(delay time.Duration, utxo UTxO) {
+	if delay > 0 {
+		utxo.availableAt = time.Now().Add(delay)
 	}
-	last := len(p.plutusLocked) - 1
-	utxo := p.plutusLocked[last]
-	p.plutusLocked = p.plutusLocked[:last]
-	return utxo, true
+	p.addLockedPlutusUTxO(utxo)
+}
+
+func (p *Pump) takeLockedPlutusUTxO() (UTxO, bool) {
+	now := time.Now()
+	for i := len(p.plutusLocked) - 1; i >= 0; i-- {
+		utxo := p.plutusLocked[i]
+		if !utxo.availableAt.IsZero() && utxo.availableAt.After(now) {
+			continue
+		}
+		p.plutusLocked = append(
+			p.plutusLocked[:i],
+			p.plutusLocked[i+1:]...,
+		)
+		return utxo, true
+	}
+	return UTxO{}, false
 }
 
 // cooldown waits for a random duration in [CooldownMin, CooldownMax]ms.
 // It returns true if the wait completed normally, false if ctx was cancelled.
 func (p *Pump) cooldown(ctx context.Context) bool {
+	if p.cooldownFn != nil {
+		return p.cooldownFn(ctx)
+	}
 	ms := IntRange(p.cfg.CooldownMin, p.cfg.CooldownMax)
 	timer := time.NewTimer(time.Duration(ms) * time.Millisecond)
 	defer timer.Stop()
@@ -625,9 +836,32 @@ func deterministicAddr(txHash string) []byte {
 	return addr
 }
 
-// deriveTestTxID returns a 32-byte (64-char hex) identifier for the
-// transaction derived from a SHA-256 hash of the CBOR payload.
+// controlledChangeAddr returns an address controlled by the selected inputs.
+// Unsigned harness inputs may not carry a key; their historical deterministic
+// fallback keeps those workloads structurally valid.
+func controlledChangeAddr(inputs []UTxO) []byte {
+	for _, input := range inputs {
+		if input.SigningKey != nil && len(input.SigningKey.Address) > 0 {
+			return append([]byte(nil), input.SigningKey.Address...)
+		}
+		if len(input.address) > 0 {
+			return append([]byte(nil), input.address...)
+		}
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
+	return deterministicAddr(inputs[0].TxHash)
+}
+
+// deriveTestTxID returns the Cardano transaction identifier: the Blake2b-256
+// hash of the serialized transaction body, which is the identifier used by
+// LocalTxMonitor and in transaction output references.
 func deriveTestTxID(txBytes []byte) string {
-	h := sha256.Sum256(txBytes)
-	return hex.EncodeToString(h[:])
+	var txParts []cbor.RawMessage
+	if _, err := cbor.Decode(txBytes, &txParts); err != nil ||
+		len(txParts) == 0 {
+		return ""
+	}
+	return common.Blake2b256Hash(txParts[0]).String()
 }

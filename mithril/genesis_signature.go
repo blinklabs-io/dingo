@@ -32,7 +32,10 @@ func VerifyGenesisCertificateSignature(
 		return errors.New("certificate is nil")
 	}
 	if !cert.IsGenesis() {
-		return fmt.Errorf("certificate %s is not a genesis certificate", cert.Hash)
+		return fmt.Errorf(
+			"certificate %s is not a genesis certificate",
+			cert.Hash,
+		)
 	}
 	key, err := ParseVerificationKey(verificationKeyText)
 	if err != nil {

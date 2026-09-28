@@ -15,16 +15,21 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"encoding/hex"
 	"os"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/require"
 )
 
 // TestDecodeMempackTxOutTag4 tests decoding a real MemPack TxOut
 // with tag 4 (TxOutCompactDatum) from a preview network snapshot.
 func TestDecodeMempackTxOutTag4(t *testing.T) {
+	t.Parallel()
+
 	// Real TxOut from preview snapshot at offset 0x28 in tvar file.
 	// Tag 4 = TxOutCompactDatum: CompactAddr + Value + BinaryData
 	// Note: the original hex extracted from the tvar file had an
@@ -51,6 +56,15 @@ func TestDecodeMempackTxOutTag4(t *testing.T) {
 		"enterprise address should be 29 bytes")
 	require.Equal(t, byte(0x70), decoded.Address[0],
 		"should be enterprise script address (testnet)")
+	outputCbor, err := encodeMempackTxOut(decoded)
+	require.NoError(t, err)
+	output, err := ledger.NewTransactionOutputFromCbor(outputCbor)
+	require.NoError(t, err)
+	gotAddress, err := output.Address().Bytes()
+	require.NoError(t, err)
+	require.Equal(t, decoded.Address, gotAddress)
+	require.Equal(t, decoded.Lovelace, output.Amount().Uint64())
+	require.NotNil(t, output.Datum(), "inline datum must survive CBOR reconstruction")
 
 	// With corrected VarLen (big-endian 7-bit), the coin bytes
 	// d8 b1 60 decode as:
@@ -69,6 +83,8 @@ func TestDecodeMempackTxOutTag4(t *testing.T) {
 // TestDecodeMempackTxOutTag4MultiAsset tests decoding entry 1 from
 // the tvar file which has tag 4 with a multi-asset value.
 func TestDecodeMempackTxOutTag4MultiAsset(t *testing.T) {
+	t.Parallel()
+
 	// Entry 1 from tvar: tag 4, 1 native asset
 	txOutHex := "041d704ab17afc9a19a4f06b6fe229f9501e727d3968bff0" +
 		"3acb1a8f86acf501f5cb2a012c5904852e00000000" +
@@ -104,6 +120,12 @@ func TestDecodeMempackTxOutTag4MultiAsset(t *testing.T) {
 	// Should have 1 native asset
 	require.Equal(t, 1, len(decoded.Assets),
 		"should have exactly 1 asset")
+	outputCbor, err := encodeMempackTxOut(decoded)
+	require.NoError(t, err)
+	output, err := ledger.NewTransactionOutputFromCbor(outputCbor)
+	require.NoError(t, err)
+	require.Equal(t, decoded.Lovelace, output.Amount().Uint64())
+	require.Len(t, output.Assets().Policies(), 1)
 
 	t.Logf("Address: %x", decoded.Address)
 	t.Logf("Lovelace: %d", decoded.Lovelace)
@@ -122,6 +144,8 @@ func TestDecodeMempackTxOutTag4MultiAsset(t *testing.T) {
 // TestDecodeMempackTxOutTag2 tests decoding entry 2 from the tvar
 // file which uses tag 2 (AddrHash28 ADA-only).
 func TestDecodeMempackTxOutTag2(t *testing.T) {
+	t.Parallel()
+
 	// Entry 2 from tvar: tag 2 = TxOut_AddrHash28_AdaOnly
 	txOutHex := "02015691d68ad87582fc89b9ac43fd0227cfa4108efb79" +
 		"1b9987b290a9ba85b06c5a4edd9c1b857a1b55106ee4" +
@@ -154,7 +178,51 @@ func TestDecodeMempackTxOutTag2(t *testing.T) {
 		float64(decoded.Lovelace)/1_000_000)
 }
 
+func TestEncodeMempackTxOutReferenceScript(t *testing.T) {
+	t.Parallel()
+
+	address := buildShelleyAddr(
+		7, 1, bytes.Repeat([]byte{0x11}, 28), nil,
+	)
+	nativeScript, err := cbor.Encode([]any{
+		uint64(0), bytes.Repeat([]byte{0x22}, 28),
+	})
+	require.NoError(t, err)
+
+	// Tag 5 stores CompactAddr, ADA-only CompactValue, no datum, then
+	// AlonzoScript's native-script tag and length-prefixed CBOR.
+	mempack := []byte{babbageTxOutCompactRefScript, byte(len(address))}
+	mempack = append(mempack, address...)
+	mempack = append(mempack, 0, 1, 0, alonzoScriptNative, byte(len(nativeScript)))
+	mempack = append(mempack, nativeScript...)
+
+	decoded, err := decodeMempackTxOut(mempack)
+	require.NoError(t, err)
+	require.Equal(t, uint8(alonzoScriptNative), decoded.ScriptRefType)
+	require.Equal(t, nativeScript, decoded.ScriptRef)
+	outputCbor, err := encodeMempackTxOut(decoded)
+	require.NoError(t, err)
+	output, err := ledger.NewTransactionOutputFromCbor(outputCbor)
+	require.NoError(t, err)
+	require.NotNil(t, output.ScriptRef())
+
+	plutusMempack := []byte{babbageTxOutCompactRefScript, byte(len(address))}
+	plutusMempack = append(plutusMempack, address...)
+	plutusMempack = append(plutusMempack, 0, 1, 0, alonzoScriptPlutus, 0, 2, 0x41, 0x00)
+	plutusOutput, err := decodeMempackTxOut(plutusMempack)
+	require.NoError(t, err)
+	require.Equal(t, uint8(1), plutusOutput.ScriptRefType,
+		"Plutus V1's zero version tag must not be mistaken for a native script")
+	encodedPlutus, err := encodeMempackTxOut(plutusOutput)
+	require.NoError(t, err)
+	parsedPlutus, err := ledger.NewTransactionOutputFromCbor(encodedPlutus)
+	require.NoError(t, err)
+	require.NotNil(t, parsedPlutus.ScriptRef())
+}
+
 func TestVarLenDecoding(t *testing.T) {
+	t.Parallel()
+
 	// MemPack VarLen is big-endian 7-bit continuation:
 	// MSB=1 means more bytes, MSB=0 means last byte.
 	// acc = (acc << 7) | (byte & 0x7f) for each byte.
@@ -191,6 +259,8 @@ func TestVarLenDecoding(t *testing.T) {
 }
 
 func TestIsMempackFormat(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, isMempackFormat([]byte{0x00, 0x01}))
 	require.True(t, isMempackFormat([]byte{0x04, 0x1d}))
 	require.True(t, isMempackFormat([]byte{0x05, 0x1d}))
@@ -203,6 +273,8 @@ func TestIsMempackFormat(t *testing.T) {
 // TestParseTvarFileIfAvailable tests parsing a real tvar file from a
 // Mithril snapshot, if one is available at the expected path.
 func TestParseTvarFileIfAvailable(t *testing.T) {
+	t.Parallel()
+
 	tvarPath := os.Getenv("DINGO_TVAR_PATH")
 	if tvarPath == "" {
 		t.Skip(

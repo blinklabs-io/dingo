@@ -22,26 +22,34 @@ import "github.com/blinklabs-io/dingo/database/types"
 // membership changes from on-chain certificates. This table captures
 // the committee composition at the time of the snapshot.
 type CommitteeMember struct {
-	ID           uint    `gorm:"primarykey"`
-	ColdCredHash []byte  `gorm:"uniqueIndex;size:28;not null"` // 28-byte credential hash
-	ExpiresEpoch uint64  `gorm:"not null"`
-	AddedSlot    uint64  `gorm:"index;not null"` // Slot when imported/registered
-	DeletedSlot  *uint64 `gorm:"index"`          // For rollback support
+	ID                uint
+	ColdCredentialTag uint8
+	ColdCredHash      []byte // 28-byte credential hash
+	ExpiresEpoch      uint64
+	TermStartSlot     uint64 // Slot from which credentials apply to this term
+	// TermStartSlotSet distinguishes an explicit slot-zero term start from a
+	// legacy caller that leaves TermStartSlot unset and expects AddedSlot.
+	TermStartSlotSet bool
+	AddedSlot        uint64  // Slot when imported/registered
+	DeletedSlot      *uint64 // For rollback support
 }
 
-// TableName returns the table name for CommitteeMember.
-func (CommitteeMember) TableName() string {
-	return "committee_member"
+// CommitteeCredential preserves a committee credential's key/script tag with
+// its hash across storage APIs.
+type CommitteeCredential struct {
+	CredentialTag uint8
+	Credential    []byte
+	TermStartSlot uint64
+}
+
+// Key returns a collision-free map key for the tagged credential.
+func (c CommitteeCredential) Key() string {
+	return string([]byte{c.CredentialTag}) + string(c.Credential)
 }
 
 // CommitteeQuorum records the quorum threshold enacted with a committee.
 type CommitteeQuorum struct {
 	Quorum    *types.Rat
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"uniqueIndex;not null"`
-}
-
-// TableName returns the table name for CommitteeQuorum.
-func (CommitteeQuorum) TableName() string {
-	return "committee_quorum"
+	ID        uint
+	AddedSlot uint64
 }

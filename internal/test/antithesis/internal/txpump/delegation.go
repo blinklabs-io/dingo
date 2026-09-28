@@ -47,7 +47,7 @@ type delegCert struct {
 // Key 2 = fee
 // Key 4 = certificates
 type txBodyWithCerts struct {
-	Inputs  []txBodyInput  `cbor:"0,keyasint"`
+	Inputs  cbor.Set       `cbor:"0,keyasint"`
 	Outputs []txBodyOutput `cbor:"1,keyasint"`
 	Fee     uint64         `cbor:"2,keyasint"`
 	Certs   []delegCert    `cbor:"4,keyasint"`
@@ -146,8 +146,12 @@ func BuildDelegationTx(
 		PoolHash: poolKeyHash,
 	}
 
+	inputSet := make(cbor.Set, len(bodyInputs))
+	for i, inp := range bodyInputs {
+		inputSet[i] = inp
+	}
 	body := txBodyWithCerts{
-		Inputs:  bodyInputs,
+		Inputs:  inputSet,
 		Outputs: outputs,
 		Fee:     fee,
 		Certs:   []delegCert{cert},

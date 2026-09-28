@@ -15,13 +15,18 @@
 package topology
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // TopologyConfig represents a cardano-node topology config
@@ -62,7 +67,7 @@ type PeerSnapshotConfig struct {
 	NodeToClientVersion uint16                   `json:"NodeToClientVersion"`
 	Point               PeerSnapshotPoint        `json:"Point"`
 	BigLedgerPools      []PeerSnapshotLedgerPool `json:"bigLedgerPools"`
-	LedgerPools         []PeerSnapshotLedgerPool `json:"ledgerPools"`
+	AllLedgerPools      []PeerSnapshotLedgerPool `json:"allLedgerPools"`
 }
 
 type PeerSnapshotPoint struct {
@@ -74,6 +79,150 @@ type PeerSnapshotLedgerPool struct {
 	AccumulatedStake float64                        `json:"accumulatedStake"`
 	RelativeStake    float64                        `json:"relativeStake"`
 	Relays           []TopologyConfigP2PAccessPoint `json:"relays"`
+}
+
+const supportedPeerSnapshotVersion = 23
+
+// Validate checks that a peer snapshot is a supported, internally consistent
+// source of TCP relay endpoints for the configured network.
+func (s *PeerSnapshotConfig) Validate(networkMagic uint32) error {
+	if s == nil {
+		return nil
+	}
+	if s.NodeToClientVersion != supportedPeerSnapshotVersion {
+		return fmt.Errorf(
+			"unsupported node-to-client version %d (want %d)",
+			s.NodeToClientVersion,
+			supportedPeerSnapshotVersion,
+		)
+	}
+	if s.NetworkMagic == 0 {
+		return errors.New("network magic must be specified")
+	}
+	if networkMagic != 0 && s.NetworkMagic != networkMagic {
+		return fmt.Errorf(
+			"network magic %d does not match configured network magic %d",
+			s.NetworkMagic,
+			networkMagic,
+		)
+	}
+	if err := validatePeerSnapshotPoint(s.Point); err != nil {
+		return err
+	}
+	if len(s.BigLedgerPools) > 0 && len(s.AllLedgerPools) > 0 {
+		return errors.New(
+			"bigLedgerPools and allLedgerPools are mutually exclusive",
+		)
+	}
+	pools := s.BigLedgerPools
+	poolMode := "bigLedgerPools"
+	if len(s.AllLedgerPools) > 0 {
+		pools = s.AllLedgerPools
+		poolMode = "allLedgerPools"
+	}
+	if len(pools) == 0 {
+		return errors.New("snapshot contains no ledger pools")
+	}
+	for poolIdx, pool := range pools {
+		if len(pool.Relays) == 0 {
+			return fmt.Errorf("%s[%d] contains no relays", poolMode, poolIdx)
+		}
+		for relayIdx, relay := range pool.Relays {
+			if err := validatePeerSnapshotRelay(relay); err != nil {
+				return fmt.Errorf(
+					"%s[%d].relays[%d]: %w",
+					poolMode,
+					poolIdx,
+					relayIdx,
+					err,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func validatePeerSnapshotPoint(point PeerSnapshotPoint) error {
+	if len(point.BlockPointHash) != 64 {
+		return errors.New(
+			"point block hash must contain 64 hexadecimal characters",
+		)
+	}
+	if _, err := hex.DecodeString(point.BlockPointHash); err != nil {
+		return fmt.Errorf("point block hash is not hexadecimal: %w", err)
+	}
+	return nil
+}
+
+func validatePeerSnapshotRelay(relay TopologyConfigP2PAccessPoint) error {
+	if relay.Address == "" {
+		return errors.New("address must not be empty")
+	}
+	if relay.Port == 0 {
+		return errors.New(
+			"SRV relay mode is not supported; port must be specified",
+		)
+	}
+	if uint64(relay.Port) > math.MaxUint16 {
+		return fmt.Errorf("port %d is outside the TCP port range", relay.Port)
+	}
+	if ip := net.ParseIP(relay.Address); ip != nil {
+		if ip.IsUnspecified() {
+			return fmt.Errorf(
+				"unspecified IP address %q is not a relay endpoint",
+				relay.Address,
+			)
+		}
+		return nil
+	}
+	if !validPeerSnapshotHostname(relay.Address) {
+		return fmt.Errorf(
+			"address %q is not a valid DNS hostname",
+			relay.Address,
+		)
+	}
+	return nil
+}
+
+func validPeerSnapshotHostname(host string) bool {
+	// DNS permits a trailing root label, but relay addresses must otherwise be
+	// plain hostnames. In particular, ports and IPv6 brackets belong to the
+	// separate endpoint fields and must not be smuggled into the host value.
+	if host == "" || len(host) > 254 || strings.TrimSpace(host) != host {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	allNumeric := true
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 ||
+			label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			switch {
+			case char >= 'a' && char <= 'z',
+				char >= 'A' && char <= 'Z',
+				char == '-':
+				allNumeric = false
+			case char >= '0' && char <= '9':
+			default:
+				return false
+			}
+		}
+	}
+	// A four-label, fully numeric host has the shape of a dotted-decimal
+	// IPv4 address. net.ParseIP already rejected it as invalid, so treating
+	// it as a hostname would defer the same malformed endpoint to DNS and
+	// the dialer instead of rejecting it here. Other all-numeric hosts (a
+	// lone numeric label, for example) are legitimate hostnames.
+	if allNumeric && len(labels) == 4 {
+		return false
+	}
+	return true
 }
 
 func NewTopologyConfigFromFile(path string) (*TopologyConfig, error) {
@@ -113,7 +262,11 @@ func NewTopologyConfigFromFS(
 
 // maxTopologySize is the maximum allowed size for a topology config file
 // (10 MB). This prevents unbounded memory allocation from untrusted readers.
-const maxTopologySize = 10 * 1024 * 1024
+const (
+	maxTopologySize     = 10 * 1024 * 1024
+	maxPeerSnapshotSize = 10 * 1024 * 1024
+	maxAccessPointPort  = 65535
+)
 
 func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	t := &TopologyConfig{}
@@ -130,12 +283,11 @@ func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	if err := json.Unmarshal(data, t); err != nil {
 		return nil, err
 	}
+	if err := t.validate(); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
-
-// maxPeerSnapshotSize is the maximum allowed size for peer-snapshot.json
-// (10 MB). This matches topology config's defensive read limit.
-const maxPeerSnapshotSize = 10 * 1024 * 1024
 
 func NewPeerSnapshotConfigFromReader(
 	r io.Reader,
@@ -155,6 +307,98 @@ func NewPeerSnapshotConfigFromReader(
 		return nil, err
 	}
 	return s, nil
+}
+
+func validateAccessPoint(
+	ap TopologyConfigP2PAccessPoint,
+	field string,
+) error {
+	if strings.TrimSpace(ap.Address) == "" {
+		return fmt.Errorf("%s.address must not be empty", field)
+	}
+	if ap.Port == 0 || ap.Port > maxAccessPointPort {
+		return fmt.Errorf("%s.port must be in range 1-65535", field)
+	}
+	return nil
+}
+
+// validateRootValencies checks the ordering and access-point bound specified
+// by blinklabs-io/dingo#3291. An empty access-point list is allowed because
+// the shipped network topologies use it with peer snapshots.
+func validateRootValencies(
+	fieldPrefix string,
+	warmValency uint,
+	valency uint,
+	accessPointCount int,
+) error {
+	if warmValency != 0 && warmValency > valency {
+		return fmt.Errorf(
+			"%s.warmValency must be <= %s.valency",
+			fieldPrefix,
+			fieldPrefix,
+		)
+	}
+	if accessPointCount > 0 && valency > uint(accessPointCount) {
+		return fmt.Errorf(
+			"%s.valency must be <= len(%s.accessPoints)",
+			fieldPrefix,
+			fieldPrefix,
+		)
+	}
+	return nil
+}
+
+func (t *TopologyConfig) validate() error {
+	for idx, localRoot := range t.LocalRoots {
+		fieldPrefix := fmt.Sprintf("localRoots[%d]", idx)
+		for apIdx, ap := range localRoot.AccessPoints {
+			if err := validateAccessPoint(
+				ap,
+				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+			); err != nil {
+				return err
+			}
+		}
+		if err := validateRootValencies(
+			fieldPrefix,
+			localRoot.WarmValency,
+			localRoot.Valency,
+			len(localRoot.AccessPoints),
+		); err != nil {
+			return err
+		}
+	}
+
+	for idx, publicRoot := range t.PublicRoots {
+		fieldPrefix := fmt.Sprintf("publicRoots[%d]", idx)
+		for apIdx, ap := range publicRoot.AccessPoints {
+			if err := validateAccessPoint(
+				ap,
+				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+			); err != nil {
+				return err
+			}
+		}
+		if err := validateRootValencies(
+			fieldPrefix,
+			publicRoot.WarmValency,
+			publicRoot.Valency,
+			len(publicRoot.AccessPoints),
+		); err != nil {
+			return err
+		}
+	}
+
+	for idx, bootstrapPeer := range t.BootstrapPeers {
+		if err := validateAccessPoint(
+			bootstrapPeer,
+			fmt.Sprintf("bootstrapPeers[%d]", idx),
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func NewPeerSnapshotConfigFromFile(
@@ -229,7 +473,7 @@ func (s *PeerSnapshotConfig) RelayAccessPoints() []TopologyConfigP2PAccessPoint 
 	for _, pool := range s.BigLedgerPools {
 		ret = append(ret, pool.Relays...)
 	}
-	for _, pool := range s.LedgerPools {
+	for _, pool := range s.AllLedgerPools {
 		ret = append(ret, pool.Relays...)
 	}
 	return ret
@@ -247,7 +491,7 @@ func (s *PeerSnapshotConfig) peerSnapshotRelayCount() int {
 	for _, pool := range s.BigLedgerPools {
 		count += len(pool.Relays)
 	}
-	for _, pool := range s.LedgerPools {
+	for _, pool := range s.AllLedgerPools {
 		count += len(pool.Relays)
 	}
 	return count

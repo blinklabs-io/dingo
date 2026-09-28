@@ -17,10 +17,13 @@ package mithril
 import (
 	"archive/tar"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -30,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -41,18 +45,65 @@ type DownloadProgress struct {
 	TotalBytes      int64
 	Percent         float64
 	BytesPerSecond  float64
+	// Artifact identifies the artifact whose progress is being reported.
+	// It is populated by the bootstrap orchestration layer so concurrent
+	// downloads can be distinguished by callers consuming one callback.
+	Artifact string
+	// SnapshotHash identifies the Mithril snapshot or Cardano database
+	// artifact that owns the download.
+	SnapshotHash string
+	// ArtifactsCompleted and ArtifactsTotal are populated for aggregate
+	// progress, such as the v2 immutable archive worker pool.
+	ArtifactsCompleted uint64
+	ArtifactsTotal     uint64
 }
 
 // ProgressFunc is a callback invoked periodically during download
 // to report progress.
 type ProgressFunc func(DownloadProgress)
 
+// withProgressContext labels progress emitted by a nested download. A
+// single BootstrapConfig.OnProgress callback is shared by the v2 ancillary
+// and immutable download paths, which may run concurrently.
+func withProgressContext(
+	onProgress ProgressFunc,
+	artifact string,
+	snapshotHash string,
+) ProgressFunc {
+	if onProgress == nil {
+		return nil
+	}
+	return func(p DownloadProgress) {
+		p.Artifact = artifact
+		p.SnapshotHash = snapshotHash
+		onProgress(p)
+	}
+}
+
 const (
+	// DefaultMaxDownloadBytes bounds each compressed archive, including any
+	// resumed prefix. It matches the existing 1 TiB extraction budget.
+	DefaultMaxDownloadBytes int64 = 1 << 40
+
 	defaultDownloadIdleTimeout = 2 * time.Minute
 	defaultDownloadIdleRetries = 12
+
+	defaultTransientRetryMaxAttempts = 10
+	defaultTransientRetryBaseDelay   = 500 * time.Millisecond
+	defaultTransientRetryMaxDelay    = 30 * time.Second
 )
 
-var errDownloadIdleTimeout = errors.New("download idle timeout")
+var (
+	// ErrDownloadTooLarge identifies a configured or expected size limit.
+	// It is terminal: retrying cannot increase the permitted file size.
+	ErrDownloadTooLarge = errors.New("download size limit exceeded")
+
+	errDownloadIdleTimeout = errors.New("download idle timeout")
+	// errDownloadTransient is wrapped into errors returned by
+	// downloadSnapshotOnce for HTTP 429 and HTTP 5xx responses so that
+	// DownloadSnapshot can identify them as retryable.
+	errDownloadTransient = errors.New("transient download error")
+)
 
 type countingReader struct {
 	reader io.Reader
@@ -79,6 +130,11 @@ type DownloadConfig struct {
 	// the downloaded file size is verified after download. A
 	// mismatch returns an error.
 	ExpectedSize int64
+	// MaxBytes bounds the complete downloaded file, including resumed bytes,
+	// even when ExpectedSize or Content-Length is absent. Zero selects
+	// DefaultMaxDownloadBytes; negative values are invalid. This is a
+	// per-object bound, not an aggregate bootstrap or transfer-byte budget.
+	MaxBytes int64
 	// Logger is used for logging download progress.
 	Logger *slog.Logger
 	// OnProgress is called periodically with download progress.
@@ -91,49 +147,133 @@ type DownloadConfig struct {
 	// after idle timeouts that make no additional download progress.
 	// If zero, a conservative default is used.
 	MaxIdleRetries int
+	// MaxTransientRetries is the maximum number of retry attempts for
+	// transient network errors (TLS handshake failures, connection
+	// resets, unexpected EOF, HTTP 429, HTTP 5xx). If zero, a
+	// conservative default is used. If negative, transient retries
+	// are disabled.
+	MaxTransientRetries int
+	// HTTPClient, when non-nil, is reused for the download instead of
+	// constructing a fresh client per call. Callers that fetch many
+	// files (the v2 immutable pool) pass one shared keep-alive client so
+	// connections are pooled across files. Unless AllowInsecureHTTP is set,
+	// custom transports are cloned and restricted before use. When nil, a
+	// per-call client with keep-alives disabled is used.
+	HTTPClient *http.Client
+	// AllowInsecureHTTP permits URL to use plain HTTP or resolve to a
+	// local/private address. By default, Validate rejects either; this is an
+	// explicit escape hatch for local development and tests (e.g. against an
+	// httptest server) and should not be set in production.
+	AllowInsecureHTTP bool
+	// idleWatchdogs, when non-nil, replaces the wall-clock watchdog that
+	// decides a transfer has gone idle. It is unexported so only this
+	// package's own tests can supply one: they need idleness to occur at a
+	// chosen point in the byte stream, because a wall-clock bound short
+	// enough to keep a test fast is also short enough for a loaded machine
+	// to trip on its own, and one that is safely long makes every run wait
+	// for it. Production leaves this nil and gets newIdleTimer.
+	idleWatchdogs func(time.Duration, func()) idleWatchdog
 }
 
 // Validate checks DownloadConfig values before use.
 func (cfg DownloadConfig) Validate() error {
+	if cfg.MaxBytes < 0 {
+		return errors.New("download config MaxBytes must be >= 0")
+	}
+	if cfg.ExpectedSize > cfg.maxBytes() {
+		return fmt.Errorf("%w: expected size %d exceeds maximum %d bytes",
+			ErrDownloadTooLarge, cfg.ExpectedSize, cfg.maxBytes())
+	}
 	if cfg.MaxIdleRetries < 0 {
 		return fmt.Errorf(
 			"download config MaxIdleRetries must be >= 0, got %d",
 			cfg.MaxIdleRetries,
 		)
 	}
+	if cfg.URL != "" {
+		if err := requireSecureURL(cfg.URL, "download URL", cfg.AllowInsecureHTTP); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
+func (cfg DownloadConfig) maxBytes() int64 {
+	if cfg.MaxBytes > 0 {
+		return cfg.MaxBytes
+	}
+	return DefaultMaxDownloadBytes
+}
+
+func (cfg DownloadConfig) sizeLimit() int64 {
+	limit := cfg.maxBytes()
+	if cfg.ExpectedSize > 0 && cfg.ExpectedSize < limit {
+		limit = cfg.ExpectedSize
+	}
+	return limit
+}
+
+func (cfg DownloadConfig) sizeLimitError() error {
+	if cfg.ExpectedSize > 0 && cfg.ExpectedSize <= cfg.maxBytes() {
+		return fmt.Errorf("%w: download response exceeds expected size %d bytes",
+			ErrDownloadTooLarge, cfg.ExpectedSize)
+	}
+	return fmt.Errorf("%w: download response exceeds maximum %d bytes",
+		ErrDownloadTooLarge, cfg.maxBytes())
+}
+
+// idleWatchdog bounds the time a download may spend making no progress.
+// A download arms one while it waits for response headers and re-arms one
+// around every body read; an armed watchdog that expires cancels the
+// download so the retry loop can resume from the bytes already on disk.
+// A watchdog is armed by its constructor.
+type idleWatchdog interface {
+	// Reset abandons any running idle period and starts a new one.
+	Reset()
+	// Stop abandons any running idle period without starting another. It
+	// returns only once a callback that was already firing has returned.
+	Stop()
+}
+
+// newIdleWatchdog builds the watchdog enforcing this download's idle
+// timeout, or nil when idle detection is disabled.
+func (cfg DownloadConfig) newIdleWatchdog(onIdle func()) idleWatchdog {
+	timeout := cfg.idleTimeout()
+	if timeout <= 0 {
+		return nil
+	}
+	if cfg.idleWatchdogs != nil {
+		return cfg.idleWatchdogs(timeout, onIdle)
+	}
+	return newIdleTimer(timeout, onIdle)
+}
+
 type idleTimeoutReader struct {
-	reader io.Reader
-	timer  *idleTimer
+	reader   io.Reader
+	watchdog idleWatchdog
 }
 
 func newIdleTimeoutReader(
 	reader io.Reader,
-	timeout time.Duration,
-	onIdle func(),
+	watchdog idleWatchdog,
 ) *idleTimeoutReader {
-	if timeout <= 0 {
-		return &idleTimeoutReader{reader: reader}
-	}
 	return &idleTimeoutReader{
-		reader: reader,
-		timer:  newIdleTimer(timeout, onIdle),
+		reader:   reader,
+		watchdog: watchdog,
 	}
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	if r.timer != nil {
-		r.timer.Reset()
-		defer r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Reset()
+		defer r.watchdog.Stop()
 	}
 	return r.reader.Read(p)
 }
 
 func (r *idleTimeoutReader) Stop() {
-	if r.timer != nil {
-		r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Stop()
 	}
 }
 
@@ -230,36 +370,150 @@ func (cfg DownloadConfig) maxIdleRetries() int {
 	return defaultDownloadIdleRetries
 }
 
-func downloadIdleTimeoutCause(timeout time.Duration) error {
-	return fmt.Errorf("%w after %s without data", errDownloadIdleTimeout, timeout)
+func (cfg DownloadConfig) maxTransientRetries() int {
+	if cfg.MaxTransientRetries < 0 {
+		return 0 // disabled
+	}
+	if cfg.MaxTransientRetries > 0 {
+		return cfg.MaxTransientRetries
+	}
+	return defaultTransientRetryMaxAttempts
 }
 
-func downloadDestinationPath(cfg DownloadConfig) string {
+// isTransientDownloadError reports whether err is a transient network
+// or server error that is safe to retry: net.Error timeouts (which
+// cover TLS handshake timeouts), unexpected EOF during body read,
+// connection reset by peer, and HTTP 429/5xx (wrapped as
+// errDownloadTransient by downloadSnapshotOnce).
+func isTransientDownloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errDownloadTransient) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Connection reset by peer — check via the syscall errno so that
+	// wrapped errors (url.Error → net.OpError → os.SyscallError → errno)
+	// are still detected without relying on string matching.
+	var errno syscall.Errno
+	return errors.As(err, &errno) && errno == syscall.ECONNRESET
+}
+
+// transientRetryDelay returns the backoff duration for the given
+// retry attempt (0-indexed). It uses exponential backoff capped at
+// defaultTransientRetryMaxDelay with ±25% jitter.
+func transientRetryDelay(attempt int) time.Duration {
+	shift := min(attempt, 6) // 2^6 * 500ms = 32s, capped at 30s
+	d := min(
+		defaultTransientRetryBaseDelay*(1<<shift),
+		defaultTransientRetryMaxDelay,
+	)
+	if quarter := d / 4; quarter > 0 {
+		// Jitter in [-quarter, +quarter]
+		d += time.Duration(
+			rand.Int63n(int64(quarter)*2+1), //nolint:gosec
+		) - quarter
+	}
+	return d
+}
+
+func downloadIdleTimeoutCause(timeout time.Duration) error {
+	return fmt.Errorf(
+		"%w after %s without data",
+		errDownloadIdleTimeout,
+		timeout,
+	)
+}
+
+// downloadFilename returns the sanitized destination file name (relative
+// to DestDir) for cfg.
+func downloadFilename(cfg DownloadConfig) string {
 	filename := filepath.Base(cfg.Filename)
 	if filename == "." || filename == "/" {
 		filename = "snapshot.tar.zst"
 	}
-	return filepath.Join(cfg.DestDir, filename)
+	return filename
 }
 
-func downloadFileSize(filename string) int64 {
-	fi, err := os.Stat(filename)
+func downloadDestinationPath(cfg DownloadConfig) string {
+	return filepath.Join(cfg.DestDir, downloadFilename(cfg))
+}
+
+// rootFileSize returns the size of filename (relative to root), or 0 if
+// it cannot be stat'd.
+func rootFileSize(root *os.Root, filename string) int64 {
+	fi, err := root.Stat(filename)
 	if err != nil {
 		return 0
 	}
 	return fi.Size()
 }
 
-func newDownloadTransport() *http.Transport {
+func newDownloadTransport(allowPrivate bool) *restrictedHTTPTransport {
+	var transport *http.Transport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport := base.Clone()
-		transport.DisableKeepAlives = true
-		return transport
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{}
 	}
-	return &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
-		DisableKeepAlives: true,
+	transport.DisableKeepAlives = true
+	return newRestrictedHTTPTransport(transport, allowPrivate)
+}
+
+// newPooledDownloadTransport returns a transport that keeps connections
+// alive and pools them across many sequential downloads sharing one
+// http.Client. This amortizes the TCP+TLS handshake over the whole batch
+// instead of paying it per file, which matters for the v2 immutable
+// download where tens of thousands of small archives are fetched.
+//
+// maxConns must be >= the number of concurrent download workers; the
+// default http.Transport caps idle connections per host at 2, so without
+// raising MaxIdleConnsPerHost most workers would close and re-handshake
+// their connection after every file and keep-alive would buy nothing.
+func newPooledDownloadTransport(
+	maxConns int,
+	allowPrivate bool,
+) *restrictedHTTPTransport {
+	if maxConns < 1 {
+		maxConns = 1
 	}
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	transport.DisableKeepAlives = false
+	transport.MaxIdleConns = maxConns * 2
+	transport.MaxIdleConnsPerHost = maxConns
+	transport.MaxConnsPerHost = maxConns
+	transport.IdleConnTimeout = 90 * time.Second
+	// The immutable archive pool intentionally uses one HTTP/1.1
+	// connection per worker. HTTP/2 multiplexes every worker through the
+	// same TLS connection for Google Cloud Storage; after an idle stream
+	// timeout, retries can be routed back onto that poisoned connection and
+	// stall in lock-step. Keeping pooled downloads on separate HTTP/1.1
+	// connections preserves keep-alive without sharing stream fate.
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	tlsConfig := transport.TLSClientConfig
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	} else if cloned := tlsConfig.Clone(); cloned != nil {
+		tlsConfig = cloned
+	}
+	tlsConfig.NextProtos = []string{"http/1.1"}
+	transport.TLSClientConfig = tlsConfig
+	return newRestrictedHTTPTransport(transport, allowPrivate)
 }
 
 // progressWriter wraps an io.Writer to track bytes written and
@@ -356,54 +610,165 @@ func DownloadSnapshot(
 	ctx context.Context,
 	cfg DownloadConfig,
 ) (string, error) {
-	if err := cfg.Validate(); err != nil {
-		return "", err
+	path, root, err := downloadSnapshot(ctx, cfg)
+	if root != nil {
+		if closeErr := root.Close(); err == nil {
+			err = closeErr
+		}
 	}
+	return path, err
+}
+
+// downloadSnapshot implements DownloadSnapshot, but returns the still-open
+// root anchored to cfg.DestDir instead of closing it before returning. The
+// caller is responsible for closing root exactly once, on every return path
+// including error, once it is done with it.
+//
+// A caller that only needs the downloaded path may discard root immediately
+// (DownloadSnapshot does exactly that). A caller that goes on to extract or
+// remove the downloaded file should do so through root and the filename it
+// requested in cfg, not by re-resolving the returned path: this function's
+// own directory verification already closed the window where a symlink
+// swapped in for cfg.DestDir could redirect its writes, and re-resolving the
+// path afterward reopens that same window at the handoff to the next step.
+func downloadSnapshot(
+	ctx context.Context,
+	cfg DownloadConfig,
+) (string, *os.Root, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", nil, err
+	}
+	if cfg.HTTPClient == nil {
+		transport := newDownloadTransport(cfg.AllowInsecureHTTP)
+		defer transport.CloseIdleConnections()
+		cfg.HTTPClient = &http.Client{
+			Timeout:   0, // No timeout for large downloads
+			Transport: transport,
+		}
+	}
+	client, err := secureMithrilHTTPClient(
+		cfg.HTTPClient,
+		cfg.AllowInsecureHTTP,
+	)
+	if err != nil {
+		return "", nil, err
+	}
+	cfg.HTTPClient = client
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	maxIdleRetries := cfg.maxIdleRetries()
-	destPath := downloadDestinationPath(cfg)
-	lastObservedSize := downloadFileSize(destPath)
+	maxTransientRetries := cfg.maxTransientRetries()
+
+	// Create and open DestDir through a verified handle on its parent,
+	// the same guard ExtractArchive/openImmutableRoot apply to their own
+	// destinations: a bare os.MkdirAll(cfg.DestDir)+os.OpenRoot(cfg.DestDir)
+	// would follow a symlink already sitting at DestDir, or one swapped
+	// in for it, since neither call inspects what it's binding to.
+	// openExtractRoot creates the leaf if missing and refuses it — and
+	// refuses a substitution racing the check — if it resolves to
+	// anything but a real directory. Every subsequent directory/file
+	// operation in this download then goes through the returned root, so
+	// a symlink swapped in afterward cannot redirect them either.
+	cleanDestDir := filepath.Clean(cfg.DestDir)
+	parent := filepath.Dir(cleanDestDir)
+	if err := os.MkdirAll(parent, extractDirMode); err != nil {
+		return "", nil, fmt.Errorf("creating download directory: %w", err)
+	}
+	parentRoot, err := os.OpenRoot(parent)
+	if err != nil {
+		return "", nil, fmt.Errorf("opening download parent: %w", err)
+	}
+	root, rootErr := openExtractRoot(parentRoot, filepath.Base(cleanDestDir))
+	closeErr := parentRoot.Close()
+	if rootErr != nil {
+		return "", nil, fmt.Errorf("creating download directory: %w", rootErr)
+	}
+	if closeErr != nil {
+		// root itself opened fine; only closing parentRoot failed. Close
+		// it here rather than returning it: a caller that only sees an
+		// error return has no reason to expect a handle to clean up, and
+		// leaving that expectation implicit is how it gets leaked.
+		_ = root.Close()
+		return "", nil, fmt.Errorf("creating download directory: %w", closeErr)
+	}
+
+	filename := downloadFilename(cfg)
+	lastObservedSize := rootFileSize(root, filename)
 	consecutiveIdleRetries := 0
+	transientRetries := 0
 	for attempt := 1; ; attempt++ {
-		startSize := downloadFileSize(destPath)
-		path, err := downloadSnapshotOnce(ctx, cfg)
+		startSize := rootFileSize(root, filename)
+		path, err := downloadSnapshotOnce(ctx, cfg, root)
 		if err == nil {
-			return path, nil
+			return path, root, nil
 		}
-		if !errors.Is(err, errDownloadIdleTimeout) || ctx.Err() != nil {
-			return "", err
+		if ctx.Err() != nil {
+			return "", root, err
 		}
-		currentSize := downloadFileSize(destPath)
+		currentSize := rootFileSize(root, filename)
 		madeProgress := currentSize > startSize ||
 			currentSize > lastObservedSize
+		// Progress resets both retry counters symmetrically: partial
+		// forward progress proves we are not permanently stuck, so the
+		// budget for each failure class is restored from scratch.
 		if madeProgress {
-			consecutiveIdleRetries = 0
 			lastObservedSize = currentSize
+			consecutiveIdleRetries = 0
+			transientRetries = 0
+		}
+		if errors.Is(err, errDownloadIdleTimeout) {
+			if !madeProgress {
+				consecutiveIdleRetries++
+			}
+			if consecutiveIdleRetries > maxIdleRetries {
+				return "", root, err
+			}
+			cfg.Logger.Warn(
+				"snapshot download stalled, retrying",
+				"component", "mithril",
+				"attempt", attempt,
+				"consecutive_idle_retries", consecutiveIdleRetries,
+				"max_idle_retries", maxIdleRetries,
+				"idle_timeout", cfg.idleTimeout(),
+				"partial_bytes", currentSize,
+				"made_progress", madeProgress,
+				"error", err,
+			)
+		} else if isTransientDownloadError(err) {
+			// Always increment: the progress-based reset above already
+			// zeroes the counter on forward progress, so transientRetries
+			// is guaranteed >= 1 here, making transientRetries-1 >= 0 and
+			// safe to pass to transientRetryDelay.
+			transientRetries++
+			if transientRetries > maxTransientRetries {
+				return "", root, err
+			}
+			delay := transientRetryDelay(transientRetries - 1)
+			cfg.Logger.Warn(
+				"transient download error, retrying",
+				"component", "mithril",
+				"attempt", attempt,
+				"transient_retry", transientRetries,
+				"max_transient_retries", maxTransientRetries,
+				"backoff", delay,
+				"error", err,
+			)
+			select {
+			case <-ctx.Done():
+				return "", root, ctx.Err()
+			case <-time.After(delay):
+			}
 		} else {
-			consecutiveIdleRetries++
+			return "", root, err
 		}
-		if consecutiveIdleRetries > maxIdleRetries {
-			return "", err
-		}
-		cfg.Logger.Warn(
-			"snapshot download stalled, retrying",
-			"component", "mithril",
-			"attempt", attempt,
-			"consecutive_idle_retries", consecutiveIdleRetries,
-			"max_idle_retries", maxIdleRetries,
-			"idle_timeout", cfg.idleTimeout(),
-			"partial_bytes", currentSize,
-			"made_progress", madeProgress,
-			"error", err,
-		)
 	}
 }
 
 func downloadSnapshotOnce(
 	ctx context.Context,
 	cfg DownloadConfig,
+	root *os.Root,
 ) (string, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -415,20 +780,17 @@ func downloadSnapshotOnce(
 	downloadCtx, cancelDownload := context.WithCancelCause(ctx)
 	defer cancelDownload(nil)
 
-	// Ensure destination directory exists
-	if err := os.MkdirAll(cfg.DestDir, 0o750); err != nil {
-		return "", fmt.Errorf(
-			"creating download directory: %w",
-			err,
-		)
-	}
-
+	filename := downloadFilename(cfg)
 	destPath := downloadDestinationPath(cfg)
 
 	// Check for partial download to support resume
 	var existingSize int64
-	if fi, err := os.Stat(destPath); err == nil {
+	if fi, err := root.Stat(filename); err == nil {
 		existingSize = fi.Size()
+		if existingSize > cfg.sizeLimit() {
+			root.Remove(filename) //nolint:errcheck
+			return "", cfg.sizeLimitError()
+		}
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -449,30 +811,31 @@ func downloadSnapshotOnce(
 		)
 	}
 
-	transport := newDownloadTransport()
-	defer transport.CloseIdleConnections()
-	client := &http.Client{
-		Timeout:       0, // No timeout for large downloads
-		Transport:     transport,
-		CheckRedirect: httpsOnlyRedirect,
-	}
-	var headerTimer *idleTimer
-	if idleTimeout > 0 {
-		headerTimer = newIdleTimer(idleTimeout, func() {
-			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-		})
-	}
-	resp, err := client.Do( //nolint:gosec // URL from caller-provided config; HTTPS-only redirect policy prevents downgrade
+	// downloadSnapshot secures the client once before entering its retry loop.
+	// The v2 immutable pool's pre-secured transport is shared across calls.
+	client := cfg.HTTPClient
+	headerTimer := cfg.newIdleWatchdog(func() {
+		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+	})
+	// Initial, redirect, and dial-time destinations are restricted by the
+	// secured client created before the retry loop.
+	resp, err := client.Do( //nolint:gosec
 		req,
 	)
 	if headerTimer != nil {
 		headerTimer.Stop()
 	}
 	if err != nil {
-		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+		if cause := context.Cause(downloadCtx); errors.Is(
+			cause,
+			errDownloadIdleTimeout,
+		) {
 			return "", fmt.Errorf("downloading snapshot: %w", cause)
 		}
-		return "", fmt.Errorf("downloading snapshot: %w", err)
+		return "", fmt.Errorf(
+			"downloading snapshot: %w",
+			redactLocationError(err, cfg.URL),
+		)
 	}
 	if resp == nil || resp.Body == nil {
 		return "", errors.New("nil response from download server")
@@ -492,8 +855,11 @@ func downloadSnapshotOnce(
 		if resp.ContentLength > 0 {
 			totalSize = resp.ContentLength
 		}
-		file, err = os.OpenFile(
-			destPath,
+		if resp.ContentLength > cfg.sizeLimit() {
+			return "", cfg.sizeLimitError()
+		}
+		file, err = root.OpenFile(
+			filename,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 			0o640,
 		)
@@ -527,8 +893,8 @@ func downloadSnapshotOnce(
 			)
 			// Discard partial file and restart from scratch
 			existingSize = 0
-			file, err = os.OpenFile(
-				destPath,
+			file, err = root.OpenFile(
+				filename,
 				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
 				0o640,
 			)
@@ -552,11 +918,9 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			if idleTimeout > 0 {
-				headerTimer = newIdleTimer(idleTimeout, func() {
-					cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-				})
-			}
+			headerTimer = cfg.newIdleWatchdog(func() {
+				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+			})
 			resp2, err := client.Do( //nolint:gosec // same URL retried after Content-Range mismatch
 				req,
 			)
@@ -566,12 +930,15 @@ func downloadSnapshotOnce(
 			}
 			if err != nil {
 				file.Close()
-				if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+				if cause := context.Cause(downloadCtx); errors.Is(
+					cause,
+					errDownloadIdleTimeout,
+				) {
 					return "", fmt.Errorf("restarting download: %w", cause)
 				}
 				return "", fmt.Errorf(
 					"restarting download: %w",
-					err,
+					redactLocationError(err, cfg.URL),
 				)
 			}
 			if resp2 == nil || resp2.Body == nil {
@@ -586,26 +953,33 @@ func downloadSnapshotOnce(
 				)
 				resp2.Body.Close()
 				file.Close()
-				return "", fmt.Errorf(
+				return "", redactLocationError(fmt.Errorf(
 					"restart download failed with "+
 						"status %d: %s",
 					resp2.StatusCode,
 					string(bodyBytes),
-				)
+				), cfg.URL)
 			}
 			// Replace the original response body with the
 			// fresh full-download stream.
 			resp.Body = resp2.Body
+			if resp2.ContentLength > cfg.sizeLimit() {
+				file.Close()
+				return "", cfg.sizeLimitError()
+			}
 			if resp2.ContentLength > 0 {
 				totalSize = resp2.ContentLength
 			}
 		} else {
 			// Resume supported with matching offset
+			if resp.ContentLength > cfg.sizeLimit()-existingSize {
+				return "", cfg.sizeLimitError()
+			}
 			if resp.ContentLength > 0 {
 				totalSize = existingSize + resp.ContentLength
 			}
-			file, err = os.OpenFile(
-				destPath,
+			file, err = root.OpenFile(
+				filename,
 				os.O_APPEND|os.O_WRONLY,
 				0o640,
 			)
@@ -615,7 +989,7 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			cfg.Logger.Info(
+			cfg.Logger.Debug(
 				"resuming download",
 				"component", "mithril",
 				"existing_bytes", existingSize,
@@ -634,7 +1008,7 @@ func downloadSnapshotOnce(
 			)
 		}
 		if expectedSize > 0 {
-			fi, err := os.Stat(destPath)
+			fi, err := root.Stat(filename)
 			if err != nil {
 				return "", fmt.Errorf(
 					"verifying existing download: %w",
@@ -645,7 +1019,7 @@ func downloadSnapshotOnce(
 				// Remove the corrupt/oversized file so
 				// the next attempt starts fresh instead
 				// of looping on the same 416 error.
-				os.Remove(destPath) //nolint:errcheck
+				root.Remove(filename) //nolint:errcheck
 				return "", fmt.Errorf(
 					"existing file size mismatch "+
 						"(removed): got %d, want %d",
@@ -659,7 +1033,7 @@ func downloadSnapshotOnce(
 				destPath,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download already complete",
 			"component", "mithril",
 			"path", destPath,
@@ -669,11 +1043,20 @@ func downloadSnapshotOnce(
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
-		return "", fmt.Errorf(
+		if resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode >= http.StatusInternalServerError {
+			return "", redactLocationError(fmt.Errorf(
+				"%w: download failed with status %d: %s",
+				errDownloadTransient,
+				resp.StatusCode,
+				string(bodyBytes),
+			), cfg.URL)
+		}
+		return "", redactLocationError(fmt.Errorf(
 			"download failed with status %d: %s",
 			resp.StatusCode,
 			string(bodyBytes),
-		)
+		), cfg.URL)
 	}
 	defer func() {
 		if file != nil {
@@ -681,10 +1064,10 @@ func downloadSnapshotOnce(
 		}
 	}() // safety net for panics/early returns
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
-		"url", cfg.URL,
+		"url", redactLocationURI(cfg.URL),
 		"total_bytes", totalSize,
 		"destination", destPath,
 	)
@@ -698,17 +1081,40 @@ func downloadSnapshotOnce(
 		onProgress:  cfg.OnProgress,
 	}
 
-	body := newIdleTimeoutReader(resp.Body, idleTimeout, func() {
-		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-	})
-	if _, err := io.Copy(pw, body); err != nil {
+	body := newIdleTimeoutReader(
+		resp.Body,
+		cfg.newIdleWatchdog(func() {
+			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+		}),
+	)
+	// Copy only the remaining file budget, then probe one byte without
+	// writing it. Separate probing avoids limit+1 overflow at MaxInt64.
+	_, copyErr := io.Copy(pw, io.LimitReader(body, cfg.sizeLimit()-existingSize))
+	if copyErr == nil && pw.written == cfg.sizeLimit() {
+		var probe [1]byte
+		var n int
+		n, copyErr = io.ReadFull(body, probe[:])
+		if n > 0 {
+			copyErr = cfg.sizeLimitError()
+		} else if errors.Is(copyErr, io.EOF) {
+			copyErr = nil
+		}
+	}
+	if copyErr != nil {
 		body.Stop()
 		file.Close()
 		file = nil
-		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+		if errors.Is(copyErr, ErrDownloadTooLarge) {
+			root.Remove(filename) //nolint:errcheck
+			return "", copyErr
+		}
+		if cause := context.Cause(downloadCtx); errors.Is(
+			cause,
+			errDownloadIdleTimeout,
+		) {
 			return "", fmt.Errorf("writing snapshot data: %w", cause)
 		}
-		return "", fmt.Errorf("writing snapshot data: %w", err)
+		return "", fmt.Errorf("writing snapshot data: %w", copyErr)
 	}
 	body.Stop()
 
@@ -735,7 +1141,7 @@ func downloadSnapshotOnce(
 		})
 	}
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"download complete",
 		"component", "mithril",
 		"bytes", pw.written,
@@ -744,7 +1150,7 @@ func downloadSnapshotOnce(
 
 	// Verify file size if expected size was provided
 	if cfg.ExpectedSize > 0 {
-		fi, err := os.Stat(destPath)
+		fi, err := root.Stat(filename)
 		if err != nil {
 			return "", fmt.Errorf(
 				"verifying download size: %w", err,
@@ -753,7 +1159,7 @@ func downloadSnapshotOnce(
 		if fi.Size() != cfg.ExpectedSize {
 			// Remove so the next attempt starts fresh
 			// instead of resuming from a corrupt file.
-			os.Remove(destPath) //nolint:errcheck
+			root.Remove(filename) //nolint:errcheck
 			return "", fmt.Errorf(
 				"download size mismatch "+
 					"(removed): got %d bytes, "+
@@ -761,7 +1167,7 @@ func downloadSnapshotOnce(
 				fi.Size(), cfg.ExpectedSize,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download size verified",
 			"component", "mithril",
 			"bytes", fi.Size(),
@@ -772,6 +1178,12 @@ func downloadSnapshotOnce(
 }
 
 const (
+	// Keep decoder allocations bounded independently of klauspost/compress
+	// defaults. These limits are intentionally separate from extracted-file
+	// limits because a hostile frame can allocate before tar validation runs.
+	maxZstdWindowSize    = 512 << 20
+	maxZstdDecoderMemory = 256 << 20
+
 	// maxExtractFileSize is the maximum allowed size for a single
 	// extracted file (8 GiB). Must be large enough for mainnet
 	// ancillary ledger state files (UTxO tables can be multi-GB).
@@ -787,24 +1199,18 @@ const (
 // specified destination directory. It returns the path to the
 // directory where files were extracted. The context is checked
 // between files so that long-running extractions can be cancelled.
+//
+// By default the destination is exclusive: it must be empty, extraction is
+// staged in a private directory, and the result is renamed into place only
+// once complete. See WithReplaceDestination and WithMergeIntoDestination for
+// the destinations that need other policies.
 func ExtractArchive(
 	ctx context.Context,
 	archivePath string,
 	destDir string,
 	logger *slog.Logger,
+	opts ...ExtractOption,
 ) (string, error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-
-	// Create destination directory
-	if err := os.MkdirAll(destDir, 0o750); err != nil {
-		return "", fmt.Errorf(
-			"creating extraction directory: %w",
-			err,
-		)
-	}
-
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return "", fmt.Errorf(
@@ -813,6 +1219,41 @@ func ExtractArchive(
 		)
 	}
 	defer file.Close()
+	return extractArchiveFile(ctx, file, archivePath, destDir, logger, opts...)
+}
+
+// extractArchiveFile extracts from an already-open archive handle instead of
+// a bare path. archiveLabel is used for logging only.
+//
+// A caller that holds a directory handle open across download, extraction,
+// and cleanup — to keep all three anchored to the same directory even if its
+// name is later replaced — opens the archive through that handle
+// (root.Open(filename)) and passes the result here, rather than calling
+// ExtractArchive with a path that would be re-resolved by name.
+func extractArchiveFile(
+	ctx context.Context,
+	file *os.File,
+	archiveLabel string,
+	destDir string,
+	logger *slog.Logger,
+	opts ...ExtractOption,
+) (string, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger = logger.With(
+		"archive", archiveLabel,
+		"destination", destDir,
+	)
+
+	extractCfg := newExtractConfig(opts)
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractCfg,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 
 	fileInfo, err := file.Stat()
 	if err != nil {
@@ -823,8 +1264,14 @@ func ExtractArchive(
 	}
 	countingFile := &countingReader{reader: file}
 
-	// Create zstd reader
-	zr, err := zstd.NewReader(countingFile)
+	// Bound decoder allocations explicitly. The library default is a protocol
+	// maximum rather than an application resource policy, and may change when
+	// the dependency is upgraded.
+	zr, err := zstd.NewReader(
+		countingFile,
+		zstd.WithDecoderMaxWindow(extractCfg.maxZstdWindowSize),
+		zstd.WithDecoderMaxMemory(extractCfg.maxZstdMemory),
+	)
 	if err != nil {
 		return "", fmt.Errorf(
 			"creating zstd reader: %w",
@@ -872,26 +1319,16 @@ func ExtractArchive(
 			)
 		}
 
-		// Zip Slip prevention: join the cleaned name to destDir,
-		// then verify the result stays within destDir using
-		// both HasPrefix and Rel checks.
-		cleanDest := filepath.Clean(destDir)
-		target := filepath.Join(
-			cleanDest, filepath.FromSlash(name),
-		)
-		if !strings.HasPrefix(
-			target,
-			cleanDest+string(filepath.Separator),
-		) {
-			return "", fmt.Errorf(
-				"path escapes destination: %s",
-				header.Name,
-			)
-		}
+		// Entry paths stay relative and are resolved through the
+		// extraction root handle, which refuses anything landing outside
+		// it. validRelPath above already rejected absolute paths and ".."
+		// components, so this is belt and braces rather than the only
+		// containment check.
+		target := filepath.FromSlash(name)
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil { //nolint:gosec // target validated by validRelPath + HasPrefix above
+			if err := mkdirExtracted(workDir, target); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
 					target,
@@ -912,7 +1349,7 @@ func ExtractArchive(
 
 			// Ensure parent directory exists
 			parent := filepath.Dir(target)
-			if err := os.MkdirAll(parent, 0o750); err != nil { //nolint:gosec // parent derived from validated target path
+			if err := mkdirExtracted(workDir, parent); err != nil {
 				return "", fmt.Errorf(
 					"creating parent directory %s: %w",
 					parent,
@@ -920,11 +1357,7 @@ func ExtractArchive(
 				)
 			}
 
-			outFile, err := os.OpenFile( //nolint:gosec // target validated by validRelPath + HasPrefix above
-				target,
-				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-				0o640,
-			)
+			outFile, err := createExtractedFile(workDir, target)
 			if err != nil {
 				return "", fmt.Errorf(
 					"creating file %s: %w",
@@ -941,7 +1374,7 @@ func ExtractArchive(
 			)
 			closeErr := outFile.Close()
 			if err != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"extracting file %s: %w",
 					target,
@@ -949,7 +1382,7 @@ func ExtractArchive(
 				)
 			}
 			if closeErr != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"closing file %s: %w",
 					target,
@@ -957,7 +1390,7 @@ func ExtractArchive(
 				)
 			}
 			if written > maxExtractFileSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"file %s decompressed beyond maximum size (%d > %d)",
 					header.Name, written, maxExtractFileSize,
@@ -967,7 +1400,7 @@ func ExtractArchive(
 			// header.Size) for cumulative extraction limit.
 			totalExtracted += written
 			if totalExtracted > maxTotalExtractSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"archive extraction exceeds maximum total size (%d)",
 					maxTotalExtractSize,
@@ -1001,6 +1434,10 @@ func ExtractArchive(
 			// Skip symlinks and other types for security
 			continue
 		}
+	}
+
+	if err := publish(); err != nil {
+		return "", err
 	}
 
 	logger.Info(

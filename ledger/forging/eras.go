@@ -17,6 +17,7 @@ package forging
 import (
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -25,6 +26,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
@@ -42,6 +44,7 @@ const (
 	eraAlonzo
 	eraBabbage
 	eraConway
+	eraDijkstra
 )
 
 // isTPraos reports whether the era runs on TPraos (Shelley→Alonzo).
@@ -79,13 +82,32 @@ type pparamsLimits struct {
 }
 
 // extractPParamsLimits returns the BuildBlock-relevant fields from any
-// era's protocol parameters. Returns an error only if pparams is nil
-// or of an unrecognized type.
+// era's protocol parameters. Returns an error if pparams is nil (including
+// a typed-nil pointer of a known era's type stored in the interface, which
+// an `== nil` interface comparison alone would miss and the type switch
+// below would then dereference) or of an unrecognized type.
 func extractPParamsLimits(p lcommon.ProtocolParameters) (pparamsLimits, error) {
 	if p == nil {
 		return pparamsLimits{}, errors.New("protocol parameters are nil")
 	}
+	if v := reflect.ValueOf(p); v.Kind() == reflect.Pointer && v.IsNil() {
+		return pparamsLimits{}, fmt.Errorf(
+			"protocol parameters are a nil %T pointer",
+			p,
+		)
+	}
 	switch pp := p.(type) {
+	case *dijkstra.DijkstraProtocolParameters:
+		// Dijkstra shares Conway's Praos header/pparam limits; its
+		// block-body layout is handled later by the era-specific encoder.
+		return pparamsLimits{
+			era:          eraDijkstra,
+			maxTxSize:    uint64(pp.MaxTxSize),
+			maxBlockSize: uint64(pp.MaxBlockBodySize),
+			maxExUnits:   pp.MaxBlockExUnits,
+			protoMajor:   uint64(pp.ProtocolVersion.Major),
+			protoMinor:   uint64(pp.ProtocolVersion.Minor),
+		}, nil
 	case *conway.ConwayProtocolParameters:
 		return pparamsLimits{
 			era:          eraConway,
@@ -178,12 +200,58 @@ func splitTxCbor(txCbor []byte) (body, witnesses cbor.RawMessage, err error) {
 	return parts[0], parts[1], nil
 }
 
+// dijkstraBlockTransactionCbor returns the Dijkstra block-body form of a
+// transaction. Local tx submission uses [body, witnesses, is_valid, aux],
+// while Dijkstra blocks use [body, witnesses, aux, is_valid]. Dijkstra
+// removed the block-body invalid transaction index field but keeps validity
+// per transaction.
+func dijkstraBlockTransactionCbor(
+	txCbor []byte,
+) (cbor.RawMessage, error) {
+	var parts []cbor.RawMessage
+	if _, decErr := cbor.Decode(txCbor, &parts); decErr != nil {
+		return nil, fmt.Errorf("decode Dijkstra tx as array: %w", decErr)
+	}
+	switch len(parts) {
+	case 4:
+		var isValid bool
+		if _, decErr := cbor.Decode(parts[2], &isValid); decErr != nil {
+			return nil, fmt.Errorf("decode Dijkstra is_valid: %w", decErr)
+		}
+		if !isValid {
+			return nil, errors.New(
+				"dijkstra admitted transaction has is_valid=false",
+			)
+		}
+		blockTxCbor, err := cbor.Encode([]cbor.RawMessage{
+			parts[0],
+			parts[1],
+			parts[3],
+			parts[2],
+		})
+		if err != nil {
+			return nil, fmt.Errorf(
+				"encode Dijkstra block transaction: %w",
+				err,
+			)
+		}
+		return cbor.RawMessage(blockTxCbor), nil
+	default:
+		return nil, fmt.Errorf(
+			"expected 4 element mempool transaction, got %d",
+			len(parts),
+		)
+	}
+}
+
 // decodeBlockFromCbor re-decodes a freshly-encoded block via the
 // constructor matching the era we emitted for. Hash() and other
 // accessors rely on the original CBOR being stored on the typed
 // block, so we round-trip through the matching era's decoder.
 func decodeBlockFromCbor(era eraKind, blockCbor []byte) (ledger.Block, error) {
 	switch era {
+	case eraDijkstra:
+		return dijkstra.NewDijkstraBlockFromCbor(blockCbor)
 	case eraConway:
 		return conway.NewConwayBlockFromCbor(blockCbor)
 	case eraBabbage:
@@ -230,5 +298,8 @@ func forgedBlockDiagnostics(blockCbor []byte) string {
 		res.Root != nil {
 		return res.Root.FormatDiagnosticPretty(opts)
 	}
-	return fmt.Sprintf("<diagnostics unavailable for %d-byte block>", len(blockCbor))
+	return fmt.Sprintf(
+		"<diagnostics unavailable for %d-byte block>",
+		len(blockCbor),
+	)
 }

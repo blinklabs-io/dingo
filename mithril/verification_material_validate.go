@@ -26,7 +26,8 @@ func ValidateVerificationMaterial(material *VerificationMaterial) error {
 	if material == nil {
 		return errors.New("verification material is nil")
 	}
-	if material.CertificateChain == nil || material.CertificateChain.LeafCertificate == nil {
+	if material.CertificateChain == nil ||
+		material.CertificateChain.LeafCertificate == nil {
 		return errors.New("certificate chain is incomplete")
 	}
 	if material.MithrilStakeDistribution == nil {

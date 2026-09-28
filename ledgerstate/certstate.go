@@ -23,7 +23,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ParseCertState decodes the CertState from raw CBOR.
@@ -60,13 +62,15 @@ func parseCertState3(
 	result := &ParsedCertState{}
 	var warnings []error
 
-	dreps, err := parseVState(certState[0])
+	dreps, hotKeys, resignations, err := parseVState(certState[0])
 	if err != nil {
 		return nil, fmt.Errorf("parsing VState: %w", err)
 	}
 	result.DReps = dreps
+	result.CommitteeHotKeys = hotKeys
+	result.CommitteeResignations = resignations
 
-	pools, err := parsePState(certState[1])
+	pools, retirements, err := parsePStateWithRetirements(certState[1])
 	if err != nil {
 		if pools == nil {
 			return nil, fmt.Errorf(
@@ -76,6 +80,7 @@ func parseCertState3(
 		warnings = append(warnings, err)
 	}
 	result.Pools = pools
+	result.PendingPoolRetirements = retirements
 
 	accounts, err := parseDState(certState[2])
 	if err != nil {
@@ -163,6 +168,13 @@ func parseCertStateConway(
 		},
 	)
 	for _, mc := range mapCandidates {
+		// ccHotKeys is also credential-keyed, so size alone would pick it when
+		// DState is empty or the smaller of the two. Its values are
+		// credentials, which an account state is not, so skip it here and let
+		// the committee scan below claim it.
+		if looksLikeCommitteeCredentialMap(certState[mc.idx]) {
+			continue
+		}
 		if looksLikeCredentialMap(certState[mc.idx]) {
 			dIdx = mc.idx
 			break
@@ -175,6 +187,7 @@ func parseCertStateConway(
 	// We call parseDRepMap directly because the raw element is a
 	// DRep map, not a VState array [drepMap, ccHotKeys, ...].
 	drepFound := false
+	drepIdx := -1
 	for i, elem := range certState {
 		if len(elem) == 0 || i == pIdx || i == dIdx {
 			continue
@@ -195,14 +208,54 @@ func parseCertStateConway(
 			}
 			result.DReps = dreps
 			drepFound = true
+			drepIdx = i
 			break
 		}
 	}
 	_ = drepFound
 
+	// Recover the committee hot-key authorizations and resignations. The
+	// flattened layout inlines the VState fields into the top-level array, so
+	// they are not reached by parseVState the way the 3-element layout is.
+	// Try each remaining element as the start of a committee state and keep the
+	// first that yields any committee data.
+	for i, elem := range certState {
+		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
+			continue
+		}
+		// Only a credential-to-authorization map can be the committee map.
+		// Testing that first keeps a wrong-candidate element from reaching a
+		// parser that now fails closed, which would abort the whole import
+		// over an element that was never the committee state.
+		if !looksLikeCommitteeCredentialMap(
+			committeeMapElement(certState[i:]),
+		) {
+			continue
+		}
+		hotKeys, resignations, committeeErr := parseCommitteeVState(
+			certState[i:],
+		)
+		if committeeErr != nil {
+			// An element that decodes as a committee map but whose
+			// entries cannot be read is a real decode failure, not a
+			// wrong-candidate miss. Surface it rather than moving on
+			// and silently importing an empty committee.
+			return nil, fmt.Errorf(
+				"parsing committee state: %w",
+				committeeErr,
+			)
+		}
+		if len(hotKeys) == 0 && len(resignations) == 0 {
+			continue
+		}
+		result.CommitteeHotKeys = hotKeys
+		result.CommitteeResignations = resignations
+		break
+	}
+
 	// Parse PState if found
 	if pIdx >= 0 {
-		pools, err := parsePStateConway(certState[pIdx])
+		pools, retirements, err := parsePStateConwayWithRetirements(certState[pIdx])
 		if err != nil {
 			if pools == nil {
 				return nil, fmt.Errorf(
@@ -212,6 +265,7 @@ func parseCertStateConway(
 			warnings = append(warnings, err)
 		}
 		result.Pools = pools
+		result.PendingPoolRetirements = retirements
 	} else {
 		warnings = append(warnings, fmt.Errorf(
 			"could not identify PState in Conway "+
@@ -249,10 +303,12 @@ func parseCertStateConway(
 // PState is encoded as an array of 7 elements rather than the
 // traditional {poolParams, futurePoolParams, retiring, deposits}
 // map.
-func parsePStateConway(data []byte) ([]ParsedPool, error) {
+func parsePStateConwayWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 
 	return parsePStateMaps(ps)
@@ -467,7 +523,7 @@ func parseConwayAccountState(
 	}
 
 	acct.Reward = reward
-	acct.Deposit = deposit
+	acct.Deposit = &deposit
 
 	partial := false
 	if len(elem) > 2 {
@@ -507,7 +563,7 @@ func parseShelleyAccountState(
 	}
 
 	acct.Reward = reward
-	acct.Deposit = deposit
+	acct.Deposit = &deposit
 
 	poolHash, ok := parsePoolDelegation(elem[3])
 	if ok {
@@ -533,7 +589,7 @@ func parseLegacyUMElem(
 
 	acct.Reward = rdPair[0]
 	if len(rdPair) > 1 {
-		acct.Deposit = rdPair[1]
+		acct.Deposit = &rdPair[1]
 	}
 
 	partial := false
@@ -598,21 +654,21 @@ func parsePoolDelegation(data []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// parsePState decodes the pool state.
-// PState = [poolParams, futurePoolParams, retiring, poolDeposits]
-func parsePState(data []byte) ([]ParsedPool, error) {
+func parsePStateWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawElements(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 	if len(ps) < 1 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	return parsePStateMaps(ps)
 }
 
-func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
+func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	type mapEntry struct {
 		idx  int
 		size int
@@ -628,7 +684,7 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 		}
 	}
 	if len(maps) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	slices.SortFunc(
@@ -649,12 +705,31 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 			bestIdx = m.idx
 		}
 	}
-	if len(bestPools) == 0 {
-		return bestPools, bestWarning
+	if len(bestPools) > 0 {
+		mergePoolDeposits(bestPools, ps, bestIdx)
 	}
-
-	mergePoolDeposits(bestPools, ps, bestIdx)
-	return bestPools, bestWarning
+	retirementIndices := make([]int, 0, len(ps))
+	if len(ps) == 4 && bestIdx == 0 {
+		// Shelley PState is [poolParams, futurePoolParams,
+		// retiring, poolDeposits]. The field position is the only
+		// reliable discriminator when a malformed deposit map contains
+		// small values.
+		retirementIndices = append(retirementIndices, 2)
+	} else {
+		for i, elem := range ps {
+			if i == bestIdx || len(elem) == 0 {
+				continue
+			}
+			major := elem[0] >> 5
+			if major == 5 || elem[0] == 0xbf {
+				retirementIndices = append(retirementIndices, i)
+			}
+		}
+	}
+	retirements := mergePoolRetirements(
+		bestPools, ps, retirementIndices,
+	)
+	return bestPools, retirements, bestWarning
 }
 
 func mergePoolDeposits(
@@ -666,7 +741,7 @@ func mergePoolDeposits(
 		if i == poolParamsIdx {
 			continue
 		}
-		deposits := parsePoolDeposits(elem)
+		deposits := parsePoolUint64Map(elem)
 		if deposits == nil || !looksLikeDeposits(deposits) {
 			continue
 		}
@@ -681,16 +756,20 @@ func mergePoolDeposits(
 	}
 }
 
-// parsePoolDeposits decodes the pool deposits map.
-// Returns nil on decode failure. Skipped entries are counted
-// but not reported since deposits are supplementary data.
-func parsePoolDeposits(data []byte) map[string]uint64 {
+// parsePoolUint64Map decodes a CBOR map of pool key hash -> unsigned
+// integer, keyed by hex-encoded pool key hash. Both PState maps that
+// carry scalar values have this shape: poolDeposits (lovelace) and
+// retiring (epoch numbers). Returns nil when the input is not a map;
+// entries whose key or value fails to decode are skipped, which is how
+// maps of a different value shape (futurePoolParams, whose values are
+// arrays) decode to an empty result rather than an error.
+func parsePoolUint64Map(data []byte) map[string]uint64 {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
 		return nil
 	}
 
-	deposits := make(map[string]uint64, len(entries))
+	values := make(map[string]uint64, len(entries))
 	for _, entry := range entries {
 		var keyHash []byte
 		if _, err := cbor.Decode(
@@ -706,10 +785,10 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 			continue
 		}
 
-		deposits[hex.EncodeToString(keyHash)] = amount
+		values[hex.EncodeToString(keyHash)] = amount
 	}
 
-	return deposits
+	return values
 }
 
 // looksLikeDeposits returns true if the map values are plausibly
@@ -718,7 +797,6 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 // numbers are small (currently < 1,000). We check whether the
 // majority of values exceed this threshold.
 func looksLikeDeposits(m map[string]uint64) bool {
-	const minDepositLovelace = 1_000_000 // 1 ADA
 	if len(m) == 0 {
 		return false
 	}
@@ -731,6 +809,92 @@ func looksLikeDeposits(m map[string]uint64) bool {
 	// Require at least half the values to look like deposits.
 	// Use multiplication to avoid integer division rounding.
 	return large*2 >= len(m)
+}
+
+// minDepositLovelace separates a pool deposit from a retirement epoch.
+// Pool deposits are at least 1 ADA on every network, while epoch numbers
+// are small (currently < 1,000), so the two PState maps that share the
+// pool-key-hash -> uint64 shape are told apart by magnitude.
+const minDepositLovelace = 1_000_000 // 1 ADA
+
+// poolKeyHashLen is the length in bytes of a pool key hash, whose
+// hex encoding is twice that.
+const poolKeyHashLen = 28
+
+// mergePoolRetirements decodes the selected PState retirement maps -- pool key
+// hash -> the epoch the pool is scheduled to retire at -- and records the
+// epoch on matching parsed pools. Unknown keys are retained so the importer
+// can report a partial pool-parameter decode instead of silently dropping a
+// scheduled retirement.
+func mergePoolRetirements(
+	pools []ParsedPool,
+	ps [][]byte,
+	retirementIndices []int,
+) map[uint64][][]byte {
+	known := make(map[string]struct{}, len(pools))
+	for i := range pools {
+		known[hex.EncodeToString(pools[i].PoolKeyHash)] = struct{}{}
+	}
+	for _, i := range retirementIndices {
+		elem := ps[i]
+		retiring := parsePoolUint64Map(elem)
+		if !looksLikeRetiringEpochs(retiring, known) {
+			continue
+		}
+		result := make(map[uint64][][]byte)
+		for j := range pools {
+			epoch, ok := retiring[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]
+			if !ok {
+				continue
+			}
+			pools[j].RetiringEpoch = &epoch
+			result[epoch] = append(result[epoch], slices.Clone(pools[j].PoolKeyHash))
+		}
+		for keyHash, epoch := range retiring {
+			if _, ok := known[keyHash]; !ok {
+				decoded, err := hex.DecodeString(keyHash)
+				if err == nil {
+					result[epoch] = append(result[epoch], decoded)
+				}
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+// looksLikeRetiringEpochs reports whether m is plausibly the PState
+// `retiring` map: non-empty, keyed by pool key hashes, every value small
+// enough to be an epoch number rather than a lovelace deposit, and mostly
+// naming pools that poolParams also registered.
+//
+// The poolParams check is a majority rather than a requirement on every key.
+// A retiring pool whose params entry failed to parse is absent from pools,
+// and rejecting the whole map over one such key would drop every other pool's
+// retirement too. Unknown keys are retained for import-time validation.
+func looksLikeRetiringEpochs(
+	m map[string]uint64,
+	known map[string]struct{},
+) bool {
+	if len(m) == 0 {
+		return false
+	}
+	var recognized int
+	for keyHash, epoch := range m {
+		if len(keyHash) != 2*poolKeyHashLen {
+			return false
+		}
+		if epoch >= minDepositLovelace {
+			return false
+		}
+		if _, ok := known[keyHash]; ok {
+			recognized++
+		}
+	}
+	// Use multiplication to avoid integer division rounding.
+	return recognized*2 >= len(m)
 }
 
 // ErrNotPoolParams signals that the input CBOR is not shaped like a full
@@ -746,6 +910,7 @@ var ErrNotPoolParams = errors.New("not pool params shape")
 //
 //	operator,      -- PoolKeyHash (28 bytes)
 //	vrfKeyHash,    -- 32 bytes
+//	leiosKey,      -- optional [96-byte BLS key, 48-byte PoP] (Dijkstra)
 //	pledge,        -- Coin
 //	cost,          -- Coin
 //	margin,        -- UnitInterval (tag 30, [num, denom])
@@ -804,25 +969,45 @@ func parsePoolParams(
 		)
 	}
 
-	// Pledge (index 2)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 2)
+	if err != nil {
+		return nil, err
+	}
+	if len(params) < 7+leiosOffset {
+		return nil, fmt.Errorf(
+			"%w: pool params has %d elements, expected at least %d",
+			ErrNotPoolParams,
+			len(params),
+			7+leiosOffset,
+		)
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = leiosKey.PublicKey
+		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+		pool.LeiosKeyRegistrationEpoch = keyRegistrationEpoch
+	}
+
+	// Pledge (legacy index 2; Dijkstra index 3 when Leios key/null is present)
 	if _, err := cbor.Decode(
-		params[2],
+		params[2+leiosOffset],
 		&pool.Pledge,
 	); err != nil {
 		return nil, fmt.Errorf("decoding pledge: %w", err)
 	}
 
-	// Cost (index 3)
+	// Cost (legacy index 3)
 	if _, err := cbor.Decode(
-		params[3],
+		params[3+leiosOffset],
 		&pool.Cost,
 	); err != nil {
 		return nil, fmt.Errorf("decoding cost: %w", err)
 	}
 
-	// Margin (index 4) - CBOR tag 30 [num, denom]
+	// Margin (legacy index 4) - CBOR tag 30 [num, denom]
 	var marginOK bool
-	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[4])
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(
+		params[4+leiosOffset],
+	)
 	if !marginOK {
 		slog.Warn(
 			"failed to decode pool margin, defaulting to 0/1",
@@ -833,28 +1018,30 @@ func parsePoolParams(
 		pool.MarginDen = 1
 	}
 
-	// Reward account (index 5)
-	if _, err := cbor.Decode(
-		params[5],
-		&pool.RewardAccount,
-	); err != nil {
+	// Reward account (legacy index 5)
+	rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+		params[5+leiosOffset],
+	)
+	if !ok {
 		return nil, fmt.Errorf(
-			"decoding reward account: %w",
-			err,
+			"decoding reward account for pool %x",
+			poolKeyHash,
 		)
 	}
+	pool.RewardAccount = rewardAccount
+	pool.RewardAccountCredentialTag = rewardAccountTag
 
-	// Owners (index 6) - set of 28-byte key hashes
-	pool.Owners = parsePoolOwners(params[6])
+	// Owners (legacy index 6) - set of 28-byte key hashes
+	pool.Owners = parsePoolOwners(params[6+leiosOffset])
 
-	// Relays (index 7) - array of relay entries
-	if len(params) > 7 {
-		pool.Relays = parseRelays(params[7])
+	// Relays (legacy index 7) - array of relay entries
+	if len(params) > 7+leiosOffset {
+		pool.Relays = parseRelays(params[7+leiosOffset])
 	}
 
-	// Pool metadata (index 8) - null or [url, hash]
-	if len(params) > 8 {
-		parsePoolMetadata(params[8], pool)
+	// Pool metadata (legacy index 8) - null or [url, hash]
+	if len(params) > 8+leiosOffset {
+		parsePoolMetadata(params[8+leiosOffset], pool)
 	}
 
 	return pool, nil
@@ -881,15 +1068,40 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	if _, err := cbor.Decode(params[1], &pool.Pledge); err != nil {
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 1)
+	if err != nil {
+		return nil, true, err
+	}
+	if len(params) < 7+leiosOffset {
+		return nil, true, fmt.Errorf(
+			"pool state has %d elements, expected at least %d",
+			len(params),
+			7+leiosOffset,
+		)
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = leiosKey.PublicKey
+		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+		pool.LeiosKeyRegistrationEpoch = keyRegistrationEpoch
+	}
+
+	if _, err := cbor.Decode(
+		params[1+leiosOffset],
+		&pool.Pledge,
+	); err != nil {
 		return nil, true, fmt.Errorf("decoding pledge: %w", err)
 	}
-	if _, err := cbor.Decode(params[2], &pool.Cost); err != nil {
+	if _, err := cbor.Decode(
+		params[2+leiosOffset],
+		&pool.Cost,
+	); err != nil {
 		return nil, true, fmt.Errorf("decoding cost: %w", err)
 	}
 
 	var marginOK bool
-	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[3])
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(
+		params[3+leiosOffset],
+	)
 	if !marginOK {
 		slog.Warn(
 			"failed to decode pool margin, defaulting to 0/1",
@@ -900,19 +1112,25 @@ func parsePoolParamsWithoutOperator(
 		pool.MarginDen = 1
 	}
 
-	if rewardAccount, ok := parseRewardAccount(params[4]); ok {
+	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+		params[4+leiosOffset],
+	); ok {
 		pool.RewardAccount = rewardAccount
+		pool.RewardAccountCredentialTag = rewardAccountTag
 	}
 
-	pool.Owners = parsePoolOwners(params[5])
-	if len(params) > 6 {
-		pool.Relays = parseRelays(params[6])
+	pool.Owners = parsePoolOwners(params[5+leiosOffset])
+	if len(params) > 6+leiosOffset {
+		pool.Relays = parseRelays(params[6+leiosOffset])
 	}
-	if len(params) > 7 {
-		parsePoolMetadata(params[7], pool)
+	if len(params) > 7+leiosOffset {
+		parsePoolMetadata(params[7+leiosOffset], pool)
 	}
-	if len(params) > 8 {
-		if _, err := cbor.Decode(params[8], &pool.Deposit); err != nil {
+	if len(params) > 8+leiosOffset {
+		if _, err := cbor.Decode(
+			params[8+leiosOffset],
+			&pool.Deposit,
+		); err != nil {
 			return nil, true, fmt.Errorf(
 				"decoding pool deposit: %w",
 				err,
@@ -923,29 +1141,90 @@ func parsePoolParamsWithoutOperator(
 	return pool, true, nil
 }
 
-func parseRewardAccount(data []byte) ([]byte, bool) {
+// optionalLeiosKeyOffset reports whether the given pool-parameter position is
+// occupied by Dijkstra's optional Leios key, decoding it when present. The
+// ledger's PV12 decoder accepts both an omitted field and an explicit null,
+// so snapshot import must preserve the same distinction when locating all
+// fields that follow it. The returned key is nil unless a real (non-null)
+// Leios key was decoded; its proof of possession is not verified here (see
+// ParsedPool.LeiosKeyPublic).
+func optionalLeiosKeyOffset(
+	params []cbor.RawMessage,
+	index int,
+) (int, *lcommon.LeiosKey, *uint64, error) {
+	if len(params) <= index || len(params[index]) == 0 {
+		return 0, nil, nil, nil
+	}
+	if len(params[index]) == 1 && params[index][0] == 0xf6 {
+		return 1, nil, nil, nil
+	}
+	// A legacy pledge/cost is an unsigned integer. Only an array at this
+	// position can be the new Leios key; if it is an array, validate its
+	// exact key/proof shape through gouroboros rather than shifting on a
+	// malformed value.
+	if params[index][0]>>5 != 4 {
+		return 0, nil, nil, nil
+	}
+	key, registrationEpoch, err := decodeOptionalLeiosKey(params[index])
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return 1, key, registrationEpoch, nil
+}
+
+func parseRewardAccount(data []byte) ([]byte, uint8, bool) {
 	var direct []byte
 	if _, err := cbor.Decode(data, &direct); err == nil {
-		return direct, true
+		return normalizeRewardAccountBytes(direct)
 	}
 
 	if cred, err := parseCredential(data); err == nil && len(cred.Hash) > 0 {
-		return cred.Hash, true
+		credentialTag, tagErr := models.CredentialTagFromUint(
+			uint(cred.Type),
+		)
+		if tagErr != nil {
+			return nil, 0, false
+		}
+		return cred.Hash, credentialTag, true
 	}
 
 	var parts []cbor.RawMessage
 	if _, err := cbor.Decode(data, &parts); err != nil || len(parts) < 2 {
-		return nil, false
+		return nil, 0, false
 	}
 	if cred, err := parseCredential(parts[1]); err == nil &&
 		len(cred.Hash) > 0 {
-		return cred.Hash, true
+		credentialTag, tagErr := models.CredentialTagFromUint(
+			uint(cred.Type),
+		)
+		if tagErr != nil {
+			return nil, 0, false
+		}
+		return cred.Hash, credentialTag, true
 	}
 	if _, err := cbor.Decode(parts[1], &direct); err == nil {
-		return direct, true
+		return normalizeRewardAccountBytes(direct)
 	}
 
-	return nil, false
+	return nil, 0, false
+}
+
+func normalizeRewardAccountBytes(data []byte) ([]byte, uint8, bool) {
+	switch len(data) {
+	case 28:
+		return slices.Clone(data), 0, true
+	case 29:
+		switch data[0] >> 4 {
+		case 14:
+			return slices.Clone(data[1:]), 0, true
+		case 15:
+			return slices.Clone(data[1:]), 1, true
+		default:
+			return nil, 0, false
+		}
+	default:
+		return nil, 0, false
+	}
 }
 
 func parsePoolOwners(data []byte) [][]byte {
@@ -982,6 +1261,15 @@ func parsePoolParamsOrDistr(
 	if !errors.Is(err, ErrNotPoolParams) {
 		return nil, err
 	}
+	// The snapshot layout carries the full parameters; try it before
+	// degrading to the VRF-only reading, which discards them.
+	if fields, arrErr := decodeRawArray(data); arrErr == nil {
+		if pool, snapErr := parseSnapshotPoolParams(
+			poolKeyHash, fields,
+		); snapErr == nil {
+			return pool, nil
+		}
+	}
 	pool, distrErr := parsePoolDistrEntry(poolKeyHash, data)
 	if distrErr == nil {
 		return pool, nil
@@ -991,6 +1279,225 @@ func parsePoolParamsOrDistr(
 		err,
 		distrErr,
 	)
+}
+
+// snapshotPoolParamsFields is the field count of the UTxO-HD snapshot pool
+// record. The layout is the stake pair this record adds -- the pool's stake
+// and its share of the total -- followed by the registration parameters:
+//
+//	0  stake (coin)
+//	1  stake share (unit interval)
+//	2  owners (set of addr_keyhash)
+//	3  reserved: a second stake-shaped figure, unused here
+//	4  vrf_keyhash
+//	5  optional Leios key (w32 and later only)
+//	6  pledge (coin)
+//	7  cost (coin)
+//	8  margin (unit interval)
+//	9  reserved: a small counter, unused here
+//	10 reward account credential
+//
+// Pre-w32 records omit field 5 and therefore contain ten fields.
+const (
+	snapshotPoolParamsFieldsLegacy = 10
+	snapshotPoolParamsFieldsLeios  = 11
+)
+
+const (
+	snapshotPoolOwnersIdx   = 2
+	snapshotPoolVrfIdx      = 4
+	snapshotPoolLeiosKeyIdx = 5
+)
+
+// parseSnapshotPoolParams decodes the registration parameters a UTxO-HD
+// snapshot keeps alongside each pool's stake.
+//
+// This is what makes a bootstrapped node able to seed the reward rounds for
+// the epochs its snapshots cover. Those epochs' parameters cannot be
+// recovered from cert state, which holds only pools registered *now*: a pool
+// that held stake in the go or set snapshot and retired before the snapshot's
+// own epoch is absent there, so its delegators' stake could not be
+// attributed and the whole epoch's basis was dropped. The snapshot describes
+// the pool set as it stood in that epoch, retired pools included, which is
+// exactly the set the reward round for that epoch needs.
+//
+// Every field read is checked rather than assumed. The layout is not part of
+// any published CDDL -- the on-chain pool_params is a different, 9-field
+// shape led by the operator -- so it was established by decoding real
+// snapshots, and a future format change must degrade to the VRF-only
+// fallback rather than quietly mapping a field onto the wrong parameter.
+// Pledge, cost and margin feed reward arithmetic directly, so a wrong value
+// there would be credited rather than visibly refused.
+func parseSnapshotPoolParams(
+	poolKeyHash []byte,
+	fields [][]byte,
+) (*ParsedPool, error) {
+	if len(fields) != snapshotPoolParamsFieldsLegacy &&
+		len(fields) != snapshotPoolParamsFieldsLeios {
+		return nil, fmt.Errorf(
+			"%w: snapshot pool params has %d fields, expected %d or %d",
+			ErrNotPoolParams,
+			len(fields),
+			snapshotPoolParamsFieldsLegacy,
+			snapshotPoolParamsFieldsLeios,
+		)
+	}
+	leiosOffset := 0
+	var leiosKey *lcommon.LeiosKey
+	var keyRegistrationEpoch *uint64
+	if len(fields) == snapshotPoolParamsFieldsLeios {
+		leiosOffset = 1
+		var err error
+		leiosKey, keyRegistrationEpoch, err = decodeOptionalLeiosKey(
+			fields[snapshotPoolLeiosKeyIdx],
+		)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrNotPoolParams, err)
+		}
+	}
+	pledgeIdx := 5 + leiosOffset
+	costIdx := 6 + leiosOffset
+	marginIdx := 7 + leiosOffset
+	rewardAccountIdx := 9 + leiosOffset
+
+	var vrfKeyHash []byte
+	if _, err := cbor.Decode(
+		fields[snapshotPoolVrfIdx], &vrfKeyHash,
+	); err != nil || len(vrfKeyHash) != 32 {
+		return nil, fmt.Errorf(
+			"%w: no 32-byte VRF key hash at field %d",
+			ErrNotPoolParams, snapshotPoolVrfIdx,
+		)
+	}
+
+	var pledge, cost uint64
+	if _, err := cbor.Decode(
+		fields[pledgeIdx], &pledge,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding pledge: %w", ErrNotPoolParams, err,
+		)
+	}
+	if _, err := cbor.Decode(fields[costIdx], &cost); err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding cost: %w", ErrNotPoolParams, err,
+		)
+	}
+
+	marginNum, marginDen, ok := parseRational(
+		fields[marginIdx],
+	)
+	// A margin outside [0,1] means this field is not a margin. The gate
+	// downstream rejects such a basis anyway; failing here instead keeps a
+	// misread from being presented as a pool parameter at all.
+	if !ok || marginDen == 0 || marginNum > marginDen {
+		return nil, fmt.Errorf(
+			"%w: field %d is not a unit interval",
+			ErrNotPoolParams, marginIdx,
+		)
+	}
+
+	rewardAccount, err := parseCredential(
+		fields[rewardAccountIdx],
+	)
+	if err != nil || len(rewardAccount.Hash) != credentialHashSize {
+		return nil, fmt.Errorf(
+			"%w: field %d is not a credential",
+			ErrNotPoolParams, rewardAccountIdx,
+		)
+	}
+
+	owners, err := parseSnapshotPoolOwners(fields[snapshotPoolOwnersIdx])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding owners: %w", ErrNotPoolParams, err,
+		)
+	}
+
+	pool := &ParsedPool{
+		PoolKeyHash:   slices.Clone(poolKeyHash),
+		VrfKeyHash:    vrfKeyHash,
+		Pledge:        pledge,
+		Cost:          cost,
+		MarginNum:     marginNum,
+		MarginDen:     marginDen,
+		RewardAccount: slices.Clone(rewardAccount.Hash),
+		// #nosec G115 -- credential type is 0 or 1
+		RewardAccountCredentialTag: uint8(rewardAccount.Type),
+		Owners:                     owners,
+		LeiosKeyRegistrationEpoch:  keyRegistrationEpoch,
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
+		pool.LeiosKeyPossessionProof = append(
+			[]byte(nil), leiosKey.PossessionProof...,
+		)
+	}
+	return pool, nil
+}
+
+func decodeOptionalLeiosKey(data []byte) (
+	*lcommon.LeiosKey,
+	*uint64,
+	error,
+) {
+	if len(data) == 0 || (len(data) == 1 && data[0] == 0xf6) {
+		return nil, nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decoding optional Leios key: %w", err)
+	}
+	if len(fields) == 0 {
+		return nil, nil, nil
+	}
+	keyData := data
+	var registrationEpoch *uint64
+	switch len(fields) {
+	case 1:
+		keyData = fields[0]
+	case 2:
+		var epoch uint64
+		if _, epochErr := cbor.Decode(fields[1], &epoch); epochErr == nil {
+			keyData = fields[0]
+			registrationEpoch = &epoch
+		}
+	default:
+		return nil, nil, fmt.Errorf(
+			"optional Leios key has %d fields, expected 0, 1, or 2",
+			len(fields),
+		)
+	}
+	var key lcommon.LeiosKey
+	if _, err := cbor.Decode(keyData, &key); err != nil {
+		return nil, nil, fmt.Errorf("decoding Leios key: %w", err)
+	}
+	return &key, registrationEpoch, nil
+}
+
+// parseSnapshotPoolOwners decodes the owner set, which is a CBOR set (tag
+// 258) or a plain array of 28-byte key hashes. An empty set is normal and is
+// not an error; anything that is not a list of key hashes is.
+func parseSnapshotPoolOwners(data []byte) ([][]byte, error) {
+	raw, err := decodeRawArray(data)
+	if err != nil {
+		return nil, err
+	}
+	owners := make([][]byte, 0, len(raw))
+	for _, entry := range raw {
+		var hash []byte
+		if _, err := cbor.Decode(entry, &hash); err != nil {
+			return nil, err
+		}
+		if len(hash) != credentialHashSize {
+			return nil, fmt.Errorf(
+				"owner hash is %d bytes, expected %d",
+				len(hash), credentialHashSize,
+			)
+		}
+		owners = append(owners, hash)
+	}
+	return owners, nil
 }
 
 // parsePoolDistrEntry decodes the compact PoolDistr/UTxO-HD pool
@@ -1171,17 +1678,262 @@ func parsePoolMetadata(
 
 // parseVState decodes the voting/DRep state.
 // VState = [dreps, ccHotKeys, numDormantEpochs, ...]
-func parseVState(data []byte) ([]ParsedDRep, error) {
+func parseVState(data []byte) (
+	[]ParsedDRep, []ParsedCommitteeHotKey, []Credential, error,
+) {
 	vs, err := decodeRawElements(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding VState: %w", err)
+		return nil, nil, nil, fmt.Errorf("decoding VState: %w", err)
 	}
 	if len(vs) < 1 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 
-	// Parse DRep registrations (index 0)
-	return parseDRepMap(vs[0])
+	// Parse DRep registrations (index 0). Conway's VState stores committee
+	// hot-key authorizations and resignations alongside the DRep map; retain
+	// the credential tags so imported state cannot alias key and script hashes.
+	dreps, warning := parseDRepMap(vs[0])
+	hotKeys, resignations, committeeErr := parseCommitteeVState(vs[1:])
+	if committeeErr != nil {
+		return nil, nil, nil, fmt.Errorf(
+			"parsing committee state: %w",
+			committeeErr,
+		)
+	}
+	return dreps, hotKeys, resignations, warning
+}
+
+// looksLikeCommitteeCredentialMap reports whether a map's entries pair a
+// credential key with a credential value, which is the committee hot-key shape.
+// DState pairs a credential with an account state, so this separates the two
+// regardless of which is larger.
+//
+// The map is homogeneous, so the first entry settles it. Reading only that
+// entry keeps this off the allocation path for a mainnet-scale DState, which
+// this classifier is run against before the DState scans.
+func looksLikeCommitteeCredentialMap(data []byte) bool {
+	entry, ok := firstMapEntry(data)
+	if !ok {
+		return false
+	}
+	if _, err := parseCredential(entry.KeyRaw); err != nil {
+		return false
+	}
+	// A resignation is still a committee map entry, so accept it here.
+	_, _, err := parseCommitteeAuthorization(entry.ValueRaw)
+	return err == nil
+}
+
+// isCborArray reports whether data begins a definite or indefinite CBOR array.
+func isCborArray(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	return data[0]>>5 == 4 || data[0] == 0x9f
+}
+
+// committeeMapElement resolves the element parseCommitteeVState would read as
+// the committee hot-key map, unwrapping the historical single-array wrapper the
+// parser also accepts. The Conway heuristic scan uses it to test candidacy
+// before committing to a parse that fails closed on a malformed entry.
+func committeeMapElement(fields [][]byte) []byte {
+	if len(fields) == 0 {
+		return nil
+	}
+	if isCborArray(fields[0]) {
+		if nested, err := decodeRawElements(fields[0]); err == nil &&
+			len(nested) >= 2 {
+			return nested[0]
+		}
+	}
+	return fields[0]
+}
+
+func parseCommitteeVState(
+	fields [][]byte,
+) ([]ParsedCommitteeHotKey, []Credential, error) {
+	var hotKeys []ParsedCommitteeHotKey
+	var resignations []Credential
+	if len(fields) == 0 {
+		return nil, nil, nil
+	}
+	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders wrap
+	// those two fields in one committee-state array, which may itself be
+	// followed by dormant-epoch or extension fields. Detect the wrapper by its
+	// own shape rather than by the absence of trailing fields: ccHotKeys is a
+	// map, so an array here can only be the wrapper.
+	committeeFields := fields
+	if isCborArray(fields[0]) {
+		if nested, err := decodeRawElements(fields[0]); err == nil &&
+			len(nested) >= 2 {
+			committeeFields = nested
+		}
+	}
+	entries, err := decodeMapEntries(committeeFields[0])
+	if err == nil && len(entries) > 0 {
+		for _, entry := range entries {
+			// Fail closed on every entry. Dropping one silently leaves that
+			// member's authorization missing, and downstream a missing
+			// authorization is the same Conway unknown-voter rejection this
+			// parser exists to prevent -- a partial committee is as broken as
+			// an empty one, and quieter.
+			cold, coldErr := parseCredential(entry.KeyRaw)
+			if coldErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee cold credential: %w",
+					coldErr,
+				)
+			}
+			hot, resigned, hotErr := parseCommitteeAuthorization(
+				entry.ValueRaw,
+			)
+			if hotErr != nil {
+				return nil, nil, fmt.Errorf(
+					"decoding committee authorization for cold "+
+						"credential %x: %w",
+					cold.Hash,
+					hotErr,
+				)
+			}
+			if resigned {
+				resignations = append(resignations, cold)
+				continue
+			}
+			hotKeys = append(
+				hotKeys,
+				ParsedCommitteeHotKey{Cold: cold, Hot: hot},
+			)
+		}
+	}
+	if len(committeeFields) < 2 {
+		return hotKeys, resignations, nil
+	}
+	resignationEntries, resignationErr := decodeMapEntries(committeeFields[1])
+	if resignationErr == nil {
+		for _, entry := range resignationEntries {
+			cold, coldErr := parseCredential(entry.KeyRaw)
+			if coldErr == nil {
+				resignations = append(resignations, cold)
+			}
+		}
+		return hotKeys, resignations, nil
+	}
+	if values, arrayErr := decodeRawArray(committeeFields[1]); arrayErr == nil {
+		for _, value := range values {
+			cold, coldErr := parseCredential(value)
+			if coldErr == nil {
+				resignations = append(resignations, cold)
+			}
+		}
+	}
+	return hotKeys, resignations, nil
+}
+
+// parseCommitteeAuthorization decodes one value of the committee map. The
+// ledger encodes it as the CommitteeAuthorization sum type:
+//
+//	[0, hot_credential]  CommitteeHotCredential -- the member authorized a hot key
+//	[1, maybe_anchor]    CommitteeMemberResigned
+//
+// Older encoders emitted a bare credential or a single-element wrapper, so both
+// are still accepted. Returning the resigned flag separately keeps a resignation
+// from being mistaken for an authorization, and keeps an unrecognized shape an
+// error rather than a silently dropped entry.
+func parseCommitteeAuthorization(
+	data []byte,
+) (Credential, bool, error) {
+	if credential, err := parseCredential(data); err == nil {
+		return credential, false, nil
+	}
+	wrapped, err := decodeRawArray(data)
+	if err != nil {
+		return Credential{}, false, errors.New(
+			"decoding committee authorization",
+		)
+	}
+	switch len(wrapped) {
+	case 1:
+		credential, credErr := parseCredential(wrapped[0])
+		return credential, false, credErr
+	case 2:
+		var tag uint64
+		if _, tagErr := cbor.Decode(wrapped[0], &tag); tagErr != nil {
+			return Credential{}, false, errors.New(
+				"decoding committee authorization tag",
+			)
+		}
+		switch tag {
+		case committeeAuthHotCredential:
+			credential, credErr := parseCredential(wrapped[1])
+			return credential, false, credErr
+		case committeeAuthResigned:
+			// The payload is StrictMaybe Anchor: absent (null) or an
+			// array. Anything else -- an integer, a bare byte string,
+			// a bool -- is not a resignation, and accepting it would
+			// let an unrelated credential-keyed map pass
+			// looksLikeCommitteeCredentialMap and be misread as the
+			// committee map by the Conway element scan.
+			if !isResignationPayload(wrapped[1]) {
+				return Credential{}, false, errors.New(
+					"decoding committee resignation payload",
+				)
+			}
+			return Credential{}, true, nil
+		}
+	}
+	return Credential{}, false, errors.New(
+		"decoding committee authorization",
+	)
+}
+
+// CommitteeAuthorization constructor tags.
+const (
+	committeeAuthHotCredential uint64 = 0
+	committeeAuthResigned      uint64 = 1
+)
+
+// isValidAnchor reports whether data is an anchor: [url, 32-byte hash]. The
+// shape and the hash length match parseConstitution's anchor handling.
+func isValidAnchor(data []byte) bool {
+	anchor, err := decodeRawArray(data)
+	if err != nil || len(anchor) != 2 {
+		return false
+	}
+	var url string
+	if _, err := cbor.Decode(anchor[0], &url); err != nil {
+		return false
+	}
+	var hash []byte
+	if _, err := cbor.Decode(anchor[1], &hash); err != nil {
+		return false
+	}
+	return len(hash) == 32
+}
+
+// isResignationPayload reports whether data is a StrictMaybe Anchor as the
+// ledger encodes it. encodeStrictMaybe writes an empty array for SNothing and a
+// one-element array wrapping the value for SJust, and decodeStrictMaybe rejects
+// every other shape -- including CBOR null and a bare anchor. Accepting those
+// would import as resignations two encodings the node never writes and its own
+// decoder refuses, so they are rejected here and reach the undecodable-entry
+// error path instead.
+func isResignationPayload(data []byte) bool {
+	// decodeRawArray accepts CBOR null, so check the major type first or the
+	// SNothing case below would let null through.
+	if !isCborArray(data) {
+		return false
+	}
+	items, err := decodeRawArray(data)
+	if err != nil {
+		return false
+	}
+	switch len(items) {
+	case 0: // SNothing
+		return true
+	case 1: // SJust anchor
+		return isValidAnchor(items[0])
+	}
+	return false
 }
 
 // parseDRepMap decodes a DRep credential -> DRepState map.
@@ -1386,7 +2138,9 @@ func parseDRepDelegation(data []byte) (Credential, error) {
 		)
 	}
 	if len(elems) < 1 {
-		return Credential{}, errors.New("drep delegation has 0 elements, expected at least 1")
+		return Credential{}, errors.New(
+			"drep delegation has 0 elements, expected at least 1",
+		)
 	}
 
 	var drepType uint64
@@ -1521,11 +2275,54 @@ type ParsedPrevGovActionIds struct {
 
 // ParsedGovState holds all decoded governance state components.
 type ParsedGovState struct {
-	Constitution     *ParsedConstitution
-	Committee        []ParsedCommitteeMember
-	CommitteeQuorum  *cbor.Rat
-	Proposals        []ParsedGovProposal
-	PrevGovActionIds *ParsedPrevGovActionIds
+	Constitution         *ParsedConstitution
+	Committee            []ParsedCommitteeMember
+	CommitteeQuorum      *cbor.Rat
+	CommitteeParseError  error
+	Proposals            []ParsedGovProposal
+	PrevGovActionIds     *ParsedPrevGovActionIds
+	RatifiedGovActionIds []ParsedGovActionId
+	// EnactCommittee and EnactCommitteeQuorum are the committee carried
+	// by RatifyState.rsEnactState. That is not a second copy of
+	// cgsCommittee: RATIFY folds every accepted action into rsEnactState
+	// and ConwayEPOCH copies the result into cgsCommittee at the next
+	// epoch boundary. See EnactedCommitteeChange.
+	EnactCommittee       []ParsedCommitteeMember
+	EnactCommitteeQuorum *cbor.Rat
+	// EnactCommitteeSet reports that cgsDRepPulsingState was present and
+	// decoded far enough to yield rsEnactState's committee field.
+	EnactCommitteeSet bool
+	// EnactedCommitteeChange reports that RatifyState.rsEnacted carries
+	// an action whose enactment rewrites EnactState.ensCommittee, namely
+	// NoConfidence (which clears it) or UpdateCommittee. Those are the
+	// only two, so cgsCommittee and EnactCommittee are required to agree
+	// only when this is false.
+	EnactedCommitteeChange bool
+	// EnactedActionTypesUnknown reports that at least one rsEnacted
+	// proposal could not be decoded, so EnactedCommitteeChange is a
+	// lower bound rather than the full answer.
+	EnactedActionTypesUnknown bool
+	// PulsingStateParseError is set when cgsDRepPulsingState could not be
+	// decoded far enough to recover rsEnactState's committee. Fatal for an
+	// import: the imported committee then has no second view to
+	// corroborate it.
+	PulsingStateParseError error
+}
+
+// parsedPulsingState holds the parts of cgsDRepPulsingState the importer
+// consumes. Its committee error is a named field rather than a second
+// bare return value because the two error channels are not
+// interchangeable: CommitteeErr is fail-closed, while a failure to decode
+// an individual rsEnacted proposal is warning-grade and is returned as
+// the bare error alongside the struct.
+type parsedPulsingState struct {
+	EnactCommittee            []ParsedCommitteeMember
+	EnactCommitteeQuorum      *cbor.Rat
+	EnactCommitteeSet         bool
+	EnactedCommitteeChange    bool
+	EnactedActionTypesUnknown bool
+	RatifiedGovActionIds      []ParsedGovActionId
+	CommitteeErr              error
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -1585,6 +2382,7 @@ func ParseGovState(
 	// Parse committee (field 1) — best-effort
 	committee, quorum, err := parseCommittee(fields[1])
 	if err != nil {
+		result.CommitteeParseError = err
 		warnings = append(warnings, fmt.Errorf(
 			"parsing committee: %w", err,
 		))
@@ -1601,6 +2399,47 @@ func ParseGovState(
 	}
 	result.Proposals = proposals
 	result.PrevGovActionIds = prevIds
+
+	// ConwayGovState encodes exactly seven fields, so a shorter record is
+	// malformed. It is reported as a warning rather than rejected here
+	// because field-count enforcement for the whole record belongs with
+	// GovState shape validation, not with the committee corroboration
+	// below; a truncated record simply leaves EnactCommitteeSet false and
+	// the corroboration unavailable.
+	if len(fields) < 7 {
+		result.PulsingStateParseError = fmt.Errorf(
+			"GovState has %d elements, expected 7; "+
+				"cgsDRepPulsingState is absent",
+			len(fields),
+		)
+		warnings = append(warnings, fmt.Errorf(
+			"parsing drep pulsing state: %w",
+			result.PulsingStateParseError,
+		))
+	} else {
+		pulsing, err := parseDRepPulsingState(fields[6])
+		if err != nil {
+			warnings = append(warnings, fmt.Errorf(
+				"parsing drep pulsing state: %w", err,
+			))
+		}
+		result.EnactCommittee = pulsing.EnactCommittee
+		result.EnactCommitteeQuorum = pulsing.EnactCommitteeQuorum
+		result.EnactCommitteeSet = pulsing.EnactCommitteeSet
+		result.EnactedCommitteeChange = pulsing.EnactedCommitteeChange
+		result.EnactedActionTypesUnknown = pulsing.EnactedActionTypesUnknown
+		result.RatifiedGovActionIds = pulsing.RatifiedGovActionIds
+		if pulsing.CommitteeErr != nil {
+			// Keep the dedicated field for the importer's fail-closed
+			// check and surface it through the returned error so every
+			// caller of this exported function still sees the failure.
+			result.PulsingStateParseError = pulsing.CommitteeErr
+			warnings = append(warnings, fmt.Errorf(
+				"parsing drep pulsing state: %w",
+				pulsing.CommitteeErr,
+			))
+		}
+	}
 
 	return result, errors.Join(warnings...)
 }
@@ -1621,7 +2460,7 @@ func parseConstitution(data []byte) (
 			"decoding constitution: %w", err,
 		)
 	}
-	if len(fields) < 2 {
+	if len(fields) != 2 {
 		return nil, fmt.Errorf(
 			"constitution has %d elements, expected 2",
 			len(fields),
@@ -1869,6 +2708,130 @@ func parseProposals(data []byte) (
 	}
 
 	return proposals, prevIds, errors.Join(propErrs...)
+}
+
+// parseDRepPulsingStateRatifiedIds decodes
+// ConwayGovState.cgsDRepPulsingState enough to recover the
+// GovActionIds in DRComplete's RatifyState.rsEnacted field.
+//
+// DRepPulsingState is persisted as DRComplete, even when the node was
+// still pulsing in memory:
+//
+//	[pulsingSnapshot, ratifyState]
+//
+// RatifyState then encodes as:
+//
+//	[enactState, enacted, expired, delayed]
+//
+// The enacted field is a sequence of GovActionState values in the same
+// representation used by cgsProposals, so parseGovActionState can
+// recover the exact action IDs without decoding the full enact state.
+//
+// Every shape below the top-level array is fixed in Conway, so a
+// missing or short element is malformed input rather than an optional
+// encoding: DRepPulsingState always encodes two elements (a pulsing
+// pulser is completed before being written), RatifyState always four,
+// and EnactState always seven with the committee first. Those shapes are
+// therefore recorded in CommitteeErr, which the importer treats as
+// fatal, instead of being skipped silently.
+func parseDRepPulsingState(
+	data []byte,
+) (parsedPulsingState, error) {
+	var result parsedPulsingState
+	if len(data) == 0 {
+		result.CommitteeErr = errors.New(
+			"DRepPulsingState is empty",
+		)
+		return result, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding DRepPulsingState: %w", err,
+		)
+		return result, nil
+	}
+	if len(fields) < 2 {
+		result.CommitteeErr = fmt.Errorf(
+			"DRepPulsingState has %d elements, expected 2",
+			len(fields),
+		)
+		return result, nil
+	}
+
+	ratifyState, err := decodeRawArray(fields[1])
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding RatifyState: %w", err,
+		)
+		return result, nil
+	}
+	if len(ratifyState) != 4 {
+		result.CommitteeErr = fmt.Errorf(
+			"RatifyState has %d elements, expected 4",
+			len(ratifyState),
+		)
+		return result, nil
+	}
+
+	enactFields, err := decodeRawArray(ratifyState[0])
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding RatifyState enact state: %w", err,
+		)
+		return result, nil
+	}
+	if len(enactFields) != 7 {
+		result.CommitteeErr = fmt.Errorf(
+			"RatifyState enact state has %d elements, expected 7",
+			len(enactFields),
+		)
+		return result, nil
+	}
+	committee, quorum, err := parseCommittee(enactFields[0])
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding enact-state committee: %w", err,
+		)
+		return result, nil
+	}
+	result.EnactCommittee = committee
+	result.EnactCommitteeQuorum = quorum
+	result.EnactCommitteeSet = true
+
+	enacted, err := decodeRawArray(ratifyState[1])
+	if err != nil {
+		result.EnactedActionTypesUnknown = true
+		return result, fmt.Errorf(
+			"decoding RatifyState enacted proposals: %w", err,
+		)
+	}
+	var idErrs []error
+	ratifiedIds := make([]ParsedGovActionId, 0, len(enacted))
+	for _, item := range enacted {
+		prop, err := parseGovActionState(item)
+		if err != nil {
+			// The action type is unrecoverable for this entry, so
+			// whether a committee action was enacted is no longer
+			// decidable from rsEnacted.
+			result.EnactedActionTypesUnknown = true
+			idErrs = append(idErrs, fmt.Errorf(
+				"decoding enacted proposal: %w", err,
+			))
+			continue
+		}
+		if prop.ActionType == govActionTypeNoConfidence ||
+			prop.ActionType == govActionTypeUpdateCommittee {
+			result.EnactedCommitteeChange = true
+		}
+		ratifiedIds = append(ratifiedIds, ParsedGovActionId{
+			TxHash:      append([]byte(nil), prop.TxHash...),
+			ActionIndex: prop.ActionIndex,
+		})
+	}
+	result.RatifiedGovActionIds = ratifiedIds
+
+	return result, errors.Join(idErrs...)
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the

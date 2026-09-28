@@ -26,6 +26,22 @@ const (
 	OffchainMetadataSourceConstitution       = "constitution"
 	OffchainMetadataSourceCommitteeResign    = "committee_resign"
 
+	// OffchainFetchErrHashMismatch is the exact LastError recorded when
+	// the fetched document does not match the on-chain anchor hash. The
+	// API error classification matches on it, so the fetcher and API
+	// must agree on the text.
+	OffchainFetchErrHashMismatch = "metadata hash mismatch"
+	// OffchainFetchErrBodyTooLargePrefix prefixes the LastError recorded
+	// when the response body exceeds the fetch size limit.
+	OffchainFetchErrBodyTooLargePrefix = "response body exceeds"
+	// OffchainFetchErrDecodeErrorPrefix prefixes the LastError recorded
+	// when hash-valid content fails schema validation for its off-chain
+	// metadata source (for example, stake-pool metadata missing a
+	// required field or violating a field length constraint). The API
+	// error classification matches on it, so the fetcher and API must
+	// agree on the text.
+	OffchainFetchErrDecodeErrorPrefix = "metadata decode error"
+
 	OffchainMetadataStatusPending = "pending"
 	OffchainMetadataStatusFetched = "fetched"
 	OffchainMetadataStatusFailed  = "failed"
@@ -36,22 +52,18 @@ const (
 // authoritative; this table is a best-effort API cache.
 type OffchainMetadata struct {
 	FetchedAt      *time.Time
-	NextFetchAfter *time.Time `gorm:"index:idx_offchain_metadata_status_next,priority:2"`
+	NextFetchAfter *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
-	URL            string `gorm:"size:512;not null;uniqueIndex:idx_offchain_metadata_source_url_hash,priority:2"`
-	SourceType     string `gorm:"size:32;not null;uniqueIndex:idx_offchain_metadata_source_url_hash,priority:1"`
-	Status         string `gorm:"size:16;not null;index:idx_offchain_metadata_status_next,priority:1"`
-	ContentType    string `gorm:"size:128"`
-	LastError      string `gorm:"size:1024"`
-	Hash           []byte `gorm:"size:32;not null;uniqueIndex:idx_offchain_metadata_source_url_hash,priority:3"`
-	BodyHash       []byte `gorm:"size:32"`
+	URL            string
+	SourceType     string
+	Status         string
+	ContentType    string
+	LastError      string
+	Hash           []byte
+	BodyHash       []byte
 	Content        []byte
-	ID             uint `gorm:"primarykey"`
+	ID             uint
 	FetchAttempts  uint
 	LastHTTPStatus uint
-}
-
-func (OffchainMetadata) TableName() string {
-	return "offchain_metadata"
 }

@@ -17,7 +17,6 @@ package cardano
 import (
 	"bytes"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -42,6 +41,7 @@ type CardanoNodeConfig struct {
 	conwayGenesis                              *conway.ConwayGenesis
 	dijkstraGenesis                            *dijkstra.DijkstraGenesis
 	shelleyGenesis                             *shelley.ShelleyGenesis
+	checkpoints                                map[uint64]string
 	path                                       string
 	AlonzoGenesisFile                          string `yaml:"AlonzoGenesisFile"`
 	AlonzoGenesisHash                          string `yaml:"AlonzoGenesisHash"`
@@ -57,6 +57,8 @@ type CardanoNodeConfig struct {
 	MithrilGenesisAncillaryVerificationKeyFile string `yaml:"MithrilGenesisAncillaryVerificationKeyFile"`
 	ShelleyGenesisFile                         string `yaml:"ShelleyGenesisFile"`
 	ShelleyGenesisHash                         string `yaml:"ShelleyGenesisHash"`
+	CheckpointsFile                            string `yaml:"CheckpointsFile"`
+	CheckpointsFileHash                        string `yaml:"CheckpointsFileHash"`
 
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
@@ -171,7 +173,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		}
 		// Store computed hash if config does not contain hash.
 		c.ByronGenesisHash = byronHash
-		byronGenesis, err := byron.NewByronGenesisFromFile(byronGenesisPath)
+		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -294,6 +296,12 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		c.dijkstraGenesis = &dijkstraGenesis
 	}
 	if err := c.loadMithrilVerificationKeysFromDisk(); err != nil {
+		return err
+	}
+	if err := c.validateGenesisConsistency(); err != nil {
+		return err
+	}
+	if err := c.loadCheckpoints(); err != nil {
 		return err
 	}
 	return nil
@@ -453,9 +461,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.ByronGenesisHash = byronHash
-		byronGenesis, err := byron.NewByronGenesisFromReader(
-			bytes.NewReader(byronGenesisBytes),
-		)
+		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -608,6 +614,12 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		}
 		c.MithrilGenesisAncillaryVerificationKey = string(keyBytes)
 	}
+	if err := c.validateGenesisConsistency(); err != nil {
+		return err
+	}
+	if err := c.loadCheckpointsFromEmbed(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -704,15 +716,35 @@ func (c *CardanoNodeConfig) P2PTargets() (
 		c.TargetNumberOfActivePeers
 }
 
-// HardForkEpoch returns the epoch at which the named era's hard fork
-// is configured to occur, and whether the setting was present. When
-// ExperimentalHardForksEnabled is not explicitly set to true, all
-// hard fork epochs are treated as unconfigured.
+// HardForkEpoch returns the epoch at which the named era's hard fork is
+// scheduled to occur, and whether it is scheduled at all. When
+// ExperimentalHardForksEnabled is not explicitly set to true, no hard fork is
+// scheduled regardless of what the file declares, matching cardano-node's
+// treatment of the TestXHardForkAtEpoch overrides.
+//
+// Callers asking what the configuration *declares*, rather than what is
+// scheduled, want DeclaredHardForkEpoch. Both read the same field through the
+// same switch so the two questions cannot drift apart.
 func (c *CardanoNodeConfig) HardForkEpoch(era string) (uint64, bool) {
 	if c.ExperimentalHardForksEnabled == nil ||
 		!*c.ExperimentalHardForksEnabled {
 		return 0, false
 	}
+	return c.DeclaredHardForkEpoch(era)
+}
+
+// DeclaredHardForkEpoch returns the epoch the configuration declares for the
+// named era's hard fork, and whether the setting is present, ignoring
+// ExperimentalHardForksEnabled.
+//
+// The declaration is a property of the file and some shipped configurations
+// carry one with the flag off: preview sets TestShelleyHardForkAtEpoch to 0
+// alongside ExperimentalHardForksEnabled: False. A caller asking "does this
+// network begin after Byron" needs to see that, while a caller asking "is a
+// fork scheduled" must not. Use HardForkEpoch for the latter.
+func (c *CardanoNodeConfig) DeclaredHardForkEpoch(
+	era string,
+) (uint64, bool) {
 	var p *uint64
 	switch era {
 	case "shelley":
@@ -756,11 +788,57 @@ func validateGenesisHash(
 }
 
 func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
-	var payload any
-	if err := json.Unmarshal(genesisBytes, &payload); err != nil {
+	parsed, err := parseByronCanonicalJSON(genesisBytes)
+	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(payload)
+	return renderByronCanonicalHash(parsed), nil
+}
+
+// loadByronGenesisFromBytes decodes a Byron genesis document into the
+// gouroboros schema type using the Byron reference's first-occurrence
+// semantics for duplicate object keys, then rejects genesis fields that are
+// unsigned in the reference schema but were parsed as negative.
+//
+// gouroboros's byron.ByronGenesis decoder (like encoding/json generally)
+// resolves duplicate JSON object keys last-occurrence-wins, which disagrees
+// with the Byron reference's first-occurrence rule. Rather than changing
+// that decoder (an upstream gouroboros concern -- see dingo#4424), this
+// pre-filters the parsed document down to one member per key, keeping
+// whichever occurred first, before handing it to the decoder.
+func loadByronGenesisFromBytes(
+	genesisBytes []byte,
+) (byron.ByronGenesis, error) {
+	parsed, err := parseByronCanonicalJSON(genesisBytes)
+	if err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	deduped := renderByronFirstOccurrenceJSON(parsed)
+	genesis, err := byron.NewByronGenesisFromReader(bytes.NewReader(deduped))
+	if err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	if err := validateByronGenesisUnsignedFields(&genesis); err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	return genesis, nil
+}
+
+// validateByronGenesisUnsignedFields rejects Byron genesis fields that the
+// reference schema declares unsigned but which gouroboros parses into a
+// signed Go int, allowing a negative value such as slotDuration "-1" through
+// genesis loading undetected. Left unchecked, a negative SlotDuration reaches
+// a bare uint conversion in the Byron era-shape calculation and wraps to a
+// very large duration instead of failing here, at the point the bad value
+// was introduced.
+func validateByronGenesisUnsignedFields(genesis *byron.ByronGenesis) error {
+	if genesis.BlockVersionData.SlotDuration < 0 {
+		return fmt.Errorf(
+			"byron genesis: slotDuration must not be negative, got %d",
+			genesis.BlockVersionData.SlotDuration,
+		)
+	}
+	return nil
 }
 
 func replaceGenesisLineEndings(genesisBytes []byte) []byte {

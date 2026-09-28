@@ -21,9 +21,32 @@ import (
 
 // EbQuorumEventType is emitted once per endorser block when collected
 // verified votes meet the stake quorum and a certificate has been built.
-// This is the hook for embedding certificates into ranking blocks once
-// the Dijkstra CDDL defines the leios_cert payload.
+// This is the hook for future forge-loop integration that embeds certificates
+// into Dijkstra ranking block bodies.
 const EbQuorumEventType event.EventType = "leios.eb_quorum"
+
+// VoteEmittedEventType announces a locally signed prototype vote to the node
+// composition layer for diffusion over LeiosNotify.
+const VoteEmittedEventType event.EventType = "leios.vote_emitted"
+
+// VoteReceivedEventType announces a newly accepted prototype vote received
+// from a peer, so the node composition layer re-diffuses it over LeiosNotify
+// the same way it diffuses a locally emitted vote. Without this, a vote
+// reaching a relay from one peer never reaches the relay's other peers, and a
+// block producer behind that relay never observes quorum.
+const VoteReceivedEventType event.EventType = "leios.vote_received"
+
+type VoteEmittedEvent struct {
+	Vote lcommon.LeiosPrototypeVote
+}
+
+// VoteReceivedEvent carries a newly accepted peer vote and the connection
+// that delivered it. The composition layer uses OriginConnKey to avoid
+// diffusing the vote back over that same LeiosNotify connection.
+type VoteReceivedEvent struct {
+	Vote          lcommon.LeiosPrototypeVote
+	OriginConnKey string
+}
 
 // EbQuorumEvent carries the certificate built when an endorser block
 // reached stake quorum.
@@ -31,8 +54,11 @@ type EbQuorumEvent struct {
 	SlotNo            uint64
 	EndorserBlockHash lcommon.Blake2b256
 	Epoch             uint64
-	Certificate       *lcommon.LeiosEbCertificate
-	VerifiedStake     uint64 // stake of signature-verified votes
-	ObservedStake     uint64 // stake of all membership-valid votes
-	TotalActiveStake  uint64 // quorum denominator
+	// AnnouncingRbHash is the BLS signing context for prototype votes. It is
+	// zero for legacy slot-plus-EB-hash votes.
+	AnnouncingRbHash lcommon.Blake2b256
+	Certificate      *lcommon.LeiosEbCertificate
+	VerifiedStake    uint64 // stake of signature-verified votes
+	ObservedStake    uint64 // stake of all membership-valid votes
+	TotalActiveStake uint64 // quorum denominator
 }

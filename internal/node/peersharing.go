@@ -40,7 +40,8 @@ func resolvePeerSharing(
 		if *dingoNative && blockProducer && logger != nil {
 			logger.Warn(
 				"PeerSharing enabled on a block producer; this leaks topology and is incompatible with relays running NtN < 13. Disable unless you know what you're doing.",
-				"component", "node",
+				"component",
+				"node",
 			)
 		}
 		return *dingoNative
@@ -49,7 +50,8 @@ func resolvePeerSharing(
 		if logger != nil {
 			logger.Info(
 				"PeerSharing disabled by default on block producer; set --peer-sharing=true to override",
-				"component", "node",
+				"component",
+				"node",
 			)
 		}
 		return false
@@ -58,8 +60,10 @@ func resolvePeerSharing(
 		if logger != nil {
 			logger.Info(
 				"using cardano-node config.json PeerSharing as fallback default",
-				"component", "node",
-				"value", *cardanoNode,
+				"component",
+				"node",
+				"value",
+				*cardanoNode,
 			)
 		}
 		return *cardanoNode

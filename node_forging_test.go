@@ -19,32 +19,65 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // devnetKeysDir locates the credential fixtures shipped with the repo.
 // Path is relative to this file (top-level dingo package).
 const devnetKeysDir = "config/cardano/devnet/keys"
 
-func devnetCredPaths() (vrf, kes, opcert string) {
-	return filepath.Join(devnetKeysDir, "vrf.skey"),
-		filepath.Join(devnetKeysDir, "kes.skey"),
-		filepath.Join(devnetKeysDir, "opcert.cert")
+func devnetCredPaths(t testing.TB) (vrf, kes, opcert string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	copyFixture := func(name string, mode os.FileMode) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(devnetKeysDir, name))
+		if err != nil {
+			t.Fatalf("read devnet credential fixture %s: %v", name, err)
+		}
+		path := filepath.Join(tmpDir, name)
+		if err := os.WriteFile(path, data, mode); err != nil {
+			t.Fatalf("copy devnet credential fixture %s: %v", name, err)
+		}
+		return path
+	}
+
+	vrf = copyFixture("vrf.skey", 0o600)
+	kes = copyFixture("kes.skey", 0o600)
+	testutil.RestrictFileToCurrentUser(t, vrf)
+	testutil.RestrictFileToCurrentUser(t, kes)
+	// OpCerts contain only public artifacts and intentionally remain exempt
+	// from the secret-key permission policy.
+	opcert = copyFixture("opcert.cert", 0o644)
+	return vrf, kes, opcert
 }
 
 // shelleyGenesisCfgForBP returns a CardanoNodeConfig with a Shelley
 // genesis that is plausible for the devnet opcert (KESPeriod=0,
 // IssueNumber=0). systemStart slightly in the past, slotsPerKESPeriod
 // generous so the opcert is current rather than expired.
-func shelleyGenesisCfgForBP(t *testing.T, systemStart time.Time) *cardano.CardanoNodeConfig {
+func shelleyGenesisCfgForBP(
+	t *testing.T,
+	systemStart time.Time,
+) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
@@ -68,7 +101,9 @@ func newTestNodeForBP(
 ) *Node {
 	t.Helper()
 	cfg := Config{
-		logger:                        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		blockProducer:                 enabled,
 		shelleyVRFKey:                 vrf,
 		shelleyKESKey:                 kes,
@@ -79,12 +114,14 @@ func newTestNodeForBP(
 }
 
 func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	t.Parallel()
+
+	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
-	creds, err := n.validateBlockProducerStartup()
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
 	if err != nil {
-		t.Fatalf("validateBlockProducerStartup: %v", err)
+		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
 	}
 	if !creds.IsLoaded() {
 		t.Error("expected credentials to be loaded")
@@ -92,7 +129,9 @@ func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
 }
 
 func TestValidateBlockProducerStartup_NoCardanoConfig(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	t.Parallel()
+
+	vrf, kes, opcert := devnetCredPaths(t)
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, nil)
 	_, err := n.validateBlockProducerStartup()
 	if err == nil {
@@ -104,11 +143,13 @@ func TestValidateBlockProducerStartup_NoCardanoConfig(t *testing.T) {
 }
 
 func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
+	t.Parallel()
+
 	// systemStart a year in the past with slotsPerKESPeriod=10 means
 	// many KES periods have elapsed; maxKESEvolutions=1 makes anything
 	// past period 1 expired, so the devnet opcert (KESPeriod=0) is well
 	// outside its validity window and validation must reject it.
-	vrf, kes, opcert := devnetCredPaths()
+	vrf, kes, opcert := devnetCredPaths(t)
 	cfg := &cardano.CardanoNodeConfig{}
 	systemStart := time.Now().Add(-365 * 24 * time.Hour)
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
@@ -122,7 +163,7 @@ func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cfg)
-	_, err := n.validateBlockProducerStartup()
+	_, err := n.validateBlockProducerStartupAtSlot(20)
 	if err == nil {
 		t.Fatal("expected error for expired opcert KES period")
 	}
@@ -132,6 +173,8 @@ func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
 }
 
 func TestValidateBlockProducerStartup_MissingFile(t *testing.T) {
+	t.Parallel()
+
 	tmp := t.TempDir()
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(
@@ -141,7 +184,7 @@ func TestValidateBlockProducerStartup_MissingFile(t *testing.T) {
 		filepath.Join(tmp, "missing-opcert.cert"),
 		cardanoCfg,
 	)
-	_, err := n.validateBlockProducerStartup()
+	_, err := n.validateBlockProducerStartupAtSlot(0)
 	if err == nil {
 		t.Fatal("expected error for missing credential files")
 	}
@@ -176,20 +219,24 @@ func mismatchedVRFHash() [32]byte {
 }
 
 func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	t.Parallel()
+
+	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
 	n.config.network = "preview"
-	creds, err := n.validateBlockProducerStartup()
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
 	if err != nil {
-		t.Fatalf("validateBlockProducerStartup: %v", err)
+		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
 	}
-	err = n.validateBlockProducerLedgerWithView(
+	err = n.validateBlockProducerLedgerWithViewAtSlot(
 		creds,
 		testBlockProducerLedgerView{
 			registered: true,
 			regVRFHash: mismatchedVRFHash(),
 		},
+		nil,
+		0,
 	)
 	if !errors.Is(err, forging.ErrVRFKeyHashMismatch) {
 		t.Fatalf("expected VRF mismatch error, got: %v", err)
@@ -197,20 +244,24 @@ func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
 }
 
 func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
-	vrf, kes, opcert := devnetCredPaths()
+	t.Parallel()
+
+	vrf, kes, opcert := devnetCredPaths(t)
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
 	n.config.network = "devnet"
-	creds, err := n.validateBlockProducerStartup()
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
 	if err != nil {
-		t.Fatalf("validateBlockProducerStartup: %v", err)
+		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
 	}
-	err = n.validateBlockProducerLedgerWithView(
+	err = n.validateBlockProducerLedgerWithViewAtSlot(
 		creds,
 		testBlockProducerLedgerView{
 			registered: true,
 			regVRFHash: mismatchedVRFHash(),
 		},
+		nil,
+		0,
 	)
 	if err != nil {
 		t.Fatalf("devnet mismatch should warn and continue: %v", err)
@@ -218,6 +269,8 @@ func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
 }
 
 func TestHandleGenesisSnapshotError_BlockProducerFatal(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -238,6 +291,8 @@ func TestHandleGenesisSnapshotError_BlockProducerFatal(t *testing.T) {
 }
 
 func TestHandleGenesisSnapshotError_RelayWarnsAndContinues(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -258,9 +313,13 @@ func (s testMempoolTransactionSource) Transactions() []mempool.MempoolTransactio
 	return s.txs
 }
 
+func (s testMempoolTransactionSource) RemoveTxsByHash(_ []string) {}
+
 // TestMempoolAdaptersPreservePendingTransactionView verifies the node-level
 // adapters preserve the pending transaction fields needed for block building.
 func TestMempoolAdaptersPreservePendingTransactionView(t *testing.T) {
+	t.Parallel()
+
 	source := testMempoolTransactionSource{
 		txs: []mempool.MempoolTransaction{
 			{
@@ -305,5 +364,235 @@ func TestMempoolAdaptersPreservePendingTransactionView(t *testing.T) {
 	if !bytes.Equal(forgingTxs[0].Cbor, source.txs[0].Cbor) {
 		t.Fatalf("forging CBOR mismatch: got %x want %x",
 			forgingTxs[0].Cbor, source.txs[0].Cbor)
+	}
+}
+
+type testLeiosParentChain struct {
+	tip   ochainsync.Tip
+	block models.Block
+	err   error
+}
+
+func (c testLeiosParentChain) Tip() ochainsync.Tip {
+	return c.tip
+}
+
+func (c testLeiosParentChain) BlockByPoint(
+	ocommon.Point,
+	*database.Txn,
+) (models.Block, error) {
+	if c.err != nil {
+		return models.Block{}, c.err
+	}
+	return c.block, nil
+}
+
+func TestLeiosPipelineAdapterParentAnnouncementUsesLegacyHeaderExtension(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ebHashBytes := testLeiosHash(0x40)
+	parent := legacyLeiosParentBlock(t, ebHashBytes, 8192)
+	adapter := &leiosPipelineAdapter{
+		chain: testLeiosParentChain{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: parent.Slot,
+					Hash: parent.Hash,
+				},
+				BlockNumber: parent.Number,
+			},
+			block: parent,
+		},
+	}
+
+	gotRbHash, gotHash, ok, err := adapter.ParentLeiosAnnouncement()
+	if err != nil {
+		t.Fatalf("ParentLeiosAnnouncement: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected parent announcement")
+	}
+	if !bytes.Equal(gotHash.Bytes(), ebHashBytes) {
+		t.Fatalf("announcement hash mismatch: got %x want %x",
+			gotHash.Bytes(), ebHashBytes)
+	}
+	if !bytes.Equal(gotRbHash.Bytes(), parent.Hash) {
+		t.Fatalf("ranking block hash mismatch: got %x want %x",
+			gotRbHash.Bytes(), parent.Hash)
+	}
+}
+
+func testLeiosHash(seed byte) []byte {
+	hash := make([]byte, lcommon.Blake2b256Size)
+	for i := range hash {
+		hash[i] = seed + byte(i)
+	}
+	return hash
+}
+
+func legacyLeiosParentBlock(
+	t *testing.T,
+	ebHash []byte,
+	ebSize uint64,
+) models.Block {
+	t.Helper()
+	body := dijkstra.DijkstraBlockBody{
+		InvalidTransactions: []uint{},
+		Transactions:        []dijkstra.DijkstraTransaction{},
+	}
+	bodyCbor, err := body.MarshalCBOR()
+	if err != nil {
+		t.Fatalf("marshal Dijkstra body: %v", err)
+	}
+	var prevHash lcommon.Blake2b256
+	var issuerVkey lcommon.IssuerVkey
+	headerBody := []any{
+		uint64(7),
+		uint64(42),
+		prevHash,
+		issuerVkey,
+		make([]byte, 32),
+		lcommon.VrfResult{
+			Output: []byte{},
+			Proof:  make([]byte, 80),
+		},
+		uint64(len(bodyCbor)),
+		body.Hash(),
+		babbage.BabbageOpCert{
+			HotVkey:   make([]byte, 32),
+			Signature: make([]byte, 64),
+		},
+		babbage.BabbageProtoVersion{
+			Major: dijkstra.MinProtocolVersionDijkstra,
+		},
+		[]any{ebHash, ebSize},
+	}
+	headerCbor, err := cbor.Encode([]any{headerBody, make([]byte, 448)})
+	if err != nil {
+		t.Fatalf("encode Dijkstra header: %v", err)
+	}
+	blockCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(headerCbor),
+		cbor.RawMessage(bodyCbor),
+	})
+	if err != nil {
+		t.Fatalf("encode Dijkstra block: %v", err)
+	}
+	decoded, err := dijkstra.NewDijkstraBlockFromCbor(blockCbor)
+	if err != nil {
+		t.Fatalf("decode test Dijkstra block: %v", err)
+	}
+	return models.Block{
+		Hash:   decoded.Hash().Bytes(),
+		Cbor:   blockCbor,
+		Slot:   decoded.SlotNumber(),
+		Number: decoded.BlockNumber(),
+		Type:   dijkstra.BlockTypeDijkstra,
+	}
+}
+
+// expiredKESGenesisForBP builds a Shelley genesis under which the devnet
+// opcert (KESPeriod 0) is well outside its validity window: many KES periods
+// have elapsed since systemStart and maxKESEvolutions=1 makes anything past
+// period 1 expired. The strict preflight must reject it, which is what makes
+// it useful for showing the deferred path is a deferral and not a bypass.
+func expiredKESGenesisForBP(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{}
+	systemStart := time.Now().Add(-365 * 24 * time.Hour)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
+		"securityParam": 10,
+		"activeSlotsCoeff": 0.5,
+		"slotsPerKESPeriod": 10,
+		"maxKESEvolutions": 1,
+		"slotLength": 1
+	}`)); err != nil {
+		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
+	}
+	return cfg
+}
+
+// TestValidateBlockProducerStartupForClock_SupportedStillRejectsExpiredOpCert
+// is the property that keeps the deferral from being a relaxation of the
+// gate. When the confirmed era history does span the wall clock there is
+// nothing to defer, so an expired or future-staged certificate must still
+// fail startup exactly as it did before the deferral existed.
+func TestValidateBlockProducerStartupForClock_SupportedStillRejectsExpiredOpCert(
+	t *testing.T,
+) {
+	vrf, kes, opcert := devnetCredPaths(t)
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, expiredKESGenesisForBP(t))
+	_, err := n.validateBlockProducerStartupForClock(20, true)
+	if err == nil {
+		t.Fatal(
+			"supported wall clock must still reject an expired opcert;" +
+				" the deferral would otherwise be a relaxation of the gate",
+		)
+	}
+	if !strings.Contains(err.Error(), "expired") {
+		t.Errorf("expected 'expired' in error, got: %v", err)
+	}
+}
+
+// TestValidateBlockProducerStartupForClock_DeferredArmsInsteadOfFailing pins
+// the other half, against the identical genesis and credentials that the
+// supported case above rejects. The only difference between the two calls is
+// whether the confirmed era history supports the wall-clock slot, so this
+// pair isolates the behavior change to exactly that condition.
+//
+// The armed protocol lifetime is asserted, not just the absence of an error:
+// the per-slot gate in the forger is what enforces the certificate in the
+// deferred state, and it fails closed on a zero expiry period. Returning
+// unarmed credentials here would leave the node unable to forge at all
+// rather than deferring the judgement.
+func TestValidateBlockProducerStartupForClock_DeferredArmsInsteadOfFailing(
+	t *testing.T,
+) {
+	vrf, kes, opcert := devnetCredPaths(t)
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, expiredKESGenesisForBP(t))
+	creds, err := n.validateBlockProducerStartupForClock(20, false)
+	if err != nil {
+		t.Fatalf(
+			"deferred path must not fail startup on the slot-dependent"+
+				" check it is deferring: %v",
+			err,
+		)
+	}
+	if !creds.IsLoaded() {
+		t.Error("expected credentials to be loaded")
+	}
+	if creds.OpCertExpiryPeriod() == 0 {
+		t.Error(
+			"expected the KES protocol lifetime to be armed;" +
+				" the forger's per-slot gate fails closed on a zero expiry",
+		)
+	}
+}
+
+// TestValidateBlockProducerStartupForClock_DeferredStillValidatesMaterial
+// pins what the deferral does *not* cover. Only the slot-dependent
+// KES-period judgement is deferred; the credential material itself is still
+// loaded and its cold-key signature still checked, so missing or unreadable
+// key files fail startup on this path too.
+func TestValidateBlockProducerStartupForClock_DeferredStillValidatesMaterial(
+	t *testing.T,
+) {
+	tmp := t.TempDir()
+	n := newTestNodeForBP(
+		t, true,
+		filepath.Join(tmp, "missing-vrf.skey"),
+		filepath.Join(tmp, "missing-kes.skey"),
+		filepath.Join(tmp, "missing-opcert.cert"),
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	_, err := n.validateBlockProducerStartupForClock(20, false)
+	if err == nil {
+		t.Fatal("deferred path must still validate credential material")
+	}
+	if !strings.Contains(err.Error(), "load pool credentials") {
+		t.Errorf("expected 'load pool credentials' in error, got: %v", err)
 	}
 }

@@ -15,19 +15,90 @@
 package dingo
 
 import (
-	"runtime/debug"
+	"context"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
-func plateauThreshold(stallTimeout time.Duration) time.Duration {
-	return max(2*stallTimeout, 4*time.Minute)
+const (
+	chainSelectedNoneInitialRetryInterval = 10 * time.Millisecond
+	chainSelectedNoneMaxRetryInterval     = time.Second
+)
+
+// chainsyncObservePeerTip synchronously feeds a peer tip update into chain
+// selection (and peergov) when the Genesis corroboration gate is active, so the
+// ChainsyncApplyEligible check that immediately follows in the roll-forward
+// handler reflects the header currently being admitted. This closes the race
+// where the apply gate would otherwise read corroboration state that predates
+// this header (the tip update is normally delivered asynchronously). It returns
+// true when it handled the observation synchronously, so the ouroboros layer
+// skips the async PeerTipUpdateEvent publish to avoid a double update.
+//
+// When corroboration is inactive the async path is used unchanged (returns
+// false), so normal high-throughput sync keeps its parallelism.
+func (n *Node) chainsyncObservePeerTip(
+	e chainselection.PeerTipUpdateEvent,
+) bool {
+	if n.chainSelector == nil ||
+		!n.chainSelector.GenesisCorroborationActive() {
+		return false
+	}
+	n.chainSelector.HandlePeerTipUpdateEvent(
+		event.NewEvent(chainselection.PeerTipUpdateEventType, e),
+	)
+	if n.peerGov != nil {
+		n.peerGov.TouchPeerByConnId(e.ConnectionId)
+	}
+	return true
+}
+
+// chainsyncObservePeerRollback synchronously applies a peer rollback into chain
+// selection when the Genesis corroboration gate is active, so the
+// ChainsyncApplyEligible check that immediately follows in the roll-backward
+// handler reflects the post-rollback corroboration state. A rollback trims the
+// peer's observed frontier (ApplyRollback), which can change its corroboration
+// status; delivering that observation asynchronously would let the apply gate
+// read pre-trim state and forward a rollback for a peer that the rollback has
+// just made uncorroborated (issue #2928). It returns true when handled
+// synchronously, so the ouroboros layer skips the async PeerRollbackEvent
+// publish to avoid a double update. Unlike chainsyncObservePeerTip there is no
+// peergov touch: only the chain selector subscribes to PeerRollbackEvent.
+//
+// When corroboration is inactive the async path is used unchanged (returns
+// false).
+func (n *Node) chainsyncObservePeerRollback(
+	e chainselection.PeerRollbackEvent,
+) bool {
+	if n.chainSelector == nil ||
+		!n.chainSelector.GenesisCorroborationActive() {
+		return false
+	}
+	n.chainSelector.HandlePeerRollbackEvent(
+		event.NewEvent(chainselection.PeerRollbackEventType, e),
+	)
+	return true
+}
+
+// chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
+// the ledger, on top of ingress eligibility. It defers to the chain selector's
+// corroboration decision so an uncorroborated Genesis fast source is observed
+// (its tips still feed corroboration) but its blocks are withheld — the real
+// enforcement of the corroboration stall, since ingress is otherwise independent
+// of the selected best peer. Returns true (apply) when no chain selector is
+// wired yet or outside Genesis corroboration.
+func (n *Node) chainsyncApplyEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	if n.chainSelector == nil {
+		return true
+	}
+	return n.chainSelector.ShouldApplyIngress(connId)
 }
 
 func (n *Node) isChainsyncIngressEligible(
@@ -81,371 +152,53 @@ func (n *Node) handlePeerEligibilityChangedEvent(evt event.Event) {
 	n.setChainsyncIngressEligibility(e.ConnectionId, e.Eligible)
 }
 
-func shouldRecycleLocalTipPlateau(
-	now time.Time,
-	lastProgressAt time.Time,
-	localTipSlot uint64,
-	bestPeerTipSlot uint64,
-	lastRecycledAt *time.Time,
-	cooldown time.Duration,
-	threshold time.Duration,
-) bool {
-	if bestPeerTipSlot <= localTipSlot {
-		return false
-	}
-	if now.Sub(lastProgressAt) <= threshold {
-		return false
-	}
-	if lastRecycledAt != nil && now.Sub(*lastRecycledAt) < cooldown {
-		return false
-	}
-	return true
-}
-
-func (n *Node) processChainsyncRecyclerTick(
-	now time.Time,
-	localTipSlot uint64,
-	chainsyncCfg chainsync.Config,
-	recycleAt map[string]time.Time,
-	lastRecycled map[string]time.Time,
-	lastProgressSlot *uint64,
-	lastProgressAt *time.Time,
-	plateauRecoveryThreshold time.Duration,
-	grace time.Duration,
-	cooldown time.Duration,
-) {
-	if localTipSlot > *lastProgressSlot {
-		*lastProgressSlot = localTipSlot
-		*lastProgressAt = now
-	}
-	// During catch-up, extend all recycling thresholds to avoid
-	// churning connections while the node is making progress.
-	// Connection recycling during bulk sync causes pipeline resets,
-	// TIME_WAIT socket exhaustion, and dropped rollbacks that slow
-	// catch-up far more than the stall itself.
-	catchUpMultiplier := 1
-	if n.ledgerState != nil && !n.ledgerState.IsAtTip() {
-		catchUpMultiplier = 5
-	}
-	effectiveGrace := time.Duration(catchUpMultiplier) * grace
-	effectivePlateau := time.Duration(catchUpMultiplier) * plateauRecoveryThreshold
-	effectiveCooldown := time.Duration(catchUpMultiplier) * cooldown
-	n.chainsyncState.CheckStalledClients()
-	trackedClients := n.chainsyncState.GetTrackedClients()
-	trackedByID := make(
-		map[string]chainsync.TrackedClient,
-		len(trackedClients),
-	)
-	eligibleCount := 0
-	for _, conn := range trackedClients {
-		connKey := conn.ConnId.String()
-		trackedByID[connKey] = conn
-		if conn.Status != chainsync.ClientStatusStalled {
-			delete(recycleAt, connKey)
-		}
-		if !conn.ObservabilityOnly {
-			eligibleCount++
-		}
-	}
-	// Prune expired cooldown entries so this map does
-	// not grow without bound over long runtimes.
-	for connKey, last := range lastRecycled {
-		if now.Sub(last) >= effectiveCooldown {
-			delete(lastRecycled, connKey)
-		}
-	}
-	// Safety net: if local tip has not moved for a long time
-	// while peers are ahead, recycle the selected chainsync
-	// connection even if it is not marked stalled.
-	if n.chainSelector != nil {
-		if bestPeer := n.chainSelector.GetBestPeer(); bestPeer != nil {
-			if bestPeerTip := n.chainSelector.GetPeerTip(*bestPeer); bestPeerTip != nil &&
-				bestPeerTip.Tip.Point.Slot > localTipSlot {
-				targetConn := n.chainsyncState.GetClientConnId()
-				if targetConn == nil {
-					targetCopy := *bestPeer
-					targetConn = &targetCopy
-				}
-				connKey := targetConn.String()
-				var lastRecycledAt *time.Time
-				if last, ok := lastRecycled[connKey]; ok {
-					lastCopy := last
-					lastRecycledAt = &lastCopy
-				}
-				if shouldRecycleLocalTipPlateau(
-					now,
-					*lastProgressAt,
-					localTipSlot,
-					bestPeerTip.Tip.Point.Slot,
-					lastRecycledAt,
-					effectiveCooldown,
-					effectivePlateau,
-				) {
-					// Never disconnect the only eligible peer over
-					// a plateau. Plateau is a local-progress signal,
-					// not a peer-health signal: closing the only
-					// upstream forces a reconnect to the same remote
-					// on a fresh source port, which cannot recover a
-					// locally-pinned tip and amplifies disruption
-					// when the remote RSTs the reconnect. Mirrors the
-					// stalled-recycle guard below.
-					if eligibleCount <= 1 {
-						n.config.logger.Warn(
-							"local tip plateau detected but no spare eligible peer, skipping resync",
-							"connection_id", connKey,
-							"local_tip_slot", localTipSlot,
-							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-							"plateau_duration", now.Sub(*lastProgressAt),
-							"eligible_peer_count", eligibleCount,
-						)
-						// Throttle the warning to plateau cadence
-						// instead of every tick.
-						*lastProgressAt = now
-					} else {
-						// Before recycling the upstream peer, give the
-						// live reconciler a chance to repair a silent
-						// primary-chain / ledger divergence. The two
-						// existing call sites in ledger/chainsync.go
-						// only fire on ErrRollbackExceedsSecurityParam;
-						// sub-K same-slot fork resolutions can advance
-						// chain.Tip() while leaving the ledger pipeline
-						// pinned on the abandoned hash with no error to
-						// trigger reconcile. The plateau is the symptom
-						// — recycle the connection and the new peer
-						// will hand back the same canonical headers
-						// the ledger already refused to follow.
-						reconciledByLedger := false
-						if n.ledgerState != nil {
-							reconciled, err := n.ledgerState.ReconcileLivePrimaryChainLedgerDivergence(
-								"local tip plateau",
-								*targetConn,
-							)
-							if err != nil {
-								n.config.logger.Warn(
-									"plateau reconcile failed, falling through to peer recycle",
-									"connection_id", connKey,
-									"error", err.Error(),
-								)
-							} else if reconciled {
-								n.config.logger.Warn(
-									"local tip plateau resolved via ledger reconcile, skipping peer recycle",
-									"connection_id", connKey,
-									"local_tip_slot", localTipSlot,
-									"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-									"plateau_duration", now.Sub(*lastProgressAt),
-								)
-								// Reset the plateau clock so we don't
-								// immediately re-trigger on the next
-								// tick before forward application has
-								// had a chance to advance the ledger.
-								*lastProgressAt = now
-								lastRecycled[connKey] = now
-								reconciledByLedger = true
-							}
-						}
-						if !reconciledByLedger {
-							n.config.logger.Warn(
-								"local tip plateau detected, resyncing chainsync client",
-								"connection_id", connKey,
-								"local_tip_slot", localTipSlot,
-								"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-								"plateau_duration", now.Sub(*lastProgressAt),
-							)
-							n.eventBus.Publish(
-								event.ChainsyncResyncEventType,
-								event.NewEvent(
-									event.ChainsyncResyncEventType,
-									event.ChainsyncResyncEvent{
-										ConnectionId: *targetConn,
-										Reason:       event.ChainsyncResyncReasonLocalTipPlateau,
-									},
-								),
-							)
-							n.realignOtherPeersAfterPlateau(
-								*targetConn,
-								trackedClients,
-								localTipSlot,
-							)
-							delete(recycleAt, connKey)
-							lastRecycled[connKey] = now
-							*lastProgressAt = now
-						}
-					}
-				}
-			}
-		}
-	}
-	for _, conn := range trackedClients {
-		if conn.Status != chainsync.ClientStatusStalled {
-			continue
-		}
-		connKey := conn.ConnId.String()
-		desiredDueAt := now.Add(effectiveGrace)
-		if dueAt, exists := recycleAt[connKey]; !exists {
-			recycleAt[connKey] = desiredDueAt
-			n.config.logger.Info(
-				"chainsync client stalled, scheduling guarded recycle",
-				"connection_id", connKey,
-				"stall_timeout", chainsyncCfg.StallTimeout,
-				"grace_period", effectiveGrace,
-			)
-		} else if dueAt.After(desiredDueAt) {
-			// Shrink deadline when transitioning from catch-up
-			// to at-tip so stalls aren't delayed unnecessarily.
-			recycleAt[connKey] = desiredDueAt
-		}
-	}
-	for connKey, dueAt := range recycleAt {
-		if now.Before(dueAt) {
-			continue
-		}
-		tracked, ok := trackedByID[connKey]
-		if !ok || tracked.Status != chainsync.ClientStatusStalled {
-			delete(recycleAt, connKey)
-			continue
-		}
-		connId := tracked.ConnId
-		if last, ok := lastRecycled[connKey]; ok &&
-			now.Sub(last) < effectiveCooldown {
-			recycleAt[connKey] = now.Add(effectiveCooldown - now.Sub(last))
-			continue
-		}
-		// Never recycle the only eligible peer. A block producer
-		// with a single relay would lose its only propagation
-		// path during the reconnect window. Observability-only
-		// connections are not eligible, so recycling them does
-		// not reduce the eligible count.
-		if eligibleCount <= 1 && !tracked.ObservabilityOnly {
-			n.config.logger.Warn(
-				"chainsync client stalled but is only eligible peer, skipping recycle",
-				"connection_id", connKey,
-				"stall_timeout", chainsyncCfg.StallTimeout,
-			)
-			recycleAt[connKey] = now.Add(grace)
-			continue
-		}
-		active := n.chainsyncState.GetClientConnId()
-		if active == nil {
-			// If no active client is selected and this client
-			// is overdue + stalled, recycle to force a fresh
-			// connection attempt and avoid indefinite stalls.
-			n.config.logger.Warn(
-				"chainsync client stalled with no active selection, recycling connection",
-				"connection_id", connKey,
-				"stall_timeout", chainsyncCfg.StallTimeout,
-				"grace_period", grace,
-				"recycle_cooldown", cooldown,
-			)
-			n.eventBus.PublishAsync(
-				connmanager.ConnectionRecycleRequestedEventType,
-				event.NewEvent(
-					connmanager.ConnectionRecycleRequestedEventType,
-					connmanager.ConnectionRecycleRequestedEvent{
-						ConnectionId: connId,
-						ConnKey:      connKey,
-						Reason:       "stalled_connection_no_active_selection",
-					},
-				),
-			)
-			delete(recycleAt, connKey)
-			lastRecycled[connKey] = now
-			continue
-		}
-		if active.String() != connKey {
-			// Don't recycle non-primary stalled clients. Keep state clean.
-			n.eventBus.PublishAsync(
-				chainsync.ClientRemoveRequestedEventType,
-				event.NewEvent(
-					chainsync.ClientRemoveRequestedEventType,
-					chainsync.ClientRemoveRequestedEvent{
-						ConnId:  connId,
-						ConnKey: connKey,
-						Reason:  "stalled_non_primary_connection",
-					},
-				),
-			)
-			delete(recycleAt, connKey)
-			continue
-		}
-		n.config.logger.Warn(
-			"chainsync client stalled, recycling active connection",
-			"connection_id", connKey,
-			"stall_timeout", chainsyncCfg.StallTimeout,
-			"grace_period", grace,
-			"recycle_cooldown", cooldown,
-		)
-		n.eventBus.PublishAsync(
-			connmanager.ConnectionRecycleRequestedEventType,
-			event.NewEvent(
-				connmanager.ConnectionRecycleRequestedEventType,
-				connmanager.ConnectionRecycleRequestedEvent{
-					ConnectionId: connId,
-					ConnKey:      connKey,
-					Reason:       "stalled_active_connection",
-				},
-			),
-		)
-		delete(recycleAt, connKey)
-		lastRecycled[connKey] = now
-	}
-}
-
-// realignOtherPeersAfterPlateau requests a fresh-connection chainsync
-// resync for every ingress-eligible tracked peer
-// other than the one being closed for plateau. Without realignment, a
-// peer that has been streaming RollForwards while the active peer was
-// stuck holds a server-side cursor far past our local tip; the chain
-// selector will promote one of these peers as the next active, and its
-// next RollForward delivers a header beyond the local block tip with
-// no in-memory ancestor history to bridge the gap. The local fork
-// resolver then fails and closes that peer too, cycling through peers
-// until process restart. Realigning candidate peers' cursors to the
-// current local tip lets whichever peer is promoted next deliver
-// headers from local-tip+1 onward.
-func (n *Node) realignOtherPeersAfterPlateau(
-	closedConnId ouroboros.ConnectionId,
-	trackedClients []chainsync.TrackedClient,
-	localTipSlot uint64,
-) {
-	closedKey := closedConnId.String()
-	for _, conn := range trackedClients {
-		if conn.ObservabilityOnly {
-			continue
-		}
-		if conn.ConnId.String() == closedKey {
-			continue
-		}
-		if conn.Cursor.Slot <= localTipSlot {
-			continue
-		}
-		n.config.logger.Info(
-			"realigning peer chainsync cursor after plateau",
-			"connection_id", conn.ConnId.String(),
-			"cursor_slot", conn.Cursor.Slot,
-			"local_tip_slot", localTipSlot,
-		)
-		n.eventBus.Publish(
-			event.ChainsyncResyncEventType,
-			event.NewEvent(
-				event.ChainsyncResyncEventType,
-				event.ChainsyncResyncEvent{
-					ConnectionId: conn.ConnId,
-					Reason:       event.ChainsyncResyncReasonPostPlateauRealign,
-				},
-			),
-		)
-	}
-}
-
 func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	e, ok := evt.Data.(chainselection.ChainSwitchEvent)
 	if !ok {
 		return
 	}
+	// chainSelector's evaluation loop is never paused during a live
+	// database restore/truncate, which briefly nils n.chainsyncState while
+	// swapping in a rebuilt one and holds n.liveLifecycleMu for its entire
+	// quiesce-through-reinitialize duration -- so this event can still fire
+	// mid-operation. TryLock, not Lock, matching nodeRecyclerComponents'
+	// identical guard below: this handler runs on the EventBus's own
+	// per-subscriber dispatch goroutine, so blocking it for a possibly
+	// long-running truncate is worse than dropping one update, since
+	// chainSelector re-evaluates and emits again once connections reattach
+	// after reinit.
+	if !n.liveLifecycleMu.TryLock() {
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.chainsyncState == nil {
+		return
+	}
+	if n.chainSelector != nil {
+		best := n.chainSelector.GetBestPeer()
+		if best == nil || *best != e.NewConnectionId {
+			n.config.logger.Debug(
+				"ignoring stale chain switch superseded by selection",
+				"new_connection", e.NewConnectionId.String(),
+			)
+			return
+		}
+	}
 	prevConn := "(none)"
 	if e.PreviousConnectionId.LocalAddr != nil &&
 		e.PreviousConnectionId.RemoteAddr != nil {
 		prevConn = e.PreviousConnectionId.String()
+	}
+	// Peer switches only change which already-running chainsync stream feeds
+	// the ledger. Restarting chainsync here re-enters FindIntersect and can
+	// race the protocol state machine under load.
+	if !n.chainsyncState.TrySetClientConnId(e.NewConnectionId) {
+		n.config.logger.Debug(
+			"ignoring stale chain switch for unavailable connection",
+			"previous_connection", prevConn,
+			"new_connection", e.NewConnectionId.String(),
+		)
+		return
 	}
 	n.config.logger.Info(
 		"chain switch: updating active connection",
@@ -454,38 +207,297 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 		"new_tip_block", e.NewTip.BlockNumber,
 		"new_tip_slot", e.NewTip.Point.Slot,
 	)
-	// Peer switches only change which already-running chainsync stream feeds
-	// the ledger. Restarting chainsync here re-enters FindIntersect and can
-	// race the protocol state machine under load.
-	n.chainsyncState.SetClientConnId(e.NewConnectionId)
 }
 
-func (n *Node) runStallCheckerTick(fn func()) {
-	defer func() {
-		if r := recover(); r != nil {
-			stack := debug.Stack()
-			n.config.logger.Error(
-				"panic in stall checker tick, continuing",
-				"panic", r,
-				"stack", string(stack),
-			)
-		}
-	}()
-	fn()
+// handleChainSelectedNoneEvent clears the previous active connection after a
+// selected-to-none transition. This keeps ledger and blockfetch consumers on
+// the same tracked-tip and eligibility decision as ChainSelector.
+func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
+	e, ok := evt.Data.(chainselection.ChainSelectedNoneEvent)
+	if !ok {
+		return
+	}
+	// Match handleChainSwitchEvent's live-lifecycle guard. A delayed event
+	// rechecks the selector before clearing, so it cannot erase a newer switch.
+	// Unlike a switch, selected-to-none is a one-shot transition and cannot be
+	// dropped on contention. A single
+	// context-owned worker below coalesces contended transitions instead of
+	// detaching an unbounded goroutine for every event.
+	if !n.liveLifecycleMu.TryLock() {
+		n.deferChainSelectedNoneEvent(e)
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	n.handleChainSelectedNoneEventLocked(e)
 }
 
-func (n *Node) runStallCheckerLoop(fn func()) (recovered bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			recovered = true
-			stack := debug.Stack()
-			n.config.logger.Error(
-				"panic in stall checker goroutine",
-				"panic", r,
-				"stack", string(stack),
+func (n *Node) handleChainSelectedNoneEventLocked(
+	e chainselection.ChainSelectedNoneEvent,
+) {
+	if n.chainsyncState == nil {
+		return
+	}
+	prevConn := "(none)"
+	if e.PreviousConnectionId.LocalAddr != nil &&
+		e.PreviousConnectionId.RemoteAddr != nil {
+		prevConn = e.PreviousConnectionId.String()
+	}
+	if n.chainSelector != nil {
+		if n.chainSelector.GetBestPeer() != nil {
+			n.config.logger.Debug(
+				"ignoring stale selected-to-none event superseded by selection",
+				"previous_connection", prevConn,
 			)
+			return
 		}
-	}()
-	fn()
-	return false
+	}
+	n.config.logger.Info(
+		"chain selection stalled: no selectable peer",
+		"previous_connection", prevConn,
+		"genesis_corroboration", e.GenesisCorroboration,
+	)
+	n.recordChainSelectionStall(e.GenesisCorroboration)
+	if n.chainSelector == nil {
+		// Direct callers without a selector cannot perform the current-selection
+		// recheck above, so retain the event's compare-and-clear behavior.
+		n.chainsyncState.ClearClientConnId(e.PreviousConnectionId)
+		return
+	}
+	// When the selector still has no best peer, clear whichever connection the
+	// chainsync registry currently considers active. A coalesced newer event may
+	// name a different previous peer after intervening switch events were
+	// skipped during the same lifecycle operation; compare-clearing only the
+	// newest event's ID would leave that older active connection behind.
+	if active := n.chainsyncState.GetClientConnId(); active != nil {
+		n.chainsyncState.ClearClientConnId(*active)
+	}
+}
+
+// startChainSelectedNoneWorker starts the one node-owned retry worker before
+// ChainSelector subscriptions can publish selected-to-none transitions.
+func (n *Node) startChainSelectedNoneWorker(ctx context.Context) {
+	n.chainSelectedNoneMu.Lock()
+	defer n.chainSelectedNoneMu.Unlock()
+	if n.chainSelectedNoneWorkerDone != nil {
+		return
+	}
+	wake := make(chan struct{}, 1)
+	done := make(chan struct{})
+	n.chainSelectedNoneWake = wake
+	n.chainSelectedNoneWorkerDone = done
+	go n.runChainSelectedNoneWorker(ctx, wake, done)
+}
+
+// waitChainSelectedNoneWorker waits for the context-owned worker to exit. The
+// caller must cancel the worker context first.
+func (n *Node) waitChainSelectedNoneWorker() {
+	n.chainSelectedNoneMu.Lock()
+	done := n.chainSelectedNoneWorkerDone
+	n.chainSelectedNoneMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+func (n *Node) deferChainSelectedNoneEvent(
+	e chainselection.ChainSelectedNoneEvent,
+) {
+	n.chainSelectedNoneMu.Lock()
+	// Retain only the newest transition. The locked handler rechecks current
+	// ChainSelector state, so an older transition cannot erase a later
+	// selection; if selection is still empty, it clears the registry's current
+	// active connection even when a dropped intermediate switch made that differ
+	// from the newest event's previous connection.
+	n.chainSelectedNonePending = e
+	n.chainSelectedNonePendingSet = true
+	wake := n.chainSelectedNoneWake
+	n.chainSelectedNoneMu.Unlock()
+	if wake == nil {
+		n.config.logger.Error(
+			"cannot defer selected-to-none event: worker is not running",
+		)
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+		// A queued wake already covers the coalesced pending transition.
+	}
+}
+
+func (n *Node) runChainSelectedNoneWorker(
+	ctx context.Context,
+	wake <-chan struct{},
+	done chan<- struct{},
+) {
+	defer close(done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		}
+
+		retryInterval := chainSelectedNoneInitialRetryInterval
+		for {
+			n.chainSelectedNoneMu.Lock()
+			hasPending := n.chainSelectedNonePendingSet
+			n.chainSelectedNoneMu.Unlock()
+			if !hasPending {
+				break
+			}
+			if !n.liveLifecycleMu.TryLock() {
+				retry := time.NewTimer(retryInterval)
+				select {
+				case <-ctx.Done():
+					if !retry.Stop() {
+						select {
+						case <-retry.C:
+						default:
+						}
+					}
+					return
+				case <-retry.C:
+				}
+				retryInterval = nextChainSelectedNoneRetryInterval(
+					retryInterval,
+					false,
+				)
+				continue
+			}
+			// A successful acquisition ends this contention period. If another
+			// lifecycle operation takes the lock before a newly queued transition
+			// is drained, ramp that fresh contention from the initial interval.
+			retryInterval = nextChainSelectedNoneRetryInterval(
+				retryInterval,
+				true,
+			)
+
+			n.chainSelectedNoneMu.Lock()
+			pending := n.chainSelectedNonePending
+			n.chainSelectedNonePendingSet = false
+			n.chainSelectedNoneMu.Unlock()
+			n.handleChainSelectedNoneEventLocked(pending)
+			n.liveLifecycleMu.Unlock()
+		}
+	}
+}
+
+func nextChainSelectedNoneRetryInterval(
+	current time.Duration,
+	lockAcquired bool,
+) time.Duration {
+	if lockAcquired {
+		return chainSelectedNoneInitialRetryInterval
+	}
+	if current >= chainSelectedNoneMaxRetryInterval/2 {
+		return chainSelectedNoneMaxRetryInterval
+	}
+	return 2 * current
+}
+
+// nodeRecyclerComponents adapts the node's swappable storage/networking
+// components to the recycler's ComponentProvider contract.
+type nodeRecyclerComponents struct {
+	node *Node
+}
+
+// recyclerComponents returns the provider the stall recycler reads live
+// components through.
+func (n *Node) recyclerComponents() chainsyncrecycler.ComponentProvider {
+	return nodeRecyclerComponents{node: n}
+}
+
+// withLiveChainsyncState runs fn while the chainsync state is stable across a
+// live database restore or truncate. Callers must tolerate a false result:
+// lifecycle work holds liveLifecycleMu while it discards and rebuilds the
+// state, and blocking a background ledger callback there can deadlock the
+// quiesce that waits for the callback's goroutine to exit.
+func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) {
+	if !n.liveLifecycleMu.TryLock() {
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.chainsyncState == nil {
+		return
+	}
+	fn(n.chainsyncState)
+}
+
+// WithLiveComponents runs fn against the node's current ledger, chainsync
+// state, and chain selector while holding liveLifecycleMu, so a live database
+// restore/truncate cannot swap them mid-tick.
+//
+// A live restore/truncate briefly nils n.ledgerState and n.chainsyncState while
+// it swaps in rebuilt ones, and holds n.liveLifecycleMu for its entire
+// quiesce-through-reinitialize duration. TryLock, not Lock: the recycler's tick
+// is a best-effort periodic check, so it must skip a contended tick rather than
+// block waiting behind a possibly long-running truncate — and a blocking Lock()
+// cannot be interrupted by context cancellation, so shutdown (which waits for
+// the recycler) would hang behind it past its configured timeout. The lock is
+// held for the whole callback, not just the nil check, because the tick
+// dereferences both fields many more times after that check. The two fields are
+// also not nilled/reassigned atomically together — reinitializeCoreStorage
+// rebuilds n.ledgerState before reinitializeNetworkingCore rebuilds
+// n.chainsyncState — so both are checked even under the lock.
+func (c nodeRecyclerComponents) WithLiveComponents(
+	fn func(chainsyncrecycler.LiveComponents),
+) bool {
+	n := c.node
+	if !n.liveLifecycleMu.TryLock() {
+		return false
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.ledgerState == nil || n.chainsyncState == nil {
+		return false
+	}
+	live := chainsyncrecycler.LiveComponents{
+		Ledger:         n.ledgerState,
+		ChainsyncState: n.chainsyncState,
+	}
+	// Assign the interface only when the selector exists: a typed-nil
+	// *ChainSelector in the interface would be non-nil to the recycler.
+	if n.chainSelector != nil {
+		live.ChainSelector = n.chainSelector
+	}
+	fn(live)
+	return true
+}
+
+// startChainsyncStallRecycler builds and starts the chainsync stall recycler.
+// It detects stalled chainsync clients and recycles truly stuck connections,
+// using a grace period + cooldown to avoid flapping healthy but quiet peers.
+func (n *Node) startChainsyncStallRecycler(
+	ctx context.Context,
+	chainsyncCfg chainsync.Config,
+) error {
+	n.chainsyncStallRecycler = chainsyncrecycler.New(
+		chainsyncrecycler.Config{
+			Components:   n.recyclerComponents(),
+			EventBus:     n.eventBus,
+			Logger:       n.config.logger,
+			StallTimeout: chainsyncCfg.StallTimeout,
+			Interval: min(
+				max(chainsyncCfg.StallTimeout/2, 10*time.Second),
+				30*time.Second,
+			),
+			Grace:    max(chainsyncCfg.StallTimeout, 30*time.Second),
+			Cooldown: max(2*chainsyncCfg.StallTimeout, 2*time.Minute),
+		},
+	)
+	return n.chainsyncStallRecycler.Start(ctx)
+}
+
+// waitChainsyncStallRecycler stops the recycler and waits for it to exit.
+//
+// The wait itself is unbounded: advancing while the recycler is still active
+// can race dependency teardown. shutdown() bounds it from outside with
+// stopWithDeadline, which is safe only because the recycler reaches node
+// components solely through WithLiveComponents, whose TryLock on
+// liveLifecycleMu fails while shutdown holds that lock.
+func (n *Node) waitChainsyncStallRecycler() {
+	if n.chainsyncStallRecycler == nil {
+		return
+	}
+	n.chainsyncStallRecycler.Stop()
 }

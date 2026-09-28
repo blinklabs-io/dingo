@@ -1,0 +1,15 @@
+# Prometheus scrape configuration for the koios-parity-compose example.
+#
+# Scrapes the dingo service's own metrics endpoint (bin/entrypoint.sh /
+# Dockerfile expose port 12798, path /metrics) over the compose network, by
+# service name -- no host port publication is required for this to work.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: dingo
+    static_configs:
+      - targets: ["dingo:12798"]
+        labels:
+          network: preview

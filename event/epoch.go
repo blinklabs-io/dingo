@@ -19,10 +19,11 @@ const EpochTransitionEventType = EventType("epoch.transition")
 
 // EpochTransitionEvent is emitted when the chain crosses an epoch boundary
 type EpochTransitionEvent struct {
-	PreviousEpoch   uint64
-	NewEpoch        uint64
-	BoundarySlot    uint64
-	EpochNonce      []byte
+	PreviousEpoch uint64
+	NewEpoch      uint64
+	BoundarySlot  uint64
+	EpochNonce    []byte
+	// ProtocolVersion is the protocol major version active for the boundary.
 	ProtocolVersion uint
 	// SnapshotSlot is the slot at which snapshot should be taken (typically boundary - 1)
 	SnapshotSlot uint64

@@ -15,6 +15,8 @@
 package database
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
@@ -23,9 +25,9 @@ func (d *Database) GetEpoch(
 	txn *Txn,
 ) (*models.Epoch, error) {
 	if txn == nil {
-		return d.metadata.GetEpoch(epochId, nil)
+		return d.epochStore().GetEpoch(epochId, nil)
 	}
-	return txn.db.metadata.GetEpoch(epochId, txn.Metadata())
+	return txn.db.epochStore().GetEpoch(epochId, txn.Metadata())
 }
 
 func (d *Database) GetEpochsByEra(
@@ -33,16 +35,37 @@ func (d *Database) GetEpochsByEra(
 	txn *Txn,
 ) ([]models.Epoch, error) {
 	if txn == nil {
-		return d.metadata.GetEpochsByEra(eraId, nil)
+		return d.epochStore().GetEpochsByEra(eraId, nil)
 	}
-	return txn.db.metadata.GetEpochsByEra(eraId, txn.Metadata())
+	return txn.db.epochStore().GetEpochsByEra(eraId, txn.Metadata())
+}
+
+// EpochBySlot returns the persisted epoch containing slot: the one with
+// the greatest StartSlot <= slot. Unlike ledger.LedgerState.SlotToEpoch
+// (which additionally consults the live hard-fork/era-transition summary
+// so it can also reason about slots in the future), this only walks the
+// persisted epoch table, with no dependency on genesis config or a live
+// LedgerState -- sufficient for every caller here, since a truncate or
+// rollback target is always at or before the already-committed tip, so
+// the epoch containing it has always already been persisted.
+func EpochBySlot(d *Database, slot uint64, txn *Txn) (models.Epoch, error) {
+	epoch, err := d.GetEpochBySlot(slot, txn)
+	if err != nil {
+		return models.Epoch{}, fmt.Errorf("get epoch by slot: %w", err)
+	}
+	if epoch == nil {
+		return models.Epoch{}, fmt.Errorf(
+			"slot %d is outside the known epoch range", slot,
+		)
+	}
+	return *epoch, nil
 }
 
 func (d *Database) GetEpochs(txn *Txn) ([]models.Epoch, error) {
 	if txn == nil {
-		return d.metadata.GetEpochs(nil)
+		return d.epochStore().GetEpochs(nil)
 	}
-	return txn.db.metadata.GetEpochs(txn.Metadata())
+	return txn.db.epochStore().GetEpochs(txn.Metadata())
 }
 
 func (d *Database) GetEpochBySlot(
@@ -50,9 +73,9 @@ func (d *Database) GetEpochBySlot(
 	txn *Txn,
 ) (*models.Epoch, error) {
 	if txn == nil {
-		return d.metadata.GetEpochBySlot(slot, nil)
+		return d.epochStore().GetEpochBySlot(slot, nil)
 	}
-	return txn.db.metadata.GetEpochBySlot(slot, txn.Metadata())
+	return txn.db.epochStore().GetEpochBySlot(slot, txn.Metadata())
 }
 
 func (d *Database) DeleteEpochsAfterSlot(
@@ -60,9 +83,9 @@ func (d *Database) DeleteEpochsAfterSlot(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		return d.metadata.DeleteEpochsAfterSlot(slot, nil)
+		return d.epochStore().DeleteEpochsAfterSlot(slot, nil)
 	}
-	return txn.db.metadata.DeleteEpochsAfterSlot(
+	return txn.db.epochStore().DeleteEpochsAfterSlot(
 		slot,
 		txn.Metadata(),
 	)
@@ -75,7 +98,7 @@ func (d *Database) SetEpoch(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		return d.metadata.SetEpoch(
+		return d.epochStore().SetEpoch(
 			slot,
 			epoch,
 			nonce,
@@ -88,7 +111,7 @@ func (d *Database) SetEpoch(
 			nil,
 		)
 	}
-	return d.metadata.SetEpoch(
+	return d.epochStore().SetEpoch(
 		slot,
 		epoch,
 		nonce,

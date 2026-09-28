@@ -17,6 +17,7 @@ package hardfork
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -27,6 +28,12 @@ var ErrBeforeGenesis = errors.New("hardfork: time is before system start")
 // ErrPastHorizon is returned when a slot or time falls past the last bounded
 // era's end and no unbounded era follows. Mirrors Haskell's PastHorizonException.
 var ErrPastHorizon = errors.New("hardfork: slot/time past era horizon")
+
+// ErrDurationOverflow is returned by SlotToTime when converting a slot
+// distance to a time.Duration would overflow its int64 nanosecond range.
+var ErrDurationOverflow = errors.New(
+	"hardfork: slot-to-duration conversion overflows time.Duration",
+)
 
 // EraSummary describes the bounds and parameters of a single era within a
 // chain's confirmed history.
@@ -94,8 +101,11 @@ func (s *Summary) Validate() error {
 		prev := s.Eras[i-1]
 		cur := s.Eras[i]
 		if prev.End == nil {
-			return fmt.Errorf("hardfork: era %d (id=%d) is unbounded but not last",
-				i-1, prev.EraID)
+			return fmt.Errorf(
+				"hardfork: era %d (id=%d) is unbounded but not last",
+				i-1,
+				prev.EraID,
+			)
 		}
 		if *prev.End != cur.Start {
 			return fmt.Errorf(
@@ -143,10 +153,33 @@ func (s *Summary) SlotToTime(slot uint64) (time.Time, error) {
 		return time.Time{}, err
 	}
 	slotsIntoEra := slot - era.Start.Slot
-	// slotsIntoEra is bounded by the era slot range; at Cardano slot lengths
-	// the product stays well within time.Duration's int64 nanosecond range.
+	slotLength := era.Params.SlotLength
+	if slotLength <= 0 {
+		return time.Time{}, fmt.Errorf(
+			"hardfork: era %d has non-positive slot length %s",
+			era.EraID, slotLength,
+		)
+	}
+	// A pathological slot distance (corrupt state, adversarial input) times
+	// SlotLength can overflow time.Duration's int64 nanosecond range; detect
+	// that before multiplying instead of silently wrapping the result.
+	if slotsIntoEra != 0 &&
+		uint64(slotLength) > uint64(math.MaxInt64)/slotsIntoEra {
+		return time.Time{}, fmt.Errorf(
+			"%w: slot=%d slots_into_era=%d slot_length=%s",
+			ErrDurationOverflow, slot, slotsIntoEra, slotLength,
+		)
+	}
+	// The overflow check above guarantees this conversion fits in int64.
 	// #nosec G115
-	rel := era.Start.RelativeTime + time.Duration(slotsIntoEra)*era.Params.SlotLength
+	elapsed := time.Duration(slotsIntoEra) * slotLength
+	if era.Start.RelativeTime > math.MaxInt64-elapsed {
+		return time.Time{}, fmt.Errorf(
+			"%w: slot=%d relative_time=%s elapsed=%s",
+			ErrDurationOverflow, slot, era.Start.RelativeTime, elapsed,
+		)
+	}
+	rel := era.Start.RelativeTime + elapsed
 	return s.SystemStart.Add(rel), nil
 }
 
@@ -184,4 +217,43 @@ func (s *Summary) SlotToEpoch(slot uint64) (EpochInfo, error) {
 		SlotLength:    era.Params.SlotLength,
 		EraID:         era.EraID,
 	}, nil
+}
+
+// EpochInfo converts an absolute epoch number to its boundary information.
+func (s *Summary) EpochInfo(epoch uint64) (EpochInfo, error) {
+	for i := range s.Eras {
+		era := &s.Eras[i]
+		if epoch < era.Start.Epoch {
+			return EpochInfo{}, ErrPastHorizon
+		}
+		if era.End != nil && epoch >= era.End.Epoch {
+			continue
+		}
+		epochsIntoEra := epoch - era.Start.Epoch
+		epochSize := era.Params.EpochSize
+		if epochsIntoEra != 0 && epochSize > ^uint64(0)/epochsIntoEra {
+			return EpochInfo{}, fmt.Errorf(
+				"hardfork: epoch start slot overflows uint64: epoch=%d era_start_epoch=%d epoch_size=%d",
+				epoch,
+				era.Start.Epoch,
+				epochSize,
+			)
+		}
+		slotOffset := epochsIntoEra * epochSize
+		if era.Start.Slot > ^uint64(0)-slotOffset {
+			return EpochInfo{}, fmt.Errorf(
+				"hardfork: epoch start slot overflows uint64: era_start_slot=%d slot_offset=%d",
+				era.Start.Slot,
+				slotOffset,
+			)
+		}
+		return EpochInfo{
+			Epoch:         epoch,
+			StartSlot:     era.Start.Slot + slotOffset,
+			LengthInSlots: epochSize,
+			SlotLength:    era.Params.SlotLength,
+			EraID:         era.EraID,
+		}, nil
+	}
+	return EpochInfo{}, ErrPastHorizon
 }

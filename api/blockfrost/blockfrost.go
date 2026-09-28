@@ -17,24 +17,28 @@ package blockfrost
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
+// Leave time to report a stalled body before the 30-second write deadline.
+const defaultRequestBodyTimeout = 15 * time.Second
+
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
-	config     BlockfrostConfig
-	logger     *slog.Logger
-	node       BlockfrostNode
-	httpServer *http.Server
-	mu         sync.Mutex
+	config             BlockfrostConfig
+	logger             *slog.Logger
+	requestBodyTimeout time.Duration
+	node               BlockfrostNode
+	// listener owns the start/stop protocol, including releasing the
+	// listening socket as part of what Stop waits for -- see
+	// internal/apilistener.
+	listener *apilistener.Listener
 }
 
 // New creates a new Blockfrost API server instance.
@@ -53,24 +57,22 @@ func New(
 		cfg.ListenAddress = ":3000"
 	}
 	return &Blockfrost{
-		config: cfg,
-		logger: logger,
-		node:   node,
+		config:             cfg,
+		requestBodyTimeout: defaultRequestBodyTimeout,
+		logger:             logger,
+		node:               node,
+		listener:           apilistener.New("Blockfrost API", logger),
 	}
 }
 
-// Start starts the HTTP server in a background goroutine.
-func (b *Blockfrost) Start(
-	ctx context.Context,
-) error {
-	b.mu.Lock()
-	if b.httpServer != nil {
-		b.mu.Unlock()
-		return errors.New("server already started")
-	}
-
+// handler builds the HTTP handler for the Blockfrost API,
+// including route registration and middleware.
+func (b *Blockfrost) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", b.handleRoot)
+	// "GET /{$}" matches only the literal root path. Without
+	// "{$}" the pattern would act as a subtree match and
+	// silently catch every unimplemented route.
+	mux.HandleFunc("GET /{$}", b.handleRoot)
 	mux.HandleFunc("GET /health", b.handleHealth)
 	mux.HandleFunc(
 		"GET /api/v0/blocks/latest",
@@ -113,12 +115,40 @@ func (b *Blockfrost) Start(
 		b.handleAsset,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/assets/{asset}/addresses",
+		b.handleAssetAddresses,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools",
+		b.handlePoolsList,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/pools/extended",
 		b.handlePoolsExtended,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/pools/retiring",
+		b.handlePoolsRetiring,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}/metadata",
+		b.handlePoolMetadata,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}",
+		b.handlePoolDetail,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps",
+		b.handleDReps,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/governance/dreps/{drep_id}",
 		b.handleDRep,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}",
+		b.handleAddress,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}/utxos",
@@ -143,6 +173,14 @@ func (b *Blockfrost) Start(
 	mux.HandleFunc(
 		"POST /api/v0/tx/submit",
 		b.handleTransactionSubmit,
+	)
+	mux.HandleFunc(
+		"POST /api/v0/utils/txs/evaluate",
+		b.handleTransactionEvaluate,
+	)
+	mux.HandleFunc(
+		"POST /api/v0/utils/txs/evaluate/utxos",
+		b.handleTransactionEvaluateUtxos,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/txs/{hash}/cbor",
@@ -212,33 +250,79 @@ func (b *Blockfrost) Start(
 		"GET /api/v0/accounts/{stake_address}/rewards",
 		b.handleAccountRewardHistory,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/utxos",
+		b.handleAccountUTXOs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/withdrawals",
+		b.handleAccountWithdrawals,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/transactions",
+		b.handleAccountTransactions,
+	)
+
+	// Catch-all for any path not matched above. Registered
+	// last so more specific patterns still take precedence;
+	// ServeMux resolves by pattern specificity, not
+	// registration order.
+	mux.HandleFunc("/", b.handleNotFound)
 
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
-	handler := httpcors.Handler(
-		http.MaxBytesHandler(mux, maxRequestBodyBytes),
+	limited := http.MaxBytesHandler(mux, maxRequestBodyBytes)
+	return httpcors.Handler(
+		limited,
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 		},
 	)
+}
 
-	server := &http.Server{
-		Addr:              b.config.ListenAddress,
-		Handler:           handler,
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	b.httpServer = server
-	b.mu.Unlock()
-
-	// Start the server with deterministic error detection
-	if err := b.startServer(server); err != nil {
-		b.mu.Lock()
-		b.httpServer = nil
-		b.mu.Unlock()
+// Start starts the HTTP server in a background goroutine.
+func (b *Blockfrost) Start(
+	ctx context.Context,
+) error {
+	startDone, err := b.listener.BeginStart()
+	if err != nil {
 		return err
+	}
+	defer b.listener.EndStart(startDone)
+
+	server, bindDone, err := b.listener.Publish(func() *http.Server {
+		return &http.Server{
+			Addr:              b.config.ListenAddress,
+			Handler:           b.handler(),
+			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+	})
+	if err != nil {
+		return err
+	}
+
+	// Watched before the bind so a context cancelled mid-bind still tears the
+	// server down: the detach is what makes an in-flight bind close its own
+	// socket.
+	b.listener.Watch(ctx, server, apilistener.Graceful)
+
+	// Bound with deterministic error detection: the socket is opened
+	// synchronously so a port conflict surfaces here rather than in a log line
+	// from a goroutine nobody is watching.
+	served, err := b.listener.Bind(server, bindDone, b.config.TLS)
+	if err != nil {
+		b.listener.Unpublish(server)
+		return err
+	}
+	if !served {
+		// A context cancellation detached this server while it was binding, so
+		// Bind closed the socket rather than serving it. Saying the listener
+		// came up would be false.
+		return nil
 	}
 
 	b.logger.Info(
@@ -246,89 +330,46 @@ func (b *Blockfrost) Start(
 			b.config.ListenAddress,
 	)
 
-	// Monitor context for cancellation
-	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
-		<-ctx.Done()
-		b.mu.Lock()
-		srv := b.httpServer
-		b.httpServer = nil
-		b.mu.Unlock()
-
-		if srv != nil {
-			b.logger.Debug(
-				"context cancelled, shutting down " +
-					"Blockfrost API server",
-			)
-			//nolint:contextcheck
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				30*time.Second,
-			)
-			defer cancel()
-			//nolint:contextcheck
-			if err := srv.Shutdown(
-				shutdownCtx,
-			); err != nil {
-				b.logger.Error(
-					"failed to shutdown Blockfrost "+
-						"API server on context "+
-						"cancellation",
-					"error", err,
-				)
-			}
-		}
-	}()
-
 	return nil
 }
 
-// Stop gracefully shuts down the HTTP server.
+// Stop gracefully shuts down the HTTP server, and does not return until the
+// listening socket has been released -- see internal/apilistener.
 func (b *Blockfrost) Stop(
 	ctx context.Context,
 ) error {
-	b.mu.Lock()
-	srv := b.httpServer
-	b.httpServer = nil
-	b.mu.Unlock()
+	return b.listener.Stop(ctx, apilistener.Graceful)
+}
 
-	if srv != nil {
-		b.logger.Debug(
-			"shutting down Blockfrost API server",
-		)
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf(
-				"failed to shutdown Blockfrost API "+
-					"server: %w",
+// readRequestBody bounds both bytes and time before transaction processing.
+func (b *Blockfrost) readRequestBody(
+	w http.ResponseWriter,
+	r *http.Request,
+	limit int64,
+) ([]byte, error) {
+	b.setRequestBodyDeadline(w)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	body, err := io.ReadAll(r.Body)
+	if err == nil {
+		// A completed read must not expire during transaction processing or
+		// a later request. Preserve failed-read deadlines: net/http can still
+		// drain the unread body before sending the error response.
+		if err := http.NewResponseController(w).SetReadDeadline(time.Time{}); err != nil &&
+			!errors.Is(err, http.ErrNotSupported) {
+			b.logger.Debug(
+				"could not clear request body deadline",
+				"error",
 				err,
 			)
 		}
 	}
-	return nil
+	return body, err
 }
 
-// startServer starts the HTTP server with deterministic
-// error detection. It binds the listening socket first so
-// port conflicts are detected immediately, then serves in
-// a background goroutine.
-func (b *Blockfrost) startServer(
-	server *http.Server,
-) error {
-	ln, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to listen for Blockfrost API "+
-				"server: %w",
-			err,
-		)
+func (b *Blockfrost) setRequestBodyDeadline(w http.ResponseWriter) {
+	if err := http.NewResponseController(w).SetReadDeadline(
+		time.Now().Add(b.requestBodyTimeout),
+	); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		b.logger.Debug("could not bound request body read", "error", err)
 	}
-	go func() {
-		if err := server.Serve(ln); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
-			b.logger.Error(
-				"Blockfrost API server error",
-				"error", err,
-			)
-		}
-	}()
-	return nil
 }

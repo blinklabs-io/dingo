@@ -64,7 +64,8 @@ func main() {
 
 	analyzer := analysis.NewAnalyzer(cfg, logger)
 
-	if runErr := analyzer.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+	if runErr := analyzer.Run(ctx); runErr != nil &&
+		!errors.Is(runErr, context.Canceled) {
 		logger.Error("analyzer exited with error", "err", runErr)
 		os.Exit(1)
 	}

@@ -23,6 +23,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -51,7 +53,7 @@ func awaitTransitionInfo(
 		ls.RLock()
 		defer ls.RUnlock()
 		return ls.transitionInfo.State == want
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"transitionInfo.State did not reach %v", want)
 	ls.RLock()
 	defer ls.RUnlock()
@@ -62,7 +64,7 @@ func awaitHFIEvalIdle(t *testing.T, ls *LedgerState) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		return !ls.hfiStabilityEvalInFlight.Load()
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"HFI stability evaluation did not become idle")
 }
 
@@ -81,27 +83,35 @@ const (
 
 // stabilityFixtureLedgerState assembles a LedgerState wired with
 // real-shaped Shelley genesis (so calculateStabilityWindowForEra returns
-// the expected 25_920) and an in-memory DB. The caller seeds proposal /
+// the expected 25_920) and a file-backed SQLite DB. The caller seeds proposal /
 // vote rows on db, sets currentTip and transitionInfo, and invokes
 // evaluateHardForkInitiationStability.
 //
 // Setting currentPParams to Conway pparams with the supplied major
 // version exercises the post-Conway code path inside the helper.
-// Bootstrap (major <= 9) uses the simplest ratification semantics
-// (single yes vote suffices) so a typical test only needs one DRep
-// fixture.
+// Bootstrap (major 9) waives the DRep threshold but preserves the
+// action-specific SPO and committee thresholds, so ratifiable fixtures must
+// include both voting bodies.
 func stabilityFixtureLedgerState(
 	t *testing.T,
 	major uint,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
-	db := newTestDB(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.ProtocolVersion.Major = major
 	ls := &LedgerState{
-		db:             db,
-		currentEra:     eras.ConwayEraDesc,
-		currentEpoch:   newTestEpoch(stabilityFixtureEpochID, stabilityFixtureEpochStart, stabilityFixtureEpochLen, eras.ConwayEraDesc.Id),
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentEpoch: newTestEpoch(
+			stabilityFixtureEpochID,
+			stabilityFixtureEpochStart,
+			stabilityFixtureEpochLen,
+			eras.ConwayEraDesc.Id,
+		),
 		currentPParams: &pparams,
 		transitionInfo: hardfork.NewTransitionUnknown(),
 		config: LedgerStateConfig{
@@ -115,8 +125,8 @@ func stabilityFixtureLedgerState(
 
 // seedRatifiableBootstrapHardForkInitiation primes the DB so that the
 // governance ratifiability helper returns a non-nil result when the
-// bootstrap (major<=9) ratification rule is in effect — a HardForkInitiation
-// proposal in the active set plus a single DRep yes vote.
+// bootstrap (major 9) ratification rule is in effect — a HardForkInitiation
+// proposal in the active set plus the required CC and SPO yes votes.
 func seedRatifiableBootstrapHardForkInitiation(
 	t *testing.T,
 	db *database.Database,
@@ -176,6 +186,48 @@ func seedRatifiableBootstrapHardForkInitiation(
 		Vote:            models.VoteYes,
 		AddedSlot:       2,
 	}, nil))
+	coldCred := repeatByte(28, 0xCE)
+	hotCred := repeatByte(28, 0xCF)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: coldCred, ExpiresEpoch: currentEpoch + 10},
+	}, nil))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential, host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`, coldCred, hotCred, 1, 1)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      loaded.ID,
+		VoterType:       models.VoterTypeCC,
+		VoterCredential: hotCred,
+		Vote:            models.VoteYes,
+		AddedSlot:       2,
+	}, nil))
+	poolCred := repeatByte(28, 0xDD)
+	// governance.predictedBoundaryStakeEpochFor(currentEpoch) resolves to
+	// currentEpoch itself (dingo#4441): the mid-epoch check tallies the SPO
+	// vote against mark[currentEpoch], the last mark durably written at the
+	// boundary that opened the currently active epoch. The boundary it
+	// predicts will instead tally mark[currentEpoch+1], which SNAP does not
+	// capture until that boundary runs.
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        currentEpoch,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  poolCred,
+			TotalStake:   types.Uint64(1_000),
+		},
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      loaded.ID,
+		VoterType:       models.VoterTypeSPO,
+		VoterCredential: poolCred,
+		Vote:            models.VoteYes,
+		AddedSlot:       2,
+	}, nil))
 	return loaded
 }
 
@@ -193,14 +245,21 @@ func repeatByte(length int, b byte) []byte {
 // must not surface the upcoming transition even if the in-flight
 // proposal currently meets thresholds — a yet-to-arrive No vote could
 // still defeat it.
-func TestEvaluateHardForkInitiationStability_PreDeadline_NoChange(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_PreDeadline_NoChange(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9 /* bootstrap */)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
 	)
 	// Tip one slot before the voting deadline.
 	ls.currentTip = ochainsync.Tip{
-		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline-1, []byte("tip")),
+		Point: ocommon.NewPoint(
+			stabilityFixtureVotingDeadline-1,
+			[]byte("tip"),
+		),
 	}
 
 	ls.evaluateHardForkInitiationStability()
@@ -213,7 +272,11 @@ func TestEvaluateHardForkInitiationStability_PreDeadline_NoChange(t *testing.T) 
 // is the core happy-path: after the voting deadline, with a ratifiable
 // HardForkInitiation in flight, the helper must set TransitionKnown for
 // the epoch the boundary will fire (currentEpoch + 1).
-func TestEvaluateHardForkInitiationStability_PostDeadline_Ratifiable_SetsKnown(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_PostDeadline_Ratifiable_SetsKnown(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9 /* bootstrap */)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
@@ -232,10 +295,17 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_Ratifiable_SetsKnown(t
 // TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange
 // pins the negative side: post-deadline without a ratifiable proposal,
 // transitionInfo stays Unknown. (No proposal seeded; helper returns nil.)
-func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, _ := stabilityFixtureLedgerState(t, 9)
 	ls.currentTip = ochainsync.Tip{
-		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline+5_000, []byte("tip")),
+		Point: ocommon.NewPoint(
+			stabilityFixtureVotingDeadline+5_000,
+			[]byte("tip"),
+		),
 	}
 
 	ls.evaluateHardForkInitiationStability()
@@ -249,7 +319,11 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange
 // short-circuit when the chain is pre-Conway: no governance state
 // machine exists, so the helper must not even attempt the DB lookup
 // (and certainly must not promote transitionInfo).
-func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	// Even with a "ratifiable" proposal seeded, swapping pparams to nil
 	// (or any non-Conway type) makes the helper short-circuit before
@@ -259,7 +333,10 @@ func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(t *testing.T)
 	)
 	ls.currentPParams = nil
 	ls.currentTip = ochainsync.Tip{
-		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline+5_000, []byte("tip")),
+		Point: ocommon.NewPoint(
+			stabilityFixtureVotingDeadline+5_000,
+			[]byte("tip"),
+		),
 	}
 
 	ls.evaluateHardForkInitiationStability()
@@ -274,13 +351,20 @@ func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(t *testing.T)
 // upcoming boundary. The function must not redundantly mutate state
 // (a redundant mutation is harmless to behaviour but makes per-block
 // invocations noisier than necessary).
-func TestEvaluateHardForkInitiationStability_AlreadyKnownForSameEpoch_Idempotent(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_AlreadyKnownForSameEpoch_Idempotent(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
 	)
 	ls.currentTip = ochainsync.Tip{
-		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline+5_000, []byte("tip")),
+		Point: ocommon.NewPoint(
+			stabilityFixtureVotingDeadline+5_000,
+			[]byte("tip"),
+		),
 	}
 	ls.transitionInfo = hardfork.NewTransitionKnown(stabilityFixtureEpochID + 1)
 
@@ -297,13 +381,20 @@ func TestEvaluateHardForkInitiationStability_AlreadyKnownForSameEpoch_Idempotent
 // mid-epoch governance detector must not clobber that decision even if
 // it would otherwise fire, so on-chain HFI ratifiability cannot
 // override an operator-configured TestXHardForkAtEpoch boundary.
-func TestEvaluateHardForkInitiationStability_PreservesKnownFromOtherSource(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_PreservesKnownFromOtherSource(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
 	)
 	ls.currentTip = ochainsync.Tip{
-		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline+5_000, []byte("tip")),
+		Point: ocommon.NewPoint(
+			stabilityFixtureVotingDeadline+5_000,
+			[]byte("tip"),
+		),
 	}
 	const externalTargetEpoch = stabilityFixtureEpochID + 7
 	ls.transitionInfo = hardfork.NewTransitionKnown(externalTargetEpoch)
@@ -311,8 +402,12 @@ func TestEvaluateHardForkInitiationStability_PreservesKnownFromOtherSource(t *te
 	ls.evaluateHardForkInitiationStability()
 
 	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
-	assert.Equal(t, uint64(externalTargetEpoch), ls.transitionInfo.KnownEpoch,
-		"a Known target set elsewhere must not be overwritten by mid-epoch detection")
+	assert.Equal(
+		t,
+		uint64(externalTargetEpoch),
+		ls.transitionInfo.KnownEpoch,
+		"a Known target set elsewhere must not be overwritten by mid-epoch detection",
+	)
 }
 
 // TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown
@@ -327,7 +422,11 @@ func TestEvaluateHardForkInitiationStability_PreservesKnownFromOtherSource(t *te
 // The check matches the era-filter the boundary path's
 // IsHardForkTransition applies, so mid-epoch detection and the
 // boundary's enactment dispatch agree on what counts as a transition.
-func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9 /* Conway, bootstrap */)
 	// Target major 10 — still in Conway (Conway covers pv9-pv10).
 	// A ratifiable proposal here represents an intra-era pparams
@@ -336,7 +435,10 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(t *test
 		t, db, stabilityFixtureEpochID, 10,
 	)
 	ls.currentTip = ochainsync.Tip{
-		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline+5_000, []byte("tip")),
+		Point: ocommon.NewPoint(
+			stabilityFixtureVotingDeadline+5_000,
+			[]byte("tip"),
+		),
 	}
 
 	ls.evaluateHardForkInitiationStability()
@@ -351,13 +453,20 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(t *test
 // TransitionImpossible (the latter only says "no transition this epoch
 // before safe-zone end", the former says "transition will happen at
 // epoch+1"). When both could apply, Known wins.
-func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(t *testing.T) {
+func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls, db := stabilityFixtureLedgerState(t, 9)
 	seedRatifiableBootstrapHardForkInitiation(
 		t, db, stabilityFixtureEpochID, 7,
 	)
 	ls.currentTip = ochainsync.Tip{
-		Point: ocommon.NewPoint(stabilityFixtureVotingDeadline+5_000, []byte("tip")),
+		Point: ocommon.NewPoint(
+			stabilityFixtureVotingDeadline+5_000,
+			[]byte("tip"),
+		),
 	}
 	ls.transitionInfo = hardfork.NewTransitionImpossible()
 

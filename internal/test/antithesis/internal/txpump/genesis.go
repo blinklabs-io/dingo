@@ -92,7 +92,7 @@ func loadGenesisFile(path string) ([]UTxO, error) {
 	if rawErr == nil {
 		utxos := make([]UTxO, len(raw))
 		for i, r := range raw {
-			utxos[i] = UTxO(r)
+			utxos[i] = UTxO{TxHash: r.TxHash, Index: r.Index, Amount: r.Amount}
 		}
 		return utxos, nil
 	}
@@ -124,7 +124,7 @@ func utxosFromShelleyInitialFunds(
 		addrBytes, err := hex.DecodeString(address)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"Shelley initialFunds address %q: %w",
+				"shelley initialFunds address %q: %w",
 				address, err,
 			)
 		}

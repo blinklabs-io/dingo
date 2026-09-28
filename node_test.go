@@ -15,20 +15,34 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
-	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -36,6 +50,88 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled guards a real
+// P0 gap: bark.go's own empty-Host default is "0.0.0.0" (all interfaces),
+// which would expose the database lifecycle service's unauthenticated,
+// destructive Restore/Truncate RPCs on every interface by default. An
+// operator's explicit --bark-host must still always win.
+func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "127.0.0.1", effectiveBarkHost("", true))
+	require.Equal(t, "", effectiveBarkHost("", false))
+	require.Equal(t, "0.0.0.0", effectiveBarkHost("0.0.0.0", true))
+	require.Equal(t, "10.0.0.5", effectiveBarkHost("10.0.0.5", false))
+}
+
+func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	stakeKey := make([]byte, 28)
+	stakeKey[0] = 0x51
+	missingStakeKey := make([]byte, 28)
+	missingStakeKey[0] = 0x52
+	_, err = raw.Exec(`
+INSERT INTO account (staking_key, pool, added_slot, active)
+VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
+		stakeKey, make([]byte, 28),
+		missingStakeKey, make([]byte, 28),
+	)
+	require.NoError(t, err)
+	// Simulate a post-upgrade write that populated only one credential. The
+	// startup check must detect the missing canonical credential, not merely
+	// test whether reward_live_stake is empty.
+	_, err = raw.Exec(`
+INSERT INTO reward_live_stake
+    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
+     registered, updated_slot)
+VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
+		stakeKey,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, make([]byte, 32)),
+	}, nil))
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.True(t, needed)
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, n.backfillRewardLiveStake())
+
+	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.False(t, needed)
+	for _, key := range [][]byte{stakeKey, missingStakeKey} {
+		var live models.RewardLiveStake
+		require.NoError(t, raw.QueryRow(`
+SELECT staking_key, credential_tag, registered, updated_slot
+FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+			0, key,
+		).Scan(
+			&live.StakingKey,
+			&live.CredentialTag,
+			&live.Registered,
+			&live.UpdatedSlot,
+		))
+		require.Equal(t, uint64(100), live.UpdatedSlot)
+	}
+}
 
 func newNodeTestConnId(id uint) ouroboros.ConnectionId {
 	return ouroboros.ConnectionId{
@@ -50,7 +146,85 @@ func newNodeTestConnId(id uint) ouroboros.ConnectionId {
 	}
 }
 
+type nodeTestSecurityParamLedger struct {
+	securityParam int
+}
+
+func (m nodeTestSecurityParamLedger) SecurityParam() int {
+	return m.securityParam
+}
+
+type nodeTestLogSignalHandler struct {
+	message string
+	seen    chan struct{}
+}
+
+type nodeTestLogCountHandler struct {
+	message string
+	count   *atomic.Int32
+}
+
+func (h nodeTestLogCountHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h nodeTestLogCountHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Message == h.message {
+		h.count.Add(1)
+	}
+	return nil
+}
+
+func (h nodeTestLogCountHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h nodeTestLogCountHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h nodeTestLogSignalHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h nodeTestLogSignalHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Message == h.message {
+		select {
+		case h.seen <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (h nodeTestLogSignalHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h nodeTestLogSignalHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func newNodeTestCardanoNodeCfg(t testing.TB) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"preview/config.json",
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	return cfg
+}
+
 func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	state := chainsync.NewStateWithConfig(
@@ -62,13 +236,13 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	connB := newNodeTestConnId(3002)
 	state.AddClientConnId(connA)
 	state.AddClientConnId(connB)
-	state.SetClientConnId(connA)
 	pointA := ocommon.NewPoint(100, []byte("hash-a"))
 	pointB := ocommon.NewPoint(200, []byte("hash-b"))
 	tipA := ochainsync.Tip{Point: pointA, BlockNumber: 10}
 	tipB := ochainsync.Tip{Point: pointB, BlockNumber: 20}
 	state.UpdateClientTip(connA, pointA, tipA)
 	state.UpdateClientTip(connB, pointB, tipB)
+	state.SetClientConnId(connA)
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -100,7 +274,459 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	assert.Equal(t, uint64(1), clientB.HeadersRecv)
 }
 
+func TestChainSelectionDoesNotPromoteUntrackedFallback(t *testing.T) {
+	t.Parallel()
+
+	for _, selectorFirst := range []bool{true, false} {
+		name := "state-removal-first"
+		if selectorFirst {
+			name = "selector-removal-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			state := chainsync.NewStateWithConfig(
+				nil,
+				nil,
+				chainsync.DefaultConfig(),
+			)
+			selector := chainselection.NewChainSelector(
+				chainselection.ChainSelectorConfig{},
+			)
+			selected := newNodeTestConnId(3101)
+			fallback := newNodeTestConnId(3102)
+			require.True(t, state.AddClientConnId(selected))
+			require.True(t, state.AddClientConnId(fallback))
+
+			selectedPoint := ocommon.NewPoint(100, []byte("selected"))
+			selectedTip := ochainsync.Tip{
+				Point:       selectedPoint,
+				BlockNumber: 10,
+			}
+			state.UpdateClientTip(selected, selectedPoint, selectedTip)
+			require.True(t, selector.UpdatePeerTip(selected, selectedTip, nil))
+			state.SetClientConnId(selected)
+			best := selector.GetBestPeer()
+			require.NotNil(t, best)
+			require.Equal(t, selected, *best)
+			trackedFallback := state.GetTrackedClient(fallback)
+			require.NotNil(t, trackedFallback)
+			require.Zero(
+				t, trackedFallback.HeadersRecv,
+				"fallback must still be connected but untracked by ChainSync",
+			)
+
+			n := &Node{
+				config: Config{
+					logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				},
+				chainsyncState: state,
+				chainSelector:  selector,
+			}
+			removeFromSelector := func() {
+				selector.RemovePeer(selected)
+				require.Nil(t, selector.GetBestPeer())
+				n.handleChainSelectedNoneEvent(event.NewEvent(
+					chainselection.ChainSelectedNoneEventType,
+					chainselection.ChainSelectedNoneEvent{
+						PreviousConnectionId: selected,
+					},
+				))
+			}
+			if selectorFirst {
+				removeFromSelector()
+				state.RemoveClientConnId(selected)
+			} else {
+				state.RemoveClientConnId(selected)
+				removeFromSelector()
+			}
+
+			require.Nil(
+				t,
+				state.GetClientConnId(),
+				"an untracked fallback must not become the ledger source",
+			)
+
+			fallbackPoint := ocommon.NewPoint(110, []byte("fallback"))
+			fallbackTip := ochainsync.Tip{
+				Point:       fallbackPoint,
+				BlockNumber: 11,
+			}
+			state.UpdateClientTip(fallback, fallbackPoint, fallbackTip)
+			require.True(t, selector.UpdatePeerTip(fallback, fallbackTip, nil))
+			best = selector.GetBestPeer()
+			require.NotNil(t, best)
+			require.Equal(t, fallback, *best)
+			n.handleChainSwitchEvent(event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: selected,
+					NewConnectionId:      fallback,
+					NewTip:               fallbackTip,
+				},
+			))
+			active := state.GetClientConnId()
+			require.NotNil(t, active)
+			require.Equal(t, fallback, *active)
+		})
+	}
+}
+
+func TestHandleChainSelectedNoneEventDoesNotClearReselectedConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	conn := newNodeTestConnId(3103)
+	require.True(t, state.AddClientConnId(conn))
+	tipPoint := ocommon.NewPoint(120, []byte("reselected"))
+	state.UpdateClientTip(conn, tipPoint, ochainsync.Tip{Point: tipPoint})
+	require.True(t, state.TrySetClientConnId(conn))
+	tip := ochainsync.Tip{
+		Point:       tipPoint,
+		BlockNumber: 12,
+	}
+	require.True(t, selector.UpdatePeerTip(conn, tip, nil))
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+	}
+
+	n.handleChainSelectedNoneEvent(event.NewEvent(
+		chainselection.ChainSelectedNoneEventType,
+		chainselection.ChainSelectedNoneEvent{
+			PreviousConnectionId: conn,
+		},
+	))
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, conn, *active)
+}
+
+func TestHandleChainSelectedNoneEventCoalescesLifecycleContention(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	conn := newNodeTestConnId(3104)
+	newerPrevious := newNodeTestConnId(3106)
+	require.True(t, state.AddClientConnId(conn))
+	point := ocommon.NewPoint(130, []byte("selected"))
+	state.UpdateClientTip(conn, point, ochainsync.Tip{Point: point})
+	require.True(t, state.TrySetClientConnId(conn))
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	var logCount atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{
+		config: Config{
+			logger: slog.New(nodeTestLogCountHandler{
+				message: "chain selection stalled: no selectable peer",
+				count:   &logCount,
+			}),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+	}
+	n.startChainSelectedNoneWorker(ctx)
+	t.Cleanup(func() {
+		cancel()
+		n.waitChainSelectedNoneWorker()
+	})
+
+	n.liveLifecycleMu.Lock()
+	for i := range 64 {
+		previous := conn
+		if i == 63 {
+			// A newer coalesced transition can name a peer whose intervening
+			// switch was skipped while the lifecycle lock was held. Selection is
+			// still none, so the older registry-active peer must still be cleared.
+			previous = newerPrevious
+		}
+		n.handleChainSelectedNoneEvent(event.NewEvent(
+			chainselection.ChainSelectedNoneEventType,
+			chainselection.ChainSelectedNoneEvent{
+				PreviousConnectionId: previous,
+			},
+		))
+	}
+	n.liveLifecycleMu.Unlock()
+
+	require.Eventually(t, func() bool {
+		return logCount.Load() == 1 && state.GetClientConnId() == nil
+	}, 5*time.Second, time.Millisecond)
+	require.Never(t, func() bool {
+		return logCount.Load() > 1
+	}, 100*time.Millisecond, time.Millisecond,
+		"a contended event burst must be handled by one coalesced worker")
+}
+
+func TestChainSelectedNoneWorkerCancelsDuringLifecycleContention(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	conn := newNodeTestConnId(3105)
+	require.True(t, state.AddClientConnId(conn))
+	point := ocommon.NewPoint(140, []byte("selected"))
+	state.UpdateClientTip(conn, point, ochainsync.Tip{Point: point})
+	require.True(t, state.TrySetClientConnId(conn))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector: chainselection.NewChainSelector(
+			chainselection.ChainSelectorConfig{},
+		),
+	}
+	n.startChainSelectedNoneWorker(ctx)
+	n.liveLifecycleMu.Lock()
+	n.handleChainSelectedNoneEvent(event.NewEvent(
+		chainselection.ChainSelectedNoneEventType,
+		chainselection.ChainSelectedNoneEvent{
+			PreviousConnectionId: conn,
+		},
+	))
+	cancel()
+	n.waitChainSelectedNoneWorker()
+	n.liveLifecycleMu.Unlock()
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, conn, *active)
+}
+
+func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
+	t.Parallel()
+
+	delay := chainSelectedNoneInitialRetryInterval
+	delays := make([]time.Duration, 0, 10)
+	for range 10 {
+		delays = append(delays, delay)
+		delay = nextChainSelectedNoneRetryInterval(delay, false)
+	}
+	require.Equal(t, []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		320 * time.Millisecond,
+		640 * time.Millisecond,
+		time.Second,
+		time.Second,
+		time.Second,
+	}, delays)
+	require.Equal(t,
+		chainSelectedNoneInitialRetryInterval,
+		nextChainSelectedNoneRetryInterval(delay, true),
+		"a successful acquisition must restart the next contention ramp",
+	)
+}
+
+// TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
+// during a live database restore/truncate where n.chainsyncState is nil
+// between closeStorageForLiveLifecycleOp and reinitializeNetworkingCore.
+// chainSelector's evaluation loop is never paused during quiesce, so it can
+// still emit a ChainSwitchEvent in that window.
+func TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	require.NotPanics(t, func() {
+		n.handleChainSwitchEvent(
+			event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					NewConnectionId: newNodeTestConnId(3003),
+					NewTip: ochainsync.Tip{
+						Point: ocommon.NewPoint(100, []byte("hash-a")),
+					},
+				},
+			),
+		)
+	})
+}
+
+// TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp covers the same
+// window from the other side: n.chainsyncState has already been rebuilt to a
+// non-nil value, but a live restore/truncate still holds n.liveLifecycleMu
+// (held for its entire quiesce-through-reinitialize duration), so the
+// handler must not block waiting for it -- it should skip the update rather
+// than stall the EventBus dispatch goroutine behind a possibly long-running
+// operation.
+func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connA := newNodeTestConnId(3001)
+	connB := newNodeTestConnId(3002)
+	state.AddClientConnId(connA)
+	state.AddClientConnId(connB)
+	pointA := ocommon.NewPoint(100, []byte("hash-a"))
+	state.UpdateClientTipWithoutDedup(
+		connA, pointA, ochainsync.Tip{Point: pointA},
+	)
+	require.True(t, state.TrySetClientConnId(connA))
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+	}
+
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+
+	n.handleChainSwitchEvent(
+		event.NewEvent(
+			chainselection.ChainSwitchEventType,
+			chainselection.ChainSwitchEvent{
+				PreviousConnectionId: connA,
+				NewConnectionId:      connB,
+				NewTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(200, []byte("hash-b")),
+				},
+			},
+		),
+	)
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	assert.Equal(t, connA, *active)
+}
+
+func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connId := newNodeTestConnId(3001)
+	require.True(t, state.AddClientConnId(connId))
+	point := ocommon.NewPoint(100, []byte("header"))
+	state.UpdateClientTipWithoutDedup(
+		connId, point, ochainsync.Tip{Point: point},
+	)
+	require.True(t, state.TrySetClientConnId(connId))
+	n := &Node{
+		chainsyncState: state,
+		config:         Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+
+	active := config.GetActiveConnectionFunc()
+	require.NotNil(t, active)
+	assert.Equal(t, connId, *active)
+
+	n.liveLifecycleMu.Lock()
+	active = config.GetActiveConnectionFunc()
+	n.liveLifecycleMu.Unlock()
+	assert.Nil(t, active)
+}
+
+// TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
+// dingo#4599 regression coverage: it proves that a Config built through the
+// public NewConfig/With... option API -- not a hand-built struct literal --
+// carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
+// into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
+// NewLedgerState. internal/node/node_test.go's
+// TestBuildDingoConfigWiresBlockPipelineFlags covers the other half: the
+// internal/config.Config -> dingo.Config hop that was the actual defect.
+// Together the two tests span the full path a live serve run takes.
+func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewConfig(
+		WithBlockPipelineEnabled(true),
+		WithBlockPipelineValidateEnabled(true),
+	)
+	n := &Node{config: cfg}
+	lsCfg := n.ledgerStateConfig()
+
+	assert.True(
+		t,
+		lsCfg.BlockPipelineEnabled,
+		"expected LedgerStateConfig.BlockPipelineEnabled true; the parallel "+
+			"block decode pipeline never constructs on the serve path "+
+			"otherwise",
+	)
+	assert.True(
+		t,
+		lsCfg.BlockPipelineValidateEnabled,
+		"expected LedgerStateConfig.BlockPipelineValidateEnabled true; the "+
+			"pipeline's parallel VRF/KES validate stage never activates "+
+			"otherwise",
+	)
+}
+
+func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Musashi prototype trusts certificate without vote manager", func(t *testing.T) {
+		n := &Node{config: Config{cfg: &internalconfig.Config{
+			Network:      ouroboros.NetworkCardanoMusashi.Name,
+			NetworkMagic: ouroboros.NetworkCardanoMusashi.NetworkMagic,
+		}}}
+		validate := n.ledgerStateConfig().ValidateLeiosCertificate
+		require.NotNil(t, validate)
+		require.NoError(t, validate(0, nil, nil, nil))
+	})
+
+	t.Run("standard network still requires certificate verifier", func(t *testing.T) {
+		n := &Node{config: Config{cfg: &internalconfig.Config{
+			Network:      ouroboros.NetworkCardanoPreview.Name,
+			NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
+		}}}
+		validate := n.ledgerStateConfig().ValidateLeiosCertificate
+		require.NotNil(t, validate)
+		require.ErrorContains(t, validate(0, nil, nil, nil), "vote manager is unavailable")
+	})
+}
+
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
+	t.Parallel()
+
 	connId := newNodeTestConnId(3003)
 	n := &Node{}
 
@@ -128,538 +754,9 @@ func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	assert.False(t, n.isChainsyncIngressEligible(connId))
 }
 
-func TestPlateauThreshold(t *testing.T) {
-	assert.Equal(t, 4*time.Minute, plateauThreshold(2*time.Minute))
-	assert.Equal(t, 6*time.Minute, plateauThreshold(3*time.Minute))
-}
-
-func TestShouldRecycleLocalTipPlateau(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	lastProgressAt := now.Add(-5 * time.Minute)
-	threshold := 4 * time.Minute
-	cooldown := 2 * time.Minute
-
-	assert.True(t, shouldRecycleLocalTipPlateau(
-		now,
-		lastProgressAt,
-		100,
-		120,
-		nil,
-		cooldown,
-		threshold,
-	))
-
-	assert.False(t, shouldRecycleLocalTipPlateau(
-		now,
-		now.Add(-3*time.Minute),
-		100,
-		120,
-		nil,
-		cooldown,
-		threshold,
-	))
-
-	lastRecycledAt := now.Add(-1 * time.Minute)
-	assert.False(t, shouldRecycleLocalTipPlateau(
-		now,
-		lastProgressAt,
-		100,
-		120,
-		&lastRecycledAt,
-		cooldown,
-		threshold,
-	))
-
-	assert.False(t, shouldRecycleLocalTipPlateau(
-		now,
-		lastProgressAt,
-		120,
-		120,
-		nil,
-		cooldown,
-		threshold,
-	))
-}
-
-func TestProcessChainsyncRecyclerTickKeepsStalledRecyclerRunning(
-	t *testing.T,
-) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(func() { bus.Stop() })
-	_, recycleCh := bus.Subscribe(
-		connmanager.ConnectionRecycleRequestedEventType,
-	)
-
-	// Two eligible peers so the stall guard does not suppress
-	// the recycle (single-peer guard is tested separately).
-	// Add connId2 first so connId has a more recent LastActivity;
-	// promoteBestClientLocked will then select connId as active
-	// after both clients stall, making the recycle deterministic.
-	connId := newNodeTestConnId(1)
-	connId2 := newNodeTestConnId(2)
-	state := chainsync.NewStateWithConfig(
-		bus,
-		nil,
-		chainsync.Config{
-			MaxClients:   2,
-			StallTimeout: time.Millisecond,
-		},
-	)
-	require.True(t, state.AddClientConnId(connId2))
-	time.Sleep(time.Millisecond)
-	require.True(t, state.AddClientConnId(connId))
-
-	selector := chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{},
-	)
-	selector.UpdatePeerTip(connId, ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 120, Hash: []byte("best")},
-		BlockNumber: 60,
-	}, nil)
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-		chainsyncState: state,
-		chainSelector:  selector,
-		eventBus:       bus,
-	}
-
-	time.Sleep(5 * time.Millisecond)
-
-	now := time.Now()
-	lastProgressSlot := uint64(100)
-	lastProgressAt := now
-	recycleAt := map[string]time.Time{
-		connId.String(): now.Add(-time.Second),
-	}
-	lastRecycled := make(map[string]time.Time)
-
-	n.processChainsyncRecyclerTick(
-		now,
-		100,
-		chainsync.Config{
-			MaxClients:   2,
-			StallTimeout: time.Millisecond,
-		},
-		recycleAt,
-		lastRecycled,
-		&lastProgressSlot,
-		&lastProgressAt,
-		plateauThreshold(2*time.Minute),
-		time.Second,
-		2*time.Minute,
-	)
-
-	select {
-	case evt := <-recycleCh:
-		recycleEvt, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
-		require.True(t, ok)
-		assert.Equal(t, connId, recycleEvt.ConnectionId)
-		assert.Equal(
-			t,
-			"stalled_active_connection",
-			recycleEvt.Reason,
-		)
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected stalled recycler event")
-	}
-}
-
-func TestProcessChainsyncRecyclerTickSkipsRecycleOnlyPeer(
-	t *testing.T,
-) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(func() { bus.Stop() })
-	_, recycleCh := bus.Subscribe(
-		connmanager.ConnectionRecycleRequestedEventType,
-	)
-
-	connId := newNodeTestConnId(1)
-	state := chainsync.NewStateWithConfig(
-		bus,
-		nil,
-		chainsync.Config{
-			MaxClients:   1,
-			StallTimeout: time.Millisecond,
-		},
-	)
-	require.True(t, state.AddClientConnId(connId))
-
-	selector := chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{},
-	)
-	selector.UpdatePeerTip(connId, ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 120, Hash: []byte("best")},
-		BlockNumber: 60,
-	}, nil)
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-		chainsyncState: state,
-		chainSelector:  selector,
-		eventBus:       bus,
-	}
-
-	time.Sleep(5 * time.Millisecond)
-
-	now := time.Now()
-	lastProgressSlot := uint64(100)
-	lastProgressAt := now
-	grace := time.Second
-	recycleAt := map[string]time.Time{
-		connId.String(): now.Add(-time.Second),
-	}
-	lastRecycled := make(map[string]time.Time)
-
-	n.processChainsyncRecyclerTick(
-		now,
-		100,
-		chainsync.Config{
-			MaxClients:   1,
-			StallTimeout: time.Millisecond,
-		},
-		recycleAt,
-		lastRecycled,
-		&lastProgressSlot,
-		&lastProgressAt,
-		plateauThreshold(2*time.Minute),
-		grace,
-		2*time.Minute,
-	)
-
-	// No recycle event should be emitted for the only peer.
-	select {
-	case evt := <-recycleCh:
-		t.Fatalf("unexpected recycle event: %+v", evt)
-	case <-time.After(50 * time.Millisecond):
-		// Expected: recycle suppressed.
-	}
-
-	// Grace timer should be rescheduled.
-	dueAt, ok := recycleAt[connId.String()]
-	require.True(t, ok, "recycle entry should still exist")
-	assert.True(
-		t,
-		dueAt.After(now),
-		"due time should be pushed forward",
-	)
-}
-
-func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(func() { bus.Stop() })
-	_, resyncCh := bus.Subscribe(
-		event.ChainsyncResyncEventType,
-	)
-
-	activeConn := newNodeTestConnId(2)
-	secondConn := newNodeTestConnId(2001)
-	state := chainsync.NewStateWithConfig(
-		bus,
-		nil,
-		chainsync.Config{
-			MaxClients:   2,
-			StallTimeout: time.Hour,
-		},
-	)
-	require.True(t, state.AddClientConnId(activeConn))
-	require.True(t, state.AddClientConnId(secondConn))
-	state.SetClientConnId(activeConn)
-
-	selector := chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{},
-	)
-	selector.UpdatePeerTip(activeConn, ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 120, Hash: []byte("best")},
-		BlockNumber: 60,
-	}, nil)
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-		chainsyncState: state,
-		chainSelector:  selector,
-		eventBus:       bus,
-	}
-
-	now := time.Now()
-	lastProgressSlot := uint64(100)
-	lastProgressAt := now.Add(-5 * time.Minute)
-	recycleAt := make(map[string]time.Time)
-	lastRecycled := make(map[string]time.Time)
-
-	n.processChainsyncRecyclerTick(
-		now,
-		100,
-		chainsync.Config{
-			MaxClients:   2,
-			StallTimeout: time.Hour,
-		},
-		recycleAt,
-		lastRecycled,
-		&lastProgressSlot,
-		&lastProgressAt,
-		4*time.Minute,
-		time.Second,
-		2*time.Minute,
-	)
-
-	select {
-	case evt := <-resyncCh:
-		resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
-		require.True(t, ok)
-		assert.Equal(t, activeConn, resyncEvt.ConnectionId)
-		assert.Equal(
-			t,
-			event.ChainsyncResyncReasonLocalTipPlateau,
-			resyncEvt.Reason,
-		)
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected plateau resync event")
-	}
-}
-
-func TestProcessChainsyncRecyclerTickSkipsPlateauOnlyPeer(
-	t *testing.T,
-) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(func() { bus.Stop() })
-	_, resyncCh := bus.Subscribe(
-		event.ChainsyncResyncEventType,
-	)
-
-	connId := newNodeTestConnId(3)
-	state := chainsync.NewStateWithConfig(
-		bus,
-		nil,
-		chainsync.Config{
-			MaxClients:   1,
-			StallTimeout: time.Hour,
-		},
-	)
-	require.True(t, state.AddClientConnId(connId))
-	state.SetClientConnId(connId)
-
-	selector := chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{},
-	)
-	selector.UpdatePeerTip(connId, ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 120, Hash: []byte("best")},
-		BlockNumber: 60,
-	}, nil)
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-		chainsyncState: state,
-		chainSelector:  selector,
-		eventBus:       bus,
-	}
-
-	now := time.Now()
-	lastProgressSlot := uint64(100)
-	originalProgress := now.Add(-5 * time.Minute)
-	lastProgressAt := originalProgress
-	recycleAt := make(map[string]time.Time)
-	lastRecycled := make(map[string]time.Time)
-
-	n.processChainsyncRecyclerTick(
-		now,
-		100,
-		chainsync.Config{
-			MaxClients:   1,
-			StallTimeout: time.Hour,
-		},
-		recycleAt,
-		lastRecycled,
-		&lastProgressSlot,
-		&lastProgressAt,
-		4*time.Minute,
-		time.Second,
-		2*time.Minute,
-	)
-
-	// No plateau resync event should be emitted when the only
-	// eligible peer would be the disconnect target. Disconnecting
-	// a single-relay BP's only upstream over a plateau cannot
-	// recover a locally-pinned tip and amplifies disruption.
-	testutil.RequireNoReceive(
-		t,
-		resyncCh,
-		50*time.Millisecond,
-		"plateau action should be suppressed for only eligible peer",
-	)
-
-	// lastProgressAt should be reset so the suppression warning
-	// is throttled to plateau cadence rather than every tick.
-	assert.True(
-		t,
-		lastProgressAt.After(originalProgress),
-		"lastProgressAt should be reset after suppressed plateau",
-	)
-}
-
-func TestProcessChainsyncRecyclerTickRealignsOtherPeersOnPlateau(t *testing.T) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(func() { bus.Stop() })
-	_, resyncCh := bus.Subscribe(
-		event.ChainsyncResyncEventType,
-	)
-
-	stalledConn := newNodeTestConnId(4001)
-	candidateConn := newNodeTestConnId(4002)
-	farBehindConn := newNodeTestConnId(4003)
-	state := chainsync.NewStateWithConfig(
-		bus,
-		nil,
-		chainsync.Config{
-			MaxClients:   3,
-			StallTimeout: time.Hour,
-		},
-	)
-	require.True(t, state.AddClientConnId(stalledConn))
-	require.True(t, state.AddClientConnId(candidateConn))
-	require.True(t, state.AddClientConnId(farBehindConn))
-	state.SetClientConnId(stalledConn)
-	// Stalled active peer reported a tip past local tip.
-	stalledPoint := ocommon.NewPoint(120, []byte("stalled"))
-	stalledTip := ochainsync.Tip{Point: stalledPoint, BlockNumber: 60}
-	state.UpdateClientTip(stalledConn, stalledPoint, stalledTip)
-	// Candidate peer's chainsync cursor has advanced past local tip
-	// (we only marked it deduped while the active peer was the sole
-	// publisher); without realignment its next RollForward delivers a
-	// header beyond the local block tip and the fork resolver fails.
-	candidatePoint := ocommon.NewPoint(150, []byte("candidate"))
-	candidateTip := ochainsync.Tip{Point: candidatePoint, BlockNumber: 75}
-	state.UpdateClientTip(candidateConn, candidatePoint, candidateTip)
-	// A peer whose cursor sits at-or-below local tip does not need
-	// realigning; it can deliver headers from local-tip+1 directly.
-	farBehindPoint := ocommon.NewPoint(80, []byte("behind"))
-	farBehindTip := ochainsync.Tip{Point: farBehindPoint, BlockNumber: 40}
-	state.UpdateClientTip(farBehindConn, farBehindPoint, farBehindTip)
-
-	selector := chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{},
-	)
-	selector.UpdatePeerTip(stalledConn, stalledTip, nil)
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-		chainsyncState: state,
-		chainSelector:  selector,
-		eventBus:       bus,
-	}
-
-	now := time.Now()
-	lastProgressSlot := uint64(100)
-	lastProgressAt := now.Add(-5 * time.Minute)
-	recycleAt := make(map[string]time.Time)
-	lastRecycled := make(map[string]time.Time)
-
-	n.processChainsyncRecyclerTick(
-		now,
-		100,
-		chainsync.Config{
-			MaxClients:   3,
-			StallTimeout: time.Hour,
-		},
-		recycleAt,
-		lastRecycled,
-		&lastProgressSlot,
-		&lastProgressAt,
-		4*time.Minute,
-		time.Second,
-		2*time.Minute,
-	)
-
-	gotPlateauForStalled := false
-	gotRealignForCandidate := false
-	timeout := time.After(200 * time.Millisecond)
-	for !gotPlateauForStalled || !gotRealignForCandidate {
-		select {
-		case evt := <-resyncCh:
-			resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
-			require.True(t, ok)
-			switch {
-			case resyncEvt.Reason == event.ChainsyncResyncReasonLocalTipPlateau &&
-				resyncEvt.ConnectionId == stalledConn:
-				gotPlateauForStalled = true
-			case resyncEvt.Reason == event.ChainsyncResyncReasonPostPlateauRealign &&
-				resyncEvt.ConnectionId == candidateConn:
-				gotRealignForCandidate = true
-			case resyncEvt.Reason == event.ChainsyncResyncReasonPostPlateauRealign &&
-				resyncEvt.ConnectionId == farBehindConn:
-				t.Fatalf(
-					"unexpected realign for peer at-or-below local tip: %+v",
-					resyncEvt,
-				)
-			default:
-				t.Fatalf("unexpected resync event: %+v", resyncEvt)
-			}
-		case <-timeout:
-			t.Fatalf(
-				"missing resync events: plateau=%v realign=%v",
-				gotPlateauForStalled, gotRealignForCandidate,
-			)
-		}
-	}
-}
-
-func TestRunStallCheckerTickRecoversAndAllowsFutureTicks(t *testing.T) {
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	var ticks atomic.Int32
-
-	assert.NotPanics(t, func() {
-		n.runStallCheckerTick(func() {
-			ticks.Add(1)
-			panic("boom")
-		})
-	})
-
-	n.runStallCheckerTick(func() {
-		ticks.Add(1)
-	})
-
-	assert.Equal(t, int32(2), ticks.Load())
-}
-
-func TestRunStallCheckerLoopRecoversAndSupportsRestart(t *testing.T) {
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	var attempts atomic.Int32
-
-	assert.NotPanics(t, func() {
-		for {
-			recovered := n.runStallCheckerLoop(func() {
-				if attempts.Add(1) == 1 {
-					panic("boom")
-				}
-			})
-			if !recovered {
-				return
-			}
-		}
-	})
-
-	assert.Equal(t, int32(2), attempts.Load())
-}
-
 func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
+	t.Parallel()
+
 	wantErr := errors.New("shutdown failed")
 	n := &Node{
 		config: Config{
@@ -679,7 +776,228 @@ func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
 	require.Equal(t, firstErr, secondErr)
 }
 
+// TestStartupFailureCleanupCancelsBeforeAllowingShutdown verifies the
+// signal-during-startup lifecycle boundary. Run owns startupLifecycleMu while
+// it unwinds its LIFO stack; shutdown must wait for that rollback rather than
+// closing the same partially initialized resource concurrently.
+func TestStartupFailureCleanupCancelsBeforeAllowingShutdown(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rollbackStarted := make(chan struct{})
+	releaseRollback := make(chan struct{})
+	var releaseRollbackOnce sync.Once
+	release := func() { releaseRollbackOnce.Do(func() { close(releaseRollback) }) }
+	defer release()
+	rollbackDone := make(chan struct{})
+	shutdownFuncStarted := make(chan struct{})
+	shutdownDone := make(chan error, 1)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ctx:    ctx,
+		cancel: cancel,
+		shutdownFuncs: []func(context.Context) error{
+			func(context.Context) error {
+				close(shutdownFuncStarted)
+				return nil
+			},
+		},
+	}
+
+	// Match Run's startup section: cleanupFailedStartup owns the gate until
+	// every started component's rollback completes.
+	n.startupLifecycleMu.Lock()
+	go func() {
+		defer close(rollbackDone)
+		n.cleanupFailedStartup([]func(){func() {
+			close(rollbackStarted)
+			<-releaseRollback
+		}})
+	}()
+	testutil.RequireReceive(
+		t,
+		rollbackStarted,
+		time.Second,
+		"startup rollback to begin",
+	)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+
+	go func() {
+		shutdownDone <- n.shutdown()
+	}()
+	// If shutdown did not take the same gate, its phase-four callback would
+	// run while the startup rollback is intentionally blocked above.
+	testutil.RequireNoReceive(
+		t,
+		shutdownFuncStarted,
+		50*time.Millisecond,
+		"normal shutdown while startup rollback owns the lifecycle gate",
+	)
+
+	release()
+	testutil.RequireReceive(
+		t,
+		rollbackDone,
+		time.Second,
+		"startup rollback completion",
+	)
+	testutil.RequireReceive(
+		t,
+		shutdownFuncStarted,
+		time.Second,
+		"normal shutdown after startup rollback completion",
+	)
+	require.NoError(t, <-shutdownDone)
+}
+
+// TestStopWaitsForLiveLifecycleOperation protects the shared storage lifecycle
+// boundary. Restore and Truncate hold liveLifecycleMu and snapshotMu while
+// they stop readers, close the old database, and rebuild its dependents. A
+// concurrent Stop must wait for both gates before cancelling those readers or
+// closing the database; otherwise the two teardown paths can use and close
+// the same storage concurrently under suite load.
+func TestStopWaitsForLiveLifecycleOperation(t *testing.T) {
+	tests := []struct {
+		name   string
+		lock   func(*Node)
+		unlock func(*Node)
+	}{
+		{
+			name:   "restore or truncate",
+			lock:   func(n *Node) { n.liveLifecycleMu.Lock() },
+			unlock: func(n *Node) { n.liveLifecycleMu.Unlock() },
+		},
+		{
+			name:   "snapshot",
+			lock:   func(n *Node) { n.snapshotMu.Lock() },
+			unlock: func(n *Node) { n.snapshotMu.Unlock() },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			phaseStarted := make(chan struct{}, 1)
+			n := &Node{
+				config: Config{
+					logger: slog.New(nodeTestLogSignalHandler{
+						message: "shutdown phase 1: stopping new work",
+						seen:    phaseStarted,
+					}),
+				},
+			}
+			test.lock(n)
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { test.unlock(n) }) }
+			t.Cleanup(release)
+
+			stopDone := make(chan error, 1)
+			go func() { stopDone <- n.Stop() }()
+
+			// Shutdown must not reach phase 1 until the live operation has
+			// released the gate it owns.
+			testutil.RequireNoReceive(
+				t,
+				phaseStarted,
+				50*time.Millisecond,
+				"shutdown must wait for the live lifecycle gate",
+			)
+
+			release()
+			testutil.RequireReceive(
+				t,
+				phaseStarted,
+				time.Second,
+				"shutdown phase 1 after the live lifecycle gate",
+			)
+			require.NoError(t, <-stopDone)
+		})
+	}
+}
+
+func TestStopCancelsBeforeLiveLifecycleGateTimeout(t *testing.T) {
+	cancelCalled := make(chan struct{})
+	var cancelOnce sync.Once
+	n := &Node{
+		config: NewConfig(
+			WithShutdownTimeout(50*time.Millisecond),
+			WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		),
+		cancel: func() { cancelOnce.Do(func() { close(cancelCalled) }) },
+	}
+
+	n.liveLifecycleMu.Lock()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { n.liveLifecycleMu.Unlock() }) }
+	defer release()
+
+	err := n.Stop()
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	testutil.RequireReceive(
+		t,
+		cancelCalled,
+		time.Second,
+		"shutdown must cancel the node even when a lifecycle gate times out",
+	)
+
+	release()
+	require.NoError(t, n.Stop())
+}
+
+func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
+	t.Parallel()
+
+	const eventType event.EventType = "test.shutdown.order"
+
+	bus := event.NewEventBus(nil, nil)
+	_, _ = bus.SubscribeWithBuffer(eventType, 1)
+	bus.Publish(eventType, event.NewEvent(eventType, "fill"))
+
+	publishDone := make(chan struct{})
+	go func() {
+		defer close(publishDone)
+		bus.Publish(eventType, event.NewEvent(eventType, "blocked"))
+	}()
+	testutil.RequireNoReceive(
+		t,
+		publishDone,
+		50*time.Millisecond,
+		"event publisher should be backpressured before shutdown",
+	)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		eventBus: bus,
+		shutdownFuncs: []func(context.Context) error{
+			func(context.Context) error {
+				select {
+				case <-publishDone:
+					return nil
+				case <-time.After(time.Second):
+					return errors.New(
+						"event bus was not closed before final cleanup",
+					)
+				}
+			},
+		},
+	}
+
+	require.NoError(t, n.Stop())
+	testutil.RequireReceive(
+		t,
+		publishDone,
+		time.Second,
+		"backpressured publisher did not exit after node shutdown",
+	)
+}
+
 func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -709,10 +1027,604 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 	)
 }
 
+// TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed protects the
+// storage safety boundary shared with live Restore/Truncate. LedgerState.Close
+// can time out while a database worker is still using the database; normal
+// shutdown must not close the database or its provider-owned stores in that
+// state.
+// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
+// in another package that every concurrent LedgerState close would observe.
+func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
+	t *testing.T,
+) {
+	n, _ := newLiveLifecycleTestNodeWithGenesis(
+		t,
+		1,
+		nil,
+		ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: 1, TaskQueueSize: 1},
+	)
+
+	origTimeout := ledger.CloseDBWorkerPoolShutdownTimeout
+	ledger.CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { ledger.CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	defer func() {
+		close(release)
+		testutil.RequireReceive(
+			t,
+			workerDone,
+			time.Second,
+			"database worker drain",
+		)
+	}()
+	go func() {
+		defer close(workerDone)
+		_ = n.ledgerState.SubmitAsyncDBOperation(
+			func(*database.Database) error {
+				close(started)
+				<-release
+				return nil
+			},
+		)
+	}()
+	<-started
+
+	shutdownErr := n.shutdown()
+	require.Error(t, shutdownErr)
+	require.ErrorContains(t, shutdownErr, "database worker pool")
+	require.ErrorContains(t, shutdownErr, "database close skipped")
+
+	// The ledger worker is still blocked, so the database must remain usable.
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, make([]byte, 32)),
+	}, nil))
+}
+
+// TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed
+// covers the startup-failure LIFO rollback path with the same guard
+// TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed covers for the
+// normal signal-driven path: cleanupFailedStartup runs the same ledgerState
+// timeout Run() registers, and the earlier-registered (so later-run) db.Close
+// and pluginHost.Stop LIFO stops must skip closing storage a still-running
+// background goroutine may be using, not silently discard the drain failure.
+//
+// Unlike that shutdown() test, this one hand-builds the rollback slice
+// rather than driving Run() to a real startup failure: shutdown()'s phase
+// ordering is hard-coded directly in that function, so calling it exercises
+// the real order; cleanupFailedStartup's ordering is purely a property of
+// which `started = append(started, ...)` calls Run() happens to reach before
+// failing, assembled across ~30 such calls interleaved through Run()'s
+// startup sequence, each registered immediately after the resource it tears
+// down becomes available -- so driving the real path here would mean
+// injecting a failure at a specific point inside that sequence rather than
+// calling one self-contained function. This test therefore only proves the
+// guard logic is correct given the order Run() is documented (here and in
+// ARCHITECTURE.md) to register it in; it cannot catch a future edit to Run()
+// that reorders the db.Close/pluginHost.Stop/ledgerState.Close registrations
+// relative to each other. Matches this file's existing convention for
+// exercising cleanupFailedStartup with a hand-built `started` (see the
+// startup-lifecycle-gate test above) and newLiveLifecycleTestNode's own
+// documented pattern of wiring a real Node without going through Run().
+// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
+// in another package that every concurrent LedgerState close would observe.
+func TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed(
+	t *testing.T,
+) {
+	n, _ := newLiveLifecycleTestNodeWithGenesis(
+		t,
+		1,
+		nil,
+		ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: 1, TaskQueueSize: 1},
+	)
+
+	origTimeout := ledger.CloseDBWorkerPoolShutdownTimeout
+	ledger.CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { ledger.CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	defer func() {
+		close(release)
+		testutil.RequireReceive(
+			t,
+			workerDone,
+			time.Second,
+			"database worker drain",
+		)
+	}()
+	go func() {
+		defer close(workerDone)
+		_ = n.ledgerState.SubmitAsyncDBOperation(
+			func(*database.Database) error {
+				close(started)
+				<-release
+				return nil
+			},
+		)
+	}()
+	<-started
+
+	// Mirror Run's exact registration order and skip logic: ledgerState.Close
+	// registered last (so run first in LIFO) sets the flag; db.Close and
+	// pluginHost.Stop, registered earlier (so run later), check it.
+	ledgerStateDrainConfirmed := true
+	var pluginHostStopped, dbClosed bool
+	rollback := []func(){
+		func() {
+			if !ledgerStateDrainConfirmed {
+				return
+			}
+			dbClosed = true
+			_ = n.db.Close()
+		},
+		func() {
+			if !ledgerStateDrainConfirmed {
+				return
+			}
+			pluginHostStopped = true
+			_ = n.pluginHost.Stop(context.Background())
+		},
+		func() {
+			if err := n.ledgerState.Close(); err != nil {
+				ledgerStateDrainConfirmed = false
+			}
+		},
+	}
+	n.startupLifecycleMu.Lock()
+	n.cleanupFailedStartup(rollback)
+
+	assert.False(
+		t,
+		dbClosed,
+		"db.Close must be skipped when the ledger drain is unconfirmed",
+	)
+	assert.False(
+		t,
+		pluginHostStopped,
+		"pluginHost.Stop must be skipped when the ledger drain is unconfirmed",
+	)
+	// The ledger worker is still blocked, so the database must remain usable.
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, make([]byte, 32)),
+	}, nil))
+}
+
+// newChainSelectorSubscriptionTestNode builds the minimal node
+// subscribeChainSelectorEvents needs, so tests can register the production
+// subscriptions instead of reimplementing them.
+func newChainSelectorSubscriptionTestNode(
+	t *testing.T,
+	bus *event.EventBus,
+	cs *chainselection.ChainSelector,
+) *Node {
+	t.Helper()
+	return &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		eventBus:      bus,
+		chainSelector: cs,
+	}
+}
+
+type blockingNodeTestLogHandler struct {
+	entered     chan struct{}
+	release     chan struct{}
+	calls       atomic.Int32
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (h *blockingNodeTestLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *blockingNodeTestLogHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Level < slog.LevelWarn {
+		return nil
+	}
+	h.calls.Add(1)
+	h.once.Do(func() {
+		close(h.entered)
+		<-h.release
+	})
+	return nil
+}
+
+func (h *blockingNodeTestLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) unblock() {
+	h.releaseOnce.Do(func() { close(h.release) })
+}
+
+var nodeRequiredSubscriptionGroups = []struct {
+	function string
+	count    int
+}{
+	{function: "Run", count: 3},
+	{function: "subscribeChainsyncClientRemoveRequests", count: 1},
+	{function: "subscribeConnectionEvents", count: 3},
+	{function: "subscribeChainSelectorEvents", count: 8},
+	{function: "initLeiosVoteManager", count: 2},
+	{function: "startKoiosParityObserver", count: 1},
+}
+
+func TestNodeEventSubscriptionClassifications(t *testing.T) {
+	t.Parallel()
+
+	expectedRequired := make(map[string]int, len(nodeRequiredSubscriptionGroups))
+	for _, group := range nodeRequiredSubscriptionGroups {
+		expectedRequired[group.function] = group.count
+	}
+	expectedDetachable := map[string]int{
+		"subscribeChainSelectorEvents": 1,
+	}
+	expectedPolicies := map[string]string{
+		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
+		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
+		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
+		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
+	}
+	expectedChainsyncRegistrations := map[string]int{
+		"Run":                        1,
+		"reinitializeNetworkingCore": 1,
+	}
+
+	files, err := filepath.Glob("node*.go")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	actualRequired := make(map[string]int)
+	actualDetachable := make(map[string]int)
+	actualPolicies := make(map[string]string)
+	actualChainsyncRegistrations := make(map[string]int)
+	var unclassified []string
+	for _, filename := range files {
+		if strings.HasSuffix(filename, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filename, nil, 0)
+		require.NoError(t, err)
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				switch selector.Sel.Name {
+				case "subscribeRequiredEvent":
+					actualRequired[function.Name.Name]++
+				case "subscribeDetachableEvent":
+					actualDetachable[function.Name.Name]++
+				case "subscribeChainsyncClientRemoveRequests":
+					actualChainsyncRegistrations[function.Name.Name]++
+				case "Subscribe", "SubscribeWithBuffer", "SubscribeFunc",
+					"SubscribeFuncWithBuffer", "SubscribeFuncStrict":
+					unclassified = append(
+						unclassified,
+						fmt.Sprintf("%s:%s", filename, function.Name.Name),
+					)
+				case "SubscribeFuncWithBufferPolicy":
+					_, ok := actualPolicies[function.Name.Name]
+					if ok {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("duplicate policy helper: %s", function.Name.Name),
+						)
+						return true
+					}
+					if len(call.Args) < 3 {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("policy missing: %s:%s", filename, function.Name.Name),
+						)
+						return true
+					}
+					policySelector, ok := call.Args[2].(*ast.SelectorExpr)
+					if !ok {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("policy not explicit: %s:%s", filename, function.Name.Name),
+						)
+						return true
+					}
+					actualPolicies[function.Name.Name] = policySelector.Sel.Name
+				}
+				return true
+			})
+		}
+	}
+
+	require.Empty(t, unclassified,
+		"node-owned EventBus function subscriptions must use a policy helper")
+	require.Equal(t, expectedRequired, actualRequired)
+	require.Equal(t, expectedDetachable, actualDetachable)
+	require.Equal(t, expectedPolicies, actualPolicies)
+	require.Equal(t, expectedChainsyncRegistrations, actualChainsyncRegistrations)
+}
+
+func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
+	t.Parallel()
+
+	type subscriberCase struct {
+		name        string
+		eventType   event.EventType
+		logger      *blockingNodeTestLogHandler
+		queueFilled chan struct{}
+		published   chan struct{}
+	}
+	var cases []subscriberCase
+	for _, group := range nodeRequiredSubscriptionGroups {
+		for i := range group.count {
+			cases = append(cases, subscriberCase{
+				name: fmt.Sprintf("%s %d", group.function, i+1),
+				eventType: event.EventType(fmt.Sprintf(
+					"node.required.test.%d", len(cases),
+				)),
+				logger: &blockingNodeTestLogHandler{
+					entered: make(chan struct{}),
+					release: make(chan struct{}),
+				},
+				queueFilled: make(chan struct{}),
+				published:   make(chan struct{}),
+			})
+		}
+	}
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() {
+		for _, testCase := range cases {
+			testCase.logger.unblock()
+		}
+		bus.Stop()
+	})
+	n := &Node{eventBus: bus}
+	for _, testCase := range cases {
+		logger := slog.New(testCase.logger)
+		n.subscribeRequiredEvent(testCase.eventType, func(event.Event) {
+			logger.Warn("blocked test subscriber")
+		})
+		bus.Publish(testCase.eventType, event.NewEvent(testCase.eventType, nil))
+		testutil.RequireReceive(
+			t,
+			testCase.logger.entered,
+			time.Second,
+			"required subscriber callback should enter",
+		)
+	}
+
+	for _, testCase := range cases {
+		go func(testCase subscriberCase) {
+			defer close(testCase.published)
+			for i := range event.DefaultSubscriberBuffer + 2 {
+				bus.Publish(
+					testCase.eventType,
+					event.NewEvent(testCase.eventType, nil),
+				)
+				if i == event.DefaultSubscriberBuffer-1 {
+					close(testCase.queueFilled)
+				}
+			}
+		}(testCase)
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for _, testCase := range cases {
+		select {
+		case <-testCase.queueFilled:
+		case <-deadline.C:
+			t.Fatalf("%s subscriber queue did not fill", testCase.name)
+		}
+	}
+
+	allPublished := make(chan struct{})
+	go func() {
+		for _, testCase := range cases {
+			<-testCase.published
+		}
+		close(allPublished)
+	}()
+	select {
+	case <-allPublished:
+		t.Fatal("a required subscriber detached while its handler was stalled")
+	case <-time.After(event.RemoteDeliverTimeout + 250*time.Millisecond):
+	}
+
+	for _, testCase := range cases {
+		testCase.logger.unblock()
+	}
+	select {
+	case <-allPublished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publishers did not resume after required subscribers drained")
+	}
+	for _, testCase := range cases {
+		require.Eventually(t, func() bool {
+			return testCase.logger.calls.Load() == event.DefaultSubscriberBuffer+3
+		}, time.Second, 5*time.Millisecond,
+			"subscriber queue should drain: %s", testCase.name)
+	}
+}
+
+func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		Logger:        slog.New(loggerHandler),
+		SecurityParam: 1,
+	})
+	referenceConn := newNodeTestConnId(5101)
+	cs.UpdatePeerTip(referenceConn, ochainsync.Tip{
+		Point:       ocommon.NewPoint(10, []byte("reference")),
+		BlockNumber: 1,
+	}, nil)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := newChainSelectorSubscriptionTestNode(t, bus, cs)
+	n.subscribeChainSelectorEvents()
+
+	// The first impossible advertised tip blocks in the real selector callback's
+	// warning logger. Further publications fill the production subscriber queue.
+	stalled := chainselection.PeerTipUpdateEvent{
+		ConnectionId: newNodeTestConnId(5102),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(1000, []byte("untrusted")),
+			BlockNumber: 1000,
+		},
+	}
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+	)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := range event.DefaultSubscriberBuffer + 2 {
+			bus.Publish(
+				chainselection.PeerTipUpdateEventType,
+				event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+			)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback queue did not fill")
+	}
+	select {
+	case <-published:
+		t.Fatal("required Node subscription stopped applying back-pressure")
+	case <-time.After(event.RemoteDeliverTimeout + time.Second):
+	}
+	loggerHandler.unblock()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("required Node subscription did not resume publishing after callback recovery")
+	}
+
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType,
+			chainselection.PeerTipUpdateEvent{
+				ConnectionId: referenceConn,
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(20, []byte("recovered")),
+					BlockNumber: 2,
+				},
+			}),
+	)
+	require.Eventually(t, func() bool {
+		got := cs.GetPeerTip(referenceConn)
+		return got != nil && got.Tip.BlockNumber == 2
+	}, time.Second, 5*time.Millisecond,
+		"required Node subscription must process events after the callback drains")
+}
+
+func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := &Node{
+		config:   Config{logger: slog.New(loggerHandler)},
+		eventBus: bus,
+	}
+	n.subscribeChainSelectorEvents()
+
+	const forkEvent = chain.ChainForkEventType
+	fork := event.NewEvent(forkEvent, chain.ChainForkEvent{})
+	bus.Publish(forkEvent, fork)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := range event.DefaultSubscriberBuffer + 2 {
+			bus.Publish(forkEvent, fork)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback queue did not fill")
+	}
+	select {
+	case <-published:
+	case <-time.After(event.RemoteDeliverTimeout + 2*time.Second):
+		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
+	}
+	loggerHandler.unblock()
+	// Detachment preserves events accepted before the timeout, so wait for that
+	// backlog to drain before checking that later publications have no observer.
+	acceptedCallbacks := int32(event.DefaultSubscriberBuffer + 1)
+	require.Eventually(t, func() bool {
+		return loggerHandler.calls.Load() == acceptedCallbacks
+	}, time.Second, 5*time.Millisecond,
+		"accepted diagnostic events should drain after the callback returns")
+	bus.Publish(forkEvent, fork)
+	require.Never(t, func() bool {
+		return loggerHandler.calls.Load() > acceptedCallbacks
+	}, 100*time.Millisecond, 5*time.Millisecond,
+		"detached diagnostic observer must not receive a later event")
+}
+
 // TestNodePeerEligibilityEventUpdatesChainSelector verifies the node wiring:
 // a PeerEligibilityChangedEvent published on the event bus must be forwarded
 // to the ChainSelector so that the now-ineligible peer is no longer selected.
 func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 
@@ -726,22 +1638,24 @@ func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
 		Point:       ocommon.NewPoint(100, []byte("tip")),
 		BlockNumber: 50,
 	}, nil)
-	require.NotNil(t, cs.GetBestPeer(), "peer should be selected before ineligibility")
+	require.NotNil(
+		t,
+		cs.GetBestPeer(),
+		"peer should be selected before ineligibility",
+	)
 
-	// Mirror the subscription wiring in node.go.
-	bus.SubscribeFunc(peergov.PeerEligibilityChangedEventType, func(evt event.Event) {
-		e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
-		if !ok {
-			return
-		}
-		cs.SetConnectionEligible(e.ConnectionId, e.Eligible)
-	})
+	// Exercise the real node wiring rather than a copy of it.
+	newChainSelectorSubscriptionTestNode(t, bus, cs).
+		subscribeChainSelectorEvents()
 
 	bus.Publish(
 		peergov.PeerEligibilityChangedEventType,
 		event.NewEvent(
 			peergov.PeerEligibilityChangedEventType,
-			peergov.PeerEligibilityChangedEvent{ConnectionId: connId, Eligible: false},
+			peergov.PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     false,
+			},
 		),
 	)
 
@@ -756,6 +1670,8 @@ func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
 // to the ChainSelector so that the higher-priority peer wins equal-tip
 // selection.
 func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 
@@ -770,28 +1686,177 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 	cs.UpdatePeerTip(lowPrioConn, equalTip, nil)
 	cs.UpdatePeerTip(highPrioConn, equalTip, nil)
 
-	// Mirror the subscription wiring in node.go.
-	bus.SubscribeFunc(peergov.PeerPriorityChangedEventType, func(evt event.Event) {
-		e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
-		if !ok {
-			return
-		}
-		cs.SetConnectionPriority(e.ConnectionId, e.Priority)
-	})
+	// Exercise the real node wiring rather than a copy of it.
+	newChainSelectorSubscriptionTestNode(t, bus, cs).
+		subscribeChainSelectorEvents()
 
 	bus.Publish(
 		peergov.PeerPriorityChangedEventType,
 		event.NewEvent(
 			peergov.PeerPriorityChangedEventType,
-			peergov.PeerPriorityChangedEvent{ConnectionId: highPrioConn, Priority: 50},
+			peergov.PeerPriorityChangedEvent{
+				ConnectionId: highPrioConn,
+				Priority:     50,
+			},
 		),
 	)
 
 	// SelectBestChain does a pure comparison with no incumbent bias, so once
 	// the priority event has been processed the higher-priority peer wins.
-	require.Eventually(t, func() bool {
-		best := cs.SelectBestChain()
-		return best != nil && *best == highPrioConn
-	}, time.Second, 5*time.Millisecond,
-		"higher-priority peer must win equal-tip selection after priority event")
+	require.Eventually(
+		t,
+		func() bool {
+			best := cs.SelectBestChain()
+			return best != nil && *best == highPrioConn
+		},
+		time.Second,
+		5*time.Millisecond,
+		"higher-priority peer must win equal-tip selection after priority event",
+	)
+}
+
+// A close/stop failure surfaced during the startup-cleanup unwind must
+// actually reach the log, not just be swallowed by the caller's `_ =`.
+func TestLogErrIfNotNilLogsOnError(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(
+		logger,
+		"failed to stop leader election during cleanup",
+		errors.New("epoch transition in flight"),
+	)
+
+	out := buf.String()
+	if !strings.Contains(out, "failed to stop leader election during cleanup") {
+		t.Fatalf("expected log message in output, got: %s", out)
+	}
+	if !strings.Contains(out, "epoch transition in flight") {
+		t.Fatalf("expected error detail in output, got: %s", out)
+	}
+}
+
+// The common case -- a clean stop -- must stay silent, or every successful
+// shutdown would log a spurious error line.
+func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	logErrIfNotNil(logger, "failed to stop leader election during cleanup", nil)
+
+	if buf.Len() != 0 {
+		t.Fatalf(
+			"expected no log output for a nil error, got: %s",
+			buf.String(),
+		)
+	}
+}
+
+// seedIncompleteRewardLiveStake reproduces a post-upgrade database whose
+// reward_live_stake aggregate covers only one of two registered credentials,
+// which is the state RewardLiveStakeNeedsBackfill is meant to detect.
+func seedIncompleteRewardLiveStake(
+	t *testing.T,
+	db *database.Database,
+) {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	stakeKey := make([]byte, 28)
+	stakeKey[0] = 0x51
+	missingStakeKey := make([]byte, 28)
+	missingStakeKey[0] = 0x52
+	_, err = raw.Exec(`
+INSERT INTO account (staking_key, pool, added_slot, active)
+VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
+		stakeKey, make([]byte, 28),
+		missingStakeKey, make([]byte, 28),
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO reward_live_stake
+    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
+     registered, updated_slot)
+VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
+		stakeKey,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, make([]byte, 32)),
+	}, nil))
+}
+
+// TestBackfillRewardLiveStakeSkipsScanWhenConfigured pins the opt-out: with
+// the flag set the whole-UTxO consistency scan must not run, so a database
+// that genuinely needs a backfill is left untouched rather than rebuilt.
+// Without the flag the sibling test above rebuilds the same fixture, so this
+// fails if the flag ever stops being honored.
+func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	seedIncompleteRewardLiveStake(t, db)
+
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.True(t, needed)
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+			skipRewardLiveStakeBackfillCheck: true,
+		},
+	}
+	require.NoError(t, n.backfillRewardLiveStake())
+
+	// Still needed: the scan was skipped, so no rebuild happened.
+	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.True(t, needed)
+}
+
+// TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping pins the boundary
+// of the opt-out: the flag suppresses only the reward_live_stake scan, never
+// the stake-snapshot provenance probe, which fails closed because such a
+// database cannot be safely reconstructed.
+func TestBackfillRewardLiveStakeChecksProvenanceWhenSkipping(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO pool_stake_snapshot
+    (epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
+     delegator_count, captured_slot, calculation_version)
+VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
+		650, make([]byte, 28), models.RewardStakeCalculationVersion-1,
+	)
+	require.NoError(t, err)
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+			skipRewardLiveStakeBackfillCheck: true,
+		},
+	}
+	err = n.backfillRewardLiveStake()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "older accounting")
 }

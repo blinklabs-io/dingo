@@ -23,11 +23,10 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
-// LeiosVoteDST is the domain separation tag for hashing vote messages to
-// the BLS12-381 G1 group. CIP-0164 has not yet pinned a DST for the voting
-// scheme; this is a dingo-local provisional value to be aligned with the
-// reference implementation once the CIP finalizes it.
-const LeiosVoteDST = "CIP-0164-LEIOS-VOTE-BLS12381G1_XMD:SHA-256_SSWU_RO_"
+const (
+	LeiosVoteDST = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
+	LeiosPoPDST  = "BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
+)
 
 // Vote signatures follow the BLS MinSig variant on BLS12-381: signatures
 // are compressed G1 points (48 bytes, matching gouroboros
@@ -48,10 +47,32 @@ var negG2Gen = func() bls12381.G2Affine {
 	return neg
 }()
 
-// VoteMessageBytes returns the message signed by a Leios vote:
-// concat(slot_no, endorser_block_hash) with slot_no encoded as 8 bytes
-// big-endian. The exact encoding is an assumption pending CIP-0164
-// finalization.
+// prototypeRbHashCborHeader is the CBOR byte-string header for a 32-byte
+// payload: major type 2 with a one-byte length (0x58) followed by the length
+// itself (0x20). Equivalent to cbor.Encode of the hash, but the length is
+// fixed here, so the header is a constant and the encoding cannot fail.
+const prototypeRbHashCborHeader = "\x58\x20"
+
+// PrototypeVoteMessageBytes returns the current prototype's signed message:
+// the hash of the ranking block that announced the endorser block, encoded
+// as a CBOR byte string.
+//
+// The reference signs the RbHash SignableRepresentation, which is
+// toStrictByteString (encodeRbHash h) == CBOR.encodeBytes of the hash, so
+// the signed preimage is the 34-byte CBOR encoding rather than the bare
+// 32 hash bytes. Signing the bare hash hashes a different preimage to the
+// curve and every pairing check fails, even with a correct key.
+func PrototypeVoteMessageBytes(announcingRbHash lcommon.Blake2b256) []byte {
+	msg := make(
+		[]byte,
+		0,
+		len(prototypeRbHashCborHeader)+lcommon.Blake2b256Size,
+	)
+	msg = append(msg, prototypeRbHashCborHeader...)
+	return append(msg, announcingRbHash.Bytes()...)
+}
+
+// VoteMessageBytes retains the legacy standalone leios-votes message shape.
 func VoteMessageBytes(slotNo uint64, ebHash lcommon.Blake2b256) []byte {
 	msg := make([]byte, 8, 8+len(ebHash))
 	binary.BigEndian.PutUint64(msg, slotNo)
@@ -61,10 +82,27 @@ func VoteMessageBytes(slotNo uint64, ebHash lcommon.Blake2b256) []byte {
 // SignVote signs a vote message with the MinSig scheme and returns the
 // 48-byte compressed G1 signature.
 func SignVote(key *VoteSigningKey, msg []byte) ([]byte, error) {
+	return signWithDST(key, msg, LeiosVoteDST)
+}
+
+// SignLeiosKeyProofOfPossession signs a voting key's serialized public key
+// with the Dijkstra Leios proof-of-possession domain.
+func SignLeiosKeyProofOfPossession(key *VoteSigningKey) ([]byte, error) {
 	if key == nil {
 		return nil, errors.New("nil vote signing key")
 	}
-	hashPoint, err := bls12381.HashToG1(msg, []byte(LeiosVoteDST))
+	return signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
+}
+
+func signWithDST(
+	key *VoteSigningKey,
+	msg []byte,
+	dst string,
+) ([]byte, error) {
+	if key == nil {
+		return nil, errors.New("nil vote signing key")
+	}
+	hashPoint, err := bls12381.HashToG1(msg, []byte(dst))
 	if err != nil {
 		return nil, fmt.Errorf("hash vote message to G1: %w", err)
 	}
@@ -102,6 +140,15 @@ func VerifyVoteSignature(
 	msg []byte,
 	sig []byte,
 ) error {
+	return verifySignatureWithDST(pub, msg, sig, LeiosVoteDST)
+}
+
+func verifySignatureWithDST(
+	pub *bls12381.G2Affine,
+	msg []byte,
+	sig []byte,
+	dst string,
+) error {
 	if pub == nil || pub.IsInfinity() {
 		return errors.New("invalid public key")
 	}
@@ -114,7 +161,7 @@ func VerifyVoteSignature(
 	if err != nil {
 		return err
 	}
-	hashPoint, err := bls12381.HashToG1(msg, []byte(LeiosVoteDST))
+	hashPoint, err := bls12381.HashToG1(msg, []byte(dst))
 	if err != nil {
 		return fmt.Errorf("hash vote message to G1: %w", err)
 	}
@@ -127,6 +174,42 @@ func VerifyVoteSignature(
 	}
 	if !ok {
 		return ErrInvalidSignature
+	}
+	return nil
+}
+
+// VerifyLeiosKeyProofOfPossession verifies a registered Dijkstra pool's
+// proof over its serialized public key with the dedicated BLS PoP domain.
+// gouroboros decodes LeiosKey and
+// checks only field lengths (LeiosKey.validate), not the proof itself --
+// callers must not treat an on-chain leios_key as usable until this passes.
+func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
+	if key == nil {
+		return errors.New("nil leios key")
+	}
+	if len(key.PublicKey) != VotePublicKeySize {
+		return fmt.Errorf(
+			"leios key public key must be %d bytes, got %d",
+			VotePublicKeySize,
+			len(key.PublicKey),
+		)
+	}
+	var pub bls12381.G2Affine
+	// SetBytes validates curve membership and subgroup order, matching
+	// ParseVoterPublicKey's checks.
+	if _, err := pub.SetBytes(key.PublicKey); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPublicKey, err)
+	}
+	if pub.IsInfinity() {
+		return fmt.Errorf("%w: point is infinity", ErrInvalidPublicKey)
+	}
+	if err := verifySignatureWithDST(
+		&pub,
+		key.PublicKey,
+		key.PossessionProof,
+		LeiosPoPDST,
+	); err != nil {
+		return fmt.Errorf("leios key proof of possession: %w", err)
 	}
 	return nil
 }

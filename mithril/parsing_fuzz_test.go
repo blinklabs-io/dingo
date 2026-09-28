@@ -74,7 +74,13 @@ func FuzzDecodePrimaryEncodedBytes(f *testing.F) {
 func FuzzParseSTMSignerVerificationKey(f *testing.F) {
 	f.Add("")
 	f.Add(hex.EncodeToString(make([]byte, 96)))
-	f.Add(hex.EncodeToString([]byte(`{"vk":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pop":""}`)))
+	f.Add(
+		hex.EncodeToString(
+			[]byte(
+				`{"vk":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","pop":""}`,
+			),
+		),
+	)
 
 	f.Fuzz(func(t *testing.T, data string) {
 		if len(data) > 64*1024 {
@@ -103,7 +109,9 @@ func FuzzParseSTMAggregateSignatureBytes(f *testing.F) {
 			return
 		}
 		if sig == nil {
-			t.Fatalf("parseSTMAggregateSignatureBytes returned nil without an error")
+			t.Fatalf(
+				"parseSTMAggregateSignatureBytes returned nil without an error",
+			)
 		}
 	})
 }

@@ -16,6 +16,7 @@ package eras
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -43,12 +44,19 @@ var ConwayEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsConway,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateConway,
 	PParamsUpdateFunc:       PParamsUpdateConway,
-	HardForkFunc:            HardForkConway,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVConway,
-	CertDepositFunc:         CertDepositConway,
-	ValidateTxFunc:          ValidateTxConway,
-	EvaluateTxFunc:          EvaluateTxConway,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(conway.ConwayProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkConway,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVConway,
+	CertDepositFunc:   CertDepositConway,
+	ValidateTxFunc:    ValidateTxConway,
+	EvaluateTxFunc:    EvaluateTxConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -85,6 +93,12 @@ func PParamsUpdateConway(
 			pparamsUpdate,
 		)
 	}
+	// ParameterChange must never change protocol version; only
+	// HardForkInitiation may (dingo#4439). Transaction validation already
+	// rejects a ParameterChange carrying key 14 before it can be persisted,
+	// so this only guards an already-stored malformed proposal that reaches
+	// enactment some other way (e.g. replay of pre-fix data).
+	conwayPParamsUpdate.ProtocolVersion = nil
 	conwayPParams.Update(&conwayPParamsUpdate)
 	return conwayPParams, nil
 }
@@ -101,6 +115,7 @@ func HardForkConway(
 		)
 	}
 	ret := conway.UpgradePParams(*babbagePParams)
+	ret.CostModels = cloneCostModels(ret.CostModels)
 	conwayGenesis := nodeConfig.ConwayGenesis()
 	if err := ret.UpdateFromGenesis(conwayGenesis); err != nil {
 		return nil, err
@@ -149,7 +164,7 @@ func CertDepositConway(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
@@ -179,7 +194,7 @@ func ValidateTxConway(
 	pp lcommon.ProtocolParameters,
 ) error {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -203,6 +218,12 @@ func ValidateTxConway(
 				),
 			)
 		}
+	}
+	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
+		errs = append(
+			errs,
+			fmt.Errorf("conway parameter-change validation: %w", err),
+		)
 	}
 	if err := ValidateTxFeeConway(tx, ls, tmpPparams); err != nil &&
 		(!isInputResolutionError(err) || len(errs) == 0) {
@@ -229,25 +250,20 @@ func ValidateTxConway(
 	); err != nil {
 		return fmt.Errorf("conway plutus redeemer validation: %w", err)
 	}
-	// Skip script evaluation (Phase-2) if TX is marked as not valid.
-	// These transactions failed script validation on-chain; collateral
-	// is consumed instead of regular inputs.
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
-	if err := validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		tmpPparams,
 		plutusCtx,
 		false,
-	); err != nil {
-		return fmt.Errorf("conway plutus validation: %w", err)
+	)
+	if phase2Err != nil {
+		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
-	return nil
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 var (
@@ -265,22 +281,196 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
-			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
-			name:           "conway.UtxoValidateFeeTooSmallUtxo",
-		},
-		{
-			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
-			validationFunc: conway.UtxoValidatePlutusScripts,
-			name:           "conway.UtxoValidatePlutusScripts",
-		},
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// conway.UtxoValidationRules is composed with
+	// common.ComposeUtxoValidationRules, so every phase-2-gated entry —
+	// committee-certificates and unknown-voters among them — is an anonymous
+	// wrapper closure with no trace of the original function.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		lcommon.UtxoValidationRuleFeeTooSmall,
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
+		lcommon.UtxoValidationRuleDelegation,
 	}
-	return buildIndexedUtxoValidationRulesWithSkips(
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			descriptors, conway.UtxoValidationRules, skipRuleIds[i],
+		)
+	}
+	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
 		conway.UtxoValidationRules,
-		skips,
+		skipRuleIds,
 	)
+	ret = append(ret, indexedUtxoValidationRule{
+		index:          indexes[0],
+		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
+	})
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[3],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[4],
+			validationFunc: validateUnknownVoters,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[5],
+			validationFunc: validateDelegationConwayBootstrapAware,
+		},
+	)
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
+	return ret
+}
+
+// validateConwayFeaturesWithNeededPlutusV1V2 rejects Conway-only transaction
+// features when a PlutusV1 or PlutusV2 script is required. The upstream rule
+// checks scripts that are merely available instead, so an unrelated reference
+// script can reject an otherwise valid transaction.
+func validateConwayFeaturesWithNeededPlutusV1V2(
+	tx lcommon.Transaction,
+	_ uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	view, err := script.NewTxScriptView(tx, ls)
+	if err != nil {
+		if isInputResolutionError(err) {
+			// UtxoValidateBadInputsUtxo owns input-resolution failures.
+			return nil
+		}
+		return err
+	}
+
+	plutusVersion := neededPlutusV1V2Version(view)
+	if plutusVersion == "" {
+		return nil
+	}
+
+	if conwayCurrentTreasuryValuePresent(tx) {
+		return conway.CurrentTreasuryValueWithPlutusV1V2Error{
+			PlutusVersion: plutusVersion,
+		}
+	}
+	if len(tx.ProposalProcedures()) > 0 {
+		return conway.ProposalProceduresWithPlutusV1V2Error{
+			PlutusVersion: plutusVersion,
+		}
+	}
+	if voting := tx.VotingProcedures(); len(voting) > 0 {
+		return conway.VotingProceduresWithPlutusV1V2Error{
+			PlutusVersion: plutusVersion,
+		}
+	}
+
+	for _, cert := range tx.Certificates() {
+		certType := ""
+		switch cert.(type) {
+		case *lcommon.AuthCommitteeHotCertificate:
+			certType = "AuthCommitteeHot"
+		case *lcommon.ResignCommitteeColdCertificate:
+			certType = "ResignCommitteeCold"
+		case *lcommon.RegistrationDrepCertificate:
+			certType = "DRepRegistration"
+		case *lcommon.DeregistrationDrepCertificate:
+			certType = "DRepDeregistration"
+		case *lcommon.UpdateDrepCertificate:
+			certType = "DRepUpdate"
+		case *lcommon.StakeVoteDelegationCertificate:
+			certType = "StakeVoteDelegation"
+		case *lcommon.StakeRegistrationDelegationCertificate:
+			certType = "StakeRegistrationDelegation"
+		case *lcommon.VoteDelegationCertificate:
+			certType = "VoteDelegation"
+		case *lcommon.VoteRegistrationDelegationCertificate:
+			certType = "VoteRegistrationDelegation"
+		case *lcommon.StakeVoteRegistrationDelegationCertificate:
+			certType = "StakeVoteRegistrationDelegation"
+		}
+		if certType != "" {
+			return conway.ConwayCertificateWithPlutusV1V2Error{
+				PlutusVersion:   plutusVersion,
+				CertificateType: certType,
+			}
+		}
+	}
+
+	return nil
+}
+
+// conwayCurrentTreasuryValuePresent reports whether transaction-body key 21
+// is present, preserving the distinction between an absent value and an
+// explicitly encoded zero. A declared zero is a real assertion about the
+// treasury and must reach validation; collapsing it into "absent" would let a
+// transaction assert a zero treasury for free.
+//
+// Maintained gouroboros exposes the distinction through a nil value and the
+// CurrentTreasuryValuePresent capability. The pinned release stores key 21 in
+// an int64 with omitempty and returns a non-nil zero for both cases, so
+// decoded or constructed Conway transactions fall back to inspecting the
+// transaction-body map. The fallback treats an undecodable body as present:
+// this rule only rejects, so failing closed cannot admit a transaction.
+func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	treasury := tx.CurrentTreasuryValue()
+	if treasury == nil {
+		return false
+	}
+	if treasury.Sign() != 0 {
+		return true
+	}
+	conwayTx, ok := tx.(*conway.ConwayTransaction)
+	if !ok || conwayTx == nil {
+		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
+		// implementations that do not need the pinned-release compatibility
+		// path.
+		return true
+	}
+	if presence, ok := any(&conwayTx.Body).(interface {
+		CurrentTreasuryValuePresent() bool
+	}); ok {
+		return presence.CurrentTreasuryValuePresent()
+	}
+	bodyCbor := conwayTx.Body.Cbor()
+	if len(bodyCbor) == 0 {
+		var err error
+		bodyCbor, err = cbor.Encode(&conwayTx.Body)
+		if err != nil {
+			return true
+		}
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(bodyCbor, &fields); err != nil {
+		return true
+	}
+	_, ok = fields[21]
+	return ok
+}
+
+func neededPlutusV1V2Version(view script.TxScriptView) string {
+	needsV2 := false
+	for _, needed := range view.Needed {
+		switch needed.(type) {
+		case lcommon.PlutusV1Script:
+			// Match the upstream rule's V1-before-V2 error precedence.
+			return "PlutusV1"
+		case lcommon.PlutusV2Script:
+			needsV2 = true
+		}
+	}
+	if needsV2 {
+		return "PlutusV2"
+	}
+	return ""
 }
 
 func isInputResolutionError(err error) bool {
@@ -334,6 +524,9 @@ func ValidateTxPlutusConway(
 	ls lcommon.LedgerState,
 	pp *conway.ConwayProtocolParameters,
 ) error {
+	if pp == nil {
+		return ErrIncompatibleProtocolParams
+	}
 	return validateTxPlutusConway(tx, ls, pp, true)
 }
 
@@ -343,20 +536,18 @@ func validateTxPlutusConway(
 	pp *conway.ConwayProtocolParameters,
 	validateRequiredRedeemers bool,
 ) error {
-	if !tx.IsValid() {
-		return nil
-	}
 	plutusCtx, err := newConwayPlutusValidationContext(tx, ls)
 	if err != nil {
 		return err
 	}
-	return validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		pp,
 		plutusCtx,
 		validateRequiredRedeemers,
 	)
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 func validateTxPlutusConwayWithContext(
@@ -388,11 +579,13 @@ func validateTxPlutusConwayWithContext(
 	if !hasRedeemers {
 		return nil
 	}
-	txInfos := newConwayTxInfoCache(
+	txInfos := newTxInfoCache(
 		ls,
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
+		protocolMajorVersion(pp),
 	)
+	synthetic := syntheticV2CostModelInEffect(ls)
 	for redeemerKey, redeemerValue := range plutusCtx.redeemers.Iter() {
 		purpose, ok := buildConwayScriptPurpose(
 			redeemerKey,
@@ -404,6 +597,7 @@ func validateTxPlutusConwayWithContext(
 			tx.VotingProcedures(),
 			tx.ProposalProcedures(),
 			plutusCtx.witnessDatums,
+			protocolMajorVersion(pp),
 		)
 		if !ok {
 			return conway.ExtraRedeemerError{RedeemerKey: redeemerKey}
@@ -466,9 +660,13 @@ func validateTxPlutusConwayWithContext(
 			}
 		}
 		redeemer := script.Redeemer{
-			Tag:     redeemerKey.Tag,
-			Index:   redeemerKey.Index,
-			Data:    redeemerValue.Data.Data,
+			Tag:   redeemerKey.Tag,
+			Index: redeemerKey.Index,
+			// Normalize: cardano-ledger rebuilds every script-visible value,
+			// so a script observes the encoding the Plutus encoder writes,
+			// not the definite/indefinite-length choice this transaction was
+			// built with. serialiseData exposes the difference.
+			Data:    data.Normalize(redeemerValue.Data.Data),
 			ExUnits: redeemerValue.ExUnits,
 		}
 		_, execErr, err := evaluateConwayPlutusScript(
@@ -480,6 +678,7 @@ func validateTxPlutusConwayWithContext(
 			pp,
 			txInfos,
 			true,
+			synthetic,
 		)
 		if err != nil {
 			return err
@@ -594,7 +793,8 @@ func validateConwayRequiredPlutusRedeemers(
 	}
 	withdrawalAddrs := sortedConwayWithdrawalAddresses(tx.Withdrawals())
 	for idx, addr := range withdrawalAddrs {
-		if (addr.Type() & lcommon.AddressTypeScriptBit) == 0 {
+		stakeCredential, ok := addr.StakeCredential()
+		if !ok || stakeCredential.CredType != lcommon.CredentialTypeScriptHash {
 			continue
 		}
 		key := lcommon.RedeemerKey{
@@ -604,10 +804,7 @@ func validateConwayRequiredPlutusRedeemers(
 		if err := checkRequired(
 			key,
 			script.ScriptPurposeRewarding{
-				StakeCredential: lcommon.Credential{
-					CredType:   lcommon.CredentialTypeScriptHash,
-					Credential: addr.StakeKeyHash(),
-				},
+				StakeCredential: stakeCredential,
 			},
 		); err != nil {
 			return err
@@ -707,13 +904,37 @@ func sortedConwayWithdrawalAddresses(
 	for addr := range withdrawals {
 		ret = append(ret, addr)
 	}
+	// cardano-ledger keys withdrawals by RewardAccount, whose derived Ord
+	// compares Network then Credential, and whose Credential constructors are
+	// declared ScriptHashObj before KeyHashObj
+	// (libs/cardano-ledger-core/src/Cardano/Ledger/Credential.hs). Reward
+	// address bytes carry the credential type in the header nibble, so raw
+	// byte order puts key-hash (0xe0/0xe1) before script-hash (0xf0/0xf1) and
+	// inverts the ledger's order whenever a transaction withdraws from both
+	// credential types. The Rewarding redeemer index is this position, so the
+	// comparator has to match script.BuildScriptPurpose, which maps an index
+	// back to a credential using the same order.
 	slices.SortFunc(ret, func(a, b *lcommon.Address) int {
-		aBytes, aErr := a.Bytes()
-		bBytes, bErr := b.Bytes()
+		if a == nil {
+			return -1
+		}
+		if b == nil {
+			return 1
+		}
+		aCred, aErr := a.RewardAccountCredential()
+		bCred, bErr := b.RewardAccountCredential()
 		if aErr != nil || bErr != nil {
 			return strings.Compare(a.String(), b.String())
 		}
-		return bytes.Compare(aBytes, bBytes)
+		if c := cmp.Compare(a.NetworkId(), b.NetworkId()); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(aCred.CredType, bCred.CredType); c != 0 {
+			// Credential's numeric order is key before script, while
+			// cardano-ledger's Ord instance places ScriptHashObj first.
+			return -c
+		}
+		return bytes.Compare(aCred.Credential[:], bCred.Credential[:])
 	})
 	return ret
 }
@@ -858,10 +1079,11 @@ func collectConwayAvailableScripts(
 	return ret
 }
 
-type conwayTxInfoCache struct {
+type txInfoCache struct {
 	ls             lcommon.LedgerState
 	tx             lcommon.Transaction
 	resolvedInputs []lcommon.Utxo
+	protocolMajor  uint
 	txInfoV1       script.TxInfoV1
 	txInfoV2       script.TxInfoV2
 	txInfoV3       script.TxInfoV3
@@ -870,24 +1092,35 @@ type conwayTxInfoCache struct {
 	txInfoV3Built  bool
 }
 
-func newConwayTxInfoCache(
+// newTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache, shared by
+// ValidateTxConway/EvaluateTxConway and ValidateTxBabbage/EvaluateTxBabbage
+// (Babbage never reaches v3, but the type is otherwise era-neutral). Building
+// a TxInfo re-derives the whole transaction's Plutus-Data-encoded inputs,
+// outputs, certificates, mint, and withdrawals, and translates the validity
+// interval through SlotToTime, so it must happen at most once per (tx,
+// language version) regardless of how many redeemers share that version.
+func newTxInfoCache(
 	ls lcommon.LedgerState,
 	tx lcommon.Transaction,
 	resolvedInputs []lcommon.Utxo,
-) *conwayTxInfoCache {
-	return &conwayTxInfoCache{
+	protocolMajor uint,
+) *txInfoCache {
+	return &txInfoCache{
 		ls:             ls,
 		tx:             tx,
 		resolvedInputs: resolvedInputs,
+		protocolMajor:  protocolMajor,
 	}
 }
 
-func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
+func (c *txInfoCache) v1() (script.TxInfoV1, error) {
 	if !c.txInfoV1Built {
 		txInfo, err := script.NewTxInfoV1FromTransaction(
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
+			c.protocolMajor,
 		)
 		if err != nil {
 			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
@@ -900,12 +1133,14 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 	return c.txInfoV1, nil
 }
 
-func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
+func (c *txInfoCache) v2() (script.TxInfoV2, error) {
 	if !c.txInfoV2Built {
 		txInfo, err := script.NewTxInfoV2FromTransaction(
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
+			c.protocolMajor,
 		)
 		if err != nil {
 			return script.TxInfoV2{}, conway.ScriptContextConstructionError{
@@ -918,12 +1153,13 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 	return c.txInfoV2, nil
 }
 
-func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
+func (c *txInfoCache) v3() (script.TxInfoV3, error) {
 	if !c.txInfoV3Built {
 		txInfo, err := script.NewTxInfoV3FromTransaction(
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			c.protocolMajor,
 		)
 		if err != nil {
 			return script.TxInfoV3{}, conway.ScriptContextConstructionError{
@@ -943,64 +1179,116 @@ func evaluateConwayPlutusScript(
 	datum data.PlutusData,
 	budget lcommon.ExUnits,
 	pp *conway.ConwayProtocolParameters,
-	txInfos *conwayTxInfoCache,
-	skipFinalSlippageFlush bool,
+	txInfos *txInfoCache,
+	restrictive bool,
+	syntheticV2CostModel bool,
 ) (lcommon.ExUnits, error, error) {
+	// In restrictive mode, use the protocol transaction budget as the machine
+	// limit so intermediate slippage-batch flushes do not reject a script just
+	// because they temporarily exceed its declared redeemer budget. After
+	// execution we compare the complete consumed amount, including the final
+	// accumulated step batch, against the declared redeemer budget.
+	//
+	// In exact mode the caller-supplied budget argument is itself the machine
+	// limit, and no post-execution comparison is done. EvaluateTxConway uses
+	// that mode and passes tmpPparams.MaxTxExUnits, so the limit there is the
+	// protocol per-transaction maximum rather than any redeemer-declared
+	// budget.
+	evalBudget := budget
+	if restrictive {
+		evalBudget = pp.MaxTxExUnits
+	}
 	switch s := plutusScript.(type) {
 	case lcommon.PlutusV3Script:
+		if err := script.ValidatePlutusV3ReferenceInputs(
+			txInfos.tx,
+			txInfos.protocolMajor,
+		); err != nil {
+			return lcommon.ExUnits{}, nil, conway.ScriptContextConstructionError{
+				Err: err,
+			}
+		}
 		txInfoV3, err := txInfos.v3()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 2, "PlutusV3")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV3,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[2],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			ctx.ToPlutusData(),
-			budget,
+			evalBudget,
 			evalContext,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
 		}
+		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+			return usedBudget, fmt.Errorf(
+				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			), nil
+		}
 		return usedBudget, nil, nil
 	case lcommon.PlutusV2Script:
+		// Real cardano-ledger rejects this transaction outright at the
+		// UTXOW level, before any script runs, when PlutusV2 has no real
+		// cost model yet -- see ErrNoCostModelForPlutusV2.
+		if syntheticV2CostModel {
+			return lcommon.ExUnits{}, nil, fmt.Errorf(
+				"script %s: %w",
+				s.Hash(),
+				ErrNoCostModelForPlutusV2,
+			)
+		}
 		txInfoV2, err := txInfos.v2()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV2, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 1, "PlutusV2")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV2,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[1],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),
-			budget,
+			evalBudget,
 			evalContext,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
+		}
+		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+			return usedBudget, fmt.Errorf(
+				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			), nil
 		}
 		return usedBudget, nil, nil
 	case lcommon.PlutusV1Script:
@@ -1009,27 +1297,36 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV1, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 0, "PlutusV1")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV1,
 			cek.ProtoVersion{
-				Major: pp.ProtocolVersion.Major,
+				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[0],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
 		}
-		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),
-			budget,
+			evalBudget,
 			evalContext,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
+		}
+		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+			return usedBudget, fmt.Errorf(
+				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			), nil
 		}
 		return usedBudget, nil, nil
 	default:
@@ -1050,6 +1347,7 @@ func buildConwayScriptPurpose(
 	votes lcommon.VotingProcedures,
 	proposalProcedures []lcommon.ProposalProcedure,
 	witnessDatums map[lcommon.Blake2b256]*lcommon.Datum,
+	protocolMajor uint,
 ) (purpose script.ScriptPurpose, ok bool) {
 	defer func() {
 		if recover() != nil {
@@ -1057,7 +1355,7 @@ func buildConwayScriptPurpose(
 			ok = false
 		}
 	}()
-	purpose = script.BuildScriptPurpose(
+	purpose, _ = script.BuildScriptPurpose(
 		redeemerKey,
 		resolvedInputs,
 		inputs,
@@ -1067,6 +1365,7 @@ func buildConwayScriptPurpose(
 		votes,
 		proposalProcedures,
 		witnessDatums,
+		protocolMajor,
 	)
 	return purpose, purpose != nil
 }
@@ -1134,7 +1433,7 @@ func EvaluateTxConway(
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
 	scriptInputs, err := resolveConwayScriptInputs(tx, ls, true)
@@ -1144,14 +1443,19 @@ func EvaluateTxConway(
 	// Evaluate scripts
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
-	txInfos := newConwayTxInfoCache(
+	txInfos := newTxInfoCache(
 		ls,
 		tx,
 		scriptInputs.resolvedAllInputs,
+		protocolMajorVersion(tmpPparams),
 	)
-	txInfoV3, err := txInfos.v3()
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	synthetic := syntheticV2CostModelInEffect(ls)
+	var txInfoV3 script.TxInfoV3
+	if txHasRedeemers(tx) {
+		txInfoV3, err = txInfos.v3()
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV3.Redeemers {
 		purpose := redeemerPair.Key
@@ -1181,6 +1485,7 @@ func EvaluateTxConway(
 			tmpPparams,
 			txInfos,
 			false,
+			synthetic,
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -1188,8 +1493,13 @@ func EvaluateTxConway(
 		if execErr != nil {
 			return 0, lcommon.ExUnits{}, nil, execErr
 		}
-		retTotalExUnits.Steps += usedBudget.Steps
-		retTotalExUnits.Memory += usedBudget.Memory
+		retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"aggregate execution units: %w",
+				err,
+			)
+		}
 		retRedeemerExUnits[lcommon.RedeemerKey{
 			Tag:   redeemer.Tag,
 			Index: redeemer.Index,

@@ -1,3 +1,5 @@
+//go:build linux && devnet
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,18 +14,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build devnet
-
-// Package devnet provides a test harness for running integration tests
-// against a private Cardano DevNet consisting of Dingo and cardano-node
-// instances connected via Docker Compose.
 package devnet
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
-	"os"
 	"sort"
 	"testing"
 	"time"
@@ -36,41 +33,13 @@ import (
 // in shelley-genesis.json.
 const DefaultNetworkMagic = 42
 
-// NodeEndpoint describes a node that the test harness can connect to
-// using the Ouroboros Node-to-Node mini-protocol over TCP.
-type NodeEndpoint struct {
-	Name    string
-	Address string // host:port
-}
-
-// DefaultEndpoints returns the standard DevNet endpoints.
-// These can be overridden via environment variables for CI flexibility.
-func DefaultEndpoints() []NodeEndpoint {
-	dingoAddr := os.Getenv("DEVNET_DINGO_ADDR")
-	if dingoAddr == "" {
-		dingoAddr = "localhost:3010"
-	}
-	cardanoAddr := os.Getenv("DEVNET_CARDANO_ADDR")
-	if cardanoAddr == "" {
-		cardanoAddr = "localhost:3011"
-	}
-	relayAddr := os.Getenv("DEVNET_RELAY_ADDR")
-	if relayAddr == "" {
-		relayAddr = "localhost:3012"
-	}
-	return []NodeEndpoint{
-		{Name: "dingo-producer", Address: dingoAddr},
-		{Name: "cardano-producer", Address: cardanoAddr},
-		{Name: "cardano-relay", Address: relayAddr},
-	}
-}
-
-// ChainTip holds the chain tip information retrieved from a node.
-type ChainTip struct {
-	SlotNumber  uint64
-	BlockNumber uint64
-	Hash        []byte
-}
+// ChainStartTimeout bounds the wait for the network to pass its genesis
+// system start and forge a first block. configurator.sh schedules
+// systemStart 30s after it exits (key generation is too slow for the
+// generator's own systemStartDelay), and the compose health checks pass
+// as soon as a node opens its socket — well before that. This covers the
+// pre-genesis wait plus the first few slot-leader draws.
+const ChainStartTimeout = 90 * time.Second
 
 // TestHarness manages connections to DevNet nodes and provides
 // helper methods for querying chain state and verifying consensus.
@@ -97,7 +66,61 @@ func NewTestHarness(
 	for _, opt := range opts {
 		opt(h)
 	}
+	h.startFailureCapture()
 	return h
+}
+
+// captureTimeout bounds the post-failure evidence collection. It runs
+// after the test has already failed, so it must not be able to hold the
+// suite open indefinitely.
+const captureTimeout = time.Minute
+
+// startFailureCapture makes a canonical scenario preserve what the
+// accelerated scenario preserves. Without it a canonical failure leaves
+// only the Go test log and whatever the compose logs still hold after the
+// run: enough to see that every node sat at one frozen tip, not enough to
+// say whether nobody forged, nobody propagated, or block production was
+// briefly held. The observed chain events are what separate those.
+//
+// Capture is wired here rather than in each scenario so a new scenario
+// cannot forget it. It stays off unless run-tests.sh gave it somewhere to
+// write and the topology names containers to read, which keeps it out of
+// the way of tests that construct endpoints they never dial.
+func (h *TestHarness) startFailureCapture() {
+	root, _ := ArtifactDir()
+	plan, ok := PlanFailureCapture(root, h.t.Name(), h.endpoints)
+	if !ok {
+		return
+	}
+	obsCtx, cancelObs := context.WithCancel(context.Background())
+	observers := StartObservers(
+		obsCtx, h.endpoints, h.networkMagic, h.t.Logf,
+	)
+	h.t.Cleanup(func() {
+		// Stop before reading, so no observer goroutine is still
+		// logging once this cleanup returns.
+		cancelObs()
+		observers.Stop()
+		if !h.t.Failed() {
+			return
+		}
+		snapshots := observers.Group().Snapshots()
+		capCtx, cancelCap := context.WithTimeout(
+			context.Background(), captureTimeout,
+		)
+		defer cancelCap()
+		// A nil source still preserves the observed chains, which
+		// are recorded in-process and need no Docker.
+		var src ArtifactSource
+		if ctl, err := NewNodeControl(h.t.Logf); err != nil {
+			h.t.Logf(
+				"harness: docker unusable for failure capture: %v", err,
+			)
+		} else {
+			src = ctl
+		}
+		WriteFailureArtifacts(capCtx, src, plan, snapshots, h.t.Logf)
+	})
 }
 
 // HarnessOptionFunc configures a TestHarness.
@@ -108,6 +131,51 @@ func WithNetworkMagic(magic uint32) HarnessOptionFunc {
 	return func(h *TestHarness) {
 		h.networkMagic = magic
 	}
+}
+
+// Producers returns the endpoints that forge blocks.
+func (h *TestHarness) Producers() []NodeEndpoint {
+	var out []NodeEndpoint
+	for _, ep := range h.endpoints {
+		if ep.Role == "producer" {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
+// Relay returns the first relay endpoint. It fails the test if none exists,
+// since every supported topology includes exactly one relay.
+func (h *TestHarness) Relay() NodeEndpoint {
+	for _, ep := range h.endpoints {
+		if ep.Role == "relay" {
+			return ep
+		}
+	}
+	h.t.Fatalf("no relay endpoint configured")
+	return NodeEndpoint{}
+}
+
+// DingoNode returns a Dingo producer to observe for chain progress.
+func (h *TestHarness) DingoNode() NodeEndpoint {
+	for _, ep := range h.endpoints {
+		if ep.IsDingo && ep.Role == "producer" {
+			return ep
+		}
+	}
+	h.t.Fatalf("no dingo producer endpoint configured")
+	return NodeEndpoint{}
+}
+
+// ReferenceNode returns the cardano-node reference producer endpoint and true
+// when running in conformance mode; false otherwise.
+func (h *TestHarness) ReferenceNode() (NodeEndpoint, bool) {
+	for _, ep := range h.endpoints {
+		if ep.IsReference && ep.Role == "producer" {
+			return ep, true
+		}
+	}
+	return NodeEndpoint{}, false
 }
 
 // GetChainTip connects to the specified node using the Ouroboros N2N
@@ -334,6 +402,50 @@ func (h *TestHarness) VerifyChainConsensus(
 		"nodes did not reach consensus within %s (tolerance: %d slots)",
 		timeout, slotTolerance,
 	)
+}
+
+// WaitForChainStart blocks until some node reports a block, i.e. the
+// network has passed its genesis system start and slot leaders have begun
+// forging. It returns the tip that satisfied the wait.
+//
+// Reachability is not chain liveness: a node answers tip queries for
+// ~30s before genesis, reporting slot 0 / block 0 the whole time. Every
+// timeout below is derived from slot counts, which only measure elapsed
+// chain time, so charging one against the pre-genesis wait can expire it
+// before the chain has produced anything at all.
+//
+// Gating here is also what keeps a test independent. Without it, a test
+// only passes because an earlier one in the package happened to absorb
+// the wait first, so it fails the moment it is run on its own with
+// `run-tests.sh -run <name>` — exactly when someone is trying to debug
+// it.
+func (h *TestHarness) WaitForChainStart(timeout time.Duration) ChainTip {
+	h.t.Helper()
+	var started ChainTip
+	require.Eventually(h.t, func() bool {
+		for _, ep := range h.endpoints {
+			tip, err := h.GetChainTip(ep)
+			if err != nil {
+				h.t.Logf(
+					"WaitForChainStart: error querying %s: %v", ep.Name, err,
+				)
+				continue
+			}
+			if tip.BlockNumber > 0 {
+				h.t.Logf(
+					"WaitForChainStart: %s forged through slot %d, block %d",
+					ep.Name, tip.SlotNumber, tip.BlockNumber,
+				)
+				started = tip
+				return true
+			}
+		}
+		return false
+	}, timeout, 2*time.Second,
+		"no node produced a block within %s; the network may not have "+
+			"reached its genesis system start", timeout,
+	)
+	return started
 }
 
 // WaitForAllNodesReady polls all endpoints until each one is reachable

@@ -12,21 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package deferred holds the bulk-load deferred-index manifest in a
-// stand-alone package so each metadata plugin (sqlite, mysql,
-// postgres) can import it without pulling in the parent metadata
-// package, which side-effect-imports every plugin and would create
-// an import cycle.
+// Package deferred holds the bulk-load deferred-index manifest.
 //
 // The parent metadata package owns the DeferredIndexManager
 // interface that callers type-assert against. This package owns the
 // data: what to drop, what to rebuild, and the sync_state key that
 // records crash-recovery state.
 package deferred
-
-import (
-	"github.com/blinklabs-io/dingo/database/models"
-)
 
 // Index is one entry in the deferred-index manifest. Each entry
 // names an index that is safe to drop while the database is in
@@ -45,44 +37,41 @@ import (
 //     (import_checkpoint.import_key, backfill_checkpoint.phase).
 //   - The utxo (tx_id, output_idx) lookup index, required to
 //     resolve transaction inputs during backfill UTxO spending.
+//   - Indexes the import path's own predicates filter on. Those are
+//     listed in Retained, which the drop and rebuild paths keep
+//     present rather than dropping.
 //   - Cross-row uniqueness constraints used by ledger-state import
 //     (pool_stake_snapshot, reward_snapshot, reward_pool_input,
 //     network_state, account.staking_key, drep.credential, etc.).
 //
-// Adding a new index to a metadata GORM model? Decide on bulk-load
-// behavior at the same time:
+// Adding a new index to the versioned metadata schema requires deciding its
+// bulk-load behavior at the same time:
 //
 //  1. Does any import path (ledger-state import, immutable blob
 //     load, backfill block replay) rely on the index for an ON
-//     CONFLICT target, FK enforcement, or constraint lookup? If
-//     yes, leave it out of the manifest.
+//     CONFLICT target, FK enforcement, constraint lookup, or the
+//     WHERE clause of a per-row idempotency delete or aggregate
+//     refresh? If yes, leave it out of the manifest. A predicate an
+//     import path runs once per transaction cannot afford a scan of
+//     a table the same import path is growing.
 //  2. Does the index only serve API/query/rollback paths that do
 //     not run during Mithril sync? If yes, add it here.
 //  3. Composite indexes share state with their constituent columns. If a field
 //     has both a deferrable single-column query index and a protected composite
 //     unique index, give the single-column index an explicit name and list that
 //     name here instead of the field.
+//  4. Taking an index back out of the manifest means adding it to
+//     Retained. Deleting the entry alone leaves it missing on every
+//     database an older binary had already dropped it from.
 //
-// See deferred_test.go for the regression test that walks every
-// model field and asserts the classification.
+// See deferred_test.go for manifest invariants.
 type Index struct {
-	// Model is the GORM model the index is attached to. Used by
-	// GORM's migrator to resolve the index back to the underlying
-	// SQL statement.
-	Model any
-	// Field is the Go struct field name on Model. When the index
-	// is a single-column index defined inline (`gorm:"index"`),
-	// GORM resolves Field to an auto-generated index name during
-	// DropIndex/CreateIndex.
-	Field string
-	// Name is the literal index name. Used for composite/named
-	// indexes (e.g. idx_utxo_deleted_staking_amount) where the
-	// struct-tag name takes precedence over field resolution.
-	// Leave empty for single-column auto-named indexes.
+	// Name is the explicit index name in the versioned schema.
 	Name string
-	// Table is the SQL table name. Carried separately because
-	// some backends can drop an index without going through GORM.
+	// Table is the SQL table name.
 	Table string
+	// Columns is the ordered SQL column list.
+	Columns []string
 	// Notes documents why this index is safe to defer. Surfaces
 	// in the manifest test failure message when the
 	// classification is questioned.
@@ -98,21 +87,18 @@ type Index struct {
 	//   - Any WHERE predicate used by the rollback path
 	//     (DeleteXAfterSlot), since rollbacks can occur as soon
 	//     as live sync resumes.
+	//   - The child column of any ON DELETE CASCADE foreign key
+	//     whose parent rows the rollback path deletes. SQLite
+	//     enforces such a cascade with an implicit
+	//     DELETE FROM child WHERE fk_column = ? per deleted parent
+	//     row, so without the child index each parent row scans the
+	//     whole child table. EXPLAIN QUERY PLAN of the parent
+	//     statement does not show it.
 	//
-	// Everything else is lazy: FK reverse-lookups,
-	// witness/redeemer secondary indexes, and any column that is
-	// only SELECTed or SET but never filtered.
+	// Everything else is lazy: FK reverse-lookups no cascade
+	// depends on, witness/redeemer secondary indexes, and any
+	// column that is only SELECTed or SET but never filtered.
 	Critical bool
-}
-
-// ResolvedName returns the GORM-visible name for the index — the
-// literal Name when set, otherwise the Field which GORM resolves to
-// the auto-generated name through the struct's schema.
-func (i Index) ResolvedName() string {
-	if i.Name != "" {
-		return i.Name
-	}
-	return i.Field
 }
 
 // CriticalManifest returns the subset of Manifest entries that are
@@ -151,156 +137,228 @@ const SyncStateValue = "true"
 // SQLite builds each index in a single statement and does not
 // benefit from re-ordering.
 var Manifest = []Index{
-	// utxo: PaymentKey/StakingKey are used by API address
-	// lookups; SpentAtTxId / ReferencedByTxId / CollateralByTxId
-	// support rollback and consumer-tx queries; AddedSlot
-	// supports range scans. None of these is consulted by the
-	// spend predicate, which uses tx_id_output_idx exclusively.
 	{
-		Model: &models.Utxo{}, Field: "PaymentKey", Table: "utxo",
-		Notes:    "API address lookup; not touched by UTxO insert or spend",
+		Name: "idx_utxo_payment_key", Table: "utxo",
+		Columns: []string{"payment_key"},
+		Notes:   "API address lookup", Critical: true,
+	},
+	{
+		Name: "idx_utxo_staking_key", Table: "utxo",
+		Columns: []string{"staking_key"},
+		Notes:   "API stake lookup", Critical: true,
+	},
+	{
+		Name: "idx_utxo_spent_at_tx_id", Table: "utxo",
+		Columns: []string{"spent_at_tx_id"},
+		Notes:   "Consumer transaction lookup and rollback repair", Critical: true,
+	},
+	{
+		Name: "idx_utxo_referenced_by_tx_id", Table: "utxo",
+		Columns: []string{"referenced_by_tx_id"},
+		Notes:   "Reference-input lookup and rollback repair", Critical: true,
+	},
+	{
+		Name: "idx_utxo_collateral_by_tx_id", Table: "utxo",
+		Columns: []string{"collateral_by_tx_id"},
+		Notes:   "Collateral lookup and rollback repair", Critical: true,
+	},
+	{
+		Name: "idx_utxo_added_slot", Table: "utxo",
+		Columns: []string{"added_slot"},
+		Notes:   "Rollback range scan", Critical: true,
+	},
+	// idx_utxo_transaction_id is critical because the rollback sweep's
+	// DELETE FROM "transaction" WHERE slot > ? cascades through
+	// fk_transaction_outputs, and SQLite resolves that cascade with one
+	// DELETE FROM utxo WHERE transaction_id = ? per deleted transaction
+	// row. Deferred, each of those is a full scan of utxo: measured on a
+	// preview relay, a 1,001-transaction rollback against a 3.2M row utxo
+	// table took 556s with the index absent and 0.095s with it present,
+	// with no log output in between.
+	{
+		Name: "idx_utxo_transaction_id", Table: "utxo",
+		Columns: []string{"transaction_id"},
+		Notes: "Rollback DELETE cascade into utxo " +
+			"(fk_transaction_outputs)",
 		Critical: true,
 	},
 	{
-		Model: &models.Utxo{}, Field: "StakingKey", Table: "utxo",
-		Notes:    "API stake lookup; not touched by UTxO insert or spend",
-		Critical: true,
+		Name: "idx_utxo_deleted_staking_amount", Table: "utxo",
+		Columns: []string{
+			"deleted_slot",
+			"credential_tag",
+			"staking_key",
+			"amount",
+		},
+		Notes: "Primary UTxO RPC search path", Critical: true,
+	},
+	// idx_utxo_staking_deleted_amount is deliberately NOT deferred.
+	// FlushBatch -> refreshRewardLiveStakeAggregates runs a per-credential
+	// live UTxO SUM (WHERE credential_tag = ? AND staking_key = ? AND
+	// deleted_slot = 0) on every API-mode backfill batch. With this index
+	// dropped each of those SUMs is a full scan of the growing utxo table,
+	// making the backfill quadratic: measured on preview, throughput
+	// collapsed from ~1700 to ~4 blocks/sec by 3% progress. The one-shot
+	// RebuildRewardLiveStake at the end of ledger-state import tolerates a
+	// missing index (single full scan), but the per-batch incremental
+	// refresh cannot.
+	{
+		Name: "idx_utxo_deleted_payment_script", Table: "utxo",
+		Columns: []string{"deleted_slot", "payment_script", "amount"},
+		Notes:   "Script-locked supply", Critical: true,
 	},
 	{
-		Model: &models.Utxo{}, Field: "SpentAtTxId", Table: "utxo",
-		Notes:    "Consumer-tx query and rollback repair (DeleteTransactionsAfterSlot); not used by spend predicate",
-		Critical: true,
+		Name: "idx_transaction_block_hash", Table: "transaction",
+		Columns: []string{"block_hash"},
+		Notes:   "Block transaction grouping", Critical: true,
 	},
 	{
-		Model: &models.Utxo{}, Field: "ReferencedByTxId", Table: "utxo",
-		Notes:    "Reference-input query and rollback repair (DeleteTransactionsAfterSlot); not used by insert path",
-		Critical: true,
+		Name: "idx_transaction_slot", Table: "transaction",
+		Columns: []string{"slot"},
+		Notes:   "Rollback and transaction history ordering", Critical: true,
 	},
 	{
-		Model: &models.Utxo{}, Field: "CollateralByTxId", Table: "utxo",
-		Notes:    "Collateral query and rollback repair (DeleteTransactionsAfterSlot); not used by insert path",
-		Critical: true,
+		Name: "idx_asset_policy_id", Table: "asset",
+		Columns: []string{"policy_id"},
+		Notes:   "Policy lookup", Critical: true,
 	},
 	{
-		Model: &models.Utxo{}, Field: "AddedSlot", Table: "utxo",
-		Notes:    "Rollback range scan (DeleteUtxosAfterSlot); not used by insert or spend",
-		Critical: true,
+		Name:    "idx_datum_added_slot",
+		Table:   "datum",
+		Columns: []string{"added_slot"},
+		Notes:   "Datum rollback scan",
 	},
 	{
-		Model: &models.Utxo{}, Field: "TransactionID", Table: "utxo",
-		Notes: "FK reverse-lookup; cascades go the other direction during sync",
+		Name:    "idx_certs_block_hash",
+		Table:   "certs",
+		Columns: []string{"block_hash"},
+		Notes:   "Block certificate lookup",
 	},
 	{
-		Model: &models.Utxo{}, Name: "idx_utxo_deleted_staking_amount", Table: "utxo",
-		Notes:    "Composite SearchUtxos index; primary utxorpc query path",
-		Critical: true,
+		Name:    "idx_certs_certificate_id",
+		Table:   "certs",
+		Columns: []string{"certificate_id"},
+		Notes:   "Certificate reverse lookup",
 	},
 	{
-		Model: &models.Utxo{}, Name: "idx_utxo_deleted_payment_script", Table: "utxo",
-		Notes:    "Script-locked supply SUM (blockfrost /network); live query path",
-		Critical: true,
+		Name: "idx_certs_slot", Table: "certs", Columns: []string{"slot"},
+		Notes: "Certificate rollback scan", Critical: true,
 	},
+	{
+		Name:    "idx_certs_cert_type",
+		Table:   "certs",
+		Columns: []string{"cert_type"},
+		Notes:   "Certificate type filter",
+	},
+	// idx_redeemer_transaction_id, idx_key_witness_transaction_id, and
+	// idx_witness_scripts_transaction_id are deliberately NOT deferred.
+	// storeTransactionWitnesses (database/plugin/metadata/sqlstore) rewrites
+	// the witness tables on every API-mode SetTransaction, and clears the
+	// previous attempt's rows first with an unconditional
+	// DELETE ... WHERE transaction_id = ? per table. With those indexes
+	// dropped each delete is a full scan of a table that gains a row per
+	// transaction written, so per-transaction cost grows with the rows
+	// already present and historical backfill turns quadratic: measured on
+	// preview, Mithril backfill fell from 3311 to 9 blocks/sec by 2%
+	// progress while its own ETA climbed from 30m to 177h (issue #3253).
+	// plutus_data, the fourth table the same loop clears, was never
+	// deferred; these three now match it.
+	{
+		Name:    "idx_redeemer_index",
+		Table:   "redeemer",
+		Columns: []string{"index"},
+		Notes:   "Redeemer index lookup",
+	},
+	{
+		Name:    "idx_redeemer_tag",
+		Table:   "redeemer",
+		Columns: []string{"tag"},
+		Notes:   "Redeemer tag filter",
+	},
+	{
+		Name:    "idx_key_witness_type",
+		Table:   "key_witness",
+		Columns: []string{"type"},
+		Notes:   "Witness type filter",
+	},
+	{
+		Name:    "idx_witness_scripts_script_hash",
+		Table:   "witness_scripts",
+		Columns: []string{"script_hash"},
+		Notes:   "Script hash lookup",
+	},
+	{
+		Name:    "idx_witness_scripts_type",
+		Table:   "witness_scripts",
+		Columns: []string{"type"},
+		Notes:   "Script type filter",
+	},
+}
 
-	// transaction: BlockHash/Slot are query indexes; the
-	// uniqueIndex on Hash carries the ON CONFLICT target and
-	// stays.
+// Retained names the indexes deliberately excluded from Manifest because an
+// import path's own predicates need them resident during bulk load.
+//
+// Removing an entry from Manifest does not restore it on databases already on
+// disk. A shipped binary whose manifest still held the entry drops it at the
+// start of a bulk-load cycle and recreates it only in the full rebuild, so a
+// database interrupted inside that window -- a multi-hour Mithril backfill,
+// for issue #3253 -- still has the index missing. The newer binary's
+// BuildDeferredIndexes no longer carries the entry, and the versioned
+// migration that created it is already recorded complete, so
+// CREATE INDEX IF NOT EXISTS never runs again: the full-table scan the
+// exclusion exists to prevent becomes permanent.
+//
+// The drop and full-rebuild paths therefore create any absent entry here
+// before touching the manifest, which repairs such a database at the start of
+// the next cycle -- including the cycle the operator starts by upgrading to
+// the binary that carries the exclusion. Entries already present cost one
+// catalog lookup each.
+var Retained = []Index{
 	{
-		Model: &models.Transaction{}, Field: "BlockHash", Table: "transaction",
-		Notes:    "Block-tx grouping query (blockfrost /blocks/{id}/txs); not used by tx upsert",
-		Critical: true,
+		Name:  "idx_utxo_staking_deleted_amount",
+		Table: "utxo",
+		Columns: []string{
+			"credential_tag",
+			"staking_key",
+			"deleted_slot",
+			"amount",
+		},
+		Notes: "Per-batch live-stake SUM during API-mode backfill",
 	},
 	{
-		Model: &models.Transaction{}, Field: "Slot", Table: "transaction",
-		Notes:    "Rollback range scan (DeleteTransactionsAfterSlot) and tx history ordering; not used by tx upsert",
-		Critical: true,
-	},
-
-	// asset: idx_asset_unique (Name + PolicyId + UtxoID) is the
-	// ON CONFLICT target during import and stays. Secondary
-	// per-column indexes are deferable.
-	{
-		Model: &models.Asset{}, Field: "NameHex", Table: "asset",
-		Notes: "Hex name lookup; query-only; no current WHERE name_hex=? path in API",
+		Name:    "idx_key_witness_transaction_id",
+		Table:   "key_witness",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
 	},
 	{
-		Model: &models.Asset{}, Name: "idx_asset_policy_id", Table: "asset",
-		Notes:    "Policy-id lookup (GetAssetsByPolicy); query-only; idx_asset_unique still covers import",
-		Critical: true,
+		Name:    "idx_witness_scripts_transaction_id",
+		Table:   "witness_scripts",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
 	},
 	{
-		Model: &models.Asset{}, Field: "Fingerprint", Table: "asset",
-		Notes: "Fingerprint lookup; query-only; returned as response field, not a WHERE predicate",
+		Name:    "idx_redeemer_transaction_id",
+		Table:   "redeemer",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
 	},
 	{
-		Model: &models.Asset{}, Field: "Amount", Table: "asset",
-		Notes: "Amount range scan; query-only",
-	},
-
-	// datum: AddedSlot is rollback / query only. The unique
-	// constraint on Hash stays for the dedup ON CONFLICT path.
-	{
-		Model: &models.Datum{}, Field: "AddedSlot", Table: "datum",
-		Notes: "Rollback range scan; not used by datum upsert",
-	},
-
-	// certs: Slot/BlockHash/CertificateID/CertType drive query
-	// and rollback paths. The uniq_tx_cert (TransactionID +
-	// CertIndex) uniqueIndex remains for cert ordering.
-	{
-		Model: &models.Certificate{}, Field: "BlockHash", Table: "certs",
-		Notes: "Block-cert query; not used by cert insert",
+		Name:    "idx_plutus_data_transaction_id",
+		Table:   "plutus_data",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction witness idempotency delete",
 	},
 	{
-		Model: &models.Certificate{}, Field: "CertificateID", Table: "certs",
-		Notes: "Polymorphic FK reverse-lookup; not enforced by DB",
+		Name:    "idx_address_transaction_transaction_id",
+		Table:   "address_transaction",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction address index idempotency delete",
 	},
 	{
-		Model: &models.Certificate{}, Field: "Slot", Table: "certs",
-		Notes:    "Rollback range scan (DeleteCertificatesAfterSlot); not used by cert insert",
-		Critical: true,
-	},
-	{
-		Model: &models.Certificate{}, Field: "CertType", Table: "certs",
-		Notes: "Filter index; query-only",
-	},
-
-	// redeemer: secondary indexes for witness queries. Redeemers
-	// are inserted via Transaction's foreignKey cascade and do
-	// not rely on these indexes.
-	{
-		Model: &models.Redeemer{}, Field: "TransactionID", Table: "redeemer",
-		Notes: "Witness query; FK enforced via parent Transaction",
-	},
-	{
-		Model: &models.Redeemer{}, Field: "Index", Table: "redeemer",
-		Notes: "Redeemer index lookup; query-only",
-	},
-	{
-		Model: &models.Redeemer{}, Field: "Tag", Table: "redeemer",
-		Notes: "Redeemer tag filter; query-only",
-	},
-
-	// witness: KeyWitness/WitnessScripts indexes back API
-	// witness queries. Inserts cascade from the parent
-	// Transaction.
-	{
-		Model: &models.KeyWitness{}, Field: "TransactionID", Table: "key_witness",
-		Notes: "Witness query; FK cascade from Transaction handles inserts",
-	},
-	{
-		Model: &models.KeyWitness{}, Field: "Type", Table: "key_witness",
-		Notes: "Witness-type filter; query-only",
-	},
-	{
-		Model: &models.WitnessScripts{}, Field: "ScriptHash", Table: "witness_scripts",
-		Notes: "Script-hash lookup; query-only",
-	},
-	{
-		Model: &models.WitnessScripts{}, Field: "TransactionID", Table: "witness_scripts",
-		Notes: "Witness query; FK cascade from Transaction handles inserts",
-	},
-	{
-		Model: &models.WitnessScripts{}, Field: "Type", Table: "witness_scripts",
-		Notes: "Witness-type filter; query-only",
+		Name:    "idx_certs_transaction_id",
+		Table:   "certs",
+		Columns: []string{"transaction_id"},
+		Notes:   "SetTransaction certificate idempotency delete subquery",
 	},
 }

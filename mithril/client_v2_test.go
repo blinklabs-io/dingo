@@ -29,6 +29,8 @@ import (
 )
 
 func TestCardanoDatabaseListFixtureParsing(t *testing.T) {
+	t.Parallel()
+
 	data, err := os.ReadFile(
 		filepath.Join("testdata", "v2", "cardano_database_list.json"),
 	)
@@ -54,6 +56,8 @@ func TestCardanoDatabaseListFixtureParsing(t *testing.T) {
 }
 
 func TestCardanoDatabaseDetailFixtureParsing(t *testing.T) {
+	t.Parallel()
+
 	snapshot := loadV2DetailFixture(t)
 	assert.Equal(t, "preprod", snapshot.Network)
 	assert.Equal(t, uint64(294), snapshot.Beacon.Epoch)
@@ -86,6 +90,8 @@ func TestCardanoDatabaseDetailFixtureParsing(t *testing.T) {
 }
 
 func TestCardanoDatabaseLocationUnknownType(t *testing.T) {
+	t.Parallel()
+
 	var loc CardanoDatabaseLocation
 	err := json.Unmarshal(
 		[]byte(`{"type":"weird_new_thing","details":{"a":1}}`),
@@ -107,6 +113,8 @@ func TestCardanoDatabaseLocationUnknownType(t *testing.T) {
 }
 
 func TestCardanoDatabaseSnapshotComputeHash(t *testing.T) {
+	t.Parallel()
+
 	snapshot := loadV2DetailFixture(t)
 	assert.Equal(t, snapshot.Hash, snapshot.ComputeHash())
 }
@@ -115,6 +123,8 @@ func TestCardanoDatabaseSnapshotComputeHash(t *testing.T) {
 // hashing against the real preprod certificate that signs the v2
 // fixture artifact.
 func TestCertificateCardanoDatabaseFixture(t *testing.T) {
+	t.Parallel()
+
 	data, err := os.ReadFile(
 		filepath.Join("testdata", "v2", "cardano_database_certificate.json"),
 	)
@@ -146,6 +156,8 @@ func TestCertificateCardanoDatabaseFixture(t *testing.T) {
 }
 
 func TestGetLatestCardanoDatabaseSnapshot(t *testing.T) {
+	t.Parallel()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(
 		"/artifact/cardano-database",
@@ -181,14 +193,18 @@ func TestGetLatestCardanoDatabaseSnapshot(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
-	snapshot, err := client.GetLatestCardanoDatabaseSnapshot(context.Background())
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
+	snapshot, err := client.GetLatestCardanoDatabaseSnapshot(
+		context.Background(),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "newest", snapshot.Hash)
 	assert.Equal(t, "preprod", snapshot.Network)
 }
 
 func TestGetLatestCardanoDatabaseSnapshotEmpty(t *testing.T) {
+	t.Parallel()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(
 		"/artifact/cardano-database",
@@ -200,13 +216,15 @@ func TestGetLatestCardanoDatabaseSnapshotEmpty(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
 	_, err := client.GetLatestCardanoDatabaseSnapshot(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no Cardano database snapshots")
 }
 
 func TestGetCardanoDatabaseDigests(t *testing.T) {
+	t.Parallel()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(
 		"/artifact/cardano-database/digests",
@@ -221,7 +239,7 @@ func TestGetCardanoDatabaseDigests(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
 	entries, err := client.GetCardanoDatabaseDigests(context.Background())
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
@@ -230,9 +248,13 @@ func TestGetCardanoDatabaseDigests(t *testing.T) {
 }
 
 func TestSignedEntityTypeCardanoDatabase(t *testing.T) {
+	t.Parallel()
+
 	var entity SignedEntityType
 	require.NoError(t, json.Unmarshal(
-		[]byte(`{"CardanoDatabase":{"epoch":294,"immutable_file_number":5810}}`),
+		[]byte(
+			`{"CardanoDatabase":{"epoch":294,"immutable_file_number":5810}}`,
+		),
 		&entity,
 	))
 	beacon := entity.CardanoDatabase()

@@ -42,7 +42,11 @@ func FuzzDecodeTxInFromBytes(f *testing.F) {
 			}
 			expectedIndex := uint32(binary.BigEndian.Uint16(data[32:34]))
 			if outputIndex != expectedIndex {
-				t.Fatalf("binary TxIn index = %d, want %d", outputIndex, expectedIndex)
+				t.Fatalf(
+					"binary TxIn index = %d, want %d",
+					outputIndex,
+					expectedIndex,
+				)
 			}
 		}
 	})
@@ -64,7 +68,10 @@ func FuzzUnwrapCborBytes(f *testing.F) {
 			return
 		}
 		if len(unwrapped) > 64*1024 {
-			t.Fatalf("unwrapCborBytes returned %d bytes, want <= 65536", len(unwrapped))
+			t.Fatalf(
+				"unwrapCborBytes returned %d bytes, want <= 65536",
+				len(unwrapped),
+			)
 		}
 
 		encoded, err := cbor.Encode([]byte(unwrapped))

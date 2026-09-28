@@ -1,0 +1,63 @@
+# DevNet configurator spec: accelerated conformance network (2 pools).
+#
+# The mixed Dingo/cardano-node counterpart to
+# testnet-dingo-accelerated.yaml: same compressed consensus timing, but
+# the two-pool layout the conformance profile wires up. The canonical
+# testnet.yaml stays the configuration for soak and canary runs.
+#
+# Timing invariants (enforced by DevNetConfig.Validate, covered by
+# internal/test/devnet/config_test.go):
+#   nonceStabilityWindow      = 4k/f = 4*10/0.4 = 100 < 120 = epochLength
+#   blockfetchStabilityWindow = 3k/f = 3*10/0.4 =  75 < 120 = epochLength
+#
+# Partition tolerance with two pools: per-pool rate = 1-(1-f)^(1/n), which
+# for f=0.4, n=2 is ~0.225 blocks/slot, so k=10 corresponds to roughly
+# 45 slots (~22s at 0.5s slots) of isolation. The scenario's interruption
+# hold is derived from k and stays well inside that.
+#
+# Format: 6 YAML documents (see testnet.yaml for the document map).
+
+--- # Required Testnet Parameters
+poolCount: 2
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+delegatedSupply: 2000000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 10
+
+--- # Shelley Genesis Override
+epochLength: 120
+slotLength: 0.5
+activeSlotsCoeff: 0.4
+securityParam: 10
+maxLovelaceSupply: 6000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

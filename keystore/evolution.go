@@ -37,7 +37,10 @@ const (
 
 // KESPeriodDuration returns the approximate wall-clock duration of a KES period.
 // This is useful for calculating when the next evolution will occur.
-func KESPeriodDuration(slotsPerPeriod uint64, slotDuration time.Duration) time.Duration {
+func KESPeriodDuration(
+	slotsPerPeriod uint64,
+	slotDuration time.Duration,
+) time.Duration {
 	//nolint:gosec // G115: slotsPerPeriod is bounded by protocol params, will not overflow
 	return time.Duration(slotsPerPeriod) * slotDuration
 }
@@ -56,7 +59,10 @@ func OpCertLifetimeSlots(slotsPerPeriod, maxEvolutions uint64) uint64 {
 // DefaultOpCertLifetimeSlots returns the OpCert lifetime using preview defaults.
 // This is approximately 93 days (62 periods * 1.5 days per period).
 func DefaultOpCertLifetimeSlots() uint64 {
-	return OpCertLifetimeSlots(DefaultSlotsPerKESPeriod, DefaultMaxKESEvolutions)
+	return OpCertLifetimeSlots(
+		DefaultSlotsPerKESPeriod,
+		DefaultMaxKESEvolutions,
+	)
 }
 
 // OpCertLifetimeDuration returns the approximate wall-clock duration an OpCert is valid.

@@ -116,7 +116,8 @@ func driveHFIToPV11(t *testing.T) {
 	startEpoch := currentEpoch(t)
 	t.Logf(
 		"HFI driver: DRep registered (txid=%s); current epoch=%d, waiting two epoch boundaries for stake snapshot",
-		drep.regTxID, startEpoch,
+		drep.regTxID,
+		startEpoch,
 	)
 	waitForEpoch(t, startEpoch+2)
 
@@ -397,7 +398,11 @@ func buildSignSubmit(
 	if lovelaceIn <= deposit+flatTxFee {
 		t.Fatalf(
 			"%s: UTxO at %s has %d lovelace, not enough for deposit %d + fee %d",
-			tag, changeAddr, lovelaceIn, deposit, flatTxFee,
+			tag,
+			changeAddr,
+			lovelaceIn,
+			deposit,
+			flatTxFee,
 		)
 	}
 	change := lovelaceIn - deposit - flatTxFee
@@ -433,7 +438,8 @@ func buildSignSubmit(
 	runCli(t, "computing "+tag+" txid",
 		fmt.Sprintf(
 			"cardano-cli conway transaction txid --tx-file %s.signed | jq -r .txhash > %s.txid",
-			outBase, outBase,
+			outBase,
+			outBase,
 		))
 
 	runCli(t, "submitting "+tag+" tx",
@@ -498,7 +504,10 @@ func selectLargestUtxo(t *testing.T, addr string) (string, uint64) {
 		t.Fatalf("decoding utxo set at %s: %v\n%s", addr, err, string(out))
 	}
 	if len(utxos) == 0 {
-		t.Fatalf("no UTxO at %s — cardano-node may still be processing the previous driver tx", addr)
+		t.Fatalf(
+			"no UTxO at %s — cardano-node may still be processing the previous driver tx",
+			addr,
+		)
 	}
 	var bestKey string
 	var bestLovelace uint64
@@ -605,7 +614,15 @@ func runCli(t *testing.T, what, cmd string) []byte {
 	t.Logf("HFI driver: %s", what)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c := exec.CommandContext(ctx, "docker", "exec", cliContainer, "sh", "-c", cmd)
+	c := exec.CommandContext(
+		ctx,
+		"docker",
+		"exec",
+		cliContainer,
+		"sh",
+		"-c",
+		cmd,
+	)
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
@@ -613,12 +630,19 @@ func runCli(t *testing.T, what, cmd string) []byte {
 		if ctx.Err() == context.DeadlineExceeded {
 			t.Fatalf(
 				"docker exec timed out after 30s (%s)\n--- cmd ---\n%s\n--- stdout ---\n%s\n--- stderr ---\n%s",
-				what, cmd, stdout.String(), stderr.String(),
+				what,
+				cmd,
+				stdout.String(),
+				stderr.String(),
 			)
 		}
 		t.Fatalf(
 			"docker exec failed (%s): %v\n--- cmd ---\n%s\n--- stdout ---\n%s\n--- stderr ---\n%s",
-			what, err, cmd, stdout.String(), stderr.String(),
+			what,
+			err,
+			cmd,
+			stdout.String(),
+			stderr.String(),
 		)
 	}
 	return stdout.Bytes()

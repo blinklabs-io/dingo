@@ -1,0 +1,441 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package server_test
+
+import (
+	"context"
+	"io"
+	"net"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/midnight"
+	"github.com/blinklabs-io/dingo/midnight/server"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	reflectionpb "google.golang.org/grpc/reflection/grpc_reflection_v1"
+	"google.golang.org/grpc/status"
+)
+
+// freePort returns a currently-free TCP port on the loopback interface.
+//
+// The port is only free at the moment it is returned: learning the number
+// requires closing the listener, so nothing owns the port until the caller
+// binds it again. Callers must therefore tolerate losing that gap -- see
+// startServerOnFreePort.
+func freePort(t *testing.T) uint {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+	return uint(port) //nolint:gosec // port is always in range
+}
+
+// startTestServerConfig starts a server with cfg (Host/Port populated from a
+// free loopback port, overriding whatever cfg set) and returns its dial
+// address. The server is stopped on test cleanup. Shared by every test
+// helper that needs a running server so the start/stop boilerplate and its
+// cleanup ordering live in exactly one place.
+func startTestServerConfig(t *testing.T, cfg server.Config) string {
+	t.Helper()
+	return startTestServerWithConfig(t, cfg)
+}
+
+// startServerOnFreePortAttempts bounds how many times startServerOnFreePort
+// re-draws a port. The race it covers is rare and independent per attempt, so
+// a small bound is enough; a genuine misconfiguration fails every attempt and
+// is reported rather than retried away.
+const startServerOnFreePortAttempts = 5
+
+// startServerOnFreePort starts a server on a free loopback port, re-drawing the
+// port if it was taken between freePort releasing it and Start binding it.
+//
+// freePort must close its listener to learn the port number, so the port is
+// unowned until Start binds it. Windows reuses the ephemeral range aggressively
+// enough to lose that gap in CI, failing with "Only one usage of each socket
+// address (protocol/network address/port) is normally permitted"; the same race
+// exists on other platforms but is far less likely to be lost.
+//
+// The returned cancel function shuts the server down and is registered for
+// cleanup, so callers that do not need to cancel early may ignore it. Stopping
+// the server is left to the caller, whose ordering requirements differ.
+func startServerOnFreePort(
+	t *testing.T,
+	cfg server.Config,
+) (*server.Server, uint, context.CancelFunc) {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		port := freePort(t)
+		cfg.Host = "127.0.0.1"
+		cfg.Port = port
+		srv, err := server.New(cfg)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		err = srv.Start(ctx)
+		if err == nil {
+			t.Cleanup(cancel)
+			return srv, port, cancel
+		}
+		cancel()
+		if attempt == startServerOnFreePortAttempts {
+			require.NoErrorf(
+				t,
+				err,
+				"server did not start on a free port after %d attempt(s)",
+				attempt,
+			)
+		}
+		t.Logf(
+			"retrying on a new port, attempt %d/%d lost the bind: %v",
+			attempt,
+			startServerOnFreePortAttempts,
+			err,
+		)
+	}
+}
+
+// startTestServerWithConfig is like startTestServer but lets the caller
+// supply Database/SlotTimer (and any other Config field); Host and Port are
+// always overridden to a free loopback address.
+func startTestServerWithConfig(t *testing.T, cfg server.Config) string {
+	t.Helper()
+	srv, port, _ := startServerOnFreePort(t, cfg)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer stopCancel()
+		require.NoError(t, srv.Stop(stopCtx))
+	})
+
+	return net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
+}
+
+// startTestServer starts a server on a free loopback port and returns its
+// dial address. The server is stopped on test cleanup.
+func startTestServer(t *testing.T) string {
+	t.Helper()
+	return startTestServerConfig(t, server.Config{})
+}
+
+func dial(t *testing.T, addr string) *grpc.ClientConn {
+	t.Helper()
+	conn, err := grpc.NewClient(
+		addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// The stub service must answer every RPC with codes.Unimplemented.
+func TestStubServiceReturnsUnimplemented(t *testing.T) {
+	addr := startTestServer(t)
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
+// A real RPC through a real dialed connection must be recorded by the
+// metrics interceptor Start wires into the server's grpc.ServerOption list --
+// not just by calling the interceptor function directly. The RPC itself
+// returning Unimplemented (no Metadata backing configured) is irrelevant:
+// the interceptor records every request regardless of the handler's outcome.
+func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var foundCount, foundDuration bool
+	for _, mf := range families {
+		for _, metric := range mf.GetMetric() {
+			var isGetAssetCreates bool
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "method" &&
+					label.GetValue() == "GetAssetCreates" {
+					isGetAssetCreates = true
+				}
+			}
+			if !isGetAssetCreates {
+				continue
+			}
+			switch mf.GetName() {
+			case "dingo_midnight_grpc_requests_total":
+				foundCount = true
+				require.Equal(t, float64(1), metric.GetCounter().GetValue())
+			case "dingo_midnight_grpc_request_duration_seconds":
+				foundDuration = true
+				require.Equal(
+					t,
+					uint64(1),
+					metric.GetHistogram().GetSampleCount(),
+				)
+			}
+		}
+	}
+	require.True(
+		t,
+		foundCount,
+		"expected dingo_midnight_grpc_requests_total{method=\"GetAssetCreates\"} after a real RPC",
+	)
+	require.True(
+		t,
+		foundDuration,
+		"expected dingo_midnight_grpc_request_duration_seconds{method=\"GetAssetCreates\"} after a real RPC",
+	)
+}
+
+// The health service's unary Check method shares this server's interceptor
+// chain but must never show up in the MidnightState request/latency metrics
+// -- otherwise routine health-check polling would pollute a metric meant to
+// reflect real MidnightState API usage. Call Check first (must not be
+// recorded), then a real MidnightState RPC (must be the only thing
+// recorded).
+func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(
+	t *testing.T,
+) {
+	reg := prometheus.NewRegistry()
+	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hc := healthpb.NewHealthClient(dial(t, addr))
+	_, err := hc.Check(ctx, &healthpb.HealthCheckRequest{})
+	require.NoError(t, err)
+
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+	_, err = client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var found bool
+	for _, mf := range families {
+		if mf.GetName() != "dingo_midnight_grpc_requests_total" {
+			continue
+		}
+		found = true
+		require.Len(
+			t,
+			mf.GetMetric(),
+			1,
+			"only the MidnightState RPC must be recorded, not the health Check",
+		)
+		for _, label := range mf.GetMetric()[0].GetLabel() {
+			if label.GetName() == "method" {
+				require.Equal(t, "GetAssetCreates", label.GetValue())
+			}
+		}
+	}
+	require.True(
+		t,
+		found,
+		"expected dingo_midnight_grpc_requests_total to exist after a real MidnightState RPC",
+	)
+}
+
+// The health service must report SERVING for both the overall server and the
+// MidnightState service by name.
+func TestHealthCheckServing(t *testing.T) {
+	addr := startTestServer(t)
+	hc := healthpb.NewHealthClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, svc := range []string{"", midnight.MidnightState_ServiceDesc.ServiceName} {
+		resp, err := hc.Check(
+			ctx,
+			&healthpb.HealthCheckRequest{Service: svc},
+		)
+		require.NoError(t, err, "service %q", svc)
+		require.Equal(
+			t,
+			healthpb.HealthCheckResponse_SERVING,
+			resp.GetStatus(),
+			"service %q",
+			svc,
+		)
+	}
+}
+
+// Reflection is an explicit opt-in and advertises the MidnightState service
+// when enabled.
+func TestReflectionListsService(t *testing.T) {
+	addr := startTestServerConfig(t, server.Config{ReflectionEnabled: true})
+	client := reflectionpb.NewServerReflectionClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.ServerReflectionInfo(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&reflectionpb.ServerReflectionRequest{
+		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
+			ListServices: "*",
+		},
+	}))
+	resp, err := stream.Recv()
+	require.NoError(t, err)
+
+	var names []string
+	for _, svc := range resp.GetListServicesResponse().GetService() {
+		names = append(names, svc.GetName())
+	}
+	require.Contains(t, names, midnight.MidnightState_ServiceDesc.ServiceName)
+}
+
+func TestReflectionDisabledByDefault(t *testing.T) {
+	addr := startTestServer(t)
+	conn := dial(t, addr)
+	readyCtx, readyCancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer readyCancel()
+	_, err := healthpb.NewHealthClient(conn).Check(
+		readyCtx,
+		&healthpb.HealthCheckRequest{},
+	)
+	require.NoError(t, err)
+	client := reflectionpb.NewServerReflectionClient(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.ServerReflectionInfo(ctx)
+	require.NoError(t, err)
+	// With reflection unregistered the server terminates this stream as soon
+	// as it sees it, so Send races that rejection. grpc documents SendMsg as
+	// returning once "the stream is done" and directs callers to take the
+	// real status from RecvMsg rather than from Send, so io.EOF here is a
+	// valid outcome rather than a failure. Requiring NoError made the test
+	// fail whenever the rejection won, which the race detector's slower
+	// scheduling makes markedly more likely -- observed on the
+	// go-test (Linux, race) job while the same commit passed unraced.
+	if err := stream.Send(&reflectionpb.ServerReflectionRequest{
+		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
+			ListServices: "*",
+		},
+	}); err != nil {
+		require.ErrorIs(t, err, io.EOF)
+	}
+	// The status is asserted here either way: this is the check that actually
+	// proves reflection is disabled.
+	_, err = stream.Recv()
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
+// New rejects a half-configured TLS pair (cert without key, or key without
+// cert).
+func TestNewRequiresBothTLSPaths(t *testing.T) {
+	_, err := server.New(server.Config{TLSCertFilePath: "cert.pem"})
+	require.Error(t, err)
+	_, err = server.New(server.Config{TLSKeyFilePath: "key.pem"})
+	require.Error(t, err)
+}
+
+func TestNewAllowsRemotePlaintextByDefault(t *testing.T) {
+	for _, host := range []string{"0.0.0.0", "::", "192.0.2.1", "example.test"} {
+		t.Run(host, func(t *testing.T) {
+			_, err := server.New(server.Config{Host: host})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestNewAllowsRemoteHostWithTLS(t *testing.T) {
+	_, err := server.New(server.Config{
+		Host:            "192.0.2.1",
+		TLSCertFilePath: "server.crt",
+		TLSKeyFilePath:  "server.key",
+	})
+	require.NoError(t, err)
+}
+
+// Cancelling the context passed to Start must shut the server down.
+func TestShutdownOnContextCancel(t *testing.T) {
+	srv, port, cancel := startServerOnFreePort(t, server.Config{})
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	addr := net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
+
+	// While running, the stub answers Unimplemented.
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+	callCtx, callCancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
+	defer callCancel()
+	_, err := client.GetAssetCreates(callCtx, &midnight.AssetCreatesRequest{})
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	// Cancellation triggers graceful shutdown; once stopped a fresh call no
+	// longer reaches the handler (transport error, not Unimplemented).
+	cancel()
+	testutil.WaitForCondition(t, func() bool {
+		conn, dialErr := grpc.NewClient(
+			addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if dialErr != nil {
+			return true
+		}
+		defer conn.Close()
+		c := midnight.NewMidnightStateClient(conn)
+		probeCtx, probeCancel := context.WithTimeout(
+			context.Background(),
+			200*time.Millisecond,
+		)
+		defer probeCancel()
+		_, probeErr := c.GetAssetCreates(
+			probeCtx,
+			&midnight.AssetCreatesRequest{},
+		)
+		return status.Code(probeErr) != codes.Unimplemented
+	}, 5*time.Second, "server did not shut down after context cancel")
+}
+
+// Stop is idempotent and safe to call when the server was never started or
+// already stopped.
+func TestStopIdempotent(t *testing.T) {
+	srv, err := server.New(server.Config{})
+	require.NoError(t, err)
+	ctx := context.Background()
+	require.NoError(t, srv.Stop(ctx))
+	require.NoError(t, srv.Stop(ctx))
+}

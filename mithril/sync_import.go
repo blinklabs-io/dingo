@@ -15,22 +15,31 @@
 package mithril
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledgerstate"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+)
+
+const (
+	mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
+	mithrilLedgerHashSyncKey = "mithril_ledger_hash"
 )
 
 // epochLengthFromConfig returns an EpochLengthFunc that resolves
@@ -84,59 +93,97 @@ func ensureMithrilBackfillCheckpoint(db *database.Database) error {
 	return nil
 }
 
+func resetMithrilBackfillCheckpoint(db *database.Database) error {
+	cp, err := db.Metadata().GetBackfillCheckpoint(
+		node.BackfillPhase, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("reading backfill checkpoint for repair: %w", err)
+	}
+	now := time.Now()
+	if cp == nil {
+		cp = &models.BackfillCheckpoint{Phase: node.BackfillPhase}
+	}
+	cp.LastSlot = 0
+	cp.TotalSlots = 0
+	cp.Completed = false
+	cp.StartedAt = now
+	cp.UpdatedAt = now
+	if err := db.Metadata().SetBackfillCheckpoint(cp, nil); err != nil {
+		return fmt.Errorf("resetting backfill checkpoint for repair: %w", err)
+	}
+	return nil
+}
+
 func updateMithrilReadyState(
 	db *database.Database,
 	logger *slog.Logger,
 	loadResult *node.LoadBlobsResult,
 	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
 	syncStatus string,
 	clearSyncState bool,
 ) error {
-	recentBlocks, err := database.BlocksRecent(db, 1)
+	ledgerTip, err := db.GetTip(nil)
 	if err != nil {
-		return fmt.Errorf("reading final chain tip: %w", err)
+		return fmt.Errorf("reading imported ledger tip: %w", err)
 	}
-	if len(recentBlocks) > 0 {
-		chainTip := recentBlocks[0]
-		if err := db.SetTip(
-			ochainsync.Tip{
-				Point: ocommon.Point{
-					Slot: chainTip.Slot,
-					Hash: chainTip.Hash,
-				},
-				BlockNumber: chainTip.Number,
-			},
-			nil,
-		); err != nil {
-			return fmt.Errorf("updating metadata tip: %w", err)
-		}
-		var blocksCopied int
-		if loadResult != nil {
-			blocksCopied = loadResult.BlocksCopied
-		}
-		logger.Info(
-			"metadata tip set",
-			"component", "mithril",
-			"slot", chainTip.Slot,
-			"blocks_loaded", blocksCopied,
+	if ledgerTip.Point.Slot != ledgerStateSlot ||
+		!bytes.Equal(ledgerTip.Point.Hash, ledgerStateHash) {
+		return fmt.Errorf(
+			"imported ledger tip %d.%x does not match stable Mithril anchor %d.%x",
+			ledgerTip.Point.Slot,
+			ledgerTip.Point.Hash,
+			ledgerStateSlot,
+			ledgerStateHash,
 		)
 	}
-
-	// Record the trust boundary as the chain tip AFTER gap closure,
-	// not the Mithril snapshot slot. Gap blocks between the snapshot
-	// slot and chain tip were imported via SetGapBlockTransaction
-	// (no UTxO tracking), so chainsync replay must skip them too.
-	// Fall back to the snapshot slot when no gap blocks were fetched.
-	trustBoundarySlot := ledgerStateSlot
-	if len(recentBlocks) > 0 {
-		trustBoundarySlot = recentBlocks[0].Slot
+	var blocksCopied int
+	if loadResult != nil {
+		blocksCopied = loadResult.BlocksCopied
 	}
+	logger.Info(
+		"metadata tip retained at stable Mithril anchor",
+		"component", "mithril",
+		"slot", ledgerTip.Point.Slot,
+		"blocks_loaded", blocksCopied,
+	)
 
 	txn := db.MetadataTxn(true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		if clearSyncState {
+			// ClearSyncState is an unqualified DELETE FROM sync_state, so
+			// every row a completed sync still needs has to be carried
+			// across it explicitly — mithril_ledger_slot and
+			// mithril_ledger_hash below, and the deferred-index marker
+			// here. Mithril sync rebuilds only the critical subset
+			// (BuildCritical, sync.go) and deliberately leaves
+			// deferred.SyncStateKey set so the first serve's maintenance
+			// pass finishes the lazy manifest. Dropping it here erases
+			// that instruction moments after it was written, and the lazy
+			// entries are then never built on a Mithril-bootstrapped
+			// database.
+			deferredIndexesPending, err := db.GetSyncState(
+				deferred.SyncStateKey, txn,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"reading deferred-index marker: %w", err,
+				)
+			}
 			if err := db.ClearSyncState(txn); err != nil {
 				return fmt.Errorf("cleaning up sync state: %w", err)
+			}
+			if deferredIndexesPending != "" {
+				if err := db.SetSyncState(
+					deferred.SyncStateKey,
+					deferredIndexesPending,
+					txn,
+				); err != nil {
+					return fmt.Errorf(
+						"restoring deferred-index marker: %w", err,
+					)
+				}
 			}
 		} else if syncStatus != "" {
 			if err := db.SetSyncState(
@@ -148,12 +195,32 @@ func updateMithrilReadyState(
 			}
 		}
 		if err := db.SetSyncState(
-			"mithril_ledger_slot",
-			strconv.FormatUint(trustBoundarySlot, 10),
+			mithrilLedgerSlotSyncKey,
+			strconv.FormatUint(ledgerStateSlot, 10),
 			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"recording mithril ledger slot: %w", err,
+			)
+		}
+		if len(ledgerStateHash) > 0 {
+			if err := db.SetSyncState(
+				mithrilLedgerHashSyncKey,
+				hex.EncodeToString(ledgerStateHash),
+				txn,
+			); err != nil {
+				return fmt.Errorf(
+					"recording mithril ledger hash: %w",
+					err,
+				)
+			}
+		} else if err := db.DeleteSyncState(
+			mithrilLedgerHashSyncKey,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"clearing mithril ledger hash: %w",
+				err,
 			)
 		}
 		return nil
@@ -161,6 +228,150 @@ func updateMithrilReadyState(
 		return err
 	}
 	return nil
+}
+
+// selectLedgerStateSnapshot searches result's verified ancillary tree, then
+// its unverified extraction tree, for the ledger state to import.
+//
+// Both are searched through the handle the bootstrap vetted them with, and
+// discovery hands back the state and UTxO table already open rather than
+// names for them. That is what makes the manifest verification mean something
+// downstream: the bytes imported come from the files that were verified, and
+// no name is resolved between checking and reading.
+//
+// beyondCertifiedTip reports true only when the returned snapshot's slot is
+// known to exceed maxTrustedSlot because a verified ancillary tree's own
+// signed manifest vouches for it directly — the one case importLedgerState's
+// caller may accept a ledger state past the certified ImmutableDB tip.
+func selectLedgerStateSnapshot(
+	logger *slog.Logger,
+	result *BootstrapResult,
+	maxTrustedSlot uint64,
+) (
+	snapshot *ledgerstate.SnapshotFiles,
+	stateDir string,
+	signedBy map[string]string,
+	beyondCertifiedTip bool,
+	err error,
+) {
+	type searchTree struct {
+		name string
+		root *os.Root
+		// digests is the signed ancillary manifest's digest map, present
+		// exactly when verified is set. Discovery hands back open files, and
+		// these are what the selected ones are re-checked against before
+		// anything is parsed.
+		digests map[string]string
+		// verified reports that this tree's contents were checked against the
+		// signed ancillary manifest. Nothing is looked at after one of these.
+		verified bool
+	}
+	searchTrees := []searchTree{}
+	if result.AncillaryRoot != nil {
+		// A tree claiming a signature but carrying no digest map cannot have
+		// its selected files re-checked, so the claim would stand on a check
+		// that ran earlier and closed every file it looked at. Refused rather
+		// than downgraded to an unverified read of a tree the flag says is
+		// verified.
+		if result.AncillaryVerified && len(result.AncillaryDigests) == 0 {
+			return nil, "", nil, false, errors.New(
+				"ancillary tree is marked verified but carries no signed " +
+					"manifest digests to check its files against",
+			)
+		}
+		searchTrees = append(searchTrees, searchTree{
+			result.AncillaryDir,
+			result.AncillaryRoot,
+			result.AncillaryDigests,
+			result.AncillaryVerified,
+		})
+	}
+	if result.ExtractRoot != nil {
+		searchTrees = append(searchTrees, searchTree{
+			result.ExtractDir, result.ExtractRoot, nil, false,
+		})
+	}
+	if len(searchTrees) == 0 {
+		return nil, "", nil, false, errors.New(
+			"bootstrap result carries no verified directory handle to " +
+				"import ledger state from",
+		)
+	}
+
+	for _, tree := range searchTrees {
+		files, findErr := ledgerstate.OpenSnapshotAtOrBefore(
+			tree.root,
+			maxTrustedSlot,
+		)
+		if findErr == nil {
+			return files, tree.name, tree.digests, false, nil
+		}
+		// Only a tree with no usable ledger state moves on to the next. One
+		// holding something unusable — a symlink, a substitution, a state that
+		// exists but will not open — fails the import, because falling through
+		// would let a planted ancillary tree choose the extraction directory
+		// as the source instead.
+		if !errors.Is(findErr, ledgerstate.ErrNoUsableLedgerState) {
+			return nil, "", nil, false, fmt.Errorf(
+				"inspecting ledger state in %s: %w", tree.name, findErr,
+			)
+		}
+		if tree.verified {
+			// A verified ancillary tree holding only states newer than the
+			// certified tip is ordinary, not adversarial: the aggregator
+			// packages the ancillary ledger state from the source node's
+			// volatile database, and that can move past the certified
+			// ImmutableDB boundary between the two being packaged. The
+			// manifest signature already vouches for this exact state, so
+			// accepting it is not the "moved from a signed tree to an
+			// unsigned one" downgrade the refusal below exists to prevent —
+			// nothing is substituted, and the caller still compares this slot
+			// against the certified tip before deciding whether to honor it.
+			newest, newestSlot, newestErr := ledgerstate.OpenNewestSnapshot(
+				tree.root,
+			)
+			if newestErr == nil {
+				logger.Info(
+					"ancillary ledger state is newer than the certified "+
+						"tip; accepting it on the ancillary manifest's own "+
+						"signature",
+					"component", "mithril",
+					"dir", tree.name,
+					"slot", newestSlot,
+					"max_trusted_slot", maxTrustedSlot,
+				)
+				return newest, tree.name, tree.digests, true, nil
+			}
+			if !errors.Is(newestErr, ledgerstate.ErrNoUsableLedgerState) {
+				return nil, "", nil, false, fmt.Errorf(
+					"inspecting ledger state in %s: %w", tree.name, newestErr,
+				)
+			}
+			// Genuinely nothing here at any slot: the tree the signature
+			// covers was truly emptied or never populated, which is exactly
+			// the case this guard exists for. Falling through would move the
+			// import from a tree the ancillary key signed to one nothing
+			// vouches for, and whoever emptied the first would have chosen
+			// the second.
+			return nil, "", nil, false, fmt.Errorf(
+				"verified ancillary data in %s has no usable ledger state; "+
+					"refusing to import one from elsewhere: %w",
+				tree.name, findErr,
+			)
+		}
+		logger.Debug(
+			"ledger state not found in directory",
+			"component", "mithril",
+			"dir", tree.name,
+			"error", findErr,
+		)
+	}
+
+	return nil, "", nil, false, fmt.Errorf(
+		"no ledger state at or before certified ImmutableDB tip slot %d; "+
+			"refusing to trust a volatile ancillary ledger state",
+		maxTrustedSlot,
+	)
 }
 
 // importLedgerState finds, parses, and imports the ledger state
@@ -172,67 +383,82 @@ func importLedgerState(
 	logger *slog.Logger,
 	nodeCfg *cardano.CardanoNodeConfig,
 	result *BootstrapResult,
+	reconcile bool,
+	maxTrustedSlot uint64,
 	onLedger func(ledgerstate.ImportProgress),
-) (ledgerStateSlot uint64, ledgerStateHash []byte, err error) {
-	// Search for ledger state: prefer ancillary dir, fall back to
-	// main extract dir.
-	searchDirs := []string{}
-	if result.AncillaryDir != "" {
-		searchDirs = append(searchDirs, result.AncillaryDir)
+) (
+	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
+	beyondCertifiedTip bool,
+	err error,
+) {
+	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
+		logger, result, maxTrustedSlot,
+	)
+	if err != nil {
+		return 0, nil, false, err
 	}
-	searchDirs = append(searchDirs, result.ExtractDir)
-
-	var lstatePath string
-	var searchDir string
-	for _, dir := range searchDirs {
-		path, findErr := ledgerstate.FindLedgerStateFile(dir)
-		if findErr == nil {
-			lstatePath = path
-			searchDir = dir
-			break
-		}
-		logger.Debug(
-			"ledger state not found in directory",
-			"component", "mithril",
-			"dir", dir,
-			"error", findErr,
-		)
-	}
-
-	if lstatePath == "" {
-		logger.Warn(
-			"no ledger state file found in snapshot, "+
-				"skipping ledger state import",
-			"component", "mithril",
-		)
-		return 0, nil, nil
-	}
+	// Held open for the whole import: the UTxO stream is read from the table
+	// handle, and closing early would put a name back in its place.
+	defer snapshot.Close()
+	lstatePath := filepath.Join(
+		stateDir, filepath.FromSlash(snapshot.StatePath),
+	)
 
 	logger.Info(
 		"found ledger state file",
 		"component", "mithril",
 		"path", lstatePath,
+		"max_trusted_slot", maxTrustedSlot,
 	)
 
-	// Parse the snapshot
-	state, err := ledgerstate.ParseSnapshot(lstatePath)
+	// Read once, from the file discovery opened. There is no name here to
+	// reopen: lstatePath exists only for the messages above and below.
+	//
+	// The bytes are then both what the signature is checked against and what
+	// the parser is given. Hashing the descriptor and handing the parser the
+	// same descriptor would not be that: the parser re-reads, and a write
+	// through the file between the two reads is visible to the second — an
+	// in-place write reaches a descriptor already open on the file, which is
+	// the one substitution the handle and the descriptor cannot rule out.
+	// One buffer leaves nothing to change.
+	stateBytes, err := io.ReadAll(snapshot.State)
 	if err != nil {
-		return 0, nil, fmt.Errorf("parsing ledger state: %w", err)
+		return 0, nil, false, fmt.Errorf("reading ledger state: %w", err)
+	}
+	if signedBy != nil {
+		if err := verifySignedState(
+			snapshot.StatePath, stateBytes, signedBy,
+		); err != nil {
+			return 0, nil, false, fmt.Errorf(
+				"verifying ledger state in %s: %w", stateDir, err,
+			)
+		}
+	}
+	state, err := ledgerstate.ParseSnapshotBytes(stateBytes)
+	if err != nil {
+		return 0, nil, false, fmt.Errorf("parsing ledger state: %w", err)
 	}
 
-	// Check for UTxO-HD tvar file (UTxOs stored separately)
-	tvarPath := ledgerstate.FindUTxOTableFile(searchDir)
-	if tvarPath != "" {
-		state.UTxOTablePath = tvarPath
+	// UTxO-HD keeps the UTxO set in a table beside the state; discovery opened
+	// it from the same directory handle, so the two belong to one snapshot.
+	if snapshot.Table != nil {
+		if err := attachSignedTable(
+			state, snapshot, stateDir, signedBy,
+		); err != nil {
+			return 0, nil, false, fmt.Errorf(
+				"verifying ledger state in %s: %w", stateDir, err,
+			)
+		}
 		logger.Info(
 			"found UTxO table file (UTxO-HD format)",
 			"component", "mithril",
-			"path", tvarPath,
+			"path", state.UTxOTablePath,
 		)
 	}
 
 	if state.Tip == nil {
-		return 0, nil, errors.New(
+		return 0, nil, false, errors.New(
 			"parsed ledger state has no tip (Origin snapshot)",
 		)
 	}
@@ -252,9 +478,11 @@ func importLedgerState(
 		"epoch_nonce", nonceHex,
 	)
 
-	// Build import key for resume tracking
+	// Build import key for resume tracking. A catch-up reconcile must run the
+	// full import pass (so its snapshot key set is complete), so resume is
+	// disabled by leaving the import key empty.
 	importKey := ""
-	if result.Snapshot != nil && result.Snapshot.Digest != "" {
+	if !reconcile && result.Snapshot != nil && result.Snapshot.Digest != "" {
 		digest := result.Snapshot.Digest
 		if len(digest) > 16 {
 			digest = digest[:16]
@@ -274,6 +502,7 @@ func importLedgerState(
 			State:     state,
 			Logger:    logger,
 			ImportKey: importKey,
+			Reconcile: reconcile,
 			EpochLength: epochLengthFromConfig(
 				nodeCfg,
 			),
@@ -316,7 +545,106 @@ func importLedgerState(
 			},
 		},
 	); err != nil {
-		return 0, nil, fmt.Errorf("importing ledger state: %w", err)
+		return 0, nil, false, fmt.Errorf("importing ledger state: %w", err)
 	}
-	return state.Tip.Slot, state.Tip.BlockHash, nil
+	return state.Tip.Slot, state.Tip.BlockHash, beyondCertifiedTip, nil
+}
+
+// errAncillaryDigestMismatch reports a file selected for import whose bytes are
+// not the bytes the signed ancillary manifest covered — either because they
+// changed after the manifest was checked, or because nothing in the manifest
+// covers that file at all.
+//
+// The second is not the lesser case. verifyAncillaryManifest already refuses a
+// tree holding a file the manifest does not list, but that is a statement about
+// the tree as it was then; a file planted afterwards has to be refused where it
+// is used, or it is refused only by a check that has already run.
+var errAncillaryDigestMismatch = errors.New(
+	"ancillary file is not the file the manifest signature covers",
+)
+
+// verifySignedState re-establishes the ancillary signature over the ledger
+// state the import is about to parse.
+//
+// It takes the bytes rather than the descriptor, and the caller passes those
+// same bytes to the parser. Hashing a descriptor and rewinding it looks
+// equivalent and is not: the parser then reads the file a second time, and an
+// in-place write between the two reads is visible through a descriptor already
+// open on it. That is the substitution neither the directory handle nor the
+// descriptor rules out, and one buffer is what removes it.
+//
+// The path is used only for the message. Resolving it would reintroduce the
+// gap being closed, since the file it named when the manifest was checked and
+// the file it names now are not required to be the same file.
+func verifySignedState(
+	statePath string,
+	data []byte,
+	digests map[string]string,
+) error {
+	expected, ok := digests[statePath]
+	if !ok {
+		return fmt.Errorf(
+			"%w: %s is not covered by the manifest",
+			errAncillaryDigestMismatch, statePath,
+		)
+	}
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != expected {
+		return fmt.Errorf(
+			"%w: %s computed %s, signed %s",
+			errAncillaryDigestMismatch, statePath, got, expected,
+		)
+	}
+	return nil
+}
+
+// attachSignedTable points the import at the UTxO-HD table discovery opened,
+// and at the digest the manifest holds for it.
+//
+// The table is mapped rather than read — it is gigabytes — so the state's
+// read-once-and-hash-the-buffer does not transfer. The digest travels down
+// instead and is checked against the mapping the decoder walks, which keeps
+// the check and the parse on one set of bytes. Carrying it is therefore not
+// bookkeeping: an absent digest is how an unsigned table is decoded, so a
+// signed one that failed to arrive would be decoded unchecked.
+func attachSignedTable(
+	state *ledgerstate.RawLedgerState,
+	snapshot *ledgerstate.SnapshotFiles,
+	stateDir string,
+	digests map[string]string,
+) error {
+	state.UTxOTablePath = filepath.Join(
+		stateDir, filepath.FromSlash(snapshot.TablePath),
+	)
+	state.UTxOTableFile = snapshot.Table
+	if digests == nil {
+		return nil
+	}
+	digest, err := signedTableDigest(digests, snapshot.TablePath)
+	if err != nil {
+		return err
+	}
+	state.UTxOTableDigest = digest
+	return nil
+}
+
+// signedTableDigest returns the digest the manifest holds for a UTxO-HD table.
+//
+// A table the manifest does not cover is refused rather than passed on with no
+// digest. An empty digest is how an unsigned tree is decoded — v1, and any tree
+// nothing vouched for — so letting one through here would turn "nobody signed
+// this file" into "nothing needs checking", which is the direction that must
+// never be reachable by removing an entry.
+func signedTableDigest(
+	digests map[string]string,
+	tablePath string,
+) (string, error) {
+	digest, ok := digests[tablePath]
+	if !ok {
+		return "", fmt.Errorf(
+			"%w: %s is not covered by the manifest",
+			errAncillaryDigestMismatch, tablePath,
+		)
+	}
+	return digest, nil
 }

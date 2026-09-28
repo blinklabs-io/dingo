@@ -21,6 +21,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,13 +30,10 @@ import (
 // a cleanup function to close it when the test finishes.
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
 	return db
 }
 
@@ -86,6 +85,8 @@ func seedCache(
 }
 
 func TestPoolRelayProviderNewErrors(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -103,6 +104,8 @@ func TestPoolRelayProviderNewErrors(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheHit(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	// Use a long TTL so the cache never expires during the test
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
@@ -131,6 +134,8 @@ func TestPoolRelayProviderCacheHit(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Millisecond)
 
@@ -148,16 +153,22 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 		expired := time.Since(adapter.cacheTime) >= adapter.cacheTTL
 		adapter.cacheMu.RUnlock()
 		return expired
-	}, 2*time.Second, 5*time.Millisecond, "cache TTL should expire")
+	}, testutil.AsyncWait, 5*time.Millisecond, "cache TTL should expire")
 
 	// After TTL expires, GetPoolRelays should re-fetch from DB.
 	// The in-memory DB has no pool registrations, so it returns empty.
 	result, err = adapter.GetPoolRelays()
 	require.NoError(t, err)
-	require.Empty(t, result, "expected empty relays after TTL expiry since DB has no data")
+	require.Empty(
+		t,
+		result,
+		"expected empty relays after TTL expiry since DB has no data",
+	)
 }
 
 func TestPoolRelayProviderInvalidateCache(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -189,6 +200,8 @@ func TestPoolRelayProviderInvalidateCache(t *testing.T) {
 }
 
 func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -218,7 +231,7 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 		adapter.cacheMu.RLock()
 		defer adapter.cacheMu.RUnlock()
 		return adapter.cachedRelays == nil
-	}, 2*time.Second, 5*time.Millisecond,
+	}, testutil.AsyncWait, 5*time.Millisecond,
 		"cache should be invalidated after PoolStateRestoredEvent",
 	)
 
@@ -229,6 +242,8 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 }
 
 func TestPoolRelayProviderDeepCopy(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -256,7 +271,12 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	// Get a second copy from the cache
 	result2, err := adapter.GetPoolRelays()
 	require.NoError(t, err)
-	require.Len(t, result2, 2, "cached slice length should not be affected by append")
+	require.Len(
+		t,
+		result2,
+		2,
+		"cached slice length should not be affected by append",
+	)
 
 	// Verify the cached data is unaffected by mutations
 	require.Equal(
@@ -286,6 +306,8 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 }
 
 func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -318,6 +340,8 @@ func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
 }
 
 func TestPoolRelayProviderNilEventBus(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -336,6 +360,8 @@ func TestPoolRelayProviderNilEventBus(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -352,8 +378,11 @@ func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
 }
 
 func TestPoolRelayProviderCurrentSlot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
 
 	adapter, err := NewPoolRelayProvider(ls, db, nil)
 	require.NoError(t, err)
@@ -363,6 +392,8 @@ func TestPoolRelayProviderCurrentSlot(t *testing.T) {
 }
 
 func TestPoolRelayProviderInvalidateCacheIdempotent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -379,6 +410,8 @@ func TestPoolRelayProviderInvalidateCacheIdempotent(t *testing.T) {
 }
 
 func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -429,6 +462,8 @@ func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -453,6 +488,8 @@ func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
 }
 
 func TestPoolRelayProviderDefaultTTL(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -467,6 +504,8 @@ func TestPoolRelayProviderDefaultTTL(t *testing.T) {
 }
 
 func TestCopyPoolRelaysEmpty(t *testing.T) {
+	t.Parallel()
+
 	result := copyPoolRelays(nil)
 	require.Empty(t, result)
 
@@ -476,6 +515,8 @@ func TestCopyPoolRelaysEmpty(t *testing.T) {
 }
 
 func TestCopyPoolRelaysFull(t *testing.T) {
+	t.Parallel()
+
 	ipv4 := net.ParseIP("10.0.0.1").To4()
 	ipv6 := net.ParseIP("fe80::1")
 	original := []PoolRelay{
@@ -501,4 +542,27 @@ func TestCopyPoolRelaysFull(t *testing.T) {
 	// Mutate the copy and verify original is unaffected
 	(*result[0].IPv4)[0] = 0xFF
 	require.Equal(t, byte(10), (*original[0].IPv4)[0])
+}
+
+// TestPoolRelayProviderCloseUnsubscribes pins that Close removes the
+// cache-invalidation handler NewPoolRelayProvider registers. Without this, a
+// live database restore/truncate -- which constructs a fresh
+// PoolRelayProvider on every cycle (node_lifecycle.go) but previously had no
+// way to unsubscribe the old one -- leaks one more permanently-active
+// EventBus subscription per cycle.
+func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	adapter := newTestAdapter(t, db, bus, defaultRelayCacheTTL)
+	require.True(t, bus.HasSubscribers(PoolStateRestoredEventType))
+
+	adapter.Close()
+	require.False(t, bus.HasSubscribers(PoolStateRestoredEventType))
+
+	// Safe to call more than once.
+	require.NotPanics(t, adapter.Close)
 }

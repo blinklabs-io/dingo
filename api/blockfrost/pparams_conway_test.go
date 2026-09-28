@@ -20,9 +20,13 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	gscript "github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,10 +35,94 @@ func rat(num, denom int64) *cbor.Rat {
 	return &cbor.Rat{Rat: big.NewRat(num, denom)}
 }
 
+func TestBlockfrostRedeemerPurposeUsesActiveProtocolMajor(t *testing.T) {
+	t.Parallel()
+	certificate := &common.RegistrationCertificate{
+		StakeCredential: common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: common.Blake2b224{1},
+		},
+		Amount: 2_000_000,
+	}
+	for _, tc := range []struct {
+		name  string
+		major uint
+		want  data.PlutusData
+	}{
+		{name: "PV9", major: common.ProtocolVersionConway, want: data.NewConstr(1)},
+		{
+			name:  "PV10",
+			major: common.ProtocolVersionPlomin,
+			want: data.NewConstr(0,
+				data.NewInteger(big.NewInt(2_000_000))),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pp := &conway.ConwayProtocolParameters{
+				ProtocolVersion: common.ProtocolParametersProtocolVersion{
+					Major: tc.major,
+				},
+			}
+			major, err := protocolMajorFromPParams(pp)
+			require.NoError(t, err)
+			purpose, err := gscript.BuildScriptPurpose(
+				common.RedeemerKey{Tag: common.RedeemerTagCert},
+				nil,
+				nil,
+				common.MultiAsset[common.MultiAssetTypeMint]{},
+				[]common.Certificate{certificate},
+				nil,
+				nil,
+				nil,
+				nil,
+				major,
+			)
+			require.NoError(t, err)
+			certificateData := purpose.ToPlutusData().(*data.Constr).Fields[1].(*data.Constr)
+			require.Equal(t, tc.want, certificateData.Fields[1])
+		})
+	}
+}
+
+func TestProtocolParamsResponsePreservesEraNativeUtxoUnit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pp   common.ProtocolParameters
+		want string
+	}{
+		{
+			name: "Alonzo words",
+			pp: &alonzo.AlonzoProtocolParameters{
+				AdaPerUtxoByte: 34482,
+			},
+			want: "34482",
+		},
+		{
+			name: "Babbage bytes",
+			pp: &babbage.BabbageProtocolParameters{
+				AdaPerUtxoByte: 4310,
+			},
+			want: "4310",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			info, err := protocolParamsInfoFromNative(tt.pp, 1)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, info.CoinsPerUtxoSize)
+		})
+	}
+}
+
 // TestProtocolParamsResponseConway verifies that Conway-era governance and
 // reference-script parameters are mapped from the native ledger type and
 // surfaced in the Blockfrost response.
 func TestProtocolParamsResponseConway(t *testing.T) {
+	t.Parallel()
+
 	pp := &conway.ConwayProtocolParameters{
 		MinFeeA:            44,
 		MinFeeB:            155381,
@@ -63,8 +151,14 @@ func TestProtocolParamsResponseConway(t *testing.T) {
 			MemPrice:  rat(577, 10000),
 			StepPrice: rat(721, 10000000),
 		},
-		MaxTxExUnits:         common.ExUnits{Memory: 14000000, Steps: 10000000000},
-		MaxBlockExUnits:      common.ExUnits{Memory: 62000000, Steps: 20000000000},
+		MaxTxExUnits: common.ExUnits{
+			Memory: 14000000,
+			Steps:  10000000000,
+		},
+		MaxBlockExUnits: common.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
 		MaxValueSize:         5000,
 		CollateralPercentage: 150,
 		MaxCollateralInputs:  3,
@@ -182,6 +276,8 @@ func TestProtocolParamsResponseConway(t *testing.T) {
 // (Shelley) parameter response carries the Conway governance fields as JSON
 // null rather than omitting them or filling placeholders.
 func TestProtocolParamsResponseShelleyGovernanceNull(t *testing.T) {
+	t.Parallel()
+
 	pp := &shelley.ShelleyProtocolParameters{
 		MinFeeA:            44,
 		MinFeeB:            155381,

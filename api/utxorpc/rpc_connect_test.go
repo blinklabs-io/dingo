@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,10 +36,13 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
-	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -53,6 +56,14 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
+	betacardano "github.com/utxorpc/go-codegen/utxorpc/v1beta/cardano"
+	betaquery "github.com/utxorpc/go-codegen/utxorpc/v1beta/query"
+	betaqueryconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/query/queryconnect"
+	betasubmit "github.com/utxorpc/go-codegen/utxorpc/v1beta/submit"
+	betasubmitconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/submit/submitconnect"
+	betasync "github.com/utxorpc/go-codegen/utxorpc/v1beta/sync"
+	betasyncconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/sync/syncconnect"
+	betawatchconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/watch/watchconnect"
 	"golang.org/x/net/http2"
 )
 
@@ -64,8 +75,8 @@ func (noopTxValidator) ValidateTx(gledger.Transaction) error { return nil }
 
 func (noopTxValidator) ValidateTxWithOverlay(
 	_ gledger.Transaction,
-	_ map[string]struct{},
-	_ map[string]lcommon.Utxo,
+	_ map[utxoref.Key]struct{},
+	_ map[utxoref.Key]lcommon.Utxo,
 ) error {
 	return nil
 }
@@ -87,8 +98,10 @@ type utxorpcConnectHarness struct {
 
 type utxorpcHarnessOptions struct {
 	numBlocks       int
+	blocks          []models.Block
 	maxHistoryItems int
 	serverTimeout   time.Duration
+	skipIndexTxHash []byte
 }
 
 func newConnectH2CClient() *http.Client {
@@ -125,10 +138,27 @@ func testUtxorpcHTTPHandler(u *Utxorpc) http.Handler {
 	mux.Handle(sp, sh)
 	mux.Handle(yp, yh)
 	mux.Handle(wp, wh)
+	// v1beta routes mirror production wiring in Start: the beta services reuse
+	// the alpha handlers via path rewriting, and the query service additionally
+	// serves the beta-only ReadState method.
+	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
+	mux.Handle(
+		betaQueryPath,
+		betaVersionedQueryHandler(u, qp, qh, betaQueryPath, compress1KB),
+	)
+	betaSubmitPath := "/" + betasubmitconnect.SubmitServiceName + "/"
+	mux.Handle(betaSubmitPath, rewriteVersionHandler(sh, betaSubmitPath, sp))
+	betaSyncPath := "/" + betasyncconnect.SyncServiceName + "/"
+	mux.Handle(betaSyncPath, rewriteVersionHandler(yh, betaSyncPath, yp))
+	betaWatchPath := "/" + betawatchconnect.WatchServiceName + "/"
+	mux.Handle(betaWatchPath, rewriteVersionHandler(wh, betaWatchPath, wp))
 	return mux
 }
 
-func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpcConnectHarness {
+func newUtxorpcConnectHarness(
+	t *testing.T,
+	opts utxorpcHarnessOptions,
+) *utxorpcConnectHarness {
 	t.Helper()
 	if opts.numBlocks < 2 {
 		opts.numBlocks = 2
@@ -140,20 +170,43 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 	)
 	require.NoError(t, err)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 
-	blocks := loadTestChainBlocks(t, opts.numBlocks)
+	blocks := opts.blocks
+	if len(blocks) == 0 {
+		blocks = loadTestChainBlocks(t, opts.numBlocks)
+	}
 	require.NotEmpty(t, blocks)
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
-	indexedTxHashes := indexFixtureTransactionsForReadTx(t, db, blocks)
+	// These blocks are inserted directly (db.BlockCreate) rather than run
+	// through LedgerState's normal block-application path, so no
+	// block_nonce row exists for any of them -- unlike a really-synced
+	// chain, which writes one for every applied block including a
+	// per-epoch checkpoint. Without at least one checkpoint here,
+	// ls.Start below hits healTruncateGapBlockNonces with an empty tip
+	// nonce and nothing to reconstruct from -- correctly refused, but for
+	// this harness gap rather than a genuine unreconstructable truncate.
+	// The nonce value is a fixed placeholder, not folded from real VRF
+	// output: these tests assert Connect RPC behavior, not nonce
+	// correctness.
+	require.NoError(t, db.SetBlockNonce(
+		blocks[0].Hash,
+		blocks[0].Slot,
+		bytes.Repeat([]byte{0x5c}, 32),
+		true, // isCheckpoint
+		nil,
+	))
+	indexedTxHashes := indexFixtureTransactionsForReadTx(
+		t,
+		db,
+		blocks,
+		opts.skipIndexTxHash,
+	)
 	tip := blocks[len(blocks)-1]
 	require.NoError(
 		t,
@@ -238,6 +291,7 @@ func indexFixtureTransactionsForReadTx(
 	t *testing.T,
 	db *database.Database,
 	blocks []models.Block,
+	skipTxHash []byte,
 ) [][]byte {
 	t.Helper()
 	indexed := make([][]byte, 0, 64)
@@ -258,6 +312,9 @@ func indexFixtureTransactionsForReadTx(
 		}
 		point := ocommon.NewPoint(mb.Slot, mb.Hash)
 		for j, tx := range txs {
+			if bytes.Equal(tx.Hash().Bytes(), skipTxHash) {
+				continue
+			}
 			err := db.SetTransaction(
 				tx,
 				point,
@@ -279,7 +336,10 @@ func indexFixtureTransactionsForReadTx(
 
 // --- fixture helpers --------------------------------------------------------
 
-func firstTxInFixtureBlocks(t *testing.T, numBlocks int) ([]byte, []byte, models.Block) {
+func firstTxInFixtureBlocks(
+	t *testing.T,
+	numBlocks int,
+) ([]byte, []byte, models.Block) {
 	t.Helper()
 	blocks := loadTestChainBlocks(t, numBlocks)
 	for _, mb := range blocks {
@@ -296,14 +356,47 @@ func firstTxInFixtureBlocks(t *testing.T, numBlocks int) ([]byte, []byte, models
 	return nil, nil, models.Block{}
 }
 
+func firstTwoTxsInFixtureBlocks(
+	t *testing.T,
+	numBlocks int,
+) (gledger.Transaction, models.Block, gledger.Transaction, models.Block) {
+	t.Helper()
+	blocks := loadTestChainBlocks(t, numBlocks)
+	var firstTx gledger.Transaction
+	var firstBlock models.Block
+	for _, mb := range blocks {
+		blk, err := gledger.NewBlockFromCbor(mb.Type, mb.Cbor)
+		require.NoError(t, err)
+		for _, tx := range blk.Transactions() {
+			if firstTx == nil {
+				firstTx = tx
+				firstBlock = mb
+				continue
+			}
+			if tx.Hash() != firstTx.Hash() {
+				return firstTx, firstBlock, tx, mb
+			}
+		}
+	}
+	t.Fatal("fewer than two distinct transactions found in fixture blocks")
+	return nil, models.Block{}, nil, models.Block{}
+}
+
 // --- tests ------------------------------------------------------------------
 
 func TestConnect_ReadParams(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadParams(ctx, connect.NewRequest(&query.ReadParamsRequest{}))
+	out, err := cli.ReadParams(
+		ctx,
+		connect.NewRequest(&query.ReadParamsRequest{}),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, out.Msg.GetValues())
 	require.NotNil(t, out.Msg.GetValues().GetCardano())
@@ -316,10 +409,17 @@ func TestConnect_ReadParams(t *testing.T) {
 
 func TestConnect_ReadEraSummary(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadEraSummary(ctx, connect.NewRequest(&query.ReadEraSummaryRequest{}))
+	out, err := cli.ReadEraSummary(
+		ctx,
+		connect.NewRequest(&query.ReadEraSummaryRequest{}),
+	)
 	require.NoError(t, err)
 	s := out.Msg.GetCardano()
 	require.NotNil(t, s)
@@ -330,10 +430,17 @@ func TestConnect_ReadEraSummary(t *testing.T) {
 
 func TestConnect_ReadGenesis(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadGenesis(ctx, connect.NewRequest(&query.ReadGenesisRequest{}))
+	out, err := cli.ReadGenesis(
+		ctx,
+		connect.NewRequest(&query.ReadGenesisRequest{}),
+	)
 	require.NoError(t, err)
 	require.NotEmpty(t, out.Msg.GetCaip2())
 	require.Equal(t, "cardano:preview", out.Msg.GetCaip2())
@@ -342,7 +449,11 @@ func TestConnect_ReadGenesis(t *testing.T) {
 
 func TestConnect_ReadTip(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 15})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := cli.ReadTip(ctx, connect.NewRequest(&sync.ReadTipRequest{}))
@@ -357,7 +468,11 @@ func TestConnect_ReadTip(t *testing.T) {
 
 func TestConnect_FetchBlock(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 12})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	tip := h.LS.Tip()
@@ -379,7 +494,11 @@ func TestConnect_FetchBlock(t *testing.T) {
 
 func TestConnect_DumpHistory(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 25})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	blocks := loadTestChainBlocks(t, 25)
@@ -424,7 +543,11 @@ func TestConnect_DumpHistory(t *testing.T) {
 
 func TestConnect_DumpHistory_StartTokenNotOnChain(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 10})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -456,7 +579,11 @@ func TestConnect_DumpHistory_MaxItemsExceeded(t *testing.T) {
 		numBlocks:       10,
 		maxHistoryItems: 50,
 	})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_, err := cli.DumpHistory(
@@ -474,7 +601,11 @@ func TestConnect_DumpHistory_MaxItemsExceeded(t *testing.T) {
 
 func TestConnect_SearchUtxos(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := cli.SearchUtxos(
@@ -488,7 +619,11 @@ func TestConnect_SearchUtxos(t *testing.T) {
 	require.NotEmpty(t, out.Msg.GetItems(), "fixture should expose live UTxOs")
 	require.LessOrEqual(t, len(out.Msg.GetItems()), 5)
 	require.NotNil(t, out.Msg.GetItems()[0].GetTxoRef())
-	require.NotEmpty(t, out.Msg.GetNextToken(), "pagination token expected for maxItems=5")
+	require.NotEmpty(
+		t,
+		out.Msg.GetNextToken(),
+		"pagination token expected for maxItems=5",
+	)
 
 	out2, err := cli.SearchUtxos(
 		ctx,
@@ -511,7 +646,11 @@ func TestConnect_SearchUtxos(t *testing.T) {
 
 func TestConnect_ReadUtxos(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	searchOut, err := cli.SearchUtxos(
@@ -540,9 +679,109 @@ func TestConnect_ReadUtxos(t *testing.T) {
 	require.NotNil(t, out.Msg.GetLedgerTip())
 }
 
+// TestConnect_ReadUtxos_MultipleKeys proves ReadUtxos resolves several keys
+// in a single request via the batched UTxO lookup (#392), returning exactly
+// one item per requested key.
+func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	searchOut, err := cli.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 5}),
+	)
+	require.NoError(t, err)
+	require.GreaterOrEqual(
+		t,
+		len(searchOut.Msg.GetItems()),
+		2,
+		"fixture should expose at least two live UTxOs",
+	)
+	keys := make([]*query.TxoRef, 0, len(searchOut.Msg.GetItems()))
+	wantNativeBytes := make([][]byte, 0, len(searchOut.Msg.GetItems()))
+	for _, item := range searchOut.Msg.GetItems() {
+		ref := item.GetTxoRef()
+		require.NotNil(t, ref)
+		nativeBytes := item.GetNativeBytes()
+		require.NotNil(t, nativeBytes)
+		keys = append(keys, ref)
+		wantNativeBytes = append(wantNativeBytes, nativeBytes)
+	}
+	out, err := cli.ReadUtxos(
+		ctx,
+		connect.NewRequest(&query.ReadUtxosRequest{Keys: keys}),
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetItems(), len(keys))
+	for i, item := range out.Msg.GetItems() {
+		gotRef := item.GetTxoRef()
+		require.NotNil(t, gotRef)
+		require.Equal(t, keys[i].GetHash(), gotRef.GetHash())
+		require.Equal(t, keys[i].GetIndex(), gotRef.GetIndex())
+		// ReadUtxos echoes the requested TxoRef regardless of which UTxO
+		// it resolved, so also compare the resolved content itself
+		// (NativeBytes) against what SearchUtxos independently found for
+		// this same key: a mis-correlated batch lookup would still pass
+		// the ref-only checks above but fail this one.
+		require.NotEmpty(t, item.GetNativeBytes())
+		require.Equal(
+			t,
+			wantNativeBytes[i],
+			item.GetNativeBytes(),
+			"ReadUtxos should return the same UTxO content SearchUtxos found for this key",
+		)
+	}
+}
+
+// TestConnect_ReadUtxos_MissingKey proves a request that includes a ref
+// with no matching live UTxO still errors the whole call, preserving the
+// pre-existing ReadUtxos error-on-miss contract (unlike the ledger-level
+// GetUTxOByTxIn query, which silently omits misses for batch lookups).
+func TestConnect_ReadUtxos_MissingKey(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	searchOut, err := cli.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(
+		t,
+		searchOut.Msg.GetItems(),
+		"fixture should expose at least one live UTxO",
+	)
+	ref := searchOut.Msg.GetItems()[0].GetTxoRef()
+	bogusRef := &query.TxoRef{
+		Hash:  bytes.Repeat([]byte{0}, 32),
+		Index: 9999,
+	}
+	_, err = cli.ReadUtxos(
+		ctx,
+		connect.NewRequest(&query.ReadUtxosRequest{
+			Keys: []*query.TxoRef{ref, bogusRef},
+		}),
+	)
+	require.Error(t, err)
+}
+
 func TestConnect_ReadData_EmptyKeys(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := cli.ReadData(ctx, connect.NewRequest(&query.ReadDataRequest{}))
@@ -556,10 +795,18 @@ func TestConnect_ReadData_EmptyKeys(t *testing.T) {
 
 func TestConnect_ReadTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	require.NotEmpty(t, h.IndexedTxHashes, "harness must index fixture transactions")
+	require.NotEmpty(
+		t,
+		h.IndexedTxHashes,
+		"harness must index fixture transactions",
+	)
 	txHash := h.IndexedTxHashes[len(h.IndexedTxHashes)-1]
 	out, err := cli.ReadTx(
 		ctx,
@@ -569,9 +816,14 @@ func TestConnect_ReadTx(t *testing.T) {
 	require.NotNil(t, out.Msg.GetTx())
 	require.NotNil(t, out.Msg.GetTx().GetCardano())
 	require.NotEmpty(t, out.Msg.GetTx().GetNativeBytes())
-	txType, err := gledger.DetermineTransactionType(out.Msg.GetTx().GetNativeBytes())
+	txType, err := gledger.DetermineTransactionType(
+		out.Msg.GetTx().GetNativeBytes(),
+	)
 	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(txType, out.Msg.GetTx().GetNativeBytes())
+	tx, err := gledger.NewTransactionFromCbor(
+		txType,
+		out.Msg.GetTx().GetNativeBytes(),
+	)
 	require.NoError(t, err)
 	require.Equal(t, txHash, tx.Hash().Bytes())
 	rec, err := h.LS.TransactionByHash(txHash)
@@ -586,7 +838,11 @@ func TestConnect_ReadTx(t *testing.T) {
 func TestConnect_SubmitTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := cli.SubmitTx(
@@ -617,22 +873,40 @@ func TestConnect_SubmitTx(t *testing.T) {
 
 func TestConnect_ReadMempool(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadMempool(ctx, connect.NewRequest(&submit.ReadMempoolRequest{}))
+	out, err := cli.ReadMempool(
+		ctx,
+		connect.NewRequest(&submit.ReadMempoolRequest{}),
+	)
 	require.NoError(t, err)
 	require.Empty(t, out.Msg.GetItems())
 }
 
 func TestConnect_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	stream, err := cli.WaitForTx(ctx, connect.NewRequest(&submit.WaitForTxRequest{}))
+	stream, err := cli.WaitForTx(
+		ctx,
+		connect.NewRequest(&submit.WaitForTxRequest{}),
+	)
 	require.NoError(t, err)
-	require.False(t, stream.Receive(), "no refs means the handler returns without frames")
+	require.False(
+		t,
+		stream.Receive(),
+		"no refs means the handler returns without frames",
+	)
 	require.NoError(t, stream.Err())
 	cancel()
 }
@@ -664,6 +938,38 @@ func waitForEventSubscriber(
 type waitForTxResult struct {
 	resp *submit.WaitForTxResponse
 	err  error
+}
+
+type waitForTxStreamEvent struct {
+	resp     *submit.WaitForTxResponse
+	err      error
+	terminal bool
+}
+
+// receiveWaitForTxStream exposes every response and the terminal stream result
+// in wire order.
+func receiveWaitForTxStream(
+	ctx context.Context,
+	cli submitconnect.SubmitServiceClient,
+	req *submit.WaitForTxRequest,
+) <-chan waitForTxStreamEvent {
+	eventCh := make(chan waitForTxStreamEvent, len(req.GetRef())+1)
+	go func() {
+		defer close(eventCh)
+		stream, err := cli.WaitForTx(ctx, connect.NewRequest(req))
+		if err != nil {
+			eventCh <- waitForTxStreamEvent{err: err, terminal: true}
+			return
+		}
+		for stream.Receive() {
+			eventCh <- waitForTxStreamEvent{resp: stream.Msg()}
+		}
+		eventCh <- waitForTxStreamEvent{
+			err:      stream.Err(),
+			terminal: true,
+		}
+	}()
+	return eventCh
 }
 
 // Run WaitForTx in the background so the test can cancel the request while
@@ -702,7 +1008,11 @@ func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
 		numBlocks:     5,
 		serverTimeout: 25 * time.Millisecond,
 	})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -716,7 +1026,11 @@ func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
 	select {
 	case result := <-resultCh:
 		require.Nil(t, result.resp)
-		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(result.err))
+		require.Equal(
+			t,
+			connect.CodeDeadlineExceeded,
+			connect.CodeOf(result.err),
+		)
 		require.ErrorContains(t, result.err, "wait for tx timed out")
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
@@ -729,7 +1043,11 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 		numBlocks:     5,
 		serverTimeout: time.Hour,
 	})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -740,9 +1058,12 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 			Ref: [][]byte{bytes.Repeat([]byte{0xbb}, 32)},
 		},
 	)
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
 	defer waitCancel()
-	waitForEventSubscriber(t, waitCtx, h.EB, ledger.BlockfetchEventType)
+	waitForEventSubscriber(t, waitCtx, h.EB, ledger.TransactionEventType)
 
 	cancel()
 
@@ -758,7 +1079,11 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 func TestConnect_EvalTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := cli.EvalTx(
@@ -779,7 +1104,10 @@ func TestConnect_EvalTx(t *testing.T) {
 	}
 }
 
-func followTipStreamErr(t *testing.T, stream *connect.ServerStreamForClient[sync.FollowTipResponse]) string {
+func followTipStreamErr(
+	t *testing.T,
+	stream *connect.ServerStreamForClient[sync.FollowTipResponse],
+) string {
 	t.Helper()
 	if err := stream.Err(); err != nil {
 		return err.Error()
@@ -796,7 +1124,11 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	roll := ocommon.NewPoint(inter.Slot, inter.Hash)
 	require.NoError(t, h.LS.Chain().ValidateRollback(roll))
 
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
@@ -843,7 +1175,11 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	require.Equal(t, rollbackBlock.Number, reset.Reset_.GetHeight())
 	rollbackTime, err := h.LS.SlotToTime(roll.Slot)
 	require.NoError(t, err)
-	require.Equal(t, uint64(rollbackTime.UnixMilli()), reset.Reset_.GetTimestamp())
+	require.Equal(
+		t,
+		uint64(rollbackTime.UnixMilli()),
+		reset.Reset_.GetTimestamp(),
+	)
 	cancel()
 }
 
@@ -851,7 +1187,7 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	// Load a long prefix to locate an empty block, then trim the harness chain
 	// so that empty block is the tip. Otherwise WatchTx keeps iterating forward
 	// and may hit transactions that panic in gouroboros Utxorpc().
-	scan := loadTestChainBlocks(t, 80)
+	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	var cut int
 	found := false
 	for j := 6; j < len(scan); j++ {
@@ -868,16 +1204,17 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	if cut < 2 {
 		t.Fatalf("empty block cut must include a parent, got %d", cut)
 	}
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: cut})
-	blocks := loadTestChainBlocks(t, cut)
-	if len(blocks) < cut {
-		t.Fatalf("expected at least %d blocks, got %d", cut, len(blocks))
-	}
+	blocks := scan[:cut]
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{blocks: blocks})
 	parent := blocks[cut-2]
 	emptyChild := blocks[cut-1]
 	require.Equal(t, emptyChild.Slot, h.LS.Tip().Point.Slot)
 
-	cli := watchconnect.NewWatchServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := watchconnect.NewWatchServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	stream, err := cli.WatchTx(
@@ -906,61 +1243,199 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	cancel()
 }
 
-func TestConnect_WaitForTx_ConfirmsOnBlockfetchEvent(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
-	txHash, _, mb := firstTxInFixtureBlocks(t, 40)
-	blk, err := gledger.NewBlockFromCbor(mb.Type, mb.Cbor)
+func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
+	committedTx, _, pendingTx, eventBlock := firstTwoTxsInFixtureBlocks(t, 40)
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:       40,
+		skipIndexTxHash: pendingTx.Hash().Bytes(),
+	})
+	committedHash := committedTx.Hash().Bytes()
+	committedRecord, err := h.LS.TransactionByHash(committedHash)
 	require.NoError(t, err)
-
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	stopPublish := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopPublish:
-				return
-			case <-ticker.C:
-				h.EB.Publish(
-					ledger.BlockfetchEventType,
-					event.NewEvent(
-						ledger.BlockfetchEventType,
-						ledger.BlockfetchEvent{
-							ConnectionId: ouroboros.ConnectionId{},
-							Block:        blk,
-							Point:        ocommon.NewPoint(mb.Slot, mb.Hash),
-							Type:         uint(mb.Type),
-							BatchDone:    false,
-						},
-					),
-				)
-			}
+	require.NotNil(
+		t,
+		committedRecord,
+		"committed fixture transaction must be indexed",
+	)
+	pendingRecord, err := h.LS.TransactionByHash(pendingTx.Hash().Bytes())
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		pendingRecord,
+		"pending fixture transaction must not be indexed",
+	)
+	blk, err := gledger.NewBlockFromCbor(eventBlock.Type, eventBlock.Cbor)
+	require.NoError(t, err)
+	requestedInBlock := false
+	for _, tx := range blk.Transactions() {
+		if tx.Hash() == pendingTx.Hash() {
+			requestedInBlock = true
+			break
 		}
-	}()
-	defer close(stopPublish)
+	}
+	require.True(
+		t,
+		requestedInBlock,
+		"raw blockfetch must contain the pending transaction",
+	)
+
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eventCh := receiveWaitForTxStream(
+		ctx,
+		cli,
+		&submit.WaitForTxRequest{
+			Ref: [][]byte{
+				append([]byte(nil), committedHash...),
+				append([]byte(nil), pendingTx.Hash().Bytes()...),
+			},
+		},
+	)
+	waitCtx, waitCancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer waitCancel()
+	waitForEventSubscriber(t, waitCtx, h.EB, ledger.TransactionEventType)
+	require.False(
+		t,
+		h.EB.HasSubscribers(ledger.BlockfetchEventType),
+		"WaitForTx must not consume pre-validation blockfetch events",
+	)
+	committed := testutil.RequireReceive(
+		t,
+		eventCh,
+		5*time.Second,
+		"persisted WaitForTx stream event",
+	)
+	require.False(t, committed.terminal)
+	require.NoError(t, committed.err)
+	require.NotNil(t, committed.resp)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, committed.resp.GetStage())
+	require.Equal(t, committedHash, committed.resp.GetRef())
+
+	// Raw blockfetch precedes validation, while a rollback removes the
+	// transaction from the active chain. Neither is a confirmation source.
+	h.EB.Publish(
+		ledger.BlockfetchEventType,
+		event.NewEvent(
+			ledger.BlockfetchEventType,
+			ledger.BlockfetchEvent{
+				Block: blk,
+				Point: ocommon.NewPoint(eventBlock.Slot, eventBlock.Hash),
+				Type:  uint(eventBlock.Type),
+			},
+		),
+	)
+	h.EB.Publish(
+		ledger.TransactionEventType,
+		event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{
+				Transaction: pendingTx,
+				Point: ocommon.NewPoint(
+					eventBlock.Slot,
+					eventBlock.Hash,
+				),
+				Rollback: true,
+			},
+		),
+	)
+	testutil.RequireNoReceive(
+		t,
+		eventCh,
+		100*time.Millisecond,
+		"raw blockfetch and rollback must not confirm a pending transaction",
+	)
+
+	// Ledger emits the forward transaction event only after the active-chain
+	// database transaction commits.
+	h.EB.Publish(
+		ledger.TransactionEventType,
+		event.NewEvent(
+			ledger.TransactionEventType,
+			ledger.TransactionEvent{
+				Transaction: pendingTx,
+				Point: ocommon.NewPoint(
+					eventBlock.Slot,
+					eventBlock.Hash,
+				),
+			},
+		),
+	)
+
+	confirmed := testutil.RequireReceive(
+		t,
+		eventCh,
+		5*time.Second,
+		"post-commit WaitForTx stream event",
+	)
+	require.False(t, confirmed.terminal)
+	require.NoError(t, confirmed.err)
+	require.NotNil(t, confirmed.resp)
+	require.Equal(t, submit.Stage_STAGE_CONFIRMED, confirmed.resp.GetStage())
+	require.Equal(t, pendingTx.Hash().Bytes(), confirmed.resp.GetRef())
+
+	terminal := testutil.RequireReceive(
+		t,
+		eventCh,
+		5*time.Second,
+		"terminal WaitForTx stream event",
+	)
+	require.True(t, terminal.terminal)
+	require.NoError(t, terminal.err)
+	_, open := <-eventCh
+	require.False(t, open)
+}
+
+func TestConnect_WaitForTx_AlreadyCommittedTransaction(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:     40,
+		serverTimeout: time.Second,
+	})
+	require.NotEmpty(t, h.IndexedTxHashes)
+	txHash := h.IndexedTxHashes[0]
+
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	stream, err := cli.WaitForTx(
 		ctx,
 		connect.NewRequest(&submit.WaitForTxRequest{
-			Ref: [][]byte{append([]byte(nil), txHash...)},
+			Ref: [][]byte{
+				append([]byte(nil), txHash...),
+				append([]byte(nil), txHash...),
+			},
 		}),
 	)
 	require.NoError(t, err)
-	if !stream.Receive() {
-		require.NoError(t, stream.Err())
-		t.Fatal("WaitForTx stream closed without confirmation frame")
-	}
+	require.True(
+		t,
+		stream.Receive(),
+		"already-committed transaction should be confirmed: %v",
+		stream.Err(),
+	)
 	resp := stream.Msg()
 	require.NotNil(t, resp)
 	require.Equal(t, submit.Stage_STAGE_CONFIRMED, resp.GetStage())
 	require.Equal(t, txHash, resp.GetRef())
-	require.False(t, stream.Receive(), "handler returns after confirming all refs")
+	require.False(
+		t,
+		stream.Receive(),
+		"handler returns after confirming all refs",
+	)
 	require.NoError(t, stream.Err())
-	cancel()
 }
 
 func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
@@ -969,7 +1444,11 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	txType, err := gledger.DetermineTransactionType(txCbor)
 	require.NoError(t, err)
 
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
@@ -1011,7 +1490,9 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	require.NotNil(t, resp.GetTx())
 	require.Equal(t, submit.Stage_STAGE_MEMPOOL, resp.GetTx().GetStage())
 	require.True(t, bytes.Equal(txCbor, resp.GetTx().GetNativeBytes()))
-	outTxType, err := gledger.DetermineTransactionType(resp.GetTx().GetNativeBytes())
+	outTxType, err := gledger.DetermineTransactionType(
+		resp.GetTx().GetNativeBytes(),
+	)
 	require.NoError(t, err)
 	outTx, err := gledger.NewTransactionFromCbor(
 		outTxType,
@@ -1019,5 +1500,257 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, txHash, outTx.Hash().Bytes())
+	cancel()
+}
+
+// --- v1beta serving/routing tests ------------------------------------------
+
+// TestConnect_Beta_ReadParams drives a real v1beta QueryService call through
+// betaVersionedQueryHandler and asserts it is rewritten onto the shared v1alpha
+// handler, returning the same ledger-backed response as the v1alpha service.
+func TestConnect_Beta_ReadParams(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := cli.ReadParams(
+		ctx,
+		connect.NewRequest(&betaquery.ReadParamsRequest{}),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, out.Msg.GetValues())
+	require.NotNil(t, out.Msg.GetValues().GetCardano())
+	require.NotNil(t, out.Msg.GetLedgerTip())
+	tip := h.LS.Tip()
+	require.Equal(t, tip.Point.Slot, out.Msg.GetLedgerTip().GetSlot())
+	require.Equal(t, tip.Point.Hash, out.Msg.GetLedgerTip().GetHash())
+	require.Equal(t, tip.BlockNumber, out.Msg.GetLedgerTip().GetHeight())
+}
+
+// seedBetaReadStatePool gives a pool a registration and snapshot stake in the
+// harness database, so ReadState has a real distribution to report rather than
+// an empty one.
+func seedBetaReadStatePool(
+	t *testing.T,
+	h *utxorpcConnectHarness,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	stake uint64,
+	snapshotEpoch uint64,
+) lcommon.PoolKeyHash {
+	t.Helper()
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+	require.NoError(t, h.DB.Metadata().ImportPool(
+		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  vrfKeyHash,
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+	require.NoError(t, h.DB.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        snapshotEpoch,
+			SnapshotType: "mark",
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(stake),
+			CapturedSlot: 1,
+		},
+		nil,
+	))
+	return pkh
+}
+
+// TestConnect_Beta_ReadState_StakePoolDistribution drives the beta-only
+// ReadState method over a real Connect/gRPC client. It covers the routing
+// branch inside betaVersionedQueryHandler -- which must not be rewritten onto
+// the alpha handler, since alpha has no such method -- and the answer it now
+// serves, over the same ledger the node-to-client GetPoolDistr2 query reads.
+func TestConnect_Beta_ReadState_StakePoolDistribution(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+
+	// The harness chain sits in epoch 0, and leader election reads the
+	// snapshot for the preceding epoch, which at epoch 0 is epoch 0.
+	vrf := bytes.Repeat([]byte{0xA1}, 32)
+	pkh := seedBetaReadStatePool(
+		t, h, bytes.Repeat([]byte{0x5A}, 28), vrf, 3_000_000, 0,
+	)
+	seedBetaReadStatePool(
+		t, h,
+		bytes.Repeat([]byte{0x7B}, 28), bytes.Repeat([]byte{0xB2}, 32),
+		1_000_000, 0,
+	)
+
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	out, err := cli.ReadState(
+		ctx,
+		connect.NewRequest(&betaquery.ReadStateRequest{
+			Query: &betaquery.AnyChainStateQuery{
+				Query: &betaquery.AnyChainStateQuery_Cardano{
+					Cardano: &betacardano.StateQuery{
+						Query: &betacardano.StateQuery_StakePoolDistribution{
+							StakePoolDistribution: &betacardano.GetStakePoolDistribution{},
+						},
+					},
+				},
+			},
+		}),
+	)
+	require.NoError(t, err)
+
+	pools := out.Msg.GetResult().GetCardano().
+		GetStakePoolDistribution().GetPools()
+	require.Len(t, pools, 2)
+	// Ordered by pool key hash, so the reply is a function of the snapshot
+	// rather than of map iteration order.
+	require.Equal(t, pkh.Bytes(), pools[0].GetPoolKeyhash())
+	require.Equal(t, vrf, pools[0].GetVrfKeyhash())
+	require.Equal(t, int32(3), pools[0].GetStakeFraction().GetNumerator())
+	require.Equal(t, uint32(4), pools[0].GetStakeFraction().GetDenominator())
+
+	tip := h.LS.Tip()
+	require.NotNil(t, out.Msg.GetLedgerTip())
+	require.Equal(t, tip.Point.Slot, out.Msg.GetLedgerTip().GetSlot())
+	require.Equal(t, tip.Point.Hash, out.Msg.GetLedgerTip().GetHash())
+	require.Equal(t, tip.BlockNumber, out.Msg.GetLedgerTip().GetHeight())
+}
+
+// TestConnect_Beta_ReadState_PoolFilter covers the bounded request form over
+// the wire, and the rejection of a filter entry that is not a pool key hash.
+func TestConnect_Beta_ReadState_PoolFilter(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+	pkh := seedBetaReadStatePool(
+		t, h,
+		bytes.Repeat([]byte{0x5A}, 28), bytes.Repeat([]byte{0xA1}, 32),
+		3_000_000, 0,
+	)
+	seedBetaReadStatePool(
+		t, h,
+		bytes.Repeat([]byte{0x7B}, 28), bytes.Repeat([]byte{0xB2}, 32),
+		1_000_000, 0,
+	)
+
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	readState := func(
+		poolKeyHashes ...[]byte,
+	) (*connect.Response[betaquery.ReadStateResponse], error) {
+		return cli.ReadState(
+			ctx,
+			connect.NewRequest(&betaquery.ReadStateRequest{
+				Query: &betaquery.AnyChainStateQuery{
+					Query: &betaquery.AnyChainStateQuery_Cardano{
+						Cardano: &betacardano.StateQuery{
+							Query: &betacardano.StateQuery_StakePoolDistribution{
+								StakePoolDistribution: &betacardano.GetStakePoolDistribution{
+									PoolKeyhashes: poolKeyHashes,
+								},
+							},
+						},
+					},
+				},
+			}),
+		)
+	}
+
+	out, err := readState(pkh.Bytes())
+	require.NoError(t, err)
+	pools := out.Msg.GetResult().GetCardano().
+		GetStakePoolDistribution().GetPools()
+	require.Len(t, pools, 1, "only the requested pool is reported")
+	require.Equal(t, pkh.Bytes(), pools[0].GetPoolKeyhash())
+	// The filter selects what is reported, not what it is a share of, so the
+	// fraction is still this pool's share of the whole snapshot.
+	require.Equal(t, int32(3), pools[0].GetStakeFraction().GetNumerator())
+	require.Equal(t, uint32(4), pools[0].GetStakeFraction().GetDenominator())
+
+	_, err = readState([]byte{0x01, 0x02})
+	require.Error(t, err)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+// TestConnect_Beta_ReadState_RejectsEmptyRequest covers a ReadState carrying no
+// query. It still has to reach the beta handler rather than the alpha one,
+// which has no ReadState method at all.
+func TestConnect_Beta_ReadState_RejectsEmptyRequest(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := cli.ReadState(
+		ctx,
+		connect.NewRequest(&betaquery.ReadStateRequest{}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+// TestConnect_Beta_ReadTip drives a real v1beta SyncService call to confirm a
+// non-query service is served through rewriteVersionHandler onto v1alpha.
+func TestConnect_Beta_ReadTip(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 15})
+	cli := betasyncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := cli.ReadTip(ctx, connect.NewRequest(&betasync.ReadTipRequest{}))
+	require.NoError(t, err)
+	require.NotNil(t, out.Msg.GetTip())
+	tip := h.LS.Tip()
+	require.Equal(t, tip.Point.Slot, out.Msg.GetTip().GetSlot())
+	require.Equal(t, tip.Point.Hash, out.Msg.GetTip().GetHash())
+	require.Equal(t, tip.BlockNumber, out.Msg.GetTip().GetHeight())
+}
+
+// TestConnect_Beta_WaitForTx_EmptyRefsClosesStream exercises a versioned
+// streaming handler served through rewriteVersionHandler: an empty-ref
+// beta WaitForTx must open and cleanly close without frames, like v1alpha.
+func TestConnect_Beta_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+	cli := betasubmitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	stream, err := cli.WaitForTx(
+		ctx,
+		connect.NewRequest(&betasubmit.WaitForTxRequest{}),
+	)
+	require.NoError(t, err)
+	require.False(
+		t,
+		stream.Receive(),
+		"no refs means the handler returns without frames",
+	)
+	require.NoError(t, stream.Err())
 	cancel()
 }

@@ -20,9 +20,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -31,14 +33,99 @@ import (
 
 // StakeDistributionProvider provides stake distribution data for leader election.
 type StakeDistributionProvider interface {
-	// GetPoolStake returns the stake for a specific pool in the given epoch.
-	// For leader election, this should query the "go" snapshot (epoch - 2).
-	GetPoolStake(epoch uint64, poolKeyHash []byte) (uint64, error)
-
-	// GetTotalActiveStake returns the total active stake for the given epoch.
-	// For leader election, this should query the "go" snapshot (epoch - 2).
-	GetTotalActiveStake(epoch uint64) (uint64, error)
+	// GetPoolAndTotalActiveStake returns the sigma numerator (this pool's
+	// stake) and the sigma denominator (total active stake) for the given
+	// snapshot epoch, which callers select with praos.StakeSnapshotEpoch.
+	//
+	// Both values MUST be read from a single consistent view of the
+	// snapshot. Reading them through two separate transactions lets a
+	// snapshot re-capture land between them and yields a sigma whose
+	// numerator and denominator come from different writes -- a leader
+	// schedule that is not reproducible from either snapshot alone
+	// (dingo #3815). The pair is returned by one method precisely so that
+	// no implementation can express the torn read.
+	//
+	// The denominator MUST come from the same store accessor the header
+	// verification path resolves it through
+	// (Metadata().GetTotalActiveStake), so that a node cannot forge against
+	// one denominator and validate against another (dingo #3814). See the
+	// reference-rule commentary below this interface for what that value
+	// is and why it must not be re-derived per code path.
+	GetPoolAndTotalActiveStake(
+		epoch uint64,
+		poolKeyHash []byte,
+	) (poolStake uint64, totalActiveStake uint64, err error)
 }
+
+// The sigma denominator, per the cardano-ledger reference implementation
+// (IntersectMBO/cardano-ledger@9bac33a, master, 2026-09-03). Written down
+// here because two prior investigations (dingo #2798 and #3626) were sent to
+// the wrong cause by a stale comment that called this "the sum of all pool
+// stakes".
+//
+// The reference computes the denominator as a sum over resolved stake
+// CREDENTIALS, not over the per-pool distribution:
+//
+//	total = sum { utxoStake(c) + accountBalance(c)
+//	            | c is a REGISTERED credential
+//	              and c delegates to SOME pool id }
+//
+//   - Cardano/Ledger/State/Stake.hs:156-160 (sumAllActiveStake; an empty
+//     credential set floors at 1 lovelace, not 0)
+//   - Cardano/Ledger/State/SnapShots.hs:419-426 (mkSnapShot, the sole
+//     production construction: ssTotalActiveStake = sumAllActiveStake
+//     ssActiveStake)
+//   - Cardano/Ledger/State/SnapShots.hs:472,486 (pdTotalActiveStake is that
+//     value verbatim; it is never recomputed from the pool map)
+//
+// The resolution predicate checks exactly two things -- the credential is in
+// the accounts map, and its stake-pool delegation is Just -- and does NOT
+// check that the target pool is registered; the pool map is not even in
+// scope (Cardano/Ledger/State/Stake.hs:217-246,
+// resolveActiveInstantStakeCredentials; Conway/State/Stake.hs:123-130,
+// which Dijkstra reuses).
+//
+// Numerators come only from REGISTERED pools, keyed by psStakePools
+// (Cardano/Ledger/State/SnapShots.hs:206-207,237,429-438,471-488,
+// calculatePoolDistr').
+//
+// It is tempting to read that asymmetry as "stake delegated to a retired or
+// unregistered pool belongs in the denominator and in no numerator". That
+// state is UNREACHABLE in the reference, so the sum of the numerators does
+// equal the denominator. Two rules keep it so, and neither lives in the
+// stake computation:
+//
+//   - DELEG rejects a delegation naming an unregistered pool
+//     (Conway/Rules/Deleg.hs:218-233,
+//     DelegateeStakePoolNotRegisteredDELEG).
+//   - POOLREAP clears the delegations of a retiring pool in the SAME state
+//     update that drops it from psStakePools
+//     (Shelley/Rules/PoolReap.hs:214-228,238-240,
+//     removeStakePoolDelegations . delegsToClear), so those credentials
+//     leave the denominator too rather than lingering in it.
+//   - An assertion enforces the pair
+//     (Shelley/Rules/Ledger.hs:274-279,453-468, "Reverse stake pool
+//     delegations must match").
+//
+// Dingo relies on the same invariant, maintained at the same point: see
+// ledger/poolreap.go, which calls ClearDelegationsToRetiredPool for each
+// reaped pool (dingo #3794 -- failing to clear inflates the total active
+// stake above the network's and makes every other pool's threshold too
+// small). Dingo also runs its SNAP stake read before POOLREAP, matching
+// EPOCH's sub-rule order (Conway/Rules/Epoch.hs:289-294; dingo
+// ledger/chainsync.go epoch-rollover step list).
+//
+// Consequences for this package: summing the numerators is the correct
+// denominator ONLY while that invariant holds. It is therefore not a safe
+// thing to derive independently in a second code path -- hence the single
+// accessor required below (dingo #3814).
+//
+// One thing the reference does NOT do: there is no stake-credential
+// inactivity gate. CIP-0163-style inactivity in the reference is DRep
+// expiry, applied only to the DRep voting ratio in RATIFY
+// (Conway/Rules/Ratify.hs:258-281); it never touches ActiveStake,
+// ssTotalActiveStake, or PoolDistr, and accounts carry no activity field
+// (Conway/State/Account.hs:60-80).
 
 // EpochInfoProvider provides epoch-related information.
 type EpochInfoProvider interface {
@@ -54,8 +141,10 @@ type EpochInfoProvider interface {
 	// for the normal nonce-ready event path instead.
 	NextEpochNonceReadyEpoch() (uint64, bool)
 
-	// SlotsPerEpoch returns the number of slots in an epoch.
-	SlotsPerEpoch() uint64
+	// EpochSlotRange returns the absolute slot range for an epoch, resolved
+	// against the ledger hard-fork summary so Byron prefixes and variable
+	// epoch lengths are respected.
+	EpochSlotRange(epoch uint64) (EpochSlotRange, error)
 
 	// EpochForSlot returns the epoch containing slot, resolved against
 	// the ledger hard-fork summary so era boundaries and variable epoch
@@ -72,13 +161,73 @@ type EpochInfoProvider interface {
 	// schedule calculator threads this into VRF input construction
 	// and threshold derivation; passing the wrong mode produces a
 	// leader-slot list that cardano-node will reject.
-	ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode
+	//
+	// It returns an error when the mode cannot be resolved for the
+	// epoch, which for a future epoch means the era forecast the
+	// provider needs is unavailable. Producing a schedule from a
+	// guessed mode is worse than producing none, so the caller must
+	// decline the schedule rather than substitute a default.
+	ConsensusModeForEpoch(epoch uint64) (consensus.ConsensusMode, error)
+}
+
+// ActiveSlotCoeffRatProvider is an optional extension of EpochInfoProvider
+// for providers that can supply the active slot coefficient (f) as the exact
+// rational written in the Shelley genesis rather than a float64.
+//
+// It is a separate, optionally-implemented interface rather than a method on
+// EpochInfoProvider so existing implementations keep compiling. computeSchedule
+// prefers it whenever the provider satisfies it and returns a non-nil value,
+// and logs the coefficient actually used so a fallback to the float64 form is
+// visible in the "leader schedule calculated" record.
+//
+// The distinction matters because the reference node derives its leadership
+// threshold from the exact genesis rational. A float64 round trip of 1/20
+// yields 3602879701896397/2^56, which is strictly larger, so every per-slot
+// threshold is strictly larger and the resulting eligible-slot set is a strict
+// superset of the reference's. dingo's own header verification already uses the
+// exact rational, so the float64 form also let the forge path disagree with
+// dingo's own validation path. See Calculator.ActiveSlotCoeffRat.
+type ActiveSlotCoeffRatProvider interface {
+	// ActiveSlotCoeffRat returns the exact active slot coefficient, or nil
+	// when the genesis value is unavailable.
+	ActiveSlotCoeffRat() *big.Rat
 }
 
 // ScheduleStore persists computed schedules for later reuse.
 type ScheduleStore interface {
 	LoadSchedule(epoch uint64, poolId lcommon.PoolKeyHash) (*Schedule, error)
 	SaveSchedule(schedule *Schedule) error
+}
+
+// markSnapshotType names the stake snapshot generation the Praos leader check
+// reads, for the audit log only. StakeDistributionProvider is documented to
+// resolve the mark snapshot selected by praos.StakeSnapshotEpoch; the string is
+// duplicated here rather than imported from database/models to keep this
+// package free of a database dependency.
+const markSnapshotType = "mark"
+
+// consensusModeName renders a consensus mode for logging. gouroboros'
+// ConsensusMode is a bare int with no String method, and the numeric value is
+// not self-describing in an operator-facing audit record.
+func consensusModeName(mode consensus.ConsensusMode) string {
+	switch mode {
+	case consensus.ConsensusModeTPraos:
+		return "tpraos"
+	case consensus.ConsensusModeCPraos:
+		return "cpraos"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(mode))
+	}
+}
+
+// thresholdHex renders a leadership threshold for logging. The threshold is a
+// 256- or 512-bit integer, so hex keeps the record compact and directly
+// comparable against a certified-natural VRF value.
+func thresholdHex(threshold *big.Int) string {
+	if threshold == nil {
+		return ""
+	}
+	return threshold.Text(16)
 }
 
 // maxCachedSchedules is the number of epoch schedules to keep in memory.
@@ -107,11 +256,17 @@ type Election struct {
 	schedules      map[uint64]*Schedule // epoch -> schedule
 	running        bool
 	cancel         context.CancelFunc
-	stopCh         chan struct{} // signals the monitoring goroutine to exit
+	lifecycleCtx   context.Context
+	lifecycleDone  chan struct{} // closes after the generation has drained
 	computeCh      chan uint64   // requests background schedule computation
 	subscriptionId event.EventSubscriberId
 	nonceReadySub  event.EventSubscriberId
 	metrics        *electionMetrics
+
+	// wg owns only the three worker loops. The cancellation coordinator joins
+	// them before closing lifecycleDone; it must never join itself. Start
+	// cannot reuse this group until the previous generation has drained.
+	wg sync.WaitGroup
 }
 
 // NewElection creates a new leader election manager for a stake pool.
@@ -164,17 +319,44 @@ func (e *Election) SetPromRegistry(reg prometheus.Registerer) {
 // slot-aligned loop without delay. The next epoch is queued later, once the
 // ledger reports that its nonce has reached the stability cutoff.
 func (e *Election) Start(ctx context.Context) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	return e.start(ctx, nil)
+}
 
-	if e.running {
-		return nil
+// start accepts a test scheduling hook after generation completion, before
+// reacquiring the lifecycle mutex. Production callers always pass nil.
+func (e *Election) start(ctx context.Context, afterWait func()) error {
+	e.mu.Lock()
+	for e.lifecycleDone != nil {
+		if e.running && e.lifecycleCtx.Err() == nil {
+			e.mu.Unlock()
+			return nil
+		}
+		done := e.lifecycleDone
+		e.mu.Unlock()
+		select {
+		case <-done:
+			if afterWait != nil {
+				afterWait()
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		e.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			e.mu.Unlock()
+			return err
+		}
+	}
+	defer e.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
 	e.running = true
-	e.stopCh = make(chan struct{})
+	e.lifecycleCtx = ctx
+	e.lifecycleDone = make(chan struct{})
 	e.schedules = make(map[uint64]*Schedule)
 	e.computeCh = make(chan uint64, 4)
 
@@ -191,7 +373,9 @@ func (e *Election) Start(ctx context.Context) error {
 			"component", "leader",
 		)
 	} else {
-		go e.epochTransitionLoop(ctx, evtCh)
+		e.wg.Go(func() {
+			e.epochTransitionLoop(ctx, evtCh)
+		})
 	}
 
 	var nonceReadyCh <-chan event.Event
@@ -201,12 +385,25 @@ func (e *Election) Start(ctx context.Context) error {
 	if nonceReadyCh == nil {
 		e.logger.Warn(
 			"event bus not available, next-epoch precompute will not be tracked",
-			"component", "leader",
+			"component",
+			"leader",
 		)
 	} else {
-		go e.epochNonceReadyLoop(ctx, nonceReadyCh)
+		e.wg.Go(func() {
+			e.epochNonceReadyLoop(ctx, nonceReadyCh)
+		})
 	}
-	go e.scheduleComputeLoop(ctx, e.computeCh)
+	// Captured into a local before spawning: e.computeCh is read here while
+	// Start still holds e.mu, but the goroutine below reads it again at
+	// whatever time it actually gets scheduled to run, with no lock -- an
+	// immediate Stop right after Start (as TestElectionStartStop does) can
+	// nil the field out first, racing this goroutine's read of the live
+	// field. The local copy is never touched by anything else, so passing
+	// it in is race-free regardless of scheduling order.
+	computeCh := e.computeCh
+	e.wg.Go(func() {
+		e.scheduleComputeLoop(ctx, computeCh)
+	})
 
 	// Kick off initial schedule computation for the current epoch.
 	currentEpoch := e.epochProvider.CurrentEpoch()
@@ -221,22 +418,23 @@ func (e *Election) Start(ctx context.Context) error {
 		}
 		e.logger.Info(
 			"next epoch nonce already stable at startup, precomputing leader schedule",
-			"component", "leader",
-			"current_epoch", currentEpoch,
-			"ready_epoch", nextEpoch,
+			"component",
+			"leader",
+			"current_epoch",
+			currentEpoch,
+			"ready_epoch",
+			nextEpoch,
 		)
 	}
 
-	// Monitor context cancellation to automatically stop.
-	// The goroutine exits when either the context is canceled or Stop() is called.
-	stopCh := e.stopCh
+	// This coordinator is deliberately outside the worker wait group. It
+	// owns teardown for this generation on either parent cancellation or
+	// Stop, and makes the completion barrier visible only after all workers
+	// have stopped accessing their providers.
+	done := e.lifecycleDone
 	go func() {
-		select {
-		case <-ctx.Done():
-			_ = e.Stop()
-		case <-stopCh:
-			// Stop() was called directly, goroutine should exit
-		}
+		<-ctx.Done()
+		e.finishStop(done)
 	}()
 
 	e.logger.Info(
@@ -387,45 +585,59 @@ func (e *Election) scheduleComputeLoop(
 	}
 }
 
-// Stop stops the leader election manager.
+// Stop cancels the current generation and waits for its workers to drain.
+// Every concurrent caller joins the same completion barrier, including after
+// parent cancellation has already marked the generation as stopped.
 func (e *Election) Stop() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if !e.running {
-		return nil
-	}
-
-	// Signal the monitoring goroutine to exit before canceling context.
-	// This prevents the goroutine from calling Stop() again.
-	if e.stopCh != nil {
-		close(e.stopCh)
-		e.stopCh = nil
-	}
-	// Nil out computeCh so ShouldProduceBlock cannot send after Stop.
-	e.computeCh = nil
-	if e.cancel != nil {
+	done := e.lifecycleDone
+	if done != nil {
+		e.running = false
+		e.computeCh = nil
+		e.schedules = nil
 		e.cancel()
 	}
-	if e.subscriptionId != 0 {
-		e.eventBus.Unsubscribe(
-			event.EpochTransitionEventType,
-			e.subscriptionId,
-		)
-		e.subscriptionId = 0
+	e.mu.Unlock()
+	if done != nil {
+		<-done
 	}
-	if e.nonceReadySub != 0 {
-		e.eventBus.Unsubscribe(
-			event.EpochNonceReadyEventType,
-			e.nonceReadySub,
-		)
-		e.nonceReadySub = 0
-	}
-	e.running = false
-	e.schedules = nil
-
-	e.logger.Info("leader election stopped", "component", "leader")
 	return nil
+}
+
+// finishStop belongs exclusively to the captured generation. Start waits for
+// done before replacing any lifecycle state or adding to the worker group.
+func (e *Election) finishStop(done chan struct{}) {
+	e.mu.Lock()
+	e.running = false
+	e.computeCh = nil
+	e.schedules = nil
+	subscriptionId := e.subscriptionId
+	nonceReadySub := e.nonceReadySub
+	e.subscriptionId = 0
+	e.nonceReadySub = 0
+	e.mu.Unlock()
+
+	// Workers take e.mu while refreshing schedules, so join without it.
+	if subscriptionId != 0 {
+		e.eventBus.UnsubscribeAndWait(
+			event.EpochTransitionEventType,
+			subscriptionId,
+		)
+	}
+	if nonceReadySub != 0 {
+		e.eventBus.UnsubscribeAndWait(
+			event.EpochNonceReadyEventType,
+			nonceReadySub,
+		)
+	}
+	e.wg.Wait()
+	e.logger.Info("leader election stopped", "component", "leader")
+	e.mu.Lock()
+	e.lifecycleDone = nil
+	e.lifecycleCtx = nil
+	e.cancel = nil
+	close(done)
+	e.mu.Unlock()
 }
 
 // RefreshSchedule recalculates the leader schedule for the current epoch.
@@ -543,26 +755,44 @@ func (e *Election) validatePersistedSchedule(
 		return false, "epoch nonce changed", nil
 	}
 
-	snapshotEpoch := scheduleSnapshotEpoch(epoch)
-	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
+	epochRange, err := e.epochProvider.EpochSlotRange(epoch)
+	if err != nil {
+		return false, "", fmt.Errorf("get epoch slot range: %w", err)
+	}
+	if epochRange.SlotCount == 0 {
+		return false, "epoch slot count is zero", nil
+	}
+	if epochRange.StartSlot > ^uint64(0)-epochRange.SlotCount {
+		return false, "", fmt.Errorf(
+			"epoch slot range overflows uint64: start=%d count=%d",
+			epochRange.StartSlot,
+			epochRange.SlotCount,
+		)
+	}
+	epochEndSlot := epochRange.StartSlot + epochRange.SlotCount
+	for _, slot := range schedule.LeaderSlotsSnapshot() {
+		if slot < epochRange.StartSlot || slot >= epochEndSlot {
+			return false, "leader slot outside epoch range", nil
+		}
+	}
+
+	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
+	// One atomic read: revalidating a persisted schedule against a torn
+	// (numerator, denominator) pair could accept a schedule that matches
+	// neither snapshot, or discard a still-valid one (dingo #3815).
+	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
+		snapshotEpoch,
+		e.poolId[:],
+	)
 	if err != nil {
 		return false, "", fmt.Errorf(
-			"get pool stake for epoch %d: %w",
+			"get pool and total active stake for epoch %d: %w",
 			snapshotEpoch,
 			err,
 		)
 	}
 	if poolStake != schedule.PoolStake {
 		return false, "pool stake changed", nil
-	}
-
-	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
-	if err != nil {
-		return false, "", fmt.Errorf(
-			"get total stake for epoch %d: %w",
-			snapshotEpoch,
-			err,
-		)
 	}
 	if totalStake != schedule.TotalStake {
 		return false, "total stake changed", nil
@@ -607,24 +837,30 @@ func (e *Election) computeSchedule(
 		return nil, ctx.Err()
 	}
 
-	// Leader election uses the Go snapshot (epoch - 2).
-	// For genesis epochs (0 and 1), use the genesis snapshot directly.
-	// The Cardano spec uses genesis staking for leader election until
-	// the first Mark→Set→Go rotation completes at epoch 2.
-	snapshotEpoch := scheduleSnapshotEpoch(currentEpoch)
+	// Leader election uses the mark snapshot that is active for the epoch.
+	snapshotEpoch := praos.StakeSnapshotEpoch(currentEpoch)
 
-	// Get pool stake from Go snapshot
+	// Read the sigma numerator and denominator together. Two separate
+	// reads let a snapshot re-capture land between them, producing a
+	// schedule computed from a sigma that exists in no single snapshot
+	// (dingo #3815). The zero-stake short circuit below therefore happens
+	// after the pair is in hand rather than between the two reads.
 	stakeLookupStart := time.Now()
-	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
+	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
+		snapshotEpoch,
+		e.poolId[:],
+	)
+	if e.metrics != nil {
+		e.metrics.stakeLookupDuration.Observe(
+			time.Since(stakeLookupStart).Seconds(),
+		)
+	}
 	if err != nil {
-		if e.metrics != nil {
-			e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
-		}
-		return nil, fmt.Errorf("get pool stake: %w", err)
+		return nil, fmt.Errorf("get pool and total active stake: %w", err)
 	}
 
 	e.logger.Info(
-		"pool stake from Go snapshot",
+		"pool stake from active snapshot",
 		"component", "leader",
 		"epoch", currentEpoch,
 		"snapshot_epoch", snapshotEpoch,
@@ -632,25 +868,19 @@ func (e *Election) computeSchedule(
 	)
 	if poolStake == 0 {
 		e.logger.Info(
-			"pool has no stake in Go snapshot, skipping schedule computation",
-			"component", "leader",
-			"epoch", currentEpoch,
-			"snapshot_epoch", snapshotEpoch,
+			"pool has no stake in active snapshot, skipping schedule computation",
+			"component",
+			"leader",
+			"epoch",
+			currentEpoch,
+			"snapshot_epoch",
+			snapshotEpoch,
 		)
 		return nil, nil
 	}
 
-	// Get total stake from Go snapshot
-	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
-	if e.metrics != nil {
-		e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get total stake: %w", err)
-	}
-
 	e.logger.Info(
-		"total active stake from Go snapshot",
+		"total active stake from active snapshot",
 		"component", "leader",
 		"epoch", currentEpoch,
 		"snapshot_epoch", snapshotEpoch,
@@ -675,16 +905,37 @@ func (e *Election) computeSchedule(
 		return nil, nil
 	}
 
-	calc := NewCalculator(
-		e.epochProvider.ActiveSlotCoeff(),
-		e.epochProvider.SlotsPerEpoch(),
-	)
+	epochRange, err := e.epochProvider.EpochSlotRange(currentEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get epoch slot range: %w", err)
+	}
 
-	mode := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
+	calc := NewCalculator(e.epochProvider.ActiveSlotCoeff())
+	// Prefer the exact Shelley genesis rational over the float64 form; see
+	// ActiveSlotCoeffRatProvider.
+	if ratProvider, ok := e.epochProvider.(ActiveSlotCoeffRatProvider); ok {
+		if exactCoeff := ratProvider.ActiveSlotCoeffRat(); exactCoeff != nil {
+			calc.ActiveSlotCoeffRat = exactCoeff
+		}
+	}
+
+	mode, err := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve consensus mode: %w", err)
+	}
+
+	// Resolve the coefficient up front so an invalid genesis value fails here
+	// with a clear message instead of deep inside the VRF loop, and so the
+	// audit log below can report the exact value that was used.
+	activeSlotCoeff, err := calc.activeSlotCoeffRat()
+	if err != nil {
+		return nil, fmt.Errorf("resolve active slot coefficient: %w", err)
+	}
 
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
+		epochRange,
 		e.poolId,
 		e.poolVrfSkey,
 		poolStake,
@@ -693,25 +944,39 @@ func (e *Election) computeSchedule(
 		mode,
 	)
 	if e.metrics != nil {
-		e.metrics.vrfEvalDurationSeconds.Observe(time.Since(vrfEvalStart).Seconds())
+		e.metrics.vrfEvalDurationSeconds.Observe(
+			time.Since(vrfEvalStart).Seconds(),
+		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("calculate schedule: %w", err)
 	}
 
+	// One O(1)-per-epoch record carrying every input to the leader check, so a
+	// schedule that disagrees with `cardano-cli query leadership-schedule` can
+	// be diffed against the reference node's `query stake-snapshot` and
+	// `query protocol-state` from logs alone, without re-running with extra
+	// instrumentation (dingo #2798). Never log per slot.
 	e.logger.Info(
 		"leader schedule calculated",
 		"component", "leader",
 		"epoch", currentEpoch,
+		"snapshot_epoch", snapshotEpoch,
+		"snapshot_type", markSnapshotType,
+		"epoch_start_slot", epochRange.StartSlot,
+		"epoch_slot_count", epochRange.SlotCount,
 		"epoch_nonce", hex.EncodeToString(epochNonce),
 		"pool_stake", poolStake,
 		"total_stake", totalStake,
 		"stake_ratio", schedule.StakeRatio(),
+		"active_slot_coeff", activeSlotCoeff.RatString(),
+		"consensus_mode", consensusModeName(mode),
+		"leader_threshold", thresholdHex(schedule.Threshold),
 		"leader_slots", schedule.SlotCount(),
 		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
 	)
 	if e.metrics != nil {
-		slotsChecked := e.epochProvider.SlotsPerEpoch()
+		slotsChecked := epochRange.SlotCount
 		slotsWon := uint64(len(schedule.LeaderSlotsSnapshot()))
 		slotsNotWon := uint64(0)
 		if slotsWon <= slotsChecked {
@@ -724,13 +989,6 @@ func (e *Election) computeSchedule(
 	}
 
 	return schedule, nil
-}
-
-func scheduleSnapshotEpoch(epoch uint64) uint64 {
-	if epoch < 2 {
-		return 0
-	}
-	return epoch - 2
 }
 
 // storeSchedule saves a computed schedule under a brief write lock and

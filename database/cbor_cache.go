@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 
@@ -199,12 +200,18 @@ func NewTieredCborCache(config CborCacheConfig, db *Database) *TieredCborCache {
 
 // ResolveUtxoCbor resolves UTxO CBOR data by transaction ID and output index.
 // It checks caches in order: hot UTxO cache, block LRU cache, then blob store.
-// An optional blob transaction can be provided to see uncommitted writes within
-// the same transaction (important for intra-batch UTxO lookups during validation).
+// An optional database transaction can be provided to see uncommitted writes
+// within the same transaction (important for intra-batch UTxO lookups during
+// validation).
+//
+// The parameter is the database transaction rather than its bare blob handle
+// because the cold path has to run against the store that handle belongs to.
+// A bare types.Txn does not say which store that is, so pairing it with the
+// currently installed store would break across a concurrent SetBlobStore.
 func (c *TieredCborCache) ResolveUtxoCbor(
 	txId []byte,
 	outputIdx uint32,
-	blobTxn ...types.Txn,
+	dbTxn ...*Txn,
 ) ([]byte, error) {
 	key := makeUtxoKey(txId, outputIdx)
 
@@ -222,24 +229,28 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	var callerTxn *Txn
+	if len(dbTxn) > 0 {
+		callerTxn = dbTxn[0]
+	}
+
+	// The caller's transaction already chose a store; reuse it rather than
+	// pinning whichever store is installed now. See Database.pinBlobForTxn.
+	blob, releaseBlob := c.db.pinBlobForTxn(callerTxn)
+	defer releaseBlob()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	// Use provided transaction if available, otherwise create a new one
+	// Use the caller's blob handle when it has one -- it belongs to the
+	// store just selected -- otherwise open one on that same store.
 	var txn types.Txn
-	var ownedTxn bool
-	if len(blobTxn) > 0 && blobTxn[0] != nil {
-		txn = blobTxn[0]
-	} else {
+	if callerTxn != nil {
+		txn = callerTxn.Blob()
+	}
+	if txn == nil {
 		txn = blob.NewTransaction(false)
-		ownedTxn = true
-		defer func() {
-			if ownedTxn {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
+		defer txn.Rollback() //nolint:errcheck
 	}
 
 	utxoData, err := blob.GetUtxo(txn, txId, outputIdx)
@@ -275,7 +286,11 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	c.metrics.IncBlockLRUMiss()
 
 	// Fetch block from blob store
-	blockCbor, _, err := blob.GetBlock(txn, offset.BlockSlot, offset.BlockHash[:])
+	blockCbor, _, err := blob.GetBlock(
+		txn,
+		offset.BlockSlot,
+		offset.BlockHash[:],
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get block for utxo extraction: %w", err)
 	}
@@ -310,7 +325,10 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 // so reconstructing a complete transaction ([body, witness, is_valid, aux_data])
 // would require fetching multiple components. Use tx.Cbor() from the parsed
 // block if you need complete transaction CBOR for decoding.
-func (c *TieredCborCache) ResolveTxCbor(txn *Txn, txHash []byte) ([]byte, error) {
+func (c *TieredCborCache) ResolveTxCbor(
+	txn *Txn,
+	txHash []byte,
+) ([]byte, error) {
 	// Tier 1: Hot cache check
 	if cbor, ok := c.hotTx.Get(txHash); ok {
 		c.metrics.IncTxHotHit()
@@ -325,13 +343,17 @@ func (c *TieredCborCache) ResolveTxCbor(txn *Txn, txHash []byte) ([]byte, error)
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	// The caller's transaction already chose a store; reuse it rather than
+	// pinning whichever store is installed now. See Database.pinBlobForTxn.
+	blob, releaseBlob := c.db.pinBlobForTxn(txn)
+	defer releaseBlob()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
 	// Get TX offset data from blob store. Use the caller's active
 	// blob transaction when provided so uncommitted writes are visible.
+	// It belongs to the store just selected.
 	blobTxn := types.Txn(nil)
 	cacheResolved := true
 	if txn != nil {
@@ -448,7 +470,8 @@ func (c *TieredCborCache) ResolveUtxoCborBatch(
 		return result, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	blob, releaseBlob := c.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return result, types.ErrBlobStoreUnavailable
 	}
@@ -545,7 +568,10 @@ func (c *TieredCborCache) ResolveUtxoCborBatch(
 
 		// Extract all UTxOs from this block
 		for _, item := range group.refs {
-			cbor := cachedBlock.Extract(item.offset.ByteOffset, item.offset.ByteLength)
+			cbor := cachedBlock.Extract(
+				item.offset.ByteOffset,
+				item.offset.ByteLength,
+			)
 			if cbor == nil {
 				return nil, fmt.Errorf(
 					"utxo batch extraction failed: offset out of bounds "+
@@ -599,7 +625,8 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 		return result, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	blob, releaseBlob := c.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return result, types.ErrBlobStoreUnavailable
 	}
@@ -640,7 +667,11 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 		// Decode the offset reference
 		offset, err := DecodeTxOffset(txData)
 		if err != nil {
-			return result, fmt.Errorf("decode tx offset %x: %w", txHash[:8], err)
+			return result, fmt.Errorf(
+				"decode tx offset %x: %w",
+				txHash[:8],
+				err,
+			)
 		}
 
 		// Group by block
@@ -686,7 +717,10 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 
 		// Extract all TXs from this block
 		for _, item := range group.txs {
-			cbor := cachedBlock.Extract(item.offset.ByteOffset, item.offset.ByteLength)
+			cbor := cachedBlock.Extract(
+				item.offset.ByteOffset,
+				item.offset.ByteLength,
+			)
 			if cbor == nil {
 				return nil, fmt.Errorf(
 					"tx batch extraction failed: offset out of bounds "+
@@ -710,6 +744,25 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 // Metrics returns the cache metrics for monitoring and observability.
 func (c *TieredCborCache) Metrics() *CacheMetrics {
 	return c.metrics
+}
+
+// SetLogger wires a logger into both hot caches for update-retry-budget
+// diagnostics (see HotCache.SetLogger). A nil logger disables this logging.
+func (c *TieredCborCache) SetLogger(logger *slog.Logger) {
+	c.hotUtxo.SetLogger(logger, "utxo")
+	c.hotTx.SetLogger(logger, "tx")
+}
+
+// RegisterCASMetrics exposes both hot caches' update-contention counters on
+// the given Prometheus registry (see HotCache.RegisterCASMetrics). The name is
+// retained for compatibility. If registry is nil, this is a no-op.
+func (c *TieredCborCache) RegisterCASMetrics(
+	registry prometheus.Registerer,
+) error {
+	if err := c.hotUtxo.RegisterCASMetrics(registry, "utxo"); err != nil {
+		return err
+	}
+	return c.hotTx.RegisterCASMetrics(registry, "tx")
 }
 
 // makeUtxoKey creates a cache key from transaction ID and output index.

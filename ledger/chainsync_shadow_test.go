@@ -34,6 +34,8 @@ import (
 // stalled until the primary or the timeout fired, defeating the point of
 // dispatching a shadow at all.
 func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -59,29 +61,34 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 		activeBlockfetchConnId:       primary,
 		shadowBlockfetchConnId:       shadow,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
-		// Skip the empty-batch retry path: pretend the shadow already
-		// delivered a block before sending BatchDone.
+		// Skip the unobtained-range retry path: pretend the shadow already
+		// delivered a block, and that it extended the chain, before sending
+		// BatchDone.
 		batchBlocksReceived: 1,
+		batchBlocksApplied:  1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = start
 				_ = end
 				requestCount++
 				requestedConnId = connId
-				return nil
+				return 0, nil
 			},
 		},
 	}
 
-	require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
-		ConnectionId: shadow,
-		BatchDone:    true,
-	}))
+	require.NoError(
+		t,
+		handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
+			ConnectionId: shadow,
+			BatchDone:    true,
+		}, nil),
+	)
 
 	// The shadow's BatchDone is accepted, so the batch advances and a
 	// follow-up RequestRange is dispatched for the still-queued header.
@@ -106,6 +113,8 @@ func TestHandleEventBlockfetchBatchDoneAcceptsShadowCompletion(t *testing.T) {
 func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -130,37 +139,44 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 		shadowBlockfetchConnId:       shadow,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		batchBlocksReceived:          1,
+		batchBlocksApplied:           1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
 				requestCount++
-				return nil
+				return 0, nil
 			},
 		},
 	}
 
 	// Primary completes first; cleanup clears the shadow ID and starts the
 	// next batch on the same primary.
-	require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
-		ConnectionId: primary,
-		BatchDone:    true,
-	}))
+	require.NoError(
+		t,
+		handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
+			ConnectionId: primary,
+			BatchDone:    true,
+		}, nil),
+	)
 	assert.Equal(t, 1, requestCount)
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.shadowBlockfetchConnId)
 
 	// The shadow's late BatchDone now arrives. It must not complete the new
 	// batch — neither active nor shadow matches it after cleanup.
-	require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
-		ConnectionId: shadow,
-		BatchDone:    true,
-	}))
+	require.NoError(
+		t,
+		handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
+			ConnectionId: shadow,
+			BatchDone:    true,
+		}, nil),
+	)
 	assert.Equal(
 		t,
 		1,
@@ -180,6 +196,8 @@ func TestHandleEventBlockfetchBatchDoneDropsStaleShadowAfterCleanup(
 // leak into the new batch and let the previous shadow's blocks be accepted
 // against the new request.
 func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -214,16 +232,19 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 				connId ouroboros.ConnectionId,
 				start ocommon.Point,
 				end ocommon.Point,
-			) error {
+			) (uint64, error) {
 				_ = connId
 				_ = start
 				_ = end
-				return nil
+				return 0, nil
 			},
 		},
 	}
 
-	require.NoError(t, ls.restartQueuedBlockfetchAfterForkLocked(primary))
+	require.NoError(
+		t,
+		restartQueuedBlockfetchAfterForkForTest(ls, primary, nil),
+	)
 
 	// Stale per-batch shadow state must be cleared by the restart so that
 	// the new batch starts in a known state.
@@ -233,11 +254,11 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 
 	// A block delivered on the previous shadow connection must be rejected
 	// because it is no longer the shadow for the active batch.
-	require.NoError(t, ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: staleShadow,
 		Block:        &mockBabbageBlock{slot: 99},
 		Point:        ocommon.Point{Slot: 99, Hash: []byte("stale-shadow")},
-	}))
+	}, nil))
 	require.Empty(
 		t,
 		ls.pendingBlockfetchEvents,

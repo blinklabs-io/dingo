@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
@@ -41,12 +42,19 @@ var BabbageEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsBabbage,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateBabbage,
 	PParamsUpdateFunc:       PParamsUpdateBabbage,
-	HardForkFunc:            HardForkBabbage,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVBabbage,
-	CertDepositFunc:         CertDepositBabbage,
-	ValidateTxFunc:          ValidateTxBabbage,
-	EvaluateTxFunc:          EvaluateTxBabbage,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(babbage.BabbageProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkBabbage,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVBabbage,
+	CertDepositFunc:   CertDepositBabbage,
+	ValidateTxFunc:    ValidateTxBabbage,
+	EvaluateTxFunc:    EvaluateTxBabbage,
 }
 
 func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
@@ -127,6 +135,7 @@ func HardForkBabbage(
 		)
 	}
 	ret := babbage.UpgradePParams(*alonzoPParams)
+	ret.CostModels = cloneCostModels(ret.CostModels)
 	// Add PlutusV2 cost model if not already present
 	// This is needed because the Babbage hard fork happens before the on-chain
 	// protocol parameter update that contains PlutusV2 cost models arrives.
@@ -218,16 +227,15 @@ func ValidateTxBabbage(
 			)
 		}
 	}
+	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 	// Core Babbage transaction validity checks (fees/size/etc.) are covered
 	// by babbage.UtxoValidationRules. Keep additional local validation scoped
 	// to script execution compatibility.
-	// Skip script evaluation if TX is marked as not valid
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -278,13 +286,17 @@ func ValidateTxBabbage(
 	}
 	// Evaluate scripts
 	var txInfoV2 script.TxInfoV2
-	txInfoV2, err = script.NewTxInfoV2FromTransaction(
+	txInfos := newTxInfoCache(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
-	if err != nil {
-		return err
+	if txHasRedeemers(tx) {
+		txInfoV2, err = txInfos.v2()
+		if err != nil {
+			return err
+		}
 	}
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
@@ -302,11 +314,10 @@ func ValidateTxBabbage(
 		}
 		switch s := tmpScript.(type) {
 		case lcommon.PlutusV1Script:
-			txInfoV1, err := script.NewTxInfoV1FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-			)
+			// Built at most once per transaction via txInfos, regardless of
+			// how many PlutusV1 redeemers share it (issue: redundant
+			// per-redeemer TxInfo rebuild).
+			txInfoV1, err := txInfos.v1()
 			if err != nil {
 				return err
 			}
@@ -316,138 +327,141 @@ func ValidateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
-			evalContext.SkipFinalSlippageFlush = true
-			_, err = s.Evaluate(
+			usedBudgetV1, err := s.Evaluate(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				redeemer.ExUnits,
+				lcommon.ExUnits{
+					Steps:  tmpPparams.MaxTxExUnits.Steps,
+					Memory: tmpPparams.MaxTxExUnits.Memory,
+				},
 				evalContext,
 			)
 			if err != nil {
-				/*
-					fmt.Printf("TX ID: %s\n", tx.Hash().String())
-					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
-					scriptHash := s.Hash()
-					fmt.Printf("scriptHash = %s\n", scriptHash.String())
-					fmt.Printf("tx = %x\n", tx.Cbor())
-					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
-					var tmpInputs []lcommon.TransactionInput
-					var tmpOutputs []lcommon.TransactionOutput
-					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
-						tmpInputs = append(tmpInputs, input.Id)
-						tmpOutputs = append(tmpOutputs, input.Output)
-					}
-					tmpInputsCbor, err2 := cbor.Encode(tmpInputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
-					tmpOutputsCbor, err2 := cbor.Encode(tmpOutputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
-					scCbor, err2 := data.Encode(sc.ToPlutusData())
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("scCbor = %x\n", scCbor)
-				*/
-				return err
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err:        err,
+					},
+				)
+			}
+			if usedBudgetV1.Steps > redeemer.ExUnits.Steps || usedBudgetV1.Memory > redeemer.ExUnits.Memory {
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err: fmt.Errorf(
+							"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+							usedBudgetV1.Steps, usedBudgetV1.Memory,
+							redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+						),
+					},
+				)
 			}
 		case lcommon.PlutusV2Script:
-			txInfoV2, err := script.NewTxInfoV2FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-			)
-			if err != nil {
-				return err
+			// Real cardano-ledger rejects this transaction outright at the
+			// UTXOW level, before any script runs, when PlutusV2 has no real
+			// cost model yet -- see ErrNoCostModelForPlutusV2.
+			if syntheticV2CostModelInEffect(ls) {
+				return fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
 			}
+			// txInfoV2 is already built above (the .Redeemers this loop
+			// ranges over came from it); reused here rather than rebuilt.
 			// Get spent UTxO datum
 			var datum data.PlutusData
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 1, "PlutusV2")
+			if err != nil {
+				return err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[1],
+				costModel,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
-			evalContext.SkipFinalSlippageFlush = true
-			_, err = s.Evaluate(
+			usedBudgetV2, err := s.Evaluate(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				redeemer.ExUnits,
+				lcommon.ExUnits{
+					Steps:  tmpPparams.MaxTxExUnits.Steps,
+					Memory: tmpPparams.MaxTxExUnits.Memory,
+				},
 				evalContext,
 			)
 			if err != nil {
-				/*
-					fmt.Printf("TX ID: %s\n", tx.Hash().String())
-					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
-					scriptHash := s.Hash()
-					fmt.Printf("scriptHash = %s\n", scriptHash.String())
-					fmt.Printf("tx = %x\n", tx.Cbor())
-					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
-					var tmpInputs []lcommon.TransactionInput
-					var tmpOutputs []lcommon.TransactionOutput
-					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
-						tmpInputs = append(tmpInputs, input.Id)
-						tmpOutputs = append(tmpOutputs, input.Output)
-					}
-					tmpInputsCbor, err2 := cbor.Encode(tmpInputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
-					tmpOutputsCbor, err2 := cbor.Encode(tmpOutputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
-					scCbor, err2 := data.Encode(sc.ToPlutusData())
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("scCbor = %x\n", scCbor)
-				*/
-				return err
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err:        err,
+					},
+				)
+			}
+			if usedBudgetV2.Steps > redeemer.ExUnits.Steps || usedBudgetV2.Memory > redeemer.ExUnits.Memory {
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err: fmt.Errorf(
+							"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+							usedBudgetV2.Steps, usedBudgetV2.Memory,
+							redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+						),
+					},
+				)
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}
 	}
-	return nil
+	return validatePlutusOutcome(tx, nil)
 }
 
 var babbageUtxoValidationRules = buildBabbageValidationRules()
 
 func buildBabbageValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
+		babbage.UtxoValidationRuleDescriptors(),
 		babbage.UtxoValidationRules,
-		babbageUtxoValidatePlutusScriptsRuleIndex,
-		babbage.UtxoValidatePlutusScripts,
-		"babbage.UtxoValidatePlutusScripts",
+		lcommon.UtxoValidationRulePlutusScripts,
 	)
 }
 
@@ -509,13 +523,18 @@ func EvaluateTxBabbage(
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
-	txInfoV2, err := script.NewTxInfoV2FromTransaction(
+	var txInfoV2 script.TxInfoV2
+	txInfos := newTxInfoCache(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	if txHasRedeemers(tx) {
+		txInfoV2, err = txInfos.v2()
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
@@ -534,11 +553,9 @@ func EvaluateTxBabbage(
 		}
 		switch s := tmpScript.(type) {
 		case lcommon.PlutusV1Script:
-			txInfoV1, err := script.NewTxInfoV1FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-			)
+			// Built at most once per transaction via txInfos, regardless of
+			// how many PlutusV1 redeemers share it.
+			txInfoV1, err := txInfos.v1()
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
@@ -548,13 +565,17 @@ func EvaluateTxBabbage(
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[0],
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -569,34 +590,44 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,
 			}] = usedBudget
 		case lcommon.PlutusV2Script:
-			txInfoV2, err := script.NewTxInfoV2FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-			)
-			if err != nil {
-				return 0, lcommon.ExUnits{}, nil, err
+			// Mirrors ValidateTxBabbage's identical check: a transaction
+			// that would be rejected outright at validation time must not
+			// be quoted a fee/ex-units estimate implying it's valid.
+			if syntheticV2CostModelInEffect(ls) {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+					"script %s: %w",
+					tmpScript.Hash(),
+					ErrNoCostModelForPlutusV2,
+				)
 			}
+			// txInfoV2 is already built above (the .Redeemers this loop
+			// ranges over came from it); reused here rather than rebuilt.
 			// Get spent UTxO datum
 			var datum data.PlutusData
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
 			sc := script.NewScriptContextV1V2(txInfoV2, purpose)
+			costModel, err := requiredCostModel(tmpPparams.CostModels, 1, "PlutusV2")
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, err
+			}
 			evalContext, err := cek.NewEvalContext(
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
-				tmpPparams.CostModels[1],
+				costModel,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -611,8 +642,10 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,

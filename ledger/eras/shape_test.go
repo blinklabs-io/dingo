@@ -29,7 +29,12 @@ import (
 // Full mainnet-ish config with both genesis files present.
 func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
-	byron := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	byron := `{
+		"avvmDistr": {},
+		"blockVersionData": {"heavyDelThd":"300000000000","maxBlockSize":"2000000","maxHeaderSize":"2000000","maxProposalSize":"700","maxTxSize":"4096","mpcThd":"20000000000000","scriptVersion":0,"slotDuration":"20000","softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000","updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"},
+		"protocolConsts":{"k":432,"protocolMagic":164},"startTime":1788739200,
+		"bootStakeholders":{},"heavyDelegation":{},"nonAvvmBalances":{}
+	}`
 	shelley := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -39,7 +44,10 @@ func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byron)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)))
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+	)
 	return cfg
 }
 
@@ -54,7 +62,10 @@ func newShelleyOnlyCfg(t *testing.T) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)))
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+	)
 	return cfg
 }
 
@@ -155,8 +166,20 @@ func TestBuildShape_OK(t *testing.T) {
 	for _, e := range shape.Eras {
 		w, ok := want[e.EraName]
 		require.True(t, ok, "unexpected era %q", e.EraName)
-		assert.Equal(t, w.min, e.MinMajorVersion, "%s MinMajorVersion", e.EraName)
-		assert.Equal(t, w.max, e.MaxMajorVersion, "%s MaxMajorVersion", e.EraName)
+		assert.Equal(
+			t,
+			w.min,
+			e.MinMajorVersion,
+			"%s MinMajorVersion",
+			e.EraName,
+		)
+		assert.Equal(
+			t,
+			w.max,
+			e.MaxMajorVersion,
+			"%s MaxMajorVersion",
+			e.EraName,
+		)
 	}
 
 	assert.NoError(t, shape.Validate(), "BuildShape must produce a valid Shape")
@@ -260,7 +283,9 @@ func TestBuildShape_NextEraTrigger_AtEpochOverride(t *testing.T) {
 
 // TestXHardForkAtEpoch is ignored when ExperimentalHardForksEnabled is not
 // set: HardForkEpoch returns false, so we fall through to AtVersion.
-func TestBuildShape_NextEraTrigger_NoOverrideWithoutExperimentalFlag(t *testing.T) {
+func TestBuildShape_NextEraTrigger_NoOverrideWithoutExperimentalFlag(
+	t *testing.T,
+) {
 	cfg := newTestCfg(t)
 	override := uint64(5)
 	cfg.TestShelleyHardForkAtEpoch = &override
@@ -296,9 +321,17 @@ func TestBuildShape_NextEraTrigger_MultipleOverrides(t *testing.T) {
 
 	assert.Equal(t, hardfork.TriggerAtEpoch, byEra["Byron"].NextEraTrigger.Kind)
 	assert.Equal(t, shelleyEpoch, byEra["Byron"].NextEraTrigger.Epoch)
-	assert.Equal(t, hardfork.TriggerAtEpoch, byEra["Babbage"].NextEraTrigger.Kind)
+	assert.Equal(
+		t,
+		hardfork.TriggerAtEpoch,
+		byEra["Babbage"].NextEraTrigger.Kind,
+	)
 	assert.Equal(t, conwayEpoch, byEra["Babbage"].NextEraTrigger.Epoch)
-	assert.Equal(t, hardfork.TriggerAtVersion, byEra["Shelley"].NextEraTrigger.Kind)
+	assert.Equal(
+		t,
+		hardfork.TriggerAtVersion,
+		byEra["Shelley"].NextEraTrigger.Kind,
+	)
 }
 
 // The Shape produced by BuildShape always validates, including the

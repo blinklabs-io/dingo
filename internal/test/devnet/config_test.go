@@ -1,0 +1,409 @@
+//go:build linux
+
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package devnet
+
+import (
+	"os"
+	"regexp"
+	"slices"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+)
+
+// TestCheckedInSpecsAreValid parses every network spec in this directory
+// and enforces the consensus-timing invariants on it. This is the guard
+// that keeps an accelerated configuration internally valid: shortening
+// the epoch without also shrinking k would put the candidate-nonce freeze
+// outside the epoch, which fails here rather than as a mystifying DevNet
+// stall.
+func TestCheckedInSpecsAreValid(t *testing.T) {
+	for _, spec := range []struct {
+		file      string
+		poolCount int
+	}{
+		{"testnet.yaml", 2},
+		{"testnet-dingo.yaml", 3},
+		{"testnet-accelerated.yaml", 2},
+		{"testnet-dingo-accelerated.yaml", 3},
+		{"testnet-dingo-leios.yaml", 3},
+	} {
+		t.Run(spec.file, func(t *testing.T) {
+			cfg, err := LoadDevNetConfigFrom(spec.file)
+			require.NoError(t, err)
+			require.NoError(t, cfg.Validate())
+			require.Equal(t, spec.poolCount, cfg.PoolCount)
+			require.Equal(t, uint32(42), cfg.NetworkMagic)
+		})
+	}
+}
+
+func TestLeiosSpecActivatesDijkstraAtGenesis(t *testing.T) {
+	cfg, err := LoadDevNetConfigFrom("testnet-dingo-leios.yaml")
+	require.NoError(t, err)
+	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
+	require.Zero(t, *cfg.DijkstraHardForkAtEpoch)
+	require.Equal(t, uint64(120), cfg.EpochLength)
+	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
+}
+
+// The accelerated specs exist to make a full scenario fit the reference
+// runner budget; if someone relaxes their timing back toward canonical,
+// this fails before CI spends five minutes discovering it.
+func TestAcceleratedSpecsMeetTheRunnerBudget(t *testing.T) {
+	for _, file := range []string{
+		"testnet-accelerated.yaml",
+		"testnet-dingo-accelerated.yaml",
+	} {
+		t.Run(file, func(t *testing.T) {
+			cfg, err := LoadDevNetConfigFrom(file)
+			require.NoError(t, err)
+
+			plan, err := NewScenarioPlan(cfg)
+			require.NoError(t, err)
+			require.LessOrEqual(t, plan.Total(), ReferenceRunnerBudget)
+		})
+	}
+}
+
+// The configured quarantine must expire before the accelerated run does;
+// otherwise submitted outputs cannot fund a later round in that scenario.
+func TestAcceleratedTxPumpQuarantineFitsRunnerBudget(t *testing.T) {
+	t.Parallel()
+	environments := loadComposeTxPumpEnvironments(t)
+	for _, profile := range []struct {
+		service string
+		spec    string
+	}{
+		{"txpump", "testnet-accelerated.yaml"},
+		{"txpump-dingo", "testnet-dingo-accelerated.yaml"},
+	} {
+		for _, script := range []string{"run-tests.sh", "start.sh"} {
+			t.Run(profile.service+"/"+script, func(t *testing.T) {
+				cfg, err := LoadDevNetConfigFrom(profile.spec)
+				require.NoError(t, err)
+				plan, err := NewScenarioPlan(cfg)
+				require.NoError(t, err)
+				args := []string{"--accelerated"}
+				if profile.service == "txpump" {
+					args = append(args, "--conformance")
+				}
+				slots := launchedTxPumpWindow(t, script, args...)
+				require.Positive(
+					t,
+					slots,
+					"accelerated runs must retain output quarantine",
+				)
+				require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
+					environments[profile.service]["TXPUMP_CONFIRMATION_SLOTS"],
+					"Compose must consume the launcher's selected window")
+				quarantine := SlotsDuration(slots, cfg.SlotDuration())
+				t.Logf(
+					"profile=%s slots=%d slotLength=%s quarantine=%s hardTimeout=%s",
+					profile.spec,
+					slots,
+					cfg.SlotDuration(),
+					quarantine,
+					plan.HardTimeout,
+				)
+				require.Less(
+					t,
+					quarantine,
+					plan.HardTimeout,
+					"configured output quarantine must expire before the accelerated scenario ends",
+				)
+				propagation, ok := plan.Phase(PhasePropagation)
+				require.True(t, ok)
+				cooldown, err := strconv.Atoi(
+					environments[profile.service]["TXPUMP_COOLDOWN_MAX"],
+				)
+				require.NoError(t, err)
+				require.Less(
+					t,
+					quarantine+time.Duration(cooldown)*time.Millisecond,
+					propagation.Deadline,
+					"quarantine and a cooldown must fit before propagation ends",
+				)
+			})
+		}
+	}
+}
+
+func launchedTxPumpWindow(t *testing.T, script string, args ...string) uint64 {
+	t.Helper()
+	result := runFakeDevnetScript(t, script, 0, false, map[string]string{
+		"DEVNET_TXPUMP_CONFIRMATION_SLOTS": "999999",
+	}, args...)
+	require.Equal(t, 0, result.exitCode, result.output)
+	matches := regexp.MustCompile(`(?m)^TXPUMP_WINDOW=(\d+)$`).
+		FindAllStringSubmatch(result.dockerLog, -1)
+	require.NotEmpty(t, matches, "launcher never invoked Compose with a window")
+	var slots uint64
+	for i, match := range matches {
+		got, err := strconv.ParseUint(match[1], 10, 64)
+		require.NoError(t, err)
+		if i == 0 {
+			slots = got
+		}
+		require.Equal(
+			t,
+			slots,
+			got,
+			"Compose invocations must agree on the window",
+		)
+	}
+	return slots
+}
+
+func TestCanonicalTxPumpWindowIsUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, script := range []string{"run-tests.sh", "start.sh"} {
+		for _, conformance := range []bool{false, true} {
+			args := []string{}
+			if conformance {
+				args = append(args, "--conformance")
+			}
+			require.Equal(
+				t,
+				uint64(600),
+				launchedTxPumpWindow(t, script, args...),
+			)
+		}
+	}
+}
+
+// The canonical specs must stay on canonical timing: they are what the
+// soak and canary runs use, and quietly accelerating them would remove
+// the long-wall-clock coverage the fast scenario deliberately does not
+// provide.
+func TestCanonicalSpecsKeepCanonicalTiming(t *testing.T) {
+	for _, file := range []string{"testnet.yaml", "testnet-dingo.yaml"} {
+		t.Run(file, func(t *testing.T) {
+			cfg, err := LoadDevNetConfigFrom(file)
+			require.NoError(t, err)
+			require.Equal(t, uint64(500), cfg.EpochLength)
+			require.Equal(t, 1.0, cfg.SlotLength)
+			require.Equal(t, uint64(40), cfg.SecurityParam)
+			require.Equal(t, time.Second, cfg.SlotDuration())
+		})
+	}
+}
+
+// run-tests.sh and start.sh each map a mode to a network spec, and
+// docker-compose.yml supplies the defaults. Nothing makes them agree, so a
+// rename that updates one and not another would leave the Go harness
+// deriving its timings from a different spec than the configurator
+// generated genesis from — the scenario would still run, just against a
+// network whose parameters it has wrong.
+//
+// Rather than route all three through a shared resolver (indirection
+// across a shell/compose/Go boundary for two filenames), assert that every
+// spec they name exists and that the two scripts agree on the accelerated
+// pair.
+func TestScriptsAndComposeAgreeOnSpecFiles(t *testing.T) {
+	specRe := regexp.MustCompile(`testnet[a-z-]*\.yaml`)
+	acceleratedRe := regexp.MustCompile(`testnet[a-z-]*accelerated\.yaml`)
+
+	referenced := map[string][]string{}
+	for _, file := range []string{
+		"run-tests.sh", "start.sh", "docker-compose.yml",
+	} {
+		data, err := os.ReadFile(file)
+		require.NoError(t, err)
+		for _, name := range specRe.FindAllString(string(data), -1) {
+			referenced[file] = append(referenced[file], name)
+		}
+	}
+
+	for file, names := range referenced {
+		require.NotEmpty(t, names, "%s names no network spec", file)
+		for _, name := range names {
+			require.FileExists(t, name,
+				"%s references %s, which does not exist", file, name)
+		}
+	}
+
+	accelerated := func(file string) []string {
+		var out []string
+		for _, name := range referenced[file] {
+			if acceleratedRe.MatchString(name) && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	runTests := accelerated("run-tests.sh")
+	require.Len(t, runTests, 2,
+		"run-tests.sh should name both accelerated specs")
+	require.Equal(t, runTests, accelerated("start.sh"),
+		"start.sh and run-tests.sh must select the same accelerated specs;"+
+			" if they drift, the harness and the running network resolve"+
+			" different timings")
+}
+
+// TestComposeTxPumpCooldownUsesMilliseconds keeps the DevNet load profile in
+// agreement with txpump's millisecond-valued configuration contract and the
+// 5-15 second cadence documented in README.md. A value copied as seconds
+// makes txpump open a fresh NtC connection and submit each configured batch
+// every 5-15 milliseconds. That saturates the mempool and can starve the
+// persistent ChainSync observers which drive the accelerated scenario.
+func TestComposeTxPumpCooldownUsesMilliseconds(t *testing.T) {
+	environments := loadComposeTxPumpEnvironments(t)
+
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		t.Run(service, func(t *testing.T) {
+			environment := environments[service]
+			for _, tc := range []struct {
+				name string
+				want int
+			}{
+				{name: "MIN", want: 5_000},
+				{name: "MAX", want: 15_000},
+			} {
+				key := "TXPUMP_COOLDOWN_" + tc.name
+				requireComposeEnvInt(t, service, environment, key, tc.want,
+					"txpump cooldown values are milliseconds; the DevNet"+
+						" profile documents a 5-15 second cadence")
+			}
+		})
+	}
+}
+
+func requireComposeEnvInt(
+	t *testing.T,
+	service string,
+	environment map[string]string,
+	key string,
+	want int,
+	message string,
+) {
+	t.Helper()
+	raw, ok := environment[key]
+	require.True(t, ok, "Compose service %s must define %s", service, key)
+	got, err := strconv.Atoi(raw)
+	require.NoError(t, err,
+		"Compose service %s setting %s must be an integer", service, key)
+	require.Equal(t, want, got, message)
+}
+
+func loadComposeTxPumpEnvironments(t *testing.T) map[string]map[string]string {
+	t.Helper()
+	composeData, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	var compose struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(composeData, &compose))
+
+	environments := make(map[string]map[string]string, 2)
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		definition, ok := compose.Services[service]
+		require.True(t, ok, "Compose service %s must exist", service)
+		require.NotNil(t, definition.Environment,
+			"Compose service %s must define an environment", service)
+		environments[service] = definition.Environment
+	}
+	return environments
+}
+
+// TestComposeTxPumpSubmitsOneTransactionPerBatch prevents the DevNet load
+// generator from immediately spending outputs created earlier in the same
+// batch. Those dependent transactions can become invalid when an early fork
+// removes their parent, leaving the accelerated scenario without a stable
+// transaction-bearing block.
+func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
+	environments := loadComposeTxPumpEnvironments(t)
+
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		t.Run(service, func(t *testing.T) {
+			environment := environments[service]
+			for _, bound := range []string{"MIN", "MAX"} {
+				key := "TXPUMP_TX_COUNT_" + bound
+				requireComposeEnvInt(
+					t,
+					service,
+					environment,
+					key,
+					1,
+					"DevNet txpump batches must not create unconfirmed dependency chains",
+				)
+			}
+			require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
+				environment["TXPUMP_CONFIRMATION_SLOTS"],
+				"direct Compose use must retain the canonical default")
+			if service == "txpump-dingo" {
+				require.Equal(
+					t,
+					"${DEVNET_TXPUMP_TRANSACTION_ERA:-conway}",
+					environment["TXPUMP_TRANSACTION_ERA"],
+					"Dingo Leios profile must select Dijkstra transactions explicitly",
+				)
+			}
+		})
+	}
+}
+
+// TestComposeTxPumpWaitsForProfileReadiness verifies that each txpump service
+// starts only after every node in its active profile is healthy, preventing
+// genesis-backed transactions from being submitted during early convergence.
+func TestComposeTxPumpWaitsForProfileReadiness(t *testing.T) {
+	composeData, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	var compose struct {
+		Services map[string]struct {
+			DependsOn map[string]struct {
+				Condition string `yaml:"condition"`
+			} `yaml:"depends_on"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(composeData, &compose))
+
+	for service, dependencies := range map[string][]string{
+		"txpump-dingo": {"dingo-1", "dingo-2", "dingo-3", "dingo-relay"},
+		"txpump":       {"dingo-producer", "cardano-producer", "cardano-relay"},
+	} {
+		t.Run(service, func(t *testing.T) {
+			for _, dependency := range dependencies {
+				condition, ok := compose.Services[service].DependsOn[dependency]
+				require.True(t, ok, "%s must depend on %s", service, dependency)
+				require.Equal(t, "service_healthy", condition.Condition,
+					"%s must wait for %s to be healthy", service, dependency)
+			}
+		})
+	}
+}
+
+func TestLoadDevNetConfigFromMissingFile(t *testing.T) {
+	_, err := LoadDevNetConfigFrom("no-such-testnet.yaml")
+	require.Error(t, err)
+}
+
+func TestLoadDevNetConfigHonoursEnvOverride(t *testing.T) {
+	t.Setenv("DEVNET_TESTNET_YAML", "testnet-dingo-accelerated.yaml")
+	cfg, err := LoadDevNetConfig()
+	require.NoError(t, err)
+	require.Equal(t, 3, cfg.PoolCount)
+	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
+}

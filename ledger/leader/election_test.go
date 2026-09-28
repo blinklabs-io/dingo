@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 )
 
@@ -72,21 +74,14 @@ func newMockStakeProvider() *mockStakeProvider {
 	}
 }
 
-func (m *mockStakeProvider) GetPoolStake(
-	epoch uint64,
+func (m *mockStakeProvider) GetPoolAndTotalActiveStake(
+	_ uint64,
 	poolKeyHash []byte,
-) (uint64, error) {
+) (uint64, uint64, error) {
 	if m.err != nil {
-		return 0, m.err
+		return 0, 0, m.err
 	}
-	return m.poolStakes[string(poolKeyHash)], nil
-}
-
-func (m *mockStakeProvider) GetTotalActiveStake(epoch uint64) (uint64, error) {
-	if m.err != nil {
-		return 0, m.err
-	}
-	return m.totalStake, nil
+	return m.poolStakes[string(poolKeyHash)], m.totalStake, nil
 }
 
 // mockEpochProvider implements EpochInfoProvider for testing
@@ -101,6 +96,12 @@ type mockEpochProvider struct {
 	// division so tests can model variable epoch lengths or simulate
 	// past-horizon errors.
 	epochForSlot func(slot uint64) (uint64, error)
+	// epochSlotRange, when set, overrides EpochSlotRange's default fixed
+	// range so tests can model Byron-era offsets or variable epoch lengths.
+	epochSlotRange func(epoch uint64) (EpochSlotRange, error)
+	// consensusModeErr, when set, makes ConsensusModeForEpoch fail so tests
+	// can model an unresolvable era forecast.
+	consensusModeErr error
 }
 
 func newMockEpochProvider() *mockEpochProvider {
@@ -140,6 +141,21 @@ func (m *mockEpochProvider) SlotsPerEpoch() uint64 {
 	return m.slotsPerEpoch
 }
 
+func (m *mockEpochProvider) EpochSlotRange(
+	epoch uint64,
+) (EpochSlotRange, error) {
+	if m.epochSlotRange != nil {
+		return m.epochSlotRange(epoch)
+	}
+	if m.slotsPerEpoch == 0 {
+		return EpochSlotRange{}, errors.New("slotsPerEpoch unset")
+	}
+	return EpochSlotRange{
+		StartSlot: epoch * m.slotsPerEpoch,
+		SlotCount: m.slotsPerEpoch,
+	}, nil
+}
+
 func (m *mockEpochProvider) EpochForSlot(slot uint64) (uint64, error) {
 	if m.epochForSlot != nil {
 		return m.epochForSlot(slot)
@@ -154,8 +170,13 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 	return m.activeSlotCoeff
 }
 
-func (m *mockEpochProvider) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
-	return consensus.ConsensusModeTPraos
+func (m *mockEpochProvider) ConsensusModeForEpoch(
+	epoch uint64,
+) (consensus.ConsensusMode, error) {
+	if m.consensusModeErr != nil {
+		return 0, m.consensusModeErr
+	}
+	return consensus.ConsensusModeTPraos, nil
 }
 
 func (m *mockEpochProvider) SetEpochNonce(nonce []byte) {
@@ -297,9 +318,196 @@ func TestElectionStartStop(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestElectionStopPreventsStaleMonitorFromStoppingALaterStart guards a
+// real bug: the ctx-cancellation monitor goroutine Start launches used to
+// be untracked by e.wg, so a completed Stop() call could return while
+// that goroutine was still alive, watching the now-superseded ctx/stopCh
+// from that Start generation. A later Start() on the same *Election (a
+// supported, idempotent-per-Stop pattern per TestElectionStartStop above)
+// builds a fresh ctx/stopCh but does nothing about a stale monitor left
+// over from the previous generation -- if that stale monitor's own parent
+// context were ever cancelled afterward, it would call e.Stop() on the
+// new, currently-running generation it has no business touching.
+func TestElectionStopPreventsStaleMonitorFromStoppingALaterStart(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 10000
+	stakeProvider.poolStakes[string(poolId[:])] = 1000
+
+	epochProvider := newMockEpochProvider()
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	parentA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	require.NoError(t, election.Start(parentA))
+	require.NoError(t, election.Stop())
+
+	parentB := t.Context()
+	require.NoError(t, election.Start(parentB))
+
+	// Cancelling the FIRST generation's now-unrelated parent must never
+	// affect the second, currently-running generation -- if Stop above
+	// left generation 1's monitor goroutine alive, this would eventually
+	// call e.Stop() on generation 2.
+	cancelA()
+
+	require.Never(t, func() bool {
+		election.mu.RLock()
+		defer election.mu.RUnlock()
+		return !election.running
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	require.NoError(t, election.Stop())
+}
+
+// TestElectionStopDoesNotDeadlockOnMonitorSelectRace guards the sharper,
+// more severe consequence of the same gap: once the monitor goroutine is
+// tracked in e.wg (so Stop actually waits for it), a select that picks its
+// <-ctx.Done() case instead of <-stopCh purely by luck -- both channels
+// can be simultaneously ready by the time the goroutine is actually
+// scheduled, since Stop closes stopCh and cancels ctx back to back with
+// no yield point in between, and Go's select has no case-priority when
+// more than one is ready -- would call e.Stop() a second, concurrent
+// time. That second call's own e.wg.Wait() would then deadlock forever
+// waiting for this very goroutine to finish, which it never will: it is
+// itself blocked inside that same e.Stop() call. Repeats many Start/Stop
+// cycles (each call is independent, so a fresh *Election every time)
+// specifically to land in that narrow race window rather than relying on
+// a single attempt to happen to hit it.
+func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 10000
+	stakeProvider.poolStakes[string(poolId[:])] = 1000
+	epochProvider := newMockEpochProvider()
+
+	for i := range 200 {
+		eventBus := event.NewEventBus(nil, nil)
+		election := NewElection(
+			poolId,
+			electionTestVRFSeed,
+			stakeProvider,
+			epochProvider,
+			eventBus,
+			slog.Default(),
+		)
+		require.NoError(t, election.Start(context.Background()))
+
+		stopDone := make(chan struct{})
+		go func() {
+			defer close(stopDone)
+			_ = election.Stop()
+		}()
+
+		select {
+		case <-stopDone:
+		case <-time.After(testutil.AsyncWait):
+			t.Fatalf("Stop() deadlocked on iteration %d", i)
+		}
+		eventBus.Stop()
+	}
+}
+
+// blockingStakeProvider wraps mockStakeProvider's GetPoolStake so a test can
+// deterministically pin a schedule computation in flight: the first call
+// signals started (closing it) and then blocks until release is closed,
+// rather than racing a real computation's completion against a timed Stop
+// call.
+type blockingStakeProvider struct {
+	*mockStakeProvider
+	started   chan struct{}
+	startOnce sync.Once
+	release   chan struct{}
+}
+
+func (b *blockingStakeProvider) GetPoolAndTotalActiveStake(
+	epoch uint64,
+	poolKeyHash []byte,
+) (uint64, uint64, error) {
+	b.startOnce.Do(func() { close(b.started) })
+	<-b.release
+	return b.mockStakeProvider.GetPoolAndTotalActiveStake(epoch, poolKeyHash)
+}
+
+// TestElectionStopWaitsForInFlightScheduleComputation guards a real bug:
+// Stop used to signal its background goroutines to exit (closing stopCh/
+// computeCh, cancelling ctx, unsubscribing) and return immediately,
+// without waiting for a schedule computation already in flight to
+// actually finish. Schedule computation reads stakeProvider/epochProvider,
+// which node.go's initBlockForger binds to whatever ledgerState exists at
+// construction time -- so on the live database restore/truncate path
+// (node_lifecycle.go), a computation still running when Stop returns could
+// keep reading from that ledgerState after the caller closes it moments
+// later. Start's own initial-epoch compute request pins the computation in
+// flight via blockingStakeProvider, so this needs no timing assumptions
+// about a real computation's speed.
+func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	inner := newMockStakeProvider()
+	inner.totalStake = 10000
+	inner.poolStakes[string(poolId[:])] = 1000
+	blocking := &blockingStakeProvider{
+		mockStakeProvider: inner,
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+
+	epochProvider := newMockEpochProvider()
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		blocking,
+		epochProvider,
+		eventBus,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	require.NoError(t, election.Start(context.Background()))
+
+	// Start's own initial schedule-compute request reaches GetPoolStake
+	// almost immediately.
+	select {
+	case <-blocking.started:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("schedule computation never started")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- election.Stop() }()
+
+	select {
+	case <-stopDone:
+		t.Fatal(
+			"Stop returned before the in-flight schedule computation finished",
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("Stop did not return after the in-flight computation finished")
+	}
+}
+
 func TestElectionScheduleEarlyEpochs(t *testing.T) {
-	// Epochs 0 and 1 use the genesis snapshot (epoch 0) for leader
-	// election, matching the Cardano spec.
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
@@ -328,6 +536,62 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 	// Schedule is computed asynchronously; wait for it.
 	schedule := waitForSchedule(t, election, 30*time.Second)
 	assert.Equal(t, uint64(1), schedule.Epoch)
+}
+
+func TestElectionUsesEpochSlotRangeForSchedule(t *testing.T) {
+	const (
+		epoch              = uint64(299)
+		preprodEpochStart  = uint64(127_526_400)
+		testEpochSlotCount = uint64(4)
+	)
+
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
+
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(epoch)
+	epochProvider.activeSlotCoeff = 1.0
+	epochProvider.SetEpochNonceForEpoch(epoch, electionTestNonce)
+	epochProvider.epochSlotRange = func(gotEpoch uint64) (EpochSlotRange, error) {
+		if gotEpoch != epoch {
+			return EpochSlotRange{}, fmt.Errorf(
+				"got epoch slot range request for epoch %d, want %d",
+				gotEpoch,
+				epoch,
+			)
+		}
+		return EpochSlotRange{
+			StartSlot: preprodEpochStart,
+			SlotCount: testEpochSlotCount,
+		}, nil
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	err := election.Start(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = election.Stop() }()
+
+	schedule := waitForSchedule(t, election, 30*time.Second)
+	require.Equal(t, epoch, schedule.Epoch)
+	slots := schedule.LeaderSlotsSnapshot()
+	require.NotEmpty(t, slots)
+	for _, slot := range slots {
+		assert.GreaterOrEqual(t, slot, preprodEpochStart)
+		assert.Less(t, slot, preprodEpochStart+testEpochSlotCount)
+	}
 }
 
 func TestElectionLoadsPersistedSchedule(t *testing.T) {
@@ -374,7 +638,13 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	store := newMockScheduleStore()
-	persisted := NewSchedule(10, poolId, 1_000_000, 1_000_000, makeElectionNonce(0x44))
+	persisted := NewSchedule(
+		10,
+		poolId,
+		1_000_000,
+		1_000_000,
+		makeElectionNonce(0x44),
+	)
 	persisted.AddLeaderSlot(999)
 	require.NoError(t, store.SaveSchedule(persisted))
 
@@ -415,7 +685,7 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 		require.NoError(t, err)
 		return persistedAfterLoad != nil &&
 			bytes.Equal(makeElectionNonce(0x55), persistedAfterLoad.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond)
+	}, testutil.AsyncWait, 50*time.Millisecond)
 }
 
 func TestElectionPersistsComputedSchedule(t *testing.T) {
@@ -452,7 +722,7 @@ func TestElectionPersistsComputedSchedule(t *testing.T) {
 		persisted, err = store.LoadSchedule(schedule.Epoch, poolId)
 		require.NoError(t, err)
 		return persisted != nil
-	}, 2*time.Second, 50*time.Millisecond)
+	}, testutil.AsyncWait, 50*time.Millisecond)
 	require.NotNil(t, persisted)
 	assert.Equal(
 		t,
@@ -497,7 +767,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
+	}, testutil.AsyncWait, 100*time.Millisecond,
 		"next epoch schedule should be precomputed at startup")
 
 	require.Eventually(t, func() bool {
@@ -505,7 +775,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 		require.NoError(t, err)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"next epoch schedule should be persisted at startup")
 }
 
@@ -693,7 +963,9 @@ func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
 // known range), the producer declines rather than running with an
 // incorrect epoch index. The compute path is not engaged because we
 // don't know which epoch's schedule to request.
-func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(t *testing.T) {
+func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(
+	t *testing.T,
+) {
 	poolId := lcommon.PoolKeyHash{}
 	epochProvider := newMockEpochProvider()
 	epochProvider.epochForSlot = func(uint64) (uint64, error) {
@@ -826,7 +1098,7 @@ func TestElectionEpochTransition(t *testing.T) {
 			)
 		}
 		return ready
-	}, 30*time.Second, 100*time.Millisecond, "schedule should update to epoch 11")
+	}, testutil.AsyncWait, 100*time.Millisecond, "schedule should update to epoch 11")
 
 	// Schedule should be updated to new epoch
 	schedule = election.CurrentSchedule()
@@ -882,7 +1154,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 30*time.Second, 100*time.Millisecond,
+	}, testutil.AsyncWait, 100*time.Millisecond,
 		"next epoch schedule should be precomputed after nonce-ready event")
 
 	require.Eventually(t, func() bool {
@@ -890,7 +1162,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		require.NoError(t, err)
 		return schedule != nil &&
 			bytes.Equal(electionTestNonce11, schedule.EpochNonce)
-	}, 2*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"next epoch schedule should be persisted")
 }
 
@@ -941,7 +1213,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 		return bytes.Equal(schedule.EpochNonce, current.EpochNonce) &&
 			assert.ObjectsAreEqual(leaderSlots, currentLeaderSlots) &&
 			election.ShouldProduceBlock(leaderSlot)
-	}, time.Second, 20*time.Millisecond,
+	}, testutil.AsyncWait, 20*time.Millisecond,
 		"rollback should not invalidate a stable current-epoch schedule")
 }
 
@@ -978,7 +1250,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 	require.Eventually(t, func() bool {
 		nextBefore = election.ScheduleForEpoch(11)
 		return nextBefore != nil
-	}, 30*time.Second, 100*time.Millisecond)
+	}, testutil.AsyncWait, 100*time.Millisecond)
 	require.NotNil(t, nextBefore)
 	expectedSlots := nextBefore.LeaderSlotsSnapshot()
 	expectedNonce := append([]byte(nil), nextBefore.EpochNonce...)
@@ -995,8 +1267,11 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(expectedNonce, schedule.EpochNonce) &&
-			assert.ObjectsAreEqual(expectedSlots, schedule.LeaderSlotsSnapshot())
-	}, time.Second, 20*time.Millisecond,
+			assert.ObjectsAreEqual(
+				expectedSlots,
+				schedule.LeaderSlotsSnapshot(),
+			)
+	}, testutil.AsyncWait, 20*time.Millisecond,
 		"rollback should not invalidate a precomputed next-epoch schedule")
 }
 
@@ -1029,7 +1304,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	// both cache-hit and cache-miss paths.
 	require.Eventually(t, func() bool {
 		return election.CurrentSchedule() != nil
-	}, 30*time.Second, 50*time.Millisecond,
+	}, testutil.AsyncWait, 50*time.Millisecond,
 		"initial schedule should be computed before concurrent access")
 
 	// Concurrent reads and operations
@@ -1047,4 +1322,175 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	for range 20 {
 		<-done
 	}
+}
+
+// Parent cancellation must join the worker generation before any concurrent
+// Stop returns or a new Start can replace the worker channels.
+func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
+	pool := lcommon.PoolKeyHash{}
+	inner := newMockStakeProvider()
+	inner.totalStake = 10000
+	inner.poolStakes[string(pool[:])] = 1000
+	blocked := &blockingStakeProvider{
+		mockStakeProvider: inner,
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	var release sync.Once
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Stop()
+	defer release.Do(func() { close(blocked.release) })
+	e := NewElection(
+		pool,
+		electionTestVRFSeed,
+		blocked,
+		newMockEpochProvider(),
+		bus,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, e.Start(parent))
+	select {
+	case <-blocked.started:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("worker did not reach provider")
+	}
+	cancel()
+	// Start must inspect the canceled generation context, even before its
+	// coordinator has acquired the election mutex and marked it stopped.
+	restarted := make(chan error, 1)
+	go func() { restarted <- e.Start(t.Context()) }()
+	select {
+	case <-restarted:
+		t.Fatal("Start replaced an undrained canceled generation")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.Eventually(t, func() bool {
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		return !e.running
+	}, testutil.AsyncWait, time.Millisecond)
+	canceled, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	require.ErrorIs(t, e.Start(canceled), context.Canceled)
+	stopped := make(chan error, 2)
+	for range 2 {
+		go func() { stopped <- e.Stop() }()
+	}
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned before canceled generation drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release.Do(func() { close(blocked.release) })
+	for range 2 {
+		select {
+		case err := <-stopped:
+			require.NoError(t, err)
+		case <-time.After(testutil.AsyncWait):
+			t.Fatal("Stop did not complete after canceled worker drained")
+		}
+	}
+	select {
+	case err := <-restarted:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("restart did not complete after canceled worker drained")
+	}
+	e.mu.RLock()
+	running := e.running
+	e.mu.RUnlock()
+	require.True(t, running, "old generation waiters must not stop the restart")
+	go func() { stopped <- e.Stop() }()
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("restarted generation did not stop")
+	}
+}
+
+// gatedElectionContext signals when Start evaluates its cancellation select.
+type gatedElectionContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *gatedElectionContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
+}
+
+func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
+	oldCtx, cancelOld := context.WithCancel(t.Context())
+	cancelOld()
+	oldDone := make(chan struct{})
+	e := &Election{lifecycleCtx: oldCtx, lifecycleDone: oldDone}
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	defer cancelWait()
+	ctx := &gatedElectionContext{Context: waitCtx, entered: make(chan struct{})}
+	afterWait := func() {
+		// This waiter selected generation completion before cancellation. A
+		// second caller installs a healthy replacement before it reacquires mu.
+		e.mu.Lock()
+		e.running = true
+		e.lifecycleCtx = t.Context()
+		e.lifecycleDone = make(chan struct{})
+		cancelWait()
+		e.mu.Unlock()
+	}
+	result := make(chan error, 1)
+	go func() { result <- e.start(ctx, afterWait) }()
+	select {
+	case <-ctx.entered:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("Start did not wait for generation completion")
+	}
+	close(oldDone)
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("Start did not return after generation completion")
+	}
+}
+
+// TestComputeScheduleDeclinesUnresolvableConsensusMode pins the caller half of
+// the fail-closed consensus-mode forecast. The mode selects both the VRF input
+// construction and the threshold, so a schedule computed from a substituted
+// default is a leader-slot list cardano-node will reject. computeSchedule must
+// return the resolution error rather than produce one.
+func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
+	t.Parallel()
+
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
+
+	epochProvider := newMockEpochProvider()
+	epochProvider.consensusModeErr = errors.New("era shape unavailable")
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(),
+		epochProvider.CurrentEpoch(),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "era shape unavailable")
+	require.Nil(t, schedule,
+		"no schedule may be produced from an unresolved consensus mode")
 }

@@ -14,27 +14,56 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"math/big"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 type MoveInstantaneousRewards struct {
-	Rewards       []MoveInstantaneousRewardsReward `gorm:"foreignKey:MIRID;constraint:OnDelete:CASCADE"`
-	Pot           uint                             `gorm:"index"`
-	CertificateID uint                             `gorm:"index"`
-	ID            uint                             `gorm:"primarykey"`
-	AddedSlot     uint64                           `gorm:"index"`
+	Rewards       []MoveInstantaneousRewardsReward
+	Pot           uint
+	CertificateID uint
+	ID            uint
+	AddedSlot     uint64
+	// OtherPot holds the lovelace amount for a pot-to-pot transfer (non-zero
+	// only when the cert moves coins between treasury and reserves rather than
+	// distributing to staking credentials).
+	OtherPot types.Uint64
 }
 
-func (MoveInstantaneousRewards) TableName() string {
-	return "move_instantaneous_rewards"
+// MIREffect is the processed form of a single MIR certificate used by the
+// epoch-boundary application logic. One of OtherPot > 0 (pot-to-pot transfer)
+// or len(Rewards) > 0 (credential distribution) will be non-empty.
+type MIREffect struct {
+	// ID is the move_instantaneous_rewards row ID. Ordering comes from the
+	// store query and this value is also the mir_id join key for reward rows.
+	ID uint
+	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
+	Pot uint
+	// OtherPot is the amount for a pot-to-pot transfer (0 when distributing).
+	OtherPot uint64
+	// Rewards lists credential→delta pairs for a distribution MIR.
+	Rewards []MIRReward
+}
+
+// MIRReward is a single credential→delta entry from a distribution MIR cert.
+type MIRReward struct {
+	Credential    []byte
+	CredentialTag uint8
+	// Amount is the signed reward delta. The wire format types it as
+	// delta_coin (int), which the reference decodes as the signed unbounded
+	// DeltaCoin, so a later certificate in the same epoch can reduce an
+	// earlier one. Never nil on a value read from the store.
+	Amount *big.Int
 }
 
 type MoveInstantaneousRewardsReward struct {
-	Credential []byte
-	Amount     types.Uint64
-	ID         uint `gorm:"primarykey"`
-	MIRID      uint `gorm:"index"`
-}
-
-func (MoveInstantaneousRewardsReward) TableName() string {
-	return "move_instantaneous_rewards_reward"
+	Credential    []byte
+	CredentialTag uint8
+	// Amount is the signed reward delta persisted for one credential of one
+	// MIR certificate. See MIRReward.Amount.
+	Amount *big.Int
+	ID     uint
+	MIRID  uint
 }

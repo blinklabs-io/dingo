@@ -102,7 +102,9 @@ func TestIsValidEraAdvancement_UnknownCurrentEra_Rejected(t *testing.T) {
 			unknownEraId)
 	}
 	if eras.IsValidEraAdvancement(unknownEraId, eras.ConwayEraDesc.Id) {
-		t.Errorf("advancement from unknown era %d to known era must be rejected",
-			unknownEraId)
+		t.Errorf(
+			"advancement from unknown era %d to known era must be rejected",
+			unknownEraId,
+		)
 	}
 }

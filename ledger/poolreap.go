@@ -1,0 +1,136 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"encoding/hex"
+	"fmt"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/governance"
+)
+
+// applyPoolRetirements applies the Shelley-era POOLREAP transition at an epoch
+// boundary, embedded in the Conway EPOCH rule before governance enactment and
+// treasury accounting (cardano-ledger Conway Epoch.hs). A pool retirement
+// certificate names the epoch at which the pool retires; its deposit is not
+// refunded in the submitting transaction but at the boundary into that epoch.
+//
+// For each pool whose effective retirement epoch is newEpoch, the deposit
+// recorded with its active registration is refunded to the pool's reward
+// account when that account is registered and active; otherwise the deposit is
+// added to the treasury. This reuses the governance refund helpers so deposit
+// returns follow identical registered-vs-unclaimed accounting.
+//
+// The reward account comes from the pool's latest registration; the amount is
+// that registration's persisted held deposit
+// (`pool_registration.deposit_held`), not what the current protocol parameters
+// would charge. cardano-ledger charges a pool deposit only for a registration
+// of a pool that is not already registered, so a re-registration carries the
+// earlier registration's held amount forward and a poolDeposit parameter change
+// after the registration that paid neither mints nor burns the difference at
+// this boundary. A registration made after the pool's retirement was reaped is
+// a first registration again and pays the deposit in force at its own slot.
+//
+// Removal from active pool state is not a separate write: dingo derives the
+// active pool set from the latest registration/retirement certificates
+// (GetActivePoolKeyHashesAtSlot excludes pools once retirement.epoch <=
+// epochAtSlot), so once the boundary into newEpoch is crossed the pool is no
+// longer active. Keeping the certificate rows — rather than deleting pool
+// state — is what makes the transition rollback-safe: the reward-account
+// credits (AccountRewardDelta journal) and treasury writes (NetworkState) are
+// slot-keyed and reverted by the normal rollback path, after which re-applying
+// the boundary re-derives the same refunds.
+func (ls *LedgerState) applyPoolRetirements(
+	txn *database.Txn,
+	newEpoch uint64,
+	boundarySlot uint64,
+) error {
+	refunds, err := ls.db.GetPoolsRetiringAtEpoch(
+		newEpoch, boundarySlot, txn,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"get pools retiring at epoch %d: %w", newEpoch, err,
+		)
+	}
+	if len(refunds) == 0 {
+		return nil
+	}
+	for _, refund := range refunds {
+		deposit := uint64(refund.DepositHeld)
+		// The reward account on a pool registration is the 28-byte stake
+		// credential hash, the same form AddAccountReward looks up.
+		credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
+			ls.db,
+			txn,
+			refund.RewardAccountCredentialTag,
+			refund.RewardAccount,
+			deposit,
+			boundarySlot,
+			// The reaped pool's key hash is the per-event credit
+			// discriminator: distinct pools refunding the same reward
+			// account in one epoch stay separate rows, and re-applying the
+			// boundary re-derives the same refund idempotently.
+			refund.PoolKeyHash,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"refund pool %x deposit: %w",
+				refund.PoolKeyHash, err,
+			)
+		}
+		if !credited {
+			if err := governance.AddUnclaimedToTreasury(
+				ls.db,
+				txn,
+				deposit,
+				boundarySlot,
+			); err != nil {
+				return fmt.Errorf(
+					"return unclaimed pool %x deposit to treasury: %w",
+					refund.PoolKeyHash, err,
+				)
+			}
+		}
+		// The delegation half of POOLREAP. cardano-ledger domain-restricts
+		// the delegation map by the reaped pools, so no account is left
+		// delegated to a pool that no longer exists. Deriving the active pool
+		// set from certificates hides the omission while the pool stays gone,
+		// and surfaces it the moment the same pool re-registers: the stale
+		// rows rejoin the pool distribution, the node's total active stake
+		// exceeds the network's, and every other pool's VRF leader threshold
+		// comes out too small (dingo #3794).
+		if err := ls.db.Metadata().ClearDelegationsToRetiredPool(
+			refund.PoolKeyHash,
+			boundarySlot,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"clear delegations to retired pool %x: %w",
+				refund.PoolKeyHash, err,
+			)
+		}
+		ls.config.Logger.Debug(
+			"applied pool retirement deposit refund",
+			"pool", hex.EncodeToString(refund.PoolKeyHash),
+			"epoch", newEpoch,
+			"deposit", deposit,
+			"credited_reward_account", credited,
+			"component", "ledger",
+		)
+	}
+	return nil
+}

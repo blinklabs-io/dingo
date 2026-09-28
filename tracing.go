@@ -25,6 +25,22 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 )
 
+// warnIfTracingMisconfigured logs a warning when stdout span export is
+// requested while tracing itself is disabled. setupTracing is only called
+// when tracing is enabled (see Node.Run), so tracingStdout on its own never
+// creates an exporter and would otherwise be silently ignored.
+func (n *Node) warnIfTracingMisconfigured() {
+	if n.config.tracing || !n.config.tracingStdout {
+		return
+	}
+	n.config.logger.Warn(
+		"tracing stdout export is enabled but tracing is disabled, so no spans"+
+			" will be exported; enable tracing (yaml tracing: true, --tracing,"+
+			" or DINGO_TRACING_ENABLED=true) or turn off the stdout option",
+		"component", "tracing",
+	)
+}
+
 func (n *Node) setupTracing(ctx context.Context) error {
 	// Set up propagator.
 	otel.SetTextMapPropagator(

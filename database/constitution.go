@@ -27,41 +27,27 @@ func (d *Database) DeleteConstitutionsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.DeleteConstitutionsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete constitutions after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().DeleteConstitutionsAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete constitutions after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetConstitution returns the current constitution
 func (d *Database) GetConstitution(txn *Txn) (*models.Constitution, error) {
 	if txn == nil {
-		return d.metadata.GetConstitution(nil)
+		return d.governanceStore().GetConstitution(nil)
 	}
-	return d.metadata.GetConstitution(txn.Metadata())
+	return d.governanceStore().GetConstitution(txn.Metadata())
 }
 
 // SetConstitution saves the constitution
@@ -70,7 +56,7 @@ func (d *Database) SetConstitution(
 	txn *Txn,
 ) error {
 	if txn == nil {
-		return d.metadata.SetConstitution(constitution, nil)
+		return d.governanceStore().SetConstitution(constitution, nil)
 	}
-	return d.metadata.SetConstitution(constitution, txn.Metadata())
+	return d.governanceStore().SetConstitution(constitution, txn.Metadata())
 }

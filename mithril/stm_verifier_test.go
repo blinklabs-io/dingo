@@ -91,7 +91,9 @@ func testCreateEncodedSTMProof(
 	vkAff.FromJacobian(&vkJac)
 	vkBytes := vkAff.Bytes()
 
-	leafBytes := append(append([]byte(nil), vkBytes[:]...), uint64ToBigEndianBytes(1)...)
+	leafBytes := append(
+		append([]byte(nil), vkBytes[:]...),
+		uint64ToBigEndianBytes(1)...)
 	root := stmBlake2b256(leafBytes)
 	msgp := append(append([]byte(nil), msg...), root...)
 	h, err := bls12381.HashToG1(msgp, stmBLSDomainSeparationTag)
@@ -140,6 +142,8 @@ func testCreateEncodedSTMProof(
 }
 
 func TestParseSTMSignerVerificationKeyGolden(t *testing.T) {
+	t.Parallel()
+
 	encoded := hex.EncodeToString([]byte(stmGoldenSignerVerificationKeyJSON))
 	vkBytes, err := parseSTMSignerVerificationKey(encoded)
 	require.NoError(t, err)
@@ -147,8 +151,12 @@ func TestParseSTMSignerVerificationKeyGolden(t *testing.T) {
 }
 
 func TestVerifySTMSignatureGolden(t *testing.T) {
+	t.Parallel()
+
 	msg := make([]byte, 16)
-	encodedAVK := hex.EncodeToString([]byte(stmGoldenAggregateVerificationKeyJSON))
+	encodedAVK := hex.EncodeToString(
+		[]byte(stmGoldenAggregateVerificationKeyJSON),
+	)
 	encodedSig := hex.EncodeToString([]byte(stmGoldenAggregateSignatureJSON))
 	err := verifySTMSignature(
 		msg,
@@ -160,9 +168,13 @@ func TestVerifySTMSignatureGolden(t *testing.T) {
 }
 
 func TestVerifySTMSignatureRejectsWrongMessage(t *testing.T) {
+	t.Parallel()
+
 	msg := make([]byte, 16)
 	msg[0] = 1
-	encodedAVK := hex.EncodeToString([]byte(stmGoldenAggregateVerificationKeyJSON))
+	encodedAVK := hex.EncodeToString(
+		[]byte(stmGoldenAggregateVerificationKeyJSON),
+	)
 	encodedSig := hex.EncodeToString([]byte(stmGoldenAggregateSignatureJSON))
 	err := verifySTMSignature(
 		msg,
@@ -175,15 +187,22 @@ func TestVerifySTMSignatureRejectsWrongMessage(t *testing.T) {
 }
 
 func TestVerifySTMSignatureRejectsTamperedBatchProof(t *testing.T) {
+	t.Parallel()
+
 	var sigObj map[string]any
-	require.NoError(t, json.Unmarshal([]byte(stmGoldenAggregateSignatureJSON), &sigObj))
+	require.NoError(
+		t,
+		json.Unmarshal([]byte(stmGoldenAggregateSignatureJSON), &sigObj),
+	)
 	batchProof := sigObj["batch_proof"].(map[string]any)
 	batchProof["indices"] = []any{1.0, 0.0}
 	raw, err := json.Marshal(sigObj)
 	require.NoError(t, err)
 
 	msg := make([]byte, 16)
-	encodedAVK := hex.EncodeToString([]byte(stmGoldenAggregateVerificationKeyJSON))
+	encodedAVK := hex.EncodeToString(
+		[]byte(stmGoldenAggregateVerificationKeyJSON),
+	)
 	encodedSig := hex.EncodeToString(raw)
 	err = verifySTMSignature(
 		msg,
@@ -200,6 +219,8 @@ func TestVerifySTMSignatureRejectsTamperedBatchProof(t *testing.T) {
 }
 
 func TestVerifySTMSignatureRejectsZeroK(t *testing.T) {
+	t.Parallel()
+
 	msg := make([]byte, 16)
 	encodedAVK := hex.EncodeToString(
 		[]byte(stmGoldenAggregateVerificationKeyJSON),
@@ -218,6 +239,8 @@ func TestVerifySTMSignatureRejectsZeroK(t *testing.T) {
 }
 
 func TestParseSTMAggregateVerificationKeyRejectsZeroLeaves(t *testing.T) {
+	t.Parallel()
+
 	// Build a binary-format AVK: 8 bytes nrLeaves + 32 bytes root + 8 bytes totalStake.
 	var buf [48]byte
 	// nrLeaves = 0 (first 8 bytes already zero).

@@ -16,6 +16,7 @@ package txpump
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,24 @@ func samplePlutusInputs() []UTxO {
 	return []UTxO{
 		{TxHash: sampleHash, Index: 0, Amount: 10_000_000},
 	}
+}
+
+// TestPumpTakeLockedPlutusUTxOSkipsQuarantinedOutput verifies that an available
+// script output can be selected while an unconfirmed script output remains
+// quarantined for a later round.
+func TestPumpTakeLockedPlutusUTxOSkipsQuarantinedOutput(t *testing.T) {
+	pump := &Pump{}
+	pump.addLockedPlutusUTxO(UTxO{
+		TxHash:      "pending",
+		availableAt: time.Now().Add(time.Hour),
+	})
+	pump.addLockedPlutusUTxO(UTxO{TxHash: "available"})
+
+	utxo, ok := pump.takeLockedPlutusUTxO()
+	require.True(t, ok)
+	require.Equal(t, "available", utxo.TxHash)
+	_, ok = pump.takeLockedPlutusUTxO()
+	require.False(t, ok)
 }
 
 // ---- PlutusLock tests ----

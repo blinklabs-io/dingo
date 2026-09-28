@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,8 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/internal/config"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -116,37 +115,19 @@ func loadBlocksFromImmutable(
 }
 
 func TestRollbackToSecurityParamDepth(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
-	// Configure plugins with temp directory
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set blob plugin data-dir: %v", err)
-	}
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set metadata plugin data-dir: %v", err)
-	}
-
 	// Create database
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
 	})
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
 	cm, err := chain.NewManager(db, nil)
@@ -244,37 +225,19 @@ func TestRollbackToSecurityParamDepth(t *testing.T) {
 }
 
 func TestRollbackBeyondSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
-	// Configure plugins with temp directory
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set blob plugin data-dir: %v", err)
-	}
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set metadata plugin data-dir: %v", err)
-	}
-
 	// Create database
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
 	})
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
 	cm, err := chain.NewManager(db, nil)
@@ -377,37 +340,19 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 }
 
 func TestRollbackStateRestoration(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
-	// Configure plugins with temp directory
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set blob plugin data-dir: %v", err)
-	}
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set metadata plugin data-dir: %v", err)
-	}
-
 	// Create database
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
 	})
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
 	cm, err := chain.NewManager(db, nil)
@@ -585,37 +530,19 @@ func TestRollbackStateRestoration(t *testing.T) {
 }
 
 func TestRollbackToOrigin(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
-	// Configure plugins with temp directory
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set blob plugin data-dir: %v", err)
-	}
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set metadata plugin data-dir: %v", err)
-	}
-
 	// Create database
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
 	})
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
 	cm, err := chain.NewManager(db, nil)
@@ -685,37 +612,19 @@ func TestRollbackToOrigin(t *testing.T) {
 }
 
 func TestChainIteratorAfterRollback(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
-	// Configure plugins with temp directory
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set blob plugin data-dir: %v", err)
-	}
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		t.Fatalf("failed to set metadata plugin data-dir: %v", err)
-	}
-
 	// Create database
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
 	})
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
 	cm, err := chain.NewManager(db, nil)

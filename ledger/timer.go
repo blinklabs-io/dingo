@@ -41,12 +41,17 @@ type ScheduledTask struct {
 }
 
 type Scheduler struct {
-	ticker             *time.Ticker
-	quit               chan struct{}
+	ticker *time.Ticker
+	quit   chan struct{}
+	// updateIntervalChan has a capacity of one: ChangeInterval coalesces a
+	// pending interval rather than dropping the new one, since the latest
+	// call always supersedes an older undelivered value. See ChangeInterval.
 	updateIntervalChan chan time.Duration
 	tasks              []*ScheduledTask
 	interval           time.Duration
-	startOnce          sync.Once
+	lifecycleMutex     sync.Mutex
+	started            bool
+	stopped            bool
 	mutex              sync.Mutex
 	// Worker pool fields
 	workerPoolSize int
@@ -74,7 +79,7 @@ func NewSchedulerWithConfig(
 	return &Scheduler{
 		interval:           interval,
 		quit:               make(chan struct{}),
-		updateIntervalChan: make(chan time.Duration),
+		updateIntervalChan: make(chan time.Duration, 1),
 		tasks:              []*ScheduledTask{},
 		workerPoolSize:     config.WorkerPoolSize,
 		taskQueue:          make(chan func(), config.TaskQueueSize),
@@ -84,11 +89,15 @@ func NewSchedulerWithConfig(
 
 // Start the timer (run goroutine once)
 func (st *Scheduler) Start() {
-	st.startOnce.Do(func() {
-		st.ticker = time.NewTicker(st.interval)
-		st.startWorkerPool()
-		go st.run()
-	})
+	st.lifecycleMutex.Lock()
+	defer st.lifecycleMutex.Unlock()
+	if st.started || st.stopped {
+		return
+	}
+	st.ticker = time.NewTicker(st.interval)
+	st.startWorkerPool()
+	st.started = true
+	go st.run()
 }
 
 // startWorkerPool initializes the worker pool
@@ -194,6 +203,12 @@ func (st *Scheduler) Register(
 
 // ChangeInterval updates the tick interval of the Scheduler at runtime.
 // It returns an error if newInterval is not positive.
+//
+// The new interval is applied when run() next reaches its select, including
+// when the call precedes Start or run() is servicing a tick. The call never
+// blocks on run(): updateIntervalChan holds one pending interval, and a full
+// buffer holds a value this call supersedes, so it is drained and the send
+// retried.
 func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 	if newInterval <= 0 {
 		return fmt.Errorf(
@@ -201,18 +216,42 @@ func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 			newInterval,
 		)
 	}
-	select {
-	case st.updateIntervalChan <- newInterval:
-	default:
+	for {
+		select {
+		case st.updateIntervalChan <- newInterval:
+			return nil
+		default:
+		}
+		select {
+		case <-st.updateIntervalChan:
+		default:
+		}
 	}
-	return nil
 }
 
-// Stop the timer (terminates)
+// Stop terminates the scheduler. Start and Stop share lifecycleMutex so a
+// shutdown racing startup either prevents startup or tears down everything
+// Start created before returning.
 func (st *Scheduler) Stop() {
+	st.lifecycleMutex.Lock()
+	defer st.lifecycleMutex.Unlock()
+	if st.stopped {
+		return
+	}
+	st.stopped = true
+	if !st.started {
+		return
+	}
 	close(st.quit)
-	if st.ticker != nil {
-		st.ticker.Stop()
+	// st.ticker is reassigned under st.mutex by run's interval-update
+	// case (ChangeInterval, called at era/epoch boundaries in a real
+	// running node) -- read it under the same lock rather than racing
+	// that write.
+	st.mutex.Lock()
+	ticker := st.ticker
+	st.mutex.Unlock()
+	if ticker != nil {
+		ticker.Stop()
 	}
 	st.stopWorkerPool()
 }

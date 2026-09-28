@@ -39,7 +39,8 @@ func FuzzNormalizePeerAddr(f *testing.F) {
 		inputHost, inputPort, err := net.SplitHostPort(peerAddr)
 		if err != nil {
 			if normalized != strings.ToLower(peerAddr) {
-				t.Fatalf("malformed address normalized to %q, want lowercase %q",
+				t.Fatalf(
+					"malformed address normalized to %q, want lowercase %q",
 					normalized,
 					strings.ToLower(peerAddr),
 				)
@@ -55,7 +56,11 @@ func FuzzNormalizePeerAddr(f *testing.F) {
 			t.Fatalf("normalized port = %q, want %q", port, inputPort)
 		}
 		if net.ParseIP(inputHost) == nil && host != strings.ToLower(inputHost) {
-			t.Fatalf("normalized hostname = %q, want %q", host, strings.ToLower(inputHost))
+			t.Fatalf(
+				"normalized hostname = %q, want %q",
+				host,
+				strings.ToLower(inputHost),
+			)
 		}
 	})
 }

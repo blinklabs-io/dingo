@@ -15,11 +15,18 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,6 +83,8 @@ func (m *mockSlotTimeProvider) SlotToEpoch(slot uint64) (EpochInfo, error) {
 }
 
 func TestSlotClockCreation(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 
@@ -86,6 +95,8 @@ func TestSlotClockCreation(t *testing.T) {
 }
 
 func TestSlotClockCurrentSlot(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now().Add(-10 * time.Second)
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 
@@ -98,6 +109,8 @@ func TestSlotClockCurrentSlot(t *testing.T) {
 }
 
 func TestSlotClockCurrentEpoch(t *testing.T) {
+	t.Parallel()
+
 	// Start 150 seconds ago with 1 second slots and 100 slot epochs
 	// Should be in epoch 1 (slots 100-199)
 	systemStart := time.Now().Add(-150 * time.Second)
@@ -113,6 +126,8 @@ func TestSlotClockCurrentEpoch(t *testing.T) {
 }
 
 func TestSlotClockGetEpochForSlot(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -151,6 +166,8 @@ func TestSlotClockGetEpochForSlot(t *testing.T) {
 }
 
 func TestSlotClockNextSlotTime(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 
@@ -162,6 +179,8 @@ func TestSlotClockNextSlotTime(t *testing.T) {
 }
 
 func TestSlotClockTimeUntilNextEpoch(t *testing.T) {
+	t.Parallel()
+
 	// Start 50 seconds ago, 1 second slots, 100 slot epochs
 	// We should be around slot 50, with ~50 seconds until epoch boundary
 	systemStart := time.Now().Add(-50 * time.Second)
@@ -177,6 +196,8 @@ func TestSlotClockTimeUntilNextEpoch(t *testing.T) {
 }
 
 func TestSlotClockTimeUntilSlot(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -198,6 +219,8 @@ func TestSlotClockTimeUntilSlot(t *testing.T) {
 }
 
 func TestSlotClockIsEpochBoundary(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -228,6 +251,8 @@ func TestSlotClockIsEpochBoundary(t *testing.T) {
 }
 
 func TestEpochInfoEndSlot(t *testing.T) {
+	t.Parallel()
+
 	epochInfo := EpochInfo{
 		EpochId:       5,
 		StartSlot:     500,
@@ -237,6 +262,8 @@ func TestEpochInfoEndSlot(t *testing.T) {
 }
 
 func TestSlotClockSubscribeUnsubscribe(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -258,6 +285,8 @@ func TestSlotClockSubscribeUnsubscribe(t *testing.T) {
 }
 
 func TestSlotClockMultipleSubscribers(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -288,6 +317,8 @@ func TestSlotClockMultipleSubscribers(t *testing.T) {
 }
 
 func TestSlotClockStartStop(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, 100*time.Millisecond, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -319,7 +350,77 @@ func TestSlotClockStartStop(t *testing.T) {
 	clock.mu.RUnlock()
 }
 
+func TestSlotClockStartOverlappingStopWaitsOnlyForStoppedGeneration(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	provider := newMockSlotTimeProvider(time.Now(), time.Second, 100)
+	clock := NewSlotClock(provider, DefaultSlotClockConfig())
+	oldStateReleased := make(chan struct{})
+	allowOldCompletion := make(chan struct{})
+	var hookCalls atomic.Uint32
+	clock.beforeRunDone = func() {
+		if hookCalls.Add(1) != 1 {
+			return
+		}
+		close(oldStateReleased)
+		<-allowOldCompletion
+	}
+
+	var releaseOnce sync.Once
+	releaseOld := func() {
+		releaseOnce.Do(func() { close(allowOldCompletion) })
+	}
+	defer clock.Stop()
+	defer releaseOld()
+
+	clock.Start(context.Background())
+	stopDone := make(chan struct{})
+	go func() {
+		clock.Stop()
+		close(stopDone)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		oldStateReleased,
+		testutil.AsyncWait,
+		"stopped generation should release its lifecycle state",
+	)
+	replacementCtx, cancelReplacement := context.WithCancel(
+		context.Background(),
+	)
+	defer cancelReplacement()
+	clock.Start(replacementCtx)
+	releaseOld()
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), time.Second)
+	defer cancelWait()
+	select {
+	case <-stopDone:
+	case <-waitCtx.Done():
+		cancelReplacement()
+		<-stopDone
+		t.Fatal("Stop waited for a replacement slot-clock generation")
+	}
+
+	clock.mu.RLock()
+	replacementRunning := clock.running
+	clock.mu.RUnlock()
+	require.True(
+		t,
+		replacementRunning,
+		"overlapping Start should remain running",
+	)
+
+	cancelReplacement()
+	clock.Stop()
+}
+
 func TestSlotClockReceivesTicks(t *testing.T) {
+	t.Parallel()
+
 	// Use short slot length for faster test
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, 50*time.Millisecond, 100)
@@ -331,17 +432,17 @@ func TestSlotClockReceivesTicks(t *testing.T) {
 	clock.Start(ctx)
 	defer clock.Stop()
 
-	// Wait for a tick
-	select {
-	case tick := <-ch:
-		assert.GreaterOrEqual(t, tick.Slot, uint64(0))
-		assert.False(t, tick.SlotStart.IsZero())
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("timeout waiting for slot tick")
-	}
+	// Wait for a tick. The bound is a deadlock guard, not a latency
+	// budget: a slot-clock goroutine delayed by scheduling load must not
+	// fail the test, because there is no retry after a missed receive.
+	tick := testutil.RequireReceive(t, ch, testutil.AsyncWait, "slot tick")
+	assert.GreaterOrEqual(t, tick.Slot, uint64(0))
+	assert.False(t, tick.SlotStart.IsZero())
 }
 
 func TestSlotClockEpochBoundary(t *testing.T) {
+	t.Parallel()
+
 	// Set up so we're close to an epoch boundary
 	// Epoch length = 10 slots, slot length = 20ms
 	systemStart := time.Now().Add(-9 * 20 * time.Millisecond) // Start at slot 9
@@ -354,9 +455,22 @@ func TestSlotClockEpochBoundary(t *testing.T) {
 	clock.Start(ctx)
 	defer clock.Stop()
 
-	// Collect ticks until we see an epoch boundary
+	// Collect ticks until we see an epoch boundary. The bound is a
+	// deadlock guard, not a latency budget: the boundary is ~20ms away
+	// and recurs every 10 slots, so 10s admits 50 boundaries and a
+	// slot-clock goroutine delayed by CI scheduling load still passes,
+	// while a clock that stops ticking still fails promptly. Clamp to the
+	// test binary's own -timeout deadline when that is nearer, so the
+	// failure is this t.Fatal rather than a binary-wide timeout panic.
+	waitFor := 10 * time.Second
+	if deadline, ok := t.Deadline(); ok {
+		if remaining := time.Until(deadline) - time.Second; remaining < waitFor {
+			waitFor = remaining
+		}
+	}
+	timeout := time.After(waitFor)
+
 	var sawEpochStart bool
-	timeout := time.After(500 * time.Millisecond)
 	for !sawEpochStart {
 		select {
 		case tick := <-ch:
@@ -371,6 +485,8 @@ func TestSlotClockEpochBoundary(t *testing.T) {
 }
 
 func TestSlotTickSlotsUntilEpoch(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -439,6 +555,8 @@ func TestSlotTickSlotsUntilEpoch(t *testing.T) {
 }
 
 func TestSlotClockConcurrentSubscribers(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, 20*time.Millisecond, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -473,32 +591,70 @@ func TestSlotClockConcurrentSubscribers(t *testing.T) {
 }
 
 func TestSlotClockContextCancellation(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, 100*time.Millisecond, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
+	existing := clock.Subscribe()
 	clock.Start(ctx)
 
 	// Cancel context
 	cancel()
 
-	// Wait briefly for goroutine to exit
-	done := make(chan struct{})
-	go func() {
-		clock.wg.Wait()
-		close(done)
-	}()
+	clock.mu.RLock()
+	done := clock.done
+	clock.mu.RUnlock()
 
 	select {
 	case <-done:
 		// Good, clock stopped
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("clock did not stop after context cancellation")
+	}
+
+	// A cancelled clock has stopped just as surely as one stopped explicitly:
+	// its existing subscriber and any later subscription must be closed.
+	_, ok := <-existing
+	assert.False(t, ok, "cancellation must close existing subscriptions")
+	_, ok = <-clock.Subscribe()
+	assert.False(t, ok, "cancellation must close later subscriptions")
+}
+
+func TestSlotClockSubscriptionAfterStopIsClosed(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		start bool
+	}{
+		{name: "before_start"},
+		{name: "after_start", start: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			systemStart := time.Now()
+			provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
+			clock := NewSlotClock(provider, DefaultSlotClockConfig())
+			if tc.start {
+				clock.Start(t.Context())
+			}
+			clock.Stop()
+
+			_, ok := <-clock.Subscribe()
+			assert.False(
+				t,
+				ok,
+				"subscriptions registered after Stop must be closed",
+			)
+		})
 	}
 }
 
 func TestBuildSlotTick(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -516,6 +672,8 @@ func TestBuildSlotTick(t *testing.T) {
 }
 
 func TestEmitTickToSubscribers(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -548,6 +706,8 @@ func TestEmitTickToSubscribers(t *testing.T) {
 }
 
 func TestSlotClockDropsTickForSlowSubscriber(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -585,6 +745,8 @@ func TestSlotClockDropsTickForSlowSubscriber(t *testing.T) {
 // =============================================================================
 
 func TestMarkEpochEmitted(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -605,6 +767,8 @@ func TestMarkEpochEmitted(t *testing.T) {
 }
 
 func TestSetLastEmittedEpoch(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -621,6 +785,8 @@ func TestSetLastEmittedEpoch(t *testing.T) {
 }
 
 func TestMarkEpochEmittedConcurrent(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -649,6 +815,8 @@ func TestMarkEpochEmittedConcurrent(t *testing.T) {
 }
 
 func TestSlotClockSlotToTime(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -661,6 +829,8 @@ func TestSlotClockSlotToTime(t *testing.T) {
 }
 
 func TestSlotClockStopClosesSubscriberChannels(t *testing.T) {
+	t.Parallel()
+
 	systemStart := time.Now()
 	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
@@ -685,7 +855,7 @@ func TestSlotClockStopClosesSubscriberChannels(t *testing.T) {
 	select {
 	case <-done:
 		// Good, channel was closed and goroutine exited
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("subscriber goroutine did not exit after Stop")
 	}
 
@@ -693,4 +863,94 @@ func TestSlotClockStopClosesSubscriberChannels(t *testing.T) {
 	clock.mu.RLock()
 	assert.Nil(t, clock.subscribers)
 	clock.mu.RUnlock()
+}
+
+// horizonBoundProvider resolves slot/time arithmetic but refuses to resolve an
+// epoch until it is armed, standing in for a node whose applied era history has
+// not yet reached the current wall-clock slot.
+type horizonBoundProvider struct {
+	*mockSlotTimeProvider
+	resolved atomic.Bool
+}
+
+func (p *horizonBoundProvider) SlotToEpoch(slot uint64) (EpochInfo, error) {
+	if !p.resolved.Load() {
+		return EpochInfo{}, fmt.Errorf(
+			"slot is outside the known epoch range: %w",
+			hardfork.ErrPastHorizon,
+		)
+	}
+	return p.mockSlotTimeProvider.SlotToEpoch(slot)
+}
+
+// A node syncing from genesis on a live network sits past the era horizon for
+// the whole catch-up. That state must not be reported as an error per slot (the
+// field-reported "failed to build slot tick" spam), and no tick may be emitted
+// with a fabricated epoch, since Epoch/IsEpochStart drive subscriber
+// epoch-boundary work.
+func TestSlotClockPastHorizonIsNotAnErrorAndResumes(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	logMu := &sync.Mutex{}
+	provider := &horizonBoundProvider{
+		mockSlotTimeProvider: newMockSlotTimeProvider(
+			time.Now(), 20*time.Millisecond, 100,
+		),
+	}
+	cfg := DefaultSlotClockConfig()
+	cfg.Logger = slog.New(slog.NewTextHandler(
+		&lockedWriter{mu: logMu, w: &logBuf},
+		&slog.HandlerOptions{Level: slog.LevelInfo},
+	))
+
+	clock := NewSlotClock(provider, cfg)
+	ch := clock.Subscribe()
+	clock.Start(t.Context())
+	defer clock.Stop()
+
+	readLog := func() string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return logBuf.String()
+	}
+
+	// While past the horizon: the transition is announced once, no ticks.
+	require.Eventually(t, func() bool {
+		return strings.Contains(readLog(), "behind the wall clock")
+	}, testutil.AsyncWait, 10*time.Millisecond,
+		"the clock should report the past-horizon state once")
+	testutil.RequireNoReceive(
+		t, ch, 100*time.Millisecond,
+		"no tick may be emitted while the epoch is unknowable",
+	)
+	assert.NotContains(t, readLog(), "level=ERROR",
+		"a past-horizon slot is expected during catch-up, not an error")
+	assert.Equal(t, 1,
+		strings.Count(readLog(), "behind the wall clock"),
+		"the transition should be reported once, not once per slot")
+
+	// Once era history covers the slot, ticks resume and that is announced.
+	provider.resolved.Store(true)
+	tick := testutil.RequireReceive(
+		t, ch, testutil.AsyncWait, "tick after era history catches up",
+	)
+	assert.NotZero(t, tick.Slot)
+	require.Eventually(t, func() bool {
+		return strings.Contains(readLog(), "resuming slot ticks")
+	}, testutil.AsyncWait, 10*time.Millisecond,
+		"recovery should be reported once")
+	assert.NotContains(t, readLog(), "level=ERROR")
+}
+
+// lockedWriter serializes writes from the clock goroutine against test reads.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }

@@ -16,6 +16,7 @@ package leios
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -64,11 +66,122 @@ const (
 	// the same window. Both keep the forgeable vote-id space (window x
 	// committee size) small.
 	slotWindowFutureTolerance = 60
+	// committeeInFlightMaxEpochs bounds how many distinct epochs may be
+	// computing a committee at once, so the coalescing map in
+	// committeeAndParamsForEpoch is size-bounded like every other admission
+	// structure here rather than growing with whatever epochs peers ask
+	// about. With the slot window enforced (production always wires a
+	// SlotProvider; see node_leios.go) the reachable set is the two epochs a
+	// vote window can straddle plus the announcement epoch, so this is well
+	// clear of legitimate demand -- it only bites in the private
+	// harness/devnet mode where slotProvider is nil and EpochForSlot
+	// projects arbitrarily far.
+	committeeInFlightMaxEpochs = 16
+	// slotWindowWarnInterval throttles the seated-but-outside-vote-window
+	// warning so catching up cannot flood the log; the
+	// dingo_metrics_leios_votes_not_emitted_total counter carries the rate.
+	slotWindowWarnInterval = 30 * time.Second
 )
 
+// Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
+// partition every path on which this node declines to emit its own vote for
+// an announcement it has both observed and acquired the endorser block for.
+//
+// The reason is first-match in the order the checks run, not the full set of
+// reasons that apply, and the order is chosen by cost: the cheap local checks
+// come before the ones that can reach the stake provider. In particular
+// slot_window is evaluated before seating, so a node that is both outside the
+// window and unseated is counted as slot_window. That matters when reading the
+// metric on a node that is not on the committee -- a syncing relay is almost
+// always outside the window, so its silence is attributed to timing, and
+// not_seated counts only the announcements it did see inside the window.
+// Deciding seating first would put a committee computation, and so a possible
+// stake-provider read, on every out-of-window announcement; catch-up replays
+// every announcement, which is the load this ordering exists to avoid.
+const (
+	// voteNotEmittedDuplicate: a vote for this announcing ranking block was
+	// already emitted. Expected -- an announcement is armed from the header
+	// and again when the block applies.
+	voteNotEmittedDuplicate = "duplicate"
+	// voteNotEmittedNoKey: local vote emission is not configured (no pool
+	// key hash or no signing key).
+	voteNotEmittedNoKey = "no_key"
+	// voteNotEmittedSlotWindow: the announcing ranking block is outside the
+	// vote window.
+	voteNotEmittedSlotWindow = "slot_window"
+	// voteNotEmittedCommitteeUnavailable: the epoch's committee could not be
+	// computed.
+	voteNotEmittedCommitteeUnavailable = "committee_unavailable"
+	// voteNotEmittedNotSeated: the local pool holds no seat this epoch.
+	voteNotEmittedNotSeated = "not_seated"
+	// voteNotEmittedUnknownMember: the resolved voter id has no committee
+	// member entry.
+	voteNotEmittedUnknownMember = "unknown_member"
+	// voteNotEmittedKeyMismatch: the configured key no longer matches the
+	// public key resolved for this pool.
+	voteNotEmittedKeyMismatch = "key_mismatch"
+	// voteNotEmittedSigningFailed: signing the vote failed.
+	voteNotEmittedSigningFailed = "signing_failed"
+	// voteNotEmittedNotInserted: the signed vote was refused by the store
+	// (dedup or equivocation guard).
+	voteNotEmittedNotInserted = "not_inserted"
+)
+
+// voteNotEmittedReasons is every label the counter can carry, so all of them
+// can be materialized at startup.
+var voteNotEmittedReasons = []string{
+	voteNotEmittedDuplicate,
+	voteNotEmittedNoKey,
+	voteNotEmittedSlotWindow,
+	voteNotEmittedCommitteeUnavailable,
+	voteNotEmittedNotSeated,
+	voteNotEmittedUnknownMember,
+	voteNotEmittedKeyMismatch,
+	voteNotEmittedSigningFailed,
+	voteNotEmittedNotInserted,
+}
+
 // ErrVoteManagerStopped is returned by blocking calls when the vote
-// manager is not running.
+// manager is not running. committeeAndParamsForEpoch also returns it to a
+// caller waiting on another caller's in-flight committee computation when the
+// manager stops before that computation finishes.
 var ErrVoteManagerStopped = errors.New("leios vote manager stopped")
+
+// ErrCommitteeComputationBacklog is returned when committeeInFlightMaxEpochs
+// distinct epochs are already computing a committee, so a further distinct
+// epoch is refused rather than admitted into unbounded concurrent work. It is
+// not memoized: the next caller retries.
+var ErrCommitteeComputationBacklog = errors.New(
+	"too many leios committee computations in flight",
+)
+
+// ErrCommitteeComputationAborted is delivered to waiters when a committee
+// computation panics, so they are released with a failure instead of parked
+// on a claim nobody will ever complete. The panic itself keeps unwinding to
+// the leader's caller.
+var ErrCommitteeComputationAborted = errors.New(
+	"leios committee computation aborted",
+)
+
+// VotingConfigurationStatus reports the outcome of configuring local Leios
+// vote emission.
+type VotingConfigurationStatus uint8
+
+const (
+	// VotingConfigurationFailed accompanies a non-nil configuration error.
+	VotingConfigurationFailed VotingConfigurationStatus = iota
+	// VotingConfigurationEnabled means local vote emission is active.
+	VotingConfigurationEnabled
+	// VotingConfigurationAwaitingKey means the configured pool has no usable
+	// on-chain voting key in the current snapshot yet.
+	VotingConfigurationAwaitingKey
+	// VotingConfigurationRetryPending means activation preparation failed but
+	// the configuration remains deferred for a later epoch-transition retry.
+	VotingConfigurationRetryPending
+	// VotingConfigurationSuperseded means a newer configuration or retry owns
+	// the voting state, so this request must not interpret that state as its own.
+	VotingConfigurationSuperseded
+)
 
 // StakeDistributionProvider supplies the active stake distribution for a
 // snapshot epoch: lowercase-hex pool key hash -> stake plus the total
@@ -77,6 +190,35 @@ type StakeDistributionProvider interface {
 	GetStakeDistribution(
 		epoch uint64,
 	) (poolStakes map[string]uint64, totalActiveStake uint64, err error)
+}
+
+// LeiosKeyProvider supplies each active pool's raw (unverified) registered
+// Dijkstra/Leios BLS key, keyed by lowercase-hex pool key hash.
+// Implementations must not verify proof of possession themselves --
+// VoteManager does that once per epoch and caches only the keys that pass,
+// so a pool with no usable key is simply absent from the resolved map (a
+// "keyless" committee seat: it still occupies a stake-weighted voter id,
+// but can never contribute a verified signature).
+//
+// The lookup is frozen to snapshotEpoch: implementations must return the key
+// stored with the same historical stake snapshot used to select the committee.
+// A key registered or rotated after that boundary is not visible until a later
+// snapshot captures it.
+//
+// poolKeyHashes names exactly the epoch's committee members (the
+// stake-coverage prefix ComputeCommittee already selected from the
+// snapshot committeeAndParamsForEpoch fetched), not every pool in the
+// stake distribution: resolveVoterKey never looks up a non-member, so
+// verifying keys for pools that cannot make the committee only spends
+// pairing work on results that are never read. Implementations must look
+// up keys for exactly the given set rather than re-fetching the stake
+// distribution themselves -- doing so would duplicate a DB round
+// trip on every new-epoch committee computation.
+type LeiosKeyProvider interface {
+	GetLeiosKeys(
+		snapshotEpoch uint64,
+		poolKeyHashes []string,
+	) (map[string]*lcommon.LeiosKey, error)
 }
 
 // EpochProvider supplies epoch information from the ledger.
@@ -96,12 +238,12 @@ type SlotProvider interface {
 	CurrentOrTipSlot() uint64
 }
 
-// CommitteeParamsProvider supplies the Leios committee protocol
-// parameters. Implementations must validate the tau < sigma_c invariant
-// (DijkstraProtocolParameters.ValidateLeiosCommitteeParameters) and
-// surface failures as errors.
+// CommitteeParamsProvider supplies the committee size and quorum threshold
+// captured by the mark snapshot used for the requested epoch.
 type CommitteeParamsProvider interface {
-	LeiosCommitteeParameters() (sigmaC, tau *big.Rat, err error)
+	LeiosCommitteeParameters(
+		snapshotEpoch uint64,
+	) (committeeSize uint16, tau *big.Rat, err error)
 }
 
 // VoteManagerConfig configures a VoteManager.
@@ -111,10 +253,17 @@ type VoteManagerConfig struct {
 	StakeProvider  StakeDistributionProvider
 	EpochProvider  EpochProvider
 	ParamsProvider CommitteeParamsProvider
+	// KeyProvider supplies on-chain registered BLS keys per epoch. When
+	// non-nil it is the authoritative key source: a key absent from its
+	// PoP-verified result is a keyless seat and Registry is ignored. Nil
+	// explicitly selects the Registry-only private test/devnet seam.
+	KeyProvider LeiosKeyProvider
 	// SlotProvider enables the vote slot acceptance window. When nil
 	// the window check is disabled and votes for any resolvable slot
 	// are accepted.
 	SlotProvider SlotProvider
+	// Registry is a private test/devnet key source used only when KeyProvider
+	// is nil. Production composition always supplies KeyProvider.
 	Registry     *VoterRegistry
 	PromRegistry prometheus.Registerer
 	// VoteWindowSlots is the offset after an EB's produce slot at which
@@ -153,16 +302,63 @@ type storedVote struct {
 //     len(tallies) <= len(voteRecords) and voteRecordMaxEntries bounds
 //     both maps.
 type voteRecord struct {
-	ebHash     lcommon.Blake2b256
-	epoch      uint64
-	insertedAt time.Time
+	ebHash           lcommon.Blake2b256
+	announcingRbHash lcommon.Blake2b256
+	epoch            uint64
+	insertedAt       time.Time
 }
 
 // tallyKey identifies the vote tally for one endorser block.
 type tallyKey struct {
-	slotNo uint64
-	ebHash lcommon.Blake2b256
+	slotNo           uint64
+	ebHash           lcommon.Blake2b256
+	announcingRbHash lcommon.Blake2b256
 }
+
+type announcementRecord struct {
+	slot   uint64
+	epoch  uint64
+	ebHash lcommon.Blake2b256
+	seenAt time.Time
+	// headerSeq is the chain-mutation sequence number of the header
+	// admission that armed this announcement, or zero when it was armed
+	// from the apply-path backstop rather than the ordered header stream.
+	// It is what lets handleRollback tell state belonging to the chain
+	// this rollback abandons from state belonging to the chain that
+	// replaced it. Never decreases: re-observing the same announcing
+	// ranking block keeps the highest sequence seen.
+	headerSeq uint64
+}
+
+type readyAnnouncement struct {
+	rbHash lcommon.Blake2b256
+	record announcementRecord
+}
+
+type votingConfigurationSnapshot struct {
+	generation uint64
+	pool       []byte
+	key        *VoteSigningKey
+}
+
+type pendingPrototypeVote struct {
+	connKey string
+	vote    lcommon.LeiosPrototypeVote
+	seenAt  time.Time
+}
+
+type acquiredEbRecord struct {
+	slot   uint64
+	epoch  uint64
+	seenAt time.Time
+}
+
+// maxPendingPrototypeCandidatesPerVoter bounds alternate signatures retained
+// while an announcing ranking block is unknown. More than one candidate is
+// required because signatures cannot be verified until the announcement maps
+// the vote to an epoch committee; retaining only the first lets a forged vote
+// suppress the real voter's later valid vote.
+const maxPendingPrototypeCandidatesPerVoter = 4
 
 // ebTally accumulates vote stake for one endorser block. observedStake
 // counts every membership-valid, deduplicated vote; verifiedStake counts
@@ -178,11 +374,39 @@ type ebTally struct {
 	lastUpdated          time.Time
 }
 
-// epochEntry memoizes the committee and quorum threshold for an epoch.
+// epochEntry memoizes the committee, quorum threshold, and resolved,
+// PoP-verified on-chain voter keys for an epoch. onChainKeys holds only
+// keys that passed VerifyLeiosKeyProofOfPossession; a committee member
+// absent from it has no usable on-chain key for the epoch and is keyless.
 type epochEntry struct {
-	committee *Committee
-	tau       *big.Rat
+	committee   *Committee
+	tau         *big.Rat
+	onChainKeys map[string]*bls12381.G2Affine
 }
+
+// committeeComputation is one epoch's in-flight committee computation. Waiters park
+// on done and read result once it closes; the close is the happens-before edge
+// that makes result safe to read without the manager lock.
+//
+// There is one unbuffered done channel per epoch, not one channel per waiter;
+// completeCommitteeComputation closes it once for every waiter.
+type committeeComputation struct {
+	done   chan struct{}
+	result committeeResult
+	// waiters counts callers that have parked on done. Read under the
+	// manager lock; used by tests to observe that a follower joined the
+	// leader's computation rather than starting its own.
+	waiters int
+}
+
+type committeeResult struct {
+	entry *epochEntry
+	err   error
+}
+
+// committeeResult carries a committee computation's outcome directly to the
+// callers waiting on it, rather than having each of them re-read m.committees
+// after waking. Exactly one of entry/err is meaningful.
 
 // VoteManager collects, validates, serves, and emits Leios votes. It
 // memoizes per-epoch voting committees from stake snapshots, tallies vote
@@ -197,7 +421,8 @@ type VoteManager struct {
 	stakeProvider  StakeDistributionProvider
 	epochProvider  EpochProvider
 	paramsProvider CommitteeParamsProvider
-	slotProvider   SlotProvider // nil disables the slot window check
+	keyProvider    LeiosKeyProvider // nil explicitly enables Registry-only mode
+	slotProvider   SlotProvider     // nil disables the slot window check
 	// voteWindowSlots is the past bound of the vote acceptance window: a
 	// vote whose slot is this many slots or more behind the current slot
 	// is rejected. It is the pipeline's VoteWindowSlots so the two
@@ -207,30 +432,102 @@ type VoteManager struct {
 	metrics         *voteManagerMetrics
 	// now is the clock used for vote TTL expiry; tests may override it.
 	now func() time.Time
+	// signVote is the local vote signer; tests may override it to synchronize
+	// configuration changes with an in-flight signature.
+	signVote func(*VoteSigningKey, []byte) ([]byte, error)
 	// voteTTL, maxVotes, and maxRecords bound the vote stores; tests
 	// may lower them.
 	voteTTL    time.Duration
 	maxVotes   int
 	maxRecords int
 
-	mu       sync.Mutex
-	running  bool
-	stopping bool
-	cancel   context.CancelFunc
-	loopWg   sync.WaitGroup
-	subs     []managerSubscription
+	mu sync.Mutex
+	// localEmissionMu keeps activation replay ahead of ordinary local emission
+	// without blocking rollback while a signature is being prepared.
+	localEmissionMu sync.Mutex
+	// prototypeEmissionMu linearizes local vote commit/publication with
+	// rollback pruning. This avoids holding mu while publishing an EventBus
+	// event, whose subscribers are outside the manager's lock hierarchy.
+	prototypeEmissionMu sync.Mutex
+	running             bool
+	stopping            bool
+	cancel              context.CancelFunc
+	loopWg              sync.WaitGroup
+	subs                []managerSubscription
 
-	committees  map[uint64]*epochEntry
-	votesById   map[lcommon.LeiosVoteId]*storedVote
-	voteLog     []*storedVote // ascending seq order
-	voteRecords map[lcommon.LeiosVoteId]voteRecord
-	nextSeq     uint64
-	cursors     map[string]uint64 // connection key -> next seq to serve
-	wakeCh      chan struct{}     // closed and replaced on every insert
-	tallies     map[tallyKey]*ebTally
+	committees map[uint64]*epochEntry
+	// committeeInFlight coalesces concurrent computation of one epoch's
+	// committee: the presence of an epoch key means some caller has claimed
+	// the computation, and its committeeComputation carries the one
+	// completion channel every waiter for that epoch parks on. The entry is
+	// deleted and that channel closed by completeCommitteeComputation -- on
+	// success, on error, and on panic unwind alike -- after which each waiter
+	// reads the result inline rather than re-reading the memo. Bounded by
+	// committeeInFlightMaxEpochs.
+	committeeInFlight map[uint64]*committeeComputation
+	// committeeStopCh releases committeeInFlight waiters at shutdown so one
+	// cannot stay parked on a leader blocked in a provider call. Closed by
+	// stopLocked and recreated by Start, like wakeCh.
+	committeeStopCh chan struct{}
+	// committeeGeneration is bumped by handleRollback when it clears the
+	// committee memo, and by stopLocked. A computation records the generation
+	// it started under and is not installed if the generation has moved on,
+	// so neither a rollback's invalidation nor a lifecycle boundary can be
+	// undone by an in-flight computation landing afterwards -- the rollback
+	// case derived from a pre-rollback stake snapshot, the stop case from the
+	// stopped lifecycle's providers.
+	committeeGeneration uint64
+	votesById           map[lcommon.LeiosVoteId]*storedVote
+	voteLog             []*storedVote // ascending seq order
+	voteRecords         map[lcommon.LeiosVoteId]voteRecord
+	nextSeq             uint64
+	cursors             map[string]uint64 // connection key -> next seq to serve
+	wakeCh              chan struct{}     // closed and replaced on every insert
+	tallies             map[tallyKey]*ebTally
+	announcements       map[lcommon.Blake2b256]announcementRecord
+	acquiredEbs         map[lcommon.Blake2b256]acquiredEbRecord
+	votedAnnouncements  map[lcommon.Blake2b256]struct{}
+	pendingVotes        map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
+	// pendingVoteCount is the sum of all pending candidate slices;
+	// pendingVoteCountByConn partitions that same total by origin connection.
+	// Every admission and removal must update both counters together.
+	pendingVoteCount       int
+	pendingVoteCountByConn map[string]int
 
 	votingPool []byte // local pool key hash; nil disables voting
 	votingKey  *VoteSigningKey
+	// deferredVotingPool/deferredVotingKey retain an operator-configured
+	// signing key while the authoritative historical on-chain key snapshot is
+	// not available locally yet. They never participate in vote emission;
+	// retryDeferredVoting promotes them to votingPool/votingKey only after the
+	// key provider returns a PoP-verified matching public key.
+	deferredVotingPool []byte
+	deferredVotingKey  *VoteSigningKey
+	// deferredVotingAuthorized records that the current deferred generation's
+	// key matched its on-chain registration. Only replay preparation, not
+	// authorization, remains pending while this is true.
+	deferredVotingAuthorized bool
+	// votingLookupGeneration orders provider lookups for the deferred
+	// configuration. Every initial lookup or retry receives a generation when
+	// it starts; only the newest generation may change voting state.
+	votingLookupGeneration uint64
+
+	// lastSlotWindowWarn throttles the seated-but-outside-vote-window
+	// warning. Guarded by mu.
+	lastSlotWindowWarn time.Time
+
+	// lastHeaderStreamSeq is the highest chain-mutation sequence number
+	// applied from the ordered header stream. It is a progress watermark
+	// only: no manager logic reads it. Deciding whether a rollback has
+	// already been superseded is rollbackProtectedLocked's job, comparing
+	// the rollback's own Seq against each announcement record's headerSeq.
+	//
+	// Its readers are tests, which use it as a barrier to wait until a
+	// published header event has been applied before asserting on what it
+	// did. Only an invalidation's sequence is a sound barrier -- see
+	// waitForAnnouncement in manager_header_arming_test.go for why an
+	// announcement's is not. Guarded by mu.
+	lastHeaderStreamSeq uint64
 }
 
 type managerSubscription struct {
@@ -269,25 +566,36 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		voteWindowSlots = DefaultPipelineTiming().VoteWindowSlots
 	}
 	m := &VoteManager{
-		logger:          logger.With("component", "leios"),
-		eventBus:        cfg.EventBus,
-		stakeProvider:   cfg.StakeProvider,
-		epochProvider:   cfg.EpochProvider,
-		paramsProvider:  cfg.ParamsProvider,
-		slotProvider:    cfg.SlotProvider,
-		voteWindowSlots: voteWindowSlots,
-		registry:        registry,
-		now:             time.Now,
-		voteTTL:         voteStoreTTL,
-		maxVotes:        voteStoreMaxEntries,
-		maxRecords:      voteRecordMaxEntries,
-		committees:      make(map[uint64]*epochEntry),
-		votesById:       make(map[lcommon.LeiosVoteId]*storedVote),
-		voteLog:         make([]*storedVote, 0),
-		voteRecords:     make(map[lcommon.LeiosVoteId]voteRecord),
-		cursors:         make(map[string]uint64),
-		wakeCh:          make(chan struct{}),
-		tallies:         make(map[tallyKey]*ebTally),
+		logger:             logger.With("component", "leios"),
+		eventBus:           cfg.EventBus,
+		stakeProvider:      cfg.StakeProvider,
+		epochProvider:      cfg.EpochProvider,
+		paramsProvider:     cfg.ParamsProvider,
+		keyProvider:        cfg.KeyProvider,
+		slotProvider:       cfg.SlotProvider,
+		voteWindowSlots:    voteWindowSlots,
+		registry:           registry,
+		now:                time.Now,
+		signVote:           SignVote,
+		voteTTL:            voteStoreTTL,
+		maxVotes:           voteStoreMaxEntries,
+		maxRecords:         voteRecordMaxEntries,
+		committees:         make(map[uint64]*epochEntry),
+		committeeInFlight:  make(map[uint64]*committeeComputation),
+		committeeStopCh:    make(chan struct{}),
+		votesById:          make(map[lcommon.LeiosVoteId]*storedVote),
+		voteLog:            make([]*storedVote, 0),
+		voteRecords:        make(map[lcommon.LeiosVoteId]voteRecord),
+		cursors:            make(map[string]uint64),
+		wakeCh:             make(chan struct{}),
+		tallies:            make(map[tallyKey]*ebTally),
+		announcements:      make(map[lcommon.Blake2b256]announcementRecord),
+		acquiredEbs:        make(map[lcommon.Blake2b256]acquiredEbRecord),
+		votedAnnouncements: make(map[lcommon.Blake2b256]struct{}),
+		pendingVotes: make(
+			map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote,
+		),
+		pendingVoteCountByConn: make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		m.metrics = initVoteManagerMetrics(cfg.PromRegistry)
@@ -320,17 +628,20 @@ func (m *VoteManager) Start(ctx context.Context) error {
 	m.cancel = cancel
 	m.running = true
 	m.wakeCh = make(chan struct{})
+	m.committeeStopCh = make(chan struct{})
 
 	epochSubId, epochCh := m.eventBus.Subscribe(
 		event.EpochTransitionEventType,
 	)
 	chainSubId, chainCh := m.eventBus.Subscribe(chain.ChainUpdateEventType)
+	headerSubId, headerCh := m.subscribeHeaderStream()
 	m.subs = []managerSubscription{
 		{eventType: event.EpochTransitionEventType, id: epochSubId},
 		{eventType: chain.ChainUpdateEventType, id: chainSubId},
+		{eventType: chain.ChainHeaderEventType, id: headerSubId},
 	}
 	m.loopWg.Go(func() {
-		m.eventLoop(childCtx, epochCh, chainCh)
+		m.eventLoop(childCtx, epochCh, chainCh, headerCh)
 		// If the loop exits because the parent context was cancelled
 		// (not via Stop), reset running and unsubscribe so Start can
 		// be called again without leaking a stale subscriber.
@@ -360,6 +671,23 @@ func (m *VoteManager) stopLocked() {
 	m.subs = nil
 	// Wake any blocked NextVotes callers so they observe the stop
 	close(m.wakeCh)
+	// Release anyone waiting on another caller's in-flight committee
+	// computation. The leader may be blocked inside the stake or key
+	// provider on a read with no deadline, and a waiter must not hold a
+	// protocol worker there past shutdown.
+	close(m.committeeStopCh)
+	// Drop the claims too. A leader blocked in a provider outlives this
+	// Stop, and leaving its claim in the map would let a caller in the NEXT
+	// lifecycle join the previous lifecycle's computation and park on the
+	// fresh stop channel until that leader returned -- or forever, if it
+	// never does. The leader still completes and still closes its own call.
+	m.committeeInFlight = make(map[uint64]*committeeComputation)
+	// Advance the generation for the same reason the rollback path does:
+	// clearing the claim stops a NEW caller joining the old leader, but not
+	// the old leader from installing. That result was derived under the
+	// stopped lifecycle's providers and configuration, and must not become
+	// the next lifecycle's memoized committee.
+	m.committeeGeneration++
 }
 
 // Stop stops the vote manager and unblocks any NextVotes waiters.
@@ -386,52 +714,693 @@ func (m *VoteManager) Stop() error {
 
 // EnableVoting enables local vote emission for the given pool using the
 // given signing key. Votes are emitted for endorser blocks observed while
-// the pool is a member of the epoch's committee.
+// the pool is a member of the epoch's committee; enabling voting itself,
+// however, does not require current committee membership (see
+// resolveOnChainKeyForPool) -- a pool not selected this epoch must still
+// be able to get ready for an epoch that does select it.
 func (m *VoteManager) EnableVoting(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
-) {
+) error {
+	if key == nil {
+		return errors.New("nil leios vote signing key")
+	}
+	// A resolvable on-chain key for this pool is authoritative: if it
+	// disagrees with key, enabling voting anyway would succeed here but
+	// emit nothing, since resolveVoterKey (checked by every emission)
+	// prefers the same on-chain key and would keep rejecting it. Reject
+	// now instead of failing silently later -- this also catches an
+	// epoch transition landing a key rotation between a caller's
+	// ValidateVotingKey check and this call.
+	//
+	// Registry is deliberately consulted only in the explicit private
+	// harness mode where no KeyProvider is wired. With a provider present,
+	// absence is authoritative: auto-registering key here would let this
+	// node emit a vote that reference-compatible peers reject.
+	onChain, onChainKnown, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	if err != nil {
+		return fmt.Errorf(
+			"resolve on-chain leios key for pool %s: %w",
+			poolKeyHash.String(),
+			err,
+		)
+	}
+	if m.keyProvider != nil {
+		if !onChainKnown {
+			return fmt.Errorf(
+				"no usable on-chain leios voting key for pool %s",
+				poolKeyHash.String(),
+			)
+		}
+		if !onChain.Equal(key.PublicKey()) {
+			return fmt.Errorf(
+				"configured leios voting key does not match the on-chain registered key for pool %s",
+				poolKeyHash.String(),
+			)
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.keyProvider != nil {
+		m.logger.Debug(
+			"leios voting key matches the on-chain registration, skipping static registry",
+			"pool",
+			poolKeyHash.String(),
+		)
+	} else if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
+		return fmt.Errorf("register local leios voting key: %w", err)
+	}
 	m.votingPool = slices.Clone(poolKeyHash[:])
 	m.votingKey = key
+	return nil
+}
+
+// ConfigureVoting configures local vote emission for a pool. Production
+// composition calls this during startup, when a node may still be behind the
+// snapshot containing its pool's on-chain Leios key registration. In that
+// case the signing key is retained only as deferred configuration and voting
+// remains disabled until an epoch transition makes a matching, PoP-verified
+// key resolvable. A key that is already resolvable but mismatches remains a
+// hard configuration error.
+//
+// The returned status distinguishes immediate activation, an on-chain key that
+// is not visible yet, a retryable activation-preparation failure, and a request
+// superseded by a newer configuration or retry. Private registry mode has no
+// chain state to catch up and therefore keeps the strict immediate EnableVoting
+// behavior.
+func (m *VoteManager) ConfigureVoting(
+	poolKeyHash lcommon.PoolKeyHash,
+	key *VoteSigningKey,
+) (VotingConfigurationStatus, error) {
+	if key == nil {
+		return VotingConfigurationFailed,
+			errors.New("nil leios vote signing key")
+	}
+	if m.keyProvider == nil {
+		if err := m.EnableVoting(poolKeyHash, key); err != nil {
+			return VotingConfigurationFailed, err
+		}
+		return VotingConfigurationEnabled, nil
+	}
+	m.mu.Lock()
+	m.votingPool = nil
+	m.votingKey = nil
+	m.deferredVotingPool = slices.Clone(poolKeyHash[:])
+	m.deferredVotingKey = key
+	m.deferredVotingAuthorized = false
+	m.votingLookupGeneration++
+	lookupGeneration := m.votingLookupGeneration
+	m.mu.Unlock()
+
+	currentEpoch := m.epochProvider.CurrentEpoch()
+	registered, ok, err := m.resolveOnChainKeyForPoolAtEpoch(
+		poolKeyHash[:],
+		currentEpoch,
+	)
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+
+	if err != nil {
+		if !m.clearDeferredVoting(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
+		}
+		return VotingConfigurationFailed, fmt.Errorf(
+			"resolve on-chain leios key for pool %s: %w",
+			poolKeyHash.String(),
+			err,
+		)
+	}
+	if !ok {
+		if !m.isCurrentVotingLookup(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
+		}
+		return VotingConfigurationAwaitingKey, nil
+	}
+	if !registered.Equal(key.PublicKey()) {
+		if !m.clearDeferredVoting(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
+		}
+		return VotingConfigurationFailed, fmt.Errorf(
+			"configured leios voting key does not match the on-chain registered key for pool %s",
+			poolKeyHash.String(),
+		)
+	}
+	enabled, err := m.activateDeferredVotingLocked(
+		poolKeyHash[:],
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
+	if err != nil {
+		status := m.currentVotingConfigurationStatus(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		)
+		m.logger.Error(
+			"cannot prepare leios voting activation; voting remains disabled",
+			"pool",
+			poolKeyHash.String(),
+			"error",
+			err,
+		)
+		return status, nil
+	}
+	if !enabled {
+		return m.currentVotingConfigurationStatus(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		), nil
+	}
+	return VotingConfigurationEnabled, nil
+}
+
+func (m *VoteManager) clearDeferredVoting(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		m.deferredVotingPool = nil
+		m.deferredVotingKey = nil
+		m.deferredVotingAuthorized = false
+		return true
+	}
+	return false
+}
+
+func (m *VoteManager) isCurrentVotingLookup(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash)
+}
+
+func (m *VoteManager) currentVotingConfigurationStatus(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) VotingConfigurationStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.votingLookupGeneration != lookupGeneration {
+		return VotingConfigurationSuperseded
+	}
+	if m.votingKey == key && slices.Equal(m.votingPool, poolKeyHash) {
+		return VotingConfigurationEnabled
+	}
+	if m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		if m.deferredVotingAuthorized {
+			return VotingConfigurationRetryPending
+		}
+		return VotingConfigurationAwaitingKey
+	}
+	return VotingConfigurationSuperseded
+}
+
+// activateDeferredVoting promotes a matching deferred configuration and
+// replays every ready current-epoch announcement before releasing ordinary
+// local emission. Any provider failure needed to prepare that replay leaves
+// voting disabled and the deferred configuration intact so a later epoch
+// transition can retry the complete activation.
+func (m *VoteManager) activateDeferredVoting(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	currentEpoch uint64,
+	lookupGeneration uint64,
+) (bool, error) {
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+	return m.activateDeferredVotingLocked(
+		poolKeyHash,
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
+}
+
+// activateDeferredVotingLocked requires localEmissionMu to be held.
+func (m *VoteManager) activateDeferredVotingLocked(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	currentEpoch uint64,
+	lookupGeneration uint64,
+) (bool, error) {
+	replayPrepared := false
+	var ready []readyAnnouncement
+	for {
+		m.mu.Lock()
+		if m.votingLookupGeneration != lookupGeneration ||
+			m.deferredVotingKey != key ||
+			!slices.Equal(m.deferredVotingPool, poolKeyHash) {
+			enabled := m.votingKey == key &&
+				slices.Equal(m.votingPool, poolKeyHash)
+			m.mu.Unlock()
+			return enabled, nil
+		}
+		m.deferredVotingAuthorized = true
+		ready = m.readyAnnouncementsForEpochLocked(currentEpoch)
+		if len(ready) == 0 || replayPrepared {
+			m.votingPool = slices.Clone(poolKeyHash)
+			m.votingKey = key
+			m.mu.Unlock()
+			break
+		}
+		m.mu.Unlock()
+
+		// Resolve and cache every provider-backed input emission will need
+		// before exposing the voting key. Failures are deliberately not
+		// cached by committeeAndParamsForEpoch, so the complete activation
+		// remains retryable.
+		if _, err := m.committeeAndParamsForEpoch(currentEpoch); err != nil {
+			return false, fmt.Errorf(
+				"prepare current-epoch announcement replay: %w",
+				err,
+			)
+		}
+		replayPrepared = true
+	}
+
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].record.slot != ready[j].record.slot {
+			return ready[i].record.slot < ready[j].record.slot
+		}
+		return slices.Compare(ready[i].rbHash[:], ready[j].rbHash[:]) < 0
+	})
+	for _, item := range ready {
+		m.emitPrototypeVoteLocked(item.rbHash, item.record)
+	}
+
+	m.mu.Lock()
+	if m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		m.deferredVotingPool = nil
+		m.deferredVotingKey = nil
+		m.deferredVotingAuthorized = false
+	}
+	enabled := m.votingKey == key &&
+		slices.Equal(m.votingPool, poolKeyHash)
+	m.mu.Unlock()
+	return enabled, nil
+}
+
+func (m *VoteManager) readyAnnouncementsForEpochLocked(
+	currentEpoch uint64,
+) []readyAnnouncement {
+	ready := make([]readyAnnouncement, 0, len(m.announcements))
+	for rbHash, record := range m.announcements {
+		if record.epoch != currentEpoch {
+			continue
+		}
+		if _, acquired := m.acquiredEbs[record.ebHash]; !acquired {
+			continue
+		}
+		if _, voted := m.votedAnnouncements[rbHash]; voted {
+			continue
+		}
+		ready = append(ready, readyAnnouncement{
+			rbHash: rbHash,
+			record: record,
+		})
+	}
+	return ready
+}
+
+// retryDeferredVoting rechecks deferred startup configuration after an epoch
+// transition. Historical Leios keys are frozen into epoch snapshots, so these
+// boundaries are the only chain updates that can make an unavailable key
+// resolvable. Provider failures, invalid proofs, and mismatches leave voting
+// disabled and retain the configuration for a later snapshot.
+func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
+	m.mu.Lock()
+	pool := slices.Clone(m.deferredVotingPool)
+	key := m.deferredVotingKey
+	if len(pool) == 0 || key == nil {
+		m.mu.Unlock()
+		return
+	}
+	m.votingLookupGeneration++
+	lookupGeneration := m.votingLookupGeneration
+	m.deferredVotingAuthorized = false
+	if m.votingKey == key && slices.Equal(m.votingPool, pool) {
+		m.votingPool = nil
+		m.votingKey = nil
+	}
+	m.mu.Unlock()
+
+	registered, ok, err := m.resolveOnChainKeyForPoolAtEpoch(
+		pool,
+		currentEpoch,
+	)
+	if !m.isCurrentVotingLookup(pool, key, lookupGeneration) {
+		return
+	}
+	if err != nil {
+		m.logger.Error(
+			"cannot resolve deferred leios voting key; voting remains disabled",
+			"pool", hex.EncodeToString(pool),
+			"error", err,
+		)
+		return
+	}
+	if !ok {
+		m.logger.Debug(
+			"deferred leios voting key is not available in the on-chain snapshot; voting remains disabled",
+			"pool",
+			hex.EncodeToString(pool),
+		)
+		return
+	}
+	if !registered.Equal(key.PublicKey()) {
+		m.logger.Error(
+			"configured leios voting key does not match the on-chain registered key; voting remains disabled",
+			"pool",
+			hex.EncodeToString(pool),
+		)
+		return
+	}
+
+	enabled, err := m.activateDeferredVoting(
+		pool,
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
+	if err != nil {
+		m.logger.Error(
+			"cannot replay deferred leios voting announcements; voting remains disabled",
+			"pool",
+			hex.EncodeToString(pool),
+			"error",
+			err,
+		)
+		return
+	}
+	if !enabled {
+		return
+	}
+	m.logger.Info(
+		"leios voting enabled after resolving the on-chain registration",
+		"pool", hex.EncodeToString(pool),
+	)
+}
+
+// ValidateVotingKey verifies that an operator-supplied voting key matches a
+// resolvable public key for the pool. A configured KeyProvider is authoritative:
+// its PoP-verified on-chain registration must exist and match. Registry is
+// consulted only in the explicit private test/devnet mode where KeyProvider is
+// nil.
+//
+// Deliberately not scoped to the current epoch's committee: resolution
+// goes through resolveOnChainKeyForPool, not the epoch-cached (and, since
+// this pool may not be a committee member today, potentially empty)
+// resolveVoterKey path -- a pool outside this epoch's stake-coverage
+// selection must still be able to validate and enable its key ahead of an
+// epoch that does select it.
+func (m *VoteManager) ValidateVotingKey(
+	poolKeyHash lcommon.PoolKeyHash,
+	key *VoteSigningKey,
+) error {
+	if key == nil {
+		return errors.New("nil leios vote signing key")
+	}
+	registered, ok, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	if err != nil {
+		return fmt.Errorf(
+			"resolve on-chain leios key for pool %x: %w",
+			poolKeyHash.Bytes(),
+			err,
+		)
+	}
+	if !ok && m.keyProvider == nil {
+		registered, ok = m.registry.PublicKeyFor(poolKeyHash[:])
+	}
+	if !ok {
+		if m.keyProvider != nil {
+			return fmt.Errorf(
+				"no usable on-chain leios voting public key for pool %x",
+				poolKeyHash.Bytes(),
+			)
+		}
+		return fmt.Errorf(
+			"no static leios voting public key for pool %x in private registry mode",
+			poolKeyHash.Bytes(),
+		)
+	}
+	if !registered.Equal(key.PublicKey()) {
+		return fmt.Errorf(
+			"configured leios voting key does not match the resolved public key for pool %x",
+			poolKeyHash.Bytes(),
+		)
+	}
+	return nil
 }
 
 // CommitteeForEpoch returns the memoized voting committee for an epoch,
 // computing it from the stake snapshot on first use.
 func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
-	committee, _, err := m.committeeAndParamsForEpoch(epoch)
-	return committee, err
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return nil, err
+	}
+	// committeeAndParamsForEpoch returns a nil entry only alongside a
+	// non-nil error: computeCommitteeEntry's nil-entry returns are all error
+	// returns, and completeCommitteeComputation memoizes an entry only when
+	// err is nil. The err check above therefore rules out a nil entry, which
+	// nilaway cannot correlate.
+	//nolint:nilaway // entry is non-nil whenever err is nil
+	return entry.committee, nil
 }
 
-// committeeAndParamsForEpoch returns the committee and quorum threshold
-// for an epoch, computing and memoizing them on first use. Failures
-// (snapshot unavailable, invalid parameters) are not memoized so later
-// calls can recover.
+// ValidateDijkstraCertificate verifies a Dijkstra certificate against the
+// historical committee and keys resolved for epoch. Unlike vote admission,
+// block admission is strict: every selected signer must have a verified key.
+func (m *VoteManager) ValidateDijkstraCertificate(
+	epoch uint64,
+	signers []byte,
+	aggregatedSignature []byte,
+	message []byte,
+) error {
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return fmt.Errorf("resolve Leios committee for epoch %d: %w", epoch, err)
+	}
+	if err := lcommon.ValidateLeiosSignature(
+		"Dijkstra Leios certificate aggregated signature",
+		aggregatedSignature,
+	); err != nil {
+		return err
+	}
+	if err := lcommon.ValidateLeiosSignerBitfield(signers, entry.committee.Size()); err != nil {
+		return err
+	}
+	var signerStake uint64
+	signerPubs := make([]*bls12381.G2Affine, 0, len(entry.committee.Members))
+	for _, member := range entry.committee.Members {
+		if !lcommon.LeiosSignerBit(signers, member.VoterId) {
+			continue
+		}
+		pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
+		if !ok {
+			return fmt.Errorf("leios certificate signer %d has no usable key", member.VoterId)
+		}
+		if ^uint64(0)-signerStake < member.Stake {
+			return errors.New("leios certificate signer stake overflows uint64")
+		}
+		signerStake += member.Stake
+		signerPubs = append(signerPubs, pub)
+	}
+	quorumMet, err := MeetsStakeQuorum(
+		signerStake,
+		entry.committee.TotalActiveStake,
+		entry.tau,
+	)
+	if err != nil {
+		return err
+	}
+	if !quorumMet {
+		return ErrQuorumNotMet
+	}
+	if err := VerifyAggregateSignature(signerPubs, message, aggregatedSignature); err != nil {
+		return fmt.Errorf("verify Leios certificate aggregate signature: %w", err)
+	}
+	return nil
+}
+
+// committeeAndParamsForEpoch returns the memoized epochEntry (committee,
+// quorum threshold, and resolved on-chain voter keys) for an epoch,
+// computing it from the stake snapshot on first use. Failures (snapshot
+// unavailable, invalid parameters) are not memoized so later calls can
+// recover.
+//
+// Concurrent callers for the same epoch share one computation. Every path
+// into this function is peer-driven (HandleVote and
+// handleResolvedPrototypeVote run on the connection's protocol worker), so
+// on a cold memo one endorser-block announcement diffused to N peers used to
+// start N identical computations: N parameter lookups, N stake-distribution
+// database reads, N committee sorts, and N x committee-size proof-of-
+// possession pairing verifications at roughly 0.75ms each, of which N-1
+// results were then discarded by the install-time double check. Coalescing
+// makes the cost independent of peer count. See dingo #3661.
 func (m *VoteManager) committeeAndParamsForEpoch(
 	epoch uint64,
-) (*Committee, *big.Rat, error) {
+) (*epochEntry, error) {
 	m.mu.Lock()
 	if entry, ok := m.committees[epoch]; ok {
 		m.mu.Unlock()
-		return entry.committee, entry.tau, nil
+		return entry, nil
 	}
+	if call, claimed := m.committeeInFlight[epoch]; claimed {
+		call.waiters++
+		stopCh := m.committeeStopCh
+		m.mu.Unlock()
+		select {
+		case <-call.done:
+			result := call.result
+			// The outcome is delivered inline rather than re-read from
+			// m.committees after waking: handleRollback clears that map
+			// wholesale, and it can do so between the leader's install and a
+			// descheduled waiter resuming, which would leave the waiter
+			// observing a miss instead of the result it waited for.
+			return result.entry, result.err
+		case <-stopCh:
+			// Released, not left parked. The leader can be blocked inside the
+			// stake or key provider -- a database read carrying no deadline of
+			// its own -- and a waiter must not hold a connection's protocol
+			// worker there across shutdown. The leader still runs to
+			// completion and still releases its claim; done is closed when the
+			// leader finishes, and the waiter returns here on stop.
+			return nil, ErrVoteManagerStopped
+		}
+	}
+	if len(m.committeeInFlight) >= committeeInFlightMaxEpochs {
+		m.mu.Unlock()
+		return nil, fmt.Errorf(
+			"%w: %d epochs already computing",
+			ErrCommitteeComputationBacklog,
+			committeeInFlightMaxEpochs,
+		)
+	}
+	// Claim the epoch.
+	call := &committeeComputation{done: make(chan struct{})}
+	m.committeeInFlight[epoch] = call
+	// The generation this computation is derived from. handleRollback bumps
+	// it when it clears the memo, so a computation that started before a
+	// rollback can tell that its inputs may no longer be current.
+	generation := m.committeeGeneration
 	m.mu.Unlock()
 
-	// Compute outside the lock: stake lookup hits the database
-	sigmaC, tau, err := m.paramsProvider.LeiosCommitteeParameters()
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		// A panic unwinding through the leader must not leave the epoch
+		// claimed (which would make it permanently uncomputable: every later
+		// caller would join a computation that no longer exists) or its
+		// waiters parked. Release them with an error and let the panic keep
+		// unwinding: unlike a CBOR decode panic on adversarial bytes, which
+		// decodeCache.getOrDecode deliberately converts into a cached
+		// "these bytes do not decode" result, a panic in parameter, stake, or
+		// key resolution is a defect in this node's own ledger handling
+		// rather than a fact about untrusted input, so it must not be
+		// laundered into a routine per-epoch error that hides it.
+		m.completeCommitteeComputation(
+			epoch,
+			call,
+			generation,
+			nil,
+			ErrCommitteeComputationAborted,
+		)
+	}()
+	entry, snapshotEpoch, err := m.computeCommitteeEntry(epoch)
+	completed = true
+	result, installed := m.completeCommitteeComputation(
+		epoch,
+		call,
+		generation,
+		entry,
+		err,
+	)
+	if !installed {
+		return result.entry, result.err
+	}
+	// Metrics and logging stay outside m.mu, and are reached only by the
+	// leader that actually installed the memo, so they are not amplified by
+	// the callers it served.
+	if m.metrics != nil {
+		m.metrics.committeeSize.Set(float64(result.entry.committee.Size()))
+	}
+	m.logger.Info(
+		"computed leios voting committee",
+		"epoch", epoch,
+		"snapshot_epoch", snapshotEpoch,
+		"members", result.entry.committee.Size(),
+		"committee_stake", result.entry.committee.CommitteeStake,
+		"total_active_stake", result.entry.committee.TotalActiveStake,
+	)
+	return result.entry, result.err
+}
+
+// computeCommitteeEntry builds an epoch's entry from the stake snapshot. It
+// touches no VoteManager state and holds no lock: the parameter lookup, the
+// stake-distribution read, and the proof-of-possession verifications all
+// reach the database or the pairing engine, and none of them may run under
+// m.mu. It also returns the snapshot epoch it used, for the caller's log.
+func (m *VoteManager) computeCommitteeEntry(
+	epoch uint64,
+) (*epochEntry, uint64, error) {
+	snapshotEpoch := CommitteeSnapshotEpoch(epoch)
+	committeeSize, tau, err := m.paramsProvider.LeiosCommitteeParameters(
+		snapshotEpoch,
+	)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, snapshotEpoch, fmt.Errorf(
 			"leios committee parameters: %w",
 			err,
 		)
 	}
-	snapshotEpoch := CommitteeSnapshotEpoch(epoch)
 	poolStakes, totalActiveStake, err := m.stakeProvider.GetStakeDistribution(
 		snapshotEpoch,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, snapshotEpoch, fmt.Errorf(
 			"stake distribution for snapshot epoch %d: %w",
 			snapshotEpoch,
 			err,
@@ -442,38 +1411,199 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 		snapshotEpoch,
 		poolStakes,
 		totalActiveStake,
-		sigmaC,
+		uint64(committeeSize), // #nosec G115 -- uint16 always fits uint64
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, snapshotEpoch, fmt.Errorf(
 			"compute committee for epoch %d: %w",
 			epoch,
 			err,
 		)
 	}
+	// Resolve keys only for committee members, not every pool in the stake
+	// distribution: resolveVoterKey only ever looks up a member.PoolKeyHash,
+	// and ComputeCommittee already trimmed poolStakes down to the
+	// top-N members that make the committee. Verifying a
+	// proof of possession is a pairing operation (measured ~0.75ms/key on
+	// this branch); at Cardano's pool counts, verifying every registered
+	// pool instead of just the committee would burn seconds of pairing
+	// work per epoch computation on results that could never be read back.
+	poolKeyHashes := make([]string, 0, len(committee.Members))
+	for _, member := range committee.Members {
+		poolKeyHashes = append(
+			poolKeyHashes,
+			hex.EncodeToString(member.PoolKeyHash),
+		)
+	}
+	// A failure here must not be cached: caching an empty onChainKeys map
+	// for this epoch would make every seat keyless until the process
+	// restarts or a rollback clears the memo, even after the underlying
+	// store recovers from what may be a transient failure. Returning the
+	// error instead means the next call retries from scratch.
+	onChainKeys, err := m.resolveOnChainKeys(snapshotEpoch, poolKeyHashes)
+	if err != nil {
+		return nil, snapshotEpoch, err
+	}
+	return &epochEntry{
+		committee:   committee,
+		tau:         tau,
+		onChainKeys: onChainKeys,
+	}, snapshotEpoch, nil
+}
 
+// completeCommitteeComputation installs a successful computation in the memo,
+// releases the epoch's in-flight claim, and hands the outcome to every waiter
+// parked on that claim. It is the single exit for a leader: the normal-return
+// path and the panic-unwind path both go through it, so neither can leave the
+// claim held or a waiter parked. installed reports whether the memo was
+// actually written.
+//
+// A failure is released to waiters but never memoized, preserving the
+// contract that a transient snapshot or key-store failure is retried by the
+// next caller instead of pinning the epoch to a keyless committee.
+func (m *VoteManager) completeCommitteeComputation(
+	epoch uint64,
+	call *committeeComputation,
+	generation uint64,
+	entry *epochEntry,
+	err error,
+) (committeeResult, bool) {
+	installed := false
 	m.mu.Lock()
-	if entry, ok := m.committees[epoch]; ok {
-		// Another caller computed it concurrently; both results are
-		// deterministic and identical, keep the first.
-		m.mu.Unlock()
-		return entry.committee, entry.tau, nil
+	switch {
+	case err != nil:
+		// Not memoized; see the function comment.
+	case m.committeeGeneration != generation:
+		// A rollback cleared the memo while this computation was in flight,
+		// so its stake snapshot may be one the rollback invalidated.
+		// Installing it now would silently undo that invalidation and pin the
+		// stale committee for the rest of the epoch. The value is still
+		// handed to this call and its waiters -- they are no worse off than a
+		// caller that completed just before the rollback landed -- and the
+		// next caller recomputes from the post-rollback snapshot.
+	default:
+		m.committees[epoch] = entry
+		installed = true
 	}
-	m.committees[epoch] = &epochEntry{committee: committee, tau: tau}
+	// Identity-checked: stopLocked clears the map wholesale, and a later
+	// lifecycle may have claimed this epoch again. Deleting by key alone
+	// would drop the new lifecycle's claim and make the epoch permanently
+	// uncomputable.
+	if m.committeeInFlight[epoch] == call {
+		delete(m.committeeInFlight, epoch)
+	}
+	result := committeeResult{entry: entry, err: err}
+	call.result = result
 	m.mu.Unlock()
+	// Releases every waiter at once, including waiters of a lifecycle that
+	// has already stopped -- they left through committeeStopCh and read
+	// nothing.
+	close(call.done)
+	return result, installed
+}
 
-	if m.metrics != nil {
-		m.metrics.committeeSize.Set(float64(committee.Size()))
+// resolveOnChainKeys fetches raw registered Leios keys from keyProvider for
+// a snapshot epoch and returns only those whose proof of possession
+// verifies. A nil keyProvider (no ledger wired, e.g. in tests) yields an
+// empty map with no error -- this is the explicit Registry-only private
+// test/devnet mode. A provider error
+// is returned rather than swallowed into an empty map: the caller must not
+// cache an empty result for a transient failure, since that would make
+// every seat keyless for the rest of the epoch even after the store
+// recovers (see committeeAndParamsForEpoch).
+func (m *VoteManager) resolveOnChainKeys(
+	snapshotEpoch uint64,
+	poolKeyHashes []string,
+) (map[string]*bls12381.G2Affine, error) {
+	verified := make(map[string]*bls12381.G2Affine)
+	if m.keyProvider == nil {
+		return verified, nil
 	}
-	m.logger.Info(
-		"computed leios voting committee",
-		"epoch", epoch,
-		"snapshot_epoch", snapshotEpoch,
-		"members", committee.Size(),
-		"committee_stake", committee.CommitteeStake,
-		"total_active_stake", committee.TotalActiveStake,
+	raw, err := m.keyProvider.GetLeiosKeys(snapshotEpoch, poolKeyHashes)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve on-chain leios keys for snapshot epoch %d: %w",
+			snapshotEpoch,
+			err,
+		)
+	}
+	for poolHashHex, key := range raw {
+		if err := VerifyLeiosKeyProofOfPossession(key); err != nil {
+			m.logger.Warn(
+				"registered leios key failed proof of possession, treating as absent",
+				"pool",
+				poolHashHex,
+				"error",
+				err,
+			)
+			continue
+		}
+		var pub bls12381.G2Affine
+		if _, err := pub.SetBytes(key.PublicKey); err != nil {
+			// Already validated by VerifyLeiosKeyProofOfPossession; this
+			// cannot fail in practice, but skip defensively rather than
+			// panic.
+			continue
+		}
+		verified[poolHashHex] = &pub
+	}
+	return verified, nil
+}
+
+// resolveOnChainKeyForPool resolves and PoP-verifies a single pool's
+// on-chain key, independent of committee membership. This is deliberately
+// not committee-scoped like resolveOnChainKeys' epoch cache:
+// ValidateVotingKey/EnableVoting must work for a pool that isn't a member
+// of the *current* epoch's committee, since ComputeCommittee re-selects
+// every epoch from that epoch's stake snapshot -- a pool outside today's
+// selection can still be selected once its stake (or others') shifts, and
+// an operator must be able to enable voting in advance of that rather than
+// getting rejected today for a reason that has nothing to do with the
+// validity of their key.
+//
+// A key-provider error is returned, not swallowed into "no on-chain key
+// found": a transient lookup failure is not the same as a genuine absence,
+// and both must block production voting rather than consulting Registry.
+func (m *VoteManager) resolveOnChainKeyForPool(
+	poolKeyHash []byte,
+) (*bls12381.G2Affine, bool, error) {
+	return m.resolveOnChainKeyForPoolAtEpoch(
+		poolKeyHash,
+		m.epochProvider.CurrentEpoch(),
 	)
-	return committee, tau, nil
+}
+
+func (m *VoteManager) resolveOnChainKeyForPoolAtEpoch(
+	poolKeyHash []byte,
+	currentEpoch uint64,
+) (*bls12381.G2Affine, bool, error) {
+	poolHashHex := hex.EncodeToString(poolKeyHash)
+	snapshotEpoch := CommitteeSnapshotEpoch(currentEpoch)
+	keys, err := m.resolveOnChainKeys(snapshotEpoch, []string{poolHashHex})
+	if err != nil {
+		return nil, false, err
+	}
+	pub, ok := keys[poolHashHex]
+	return pub, ok, nil
+}
+
+// resolveVoterKey resolves a committee member's voting public key. With a
+// KeyProvider, the epoch's PoP-verified on-chain result is authoritative and a
+// missing key is a keyless seat. Registry is used only when KeyProvider is nil,
+// the explicit private test/devnet seam.
+func (m *VoteManager) resolveVoterKey(
+	entry *epochEntry,
+	poolKeyHash []byte,
+) (*bls12381.G2Affine, bool) {
+	if entry != nil && entry.onChainKeys != nil {
+		if pub, ok := entry.onChainKeys[hex.EncodeToString(poolKeyHash)]; ok {
+			return pub, true
+		}
+	}
+	if m.keyProvider != nil {
+		return nil, false
+	}
+	return m.registry.PublicKeyFor(poolKeyHash)
 }
 
 // slotWindowCheck reports whether a vote slot falls within the
@@ -553,11 +1683,12 @@ func (m *VoteManager) HandleVote(
 		m.rejectVote("epoch", vote, err)
 		return nil
 	}
-	committee, tau, err := m.committeeAndParamsForEpoch(epoch)
+	entry, err := m.committeeAndParamsForEpoch(epoch)
 	if err != nil {
 		m.rejectVote("committee", vote, err)
 		return nil
 	}
+	committee := entry.committee
 	member, ok := committee.Member(vote.VoterId)
 	if !ok {
 		m.rejectVote(
@@ -572,7 +1703,7 @@ func (m *VoteManager) HandleVote(
 		return nil
 	}
 	verified := false
-	if pub, ok := m.registry.PublicKeyFor(member.PoolKeyHash); ok {
+	if pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash); ok {
 		msg := VoteMessageBytes(vote.SlotNo, vote.EndorserBlockHash)
 		if err := VerifyVoteSignature(
 			pub,
@@ -584,17 +1715,319 @@ func (m *VoteManager) HandleVote(
 		}
 		verified = true
 	} else {
-		// Lenient mode pending CIP-0164 key registration: the vote
-		// counts toward observed stake but cannot be verified or
-		// aggregated into a certificate.
+		// Keyless committee seat: the pool has no usable authoritative key,
+		// so the vote counts toward observed
+		// stake but cannot be verified or aggregated into a certificate.
 		m.logger.Debug(
 			"no registered voting key for leios voter, skipping signature verification",
 			"slot", vote.SlotNo,
 			"voter_id", vote.VoterId,
 		)
 	}
-	m.insertVote(connKey, vote, epoch, committee, member, verified, tau)
+	m.insertVote(
+		connKey,
+		vote,
+		epoch,
+		committee,
+		member,
+		verified,
+		entry.tau,
+		lcommon.Blake2b256{},
+		nil,
+	)
 	return nil
+}
+
+// HandlePrototypeVote validates the current three-field prototype vote after
+// resolving its announcing ranking block to the slot and EB identity.
+func (m *VoteManager) HandlePrototypeVote(
+	connKey string,
+	vote lcommon.LeiosPrototypeVote,
+) error {
+	if m.metrics != nil {
+		m.metrics.votesReceivedTotal.Inc()
+	}
+	if err := vote.Validate(); err != nil {
+		if m.metrics != nil {
+			m.metrics.votesRejectedTotal.WithLabelValues("structural").Inc()
+		}
+		return nil
+	}
+	m.mu.Lock()
+	record, ok := m.announcements[vote.AnnouncingRbHash]
+	if !ok {
+		m.queuePrototypeVoteLocked(connKey, vote)
+	}
+	m.mu.Unlock()
+	if !ok {
+		m.logger.Debug(
+			"queued leios vote pending announcing ranking block",
+			"announcing_rb_hash", vote.AnnouncingRbHash.String(),
+			"voter_id", vote.VoterId,
+		)
+		return nil
+	}
+	return m.handleResolvedPrototypeVote(connKey, vote, record)
+}
+
+func (m *VoteManager) handleResolvedPrototypeVote(
+	connKey string,
+	vote lcommon.LeiosPrototypeVote,
+	record announcementRecord,
+) error {
+	if err := m.slotWindowCheck(record.slot); err != nil {
+		m.rejectVote(
+			"slot_window",
+			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			err,
+		)
+		return nil
+	}
+	entry, err := m.committeeAndParamsForEpoch(record.epoch)
+	if err != nil {
+		m.rejectVote(
+			"committee",
+			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			err,
+		)
+		return nil
+	}
+	committee := entry.committee
+	member, ok := committee.Member(vote.VoterId)
+	if !ok {
+		m.rejectVote(
+			"membership",
+			lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+			errors.New("voter id outside committee"),
+		)
+		return nil
+	}
+	verified := false
+	// A member resolving to no key here is a keyless committee seat: its
+	// stake still counts toward membership, but its vote can never be
+	// verified or aggregated into a certificate.
+	pub, _ := m.resolveVoterKey(entry, member.PoolKeyHash)
+	if pub != nil {
+		if err := VerifyVoteSignature(pub, PrototypeVoteMessageBytes(vote.AnnouncingRbHash), vote.VoteSignature); err != nil {
+			m.rejectVote(
+				"signature",
+				lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+				err,
+			)
+			return nil
+		}
+		verified = true
+	}
+	resolved := lcommon.LeiosVote{
+		SlotNo:            record.slot,
+		EndorserBlockHash: record.ebHash,
+		VoterId:           vote.VoterId,
+		VoteSignature:     vote.VoteSignature,
+	}
+	inserted := m.insertVote(
+		connKey,
+		resolved,
+		record.epoch,
+		committee,
+		member,
+		verified,
+		entry.tau,
+		vote.AnnouncingRbHash,
+		nil,
+	)
+	// Re-diffuse a newly accepted peer vote the same way a locally emitted
+	// one is diffused. insertVote's dedup/equivocation gate above means this
+	// fires exactly once per distinct vote, so a relay forwards it to its
+	// other peers instead of stopping it at the connection that delivered
+	// it, without re-broadcasting a resubmission or an equivocation attempt.
+	if inserted {
+		m.eventBus.Publish(VoteReceivedEventType, event.NewEvent(
+			VoteReceivedEventType,
+			VoteReceivedEvent{Vote: vote, OriginConnKey: connKey},
+		))
+	}
+	return nil
+}
+
+func (m *VoteManager) queuePrototypeVoteLocked(
+	connKey string,
+	vote lcommon.LeiosPrototypeVote,
+) {
+	now := m.now()
+	m.prunePrototypeStateLocked(now)
+	byVoter := m.pendingVotes[vote.AnnouncingRbHash]
+	if byVoter == nil {
+		byVoter = make(map[uint64][]pendingPrototypeVote)
+		m.pendingVotes[vote.AnnouncingRbHash] = byVoter
+	}
+	candidates := byVoter[vote.VoterId]
+	for _, candidate := range candidates {
+		if slices.Equal(candidate.vote.VoteSignature, vote.VoteSignature) {
+			return
+		}
+	}
+	if len(candidates) >= maxPendingPrototypeCandidatesPerVoter {
+		// Prefer recent alternatives over permanently reserving this voter id
+		// for the first unverified arrivals. Verification is impossible until
+		// the ranking block resolves the epoch committee.
+		evictedConn := candidates[0].connKey
+		candidates = candidates[1:]
+		m.pendingVoteCount--
+		m.decrementPendingConnectionLocked(evictedConn)
+		if m.metrics != nil {
+			m.metrics.votesRejectedTotal.WithLabelValues("pending_candidates").
+				Inc()
+		}
+	}
+	if m.pendingVoteCount >= m.maxRecords {
+		mostRepresentedConn := ""
+		mostRepresentedCount := 0
+		for candidateConn, count := range m.pendingVoteCountByConn {
+			if count > mostRepresentedCount {
+				mostRepresentedConn = candidateConn
+				mostRepresentedCount = count
+			}
+		}
+		// At capacity, make room when the incoming connection is less
+		// represented than the largest incumbent. This lets the queue use its
+		// full capacity with one healthy peer while preventing that peer from
+		// excluding later peers entirely.
+		if mostRepresentedCount > m.pendingVoteCountByConn[connKey] {
+			if !m.evictOldestPendingForConnectionLocked(mostRepresentedConn) {
+				if m.metrics != nil {
+					m.metrics.votesRejectedTotal.WithLabelValues("pending_capacity").
+						Inc()
+				}
+				return
+			}
+			byVoter = m.pendingVotes[vote.AnnouncingRbHash]
+			if byVoter == nil {
+				byVoter = make(map[uint64][]pendingPrototypeVote)
+				m.pendingVotes[vote.AnnouncingRbHash] = byVoter
+			}
+			candidates = byVoter[vote.VoterId]
+		} else {
+			if m.metrics != nil {
+				m.metrics.votesRejectedTotal.WithLabelValues("pending_capacity").
+					Inc()
+			}
+			return
+		}
+	}
+	copyVote := vote
+	copyVote.VoteSignature = slices.Clone(vote.VoteSignature)
+	byVoter[vote.VoterId] = append(candidates, pendingPrototypeVote{
+		connKey: connKey,
+		vote:    copyVote,
+		seenAt:  now,
+	})
+	m.pendingVoteCount++
+	m.pendingVoteCountByConn[connKey]++
+}
+
+func (m *VoteManager) evictOldestPendingForConnectionLocked(
+	connKey string,
+) bool {
+	var oldestRb lcommon.Blake2b256
+	var oldestVoter uint64
+	oldestIndex := -1
+	var oldestTime time.Time
+	for rbHash, byVoter := range m.pendingVotes {
+		for voterId, candidates := range byVoter {
+			for idx, candidate := range candidates {
+				if candidate.connKey != connKey ||
+					(oldestIndex >= 0 && !candidate.seenAt.Before(oldestTime)) {
+					continue
+				}
+				oldestRb = rbHash
+				oldestVoter = voterId
+				oldestIndex = idx
+				oldestTime = candidate.seenAt
+			}
+		}
+	}
+	if oldestIndex < 0 {
+		return false
+	}
+	byVoter, ok := m.pendingVotes[oldestRb]
+	if !ok {
+		return false
+	}
+	candidates, ok := byVoter[oldestVoter]
+	if !ok || oldestIndex >= len(candidates) {
+		return false
+	}
+	candidates = slices.Delete(candidates, oldestIndex, oldestIndex+1)
+	if len(candidates) == 0 {
+		delete(byVoter, oldestVoter)
+	} else {
+		byVoter[oldestVoter] = candidates
+	}
+	if len(byVoter) == 0 {
+		delete(m.pendingVotes, oldestRb)
+	}
+	m.pendingVoteCount--
+	m.decrementPendingConnectionLocked(connKey)
+	return true
+}
+
+func (m *VoteManager) decrementPendingConnectionLocked(connKey string) {
+	if m.pendingVoteCountByConn[connKey] <= 1 {
+		delete(m.pendingVoteCountByConn, connKey)
+		return
+	}
+	m.pendingVoteCountByConn[connKey]--
+}
+
+func (m *VoteManager) removePendingAnnouncementLocked(
+	rbHash lcommon.Blake2b256,
+) map[uint64][]pendingPrototypeVote {
+	pendingMap := m.pendingVotes[rbHash]
+	delete(m.pendingVotes, rbHash)
+	for _, candidates := range pendingMap {
+		for _, candidate := range candidates {
+			m.pendingVoteCount--
+			m.decrementPendingConnectionLocked(candidate.connKey)
+		}
+	}
+	return pendingMap
+}
+
+func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
+	cutoff := now.Add(-m.voteTTL)
+	for rbHash, record := range m.announcements {
+		if record.seenAt.Before(cutoff) {
+			delete(m.announcements, rbHash)
+			delete(m.votedAnnouncements, rbHash)
+			m.removePendingAnnouncementLocked(rbHash)
+		}
+	}
+	for ebHash, record := range m.acquiredEbs {
+		if record.seenAt.Before(cutoff) {
+			delete(m.acquiredEbs, ebHash)
+		}
+	}
+	for rbHash, byVoter := range m.pendingVotes {
+		for voterId, candidates := range byVoter {
+			kept := candidates[:0]
+			for _, pending := range candidates {
+				if pending.seenAt.Before(cutoff) {
+					m.pendingVoteCount--
+					m.decrementPendingConnectionLocked(pending.connKey)
+					continue
+				}
+				kept = append(kept, pending)
+			}
+			if len(kept) == 0 {
+				delete(byVoter, voterId)
+			} else {
+				byVoter[voterId] = kept
+			}
+		}
+		if len(byVoter) == 0 {
+			delete(m.pendingVotes, rbHash)
+		}
+	}
 }
 
 // insertVote stores a validated vote, updates the endorser block tally,
@@ -607,11 +2040,13 @@ func (m *VoteManager) insertVote(
 	member CommitteeMember,
 	verified bool,
 	tau *big.Rat,
-) {
+	announcingRbHash lcommon.Blake2b256,
+	expectedVoting *votingConfigurationSnapshot,
+) bool {
 	raw, err := vote.MarshalCBOR()
 	if err != nil {
 		m.rejectVote("encoding", vote, err)
-		return
+		return false
 	}
 	voteId := lcommon.LeiosVoteId{
 		SlotNo:  vote.SlotNo,
@@ -620,6 +2055,31 @@ func (m *VoteManager) insertVote(
 	now := m.now()
 
 	m.mu.Lock()
+	if expectedVoting != nil &&
+		(m.votingLookupGeneration != expectedVoting.generation ||
+			m.votingKey != expectedVoting.key ||
+			!slices.Equal(m.votingPool, expectedVoting.pool)) {
+		m.mu.Unlock()
+		return false
+	}
+	if announcingRbHash != (lcommon.Blake2b256{}) {
+		current, ok := m.announcements[announcingRbHash]
+		if !ok || current.slot != vote.SlotNo || current.epoch != epoch ||
+			current.ebHash != vote.EndorserBlockHash {
+			m.mu.Unlock()
+			return false
+		}
+		if originConn == "" {
+			if _, acquired := m.acquiredEbs[current.ebHash]; !acquired {
+				m.mu.Unlock()
+				return false
+			}
+			if _, voted := m.votedAnnouncements[announcingRbHash]; voted {
+				m.mu.Unlock()
+				return false
+			}
+		}
+	}
 	// Prune before the dedup check so an expired entry cannot block a
 	// fresh vote with the same id.
 	m.pruneExpiredLocked(now)
@@ -634,7 +2094,7 @@ func (m *VoteManager) insertVote(
 			// serving: a size-evicted vote stays unservable until its
 			// record dies, which avoids serving-store churn under
 			// re-delivery.
-			return
+			return false
 		}
 		// Equivocation: same voter and slot, different endorser
 		// block. The first vote wins for as long as its record
@@ -649,7 +2109,7 @@ func (m *VoteManager) insertVote(
 			"kept_endorser_block_hash", record.ebHash.String(),
 			"dropped_endorser_block_hash", vote.EndorserBlockHash.String(),
 		)
-		return
+		return false
 	}
 	if originConn != "" && !verified && len(m.voteRecords) >= m.maxRecords {
 		// Reject rather than evict: dropping a record would let a
@@ -670,12 +2130,16 @@ func (m *VoteManager) insertVote(
 			vote,
 			errors.New("vote record ledger full"),
 		)
-		return
+		return false
+	}
+	if originConn == "" && announcingRbHash != (lcommon.Blake2b256{}) {
+		m.votedAnnouncements[announcingRbHash] = struct{}{}
 	}
 	m.voteRecords[voteId] = voteRecord{
-		ebHash:     vote.EndorserBlockHash,
-		epoch:      epoch,
-		insertedAt: now,
+		ebHash:           vote.EndorserBlockHash,
+		announcingRbHash: announcingRbHash,
+		epoch:            epoch,
+		insertedAt:       now,
 	}
 	m.updateRecordsGaugeLocked()
 	stored := &storedVote{
@@ -692,7 +2156,10 @@ func (m *VoteManager) insertVote(
 	m.voteLog = append(m.voteLog, stored)
 	m.enforceSizeLocked()
 
-	key := tallyKey{slotNo: vote.SlotNo, ebHash: vote.EndorserBlockHash}
+	key := tallyKey{
+		slotNo: vote.SlotNo, ebHash: vote.EndorserBlockHash,
+		announcingRbHash: announcingRbHash,
+	}
 	tally, ok := m.tallies[key]
 	if !ok {
 		tally = &ebTally{epoch: epoch}
@@ -734,6 +2201,7 @@ func (m *VoteManager) insertVote(
 			event.NewEvent(EbQuorumEventType, *quorumEvt),
 		)
 	}
+	return true
 }
 
 // evaluateQuorumLocked checks the tally against the quorum threshold and
@@ -774,10 +2242,14 @@ func (m *VoteManager) evaluateQuorumLocked(
 				tally.observedQuorumLogged = true
 				m.logger.Info(
 					"leios stake quorum observed but not certifiable: unverified voter signatures",
-					"slot", key.slotNo,
-					"endorser_block_hash", key.ebHash.String(),
-					"observed_stake", tally.observedStake,
-					"verified_stake", tally.verifiedStake,
+					"slot",
+					key.slotNo,
+					"endorser_block_hash",
+					key.ebHash.String(),
+					"observed_stake",
+					tally.observedStake,
+					"verified_stake",
+					tally.verifiedStake,
 				)
 			}
 		}
@@ -803,6 +2275,7 @@ func (m *VoteManager) evaluateQuorumLocked(
 		SlotNo:            key.slotNo,
 		EndorserBlockHash: key.ebHash,
 		Epoch:             tally.epoch,
+		AnnouncingRbHash:  key.announcingRbHash,
 		Certificate:       cert,
 		VerifiedStake:     tally.verifiedStake,
 		ObservedStake:     tally.observedStake,
@@ -834,8 +2307,9 @@ func (m *VoteManager) pruneExpiredLocked(now time.Time) {
 			continue
 		}
 		if _, ok := m.tallies[tallyKey{
-			slotNo: id.SlotNo,
-			ebHash: rec.ebHash,
+			slotNo:           id.SlotNo,
+			ebHash:           rec.ebHash,
+			announcingRbHash: rec.announcingRbHash,
 		}]; ok {
 			continue
 		}
@@ -962,89 +2436,229 @@ func (m *VoteManager) VotesByIds(
 	return ret
 }
 
-// HandleEndorserBlock emits a local vote for an endorser block when
-// voting is enabled and the local pool is a member of the slot epoch's
-// committee.
+// HandleEndorserBlock records acquisition. The current prototype votes only
+// after a selected ranking block announces the acquired EB.
 func (m *VoteManager) HandleEndorserBlock(
 	slot uint64,
 	ebHash lcommon.Blake2b256,
 ) {
-	m.mu.Lock()
-	votingPool := m.votingPool
-	votingKey := m.votingKey
-	m.mu.Unlock()
-	if len(votingPool) == 0 || votingKey == nil {
-		return
-	}
-	// Do not sign votes peers will reject as out of window (e.g. a
-	// replayed old endorser block).
-	if err := m.slotWindowCheck(slot); err != nil {
-		m.logger.Debug(
-			"endorser block slot outside vote window, not voting",
-			"slot", slot,
-			"error", err,
-		)
-		return
-	}
 	epoch, err := m.epochProvider.EpochForSlot(slot)
 	if err != nil {
 		m.logger.Debug(
-			"cannot resolve epoch for endorser block slot",
-			"slot", slot,
-			"error", err,
+			"cannot resolve acquired endorser block epoch",
+			"error",
+			err,
 		)
 		return
 	}
-	committee, tau, err := m.committeeAndParamsForEpoch(epoch)
+	m.mu.Lock()
+	now := m.now()
+	m.prunePrototypeStateLocked(now)
+	m.acquiredEbs[ebHash] = acquiredEbRecord{
+		slot: slot, epoch: epoch, seenAt: now,
+	}
+	var ready []struct {
+		rbHash lcommon.Blake2b256
+		record announcementRecord
+	}
+	for rbHash, record := range m.announcements {
+		if record.ebHash == ebHash {
+			ready = append(ready, struct {
+				rbHash lcommon.Blake2b256
+				record announcementRecord
+			}{rbHash: rbHash, record: record})
+		}
+	}
+	m.mu.Unlock()
+	for _, item := range ready {
+		m.emitPrototypeVote(item.rbHash, item.record)
+	}
+}
+
+func (m *VoteManager) emitPrototypeVote(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+) {
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+	m.emitPrototypeVoteLocked(rbHash, record)
+}
+
+func (m *VoteManager) emitPrototypeVoteLocked(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+) {
+	m.mu.Lock()
+	votingPool := slices.Clone(m.votingPool)
+	votingKey := m.votingKey
+	votingGeneration := m.votingLookupGeneration
+	_, alreadyVoted := m.votedAnnouncements[rbHash]
+	m.mu.Unlock()
+	if alreadyVoted {
+		m.noteVoteNotEmitted(voteNotEmittedDuplicate)
+		return
+	}
+	if len(votingPool) == 0 || votingKey == nil {
+		m.noteVoteNotEmitted(voteNotEmittedNoKey)
+		return
+	}
+	entry, err := m.committeeAndParamsForEpoch(record.epoch)
 	if err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedCommitteeUnavailable)
 		m.logger.Debug(
 			"leios committee unavailable, not voting",
-			"slot", slot,
-			"epoch", epoch,
+			"slot", record.slot,
+			"epoch", record.epoch,
 			"error", err,
 		)
 		return
 	}
+	committee := entry.committee
 	voterId, ok := committee.VoterIdFor(votingPool)
 	if !ok {
+		m.noteVoteNotEmitted(voteNotEmittedNotSeated)
 		m.logger.Debug(
 			"local pool is not a leios committee member, not voting",
-			"slot", slot,
-			"epoch", epoch,
+			"slot", record.slot,
+			"epoch", record.epoch,
 		)
+		return
+	}
+	if err := m.slotWindowCheck(record.slot); err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedSlotWindow)
+		// Reaching here means seating is already established: the
+		// committee resolved above and VoterIdFor returned this node's
+		// voter id, or the declination would have been classified as
+		// not-seated. So this is the seated-node case, which is
+		// otherwise silently green -- committee size, key loaded, EBs
+		// observed and certificates built all read healthy. Warn on it,
+		// but throttle it -- catch-up replays every announcement it
+		// passes -- and let the counter carry the true rate.
+		if m.slotWindowWarnDue() {
+			m.markSlotWindowWarned()
+			m.logger.Warn(
+				"announcing ranking block outside vote window, not voting; this node is seated on the leios committee and holds a voting key",
+				"slot",
+				record.slot,
+				"epoch",
+				record.epoch,
+				"error",
+				err,
+			)
+		} else {
+			m.logger.Debug(
+				"announcing ranking block outside vote window, not voting",
+				"slot", record.slot,
+				"error", err,
+			)
+		}
 		return
 	}
 	member, ok := committee.Member(voterId)
 	if !ok {
+		m.noteVoteNotEmitted(voteNotEmittedUnknownMember)
 		return
 	}
-	msg := VoteMessageBytes(slot, ebHash)
-	sig, err := SignVote(votingKey, msg)
+	// A vote this node marks verified=true is trusted without a
+	// signature check by every local consumer (tallying, certificate
+	// aggregation). That trust is only sound if votingKey is what the
+	// rest of the network would actually resolve for this pool right
+	// now -- otherwise a stale local key (e.g. after an on-chain
+	// rotation) would let this node certify a vote no honest peer's
+	// signature check would accept.
+	resolved, resolvedOK := m.resolveVoterKey(entry, member.PoolKeyHash)
+	if !resolvedOK || !resolved.Equal(votingKey.PublicKey()) {
+		m.noteVoteNotEmitted(voteNotEmittedKeyMismatch)
+		m.logger.Error(
+			"configured leios voting key no longer matches the resolved public key for this pool, not voting",
+			"slot",
+			record.slot,
+			"voter_id",
+			voterId,
+		)
+		return
+	}
+	msg := PrototypeVoteMessageBytes(rbHash)
+	sig, err := m.signVote(votingKey, msg)
 	if err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedSigningFailed)
 		m.logger.Error(
 			"failed to sign leios vote",
-			"slot", slot,
+			"slot", record.slot,
 			"voter_id", voterId,
 			"error", err,
 		)
 		return
 	}
 	vote := lcommon.LeiosVote{
-		SlotNo:            slot,
-		EndorserBlockHash: ebHash,
+		SlotNo:            record.slot,
+		EndorserBlockHash: record.ebHash,
 		VoterId:           voterId,
 		VoteSignature:     sig,
 	}
-	if m.metrics != nil {
-		m.metrics.votesReceivedTotal.Inc()
-	}
-	m.logger.Info(
-		"emitting leios vote",
-		"slot", slot,
-		"voter_id", voterId,
-		"endorser_block_hash", ebHash.String(),
+	m.prototypeEmissionMu.Lock()
+	inserted := m.insertVote(
+		"", vote, record.epoch, committee, member, true, entry.tau, rbHash,
+		&votingConfigurationSnapshot{
+			generation: votingGeneration,
+			pool:       votingPool,
+			key:        votingKey,
+		},
 	)
-	m.insertVote("", vote, epoch, committee, member, true, tau)
+	if inserted {
+		if m.metrics != nil {
+			m.metrics.votesReceivedTotal.Inc()
+		}
+		m.logger.Info(
+			"emitting leios vote",
+			"slot", record.slot,
+			"voter_id", voterId,
+			"announcing_rb_hash", rbHash.String(),
+			"endorser_block_hash", record.ebHash.String(),
+		)
+		m.eventBus.Publish(VoteEmittedEventType, event.NewEvent(
+			VoteEmittedEventType,
+			VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{
+				AnnouncingRbHash: rbHash,
+				VoterId:          voterId,
+				VoteSignature:    sig,
+			}},
+		))
+	} else {
+		m.noteVoteNotEmitted(voteNotEmittedNotInserted)
+	}
+	m.prototypeEmissionMu.Unlock()
+}
+
+// noteVoteNotEmitted counts one declined local vote emission. The reasons
+// partition every early return in emitPrototypeVoteLocked, so the sum of this
+// counter plus dingo_metrics_leios_votes_received_total's locally produced
+// votes accounts for every announcement this node considered voting on.
+func (m *VoteManager) noteVoteNotEmitted(reason string) {
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.votesNotEmittedTotal.WithLabelValues(reason).Inc()
+}
+
+// slotWindowWarnDue rate-limits the seated-but-not-voting warning. Catching up
+// replays every announcement between the local tip and the network tip, and
+// every one of those is legitimately outside the vote window.
+//
+// Peek and commit are separate rather than one test-and-set so the window is
+// only marked warned on the branch that actually logs. Two emissions racing
+// between the two calls costs at most an extra warning line.
+func (m *VoteManager) slotWindowWarnDue() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastSlotWindowWarn.IsZero() ||
+		m.now().Sub(m.lastSlotWindowWarn) >= slotWindowWarnInterval
+}
+
+func (m *VoteManager) markSlotWindowWarned() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSlotWindowWarn = m.now()
 }
 
 // RemoveConnection drops the vote-serving cursor for a closed connection.
@@ -1054,12 +2668,13 @@ func (m *VoteManager) RemoveConnection(connKey string) {
 	delete(m.cursors, connKey)
 }
 
-// eventLoop processes epoch transition and chain update events until the
-// context is cancelled or both subscriptions close.
+// eventLoop processes epoch transition, chain update and header announcement
+// events until the context is cancelled or a subscription closes.
 func (m *VoteManager) eventLoop(
 	ctx context.Context,
 	epochCh <-chan event.Event,
 	chainCh <-chan event.Event,
+	headerCh <-chan event.Event,
 ) {
 	for {
 		select {
@@ -1071,13 +2686,389 @@ func (m *VoteManager) eventLoop(
 			}
 			if data, ok := evt.Data.(event.EpochTransitionEvent); ok {
 				m.handleEpochTransition(data)
+				m.retryDeferredVoting(data.NewEpoch)
 			}
 		case evt, ok := <-chainCh:
 			if !ok {
 				return
 			}
-			if data, ok := evt.Data.(chain.ChainRollbackEvent); ok {
+			switch data := evt.Data.(type) {
+			case chain.ChainRollbackEvent:
 				m.handleRollback(data)
+			case chain.ChainBlockEvent:
+				m.handleChainBlock(data)
+			}
+		case evt, ok := <-headerCh:
+			if !ok {
+				// The header stream is ordering-critical: losing it
+				// silently would put the node back to never voting,
+				// which is the failure this stream exists to fix. It
+				// is subscribed with SubscriberBackpressureBlock so
+				// the bus does not detach it under load, leaving Stop
+				// (which closes it after clearing running) as the
+				// expected closer. Anything else is recovered.
+				replacement, ok := m.replaceHeaderStream()
+				if !ok {
+					return
+				}
+				headerCh = replacement
+				continue
+			}
+			switch data := evt.Data.(type) {
+			case chain.ChainHeaderAnnouncementEvent:
+				m.handleChainHeaderAnnouncement(data)
+			case chain.ChainHeaderInvalidationEvent:
+				m.handleChainHeaderInvalidation(data)
+			}
+		}
+	}
+}
+
+// subscribeHeaderStream subscribes to the ordered header-lifecycle stream.
+//
+// The buffer and the blocking backpressure policy match what ledger/state.go
+// uses for chain.update, and for the same reason: this stream is
+// ordering-critical. An announcement and the invalidation that voids it are
+// only safe to act on in the order the chain produced them, so a subscriber
+// that the bus detached mid-stream (the default policy) could arm a vote for a
+// ranking block that had already left our chain. Blocking backpressures the
+// publisher instead, and the buffer is sized for bulk catch-up, where every
+// admitted header is replayed through this stream.
+func (m *VoteManager) subscribeHeaderStream() (
+	event.EventSubscriberId,
+	<-chan event.Event,
+) {
+	return m.eventBus.SubscribeWithBufferPolicy(
+		chain.ChainHeaderEventType,
+		event.EventQueueSize,
+		event.SubscriberBackpressureBlock,
+	)
+}
+
+// replaceHeaderStream re-subscribes after the header channel closed
+// unexpectedly. It reports false when the manager is stopping or the bus is
+// gone, in which case the closure was the expected teardown and the event loop
+// should exit.
+func (m *VoteManager) replaceHeaderStream() (<-chan event.Event, bool) {
+	m.mu.Lock()
+	stopping := m.stopping || !m.running
+	m.mu.Unlock()
+	if stopping {
+		return nil, false
+	}
+	subId, ch := m.subscribeHeaderStream()
+	if ch == nil {
+		// The bus is stopped or closed; nothing to recover to.
+		return nil, false
+	}
+	if !m.registerReplacementHeaderSubscription(subId) {
+		return nil, false
+	}
+	if m.metrics != nil {
+		m.metrics.headerStreamResubscribeTotal.Inc()
+	}
+	m.logger.Warn(
+		"leios header stream closed unexpectedly, resubscribed; announcements in the gap are armed only when their ranking block applies",
+	)
+	return ch, true
+}
+
+// registerReplacementHeaderSubscription records subId as the manager's header
+// subscription, reporting false when the manager stopped while the
+// subscription was being created.
+//
+// The lifecycle check in replaceHeaderStream is made before subscribing, and
+// the lock is released across the subscribe call, so a Stop landing in that
+// gap has already snapshotted and unsubscribed m.subs without this id in it.
+// Registering it then would leave a subscriber nothing drains, and because the
+// header stream is subscribed with SubscriberBackpressureBlock the bus does
+// not detach it under load: the next publisher on this event type would block
+// on the orphan forever instead of having its event dropped. So the check is
+// repeated here, under the same lock that guards the registration, and the
+// subscription is undone rather than recorded.
+func (m *VoteManager) registerReplacementHeaderSubscription(
+	subId event.EventSubscriberId,
+) bool {
+	m.mu.Lock()
+	if m.stopping || !m.running {
+		m.mu.Unlock()
+		m.eventBus.Unsubscribe(chain.ChainHeaderEventType, subId)
+		return false
+	}
+	replaced := false
+	for i := range m.subs {
+		if m.subs[i].eventType == chain.ChainHeaderEventType {
+			m.subs[i].id = subId
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		m.subs = append(m.subs, managerSubscription{
+			eventType: chain.ChainHeaderEventType,
+			id:        subId,
+		})
+	}
+	m.mu.Unlock()
+	return true
+}
+
+// handleChainHeaderInvalidation drops announcements for ranking blocks that
+// left our chain without becoming blocks -- a rollback, or the header queue
+// being discarded -- together with everything derived from them: the votes
+// this node emitted for them, their tallies, their dedup records, and the
+// endorser-block acquisitions no surviving announcement still needs. See
+// dropAnnouncementDerivedStateLocked, which does that cleanup keyed by
+// announcing ranking block rather than by slot.
+//
+// It is the counterpart to handleChainHeaderAnnouncement and arrives on the
+// same event type, so the two can never be observed out of order: an
+// announcement re-armed after an invalidation was genuinely re-admitted to the
+// chain, and one armed before it is genuinely gone.
+//
+// The block-level rollback on chain.update (handleRollback) still performs its
+// own slot-keyed sweep for state this handler cannot see -- peer votes for
+// slots above the rollback point that no local announcement accounts for. The
+// two are delivered on independent channels, so neither may depend on running
+// before the other; both are therefore idempotent, and handleRollback is
+// additionally sequence-guarded so it cannot undo what this handler has
+// already let through.
+func (m *VoteManager) handleChainHeaderInvalidation(
+	evt chain.ChainHeaderInvalidationEvent,
+) {
+	// prototypeEmissionMu linearizes this against an in-flight local
+	// emission, exactly as handleRollback does: without it a vote being
+	// signed for an announcement invalidated here could be committed after
+	// the cleanup ran.
+	m.prototypeEmissionMu.Lock()
+	defer m.prototypeEmissionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if evt.Seq > m.lastHeaderStreamSeq {
+		m.lastHeaderStreamSeq = evt.Seq
+	}
+	// Two rules, because a chain can lose headers by shrinking or by
+	// growing past them. Point covers the shrink (rollback, discarded
+	// queue): everything above it is gone. RbHashes covers the grow (a
+	// locally forged block replacing queued peer headers), where the
+	// discarded headers can sit at or below the new tip and no point-based
+	// rule can name them.
+	named := make(map[lcommon.Blake2b256]struct{}, len(evt.RbHashes))
+	for _, rbHash := range evt.RbHashes {
+		named[rbHash] = struct{}{}
+	}
+	invalidated := make(map[lcommon.Blake2b256]struct{})
+	for rbHash, record := range m.announcements {
+		_, byHash := named[rbHash]
+		if !byHash && record.slot <= evt.Point.Slot {
+			continue
+		}
+		delete(m.announcements, rbHash)
+		delete(m.votedAnnouncements, rbHash)
+		m.removePendingAnnouncementLocked(rbHash)
+		invalidated[rbHash] = struct{}{}
+	}
+	if len(invalidated) == 0 {
+		return
+	}
+	droppedVotes := m.dropAnnouncementDerivedStateLocked(invalidated)
+	m.updateRecordsGaugeLocked()
+	m.logger.Debug(
+		"dropped leios announcements for headers no longer on our chain",
+		"point_slot", evt.Point.Slot,
+		"reason", evt.Reason,
+		"named_headers", len(evt.RbHashes),
+		"dropped_announcements", len(invalidated),
+		"dropped_votes", droppedVotes,
+	)
+}
+
+// dropAnnouncementDerivedStateLocked removes the votes, tallies and dedup
+// records that belong to the given announcing ranking blocks, and the
+// endorser-block acquisitions those announcements were the only reason to
+// keep. Callers must hold mu.
+//
+// It is keyed by announcing ranking block, not by slot, so a competing
+// announcement at the same slot -- the replacement chain's -- keeps its own
+// vote, tally and record. That is stricter than the slot-wide sweep
+// handleRollback performs for block rollbacks, and it is what frees the
+// (slot, voter) vote id so a re-vote on the replacement chain is accepted
+// rather than being read as equivocation.
+//
+// A local vote already published to peers is not retracted: the prototype has
+// no vote-retraction message, and none is needed. A vote names the announcing
+// ranking block, so a peer whose chain does not hold that block does not tally
+// it; peers that do hold it are on the fork we abandoned. Dropping the local
+// copy is what matters, because it is what would otherwise keep occupying the
+// vote id and be served to peers as if it were current.
+func (m *VoteManager) dropAnnouncementDerivedStateLocked(
+	invalidated map[lcommon.Blake2b256]struct{},
+) int {
+	droppedIds := make(map[lcommon.LeiosVoteId]struct{})
+	keptEbs := make(map[lcommon.Blake2b256]struct{})
+	for id, rec := range m.voteRecords {
+		if _, ok := invalidated[rec.announcingRbHash]; ok {
+			delete(m.voteRecords, id)
+			droppedIds[id] = struct{}{}
+		}
+	}
+	for key := range m.tallies {
+		if _, ok := invalidated[key.announcingRbHash]; ok {
+			delete(m.tallies, key)
+		}
+	}
+	if len(droppedIds) > 0 {
+		m.filterVotesLocked(func(sv *storedVote) bool {
+			_, dropped := droppedIds[lcommon.LeiosVoteId{
+				SlotNo:  sv.vote.SlotNo,
+				VoterId: sv.vote.VoterId,
+			}]
+			return !dropped
+		})
+	}
+	// An acquired endorser block is kept while any surviving announcement
+	// still refers to it: the same EB can be announced by more than one
+	// ranking block, and re-fetching it would be wasted work.
+	for _, record := range m.announcements {
+		keptEbs[record.ebHash] = struct{}{}
+	}
+	for _, rec := range m.voteRecords {
+		keptEbs[rec.ebHash] = struct{}{}
+	}
+	for ebHash := range m.acquiredEbs {
+		if _, keep := keptEbs[ebHash]; !keep {
+			delete(m.acquiredEbs, ebHash)
+		}
+	}
+	return len(droppedIds)
+}
+
+// handleChainHeaderAnnouncement arms an announcement from the chainsync
+// roll-forward header, roughly thirty slots before the announcing ranking
+// block finishes applying.
+//
+// The announcing ranking block has not been validated or applied here and may
+// still be rolled back. That is deliberate and matches what a Leios vote
+// attests to: the vote binds the announced endorser block to the announcing
+// ranking block's hash, not to that block's ledger validity. The header's
+// *cryptography* is not optional, though: chain.Chain publishes this event
+// only for a header it was given as crypto-verified, so a peer cannot arm a
+// vote here for a ranking block nobody authenticated. If the header is
+// later rolled back, handleRollback drops the announcement, the emitted vote,
+// and its dedup marker together, exactly as it already does for announcements
+// armed from block application, which also permits a re-vote on the
+// replacement chain.
+func (m *VoteManager) handleChainHeaderAnnouncement(
+	evt chain.ChainHeaderAnnouncementEvent,
+) {
+	m.advanceHeaderStreamSeq(evt.Seq)
+	m.observeAnnouncement(evt.Slot, evt.RbHash, evt.EbHash, evt.Seq)
+}
+
+// advanceHeaderStreamSeq records how far the ordered header stream has been
+// applied.
+func (m *VoteManager) advanceHeaderStreamSeq(seq uint64) {
+	if seq == 0 {
+		return
+	}
+	m.mu.Lock()
+	if seq > m.lastHeaderStreamSeq {
+		m.lastHeaderStreamSeq = seq
+	}
+	m.mu.Unlock()
+}
+
+// handleChainBlock arms an announcement from an applied ranking block. It is a
+// backstop for blocks that reach the chain without a chainsync roll-forward
+// header (local forging, block replay); for announcements that did arrive by
+// header, ObserveAnnouncement is idempotent and emitPrototypeVoteLocked
+// dedups, so this is a no-op.
+func (m *VoteManager) handleChainBlock(evt chain.ChainBlockEvent) {
+	block, err := evt.Block.Decode()
+	if err != nil {
+		m.logger.Debug(
+			"cannot decode chain block for leios announcement",
+			"error",
+			err,
+		)
+		return
+	}
+	header := block.Header()
+	announcer, ok := header.(interface {
+		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
+	})
+	if !ok {
+		return
+	}
+	ebHash, _, ok := announcer.LeiosAnnouncement()
+	if !ok {
+		return
+	}
+	rbHash := lcommon.NewBlake2b256(header.Hash().Bytes())
+	m.ObserveAnnouncement(header.SlotNumber(), rbHash, ebHash)
+}
+
+// ObserveAnnouncement records the ranking-block identity used by current
+// prototype votes and connects it to the announced EB.
+func (m *VoteManager) ObserveAnnouncement(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+) {
+	m.observeAnnouncement(slot, rbHash, ebHash, 0)
+}
+
+// observeAnnouncement is ObserveAnnouncement with the chain-mutation sequence
+// number of the header admission that produced it. headerSeq is zero for
+// announcements that did not come from the ordered header stream.
+func (m *VoteManager) observeAnnouncement(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+	headerSeq uint64,
+) {
+	epoch, err := m.epochProvider.EpochForSlot(slot)
+	if err != nil {
+		m.logger.Debug(
+			"cannot resolve announcing ranking block epoch",
+			"error",
+			err,
+		)
+		return
+	}
+	record := announcementRecord{
+		slot: slot, epoch: epoch, ebHash: ebHash, seenAt: m.now(),
+		headerSeq: headerSeq,
+	}
+	m.mu.Lock()
+	m.prunePrototypeStateLocked(record.seenAt)
+	// The apply-path backstop re-observes announcements the header stream
+	// already armed; keep the sequence that records where on the chain
+	// this announcement came from rather than clearing it to zero.
+	if existing, ok := m.announcements[rbHash]; ok &&
+		existing.headerSeq > record.headerSeq {
+		record.headerSeq = existing.headerSeq
+	}
+	m.announcements[rbHash] = record
+	_, acquired := m.acquiredEbs[ebHash]
+	pendingMap := m.removePendingAnnouncementLocked(rbHash)
+	m.mu.Unlock()
+	if acquired {
+		m.emitPrototypeVote(rbHash, record)
+	}
+	for _, candidates := range pendingMap {
+		for _, pending := range candidates {
+			if err := m.handleResolvedPrototypeVote(
+				pending.connKey,
+				pending.vote,
+				record,
+			); err != nil {
+				m.logger.Debug(
+					"failed to handle queued prototype leios vote",
+					"announcing_rb_hash", rbHash.String(),
+					"voter_id", pending.vote.VoterId,
+					"error", err,
+				)
 			}
 		}
 	}
@@ -1093,8 +3084,11 @@ func (m *VoteManager) handleEpochTransition(
 	if evt.NewEpoch >= 1 {
 		keepFrom = evt.NewEpoch - 1
 	}
+	m.prototypeEmissionMu.Lock()
+	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.prunePrototypeStateLocked(m.now())
 	for epoch := range m.committees {
 		if epoch < keepFrom {
 			delete(m.committees, epoch)
@@ -1115,6 +3109,18 @@ func (m *VoteManager) handleEpochTransition(
 			delete(m.voteRecords, id)
 		}
 	}
+	for rbHash, record := range m.announcements {
+		if record.epoch < keepFrom {
+			delete(m.announcements, rbHash)
+			delete(m.votedAnnouncements, rbHash)
+			m.removePendingAnnouncementLocked(rbHash)
+		}
+	}
+	for ebHash, record := range m.acquiredEbs {
+		if record.epoch < keepFrom {
+			delete(m.acquiredEbs, ebHash)
+		}
+	}
 	m.updateRecordsGaugeLocked()
 	m.logger.Debug(
 		"pruned leios vote state at epoch transition",
@@ -1123,31 +3129,126 @@ func (m *VoteManager) handleEpochTransition(
 	)
 }
 
+// rollbackProtectedLocked returns the announcing ranking blocks, vote ids and
+// endorser blocks that belong to announcements the ordered header stream armed
+// *after* the chain mutation numbered rollbackSeq -- that is, state belonging
+// to the chain that replaced the one being rolled back. A zero rollbackSeq
+// means the rollback carries no sequence number and supersedes nothing, so
+// nothing is protected. Callers must hold mu.
+func (m *VoteManager) rollbackProtectedLocked(rollbackSeq uint64) (
+	map[lcommon.Blake2b256]struct{},
+	map[lcommon.LeiosVoteId]struct{},
+	map[lcommon.Blake2b256]struct{},
+) {
+	rbs := make(map[lcommon.Blake2b256]struct{})
+	ids := make(map[lcommon.LeiosVoteId]struct{})
+	ebs := make(map[lcommon.Blake2b256]struct{})
+	if rollbackSeq == 0 {
+		return rbs, ids, ebs
+	}
+	for rbHash, record := range m.announcements {
+		if record.headerSeq > rollbackSeq {
+			rbs[rbHash] = struct{}{}
+			ebs[record.ebHash] = struct{}{}
+		}
+	}
+	if len(rbs) == 0 {
+		return rbs, ids, ebs
+	}
+	for id, rec := range m.voteRecords {
+		if _, ok := rbs[rec.announcingRbHash]; ok {
+			ids[id] = struct{}{}
+		}
+	}
+	return rbs, ids, ebs
+}
+
 // handleRollback drops votes and tallies past the rollback point and
 // clears the committee memo: a rollback across an epoch boundary can
 // change the stake snapshots committees derive from, and recomputation is
 // cheap.
 func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
+	m.prototypeEmissionMu.Lock()
+	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// chain.update and the ordered header stream are delivered on
+	// independent channels, so this rollback can arrive after the header
+	// stream has already applied the matching invalidation *and* re-armed
+	// the replacement chain's announcements -- which is systematic during
+	// fork resolution, since it rolls back and then re-queues the peer's
+	// fork headers. Everything below is keyed by slot, and the replacement
+	// chain occupies the same slots, so an unguarded sweep would delete the
+	// replacement chain's announcement, its vote, its tally and its dedup
+	// record, leaving the node unable to re-vote for a slot it had already
+	// voted on correctly.
+	//
+	// Protect exactly the state whose announcement the header stream armed
+	// after this rollback. An unsequenced rollback (Seq 0) supersedes
+	// nothing and protects nothing, so it prunes exactly as before.
+	protectedRbs, protectedIds, protectedEbs := m.rollbackProtectedLocked(
+		evt.Seq,
+	)
 	m.filterVotesLocked(func(sv *storedVote) bool {
-		return sv.vote.SlotNo <= evt.Point.Slot
+		if sv.vote.SlotNo <= evt.Point.Slot {
+			return true
+		}
+		_, protected := protectedIds[lcommon.LeiosVoteId{
+			SlotNo:  sv.vote.SlotNo,
+			VoterId: sv.vote.VoterId,
+		}]
+		return protected
 	})
 	for key := range m.tallies {
-		if key.slotNo > evt.Point.Slot {
-			delete(m.tallies, key)
+		if key.slotNo <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[key.announcingRbHash]; protected {
+			continue
+		}
+		delete(m.tallies, key)
 	}
 	// Records share the tally predicate, so record/tally pairs are
 	// dropped together and a re-vote for the replacement chain is
 	// accepted instead of being mistaken for equivocation.
-	for id := range m.voteRecords {
-		if id.SlotNo > evt.Point.Slot {
-			delete(m.voteRecords, id)
+	for id, rec := range m.voteRecords {
+		if id.SlotNo <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[rec.announcingRbHash]; protected {
+			continue
+		}
+		delete(m.voteRecords, id)
+	}
+	for rbHash, record := range m.announcements {
+		if record.slot <= evt.Point.Slot {
+			continue
+		}
+		if _, protected := protectedRbs[rbHash]; protected {
+			continue
+		}
+		delete(m.announcements, rbHash)
+		delete(m.votedAnnouncements, rbHash)
+		m.removePendingAnnouncementLocked(rbHash)
+	}
+	for ebHash, record := range m.acquiredEbs {
+		if record.slot <= evt.Point.Slot {
+			continue
+		}
+		if _, protected := protectedEbs[ebHash]; protected {
+			continue
+		}
+		delete(m.acquiredEbs, ebHash)
 	}
 	m.updateRecordsGaugeLocked()
 	m.committees = make(map[uint64]*epochEntry)
+	// Bumping the generation extends the memo clear to computations already
+	// in flight: one that started before this rollback read a stake snapshot
+	// the rollback may have invalidated, and completeCommitteeComputation
+	// declines to install it rather than letting it repopulate the memo that
+	// was just cleared. In-flight claims themselves are left alone so their
+	// waiters are still served and released.
+	m.committeeGeneration++
 	m.logger.Debug(
 		"pruned leios vote state after rollback",
 		"rollback_slot", evt.Point.Slot,

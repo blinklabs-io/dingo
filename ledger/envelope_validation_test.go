@@ -1,0 +1,953 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"fmt"
+	"math"
+	"strings"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
+	"github.com/stretchr/testify/require"
+	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
+)
+
+type envelopeTestHeader struct {
+	cbor     []byte
+	bodySize uint64
+	slot     uint64
+	number   uint64
+	era      lcommon.Era
+}
+
+func (h *envelopeTestHeader) Hash() lcommon.Blake2b256 {
+	return lcommon.Blake2b256{}
+}
+
+func (h *envelopeTestHeader) PrevHash() lcommon.Blake2b256 {
+	return lcommon.Blake2b256{}
+}
+
+func (h *envelopeTestHeader) BlockNumber() uint64 { return h.number }
+func (h *envelopeTestHeader) SlotNumber() uint64  { return h.slot }
+func (h *envelopeTestHeader) IssuerVkey() lcommon.IssuerVkey {
+	return lcommon.IssuerVkey{}
+}
+func (h *envelopeTestHeader) BlockBodySize() uint64 { return h.bodySize }
+func (h *envelopeTestHeader) Era() lcommon.Era      { return h.era }
+func (h *envelopeTestHeader) Cbor() []byte          { return h.cbor }
+func (h *envelopeTestHeader) BlockBodyHash() lcommon.Blake2b256 {
+	return lcommon.Blake2b256{}
+}
+
+type envelopeTestBlock struct {
+	header *envelopeTestHeader
+	cbor   []byte
+	txs    []lcommon.Transaction
+}
+
+func (b *envelopeTestBlock) Header() lcommon.BlockHeader { return b.header }
+
+func (b *envelopeTestBlock) Hash() lcommon.Blake2b256 { return b.header.Hash() }
+func (b *envelopeTestBlock) PrevHash() lcommon.Blake2b256 {
+	return b.header.PrevHash()
+}
+
+func (b *envelopeTestBlock) BlockNumber() uint64 { return b.header.BlockNumber() }
+
+func (b *envelopeTestBlock) SlotNumber() uint64 { return b.header.SlotNumber() }
+func (b *envelopeTestBlock) IssuerVkey() lcommon.IssuerVkey {
+	return b.header.IssuerVkey()
+}
+
+func (b *envelopeTestBlock) BlockBodySize() uint64 { return b.header.BlockBodySize() }
+func (b *envelopeTestBlock) Era() lcommon.Era      { return b.header.Era() }
+func (b *envelopeTestBlock) Cbor() []byte          { return b.cbor }
+func (b *envelopeTestBlock) BlockBodyHash() lcommon.Blake2b256 {
+	return b.header.BlockBodyHash()
+}
+func (b *envelopeTestBlock) Type() int { return 0 }
+func (b *envelopeTestBlock) Transactions() []lcommon.Transaction {
+	return b.txs
+}
+
+func TestValidateInboundBlockExUnitsAggregatesDeclaredBudgets(t *testing.T) {
+	t.Parallel()
+
+	newTx := func(memory, steps int64) lcommon.Transaction {
+		return &dijkstra.DijkstraTransaction{
+			WitnessSet: dijkstra.DijkstraTransactionWitnessSet{
+				WsRedeemers: dijkstra.DijkstraRedeemers{
+					Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+						{}: {ExUnits: lcommon.ExUnits{
+							Memory: memory,
+							Steps:  steps,
+						}},
+					},
+				},
+			},
+			TxIsValid: false,
+		}
+	}
+	pparams := &conway.ConwayProtocolParameters{
+		MaxBlockExUnits: lcommon.ExUnits{Memory: 10, Steps: 10},
+	}
+	tests := []struct {
+		name string
+		txs  []lcommon.Transaction
+		want string
+	}{
+		{name: "valid exact aggregate", txs: []lcommon.Transaction{
+			newTx(4, 4), newTx(6, 6),
+		}},
+		{name: "over budget aggregate", txs: []lcommon.Transaction{
+			newTx(5, 5), newTx(6, 5),
+		}, want: "exceed maxBlockExUnits"},
+		{name: "checked overflow", txs: []lcommon.Transaction{
+			newTx(math.MaxInt64, 0), newTx(1, 0),
+		}, want: "overflow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			block := &envelopeTestBlock{txs: tt.txs}
+			checkParams := pparams
+			if tt.name == "checked overflow" {
+				checkParams = &conway.ConwayProtocolParameters{
+					MaxBlockExUnits: lcommon.ExUnits{
+						Memory: math.MaxInt64,
+						Steps:  math.MaxInt64,
+					},
+				}
+			}
+			err := validateBlockExUnits(block, checkParams)
+			if tt.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateInboundBlockExUnitsIncludesDijkstraSubtransactions(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	newWitnessSet := func(memory, steps int64) dijkstra.DijkstraTransactionWitnessSet {
+		return dijkstra.DijkstraTransactionWitnessSet{
+			WsRedeemers: dijkstra.DijkstraRedeemers{
+				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+					{}: {ExUnits: lcommon.ExUnits{
+						Memory: memory,
+						Steps:  steps,
+					}},
+				},
+			},
+		}
+	}
+	tx := &dijkstra.DijkstraTransaction{
+		Body: dijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]dijkstra.DijkstraSubTransaction{{
+					WitnessSet: newWitnessSet(6, 7),
+				}},
+				true,
+			),
+		},
+		WitnessSet: newWitnessSet(5, 4),
+		TxIsValid:  false,
+	}
+	block := &envelopeTestBlock{txs: []lcommon.Transaction{tx}}
+
+	require.NoError(t, validateBlockExUnits(
+		block,
+		&dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				MaxBlockExUnits: lcommon.ExUnits{Memory: 11, Steps: 11},
+			},
+		},
+	))
+	require.ErrorContains(t, validateBlockExUnits(
+		block,
+		&dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				MaxBlockExUnits: lcommon.ExUnits{Memory: 10, Steps: 10},
+			},
+		},
+	), "11 memory/11 steps exceed maxBlockExUnits")
+
+	overflowTx := &dijkstra.DijkstraTransaction{
+		Body: dijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]dijkstra.DijkstraSubTransaction{{
+					WitnessSet: newWitnessSet(1, 0),
+				}},
+				true,
+			),
+		},
+		WitnessSet: newWitnessSet(math.MaxInt64, 0),
+		TxIsValid:  false,
+	}
+	require.ErrorContains(t, validateBlockExUnits(
+		&envelopeTestBlock{txs: []lcommon.Transaction{overflowTx}},
+		&dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: math.MaxInt64,
+					Steps:  math.MaxInt64,
+				},
+			},
+		},
+	), "overflow")
+}
+
+func (b *envelopeTestBlock) Utxorpc() (*utxorpc.Block, error) {
+	return nil, nil
+}
+
+// TestValidateInboundBlockEnvelopeSizes covers header/body size limits and
+// the requirement that the declared body size matches serialized block CBOR.
+func TestValidateInboundBlockEnvelopeSizes(t *testing.T) {
+	t.Parallel()
+
+	parent := envelopeParent{slot: 9, blockNumber: 41}
+	pparams := &shelley.ShelleyProtocolParameters{
+		MaxBlockBodySize:   3,
+		MaxBlockHeaderSize: 4,
+	}
+	validHeader := mustEnvelopeCbor(t, "hdr")
+	validBlockCbor := mustEnvelopeBlockCbor(t, validHeader,
+		cbor.RawMessage{0x80},
+		cbor.RawMessage{0x80},
+		cbor.RawMessage{0xa0},
+	)
+
+	tests := []struct {
+		name       string
+		headerCbor []byte
+		blockCbor  []byte
+		bodySize   uint64
+		pparams    *shelley.ShelleyProtocolParameters
+		wantErr    string
+	}{
+		{
+			name:       "valid exact limits",
+			headerCbor: validHeader,
+			blockCbor:  validBlockCbor,
+			bodySize:   3,
+			pparams:    pparams,
+		},
+		{
+			name:       "header over limit",
+			headerCbor: mustEnvelopeCbor(t, "long-header"),
+			blockCbor:  validBlockCbor,
+			bodySize:   3,
+			pparams:    pparams,
+			wantErr:    "exceeds maxBlockHeaderSize",
+		},
+		{
+			name:       "declared body size mismatch",
+			headerCbor: validHeader,
+			blockCbor:  validBlockCbor,
+			bodySize:   2,
+			pparams:    pparams,
+			wantErr:    "block body size mismatch",
+		},
+		{
+			name:       "body over limit",
+			headerCbor: validHeader,
+			blockCbor:  validBlockCbor,
+			bodySize:   3,
+			pparams: &shelley.ShelleyProtocolParameters{
+				MaxBlockBodySize:   2,
+				MaxBlockHeaderSize: 4,
+			},
+			wantErr: "exceeds maxBlockBodySize",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			block := &envelopeTestBlock{
+				header: &envelopeTestHeader{
+					cbor:     tt.headerCbor,
+					bodySize: tt.bodySize,
+					slot:     10,
+					number:   42,
+					era:      shelley.EraShelley,
+				},
+				cbor: tt.blockCbor,
+			}
+			err := validateInboundBlockEnvelope(block, tt.pparams, nil, parent)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidateInboundBlockEnvelopeRejectsByronBodyProofMismatch(
+	t *testing.T,
+) {
+	block := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{},
+	}
+	block.BlockHeader.SetCbor([]byte{0x80})
+	block.Body.SetCbor([]byte{0x84, 0x80, 0x80, 0x80, 0x80})
+	block.SetCbor(mustEnvelopeBlockCbor(
+		t,
+		[]byte{0x80},
+		cbor.RawMessage{0x84, 0x80, 0x80, 0x80, 0x80},
+		cbor.RawMessage{0x80},
+	))
+
+	err := validateInboundBlockEnvelope(
+		block,
+		nil,
+		nil,
+		envelopeParent{origin: true},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+}
+
+func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
+	t *testing.T,
+) {
+	genuine := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_regular",
+		uint(gledger.BlockTypeByronMain),
+	)
+	tamperedCbor := substituteByronMainTxPayload(t, genuine.Cbor())
+	tampered, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronMain),
+		tamperedCbor,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
+	require.NoError(t, err)
+	require.Equal(t, genuine.Hash(), tampered.Hash())
+	require.NotEqual(t, genuine.Cbor(), tampered.Cbor())
+
+	config := newByronEnvelopeNodeConfig(
+		t,
+		len(genuine.Cbor())+64,
+		len(genuine.Header().Cbor()),
+	)
+	err = validateInboundBlockEnvelope(
+		tampered,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+}
+
+func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *testing.T) {
+	genuine := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	config := newByronEnvelopeNodeConfig(
+		t,
+		len(genuine.Cbor())+64,
+		len(genuine.Header().Cbor()),
+	)
+	require.NoError(t, validateInboundBlockEnvelope(
+		genuine,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	))
+
+	tamperedCbor := substituteByronEbbBody(t, genuine.Cbor())
+	tampered, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		tamperedCbor,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
+	require.NoError(t, err)
+	require.Equal(t, genuine.Hash(), tampered.Hash())
+	require.NotEqual(t, genuine.Cbor(), tampered.Cbor())
+
+	err = validateInboundBlockEnvelope(
+		tampered,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	)
+	require.NoError(t, err)
+}
+
+func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
+	block := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_regular",
+		uint(gledger.BlockTypeByronMain),
+	)
+	blockSize := len(block.Cbor())
+	headerSize := len(block.Header().Cbor())
+	tests := []struct {
+		name          string
+		maxBlockSize  int
+		maxHeaderSize int
+		missingConfig bool
+		wantErr       string
+	}{
+		{
+			name:          "limits above encoded sizes",
+			maxBlockSize:  blockSize + 1,
+			maxHeaderSize: headerSize + 1,
+		},
+		{
+			name:          "limits equal encoded sizes",
+			maxBlockSize:  blockSize,
+			maxHeaderSize: headerSize,
+		},
+		{
+			name:          "header limit below encoded size",
+			maxBlockSize:  blockSize,
+			maxHeaderSize: headerSize - 1,
+			wantErr:       "exceeds maxHeaderSize",
+		},
+		{
+			name:          "block limit below encoded size",
+			maxBlockSize:  blockSize - 1,
+			maxHeaderSize: headerSize,
+			wantErr:       "exceeds maxBlockSize",
+		},
+		{
+			name:          "zero limits rejected",
+			maxBlockSize:  0,
+			maxHeaderSize: 0,
+			wantErr:       "invalid block size limits",
+		},
+		{
+			name:          "missing Byron genesis rejected",
+			missingConfig: true,
+			wantErr:       "byron genesis is required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var config *cardano.CardanoNodeConfig
+			if !tt.missingConfig {
+				config = newByronEnvelopeNodeConfig(
+					t,
+					tt.maxBlockSize,
+					tt.maxHeaderSize,
+				)
+			}
+			err := validateInboundBlockEnvelope(
+				block,
+				nil,
+				config,
+				envelopeParent{origin: true},
+			)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+// TestValidateInboundBlockEnvelopeOrdering checks normal block number and
+// slot ordering failures, including Byron main blocks reusing parent numbers.
+func TestValidateInboundBlockEnvelopeOrdering(t *testing.T) {
+	t.Parallel()
+
+	parent := envelopeParent{slot: 10, blockNumber: 5}
+	pparams := &shelley.ShelleyProtocolParameters{
+		MaxBlockBodySize:   3,
+		MaxBlockHeaderSize: 4,
+	}
+	headerCbor := mustEnvelopeCbor(t, "hdr")
+	blockCbor := mustEnvelopeBlockCbor(t, headerCbor,
+		cbor.RawMessage{0x80},
+		cbor.RawMessage{0x80},
+		cbor.RawMessage{0xa0},
+	)
+
+	tests := []struct {
+		name    string
+		slot    uint64
+		number  uint64
+		era     lcommon.Era
+		wantErr string
+	}{
+		{
+			name:    "normal block equal slot rejected",
+			slot:    10,
+			number:  6,
+			era:     shelley.EraShelley,
+			wantErr: "does not follow parent slot",
+		},
+		{
+			name:    "normal block non-successor number rejected",
+			slot:    11,
+			number:  7,
+			era:     shelley.EraShelley,
+			wantErr: "does not follow parent block number",
+		},
+		{
+			name:    "Byron main block cannot reuse parent number",
+			slot:    11,
+			number:  5,
+			era:     byron.EraByron,
+			wantErr: "does not follow parent block number",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			block := &envelopeTestBlock{
+				header: &envelopeTestHeader{
+					cbor:     headerCbor,
+					bodySize: 3,
+					slot:     tt.slot,
+					number:   tt.number,
+					era:      tt.era,
+				},
+				cbor: blockCbor,
+			}
+			err := validateInboundBlockEnvelope(block, pparams, nil, parent)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateBlockOrderAllowsOriginParent verifies the first block is not
+// compared against a synthetic parent when the chain tip is origin.
+func TestValidateBlockOrderAllowsOriginParent(t *testing.T) {
+	t.Parallel()
+
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   0,
+			number: 0,
+			era:    shelley.EraShelley,
+		},
+	}
+
+	require.NoError(t, validateBlockOrder(block, envelopeParent{origin: true}))
+}
+
+// TestValidateBlockOrderAllowsByronMainBlockAfterEbb verifies that the main
+// block at a Byron epoch boundary may share the EBB parent's slot.
+func TestValidateBlockOrderAllowsByronMainBlockAfterEbb(t *testing.T) {
+	t.Parallel()
+
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   10,
+			number: 6,
+			era:    byron.EraByron,
+		},
+	}
+	parent := envelopeParent{
+		slot:        10,
+		blockNumber: 5,
+		byronEbb:    true,
+	}
+
+	require.NoError(t, validateBlockOrder(block, parent))
+}
+
+// TestEnvelopeParentFromTipPreservesByronEbb verifies that reconstructing a
+// parent from persisted tip metadata keeps the same-slot Byron main-block
+// exception after the EBB has already been committed.
+func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
+	t.Parallel()
+
+	parent := envelopeParentFromTip(
+		byron.ByronSlotsPerEpoch,
+		5,
+		[]byte{1},
+		uint(gledger.BlockTypeByronEbb),
+		true,
+	)
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   byron.ByronSlotsPerEpoch,
+			number: 6,
+			era:    byron.EraByron,
+		},
+	}
+
+	require.True(t, parent.byronEbb)
+	require.NoError(t, validateBlockOrder(block, parent))
+}
+
+func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent := envelopeParentFromTip(
+		byron.ByronSlotsPerEpoch,
+		5,
+		[]byte{1},
+		uint(gledger.BlockTypeByronEbb),
+		false,
+	)
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   byron.ByronSlotsPerEpoch,
+			number: 6,
+			era:    byron.EraByron,
+		},
+	}
+
+	require.False(t, parent.byronEbb)
+	require.ErrorContains(
+		t,
+		validateBlockOrder(block, parent),
+		"does not follow parent slot",
+	)
+}
+
+func byronOrderingEbb(
+	epoch, blockNumber uint64,
+) *byron.ByronEpochBoundaryBlock {
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = epoch
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+	return ebb
+}
+
+func byronOrderingMain(
+	epoch, slot, blockNumber uint64,
+) *byron.ByronMainBlock {
+	block := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{},
+	}
+	block.BlockHeader.ConsensusData.SlotId.Epoch = epoch
+	block.BlockHeader.ConsensusData.SlotId.Slot = slot
+	block.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+	return block
+}
+
+// TestValidateInboundBlockEnvelopeByronEbbOrdering covers #4408: the four
+// parent/block combinations of the Byron envelope, including consecutive
+// EBBs across an otherwise empty epoch. These structured blocks deliberately
+// have no wire CBOR, so this isolates the ordering rule; the golden-fixture
+// test above covers the body proof against the real serialized body.
+func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
+	t.Parallel()
+
+	const epochSlots = byron.ByronSlotsPerEpoch
+	regular := func(slot, blockNumber uint64) envelopeParent {
+		return envelopeParent{slot: slot, blockNumber: blockNumber}
+	}
+	ebbParent := func(epoch, blockNumber uint64) envelopeParent {
+		return envelopeParent{
+			slot:        epoch * epochSlots,
+			blockNumber: blockNumber,
+			byronEbb:    true,
+		}
+	}
+	tests := []struct {
+		name    string
+		block   gledger.Block
+		parent  envelopeParent
+		wantErr string
+	}{
+		{
+			"regular to regular",
+			byronOrderingMain(1, 5, 8),
+			regular(epochSlots+4, 7),
+			"",
+		},
+		{
+			"regular to regular same slot",
+			byronOrderingMain(1, 4, 8),
+			regular(epochSlots+4, 7),
+			"does not follow parent slot",
+		},
+		{
+			"regular to EBB",
+			byronOrderingEbb(2, 7),
+			regular(2*epochSlots-1, 7),
+			"",
+		},
+		{
+			"regular to EBB with next number",
+			byronOrderingEbb(2, 8),
+			regular(2*epochSlots-1, 7),
+			"does not match expected block number 7",
+		},
+		{
+			"EBB to regular same slot",
+			byronOrderingMain(2, 0, 8),
+			ebbParent(2, 7),
+			"",
+		},
+		{
+			"EBB to regular same number",
+			byronOrderingMain(2, 0, 7),
+			ebbParent(2, 7),
+			"does not follow parent block number",
+		},
+		{
+			"EBB to EBB across an empty epoch",
+			byronOrderingEbb(3, 8),
+			ebbParent(2, 7),
+			"",
+		},
+		{
+			"EBB to EBB with equal number",
+			byronOrderingEbb(3, 7),
+			ebbParent(2, 7),
+			"does not match expected block number 8",
+		},
+		{
+			"EBB to EBB with equal slot",
+			byronOrderingEbb(2, 8),
+			ebbParent(2, 7),
+			"does not follow parent slot",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateInboundBlockEnvelope(
+				test.block,
+				nil,
+				nil,
+				test.parent,
+			)
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
+}
+
+// TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs
+// fail before placement or ordering logic reads header consensus data.
+func TestValidateByronEbbPlacementRejectsNilHeader(t *testing.T) {
+	t.Parallel()
+
+	err := validateByronEbbPlacement(&byron.ByronEpochBoundaryBlock{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "nil header")
+
+	err = validateInboundBlockEnvelope(
+		&byron.ByronEpochBoundaryBlock{},
+		nil,
+		nil,
+		envelopeParent{},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "nil header")
+}
+
+// TestValidateInboundBlockEnvelopeRejectsNilHeader ensures malformed non-Byron
+// blocks fail before ordering or size validation can dereference the header.
+func TestValidateInboundBlockEnvelopeRejectsNilHeader(t *testing.T) {
+	t.Parallel()
+
+	err := validateInboundBlockEnvelope(
+		&envelopeTestBlock{},
+		&shelley.ShelleyProtocolParameters{},
+		nil,
+		envelopeParent{},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "nil block header")
+}
+
+func mustEnvelopeCbor(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := cbor.Encode(value)
+	require.NoError(t, err)
+	return data
+}
+
+func mustEnvelopeBlockCbor(
+	t *testing.T,
+	header []byte,
+	bodyFields ...cbor.RawMessage,
+) []byte {
+	t.Helper()
+	fields := make([]cbor.RawMessage, 0, 1+len(bodyFields))
+	fields = append(fields, cbor.RawMessage(header))
+	fields = append(fields, bodyFields...)
+	data, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	return data
+}
+
+func newByronEnvelopeNodeConfig(
+	t *testing.T,
+	maxBlockSize int,
+	maxHeaderSize int,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	config := &cardano.CardanoNodeConfig{}
+	genesis := strings.Replace(
+		testByronGenesisJSON,
+		`"maxBlockSize": "1"`,
+		fmt.Sprintf(`"maxBlockSize": "%d"`, maxBlockSize),
+		1,
+	)
+	genesis = strings.Replace(
+		genesis,
+		`"maxHeaderSize": "1"`,
+		fmt.Sprintf(`"maxHeaderSize": "%d"`, maxHeaderSize),
+		1,
+	)
+	require.NoError(
+		t,
+		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),
+	)
+	return config
+}
+
+func loadEnvelopeByronFixture(
+	t *testing.T,
+	name string,
+	blockType uint,
+) gledger.Block {
+	t.Helper()
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	require.NoError(t, err)
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/"+name,
+	)
+	require.NoError(t, err)
+	raw, err := fixture.ConsensusLedgerBlockBytes()
+	require.NoError(t, err)
+	actualType, err := fixture.LedgerBlockType()
+	require.NoError(t, err)
+	require.Equal(t, blockType, actualType)
+	block, err := gledger.NewBlockFromCbor(blockType, raw)
+	require.NoError(t, err)
+	return block
+}
+
+func substituteByronMainTxPayload(t *testing.T, blockCbor []byte) []byte {
+	t.Helper()
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(blockCbor, &block)
+	require.NoError(t, err)
+	require.Len(t, block, 3)
+
+	var body []cbor.RawMessage
+	_, err = cbor.Decode(block[1], &body)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(body), 4)
+	emptyTxPayload, err := cbor.Encode(cbor.IndefLengthList{})
+	require.NoError(t, err)
+	require.NotEqual(t, []byte(body[0]), emptyTxPayload)
+	body[0] = emptyTxPayload
+	block[1], err = cbor.Encode(body)
+	require.NoError(t, err)
+	tampered, err := cbor.Encode(block)
+	require.NoError(t, err)
+	return tampered
+}
+
+func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
+	t.Helper()
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(blockCbor, &block)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(block), 2)
+	emptyBody, err := cbor.Encode(cbor.IndefLengthList{[]byte{0}})
+	require.NoError(t, err)
+	require.NotEqual(t, []byte(block[1]), emptyBody)
+	block[1] = emptyBody
+	tampered, err := cbor.Encode(block)
+	require.NoError(t, err)
+	return tampered
+}
+
+// TestValidateBlockOrderPinsTheEqualSlotAlternativeShape pins, from the
+// validator's side, exactly which of the two possible equal-slot blocks may
+// ever be built.
+//
+// When a rival occupies the slot this node is about to forge, there are two
+// candidate shapes. Binding the parent to the live chain tip -- what
+// DefaultBlockBuilder does for an uncontested slot -- names the rival as
+// parent, so the block's parent slot equals its own and this validator rejects
+// it; so does every Praos peer. Binding the rival's predecessor instead (the
+// alternative-block context, mirroring ouroboros-consensus
+// mkCurrentBlockContext) is a well-ordered sibling of the rival and passes.
+//
+// DefaultBlockBuilder refuses to construct the first shape at all
+// (TestBuildBlockRefusesAParentAtItsOwnSlot in ledger/forging); this test
+// documents why it must, and fails if either side of the rule ever moves.
+func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
+	const (
+		predecessorSlot   = uint64(999)
+		predecessorNumber = uint64(99)
+		contestedSlot     = uint64(1000)
+		rivalNumber       = predecessorNumber + 1
+	)
+
+	// The block a live-tip-bound builder would produce at a contested slot:
+	// the rival is the parent, so parent slot == block slot.
+	sameSlotParent := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber + 1,
+			era:    shelley.EraShelley,
+		},
+	}
+	err := validateBlockOrder(sameSlotParent, envelopeParent{
+		slot:        contestedSlot,
+		blockNumber: rivalNumber,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not follow parent slot")
+
+	// The alternative: same block number as the rival, the rival's
+	// predecessor as parent.
+	alternative := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber,
+			era:    shelley.EraShelley,
+		},
+	}
+	require.NoError(t, validateBlockOrder(alternative, envelopeParent{
+		slot:        predecessorSlot,
+		blockNumber: predecessorNumber,
+	}))
+}

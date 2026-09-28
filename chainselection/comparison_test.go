@@ -35,12 +35,22 @@ func TestComparePraosTipsLongerChainWins(t *testing.T) {
 	assert.Equal(
 		t,
 		ChainBBetter,
-		ComparePraosTips(shorter, longer, PraosTiebreakerView{}, PraosTiebreakerView{}),
+		ComparePraosTips(
+			shorter,
+			longer,
+			PraosTiebreakerView{},
+			PraosTiebreakerView{},
+		),
 	)
 	assert.Equal(
 		t,
 		ChainABetter,
-		ComparePraosTips(longer, shorter, PraosTiebreakerView{}, PraosTiebreakerView{}),
+		ComparePraosTips(
+			longer,
+			shorter,
+			PraosTiebreakerView{},
+			PraosTiebreakerView{},
+		),
 	)
 }
 

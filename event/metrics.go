@@ -20,10 +20,13 @@ import (
 )
 
 type eventMetrics struct {
-	eventsTotal      *prometheus.CounterVec
-	subscribers      *prometheus.GaugeVec
-	deliveryErrors   *prometheus.CounterVec
-	deliveryTimeouts *prometheus.CounterVec
+	eventsTotal         *prometheus.CounterVec
+	subscribers         *prometheus.GaugeVec
+	deliveryErrors      *prometheus.CounterVec
+	deliveryTimeouts    *prometheus.CounterVec
+	deliveryBlocked     *prometheus.CounterVec
+	asyncEnqueueBlocked *prometheus.CounterVec
+	handlerStalls       *prometheus.CounterVec
 }
 
 func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) {
@@ -53,7 +56,31 @@ func (e *EventBus) initMetrics(promRegistry prometheus.Registerer) {
 	e.metrics.deliveryTimeouts = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "event_delivery_timeouts_total",
-			Help: "total remote subscriber delivery timeouts by event type",
+			Help: "total subscriber delivery timeouts by event type",
+		},
+		[]string{"type"},
+	)
+	e.metrics.deliveryBlocked = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "event_delivery_blocked_total",
+			Help: "total deliveries that waited for subscriber buffer " +
+				"capacity, by event type and kind",
+		},
+		[]string{"type", "kind"},
+	)
+	e.metrics.asyncEnqueueBlocked = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "event_async_enqueue_blocked_total",
+			Help: "total async publishes that waited for queue capacity, " +
+				"by event type",
+		},
+		[]string{"type"},
+	)
+	e.metrics.handlerStalls = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "event_subscriber_handler_stalled_total",
+			Help: "observations of a subscriber handler that had not " +
+				"returned within the progress interval, by event type",
 		},
 		[]string{"type"},
 	)

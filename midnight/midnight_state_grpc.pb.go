@@ -13,6 +13,7 @@ package midnight
 
 import (
 	context "context"
+
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -44,20 +45,76 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type MidnightStateClient interface {
-	GetAssetCreates(ctx context.Context, in *AssetCreatesRequest, opts ...grpc.CallOption) (*AssetCreatesResponse, error)
-	GetAssetSpends(ctx context.Context, in *AssetSpendsRequest, opts ...grpc.CallOption) (*AssetSpendsResponse, error)
-	GetRegistrations(ctx context.Context, in *RegistrationsRequest, opts ...grpc.CallOption) (*RegistrationsResponse, error)
-	GetDeregistrations(ctx context.Context, in *DeregistrationsRequest, opts ...grpc.CallOption) (*DeregistrationsResponse, error)
-	GetTechnicalCommitteeDatum(ctx context.Context, in *TechnicalCommitteeDatumRequest, opts ...grpc.CallOption) (*TechnicalCommitteeDatumResponse, error)
-	GetCouncilDatum(ctx context.Context, in *CouncilDatumRequest, opts ...grpc.CallOption) (*CouncilDatumResponse, error)
-	GetAriadneParameters(ctx context.Context, in *AriadneParametersRequest, opts ...grpc.CallOption) (*AriadneParametersResponse, error)
-	GetBlockByHash(ctx context.Context, in *BlockByHashRequest, opts ...grpc.CallOption) (*BlockByHashResponse, error)
-	GetUtxoEvents(ctx context.Context, in *UtxoEventsRequest, opts ...grpc.CallOption) (*UtxoEventsResponse, error)
-	GetEpochNonce(ctx context.Context, in *EpochNonceRequest, opts ...grpc.CallOption) (*EpochNonceResponse, error)
-	GetEpochCandidates(ctx context.Context, in *EpochCandidatesRequest, opts ...grpc.CallOption) (*EpochCandidatesResponse, error)
-	GetStableBlock(ctx context.Context, in *StableBlockRequest, opts ...grpc.CallOption) (*StableBlockResponse, error)
-	GetLatestStableBlock(ctx context.Context, in *LatestStableBlockRequest, opts ...grpc.CallOption) (*LatestStableBlockResponse, error)
-	GetLatestBlock(ctx context.Context, in *LatestBlockRequest, opts ...grpc.CallOption) (*LatestBlockResponse, error)
+	GetAssetCreates(
+		ctx context.Context,
+		in *AssetCreatesRequest,
+		opts ...grpc.CallOption,
+	) (*AssetCreatesResponse, error)
+	GetAssetSpends(
+		ctx context.Context,
+		in *AssetSpendsRequest,
+		opts ...grpc.CallOption,
+	) (*AssetSpendsResponse, error)
+	GetRegistrations(
+		ctx context.Context,
+		in *RegistrationsRequest,
+		opts ...grpc.CallOption,
+	) (*RegistrationsResponse, error)
+	GetDeregistrations(
+		ctx context.Context,
+		in *DeregistrationsRequest,
+		opts ...grpc.CallOption,
+	) (*DeregistrationsResponse, error)
+	GetTechnicalCommitteeDatum(
+		ctx context.Context,
+		in *TechnicalCommitteeDatumRequest,
+		opts ...grpc.CallOption,
+	) (*TechnicalCommitteeDatumResponse, error)
+	GetCouncilDatum(
+		ctx context.Context,
+		in *CouncilDatumRequest,
+		opts ...grpc.CallOption,
+	) (*CouncilDatumResponse, error)
+	GetAriadneParameters(
+		ctx context.Context,
+		in *AriadneParametersRequest,
+		opts ...grpc.CallOption,
+	) (*AriadneParametersResponse, error)
+	GetBlockByHash(
+		ctx context.Context,
+		in *BlockByHashRequest,
+		opts ...grpc.CallOption,
+	) (*BlockByHashResponse, error)
+	GetUtxoEvents(
+		ctx context.Context,
+		in *UtxoEventsRequest,
+		opts ...grpc.CallOption,
+	) (*UtxoEventsResponse, error)
+	GetEpochNonce(
+		ctx context.Context,
+		in *EpochNonceRequest,
+		opts ...grpc.CallOption,
+	) (*EpochNonceResponse, error)
+	GetEpochCandidates(
+		ctx context.Context,
+		in *EpochCandidatesRequest,
+		opts ...grpc.CallOption,
+	) (*EpochCandidatesResponse, error)
+	GetStableBlock(
+		ctx context.Context,
+		in *StableBlockRequest,
+		opts ...grpc.CallOption,
+	) (*StableBlockResponse, error)
+	GetLatestStableBlock(
+		ctx context.Context,
+		in *LatestStableBlockRequest,
+		opts ...grpc.CallOption,
+	) (*LatestStableBlockResponse, error)
+	GetLatestBlock(
+		ctx context.Context,
+		in *LatestBlockRequest,
+		opts ...grpc.CallOption,
+	) (*LatestBlockResponse, error)
 }
 
 type midnightStateClient struct {
@@ -68,140 +125,266 @@ func NewMidnightStateClient(cc grpc.ClientConnInterface) MidnightStateClient {
 	return &midnightStateClient{cc}
 }
 
-func (c *midnightStateClient) GetAssetCreates(ctx context.Context, in *AssetCreatesRequest, opts ...grpc.CallOption) (*AssetCreatesResponse, error) {
+func (c *midnightStateClient) GetAssetCreates(
+	ctx context.Context,
+	in *AssetCreatesRequest,
+	opts ...grpc.CallOption,
+) (*AssetCreatesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AssetCreatesResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetAssetCreates_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetAssetCreates_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetAssetSpends(ctx context.Context, in *AssetSpendsRequest, opts ...grpc.CallOption) (*AssetSpendsResponse, error) {
+func (c *midnightStateClient) GetAssetSpends(
+	ctx context.Context,
+	in *AssetSpendsRequest,
+	opts ...grpc.CallOption,
+) (*AssetSpendsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AssetSpendsResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetAssetSpends_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetAssetSpends_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetRegistrations(ctx context.Context, in *RegistrationsRequest, opts ...grpc.CallOption) (*RegistrationsResponse, error) {
+func (c *midnightStateClient) GetRegistrations(
+	ctx context.Context,
+	in *RegistrationsRequest,
+	opts ...grpc.CallOption,
+) (*RegistrationsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RegistrationsResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetRegistrations_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetRegistrations_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetDeregistrations(ctx context.Context, in *DeregistrationsRequest, opts ...grpc.CallOption) (*DeregistrationsResponse, error) {
+func (c *midnightStateClient) GetDeregistrations(
+	ctx context.Context,
+	in *DeregistrationsRequest,
+	opts ...grpc.CallOption,
+) (*DeregistrationsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DeregistrationsResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetDeregistrations_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetDeregistrations_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetTechnicalCommitteeDatum(ctx context.Context, in *TechnicalCommitteeDatumRequest, opts ...grpc.CallOption) (*TechnicalCommitteeDatumResponse, error) {
+func (c *midnightStateClient) GetTechnicalCommitteeDatum(
+	ctx context.Context,
+	in *TechnicalCommitteeDatumRequest,
+	opts ...grpc.CallOption,
+) (*TechnicalCommitteeDatumResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TechnicalCommitteeDatumResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetTechnicalCommitteeDatum_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetTechnicalCommitteeDatum_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetCouncilDatum(ctx context.Context, in *CouncilDatumRequest, opts ...grpc.CallOption) (*CouncilDatumResponse, error) {
+func (c *midnightStateClient) GetCouncilDatum(
+	ctx context.Context,
+	in *CouncilDatumRequest,
+	opts ...grpc.CallOption,
+) (*CouncilDatumResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CouncilDatumResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetCouncilDatum_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetCouncilDatum_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetAriadneParameters(ctx context.Context, in *AriadneParametersRequest, opts ...grpc.CallOption) (*AriadneParametersResponse, error) {
+func (c *midnightStateClient) GetAriadneParameters(
+	ctx context.Context,
+	in *AriadneParametersRequest,
+	opts ...grpc.CallOption,
+) (*AriadneParametersResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AriadneParametersResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetAriadneParameters_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetAriadneParameters_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetBlockByHash(ctx context.Context, in *BlockByHashRequest, opts ...grpc.CallOption) (*BlockByHashResponse, error) {
+func (c *midnightStateClient) GetBlockByHash(
+	ctx context.Context,
+	in *BlockByHashRequest,
+	opts ...grpc.CallOption,
+) (*BlockByHashResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BlockByHashResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetBlockByHash_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetBlockByHash_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetUtxoEvents(ctx context.Context, in *UtxoEventsRequest, opts ...grpc.CallOption) (*UtxoEventsResponse, error) {
+func (c *midnightStateClient) GetUtxoEvents(
+	ctx context.Context,
+	in *UtxoEventsRequest,
+	opts ...grpc.CallOption,
+) (*UtxoEventsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UtxoEventsResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetUtxoEvents_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetUtxoEvents_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetEpochNonce(ctx context.Context, in *EpochNonceRequest, opts ...grpc.CallOption) (*EpochNonceResponse, error) {
+func (c *midnightStateClient) GetEpochNonce(
+	ctx context.Context,
+	in *EpochNonceRequest,
+	opts ...grpc.CallOption,
+) (*EpochNonceResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(EpochNonceResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetEpochNonce_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetEpochNonce_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetEpochCandidates(ctx context.Context, in *EpochCandidatesRequest, opts ...grpc.CallOption) (*EpochCandidatesResponse, error) {
+func (c *midnightStateClient) GetEpochCandidates(
+	ctx context.Context,
+	in *EpochCandidatesRequest,
+	opts ...grpc.CallOption,
+) (*EpochCandidatesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(EpochCandidatesResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetEpochCandidates_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetEpochCandidates_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetStableBlock(ctx context.Context, in *StableBlockRequest, opts ...grpc.CallOption) (*StableBlockResponse, error) {
+func (c *midnightStateClient) GetStableBlock(
+	ctx context.Context,
+	in *StableBlockRequest,
+	opts ...grpc.CallOption,
+) (*StableBlockResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StableBlockResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetStableBlock_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetStableBlock_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetLatestStableBlock(ctx context.Context, in *LatestStableBlockRequest, opts ...grpc.CallOption) (*LatestStableBlockResponse, error) {
+func (c *midnightStateClient) GetLatestStableBlock(
+	ctx context.Context,
+	in *LatestStableBlockRequest,
+	opts ...grpc.CallOption,
+) (*LatestStableBlockResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(LatestStableBlockResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetLatestStableBlock_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetLatestStableBlock_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *midnightStateClient) GetLatestBlock(ctx context.Context, in *LatestBlockRequest, opts ...grpc.CallOption) (*LatestBlockResponse, error) {
+func (c *midnightStateClient) GetLatestBlock(
+	ctx context.Context,
+	in *LatestBlockRequest,
+	opts ...grpc.CallOption,
+) (*LatestBlockResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(LatestBlockResponse)
-	err := c.cc.Invoke(ctx, MidnightState_GetLatestBlock_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(
+		ctx,
+		MidnightState_GetLatestBlock_FullMethodName,
+		in,
+		out,
+		cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -212,20 +395,62 @@ func (c *midnightStateClient) GetLatestBlock(ctx context.Context, in *LatestBloc
 // All implementations must embed UnimplementedMidnightStateServer
 // for forward compatibility.
 type MidnightStateServer interface {
-	GetAssetCreates(context.Context, *AssetCreatesRequest) (*AssetCreatesResponse, error)
-	GetAssetSpends(context.Context, *AssetSpendsRequest) (*AssetSpendsResponse, error)
-	GetRegistrations(context.Context, *RegistrationsRequest) (*RegistrationsResponse, error)
-	GetDeregistrations(context.Context, *DeregistrationsRequest) (*DeregistrationsResponse, error)
-	GetTechnicalCommitteeDatum(context.Context, *TechnicalCommitteeDatumRequest) (*TechnicalCommitteeDatumResponse, error)
-	GetCouncilDatum(context.Context, *CouncilDatumRequest) (*CouncilDatumResponse, error)
-	GetAriadneParameters(context.Context, *AriadneParametersRequest) (*AriadneParametersResponse, error)
-	GetBlockByHash(context.Context, *BlockByHashRequest) (*BlockByHashResponse, error)
-	GetUtxoEvents(context.Context, *UtxoEventsRequest) (*UtxoEventsResponse, error)
-	GetEpochNonce(context.Context, *EpochNonceRequest) (*EpochNonceResponse, error)
-	GetEpochCandidates(context.Context, *EpochCandidatesRequest) (*EpochCandidatesResponse, error)
-	GetStableBlock(context.Context, *StableBlockRequest) (*StableBlockResponse, error)
-	GetLatestStableBlock(context.Context, *LatestStableBlockRequest) (*LatestStableBlockResponse, error)
-	GetLatestBlock(context.Context, *LatestBlockRequest) (*LatestBlockResponse, error)
+	GetAssetCreates(
+		context.Context,
+		*AssetCreatesRequest,
+	) (*AssetCreatesResponse, error)
+	GetAssetSpends(
+		context.Context,
+		*AssetSpendsRequest,
+	) (*AssetSpendsResponse, error)
+	GetRegistrations(
+		context.Context,
+		*RegistrationsRequest,
+	) (*RegistrationsResponse, error)
+	GetDeregistrations(
+		context.Context,
+		*DeregistrationsRequest,
+	) (*DeregistrationsResponse, error)
+	GetTechnicalCommitteeDatum(
+		context.Context,
+		*TechnicalCommitteeDatumRequest,
+	) (*TechnicalCommitteeDatumResponse, error)
+	GetCouncilDatum(
+		context.Context,
+		*CouncilDatumRequest,
+	) (*CouncilDatumResponse, error)
+	GetAriadneParameters(
+		context.Context,
+		*AriadneParametersRequest,
+	) (*AriadneParametersResponse, error)
+	GetBlockByHash(
+		context.Context,
+		*BlockByHashRequest,
+	) (*BlockByHashResponse, error)
+	GetUtxoEvents(
+		context.Context,
+		*UtxoEventsRequest,
+	) (*UtxoEventsResponse, error)
+	GetEpochNonce(
+		context.Context,
+		*EpochNonceRequest,
+	) (*EpochNonceResponse, error)
+	GetEpochCandidates(
+		context.Context,
+		*EpochCandidatesRequest,
+	) (*EpochCandidatesResponse, error)
+	GetStableBlock(
+		context.Context,
+		*StableBlockRequest,
+	) (*StableBlockResponse, error)
+	GetLatestStableBlock(
+		context.Context,
+		*LatestStableBlockRequest,
+	) (*LatestStableBlockResponse, error)
+	GetLatestBlock(
+		context.Context,
+		*LatestBlockRequest,
+	) (*LatestBlockResponse, error)
 	mustEmbedUnimplementedMidnightStateServer()
 }
 
@@ -236,50 +461,149 @@ type MidnightStateServer interface {
 // pointer dereference when methods are called.
 type UnimplementedMidnightStateServer struct{}
 
-func (UnimplementedMidnightStateServer) GetAssetCreates(context.Context, *AssetCreatesRequest) (*AssetCreatesResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetAssetCreates not implemented")
+func (UnimplementedMidnightStateServer) GetAssetCreates(
+	context.Context,
+	*AssetCreatesRequest,
+) (*AssetCreatesResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetAssetCreates not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetAssetSpends(context.Context, *AssetSpendsRequest) (*AssetSpendsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetAssetSpends not implemented")
+
+func (UnimplementedMidnightStateServer) GetAssetSpends(
+	context.Context,
+	*AssetSpendsRequest,
+) (*AssetSpendsResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetAssetSpends not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetRegistrations(context.Context, *RegistrationsRequest) (*RegistrationsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetRegistrations not implemented")
+
+func (UnimplementedMidnightStateServer) GetRegistrations(
+	context.Context,
+	*RegistrationsRequest,
+) (*RegistrationsResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetRegistrations not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetDeregistrations(context.Context, *DeregistrationsRequest) (*DeregistrationsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetDeregistrations not implemented")
+
+func (UnimplementedMidnightStateServer) GetDeregistrations(
+	context.Context,
+	*DeregistrationsRequest,
+) (*DeregistrationsResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetDeregistrations not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetTechnicalCommitteeDatum(context.Context, *TechnicalCommitteeDatumRequest) (*TechnicalCommitteeDatumResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetTechnicalCommitteeDatum not implemented")
+
+func (UnimplementedMidnightStateServer) GetTechnicalCommitteeDatum(
+	context.Context,
+	*TechnicalCommitteeDatumRequest,
+) (*TechnicalCommitteeDatumResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetTechnicalCommitteeDatum not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetCouncilDatum(context.Context, *CouncilDatumRequest) (*CouncilDatumResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetCouncilDatum not implemented")
+
+func (UnimplementedMidnightStateServer) GetCouncilDatum(
+	context.Context,
+	*CouncilDatumRequest,
+) (*CouncilDatumResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetCouncilDatum not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetAriadneParameters(context.Context, *AriadneParametersRequest) (*AriadneParametersResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetAriadneParameters not implemented")
+
+func (UnimplementedMidnightStateServer) GetAriadneParameters(
+	context.Context,
+	*AriadneParametersRequest,
+) (*AriadneParametersResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetAriadneParameters not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetBlockByHash(context.Context, *BlockByHashRequest) (*BlockByHashResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetBlockByHash not implemented")
+
+func (UnimplementedMidnightStateServer) GetBlockByHash(
+	context.Context,
+	*BlockByHashRequest,
+) (*BlockByHashResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetBlockByHash not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetUtxoEvents(context.Context, *UtxoEventsRequest) (*UtxoEventsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetUtxoEvents not implemented")
+
+func (UnimplementedMidnightStateServer) GetUtxoEvents(
+	context.Context,
+	*UtxoEventsRequest,
+) (*UtxoEventsResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetUtxoEvents not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetEpochNonce(context.Context, *EpochNonceRequest) (*EpochNonceResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetEpochNonce not implemented")
+
+func (UnimplementedMidnightStateServer) GetEpochNonce(
+	context.Context,
+	*EpochNonceRequest,
+) (*EpochNonceResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetEpochNonce not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetEpochCandidates(context.Context, *EpochCandidatesRequest) (*EpochCandidatesResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetEpochCandidates not implemented")
+
+func (UnimplementedMidnightStateServer) GetEpochCandidates(
+	context.Context,
+	*EpochCandidatesRequest,
+) (*EpochCandidatesResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetEpochCandidates not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetStableBlock(context.Context, *StableBlockRequest) (*StableBlockResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetStableBlock not implemented")
+
+func (UnimplementedMidnightStateServer) GetStableBlock(
+	context.Context,
+	*StableBlockRequest,
+) (*StableBlockResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetStableBlock not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetLatestStableBlock(context.Context, *LatestStableBlockRequest) (*LatestStableBlockResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetLatestStableBlock not implemented")
+
+func (UnimplementedMidnightStateServer) GetLatestStableBlock(
+	context.Context,
+	*LatestStableBlockRequest,
+) (*LatestStableBlockResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetLatestStableBlock not implemented",
+	)
 }
-func (UnimplementedMidnightStateServer) GetLatestBlock(context.Context, *LatestBlockRequest) (*LatestBlockResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetLatestBlock not implemented")
+
+func (UnimplementedMidnightStateServer) GetLatestBlock(
+	context.Context,
+	*LatestBlockRequest,
+) (*LatestBlockResponse, error) {
+	return nil, status.Error(
+		codes.Unimplemented,
+		"method GetLatestBlock not implemented",
+	)
 }
+
 func (UnimplementedMidnightStateServer) mustEmbedUnimplementedMidnightStateServer() {}
-func (UnimplementedMidnightStateServer) testEmbeddedByValue()                       {}
+
+func (UnimplementedMidnightStateServer) testEmbeddedByValue() {}
 
 // UnsafeMidnightStateServer may be embedded to opt out of forward compatibility for this service.
 // Use of this interface is not recommended, as added methods to MidnightStateServer will
@@ -288,7 +612,10 @@ type UnsafeMidnightStateServer interface {
 	mustEmbedUnimplementedMidnightStateServer()
 }
 
-func RegisterMidnightStateServer(s grpc.ServiceRegistrar, srv MidnightStateServer) {
+func RegisterMidnightStateServer(
+	s grpc.ServiceRegistrar,
+	srv MidnightStateServer,
+) {
 	// If the following call panics, it indicates UnimplementedMidnightStateServer was
 	// embedded by pointer and is nil.  This will cause panics if an
 	// unimplemented method is ever invoked, so we test this at initialization
@@ -299,7 +626,12 @@ func RegisterMidnightStateServer(s grpc.ServiceRegistrar, srv MidnightStateServe
 	s.RegisterService(&MidnightState_ServiceDesc, srv)
 }
 
-func _MidnightState_GetAssetCreates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetAssetCreates_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(AssetCreatesRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -312,12 +644,20 @@ func _MidnightState_GetAssetCreates_Handler(srv interface{}, ctx context.Context
 		FullMethod: MidnightState_GetAssetCreates_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetAssetCreates(ctx, req.(*AssetCreatesRequest))
+		return srv.(MidnightStateServer).GetAssetCreates(
+			ctx,
+			req.(*AssetCreatesRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetAssetSpends_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetAssetSpends_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(AssetSpendsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -330,12 +670,20 @@ func _MidnightState_GetAssetSpends_Handler(srv interface{}, ctx context.Context,
 		FullMethod: MidnightState_GetAssetSpends_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetAssetSpends(ctx, req.(*AssetSpendsRequest))
+		return srv.(MidnightStateServer).GetAssetSpends(
+			ctx,
+			req.(*AssetSpendsRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetRegistrations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetRegistrations_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(RegistrationsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -348,12 +696,20 @@ func _MidnightState_GetRegistrations_Handler(srv interface{}, ctx context.Contex
 		FullMethod: MidnightState_GetRegistrations_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetRegistrations(ctx, req.(*RegistrationsRequest))
+		return srv.(MidnightStateServer).GetRegistrations(
+			ctx,
+			req.(*RegistrationsRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetDeregistrations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetDeregistrations_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(DeregistrationsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -366,12 +722,20 @@ func _MidnightState_GetDeregistrations_Handler(srv interface{}, ctx context.Cont
 		FullMethod: MidnightState_GetDeregistrations_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetDeregistrations(ctx, req.(*DeregistrationsRequest))
+		return srv.(MidnightStateServer).GetDeregistrations(
+			ctx,
+			req.(*DeregistrationsRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetTechnicalCommitteeDatum_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetTechnicalCommitteeDatum_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(TechnicalCommitteeDatumRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -384,12 +748,20 @@ func _MidnightState_GetTechnicalCommitteeDatum_Handler(srv interface{}, ctx cont
 		FullMethod: MidnightState_GetTechnicalCommitteeDatum_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetTechnicalCommitteeDatum(ctx, req.(*TechnicalCommitteeDatumRequest))
+		return srv.(MidnightStateServer).GetTechnicalCommitteeDatum(
+			ctx,
+			req.(*TechnicalCommitteeDatumRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetCouncilDatum_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetCouncilDatum_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(CouncilDatumRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -402,12 +774,20 @@ func _MidnightState_GetCouncilDatum_Handler(srv interface{}, ctx context.Context
 		FullMethod: MidnightState_GetCouncilDatum_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetCouncilDatum(ctx, req.(*CouncilDatumRequest))
+		return srv.(MidnightStateServer).GetCouncilDatum(
+			ctx,
+			req.(*CouncilDatumRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetAriadneParameters_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetAriadneParameters_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(AriadneParametersRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -420,12 +800,20 @@ func _MidnightState_GetAriadneParameters_Handler(srv interface{}, ctx context.Co
 		FullMethod: MidnightState_GetAriadneParameters_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetAriadneParameters(ctx, req.(*AriadneParametersRequest))
+		return srv.(MidnightStateServer).GetAriadneParameters(
+			ctx,
+			req.(*AriadneParametersRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetBlockByHash_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetBlockByHash_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(BlockByHashRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -438,12 +826,20 @@ func _MidnightState_GetBlockByHash_Handler(srv interface{}, ctx context.Context,
 		FullMethod: MidnightState_GetBlockByHash_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetBlockByHash(ctx, req.(*BlockByHashRequest))
+		return srv.(MidnightStateServer).GetBlockByHash(
+			ctx,
+			req.(*BlockByHashRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetUtxoEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetUtxoEvents_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(UtxoEventsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -456,12 +852,20 @@ func _MidnightState_GetUtxoEvents_Handler(srv interface{}, ctx context.Context, 
 		FullMethod: MidnightState_GetUtxoEvents_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetUtxoEvents(ctx, req.(*UtxoEventsRequest))
+		return srv.(MidnightStateServer).GetUtxoEvents(
+			ctx,
+			req.(*UtxoEventsRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetEpochNonce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetEpochNonce_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(EpochNonceRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -474,12 +878,20 @@ func _MidnightState_GetEpochNonce_Handler(srv interface{}, ctx context.Context, 
 		FullMethod: MidnightState_GetEpochNonce_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetEpochNonce(ctx, req.(*EpochNonceRequest))
+		return srv.(MidnightStateServer).GetEpochNonce(
+			ctx,
+			req.(*EpochNonceRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetEpochCandidates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetEpochCandidates_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(EpochCandidatesRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -492,12 +904,20 @@ func _MidnightState_GetEpochCandidates_Handler(srv interface{}, ctx context.Cont
 		FullMethod: MidnightState_GetEpochCandidates_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetEpochCandidates(ctx, req.(*EpochCandidatesRequest))
+		return srv.(MidnightStateServer).GetEpochCandidates(
+			ctx,
+			req.(*EpochCandidatesRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetStableBlock_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetStableBlock_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(StableBlockRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -510,12 +930,20 @@ func _MidnightState_GetStableBlock_Handler(srv interface{}, ctx context.Context,
 		FullMethod: MidnightState_GetStableBlock_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetStableBlock(ctx, req.(*StableBlockRequest))
+		return srv.(MidnightStateServer).GetStableBlock(
+			ctx,
+			req.(*StableBlockRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetLatestStableBlock_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetLatestStableBlock_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(LatestStableBlockRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -528,12 +956,20 @@ func _MidnightState_GetLatestStableBlock_Handler(srv interface{}, ctx context.Co
 		FullMethod: MidnightState_GetLatestStableBlock_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetLatestStableBlock(ctx, req.(*LatestStableBlockRequest))
+		return srv.(MidnightStateServer).GetLatestStableBlock(
+			ctx,
+			req.(*LatestStableBlockRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MidnightState_GetLatestBlock_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _MidnightState_GetLatestBlock_Handler(
+	srv interface{},
+	ctx context.Context,
+	dec func(interface{}) error,
+	interceptor grpc.UnaryServerInterceptor,
+) (interface{}, error) {
 	in := new(LatestBlockRequest)
 	if err := dec(in); err != nil {
 		return nil, err
@@ -546,7 +982,10 @@ func _MidnightState_GetLatestBlock_Handler(srv interface{}, ctx context.Context,
 		FullMethod: MidnightState_GetLatestBlock_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MidnightStateServer).GetLatestBlock(ctx, req.(*LatestBlockRequest))
+		return srv.(MidnightStateServer).GetLatestBlock(
+			ctx,
+			req.(*LatestBlockRequest),
+		)
 	}
 	return interceptor(ctx, in, info, handler)
 }

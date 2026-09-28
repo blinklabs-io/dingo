@@ -93,7 +93,9 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 // FormatVersion has no "format_version" field. JSON decodes the missing
 // field as 0, which validatePersistedSchedule rejects as "version
 // mismatch" and forces a recompute on first run after upgrade.
-func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(t *testing.T) {
+func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(
+	t *testing.T,
+) {
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 

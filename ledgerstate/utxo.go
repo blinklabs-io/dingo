@@ -16,10 +16,12 @@ package ledgerstate
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -31,6 +33,69 @@ import (
 // zeroBlake2b224 is the zero-value Blake2b224 used to check whether
 // PaymentKeyHash/StakeKeyHash returned a meaningful credential.
 var zeroBlake2b224 ledger.Blake2b224
+
+// maxUTxOMapEntries is separate from the generic maxMapEntries limit because
+// the valid chain UTxO set can be much larger than other ledger-state maps.
+// The explicit cap still bounds work on a malformed or adversarial stream.
+const maxUTxOMapEntries = 100_000_000
+
+// checkUTxOMapEntryCount validates a definite-length UTxO map's
+// declared entry count against maxUTxOMapEntries before any entries
+// are streamed. See "Local CBOR decode limits policy" in
+// cbor_decode.go for why UTxO streaming has a larger cap than
+// decodeMapEntries.
+func checkUTxOMapEntryCount(count int) error {
+	if count > maxUTxOMapEntries {
+		return fmt.Errorf(
+			"UTxO map claims %d entries, exceeds max (%d)",
+			count, maxUTxOMapEntries,
+		)
+	}
+	return nil
+}
+
+// checkUTxOMapRunningEntryCount enforces limit against a running
+// entry count while streaming an indefinite-length UTxO map, which
+// (unlike the definite-length case checked up front by
+// checkUTxOMapEntryCount) has no declared header count to validate
+// before entries are read. Production code always calls this via
+// parseIndefiniteUTxOMapWithProgress with limit=maxUTxOMapEntries; tests
+// call parseIndefiniteUTxOMapWithProgressLimit directly with a small
+// limit to prove the boundary check accepts exactly `limit` entries
+// and rejects entry `limit`+1 without streaming a mainnet-scale
+// fixture.
+//
+// Because there is no upfront count, batches of entries below the
+// cap are delivered to the UTxO callback (and therefore committed to
+// the database, see importUTxOs in import.go) before this check can
+// reject entry `limit`+1. That is intentionally not treated as a
+// partial-import bug: every row importUTxOs writes goes through
+// ImportUtxos, an idempotent "insert if absent" upsert, so re-running
+// the same phase (whether via checkpoint resume or a from-scratch
+// retry) can never duplicate or corrupt those rows. And the failure
+// here aborts ImportLedgerState before it sets the UTxO phase
+// checkpoint or advances the chain tip (see ImportLedgerState and
+// mithril.Sync's sync_status handling), so the already-committed rows
+// are never treated as a complete, ready ledger state. See
+// "Local CBOR decode limits policy" in cbor_decode.go for the
+// corresponding note on why this doesn't need a preflight count or a
+// transactional rollback of the UTxO phase.
+func checkUTxOMapRunningEntryCount(entryIndex, limit int) error {
+	if entryIndex >= limit {
+		return fmt.Errorf(
+			"indefinite-length UTxO map exceeded max entries (%d); "+
+				"UTxO rows already committed before this point are "+
+				"harmless and duplicate-safe on a future import, but "+
+				"the import checkpoint and chain tip were not "+
+				"advanced, so the database is not left in a usable "+
+				"state — this indicates the map is corrupted or "+
+				"genuinely exceeds the production cap and needs "+
+				"investigation, not a bare retry",
+			limit,
+		)
+	}
+	return nil
+}
 
 // decodeTxIn extracts the transaction hash and output index from a
 // TxIn encoded in various formats:
@@ -186,18 +251,27 @@ type utxoIterFunc func() (
 )
 
 // processBatchedUTxOsWithProgress reads key/value pairs from next,
-// parses each entry, and delivers them to the callback in batches
-// of utxoBatchSize. An optional progress function is called after
-// each batch with the running total of processed entries.
+// parses each entry, and delivers them to the callback in batches of
+// batchSize. An optional progress function is called after each batch
+// with the running total of processed entries.
+//
+// batchSize is a parameter rather than utxoBatchSize directly for the
+// same reason parseIndefiniteUTxOMapWithProgressLimit takes limit: a
+// test that has to observe a full batch reaching the callback can do it
+// with a handful of entries instead of a production-sized 10,000.
 func processBatchedUTxOsWithProgress(
 	next utxoIterFunc,
 	callback UTxOCallback,
 	progress func(int),
+	batchSize int,
 ) (int, error) {
 	if callback == nil {
 		return 0, errors.New("nil UTxO callback")
 	}
-	batch := make([]ParsedUTxO, 0, utxoBatchSize)
+	if batchSize <= 0 {
+		return 0, errors.New("non-positive UTxO batch size")
+	}
+	batch := make([]ParsedUTxO, 0, batchSize)
 	totalCount := 0
 
 	for {
@@ -221,7 +295,7 @@ func processBatchedUTxOsWithProgress(
 		batch = append(batch, *parsed)
 		totalCount++
 
-		if len(batch) >= utxoBatchSize {
+		if len(batch) >= batchSize {
 			if err := callback(batch); err != nil {
 				return totalCount, fmt.Errorf(
 					"UTxO callback error at entry %d: %w",
@@ -232,7 +306,7 @@ func processBatchedUTxOsWithProgress(
 			if progress != nil {
 				progress(totalCount)
 			}
-			batch = make([]ParsedUTxO, 0, utxoBatchSize)
+			batch = make([]ParsedUTxO, 0, batchSize)
 		}
 	}
 
@@ -295,6 +369,14 @@ func parseUTxOsStreamingWithProgress(
 			err,
 		)
 	}
+	// The map header count comes straight off the wire and is not
+	// otherwise bounds-checked by DecodeMapHeader (unlike a full
+	// cbor.Decode of a map, which is capped internally). Enforce the
+	// UTxO-specific cap so a corrupted or adversarial header can't
+	// drive an unbounded loop below.
+	if err := checkUTxOMapEntryCount(count); err != nil {
+		return 0, err
+	}
 
 	i := 0
 	next := func() (cbor.RawMessage, cbor.RawMessage, bool, error) {
@@ -342,6 +424,7 @@ func parseUTxOsStreamingWithProgress(
 				Percent:          percent,
 			})
 		},
+		utxoBatchSize,
 	)
 }
 
@@ -386,10 +469,15 @@ func parseMempackTxOut(
 	if err != nil {
 		return nil, fmt.Errorf("decoding MemPack TxOut: %w", err)
 	}
+	outputCbor, err := encodeMempackTxOut(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("encoding MemPack TxOut as CBOR: %w", err)
+	}
 
 	result := &ParsedUTxO{
 		TxHash:      txHash,
 		OutputIndex: outputIndex,
+		Cbor:        outputCbor,
 		Address:     decoded.Address,
 		Amount:      decoded.Lovelace,
 		Assets:      decoded.Assets,
@@ -399,7 +487,9 @@ func parseMempackTxOut(
 	}
 
 	// Extract payment and staking keys from the raw address
-	extractAddressKeys(decoded.Address, result)
+	if err := extractAddressKeys(decoded.Address, result); err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }
@@ -415,47 +505,72 @@ func parseMempackTxOut(
 //     extract.
 //   - Types 14-15 (reward/stake): These are used for reward
 //     withdrawals and do not appear in transaction outputs (UTxOs).
-func extractAddressKeys(addr []byte, result *ParsedUTxO) {
+func extractAddressKeys(addr []byte, result *ParsedUTxO) error {
 	if len(addr) < 1 {
-		return
+		return nil
 	}
 
 	headerByte := addr[0]
 	addrType := (headerByte >> 4) & 0x0f
 
 	// Even address types (0,2,4,6) have payment KEY credentials;
-	// odd types (1,3,5,7) have payment SCRIPT credentials.
+	// odd types (1,3,5,7) have payment SCRIPT credentials. The payment
+	// credential hash is stored for both kinds — the CBOR parsing path
+	// (parseCborTxOut) and live sync (UtxoLedgerToModel) both store
+	// script hashes in PaymentKey, and payment-credential queries
+	// (address lookups, blockfrost addr_vkh/script) match on it.
 	// For staking: types 0,1 have staking KEY; types 2,3 have
-	// staking SCRIPT. Only store key hashes, not script hashes,
-	// to match the CBOR parsing path (parseCborTxOut).
-	paymentIsKey := addrType%2 == 0
+	// staking SCRIPT.
+	paymentIsScript := addrType%2 == 1
 
 	switch {
 	case addrType <= 3 && len(addr) >= 57:
 		// Base address: 1 header + 28 payment + 28 staking
-		if paymentIsKey {
-			result.PaymentKey = bytes.Clone(addr[1:29])
-		} else {
-			result.PaymentScript = true
-		}
+		result.PaymentKey = bytes.Clone(addr[1:29])
+		result.PaymentScript = paymentIsScript
 		if addrType <= 1 { // staking is key for types 0,1
 			result.StakingKey = bytes.Clone(addr[29:57])
+			result.CredentialTag = 0
+		} else { // staking is script for types 2,3
+			result.StakingKey = bytes.Clone(addr[29:57])
+			result.CredentialTag = 1
 		}
-	case (addrType == 4 || addrType == 5) && len(addr) >= 29:
-		// Pointer address: 1 header + 28 payment + pointer
-		if paymentIsKey {
-			result.PaymentKey = bytes.Clone(addr[1:29])
-		} else {
-			result.PaymentScript = true
+	case addrType == 4 || addrType == 5:
+		// Pointer address: 1 header + 28 payment + three variable-length
+		// naturals. Validate the pointer through the canonical address
+		// decoder before storing even the payment credential; otherwise a
+		// truncated pointer could be treated as an enterprise address.
+		parsed, err := lcommon.NewAddressFromBytes(addr)
+		if err != nil {
+			return fmt.Errorf("decoding pointer address: %w", err)
+		}
+		if _, ok := parsed.StakingPayload().(lcommon.AddressPayloadPointer); !ok {
+			return errors.New(
+				"decoding pointer address: missing pointer payload",
+			)
+		}
+		result.PaymentKey = bytes.Clone(addr[1:29])
+		result.PaymentScript = paymentIsScript
+		// Decode the pointer with the canonical address parser so the
+		// variable-length integer rules stay in one place. Preserve the
+		// existing fail-soft behavior for malformed or unrepresentable
+		// pointer payloads: the spendable UTxO remains importable, but it
+		// contributes no pointer-derived stake.
+		if parsed, err := lcommon.NewAddressFromBytes(addr); err == nil {
+			if pointer, ok := parsed.StakingPayload().(lcommon.AddressPayloadPointer); ok {
+				result.Pointer = &models.UtxoPointer{
+					Slot:      pointer.Slot,
+					TxIndex:   pointer.TxIndex,
+					CertIndex: pointer.CertIndex,
+				}
+			}
 		}
 	case (addrType == 6 || addrType == 7) && len(addr) >= 29:
 		// Enterprise address: 1 header + 28 payment
-		if paymentIsKey {
-			result.PaymentKey = bytes.Clone(addr[1:29])
-		} else {
-			result.PaymentScript = true
-		}
+		result.PaymentKey = bytes.Clone(addr[1:29])
+		result.PaymentScript = paymentIsScript
 	}
+	return nil
 }
 
 // parseCborTxOut decodes a standard CBOR-encoded TxOut.
@@ -493,6 +608,7 @@ func parseCborTxOut(
 	result := &ParsedUTxO{
 		TxHash:      txHash,
 		OutputIndex: outputIndex,
+		Cbor:        append([]byte(nil), txOutData...),
 		Address:     addrBytes,
 		Amount:      txOut.Amount().Uint64(),
 	}
@@ -505,9 +621,19 @@ func parseCborTxOut(
 	skh := addr.StakeKeyHash()
 	if skh != zeroBlake2b224 {
 		result.StakingKey = skh.Bytes()
+		if credentialTag, ok := models.StakeCredentialTagFromAddress(addr); ok {
+			result.CredentialTag = credentialTag
+		}
 	}
 	if addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit {
 		result.PaymentScript = true
+	}
+	if pointer, ok := addr.StakingPayload().(lcommon.AddressPayloadPointer); ok {
+		result.Pointer = &models.UtxoPointer{
+			Slot:      pointer.Slot,
+			TxIndex:   pointer.TxIndex,
+			CertIndex: pointer.CertIndex,
+		}
 	}
 
 	if dh := txOut.DatumHash(); dh != nil {
@@ -570,7 +696,55 @@ func parseUTxOsFromFileWithProgress(
 		return 0, fmt.Errorf("reading tvar file: %w", err)
 	}
 	defer cleanup()
+	return parseUTxOsFromMapped(data, callback, progress)
+}
 
+// parseUTxOsFromOpenFileWithProgress is parseUTxOsFromFileWithProgress reading
+// an already-open file, for callers that resolved it through a directory handle
+// and must not have the name resolved again here. The caller closes f.
+func parseUTxOsFromOpenFileWithProgress(
+	f *os.File,
+	expectedDigest string,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
+	data, cleanup, err := mmapFile(f)
+	if err != nil {
+		return 0, fmt.Errorf("reading tvar file: %w", err)
+	}
+	defer cleanup()
+	// Checked over the mapping, not over the descriptor beforehand. The table
+	// is gigabytes, so it cannot be read into a buffer the way the state file
+	// is; mapping it once and hashing what was mapped is the nearest thing —
+	// the decoder below walks these same bytes, so nothing re-reads the file
+	// between the check and the parse.
+	//
+	// An empty digest is the unsigned path: v1, and any tree nothing vouched
+	// for. Those have nothing to check against, not permission to skip a check
+	// they have.
+	if expectedDigest != "" {
+		sum := sha256.Sum256(data)
+		if got := hex.EncodeToString(sum[:]); got != expectedDigest {
+			return 0, fmt.Errorf(
+				"%w: computed %s, signed %s",
+				ErrTableDigestMismatch, got, expectedDigest,
+			)
+		}
+	}
+	return parseUTxOsFromMapped(data, callback, progress)
+}
+
+// ErrTableDigestMismatch reports a UTxO-HD table whose mapped contents are not
+// the contents the caller's digest covers.
+var ErrTableDigestMismatch = errors.New(
+	"UTxO table is not the file the digest covers",
+)
+
+func parseUTxOsFromMapped(
+	data []byte,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
 	// Parse outer array header using StreamDecoder
 	decoder, err := cbor.NewStreamDecoder(data)
 	if err != nil {
@@ -616,11 +790,32 @@ func parseUTxOsFromFileWithProgress(
 // parseIndefiniteUTxOMapWithProgress streams UTxO entries from an
 // indefinite-length CBOR map (0xbf ... 0xff). Each entry is a
 // TxIn key and TxOut value decoded using the existing parsers.
-// An optional progress callback receives byte-level progress.
+// An optional progress callback receives byte-level progress. The
+// entry count is capped at maxUTxOMapEntries; see
+// checkUTxOMapRunningEntryCount for why indefinite-length maps need
+// a running check rather than an upfront header check.
 func parseIndefiniteUTxOMapWithProgress(
 	data []byte,
 	callback UTxOCallback,
 	progress func(UTxOParseProgress),
+) (int, error) {
+	return parseIndefiniteUTxOMapWithProgressLimit(
+		data, callback, progress, maxUTxOMapEntries, utxoBatchSize,
+	)
+}
+
+// parseIndefiniteUTxOMapWithProgressLimit is
+// parseIndefiniteUTxOMapWithProgress parameterized by the maximum
+// allowed entry count. Production code always calls it via
+// parseIndefiniteUTxOMapWithProgress with limit=maxUTxOMapEntries; tests
+// call it directly with a small limit to exercise the boundary
+// check without streaming a mainnet-scale fixture.
+func parseIndefiniteUTxOMapWithProgressLimit(
+	data []byte,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+	limit int,
+	batchSize int,
 ) (int, error) {
 	if len(data) < 2 || data[0] != 0xbf {
 		return 0, errors.New("expected indefinite map (0xbf)")
@@ -652,6 +847,15 @@ func parseIndefiniteUTxOMapWithProgress(
 		if data[absPos] == 0xff {
 			mapComplete = true
 			return nil, nil, true, nil
+		}
+
+		// Indefinite-length maps have no declared header count to
+		// check up front (unlike the definite-length path, which
+		// checkUTxOMapEntryCount validates before any entry is
+		// streamed), so the cap must be enforced as a running check
+		// here on every entry instead.
+		if err := checkUTxOMapRunningEntryCount(entryIndex, limit); err != nil {
+			return nil, nil, false, err
 		}
 
 		idx := entryIndex
@@ -701,6 +905,7 @@ func parseIndefiniteUTxOMapWithProgress(
 				Percent:          percent,
 			})
 		},
+		batchSize,
 	)
 }
 
@@ -709,14 +914,23 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 	utxo := models.Utxo{
 		TxId:          u.TxHash,
 		OutputIdx:     u.OutputIndex,
+		Cbor:          u.Cbor,
 		PaymentKey:    u.PaymentKey,
 		StakingKey:    u.StakingKey,
+		CredentialTag: u.CredentialTag,
 		PaymentScript: u.PaymentScript,
 		Amount:        types.Uint64(u.Amount),
 		AddedSlot:     slot,
 		DatumHash:     u.DatumHash,
 		Datum:         u.Datum,
 		ScriptRef:     u.ScriptRef,
+	}
+	if u.Pointer != nil {
+		utxo.Pointer = &models.UtxoPointer{
+			Slot:      u.Pointer.Slot,
+			TxIndex:   u.Pointer.TxIndex,
+			CertIndex: u.Pointer.CertIndex,
+		}
 	}
 
 	// Convert assets
@@ -725,7 +939,6 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 		utxo.Assets = append(utxo.Assets, models.Asset{
 			PolicyId:    a.PolicyId,
 			Name:        a.Name,
-			NameHex:     []byte(hex.EncodeToString(a.Name)),
 			Amount:      types.Uint64(a.Amount),
 			Fingerprint: []byte(fingerprint.String()),
 		})

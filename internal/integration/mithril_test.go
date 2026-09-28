@@ -16,11 +16,13 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/stretchr/testify/require"
@@ -31,6 +33,8 @@ import (
 // into a temporary SQLite database. This is an integration test
 // that requires network access and takes several minutes.
 func TestImportLedgerStateFromMithril(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -77,6 +81,9 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 			},
 		},
 	)
+	if errors.Is(err, mithril.ErrNoSnapshotsAvailable) {
+		t.Skipf("Mithril aggregator has no snapshots: %v", err)
+	}
 	require.NoError(t, err, "bootstrapping from Mithril")
 	t.Logf(
 		"snapshot extracted: epoch=%d, immutable=%s",
@@ -84,41 +91,39 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 		result.ImmutableDir,
 	)
 
-	// Search for ledger state in ancillary dir first,
-	// then extract dir
-	var lstatePath string
-	var searchDir string
-	for _, dir := range []string{
-		result.AncillaryDir, result.ExtractDir,
+	// Search for ledger state in ancillary dir first, then extract dir,
+	// through the directory handles the bootstrap vetted — the same discovery
+	// the import performs. Searching by pathname here would leave the
+	// integration coverage on a code path production no longer takes.
+	var snapshot *ledgerstate.SnapshotFiles
+	for _, root := range []*os.Root{
+		result.AncillaryRoot, result.ExtractRoot,
 	} {
-		if dir == "" {
+		if root == nil {
 			continue
 		}
-		path, findErr := ledgerstate.FindLedgerStateFile(
-			dir,
+		files, findErr := ledgerstate.OpenSnapshotAtOrBefore(
+			root, ^uint64(0),
 		)
 		if findErr == nil {
-			lstatePath = path
-			searchDir = dir
+			snapshot = files
 			break
 		}
-		t.Logf("no ledger state in %s: %v", dir, findErr)
+		t.Logf("no ledger state in %s: %v", root.Name(), findErr)
 	}
-	require.NotEmpty(
-		t, lstatePath,
-		"should find ledger state file",
-	)
-	t.Logf("ledger state file: %s", lstatePath)
+	require.NotNil(t, snapshot, "should find ledger state file")
+	defer snapshot.Close()
+	t.Logf("ledger state file: %s", snapshot.StatePath)
 
 	// Parse the snapshot
-	state, err := ledgerstate.ParseSnapshot(lstatePath)
+	state, err := ledgerstate.ParseSnapshotFile(snapshot.State)
 	require.NoError(t, err, "parsing snapshot")
 
 	// Check for UTxO-HD tvar file
-	tvarPath := ledgerstate.FindUTxOTableFile(searchDir)
-	if tvarPath != "" {
-		state.UTxOTablePath = tvarPath
-		t.Logf("UTxO table file (UTxO-HD): %s", tvarPath)
+	if snapshot.Table != nil {
+		state.UTxOTablePath = snapshot.TablePath
+		state.UTxOTableFile = snapshot.Table
+		t.Logf("UTxO table file (UTxO-HD): %s", snapshot.TablePath)
 	}
 
 	require.NotNil(t, state.Tip, "tip should not be nil")
@@ -145,12 +150,12 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 
 	// Open a temporary database
 	dbDir := t.TempDir()
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: dbDir,
 		Logger:  logger,
 	})
 	require.NoError(t, err, "creating database")
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Import the ledger state
 	var lastProgress ledgerstate.ImportProgress

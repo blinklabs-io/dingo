@@ -42,6 +42,10 @@ const (
 	// EventMempoolAdd indicates a transaction was added to the mempool.
 	EventMempoolAdd
 
+	// EventTxConfirmed indicates a transaction was removed after inclusion in
+	// a confirmed block.
+	EventTxConfirmed
+
 	// EventTxSubmitted indicates txpump successfully submitted a transaction.
 	// The TxType field on BlockEvent identifies the tx type (payment,
 	// delegation, governance, plutus).
@@ -72,6 +76,9 @@ type BlockEvent struct {
 	// TxType is the transaction type for EventTxSubmitted events
 	// (e.g. "payment", "delegation", "governance", "plutus").
 	TxType string
+
+	// TxID is the transaction hash when the source log provides one.
+	TxID string
 }
 
 // ParseLogLine attempts to parse a single JSON log line and return a
@@ -119,6 +126,8 @@ func parseDingoLine(raw map[string]interface{}) *BlockEvent {
 		evType = EventChainExtended
 	case msg == "added transaction" && componentIs(raw, "mempool"):
 		evType = EventMempoolAdd
+	case msg == "confirmed transaction" && componentIs(raw, "mempool"):
+		evType = EventTxConfirmed
 	default:
 		return nil
 	}
@@ -132,6 +141,7 @@ func parseDingoLine(raw map[string]interface{}) *BlockEvent {
 		ev.Slot = extractSlotFromMsg(msg)
 	}
 	ev.BlockHash = extractHash(raw)
+	ev.TxID = extractTxID(raw)
 	return ev
 }
 
@@ -157,6 +167,7 @@ func parseCardanoNodeLine(raw map[string]interface{}) *BlockEvent {
 	ev.Timestamp = extractTimestamp(raw)
 	ev.Slot = extractSlotCardano(raw)
 	ev.BlockHash = extractHash(raw)
+	ev.TxID = extractTxID(raw)
 	return ev
 }
 
@@ -252,6 +263,7 @@ func parseTxpumpLine(raw map[string]interface{}) *BlockEvent {
 	ev := &BlockEvent{
 		Type:   EventTxSubmitted,
 		TxType: txType,
+		TxID:   stringValue(raw["tx_id"]),
 	}
 	if ts, ok := raw["ts"].(string); ok {
 		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
@@ -259,6 +271,27 @@ func parseTxpumpLine(raw map[string]interface{}) *BlockEvent {
 		}
 	}
 	return ev
+}
+
+func stringValue(v interface{}) string {
+	s, _ := v.(string)
+	return s
+}
+
+func extractTxID(raw map[string]interface{}) string {
+	for _, key := range []string{"tx_id", "tx_hash", "primary_tx_hash"} {
+		if v := stringValue(raw[key]); v != "" {
+			return v
+		}
+	}
+	if data, ok := raw["data"].(map[string]interface{}); ok {
+		for _, key := range []string{"tx_id", "tx_hash", "primary_tx_hash"} {
+			if v := stringValue(data[key]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // extractHash pulls the block hash from the log object.

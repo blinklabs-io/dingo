@@ -1,0 +1,1320 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
+)
+
+type byronPBFTTestKey struct {
+	verificationKey []byte
+	privateKey      ed25519.PrivateKey
+}
+
+func newByronPBFTTestKey(seedByte byte) byronPBFTTestKey {
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat(
+		[]byte{seedByte},
+		ed25519.SeedSize,
+	))
+	verificationKey := make([]byte, 64)
+	copy(verificationKey, privateKey.Public().(ed25519.PublicKey))
+	copy(verificationKey[32:], bytes.Repeat([]byte{seedByte ^ 0xff}, 32))
+	return byronPBFTTestKey{
+		verificationKey: verificationKey,
+		privateKey:      privateKey,
+	}
+}
+
+func newSignedByronPBFTDelegationCertificate(
+	t testing.TB,
+	protocolMagic uint32,
+	epoch uint64,
+	issuer byronPBFTTestKey,
+	delegate byronPBFTTestKey,
+) []any {
+	t.Helper()
+	epochCbor, err := cbor.Encode(epoch)
+	require.NoError(t, err)
+	inner := make([]byte, 0, 2+len(delegate.verificationKey)+len(epochCbor))
+	inner = append(inner, '0', '0')
+	inner = append(inner, delegate.verificationKey...)
+	inner = append(inner, epochCbor...)
+	innerCbor, err := cbor.Encode(inner)
+	require.NoError(t, err)
+	protocolMagicCbor, err := cbor.Encode(protocolMagic)
+	require.NoError(t, err)
+	signed := []byte{0x0a} // Byron SignCertificate tag.
+	signed = append(signed, protocolMagicCbor...)
+	signed = append(signed, innerCbor...)
+	return []any{
+		epoch,
+		append([]byte(nil), issuer.verificationKey...),
+		append([]byte(nil), delegate.verificationKey...),
+		ed25519.Sign(issuer.privateKey, signed),
+	}
+}
+
+func newSignedByronPBFTBlock(
+	t *testing.T,
+	template models.Block,
+	protocolMagic uint32,
+	epoch uint64,
+	slot uint64,
+	difficulty uint64,
+	previousHash lcommon.Blake2b256,
+	issuer byronPBFTTestKey,
+	delegate byronPBFTTestKey,
+	proxyCertificate []any,
+	delegationPayload []any,
+) *byron.ByronMainBlock {
+	t.Helper()
+	decoded, err := template.Decode()
+	require.NoError(t, err)
+	block, ok := decoded.(*byron.ByronMainBlock)
+	require.True(t, ok)
+	header := block.BlockHeader
+	header.ProtocolMagic = protocolMagic
+	header.PrevBlock = previousHash
+	header.ConsensusData.SlotId.Epoch = epoch
+	header.ConsensusData.SlotId.Slot = slot
+	header.ConsensusData.PubKey = append(
+		[]byte(nil),
+		issuer.verificationKey...,
+	)
+	header.ConsensusData.Difficulty.Value = difficulty
+	header.ConsensusData.BlockSig = []any{
+		uint64(2),
+		[]any{proxyCertificate, make([]byte, ed25519.SignatureSize)},
+	}
+	if delegationPayload == nil {
+		delegationPayload = []any{}
+	}
+	delegationPayloadCbor, err := cbor.Encode(cbor.IndefLengthList(delegationPayload))
+	require.NoError(t, err)
+	bodyProof, ok := header.BodyProof.([]any)
+	require.True(t, ok)
+	require.Len(t, bodyProof, 4)
+	bodyProof = append([]any(nil), bodyProof...)
+	bodyProof[2] = lcommon.Blake2b256Hash(delegationPayloadCbor).Bytes()
+	header.BodyProof = bodyProof
+
+	epochSlot := struct {
+		cbor.StructAsArray
+		Epoch uint64
+		Slot  uint64
+	}{Epoch: epoch, Slot: slot}
+	chainDifficulty := struct {
+		cbor.StructAsArray
+		Value uint64
+	}{Value: difficulty}
+	extraData := struct {
+		cbor.StructAsArray
+		BlockVersion    byron.ByronBlockVersion
+		SoftwareVersion byron.ByronSoftwareVersion
+		Attributes      any
+		ExtraProof      []byte
+	}{
+		BlockVersion:    header.ExtraData.BlockVersion,
+		SoftwareVersion: header.ExtraData.SoftwareVersion,
+		Attributes:      header.ExtraData.Attributes,
+		ExtraProof:      header.ExtraData.ExtraProof,
+	}
+	toSign := struct {
+		cbor.StructAsArray
+		PrevHash    lcommon.Blake2b256
+		BodyProof   any
+		EpochSlot   any
+		Difficulty  any
+		ExtraHeader any
+	}{
+		PrevHash:    previousHash,
+		BodyProof:   header.BodyProof,
+		EpochSlot:   epochSlot,
+		Difficulty:  chainDifficulty,
+		ExtraHeader: extraData,
+	}
+	toSignCbor, err := cbor.Encode(toSign)
+	require.NoError(t, err)
+	protocolMagicCbor, err := cbor.Encode(protocolMagic)
+	require.NoError(t, err)
+	signed := []byte{'0', '1'}
+	signed = append(signed, issuer.verificationKey...)
+	signed = append(signed, 0x09) // Byron heavyweight main-block tag.
+	signed = append(signed, protocolMagicCbor...)
+	signed = append(signed, toSignCbor...)
+	header.ConsensusData.BlockSig[1].([]any)[1] = ed25519.Sign(
+		delegate.privateKey,
+		signed,
+	)
+	header.SetCbor(nil)
+	headerCbor, err := cbor.Encode(header)
+	require.NoError(t, err)
+	var decodedHeader byron.ByronMainBlockHeader
+	_, err = cbor.Decode(headerCbor, &decodedHeader)
+	require.NoError(t, err)
+
+	var blockParts []cbor.RawMessage
+	_, err = cbor.Decode(template.Cbor, &blockParts)
+	require.NoError(t, err)
+	require.Len(t, blockParts, 3)
+	var bodyParts []cbor.RawMessage
+	_, err = cbor.Decode(blockParts[1], &bodyParts)
+	require.NoError(t, err)
+	require.Len(t, bodyParts, 4)
+	blockParts[0] = cbor.RawMessage(headerCbor)
+	bodyParts[2] = cbor.RawMessage(delegationPayloadCbor)
+	bodyCbor, err := cbor.Encode(bodyParts)
+	require.NoError(t, err)
+	blockParts[1] = cbor.RawMessage(bodyCbor)
+	blockCbor, err := cbor.Encode(blockParts)
+	require.NoError(t, err)
+	rebuilt, err := byron.NewByronMainBlockFromCbor(blockCbor)
+	require.NoError(t, err)
+	require.Equal(t, previousHash, rebuilt.PrevHash())
+	require.Equal(t, delegationPayload, rebuilt.Body.DlgPayload)
+	return rebuilt
+}
+
+func encodeIndefiniteByronList(t *testing.T, values []any) []byte {
+	t.Helper()
+	encoded := []byte{0x9f}
+	for _, value := range values {
+		item, err := cbor.Encode(value)
+		require.NoError(t, err)
+		encoded = append(encoded, item...)
+	}
+	return append(encoded, 0xff)
+}
+
+func rawByronPBFTBlock(
+	t *testing.T,
+	block *byron.ByronMainBlock,
+) chain.RawBlock {
+	t.Helper()
+	require.NotNil(t, block)
+	require.NotEmpty(t, block.Cbor())
+	decoded, err := gledger.NewBlockFromCbor(
+		gledger.BlockTypeByronMain,
+		block.Cbor(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, block.Hash(), decoded.Hash())
+	require.Equal(t, block.PrevHash(), decoded.PrevHash())
+	return chain.RawBlock{
+		Slot:        block.SlotNumber(),
+		Hash:        block.Hash().Bytes(),
+		PrevHash:    block.PrevHash().Bytes(),
+		BlockNumber: block.BlockNumber(),
+		Type:        gledger.BlockTypeByronMain,
+		Cbor:        append([]byte(nil), block.Cbor()...),
+	}
+}
+
+func newGeneratedByronPBFTTestNodeConfig(
+	t *testing.T,
+	protocolMagic uint32,
+	securityParam uint64,
+	issuer byronPBFTTestKey,
+	initialDelegate byronPBFTTestKey,
+	genesisCertificate []any,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(
+		issuer.verificationKey,
+	)
+	require.NoError(t, err)
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
+	)
+	require.NoError(t, err)
+	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
+		fmt.Sprintf(`{
+			"avvmDistr": {},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
+			"ftsSeed": null,
+			"protocolConsts": {"k": %d, "protocolMagic": %d},
+			"startTime": 1506203091,
+			"bootStakeholders": {%q: 1},
+			"heavyDelegation": {
+				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": 0}
+			},
+			"nonAvvmBalances": {},
+			"vssCerts": {}
+		}`,
+			securityParam,
+			protocolMagic,
+			issuerHash.String(),
+			issuerHash.String(),
+			hex.EncodeToString(genesisCertificate[3].([]byte)),
+			base64.StdEncoding.EncodeToString(initialDelegate.verificationKey),
+			base64.StdEncoding.EncodeToString(issuer.verificationKey),
+		),
+	)))
+	return nodeConfig
+}
+
+func newByronPBFTTestNodeConfig(
+	t *testing.T,
+	block gledger.Block,
+	securityParam uint64,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	header, ok := block.Header().(*byron.ByronMainBlockHeader)
+	require.True(t, ok)
+	proxySignature, ok := header.ConsensusData.BlockSig[1].([]any)
+	require.True(t, ok)
+	certificate, ok := proxySignature[0].([]any)
+	require.True(t, ok)
+	delegateKey, ok := certificate[2].([]byte)
+	require.True(t, ok)
+	certificateSignature, ok := certificate[3].([]byte)
+	require.True(t, ok)
+	omega, ok := certificate[0].(uint64)
+	require.True(t, ok)
+	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(
+		header.ConsensusData.PubKey,
+	)
+	require.NoError(t, err)
+
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
+	)
+	require.NoError(t, err)
+	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
+		fmt.Sprintf(`{
+			"avvmDistr": {},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
+			"ftsSeed": null,
+			"protocolConsts": {"k": %d, "protocolMagic": %d},
+			"startTime": 1506203091,
+			"bootStakeholders": {%q: 1},
+			"heavyDelegation": {
+				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": %d}
+			},
+			"nonAvvmBalances": {},
+			"vssCerts": {}
+		}`,
+			securityParam,
+			header.ProtocolMagic,
+			issuerHash.String(),
+			issuerHash.String(),
+			hex.EncodeToString(certificateSignature),
+			base64.StdEncoding.EncodeToString(delegateKey),
+			base64.StdEncoding.EncodeToString(header.ConsensusData.PubKey),
+			omega,
+		),
+	)))
+	return nodeConfig
+}
+
+func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
+	t.Parallel()
+
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	const securityParam = 10
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newByronPBFTTestNodeConfig(
+				t,
+				block,
+				securityParam,
+			),
+		},
+	}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(time.Unix(0, 0), time.Second, 100),
+		DefaultSlotClockConfig(),
+	)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(config)
+	require.NoError(t, err)
+
+	state, err = ls.advanceByronPBFTState(state, block, true)
+	require.NoError(t, err)
+	state, err = ls.advanceByronPBFTState(state, block, true)
+	require.NoError(t, err)
+	_, err = ls.advanceByronPBFTState(state, block, true)
+	require.ErrorContains(t, err, "signature threshold")
+	require.Len(t, state.issuerState.SignatureHistory(), 2)
+}
+
+func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		protocolMagic = uint32(42)
+		securityParam = uint64(100)
+	)
+	template := loadRealByronMainBlock(t)
+	issuer := newByronPBFTTestKey(0x61)
+	initialDelegate := newByronPBFTTestKey(0x62)
+	replacementDelegate := newByronPBFTTestKey(0x63)
+	genesisCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		0,
+		issuer,
+		initialDelegate,
+	)
+	activationCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		1,
+		issuer,
+		replacementDelegate,
+	)
+	revocationCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		2,
+		issuer,
+		issuer,
+	)
+	ls := &LedgerState{config: LedgerStateConfig{
+		CardanoNodeConfig: newGeneratedByronPBFTTestNodeConfig(
+			t,
+			protocolMagic,
+			securityParam,
+			issuer,
+			initialDelegate,
+			genesisCertificate,
+		),
+	}}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-50_000*time.Second),
+			time.Second,
+			1_000,
+		),
+		DefaultSlotClockConfig(),
+	)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(config)
+	require.NoError(t, err)
+
+	var origin lcommon.Blake2b256
+	scheduleActivation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		1,
+		1,
+		origin,
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		[]any{activationCertificate},
+	)
+	require.Equal(t, origin, scheduleActivation.PrevHash())
+	state, err = ls.advanceByronPBFTState(state, scheduleActivation, true)
+	require.NoError(t, err)
+
+	beforeActivation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		200,
+		2,
+		scheduleActivation.Hash(),
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		nil,
+	)
+	require.Greater(
+		t,
+		beforeActivation.SlotNumber(),
+		scheduleActivation.SlotNumber(),
+	)
+	require.Equal(t, scheduleActivation.Hash(), beforeActivation.PrevHash())
+	state, err = ls.advanceByronPBFTState(state, beforeActivation, true)
+	require.NoError(t, err)
+
+	staleAtActivation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		201,
+		3,
+		beforeActivation.Hash(),
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		nil,
+	)
+	_, err = ls.advanceByronPBFTState(state, staleAtActivation, true)
+	require.ErrorContains(t, err, "does not authorize delegate")
+
+	activated := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		201,
+		3,
+		beforeActivation.Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		nil,
+	)
+	require.Equal(t, beforeActivation.Hash(), activated.PrevHash())
+	state, err = ls.advanceByronPBFTState(state, activated, true)
+	require.NoError(t, err)
+
+	scheduleRevocation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		1,
+		4,
+		activated.Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		[]any{revocationCertificate},
+	)
+	require.Greater(t, scheduleRevocation.SlotNumber(), activated.SlotNumber())
+	require.Equal(t, activated.Hash(), scheduleRevocation.PrevHash())
+	state, err = ls.advanceByronPBFTState(state, scheduleRevocation, true)
+	require.NoError(t, err)
+
+	beforeRevocation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		200,
+		5,
+		scheduleRevocation.Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		nil,
+	)
+	require.Equal(t, scheduleRevocation.Hash(), beforeRevocation.PrevHash())
+	state, err = ls.advanceByronPBFTState(state, beforeRevocation, true)
+	require.NoError(t, err)
+
+	staleAfterRevocation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		201,
+		6,
+		beforeRevocation.Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		nil,
+	)
+	_, err = ls.advanceByronPBFTState(state, staleAfterRevocation, true)
+	require.ErrorContains(t, err, "does not authorize delegate")
+
+	revoked := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		201,
+		6,
+		beforeRevocation.Hash(),
+		issuer,
+		issuer,
+		revocationCertificate,
+		nil,
+	)
+	require.Equal(t, beforeRevocation.Hash(), revoked.PrevHash())
+	state, err = ls.advanceByronPBFTState(state, revoked, true)
+	require.NoError(t, err)
+	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(
+		issuer.verificationKey,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		issuerHash,
+		state.delegationState.ActiveDelegations()[issuerHash],
+	)
+}
+
+func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		protocolMagic = uint32(43)
+		securityParam = uint64(100)
+	)
+	template := loadRealByronMainBlock(t)
+	issuer := newByronPBFTTestKey(0x71)
+	initialDelegate := newByronPBFTTestKey(0x72)
+	genesisCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		0,
+		issuer,
+		initialDelegate,
+	)
+	revocationCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		1,
+		issuer,
+		issuer,
+	)
+	ls := &LedgerState{config: LedgerStateConfig{
+		CardanoNodeConfig: newGeneratedByronPBFTTestNodeConfig(
+			t,
+			protocolMagic,
+			securityParam,
+			issuer,
+			initialDelegate,
+			genesisCertificate,
+		),
+	}}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-50_000*time.Second),
+			time.Second,
+			1_000,
+		),
+		DefaultSlotClockConfig(),
+	)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(config)
+	require.NoError(t, err)
+
+	var origin lcommon.Blake2b256
+	scheduleRevocation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		1,
+		1,
+		origin,
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		[]any{revocationCertificate},
+	)
+	state, err = ls.advanceByronPBFTState(state, scheduleRevocation, true)
+	require.NoError(t, err)
+	beforeRevocation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		200,
+		2,
+		scheduleRevocation.Hash(),
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		nil,
+	)
+	require.Equal(t, scheduleRevocation.Hash(), beforeRevocation.PrevHash())
+	state, err = ls.advanceByronPBFTState(state, beforeRevocation, true)
+	require.NoError(t, err)
+	staleDelegate := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		201,
+		3,
+		beforeRevocation.Hash(),
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		nil,
+	)
+	_, err = ls.advanceByronPBFTState(state, staleDelegate, true)
+	require.ErrorContains(t, err, "does not authorize delegate")
+	revoked := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		201,
+		3,
+		beforeRevocation.Hash(),
+		issuer,
+		issuer,
+		revocationCertificate,
+		nil,
+	)
+	require.Equal(t, beforeRevocation.Hash(), revoked.PrevHash())
+	_, err = ls.advanceByronPBFTState(state, revoked, true)
+	require.NoError(t, err)
+}
+
+func TestByronPBFTStateAtOriginDoesNotRequireChain(t *testing.T) {
+	t.Parallel()
+
+	block, err := loadRealByronMainBlock(t).Decode()
+	require.NoError(t, err)
+	ls := &LedgerState{config: LedgerStateConfig{
+		CardanoNodeConfig: newByronPBFTTestNodeConfig(t, block, 10),
+	}}
+
+	state, err := ls.byronPBFTStateAtTip(context.Background(), ocommon.Tip{})
+	require.NoError(t, err)
+	require.Empty(t, state.issuerState.SignatureHistory())
+	require.NotEmpty(t, state.delegationState.ActiveDelegations())
+}
+
+func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
+	t.Parallel()
+
+	const (
+		protocolMagic = uint32(44)
+		securityParam = 10
+	)
+	template := loadRealByronMainBlock(t)
+	issuer := newByronPBFTTestKey(0x81)
+	initialDelegate := newByronPBFTTestKey(0x82)
+	replacementDelegate := newByronPBFTTestKey(0x83)
+	genesisCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		0,
+		issuer,
+		initialDelegate,
+	)
+	activationCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		1,
+		issuer,
+		replacementDelegate,
+	)
+	revocationCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		2,
+		issuer,
+		issuer,
+	)
+	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(
+		issuer.verificationKey,
+	)
+	require.NoError(t, err)
+	initialDelegateHash, err := byronconsensus.PBFTVerificationKeyHash(
+		initialDelegate.verificationKey,
+	)
+	require.NoError(t, err)
+	replacementDelegateHash, err := byronconsensus.PBFTVerificationKeyHash(
+		replacementDelegate.verificationKey,
+	)
+	require.NoError(t, err)
+
+	var origin lcommon.Blake2b256
+	blocks := make([]*byron.ByronMainBlock, 0, 6)
+	blocks = append(blocks, newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		1,
+		1,
+		origin,
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		[]any{activationCertificate},
+	))
+	blocks = append(blocks, newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		20,
+		2,
+		blocks[0].Hash(),
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		nil,
+	))
+	blocks = append(blocks, newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		21,
+		3,
+		blocks[1].Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		nil,
+	))
+	blocks = append(blocks, newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		1,
+		4,
+		blocks[2].Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		[]any{revocationCertificate},
+	))
+	blocks = append(blocks, newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		20,
+		5,
+		blocks[3].Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		nil,
+	))
+	blocks = append(blocks, newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		21,
+		6,
+		blocks[4].Hash(),
+		issuer,
+		issuer,
+		revocationCertificate,
+		nil,
+	))
+	rawBlocks := make([]chain.RawBlock, len(blocks))
+	for i, block := range blocks {
+		rawBlocks[i] = rawByronPBFTBlock(t, block)
+		if i > 0 {
+			require.Equal(t, blocks[i-1].Hash(), block.PrevHash())
+			require.Greater(t, block.SlotNumber(), blocks[i-1].SlotNumber())
+		}
+	}
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
+		securityParam: securityParam,
+	}))
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	ls := &LedgerState{
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newGeneratedByronPBFTTestNodeConfig(
+				t,
+				protocolMagic,
+				securityParam,
+				issuer,
+				initialDelegate,
+				genesisCertificate,
+			),
+		},
+	}
+	finalTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			rawBlocks[5].Slot,
+			rawBlocks[5].Hash,
+		),
+		BlockNumber: rawBlocks[5].BlockNumber,
+	}
+	state, err := ls.byronPBFTStateAtTip(context.Background(), finalTip)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		[]lcommon.Blake2b224{
+			issuerHash,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+		},
+		state.issuerState.SignatureHistory(),
+		"delegate rotation must continue charging the genesis issuer",
+	)
+	require.Equal(
+		t,
+		issuerHash,
+		state.delegationState.ActiveDelegations()[issuerHash],
+		"restart reconstruction must activate the revocation",
+	)
+
+	ls.Lock()
+	ls.byronPBFT = byronPBFTCache{
+		state:       state,
+		tip:         finalTip.Point,
+		initialized: true,
+	}
+	ls.Unlock()
+	beforeRevocation := ocommon.NewPoint(rawBlocks[4].Slot, rawBlocks[4].Hash)
+	state, err = ls.byronPBFTStateAtTip(context.Background(), ochainsync.Tip{
+		Point:       beforeRevocation,
+		BlockNumber: rawBlocks[4].BlockNumber,
+	})
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		replacementDelegateHash,
+		state.delegationState.ActiveDelegations()[issuerHash],
+		"rollback must discard a cached revocation",
+	)
+	require.Equal(
+		t,
+		[]lcommon.Blake2b224{
+			issuerHash,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+		},
+		state.issuerState.SignatureHistory(),
+		"rollback reconstruction must ignore a cache from the abandoned tip",
+	)
+
+	beforeActivation := ocommon.NewPoint(rawBlocks[1].Slot, rawBlocks[1].Hash)
+	state, err = ls.byronPBFTStateAtTip(context.Background(), ochainsync.Tip{
+		Point:       beforeActivation,
+		BlockNumber: rawBlocks[1].BlockNumber,
+	})
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		initialDelegateHash,
+		state.delegationState.ActiveDelegations()[issuerHash],
+		"rollback must discard a cached delegate activation",
+	)
+
+	var cachedMarker lcommon.Blake2b224
+	cachedMarker[0] = 0xff
+	state.issuerState, err = byronconsensus.NewPBFTState(
+		[]lcommon.Blake2b224{cachedMarker},
+		securityParam,
+	)
+	require.NoError(t, err)
+	ls.Lock()
+	ls.byronPBFT = byronPBFTCache{
+		state:       state,
+		tip:         beforeActivation,
+		initialized: true,
+	}
+	ls.Unlock()
+	state, err = ls.byronPBFTStateAtTip(context.Background(), finalTip)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		[]lcommon.Blake2b224{
+			cachedMarker,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+			issuerHash,
+		},
+		state.issuerState.SignatureHistory(),
+		"forward reconstruction must continue from the cached ancestor",
+	)
+}
+
+func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	err := ls.validateByronPBFTCurrentSlot(&mockByronBlock{})
+	require.ErrorIs(t, err, errByronPBFTCurrentSlotUnavailable)
+
+	err = classifyByronPBFTApplyError(
+		ocommon.NewPoint(100, []byte{0x01}),
+		err,
+		true,
+	)
+	var validationErr *headerValidationError
+	require.False(t, errors.As(err, &validationErr))
+}
+
+func TestByronPBFTConsensusFailureIsAHeaderRejection(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("invalid signature")
+	err := classifyByronPBFTApplyError(
+		ocommon.NewPoint(100, []byte{0x01}),
+		cause,
+		true,
+	)
+	var validationErr *headerValidationError
+	require.ErrorAs(t, err, &validationErr)
+	require.ErrorIs(t, err, cause)
+}
+
+func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-100*time.Second),
+			time.Second,
+			100,
+		),
+		DefaultSlotClockConfig(),
+	)
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "current slot")
+}
+
+// newByronGenesisAnchorTestLedger builds a LedgerState wired to a fresh,
+// real *chain.Chain and a Byron genesis hash, for testing
+// validateByronPBFTHeaderCrypto's origin-anchor checks
+// (blinklabs-io/dingo#4399). The chain starts at origin unless the caller
+// adds blocks to it first.
+func newByronGenesisAnchorTestLedger(
+	t *testing.T,
+	genesisHash string,
+) (*LedgerState, *chain.Chain) {
+	t.Helper()
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 10}),
+	)
+	primaryChain := cm.PrimaryChain()
+
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
+	)
+	require.NoError(t, err)
+	nodeConfig.ByronGenesisHash = genesisHash
+
+	ls := &LedgerState{
+		chain:  primaryChain,
+		config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
+	}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-100*time.Second),
+			time.Second,
+			100,
+		),
+		DefaultSlotClockConfig(),
+	)
+	return ls, primaryChain
+}
+
+// TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb is the
+// blinklabs-io/dingo#4399 positive case: at origin, an epoch-boundary block
+// whose previous hash matches the configured Byron genesis hash is accepted.
+func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
+	t.Parallel()
+
+	genesisHashValue := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHashValue.String(),
+	)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: genesisHashValue,
+		},
+	}
+
+	require.NoError(t, ls.validateByronPBFTHeaderCrypto(ebb))
+}
+
+// TestValidateByronPBFTHeaderRejectsGenesisHashMismatch is the
+// blinklabs-io/dingo#4399 regression itself: at origin, an epoch-boundary
+// block whose previous hash does not match the configured Byron genesis
+// hash must be rejected, even though it is otherwise correctly placed and
+// sized. The reference rejects this with ChainValidationGenesisHashMismatch.
+func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	wrongPrevBlock := lcommon.Blake2b256Hash([]byte("wrong prev hash"))
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: wrongPrevBlock,
+		},
+	}
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
+// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
+// (derived from ConsensusData.Epoch) are independent fields.
+// chain.firstBlockNumberValid only constrains the former, and
+// validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
+// Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to
+// the configured genesis hash, and any past nonzero epoch would pass every
+// other check here despite skipping every epoch before it -- the first EBB
+// of any Byron chain is always epoch 0, unconditionally.
+func TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin(t *testing.T) {
+	t.Parallel()
+
+	genesisHashValue := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHashValue.String(),
+	)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+	// Epoch 1 is slot 21600 (byron.ByronSlotsPerEpoch); push the mock clock's
+	// current slot well past that so this is a genuinely past epoch, not one
+	// that would incidentally also fail the future-slot check instead.
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-30000*time.Second),
+			time.Second,
+			100,
+		),
+		DefaultSlotClockConfig(),
+	)
+
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: genesisHashValue,
+		},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = 0
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "epoch 0")
+}
+
+// TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin is the
+// blinklabs-io/dingo#4399 acceptance criterion that a PBFT-signed regular
+// Byron block must never be accepted as the first block of a from-genesis
+// chain, even one that (like the genuine first block) carries block number
+// and difficulty 0. Only an epoch-boundary block may open the chain. This
+// must be rejected before any PBFT signature verification runs -- the
+// header below carries no signature at all, and still must be rejected.
+func TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	mainBlock := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{},
+	}
+
+	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	require.ErrorContains(t, err, "epoch-boundary block")
+}
+
+// TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin confirms the
+// anchor check is scoped to the chain's first block only. An epoch-boundary
+// block at a later epoch boundary chains onto the previous block, not
+// genesis, and a ledger started from a trusted snapshot or bulk import at a
+// non-origin point has the same shape: its primary chain tip is that
+// trusted point, not origin. Both must reach the ordinary current-slot
+// check unaffected by the genesis hash, matching pre-#4399 behavior.
+func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.NoError(t, primaryChain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        0,
+			Hash:        bytes.Repeat([]byte{0xaa}, 32),
+			BlockNumber: 0,
+			Type:        gledger.BlockTypeByronEbb,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NotZero(t, primaryChain.Tip().Point.Hash)
+
+	// A prev hash that matches neither genesis nor the block just added:
+	// away from origin, neither should matter to this check.
+	wrongPrevBlock := lcommon.Blake2b256Hash([]byte("neither genesis nor tip"))
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: wrongPrevBlock,
+		},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "current slot")
+	require.NotContains(t, err.Error(), "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin is
+// the blinklabs-io/dingo#4399 acceptance criterion that the EBB-only
+// anchor rule applies identically after a rollback empties the chain back
+// to origin, not only on a chain that has never been touched.
+// chain.Chain.atOriginAfterMutation documents the equivalent chain-layer
+// distinction for the block-number half of this same anchor.
+func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis")).
+		String()
+	ls, primaryChain := newByronGenesisAnchorTestLedger(t, genesisHash)
+	require.NoError(t, primaryChain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        0,
+			Hash:        bytes.Repeat([]byte{0xaa}, 32),
+			BlockNumber: 0,
+			Type:        gledger.BlockTypeByronEbb,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NotZero(t, primaryChain.Tip().Point.Hash)
+
+	require.NoError(t, primaryChain.RollbackUnbounded(ocommon.Point{}))
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+
+	wrongPrevBlock := lcommon.Blake2b256Hash([]byte("wrong prev hash"))
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+			PrevBlock: wrongPrevBlock,
+		},
+	}
+
+	err := ls.validateByronPBFTHeaderCrypto(ebb)
+	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
+// validator with typed-nil headers, the shape a Byron block type can carry
+// in process. It must return an error rather than read through the header.
+func TestValidateByronPBFTHeaderCryptoRejectsNilHeaders(t *testing.T) {
+	t.Parallel()
+
+	blocks := map[string]gledger.Block{
+		"header-only main": headerOnlyBlock{
+			header: (*byron.ByronMainBlockHeader)(nil),
+		},
+		"header-only EBB": headerOnlyBlock{
+			header: (*byron.ByronEpochBoundaryBlockHeader)(nil),
+		},
+		"main block":     &byron.ByronMainBlock{},
+		"boundary block": &byron.ByronEpochBoundaryBlock{},
+	}
+	for name, block := range blocks {
+		for _, atOrigin := range []bool{true, false} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				ls, primaryChain := newByronGenesisAnchorTestLedger(
+					t,
+					lcommon.Blake2b256Hash([]byte("genesis")).String(),
+				)
+				if !atOrigin {
+					require.NoError(t, primaryChain.AddBlock(
+						loadBoundaryBlock(
+							t,
+							"mainnet-byron-last-4492799.cbor",
+							gledger.BlockTypeByronMain,
+						),
+						nil,
+					))
+				}
+				var err error
+				require.NotPanics(t, func() {
+					err = ls.validateByronPBFTHeaderCrypto(block)
+				})
+				require.ErrorContains(t, err, "nil header")
+			})
+		}
+	}
+}

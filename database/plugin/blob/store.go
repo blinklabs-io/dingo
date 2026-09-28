@@ -16,9 +16,7 @@ package blob
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -78,7 +76,11 @@ type BlobStore interface {
 	// DeleteBlock continues to fully remove a block for orphan rollbacks
 	// where there is no retained history entry.
 	TombstoneBlock(txn types.Txn, slot uint64, hash []byte) error
-	GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (types.SignedURL, types.BlockMetadata, error)
+	GetBlockURL(
+		ctx context.Context,
+		txn types.Txn,
+		point ocommon.Point,
+	) (types.SignedURL, types.BlockMetadata, error)
 	// UTxO operations
 	SetUtxo(txn types.Txn, txId []byte, outputIdx uint32, cbor []byte) error
 	GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([]byte, error)
@@ -92,24 +94,65 @@ type BlobStore interface {
 	// DiskSize returns the on-disk size of the blob store in bytes.
 	// Returns 0 for cloud-backed stores where local size is not meaningful.
 	DiskSize() (int64, error)
+
+	// Sync flushes everything committed so far to durable storage, so it
+	// survives an unclean shutdown of the process or host.
+	//
+	// This exists because committing a blob transaction is not the same as
+	// making it durable. The combined blob+metadata commit in database.Txn
+	// deliberately commits blob first so the blob store can only ever be ahead
+	// of the metadata tip, never behind -- startup reconciliation knows how to
+	// trim a blob store that is ahead (cleanupOrphanedBlobs) but cannot
+	// reconstruct blocks the metadata tip already references. That ordering
+	// only holds on disk if the blob commit is durable before the metadata
+	// commit is, so Txn.Commit calls Sync between the two. Skipping it inverts
+	// the invariant on an unclean host shutdown, because the two stores flush on
+	// very different schedules: SQLite reaches disk at WAL checkpoints (every
+	// 1000 pages by default) while Badger can hold committed writes in a 128MiB
+	// memtable for hours at chain tip. The metadata tip then survives while the
+	// blocks it references are silently discarded.
+	//
+	// Implementations whose writes are already durable on commit (remote
+	// object stores) may return nil.
+	Sync() error
 }
 
-// New returns the started blob plugin selected by name
-func New(pluginName string) (BlobStore, error) {
-	// Get and start the plugin
-	p, err := plugin.StartPlugin(plugin.PluginTypeBlob, pluginName)
-	if err != nil {
-		return nil, err
-	}
+// TxnBudget is an optional extension for blob stores whose transactions hold
+// only a bounded number of staged mutations.
+//
+// badger is one: it rejects every further staged write once a transaction
+// reaches its per-transaction entry count or byte budget, and the last write
+// any combined transaction makes is the commit timestamp Txn.Commit puts into
+// that same blob transaction. Staging an unbounded set therefore does not
+// cost the caller only the tail of that set -- it costs the caller the whole
+// commit, which on the startup rollback path leaves a node that fails
+// identically on every start (blinklabs-io/dingo#4657). Callers that stage a
+// set they did not size themselves ask how much room is left and stop short
+// of it.
+//
+// A store that does not implement this has no per-transaction bound for
+// callers to respect: the cloud plugins stage mutations in memory and apply
+// them in Commit. Callers treat such a store as unbounded.
+type TxnBudget interface {
+	// RemainingTxnEntries reports how many further mutations, each costing
+	// entryBytes of key plus value, txn will still accept. Staging all of
+	// them fills the transaction, so a caller with anything left to write
+	// into it afterwards -- and every combined transaction has the commit
+	// timestamp -- keeps headroom of its own.
+	//
+	// The bool is false when the store cannot answer for this transaction
+	// -- a nil, finished, or foreign handle -- which callers read the same
+	// way as a store that does not implement the interface at all.
+	RemainingTxnEntries(txn types.Txn, entryBytes int) (int, bool)
+}
 
-	// Type assert to BlobStore interface
-	blobStore, ok := p.(BlobStore)
-	if !ok {
-		return nil, fmt.Errorf(
-			"plugin '%s' does not implement BlobStore interface",
-			pluginName,
-		)
-	}
-
-	return blobStore, nil
+// LocalBlockReader is an optional extension for wrappers that can bypass a
+// remote archive fallback. Database code uses it for bounded local probes
+// where a cache miss must remain a miss.
+type LocalBlockReader interface {
+	GetBlockLocal(
+		txn types.Txn,
+		slot uint64,
+		hash []byte,
+	) ([]byte, types.BlockMetadata, error)
 }

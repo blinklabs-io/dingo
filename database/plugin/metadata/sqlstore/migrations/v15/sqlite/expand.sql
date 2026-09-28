@@ -1,0 +1,5 @@
+-- No schema change. This release's backfill re-stamps pool_stake_snapshot
+-- and reward_snapshot rows left behind by a prior calculation-version bump
+-- (dingo #4026) to the current RewardStakeCalculationVersion wherever doing
+-- so is provably safe, so upgrading in place no longer requires a
+-- rebootstrap for a database the version bump never actually affected.

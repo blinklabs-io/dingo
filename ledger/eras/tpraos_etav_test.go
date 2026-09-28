@@ -66,7 +66,9 @@ func expectedTPraosEtaV(prev, rawVrfOutput []byte) []byte {
 // tpraosTestVectors returns deterministic inputs the TPraos eras share.
 // Non-trivial fixed bytes (no all-zeros, no neutral-nonce path) so the
 // divergence between the buggy and correct formulas is unambiguous.
-func tpraosTestVectors(t *testing.T) (cfg *cardano.CardanoNodeConfig, prev, rawVrf []byte) {
+func tpraosTestVectors(
+	t *testing.T,
+) (cfg *cardano.CardanoNodeConfig, prev, rawVrf []byte) {
 	t.Helper()
 	prev = bytes.Repeat([]byte{0x33}, 32)
 	rawVrf = bytes.Repeat([]byte{0x42}, 64)

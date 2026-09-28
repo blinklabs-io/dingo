@@ -21,10 +21,9 @@ import (
 	"testing"
 )
 
-//go:fix inline
-func boolPtr(v bool) *bool { return new(v) }
-
 func TestResolvePeerSharing(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name            string
 		dingoNative     *bool
@@ -119,6 +118,8 @@ func TestResolvePeerSharing(t *testing.T) {
 }
 
 func TestResolvePeerSharingNilLogger(t *testing.T) {
+	t.Parallel()
+
 	// Must not panic with nil logger on any branch.
 	cases := []struct {
 		dingoNative   *bool

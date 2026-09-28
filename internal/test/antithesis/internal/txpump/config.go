@@ -18,12 +18,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/antithesis/internal/genesis"
 )
+
+const maxStartupTimeoutSeconds = int64(^uint64(0)>>1) / int64(time.Second)
 
 // Config holds all runtime configuration for txpump.
 // Values are read from environment variables; defaults apply when a variable
@@ -47,10 +51,23 @@ type Config struct {
 	CooldownMin int
 	CooldownMax int
 
+	// ConfirmationSlots is the number of slots newly submitted outputs remain
+	// unavailable for coin selection. Zero permits immediate chained spending.
+	ConfirmationSlots uint64
+
+	// SlotLength is the wall-clock duration of one network slot. It is loaded
+	// from the genesis file and used with ConfirmationSlots.
+	SlotLength time.Duration
+
 	// Types is the set of transaction types to generate.
 	// Recognised values: "payment", "delegation", "governance", "plutus".
 	// Default: ["payment","delegation","governance","plutus"]
 	Types []string
+
+	// TransactionEra selects the era used for payment transaction encoding.
+	// Conway supports all transaction types; Dijkstra currently supports
+	// payment transactions only.
+	TransactionEra string
 
 	// LogDir is the directory for structured log files.
 	// Default: /logs
@@ -60,8 +77,15 @@ type Config struct {
 	// Empty string means no fallback.
 	FallbackAddr string
 
-	// GenesisUTxOFile is an optional path to a JSON file containing initial
-	// UTxO entries (used when the wallet is empty on first start).
+	// StartupTimeout is the maximum time allowed to establish a connection and
+	// successfully submit the first transaction. A zero value disables the
+	// startup deadline; the default is 60 seconds.
+	StartupTimeout time.Duration
+
+	// GenesisUTxOFile is a path to a directory (or a single JSON file) containing
+	// initial UTxO entries. When signing keys are present it must be a directory:
+	// LoadSigningKeys globs genesis.*.skey inside it, while LoadGenesisUTxOs
+	// accepts either a directory of JSON files or a single JSON file.
 	GenesisUTxOFile string
 
 	// GenesisFile is the path to the testnet.yaml genesis configuration.
@@ -89,15 +113,24 @@ type Config struct {
 // fully-populated Config struct.
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
-		NodeAddr:     envString("TXPUMP_NODE_ADDR", "/ipc/node.socket"),
-		NetworkMagic: 42,
-		TxCountMin:   1,
-		TxCountMax:   10,
-		CooldownMin:  500,
-		CooldownMax:  2000,
-		Types:        []string{"payment", "delegation", "governance", "plutus"},
-		LogDir:       envString("TXPUMP_LOG_DIR", "/logs"),
-		FallbackAddr: envString("TXPUMP_FALLBACK_ADDR", ""),
+		NodeAddr:          envString("TXPUMP_NODE_ADDR", "/ipc/node.socket"),
+		NetworkMagic:      42,
+		TxCountMin:        1,
+		TxCountMax:        10,
+		CooldownMin:       500,
+		CooldownMax:       2000,
+		ConfirmationSlots: 30,
+		SlotLength:        time.Second,
+		Types: []string{
+			"payment",
+			"delegation",
+			"governance",
+			"plutus",
+		},
+		TransactionEra: envString("TXPUMP_TRANSACTION_ERA", "conway"),
+		LogDir:         envString("TXPUMP_LOG_DIR", "/logs"),
+		FallbackAddr:   envString("TXPUMP_FALLBACK_ADDR", ""),
+		StartupTimeout: 60 * time.Second,
 		GenesisUTxOFile: envString(
 			"TXPUMP_GENESIS_UTXO_FILE", "",
 		),
@@ -163,6 +196,25 @@ func LoadConfig() (*Config, error) {
 		cfg.CooldownMax = n
 	}
 
+	if v := os.Getenv("TXPUMP_CONFIRMATION_SLOTS"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"TXPUMP_CONFIRMATION_SLOTS: must be a non-negative integer, got %q",
+				v,
+			)
+		}
+		cfg.ConfirmationSlots = n
+	}
+
+	if v := os.Getenv("TXPUMP_STARTUP_TIMEOUT"); v != "" {
+		timeout, err := parseStartupTimeout(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.StartupTimeout = timeout
+	}
+
 	if v := os.Getenv("TXPUMP_TYPES"); v != "" {
 		cfg.Types = splitComma(v)
 	}
@@ -175,11 +227,13 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("TXPUMP_GENESIS_FILE: %w", loadErr)
 		}
 		if gcfg.EpochLength == 0 {
-			return nil, fmt.Errorf(
-				"TXPUMP_GENESIS_FILE: genesis has epochLength=0, which is invalid",
+			return nil, errors.New(
+				"TXPUMP_GENESIS_FILE: genesis has epochLength=0, " +
+					"which is invalid",
 			)
 		}
 		cfg.EpochLength = gcfg.EpochLength
+		cfg.SlotLength = time.Duration(gcfg.SlotLength * float64(time.Second))
 		cfg.SystemStartUnix = gcfg.SystemStartUnix
 		if os.Getenv("TXPUMP_NETWORK_MAGIC") == "" {
 			cfg.NetworkMagic = gcfg.NetworkMagic
@@ -191,6 +245,30 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) confirmationDelay() time.Duration {
+	if c.ConfirmationSlots == 0 || c.SlotLength <= 0 {
+		return 0
+	}
+	slotNanos := uint64(c.SlotLength)
+	if c.ConfirmationSlots > uint64(math.MaxInt64)/slotNanos {
+		return time.Duration(math.MaxInt64)
+	}
+	// The guard above bounds the product at math.MaxInt64.
+	return time.Duration(c.ConfirmationSlots * slotNanos) //nolint:gosec
+}
+
+func parseStartupTimeout(value string) (time.Duration, error) {
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || seconds < 0 || seconds > maxStartupTimeoutSeconds {
+		return 0, fmt.Errorf(
+			"TXPUMP_STARTUP_TIMEOUT: must be a non-negative integer (seconds) <= %d, got %q",
+			maxStartupTimeoutSeconds,
+			value,
+		)
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 // validate checks that the config values are internally consistent.
@@ -210,6 +288,12 @@ func (c *Config) validate() error {
 	if len(c.Types) == 0 {
 		return errors.New("TXPUMP_TYPES must not be empty")
 	}
+	if c.TransactionEra != "conway" && c.TransactionEra != "dijkstra" {
+		return fmt.Errorf(
+			"TXPUMP_TRANSACTION_ERA must be conway or dijkstra, got %q",
+			c.TransactionEra,
+		)
+	}
 	validTypes := map[string]bool{
 		"payment":    true,
 		"delegation": true,
@@ -225,6 +309,16 @@ func (c *Config) validate() error {
 			)
 		}
 	}
+	if c.TransactionEra == "dijkstra" {
+		for _, txType := range c.Types {
+			if txType != "payment" {
+				return fmt.Errorf(
+					"TXPUMP_TRANSACTION_ERA=dijkstra supports payment only, got %q",
+					txType,
+				)
+			}
+		}
+	}
 	stakeConfigured := c.DelegationStakeKeyHash != ""
 	poolConfigured := c.DelegationPoolKeyHash != ""
 	if stakeConfigured != poolConfigured {
@@ -237,14 +331,12 @@ func (c *Config) validate() error {
 		if _, err := decodeConfiguredHash(
 			"TXPUMP_DELEGATION_STAKE_KEY_HASH",
 			c.DelegationStakeKeyHash,
-			28,
 		); err != nil {
 			return err
 		}
 		if _, err := decodeConfiguredHash(
 			"TXPUMP_DELEGATION_POOL_KEY_HASH",
 			c.DelegationPoolKeyHash,
-			28,
 		); err != nil {
 			return err
 		}
@@ -281,19 +373,22 @@ func splitComma(s string) []string {
 	return out
 }
 
+// credentialHashLen is the length of a Cardano credential hash
+// (Blake2b-224), which is what every configured stake and pool key hash is.
+const credentialHashLen = 28
+
 func decodeConfiguredHash(
 	name string,
 	value string,
-	expectedLen int,
 ) ([]byte, error) {
 	decoded, err := hex.DecodeString(value)
 	if err != nil {
 		return nil, fmt.Errorf("%s: invalid hex %q: %w", name, value, err)
 	}
-	if len(decoded) != expectedLen {
+	if len(decoded) != credentialHashLen {
 		return nil, fmt.Errorf(
 			"%s: expected %d bytes, got %d",
-			name, expectedLen, len(decoded),
+			name, credentialHashLen, len(decoded),
 		)
 	}
 	return decoded, nil

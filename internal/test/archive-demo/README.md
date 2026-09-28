@@ -7,8 +7,8 @@ the S3 blob plugin, local History Expiry, and Bark proxy working end to end.
 ## Stack
 
 - `cardano-producer` - sole block producer (cardano-node 11.0.1)
-- `dingo-archive` - Dingo with `blobPlugin: s3`, Bark server on port 3003
-- `dingo-pruning` - Dingo with `blobPlugin: badger`,
+- `dingo-archive` - Dingo with `plugins.storage.blob.provider: s3`, Bark server on port 3003
+- `dingo-pruning` - Dingo with `plugins.storage.blob.provider: badger`,
   `barkBaseUrl` pointing at `dingo-archive`,
   `historyExpiry.enabled: true`, and `historyExpiry.frequency: 5s`. The
   security window is derived from the ledger's stability window (3k/f = 300
@@ -30,6 +30,10 @@ helper binary, brings the stack up, prints a stats line every 10 seconds
 once the chain has crossed the security window it runs a scripted
 BlockFetch from outside the stack against a pre-window block on the
 history-expiry node and prints the byte count and timing.
+
+All Go packages in this directory use the `archive_demo` build tag, so
+normal `go test ./...` runs exclude the demo. Use `run-tests.sh` to build
+the helpers and execute the integration test with the tag enabled.
 
 ## What it shows
 

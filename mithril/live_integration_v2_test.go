@@ -35,6 +35,8 @@ import (
 // verification of a single immutable archive. Bandwidth use is kept
 // small (one immutable archive plus the digest list).
 func TestLiveMithrilV2Verification(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("DINGO_LIVE_MITHRIL") == "" {
 		t.Skip("set DINGO_LIVE_MITHRIL=1 to run live Mithril v2 verification")
 	}
@@ -126,9 +128,10 @@ func TestLiveMithrilV2Verification(t *testing.T) {
 		downloadDir,
 		extractDir,
 	))
-	bytes, err := checkImmutableTrio(
-		filepath.Join(extractDir, "immutable"), 0, digests,
-	)
+	immutableRoot, err := os.OpenRoot(filepath.Join(extractDir, "immutable"))
+	require.NoError(t, err)
+	defer func() { _ = immutableRoot.Close() }()
+	bytes, err := checkImmutableTrio(immutableRoot, 0, digests)
 	require.NoError(t, err)
 	assert.Positive(t, bytes)
 

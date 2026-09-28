@@ -36,6 +36,80 @@ type proposalSource interface {
 	ProposalProcedures() []lcommon.ProposalProcedure
 }
 
+// HasDRepActivityCertificates reports whether the transaction contains a
+// certificate that renews a DRep's activity period.
+func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
+	for _, cert := range tx.Certificates() {
+		switch cert.(type) {
+		case *lcommon.RegistrationDrepCertificate,
+			*lcommon.UpdateDrepCertificate:
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessDRepActivityCertificates renews DRep activity for registration and
+// update certificates. Certificate persistence creates or updates the DRep row
+// before this function runs, and both writes participate in the same database
+// transaction.
+func ProcessDRepActivityCertificates(
+	tx lcommon.Transaction,
+	currentEpoch uint64,
+	drepInactivityPeriod uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	updated := make(map[string]struct{})
+	for i, cert := range tx.Certificates() {
+		var credential lcommon.Credential
+		switch c := cert.(type) {
+		case *lcommon.RegistrationDrepCertificate:
+			if c == nil {
+				continue
+			}
+			credential = c.DrepCredential
+		case *lcommon.UpdateDrepCertificate:
+			if c == nil {
+				continue
+			}
+			credential = c.DrepCredential
+		default:
+			continue
+		}
+
+		credentialTag, err := models.CredentialTagFromUint(
+			credential.CredType,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"renew DRep activity for certificate %d: %w",
+				i,
+				err,
+			)
+		}
+		key := string([]byte{credentialTag}) + string(credential.Credential[:])
+		if _, ok := updated[key]; ok {
+			continue
+		}
+		if err := db.UpdateDRepActivity(
+			credentialTag,
+			credential.Credential[:],
+			currentEpoch,
+			drepInactivityPeriod,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"renew DRep activity for certificate %d: %w",
+				i,
+				err,
+			)
+		}
+		updated[key] = struct{}{}
+	}
+	return nil
+}
+
 // ProcessProposals extracts governance proposals from a Conway-era
 // transaction and persists them to the database. Each proposal procedure in the
 // transaction body is mapped to a GovernanceProposal model with the appropriate
@@ -82,7 +156,22 @@ func persistGovernanceProposals(
 
 	for i, proposal := range proposals {
 		govAction := proposal.GovAction()
-		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(govAction)
+		if updateCommittee, ok := govAction.(*lcommon.UpdateCommitteeGovAction); ok {
+			for _, expiryEpoch := range updateCommittee.CredEpochs {
+				if expiryEpoch <= currentEpoch {
+					return fmt.Errorf(
+						"proposal %d in tx %s: committee member expiry epoch %d is not after current epoch %d",
+						i,
+						txHashForLog,
+						expiryEpoch,
+						currentEpoch,
+					)
+				}
+			}
+		}
+		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+			govAction,
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"proposal %d in tx %s: %w",
@@ -206,9 +295,14 @@ func ProcessVotes(
 
 		// Update DRep activity when a DRep votes (once per DRep per tx)
 		if voterType == models.VoterTypeDRep {
-			credKey := string(voter.Hash[:])
+			var drepCredTag uint8
+			if voter.Type == lcommon.VoterTypeDRepScriptHash {
+				drepCredTag = 1
+			}
+			credKey := string([]byte{drepCredTag}) + string(voter.Hash[:])
 			if !drepActivityUpdated[credKey] {
 				err := db.UpdateDRepActivity(
+					drepCredTag,
 					voter.Hash[:],
 					currentEpoch,
 					drepInactivityPeriod,
@@ -223,6 +317,7 @@ func ProcessVotes(
 					// anchor_hash, active) is preserved and rollback semantics
 					// in RestoreDrepStateAtSlot remain intact.
 					if setErr := db.InsertDrepIfAbsent(
+						drepCredTag,
 						voter.Hash[:],
 						point.Slot,
 						"",
@@ -246,6 +341,7 @@ func ProcessVotes(
 						)
 					}
 					err = db.UpdateDRepActivity(
+						drepCredTag,
 						voter.Hash[:],
 						currentEpoch,
 						drepInactivityPeriod,
@@ -327,12 +423,13 @@ func ProcessVotes(
 			// code handles both cases correctly.
 			updatedSlot := point.Slot
 			vote := &models.GovernanceVote{
-				ProposalID:      proposal.ID,
-				VoterType:       voterType,
-				VoterCredential: voter.Hash[:],
-				Vote:            procedure.Vote,
-				AddedSlot:       point.Slot,
-				VoteUpdatedSlot: &updatedSlot,
+				ProposalID:         proposal.ID,
+				VoterType:          voterType,
+				VoterCredentialTag: voterCredentialTag(voter.Type),
+				VoterCredential:    voter.Hash[:],
+				Vote:               procedure.Vote,
+				AddedSlot:          point.Slot,
+				VoteUpdatedSlot:    &updatedSlot,
 			}
 
 			if procedure.Anchor != nil {
@@ -410,12 +507,15 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 			return validity, nil
 		}
 	}
-	if epoch.EraId != conway.EraIdConway {
+	switch epoch.EraId {
+	case conway.EraIdConway, gdijkstra.EraIdDijkstra:
+		// Governance proposal repair is supported for the concrete eras whose
+		// protocol-parameter adapters are handled below.
+	default:
 		return 0, fmt.Errorf(
-			"unexpected era %d for governance proposal tx %s, expected Conway era %d",
+			"unexpected governance era %d for proposal tx %s",
 			epoch.EraId,
 			shortHash(proposalTxHash),
-			conway.EraIdConway,
 		)
 	}
 	era := eras.GetEraById(epoch.EraId)
@@ -436,10 +536,18 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 			err,
 		)
 	}
-	conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams, err := conwayGovernanceProtocolParameters(pparams)
+	if err != nil {
 		return 0, fmt.Errorf(
-			"unexpected protocol params %T for governance proposal tx %s in era %d",
+			"resolve governance protocol params for proposal tx %s in era %d: %w",
+			shortHash(proposalTxHash),
+			epoch.EraId,
+			err,
+		)
+	}
+	if conwayPParams == nil {
+		return 0, fmt.Errorf(
+			"pre-Conway protocol params %T for governance proposal tx %s in era %d",
 			pparams,
 			shortHash(proposalTxHash),
 			epoch.EraId,
@@ -604,6 +712,16 @@ func extractGovActionInfo(
 		)
 	}
 	return actionType, parentTxHash, parentActionIdx, policyHash, nil
+}
+
+func voterCredentialTag(voterType uint8) uint8 {
+	switch voterType {
+	case lcommon.VoterTypeDRepScriptHash,
+		lcommon.VoterTypeConstitutionalCommitteeHotScriptHash:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // mapVoterType maps gouroboros voter type constants to the database model

@@ -44,12 +44,18 @@ func assertLogContains(t *testing.T, buf *bytes.Buffer, wants []string) {
 	logOutput := buf.String()
 	for _, want := range wants {
 		if !strings.Contains(logOutput, want) {
-			t.Fatalf("expected log output to contain %q, got %s", want, logOutput)
+			t.Fatalf(
+				"expected log output to contain %q, got %s",
+				want,
+				logOutput,
+			)
 		}
 	}
 }
 
 func TestHandleEventChainsync_WarnsOnUnexpectedEventDataType(t *testing.T) {
+	t.Parallel()
+
 	ls, logBuf := newTestLedgerStateWithBuffer()
 	evt := event.Event{
 		Type:      event.EventType("chainsync.test"),
@@ -70,6 +76,8 @@ func TestHandleEventChainsync_WarnsOnUnexpectedEventDataType(t *testing.T) {
 }
 
 func TestHandleEventBlockfetch_WarnsOnUnexpectedEventDataType(t *testing.T) {
+	t.Parallel()
+
 	ls, logBuf := newTestLedgerStateWithBuffer()
 	evt := event.Event{
 		Type:      event.EventType("blockfetch.test"),

@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/stretchr/testify/require"
 )
@@ -74,10 +75,14 @@ import (
 // All other era boundaries within TPraos (Shelley→Allegra, Allegra→Mary,
 // Mary→Alonzo) and within Praos (Babbage→Conway) use the same multiplier
 // either way and therefore mask the bug.
-func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cfg := newAlonzoToBabbageStabilityCfg(t)
 
@@ -158,6 +163,7 @@ func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(t *test
 			ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
 			eras.BabbageEraDesc,
 			ls.currentEpoch,
+			nil,
 		)
 		candidate = c
 		return err
@@ -188,7 +194,7 @@ func newAlonzoToBabbageStabilityCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
 		"protocolConsts": {
 			"k": 6,
 			"protocolMagic": 42

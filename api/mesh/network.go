@@ -24,7 +24,7 @@ func (s *Server) handleNetworkList(
 	r *http.Request,
 ) {
 	var req MetadataRequest
-	if err := decodeRequest(w, r, &req); err != nil {
+	if err := s.decodeRequest(w, r, &req); err != nil {
 		writeError(w, ErrInvalidRequest)
 		return
 	}
@@ -62,7 +62,7 @@ func (s *Server) handleNetworkOptions(
 			OperationStatuses:       OperationStatuses(),
 			OperationTypes:          OperationTypes(),
 			Errors:                  AllErrors(),
-			HistoricalBalanceLookup: false,
+			HistoricalBalanceLookup: true,
 			MempoolCoins:            false,
 		},
 	}
@@ -84,7 +84,10 @@ func (s *Server) handleNetworkStatus(
 
 	tip := s.config.Chain.Tip()
 	tipTimestamp := s.slotToTimestamp(tip.Point.Slot)
-	synced := true
+	synced := false
+	if progress, ok := s.config.LedgerState.(MeshSyncProgress); ok {
+		synced = progress.SyncProgress() == 1
+	}
 
 	resp := &NetworkStatusResponse{
 		CurrentBlockIdentifier: s.tipBlockID(tip),

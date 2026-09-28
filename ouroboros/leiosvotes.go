@@ -25,17 +25,12 @@ import (
 
 var errLeiosVotesUnavailable = errors.New("leios votes unavailable")
 
-// leiosVotesBusyTimeout effectively disables the LeiosVotes Busy-state
-// timeout. Vote serving blocks until votes become available, so idle
-// waits of arbitrary length are normal. The protocol replaces a zero
-// timeout with its 60s default, so a very large value is used instead.
-const leiosVotesBusyTimeout = 365 * 24 * time.Hour
-
 func (o *Ouroboros) leiosvotesServerConnOpts() []oleiosvotes.LeiosVotesOptionFunc {
 	return []oleiosvotes.LeiosVotesOptionFunc{
 		oleiosvotes.WithRequestNextFunc(
 			o.instrumentLeiosvotesRequestNext(o.leiosvotesServerRequestNext),
 		),
+		oleiosvotes.WithTimeout(oleiosvotes.DefaultTimeout),
 	}
 }
 
@@ -48,7 +43,7 @@ func (o *Ouroboros) leiosvotesClientConnOpts() []oleiosvotes.LeiosVotesOptionFun
 		// peer with few votes does not stall a large batch request.
 		oleiosvotes.WithRequestNextCount(1),
 		oleiosvotes.WithPipelineLimit(16),
-		oleiosvotes.WithTimeout(leiosVotesBusyTimeout),
+		oleiosvotes.WithTimeout(oleiosvotes.DefaultTimeout),
 	}
 }
 
@@ -56,7 +51,7 @@ func (o *Ouroboros) leiosvotesClientConnOpts() []oleiosvotes.LeiosVotesOptionFun
 func (o *Ouroboros) leiosvotesClientStart(
 	connId ouroboros.ConnectionId,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf(
 			"failed to lookup connection ID: %s",
@@ -102,7 +97,7 @@ func (o *Ouroboros) leiosvotesServerRequestNext(
 	ctx oleiosvotes.CallbackContext,
 	count uint64,
 ) ([]oleiosvotes.Vote, error) {
-	if o.LeiosVotes == nil {
+	if o.leiosVotes == nil {
 		o.config.Logger.Debug(
 			"leios votes requested but vote manager is not wired",
 			"protocol", "leios-votes",
@@ -112,14 +107,29 @@ func (o *Ouroboros) leiosvotesServerRequestNext(
 		return nil, errLeiosVotesUnavailable
 	}
 	// The protocol requires exactly count votes per request, so the
-	// vote manager blocks until enough votes are available. Protocol
-	// shutdown aborts the wait via the done channel.
+	// vote manager blocks until enough votes are available. Observe the
+	// stop request because this callback runs on a protocol loop that must
+	// return before DoneChan can close.
 	done := (<-chan struct{})(nil)
 	if ctx.Server != nil {
-		done = ctx.Server.DoneChan()
+		if protocol := ctx.Server.ProtocolInstance(); protocol != nil {
+			done = protocol.StopChan()
+		}
 	}
-	return o.LeiosVotes.NextVotes(
-		done,
+	combinedDone := make(chan struct{})
+	cancelCombine := make(chan struct{})
+	defer close(cancelCombine)
+	go func() {
+		select {
+		case <-done:
+		case <-ctx.ConnectionDoneChan:
+		case <-cancelCombine:
+			return
+		}
+		close(combinedDone)
+	}()
+	return o.leiosVotes.NextVotes(
+		combinedDone,
 		leiosConnectionIdString(ctx.ConnectionId),
 		count,
 	)
@@ -138,8 +148,8 @@ func (o *Ouroboros) leiosvotesClientVote(
 		"voter_id", vote.VoterId,
 		"endorser_block_hash", vote.EndorserBlockHash.String(),
 	)
-	if o.LeiosVotes == nil {
+	if o.leiosVotes == nil {
 		return nil
 	}
-	return o.LeiosVotes.HandleVote(connId, vote)
+	return o.leiosVotes.HandleVote(connId, vote)
 }

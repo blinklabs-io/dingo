@@ -35,6 +35,8 @@ import (
 // eras.Eras (7 entries for Cardano), even when most eras have no epochs in the
 // DB. Clients rely on this shape.
 func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -65,6 +67,7 @@ func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
@@ -99,7 +102,11 @@ func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
 // the safe-zone computation to hardfork.BuildSummary; dingo's legacy
 // pre-HFC-adapter code clamped too conservatively to the last-in-DB epoch's
 // end.
-func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(t *testing.T) {
+func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -133,6 +140,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(t *testing.T)
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	eraList := result.(cbor.IndefLengthList)
@@ -144,10 +152,18 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(t *testing.T)
 	epoch, ok := eraEnd[2].(uint64)
 	require.True(t, ok)
 
-	assert.Equal(t, expectedEraEndSlot, slot,
-		"Unknown: tip+safeZone crossing into next epoch should extend EraEnd to that epoch's end")
-	assert.Equal(t, expectedEraEndEpoch, epoch,
-		"Unknown: EraEnd epoch should be the epoch *after* the one containing tip+safeZone")
+	assert.Equal(
+		t,
+		expectedEraEndSlot,
+		slot,
+		"Unknown: tip+safeZone crossing into next epoch should extend EraEnd to that epoch's end",
+	)
+	assert.Equal(
+		t,
+		expectedEraEndEpoch,
+		epoch,
+		"Unknown: EraEnd epoch should be the epoch *after* the one containing tip+safeZone",
+	)
 }
 
 // TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd pins that
@@ -160,7 +176,11 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(t *testing.T)
 // ExperimentalHardForksEnabled is true, so Byron's NextEraTrigger resolves to
 // AtEpoch(5). With currentEpoch=3 < 5, evaluateTriggerAtEpoch will set
 // TransitionKnown(5) and the Byron era's End must snap to epoch 5's start.
-func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(t *testing.T) {
+func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		epochId        = uint64(3)
 		epochLen       = uint(21_600)   // Byron epoch length (10k, k=2160)
@@ -209,6 +229,7 @@ func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(t *testing.T) 
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	require.Equal(t, override, ls.transitionInfo.KnownEpoch)
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
@@ -225,8 +246,12 @@ func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(t *testing.T) 
 
 	endEpoch, ok := byronEnd[2].(uint64)
 	require.True(t, ok, "EraEnd epoch must be uint64, got %T", byronEnd[2])
-	assert.Equal(t, override, endEpoch,
-		"AtEpoch override must pin the open era's EraEnd.Epoch at the override value")
+	assert.Equal(
+		t,
+		override,
+		endEpoch,
+		"AtEpoch override must pin the open era's EraEnd.Epoch at the override value",
+	)
 }
 
 // TestQueryHardForkEraHistory_AdjacentErasContiguous pins that whenever two
@@ -235,6 +260,8 @@ func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(t *testing.T) 
 // catch a timespan-accumulation bug like the one the legacy code flagged with
 // a hand-written "timespan.Sub" after the transition-epoch detection.
 func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
+	t.Parallel()
+
 	const (
 		byronEpoch0     = uint64(0)
 		byronEpoch0Len  = uint(21_600)
@@ -269,6 +296,7 @@ func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
@@ -282,9 +310,19 @@ func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
 
 	// relTime — *big.Int picoseconds
 	byronEndRel, ok := byronEnd[0].(*big.Int)
-	require.True(t, ok, "byron end relTime must be *big.Int, got %T", byronEnd[0])
+	require.True(
+		t,
+		ok,
+		"byron end relTime must be *big.Int, got %T",
+		byronEnd[0],
+	)
 	shelleyStartRel, ok := shelleyStartBound[0].(*big.Int)
-	require.True(t, ok, "shelley start relTime must be *big.Int, got %T", shelleyStartBound[0])
+	require.True(
+		t,
+		ok,
+		"shelley start relTime must be *big.Int, got %T",
+		shelleyStartBound[0],
+	)
 	assert.Equal(t, 0, byronEndRel.Cmp(shelleyStartRel),
 		"byron end relTime (%s) must equal shelley start relTime (%s)",
 		byronEndRel, shelleyStartRel,

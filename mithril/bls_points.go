@@ -37,7 +37,9 @@ func decodeBLSG1Point(encoded string) (*bls12381.G1Affine, error) {
 	return &point, nil
 }
 
-func decodeBLSG2Point(encoded string) (*bls12381.G2Affine, error) { //nolint:unparam // return value used post-merge
+func decodeBLSG2Point(
+	encoded string,
+) (*bls12381.G2Affine, error) { //nolint:unparam // return value used post-merge
 	raw, ok := decodePrimaryEncodedBytes(encoded)
 	if !ok {
 		return nil, errors.New("could not decode encoded bytes")

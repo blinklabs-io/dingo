@@ -17,6 +17,7 @@ package types
 import (
 	"bytes"
 	"database/sql/driver"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -120,6 +121,60 @@ func (u *Uint64) Scan(val any) error {
 	default:
 		return fmt.Errorf(
 			"value was not expected type, wanted string/[]byte/uint64/int64, got %T",
+			val,
+		)
+	}
+}
+
+// NullableHash is a byte slice that serializes to SQL NULL when empty,
+// rather than to an empty blob. It is used for nullable foreign-key columns
+// that reference transaction(hash) (e.g. utxo.spent_at_tx_id) and are unset
+// until the UTxO is spent/referenced.
+//
+// Without a custom driver.Valuer, an empty/nil []byte can be bound by some
+// SQLite drivers as an empty blob instead of SQL NULL. SQLite
+// enforces FK constraints against an empty blob (no transaction has an empty
+// hash), so such a row fails with SQLITE_CONSTRAINT_FOREIGNKEY (787).
+// This affects every UTxO not yet spent/referenced, including all genesis
+// UTxOs. Returning a nil driver.Value guarantees SQL NULL on every driver
+// version, so the FK is correctly skipped.
+//
+//nolint:recvcheck
+type NullableHash []byte
+
+// Value implements driver.Valuer. An empty (or nil) slice serializes to SQL
+// NULL; a non-empty slice serializes to its bytes.
+func (h NullableHash) Value() (driver.Value, error) {
+	if len(h) == 0 {
+		return nil, nil
+	}
+	return []byte(h), nil
+}
+
+// Scan implements sql.Scanner.
+func (h *NullableHash) Scan(val any) error {
+	switch v := val.(type) {
+	case nil:
+		*h = nil
+		return nil
+	case []byte:
+		if len(v) == 0 {
+			*h = nil
+			return nil
+		}
+		// Copy so we do not retain the driver's buffer.
+		*h = append(NullableHash(nil), v...)
+		return nil
+	case string:
+		if v == "" {
+			*h = nil
+			return nil
+		}
+		*h = append(NullableHash(nil), v...)
+		return nil
+	default:
+		return fmt.Errorf(
+			"value was not expected type, wanted []byte/string, got %T",
 			val,
 		)
 	}
@@ -263,6 +318,19 @@ type Txn interface {
 	Rollback() error
 }
 
+// IrreversibleTxn identifies a transaction whose Rollback cannot undo writes
+// already issued to its backing store.
+//
+// No current implementation reports true: the cloud plugins stage mutations and
+// apply them only in Commit, so their Rollback discards staged work with no
+// backing-store I/O. Callers must not infer "the store was mutated" from a
+// failed transaction; check errors.Is(err, ErrPartialCommit) instead, which is
+// the only case where a commit left the store partially applied.
+type IrreversibleTxn interface {
+	Txn
+	RollbackIsNoop() bool
+}
+
 // MetadataBatchAccumulator is an opaque plugin-owned accumulator used by
 // metadata stores that support batched transaction ingestion.
 type MetadataBatchAccumulator interface {
@@ -279,6 +347,106 @@ type BlockMetadata struct {
 	Type     uint
 	Height   uint64
 	PrevHash []byte
+}
+
+// BlockMetadataBinaryMagic is the four-byte prefix identifying the compact
+// binary encoding of BlockMetadata. The badger plugin writes that encoding
+// instead of CBOR when compact block metadata is enabled (run mode "serve"
+// or "leios" with storage mode "core"), so the value stored at a block's
+// BlockBlobMetadataKey is one of two encodings depending on how the node
+// was configured when the block was written. Anything reading that key
+// directly has to accept both: use UnmarshalBlockMetadata rather than
+// decoding it as CBOR. The bytes "DBM1" cannot begin a CBOR-encoded
+// BlockMetadata, which starts with an array header byte, so the two are
+// unambiguous.
+var BlockMetadataBinaryMagic = [4]byte{'D', 'B', 'M', '1'}
+
+// BlockMetadataBinaryHeaderLen is the fixed part of the compact encoding:
+// the magic, then ID, type, and height as big-endian uint64s, then the
+// previous-hash length as a big-endian uint32.
+const BlockMetadataBinaryHeaderLen = 32
+
+// BlockMetadataPrevHashMaxLen bounds the previous-hash field of the
+// compact encoding, whose length prefix must stay within a block hash.
+const BlockMetadataPrevHashMaxLen = 32
+
+// BlockMetadataBinarySize returns the length MarshalBlockMetadataInto
+// needs for metadata carrying the given previous hash.
+func BlockMetadataBinarySize(prevHash []byte) int {
+	return BlockMetadataBinaryHeaderLen + len(prevHash)
+}
+
+// MarshalBlockMetadataInto writes the compact binary encoding of metadata
+// into dst, which must be exactly BlockMetadataBinarySize long. Writing
+// into a caller-supplied buffer lets the blob plugin pack the metadata
+// value into the same allocation as the keys it writes alongside it.
+func MarshalBlockMetadataInto(dst []byte, metadata BlockMetadata) error {
+	prevHashLen := len(metadata.PrevHash)
+	if prevHashLen > BlockMetadataPrevHashMaxLen {
+		return fmt.Errorf(
+			"invalid block metadata prev hash length: %d",
+			prevHashLen,
+		)
+	}
+	if len(dst) != BlockMetadataBinarySize(metadata.PrevHash) {
+		return fmt.Errorf(
+			"invalid block metadata buffer length: got %d, want %d",
+			len(dst),
+			BlockMetadataBinarySize(metadata.PrevHash),
+		)
+	}
+	copy(dst[:4], BlockMetadataBinaryMagic[:])
+	binary.BigEndian.PutUint64(dst[4:12], metadata.ID)
+	binary.BigEndian.PutUint64(dst[12:20], uint64(metadata.Type))
+	binary.BigEndian.PutUint64(dst[20:28], metadata.Height)
+	binary.BigEndian.PutUint32(dst[28:32], uint32(prevHashLen))
+	copy(dst[32:], metadata.PrevHash)
+	return nil
+}
+
+// UnmarshalBlockMetadata decodes a block metadata value in either
+// encoding, dispatching on BlockMetadataBinaryMagic and falling back to
+// CBOR. This is the only supported way to read the value at a
+// BlockBlobMetadataKey, since which encoding is there depends on the
+// writing node's configuration rather than on the plugin being read.
+func UnmarshalBlockMetadata(data []byte) (BlockMetadata, error) {
+	if len(data) >= BlockMetadataBinaryHeaderLen &&
+		bytes.Equal(data[:4], BlockMetadataBinaryMagic[:]) {
+		prevHashLen := binary.BigEndian.Uint32(data[28:32])
+		// The same bound the encoder enforces. A value carrying a longer
+		// previous hash is one MarshalBlockMetadataInto could not have
+		// written, so it is corrupt rather than merely unexpected, and
+		// decoding it would propagate an impossible block record instead
+		// of reporting the damage.
+		if prevHashLen > BlockMetadataPrevHashMaxLen {
+			return BlockMetadata{}, fmt.Errorf(
+				"invalid block metadata prev hash length: got %d, max %d",
+				prevHashLen,
+				BlockMetadataPrevHashMaxLen,
+			)
+		}
+		expectedLen := BlockMetadataBinaryHeaderLen + int(prevHashLen)
+		if len(data) != expectedLen {
+			return BlockMetadata{}, fmt.Errorf(
+				"invalid block metadata length: got %d, want %d",
+				len(data),
+				expectedLen,
+			)
+		}
+		prevHash := make([]byte, prevHashLen)
+		copy(prevHash, data[BlockMetadataBinaryHeaderLen:])
+		return BlockMetadata{
+			ID:       binary.BigEndian.Uint64(data[4:12]),
+			Type:     uint(binary.BigEndian.Uint64(data[12:20])),
+			Height:   binary.BigEndian.Uint64(data[20:28]),
+			PrevHash: prevHash,
+		}, nil
+	}
+	var metadata BlockMetadata
+	if _, err := cbor.Decode(data, &metadata); err != nil {
+		return BlockMetadata{}, err
+	}
+	return metadata, nil
 }
 
 // SignedURL is a url that has been pre-signed and has an expiration time

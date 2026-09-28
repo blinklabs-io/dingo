@@ -106,6 +106,11 @@ type Peer struct {
 	// so this counter is what carries the backoff rung across sessions.
 	OutboundShortLivedCount uint32
 	Reconnecting            bool // Whether a reconnect goroutine is active for this peer
+	// EverConnected records whether this peer has ever established a
+	// client-capable connection. Discovered (peer-share/ledger) and
+	// public-root peers that have never connected are dropped after a failed
+	// dial instead of being retried indefinitely.
+	EverConnected           bool
 	State                   PeerState
 	Source                  PeerSource
 	Sharable                bool
@@ -123,6 +128,9 @@ type Peer struct {
 
 	// EMA configuration (0 means use default)
 	EMAAlpha float64
+	// ScoreLastUpdate records when scoring metrics were last observed. It is
+	// used to decay stale EMA values toward neutral values.
+	ScoreLastUpdate time.Time
 
 	// Topology valency configuration (only used for topology-sourced peers)
 	// Valency is the target number of hot connections from this peer's group

@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
@@ -69,6 +70,8 @@ func setupTestKeys(t *testing.T) (string, string, string) {
 	require.NoError(t, os.WriteFile(vrfPath, []byte(testVRFSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(kesPath, []byte(testKESSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(opCertPath, []byte(testOpCertJSON), 0o600))
+	testutil.RestrictFileToCurrentUser(t, vrfPath)
+	testutil.RestrictFileToCurrentUser(t, kesPath)
 
 	return vrfPath, kesPath, opCertPath
 }
@@ -535,24 +538,60 @@ func TestKeyStoreNotLoadedError(t *testing.T) {
 func TestEvolutionConstants(t *testing.T) {
 	// Test slot to KES period conversion
 	assert.Equal(t, uint64(0), SlotToKESPeriod(0, DefaultSlotsPerKESPeriod))
-	assert.Equal(t, uint64(0), SlotToKESPeriod(129599, DefaultSlotsPerKESPeriod))
-	assert.Equal(t, uint64(1), SlotToKESPeriod(129600, DefaultSlotsPerKESPeriod))
-	assert.Equal(t, uint64(1), SlotToKESPeriod(259199, DefaultSlotsPerKESPeriod))
-	assert.Equal(t, uint64(2), SlotToKESPeriod(259200, DefaultSlotsPerKESPeriod))
+	assert.Equal(
+		t,
+		uint64(0),
+		SlotToKESPeriod(129599, DefaultSlotsPerKESPeriod),
+	)
+	assert.Equal(
+		t,
+		uint64(1),
+		SlotToKESPeriod(129600, DefaultSlotsPerKESPeriod),
+	)
+	assert.Equal(
+		t,
+		uint64(1),
+		SlotToKESPeriod(259199, DefaultSlotsPerKESPeriod),
+	)
+	assert.Equal(
+		t,
+		uint64(2),
+		SlotToKESPeriod(259200, DefaultSlotsPerKESPeriod),
+	)
 
 	// Test period start/end slots
 	assert.Equal(t, uint64(0), KESPeriodStartSlot(0, DefaultSlotsPerKESPeriod))
-	assert.Equal(t, uint64(129599), KESPeriodEndSlot(0, DefaultSlotsPerKESPeriod))
-	assert.Equal(t, uint64(129600), KESPeriodStartSlot(1, DefaultSlotsPerKESPeriod))
-	assert.Equal(t, uint64(259199), KESPeriodEndSlot(1, DefaultSlotsPerKESPeriod))
+	assert.Equal(
+		t,
+		uint64(129599),
+		KESPeriodEndSlot(0, DefaultSlotsPerKESPeriod),
+	)
+	assert.Equal(
+		t,
+		uint64(129600),
+		KESPeriodStartSlot(1, DefaultSlotsPerKESPeriod),
+	)
+	assert.Equal(
+		t,
+		uint64(259199),
+		KESPeriodEndSlot(1, DefaultSlotsPerKESPeriod),
+	)
 
 	// Test KES period duration
 	duration := DefaultKESPeriodDuration()
-	assert.Equal(t, time.Duration(DefaultSlotsPerKESPeriod)*time.Second, duration)
+	assert.Equal(
+		t,
+		time.Duration(DefaultSlotsPerKESPeriod)*time.Second,
+		duration,
+	)
 
 	// Test OpCert lifetime
 	lifetimeSlots := DefaultOpCertLifetimeSlots()
-	assert.Equal(t, uint64(DefaultSlotsPerKESPeriod*DefaultMaxKESEvolutions), lifetimeSlots)
+	assert.Equal(
+		t,
+		uint64(DefaultSlotsPerKESPeriod*DefaultMaxKESEvolutions),
+		lifetimeSlots,
+	)
 }
 
 func TestExpiryWarningThresholds(t *testing.T) {
@@ -630,7 +669,9 @@ func assertNotAllZero(t *testing.T, data []byte, msg string) {
 
 func TestInsecureFileModeUnix(t *testing.T) {
 	if isWindows() {
-		t.Skip("Unix permission test; see TestInsecureFileModeWindows for Windows DACL test")
+		t.Skip(
+			"Unix permission test; see TestInsecureFileModeWindows for Windows DACL test",
+		)
 	}
 
 	tmpDir := t.TempDir()

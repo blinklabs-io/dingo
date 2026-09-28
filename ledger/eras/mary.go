@@ -138,7 +138,9 @@ func CertDepositMary(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*mary.MaryProtocolParameters)
-	if !ok {
+	// A typed nil satisfies the assertion, so the nil test is not
+	// redundant: without it the deposit reads below dereference it.
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
@@ -157,12 +159,13 @@ func ValidateTxMary(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := make([]error, 0, len(mary.UtxoValidationRules))
+	errs := make([]error, 0, len(mary.UtxoValidationRules)+1)
 	for _, validationFunc := range mary.UtxoValidationRules {
 		errs = append(
 			errs,
 			validationFunc(tx, slot, ls, pp),
 		)
 	}
+	errs = append(errs, validateShelleyDelegCerts(tx, slot, ls, pp))
 	return errors.Join(errs...)
 }

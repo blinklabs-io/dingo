@@ -19,18 +19,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
 	"slices"
+
+	"github.com/blinklabs-io/dingo/consensus/praos"
 )
 
 var (
-	// ErrEmptyStakeDistribution is returned when no pools with non-zero
-	// stake are available to form a committee.
+	// ErrEmptyStakeDistribution is returned when no registered pools are
+	// available to form a committee.
 	ErrEmptyStakeDistribution = errors.New("empty stake distribution")
-	// ErrInvalidCommitteeStakeCoverage is returned when the cumulative
-	// stake coverage target is not in (0, 1].
-	ErrInvalidCommitteeStakeCoverage = errors.New(
-		"committee stake coverage must be in (0, 1]",
+	// ErrInvalidCommitteeSize is returned when committee size is zero.
+	ErrInvalidCommitteeSize = errors.New(
+		"committee size must be greater than zero",
 	)
 )
 
@@ -41,9 +41,10 @@ type CommitteeMember struct {
 	Stake       uint64 // active stake (lovelace) from the snapshot
 }
 
-// Committee is the deterministic stake-truncated voting committee for an
-// epoch. Members are ordered by stake descending (pool key hash ascending
-// for equal stake) and VoterId equals the member's index in that order.
+// Committee is a deterministic voting committee for an epoch, computed by
+// ComputeCommittee: the first N snapshot pools ordered by stake descending,
+// breaking equal-stake ties by pool key hash ascending, with VoterId assigned
+// from a member's index in that order.
 type Committee struct {
 	Epoch            uint64
 	SnapshotEpoch    uint64
@@ -53,48 +54,19 @@ type Committee struct {
 	byPoolHex        map[string]uint64 // hex pool key hash -> VoterId
 }
 
-// CommitteeSnapshotEpoch returns the epoch whose "mark" stake snapshot
-// backs the committee for the given epoch. This must stay in lockstep with
-// leader.scheduleSnapshotEpoch (ledger/leader/election.go): both consume
-// the snapshot captured two epochs earlier (the Mark->Set->Go rotation),
-// matching CIP-0164's requirement that the committee use the same stake
-// snapshot cadence as Praos leader election.
-func CommitteeSnapshotEpoch(epoch uint64) uint64 {
-	if epoch < 2 {
-		return 0
-	}
-	return epoch - 2
+type poolStake struct {
+	hash  []byte
+	stake uint64
 }
 
-// ComputeCommittee selects the voting committee for an epoch from the
-// active stake distribution: pools are ordered by stake descending (pool
-// key hash ascending breaks ties), then selected in order until their
-// cumulative stake reaches committeeStakeCoverage (sigma_c) of
-// totalActiveStake. The pool that crosses the threshold is included.
-// Zero-stake pools are excluded. poolStakes maps lowercase-hex pool key
-// hashes to stake in lovelace.
-func ComputeCommittee(
-	epoch uint64,
-	snapshotEpoch uint64,
+// prepareCommitteePools parses and validates the stake distribution passed
+// to ComputeCommittee, decoding every registered pool key hash, including
+// pools with zero active stake.
+func prepareCommitteePools(
 	poolStakes map[string]uint64,
-	totalActiveStake uint64,
-	committeeStakeCoverage *big.Rat,
-) (*Committee, error) {
-	one := big.NewRat(1, 1)
-	if committeeStakeCoverage == nil ||
-		committeeStakeCoverage.Sign() <= 0 ||
-		committeeStakeCoverage.Cmp(one) > 0 {
-		return nil, ErrInvalidCommitteeStakeCoverage
-	}
-	type poolStake struct {
-		hash  []byte
-		stake uint64
-	}
+) ([]poolStake, error) {
 	pools := make([]poolStake, 0, len(poolStakes))
 	for hashHex, stake := range poolStakes {
-		if stake == 0 {
-			continue
-		}
 		hash, err := hex.DecodeString(hashHex)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -103,30 +75,29 @@ func ComputeCommittee(
 				err,
 			)
 		}
+		if len(hash) != voterPoolKeyHashSize {
+			return nil, fmt.Errorf(
+				"malformed pool key hash %q: must be %d bytes",
+				hashHex,
+				voterPoolKeyHashSize,
+			)
+		}
 		pools = append(pools, poolStake{hash: hash, stake: stake})
 	}
-	if len(pools) == 0 || totalActiveStake == 0 {
+	if len(pools) == 0 {
 		return nil, ErrEmptyStakeDistribution
 	}
-	slices.SortFunc(pools, func(a, b poolStake) int {
-		// Stake descending, pool key hash ascending for equal stake
-		if a.stake != b.stake {
-			if a.stake > b.stake {
-				return -1
-			}
-			return 1
-		}
-		return bytes.Compare(a.hash, b.hash)
-	})
-	// Selection threshold: cumStake * sigmaC.Denom() >= sigmaC.Num() *
-	// totalActiveStake, evaluated in big.Int since the products overflow
-	// uint64.
-	target := new(big.Int).Mul(
-		committeeStakeCoverage.Num(),
-		new(big.Int).SetUint64(totalActiveStake),
-	)
-	cumStake := new(big.Int)
-	scaledCum := new(big.Int)
+	return pools, nil
+}
+
+// buildCommittee assigns member indices and the lookup map after
+// ComputeCommittee has applied its top-N ordering and selection.
+func buildCommittee(
+	epoch uint64,
+	snapshotEpoch uint64,
+	totalActiveStake uint64,
+	pools []poolStake,
+) *Committee {
 	committee := &Committee{
 		Epoch:            epoch,
 		SnapshotEpoch:    snapshotEpoch,
@@ -143,24 +114,57 @@ func ComputeCommittee(
 		})
 		committee.byPoolHex[hex.EncodeToString(pool.hash)] = voterId
 		committee.CommitteeStake += pool.stake
-		cumStake.Add(cumStake, new(big.Int).SetUint64(pool.stake))
-		scaledCum.Mul(cumStake, committeeStakeCoverage.Denom())
-		if scaledCum.Cmp(target) >= 0 {
-			break
+	}
+	return committee
+}
+
+// CommitteeSnapshotEpoch returns the epoch whose mark stake snapshot is active
+// for the given epoch. This must stay in lockstep with Praos leader election.
+func CommitteeSnapshotEpoch(epoch uint64) uint64 {
+	return praos.StakeSnapshotEpoch(epoch)
+}
+
+// ComputeCommittee selects the first committeeSize pools from the snapshot,
+// ordered by stake descending and pool key hash ascending for equal stake.
+// Zero-stake registered pools remain candidates and receive seats when the
+// configured size reaches them. poolStakes maps lowercase-hex pool key hashes
+// to stake in lovelace.
+func ComputeCommittee(
+	epoch uint64,
+	snapshotEpoch uint64,
+	poolStakes map[string]uint64,
+	totalActiveStake uint64,
+	committeeSize uint64,
+) (*Committee, error) {
+	if committeeSize == 0 {
+		return nil, ErrInvalidCommitteeSize
+	}
+	pools, err := prepareCommitteePools(poolStakes)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(pools, func(a, b poolStake) int {
+		// Stake descending, pool key hash ascending for equal stake
+		if a.stake != b.stake {
+			if a.stake > b.stake {
+				return -1
+			}
+			return 1
 		}
+		return bytes.Compare(a.hash, b.hash)
+	})
+	selectedCount := len(pools)
+	if committeeSize < uint64(selectedCount) {
+		// This branch bounds the conversion by the slice length.
+		//nolint:gosec // committeeSize is strictly less than len(pools).
+		selectedCount = int(committeeSize)
 	}
-	if scaledCum.Cmp(target) < 0 {
-		// Inconsistent inputs: the pools cannot cover the target
-		// fraction of total active stake. A partial committee would
-		// break downstream stake-quorum assumptions.
-		return nil, fmt.Errorf(
-			"committee stake coverage target %s unreachable: pool stake %d of total active stake %d",
-			committeeStakeCoverage.RatString(),
-			committee.CommitteeStake,
-			totalActiveStake,
-		)
-	}
-	return committee, nil
+	return buildCommittee(
+		epoch,
+		snapshotEpoch,
+		totalActiveStake,
+		pools[:selectedCount],
+	), nil
 }
 
 // Size returns the number of committee members.

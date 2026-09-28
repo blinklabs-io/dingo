@@ -15,6 +15,7 @@
 package event_test
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,6 +78,8 @@ func (s *publishBlockingProbeSubscriber) Deliver(evt event.Event) error {
 func (s *publishBlockingProbeSubscriber) Close() {}
 
 func TestEventBusSingleSubscriber(t *testing.T) {
+	t.Parallel()
+
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
@@ -100,6 +104,8 @@ func TestEventBusSingleSubscriber(t *testing.T) {
 }
 
 func TestEventBusMultipleSubscribers(t *testing.T) {
+	t.Parallel()
+
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
@@ -151,6 +157,8 @@ func TestEventBusMultipleSubscribers(t *testing.T) {
 }
 
 func TestEventBusUnsubscribe(t *testing.T) {
+	t.Parallel()
+
 	var testEvtData int = 999
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
@@ -170,6 +178,8 @@ func TestEventBusUnsubscribe(t *testing.T) {
 }
 
 func TestEventBusStop(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.event"
 	eb := event.NewEventBus(nil, nil)
 
@@ -244,6 +254,8 @@ func TestEventBusStop(t *testing.T) {
 }
 
 func TestEventBusClose(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.close"
 	eb := event.NewEventBus(nil, nil)
 	t.Cleanup(eb.Close)
@@ -293,7 +305,187 @@ func TestEventBusClose(t *testing.T) {
 	eb.Close()
 }
 
+func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
+	t.Parallel()
+
+	const testEvtType event.EventType = "test.close.discard"
+	eb := event.NewEventBus(nil, nil)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int32
+	eb.SubscribeFuncWithBuffer(testEvtType, 2, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-1"))
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-2"))
+
+	closeDone := make(chan struct{})
+	go func() {
+		eb.Close()
+		close(closeDone)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		closeDone,
+		50*time.Millisecond,
+		"Close should still wait for the in-flight handler",
+	)
+	close(release)
+	testutil.RequireReceive(t, closeDone, time.Second, "Close did not finish")
+	require.Equal(
+		t,
+		int32(1),
+		handled.Load(),
+		"queued events were replayed during Close",
+	)
+}
+
+func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
+	t.Parallel()
+
+	const testEvtType event.EventType = "test.unsubscribe.preserves"
+	eb := event.NewEventBus(nil, nil)
+	// Close, not Stop: NewEventBus starts an async worker unconditionally, and
+	// Stop reinitializes it (restart=true) rather than leaving it stopped, so
+	// only Close lets the worker goroutine exit when the test ends.
+	defer eb.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int32
+	subID := eb.SubscribeFuncWithBuffer(testEvtType, 2, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-1"))
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-2"))
+
+	unsubscribed := make(chan struct{})
+	go func() {
+		eb.UnsubscribeAndWait(testEvtType, subID)
+		close(unsubscribed)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		unsubscribed,
+		50*time.Millisecond,
+		"UnsubscribeAndWait should wait for the in-flight handler",
+	)
+	close(release)
+	testutil.RequireReceive(
+		t,
+		unsubscribed,
+		time.Second,
+		"UnsubscribeAndWait did not finish",
+	)
+	require.Equal(
+		t,
+		int32(3),
+		handled.Load(),
+		"ordinary unsubscribe discarded queued events",
+	)
+}
+
+func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
+	t.Parallel()
+
+	const testEvtType event.EventType = "test.unsubscribe.ctx"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	// Registered after the deferred Close so it runs first: a failure here
+	// leaves the handler blocked, and Close would otherwise wait on it
+	// forever instead of letting the test report the failure.
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHandler()
+
+	var handled atomic.Int32
+	subID := eb.SubscribeFunc(testEvtType, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- eb.UnsubscribeAndWaitContext(ctx, testEvtType, subID)
+	}()
+	// The wait, not the unsubscribe, is what ctx bounds: this must return
+	// while the handler is still blocked, or a bounded shutdown path can be
+	// held open indefinitely by one stuck handler.
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			returned,
+			5*time.Second,
+			"UnsubscribeAndWaitContext did not honor the context deadline",
+		),
+		context.DeadlineExceeded,
+	)
+
+	// Delivery stopped even though the wait was cut short.
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-unsubscribe"))
+	releaseHandler()
+	// Never, not Eventually: handled is already 1 from the in-flight event,
+	// so an Eventually would pass on its first poll without ever observing
+	// whether the post-unsubscribe publish got delivered.
+	require.Never(
+		t,
+		func() bool { return handled.Load() != 1 },
+		time.Second,
+		10*time.Millisecond,
+		"unsubscribe must still take effect when the wait is cut short",
+	)
+}
+
+func TestUnsubscribeAndWaitContextReturnsNilOnceHandlerFinishes(t *testing.T) {
+	t.Parallel()
+
+	const testEvtType event.EventType = "test.unsubscribe.ctx.ok"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Close()
+
+	handled := make(chan struct{})
+	subID := eb.SubscribeFunc(testEvtType, func(event.Event) {
+		close(handled)
+	})
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "handled"))
+	testutil.RequireReceive(t, handled, time.Second, "handler did not run")
+
+	require.NoError(
+		t,
+		eb.UnsubscribeAndWaitContext(t.Context(), testEvtType, subID),
+	)
+}
+
 func TestSubscribeFuncPanicRecovery(t *testing.T) {
+	t.Parallel()
+
 	var testEvtType event.EventType = "test.panic"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -322,28 +514,179 @@ func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	)
 }
 
-// TestPublishNoGoroutineLeak verifies that publishing to a slow or blocked
-// subscriber does not leak goroutines. This is a regression test for MEM-06
-// where publishWithTimeout spawned goroutines that could never complete when
-// a subscriber's channel buffer was full.
+// TestSubscribeFuncStrictPanicRecovery verifies that, unlike SubscribeFunc,
+// a SubscribeFuncStrict handler panic is recovered but not silently followed
+// by continued delivery: onPanic is invoked with the failing event and the
+// recovered value, and the subscription is torn down so a later publish is
+// not delivered to it.
+func TestSubscribeFuncStrictPanicRecovery(t *testing.T) {
+	t.Parallel()
+
+	var testEvtType event.EventType = "test.strict.panic"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	var received atomic.Int32
+	var panicEvt atomic.Value
+	var panicVal atomic.Value
+
+	subId := eb.SubscribeFuncStrict(
+		testEvtType,
+		0,
+		event.SubscriberBackpressureDetach,
+		func(evt event.Event) {
+			received.Add(1)
+			panic("intentional strict test panic")
+		},
+		func(evt event.Event, r any) {
+			panicEvt.Store(evt)
+			panicVal.Store(r)
+		},
+	)
+	require.NotZero(t, subId)
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "boom"))
+
+	require.Eventually(t, func() bool {
+		return panicVal.Load() != nil
+	}, 10*time.Second, 10*time.Millisecond,
+		"onPanic should be invoked after the handler panics",
+	)
+	require.Equal(t, "intentional strict test panic", panicVal.Load())
+	require.Equal(
+		t,
+		testEvtType,
+		panicEvt.Load().(event.Event).Type,
+		"onPanic should receive the event that was being processed",
+	)
+
+	require.Eventually(t, func() bool {
+		return !eb.HasSubscribers(testEvtType)
+	}, 10*time.Second, 10*time.Millisecond,
+		"the subscription must be torn down after the handler panics",
+	)
+
+	// A later publish must not reach the (now unsubscribed) handler.
+	// Never, not Eventually: received is already 1 from the panicking
+	// delivery, so an Eventually would pass on its first poll without ever
+	// observing whether the post-panic publish got delivered.
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-panic"))
+	require.Never(
+		t,
+		func() bool { return received.Load() != 1 },
+		time.Second,
+		10*time.Millisecond,
+		"no further event should be delivered after the handler panicked",
+	)
+}
+
+// TestSubscribeFuncStrictOnPanicHookPanicIsContained is a regression test for
+// a bug where a panicking onPanic hook was not itself panic-safe: it runs
+// from inside safeHandlerCall's own deferred recover, which has already
+// consumed the handler's panic, so nothing further up the stack could catch
+// a second one from onPanic. That let a misbehaving onPanic hook (or Logger)
+// propagate out of safeHandlerCall as a fresh, unrecovered panic --
+// safeHandlerCall never returned at all, so SubscribeFuncStrict never
+// observed panicked=true and never tore the subscription down, and the
+// panic crashed the whole process once it unwound past the dispatch
+// goroutine's remaining defers with nothing left to catch it. This verifies
+// the subscription is still torn down, and the EventBus itself remains
+// usable, even when onPanic panics.
+func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
+	t.Parallel()
+
+	var testEvtType event.EventType = "test.strict.onpanic.panic"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	var onPanicCalled atomic.Bool
+
+	eb.SubscribeFuncStrict(
+		testEvtType,
+		0,
+		event.SubscriberBackpressureDetach,
+		func(evt event.Event) {
+			panic("intentional handler panic")
+		},
+		func(evt event.Event, r any) {
+			// Set before panicking: this is what proves the panic below
+			// actually happened inside onPanic (the path under test) rather
+			// than the test passing on handler-panic teardown alone with
+			// onPanic silently never having run at all.
+			onPanicCalled.Store(true)
+			panic("intentional onPanic hook panic")
+		},
+	)
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "boom"))
+
+	require.Eventually(t, func() bool {
+		return onPanicCalled.Load()
+	}, 10*time.Second, 10*time.Millisecond,
+		"onPanic must have been invoked",
+	)
+	require.Eventually(
+		t,
+		func() bool {
+			return !eb.HasSubscribers(testEvtType)
+		},
+		10*time.Second,
+		10*time.Millisecond,
+		"the subscription must still be torn down even when onPanic itself panics",
+	)
+
+	// The EventBus itself must still be usable: an unrelated subscription
+	// must still receive its own events normally, proving the dispatch
+	// goroutine's panic did not crash the process or corrupt the bus.
+	var otherType event.EventType = "test.strict.onpanic.panic.other"
+	var received atomic.Bool
+	eb.SubscribeFunc(otherType, func(event.Event) {
+		received.Store(true)
+	})
+	eb.Publish(otherType, event.NewEvent(otherType, "ok"))
+	require.Eventually(t, func() bool {
+		return received.Load()
+	}, 10*time.Second, 10*time.Millisecond,
+		"the EventBus must remain usable after a panicking onPanic hook",
+	)
+}
+
+// TestPublishNoGoroutineLeak verifies that publishing far more events than a
+// subscriber's buffer can hold does not leak goroutines. This is a regression
+// test for MEM-06 where publishWithTimeout spawned goroutines that could never
+// complete when a subscriber's channel buffer was full. Publish now
+// backpressures instead of dropping (#2932), so the subscriber is drained
+// concurrently and the assertion is that repeatedly hitting the full-buffer
+// path spawns no per-event goroutines.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestPublishNoGoroutineLeak(t *testing.T) {
 	const testEvtType event.EventType = "test.leak"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	// Subscribe but never read from the channel, simulating a blocked subscriber.
-	_, _ = eb.Subscribe(testEvtType)
+	// Small buffer so nearly every publish hits the blocked-send path.
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 4)
 
-	// Allow the runtime to settle (async workers, etc.)
+	const eventCount = 5000
+	drained := make(chan int, 1)
+	go func() {
+		count := 0
+		for range subCh {
+			count++
+			if count == eventCount {
+				drained <- count
+				return
+			}
+		}
+		drained <- count
+	}()
+
+	// Allow the runtime to settle (async workers, drain goroutine, etc.)
 	runtime.GC()
 	runtime.Gosched()
 	goroutinesBefore := runtime.NumGoroutine()
 
-	// Publish many more events than the channel buffer can hold
-	// (buffer = EventQueueSize). With the old publishWithTimeout
-	// approach, each publish beyond the buffer would spawn a
-	// goroutine that could never complete.
-	const eventCount = event.EventQueueSize + 10
 	for i := range eventCount {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, i))
 	}
@@ -353,7 +696,13 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 	runtime.Gosched()
 	goroutinesAfter := runtime.NumGoroutine()
 
-	// With the fix, Publish returns immediately via non-blocking send.
+	require.Equal(
+		t,
+		eventCount,
+		<-drained,
+		"every published event must reach the subscriber",
+	)
+
 	// Allow a small margin (5) for normal runtime variation.
 	require.InDelta(
 		t,
@@ -361,7 +710,7 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 		goroutinesAfter,
 		5,
 		"goroutine count should not grow significantly after "+
-			"publishing to a blocked subscriber "+
+			"publishing through a full subscriber buffer "+
 			"(before=%d, after=%d)",
 		goroutinesBefore,
 		goroutinesAfter,
@@ -370,43 +719,54 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 
 // TestPublishAsyncNoGoroutineLeak verifies that PublishAsync with a slow
 // subscriber does not leak goroutines. The async workers call Publish
-// internally, which previously used publishWithTimeout.
+// internally, which previously used publishWithTimeout. Since #2932 the async
+// queue backpressures instead of dropping, so the subscriber is drained
+// concurrently.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 	const testEvtType event.EventType = "test.async.leak"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	// Subscribe but never read from the channel.
-	_, _ = eb.Subscribe(testEvtType)
+	// Small buffer so the async workers repeatedly hit the blocked-send path.
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 4)
+
+	const eventCount = 5000
+	drained := make(chan int, 1)
+	go func() {
+		count := 0
+		for range subCh {
+			count++
+			if count == eventCount {
+				drained <- count
+				return
+			}
+		}
+		drained <- count
+	}()
 
 	// Allow the runtime to settle
 	runtime.GC()
 	runtime.Gosched()
 	goroutinesBefore := runtime.NumGoroutine()
 
-	// PublishAsync many events; async workers will attempt to deliver them
-	// to the blocked subscriber via Publish -> Deliver.
-	const eventCount = event.EventQueueSize + 10
+	// PublishAsync more events than the shared async queue can hold; the
+	// workers deliver them to the slow subscriber via Publish -> Deliver.
 	for i := range eventCount {
-		eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i))
+		require.True(
+			t,
+			eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i)),
+			"PublishAsync must not drop events",
+		)
 	}
 
-	// Wait for async workers to process the queued events.
-	// We probe by attempting a single PublishAsync; a successful
-	// enqueue means the workers have drained at least one slot.
-	// The flag ensures we stop probing after the first success
-	// so the callback is side-effect-free on subsequent calls.
-	probed := false
-	require.Eventually(t, func() bool {
-		if probed {
-			return true
-		}
-		if eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, -1)) {
-			probed = true
-			return true
-		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "async workers should drain the queue")
+	require.Equal(
+		t,
+		eventCount,
+		<-drained,
+		"every async-published event must reach the subscriber",
+	)
 
 	runtime.GC()
 	runtime.Gosched()
@@ -418,60 +778,90 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 		goroutinesAfter,
 		5,
 		"goroutine count should not grow after async "+
-			"publishing to a blocked subscriber "+
+			"publishing to a slow subscriber "+
 			"(before=%d, after=%d)",
 		goroutinesBefore,
 		goroutinesAfter,
 	)
 }
 
-// TestPublishDropsEventsOnFullBuffer verifies that when a subscriber's channel
-// buffer is full, Publish drops events gracefully instead of blocking.
-func TestPublishDropsEventsOnFullBuffer(t *testing.T) {
-	const testEvtType event.EventType = "test.drop"
-	eb := event.NewEventBus(nil, nil)
+// TestPublishBlocksOnFullBufferAndLosesNothing verifies that when a
+// subscriber's channel buffer is full, Publish backpressures the producer and
+// every event is eventually delivered. Regression test for
+// blinklabs-io/dingo#2932, which replaced the drop-on-full behavior this test
+// previously asserted.
+func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
+	t.Parallel()
+
+	const testEvtType event.EventType = "test.backpressure"
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 	defer eb.Stop()
 
-	// Subscribe with the high-burst buffer; never consume events.
-	_, subCh := eb.SubscribeWithBuffer(testEvtType, event.EventQueueSize)
+	const buffer = 16
+	const overflow = 50
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, buffer)
 
-	// Fill the buffer (EventQueueSize)
-	for i := range event.EventQueueSize {
+	// Fill the buffer exactly.
+	for i := range buffer {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, i))
 	}
 
-	// Publish should return immediately even though the buffer is full.
-	// Use a timeout to ensure Publish doesn't block.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := range 50 {
-			eb.Publish(
-				testEvtType,
-				event.NewEvent(testEvtType, event.EventQueueSize+i),
-			)
+		for i := range overflow {
+			eb.Publish(testEvtType, event.NewEvent(testEvtType, buffer+i))
 		}
 	}()
 
-	select {
-	case <-done:
-		// Good: Publish returned promptly
-	case <-time.After(2 * time.Second):
-		t.Fatal("Publish blocked on full subscriber channel buffer")
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill loop above,
+	// so a one-time length check cannot prove the overflow publisher
+	// actually reached its blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"a backpressured delivery should be counted",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"Publish should backpressure while the subscriber buffer is full",
+	)
+
+	// Drain everything; each event must arrive exactly once, in order.
+	for i := range buffer + overflow {
+		evt := testutil.RequireReceive(
+			t,
+			subCh,
+			2*time.Second,
+			"expected event to be delivered, not dropped",
+		)
+		require.Equal(t, i, evt.Data, "events must arrive in publish order")
 	}
 
-	// Verify the subscriber still received the first EventQueueSize events.
-	for range event.EventQueueSize {
-		select {
-		case _, ok := <-subCh:
-			require.True(t, ok, "channel should not be closed")
-		case <-time.After(1 * time.Second):
-			t.Fatal("expected buffered event not received")
-		}
-	}
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"Publish did not complete after the subscriber drained",
+	)
 }
 
 func TestPublishBlockingWaitsForSubscriberCapacity(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.blocking"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -547,10 +937,13 @@ func TestPublishBlockingWaitsForSubscriberCapacity(t *testing.T) {
 }
 
 func TestPublishBlockingUnblocksOnStop(t *testing.T) {
-	const testEvtType event.EventType = "test.blocking.stop"
-	eb := event.NewEventBus(nil, nil)
+	t.Parallel()
 
-	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	const testEvtType event.EventType = "test.blocking.stop"
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
+
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "first"))
 
 	done := make(chan error, 1)
@@ -561,6 +954,24 @@ func TestPublishBlockingUnblocksOnStop(t *testing.T) {
 		)
 	}()
 
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill above, so a
+	// one-time length check cannot prove PublishBlocking actually reached its
+	// blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"the blocked PublishBlocking should be counted before Stop is exercised",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		done,
@@ -582,6 +993,8 @@ func TestPublishBlockingUnblocksOnStop(t *testing.T) {
 func TestPublishBlockingReturnsErrWhenStopCompletesDuringDelivery(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.blocking.stop.remote"
 	eb := event.NewEventBus(nil, nil)
 
@@ -629,11 +1042,16 @@ func TestPublishBlockingReturnsErrWhenStopCompletesDuringDelivery(
 }
 
 func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.blocking.closed"
 	eb := event.NewEventBus(nil, nil)
 	eb.Close()
 
-	err := eb.PublishBlocking(testEvtType, event.NewEvent(testEvtType, "closed"))
+	err := eb.PublishBlocking(
+		testEvtType,
+		event.NewEvent(testEvtType, "closed"),
+	)
 	require.ErrorIs(t, err, event.ErrEventBusStopped)
 }
 
@@ -643,6 +1061,8 @@ func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
 // the EventQueueSize allocation. Verified by capacity, since cap on a
 // receive-only channel reports the underlying buffer size.
 func TestSubscribeUsesSmallDefaultBuffer(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.default.buffer"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()

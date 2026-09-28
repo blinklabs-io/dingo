@@ -17,7 +17,7 @@ package forging
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -120,12 +120,12 @@ func TestChainSelectionPrefersLongerChainOverLowerSlot(t *testing.T) {
 
 	require.Truef(
 		t,
-		chainselection.ComparePraosTips(
+		praos.ComparePraosTips(
 			cardanoIncomingTip,
 			dingoLocalTip,
-			chainselection.PraosTiebreakerView{},
-			chainselection.PraosTiebreakerView{},
-		) == chainselection.ChainABetter,
+			praos.PraosTiebreakerView{},
+			praos.PraosTiebreakerView{},
+		) == praos.ChainABetter,
 		"cardano's longer (block_number=3) chain must beat dingo's "+
 			"local (block_number=1) chain even though dingo's tip "+
 			"slot is lower (%d < %d).",
@@ -133,12 +133,12 @@ func TestChainSelectionPrefersLongerChainOverLowerSlot(t *testing.T) {
 	)
 	require.Falsef(
 		t,
-		chainselection.ComparePraosTips(
+		praos.ComparePraosTips(
 			dingoLocalTip,
 			cardanoIncomingTip,
-			chainselection.PraosTiebreakerView{},
-			chainselection.PraosTiebreakerView{},
-		) == chainselection.ChainABetter,
+			praos.PraosTiebreakerView{},
+			praos.PraosTiebreakerView{},
+		) == praos.ChainABetter,
 		"dingo's local chain at lower slot but fewer blocks must "+
 			"NOT win against cardano's longer chain. If it did, "+
 			"dingo would entrench a forked solo-extension chain "+

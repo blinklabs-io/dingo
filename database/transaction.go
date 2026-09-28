@@ -19,14 +19,175 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
+	"slices"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+// mithrilLedgerSlotSyncKey mirrors the sync-state key written by the ledger
+// and mithril packages when a Mithril snapshot is imported: blocks at or
+// below this slot are Mithril-verified, so the node is not expected to have
+// complete pre-boundary UTxO history. Duplicated here (rather than imported)
+// because the database package cannot depend on ledger, which depends on it.
+const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
+
+type metadataOnlyTransaction struct {
+	lcommon.Transaction
+}
+
+func (tx metadataOnlyTransaction) Inputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Outputs() []lcommon.TransactionOutput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) ReferenceInputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Collateral() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) CollateralReturn() lcommon.TransactionOutput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Consumed() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
+	return nil
+}
+
+// MithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
+// or 0 if none is recorded (genesis sync, or a non-genesis chainsync
+// intersect point with no snapshot import). A failure to read the sync
+// state is logged and also treated as 0 (the caller cannot distinguish it
+// from "no boundary recorded" by return value alone), but the log lets an
+// operator tell a transient storage problem apart from a genuinely
+// unrecoverable UTxO when StrictUtxoValidation turns the latter into an
+// ingest error.
+//
+// This fail-open behavior is intentional for that caller (a best-effort
+// recovery heuristic), but wrong for a caller enforcing a safety check —
+// see MithrilTrustBoundarySlotStrict, used by database/lifecycle.Truncate,
+// where treating a failed read as "no boundary recorded" would silently
+// let a truncate proceed past a boundary that could not actually be
+// verified, rather than merely under-informing a heuristic.
+func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
+	// Deliberately not MithrilTrustBoundarySlotStrict: this runs once per
+	// transaction that consumes inputs, and the strict variant pays an extra
+	// sync_state enumeration on the empty-value path — which is the common
+	// path here, since a genesis-synced node has no boundary row at all.
+	// This caller discards every failure as 0 regardless, so the distinction
+	// that enumeration buys is worth nothing to it.
+	slot, err := d.mithrilTrustBoundarySlot(txn)
+	if err != nil {
+		d.logger.Warn(
+			"failed to read Mithril trust boundary from sync state; "+
+				"treating consumed-utxo recovery failures as past the boundary",
+			"error", err,
+		)
+		return 0
+	}
+	return slot
+}
+
+// MithrilTrustBoundarySlotStrict is MithrilTrustBoundarySlot, but returns
+// the underlying read error instead of swallowing it as "no boundary
+// recorded" — for a caller that must fail closed (refuse the operation)
+// rather than fail open when the boundary can't be verified. A malformed
+// stored value is also propagated as an error here (unlike
+// MithrilTrustBoundarySlot, which still treats it as absent): a corrupted
+// persisted boundary must not be indistinguishable from "no snapshot was
+// ever imported" for a caller enforcing a safety check, or the check is
+// defeated exactly when it matters most.
+//
+// That includes a recorded empty value. GetSyncState reports an absent key
+// as the empty string, so an empty return alone cannot tell "no snapshot was
+// ever imported" from "a boundary row exists and holds nothing"; only the
+// second is malformed, and the two are separated here by asking the
+// sync_state keyspace whether the row exists at all. The extra query runs
+// only on that path.
+func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
+	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
+	if val == "" {
+		recorded, err := d.mithrilTrustBoundaryRecorded(txn)
+		if err != nil {
+			return 0, err
+		}
+		if recorded {
+			return 0, errors.New(
+				"parse Mithril trust boundary: empty value",
+			)
+		}
+		return 0, nil
+	}
+	return parseMithrilTrustBoundary(val)
+}
+
+// mithrilTrustBoundarySlot is MithrilTrustBoundarySlotStrict without the
+// absent-versus-empty distinction, for the fail-open accessor that discards
+// it anyway. An absent key and a key recorded with an empty value both come
+// back as 0 with no error.
+func (d *Database) mithrilTrustBoundarySlot(txn *Txn) (uint64, error) {
+	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
+	if val == "" {
+		return 0, nil
+	}
+	return parseMithrilTrustBoundary(val)
+}
+
+func parseMithrilTrustBoundary(val string) (uint64, error) {
+	slot, err := strconv.ParseUint(val, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			val,
+			err,
+		)
+	}
+	return slot, nil
+}
+
+// mithrilTrustBoundaryRecorded reports whether a mithril_ledger_slot
+// sync_state row exists, which GetSyncState's empty-string return cannot
+// express on its own (the metadata store maps the driver's no-rows error to
+// ""). ListSyncStateKeysByPrefix enumerates the small sync_state keyspace and
+// matches the byte prefix in Go, so the exact key is checked here rather than
+// trusting the prefix match alone.
+func (d *Database) mithrilTrustBoundaryRecorded(txn *Txn) (bool, error) {
+	keys, err := d.ListSyncStateKeysByPrefix(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"read Mithril trust boundary: %w",
+			err,
+		)
+	}
+	return slices.Contains(keys, mithrilLedgerSlotSyncKey), nil
+}
 
 func ledgerHashBytes(hash lcommon.Blake2b256) []byte {
 	return hash[:]
@@ -39,6 +200,22 @@ func ledgerHashPrefix(hash lcommon.Blake2b256) []byte {
 func ledgerInputIDBytes(input lcommon.TransactionInput) []byte {
 	id := input.Id()
 	return id[:]
+}
+
+// consumedInputKey is a comparable, allocation-free dedup key for a
+// transaction input's hash+index. ensureTransactionConsumedUtxos and
+// ensureGapConsumedUtxos use it to skip repeated processing of an input a
+// transaction's Consumed() set lists more than once. Both fields are plain
+// value types (a fixed-size byte array and a uint32), so using this struct
+// as a map key never allocates, unlike the fmt.Sprintf-formatted hex string
+// this replaced on the block-application hot path.
+type consumedInputKey struct {
+	id    lcommon.Blake2b256
+	index uint32
+}
+
+func newConsumedInputKey(input lcommon.TransactionInput) consumedInputKey {
+	return consumedInputKey{id: input.Id(), index: input.Index()}
 }
 
 func bytePrefix(data []byte) []byte {
@@ -59,6 +236,39 @@ func (d *Database) SetTransaction(
 	offsets *BlockIngestionResult,
 	txn *Txn,
 ) error {
+	return d.SetTransactionWithOpts(
+		tx,
+		point,
+		idx,
+		updateEpoch,
+		pparamUpdates,
+		certDeposits,
+		offsets,
+		txn,
+		BatchedTxIngestOpts{},
+	)
+}
+
+// SetTransactionWithOpts is SetTransaction with control over UTxO ingest
+// behavior via opts. Leios endorser-block application on the Musashi/
+// Haskell-conformant path passes SkipConsumedInputRecovery so a transaction's
+// effects are applied without the consumed-utxo recovery/repair pass: produced
+// outputs and input spends are written, but a consumed input that is absent from
+// the store is left as a no-op instead of triggering blob recovery. This matches
+// the reference ledger's endorser-closure apply (ruleApplyTxValidation
+// ValidateNone), which folds the closure's transactions onto the ledger state
+// without validation or recovery.
+func (d *Database) SetTransactionWithOpts(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	updateEpoch uint64,
+	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
+	certDeposits map[int]uint64,
+	offsets *BlockIngestionResult,
+	txn *Txn,
+	opts BatchedTxIngestOpts,
+) error {
 	owned := false
 	if txn == nil {
 		txn = d.Transaction(true)
@@ -66,7 +276,7 @@ func (d *Database) SetTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -107,12 +317,38 @@ func (d *Database) SetTransaction(
 	// transactions (collateral return at index len(Outputs()))
 	// UTxO offsets MUST be available - no fallback to full CBOR storage
 	produced := tx.Produced()
+	// Producing no UTxOs is a legal shape: a valid transaction can spend its
+	// whole input on deposits plus the fee and return no change (issue #3932),
+	// and an invalid transaction without a collateral return produces nothing
+	// either. Produced() is Outputs() for a valid transaction and the
+	// collateral return for an invalid one, so an empty set means outputs were
+	// dropped before storage only when the matching declaration is non-empty.
+	// Each branch reports its own declaration: the two are different fields, so
+	// one shared message would name the wrong one for half the warnings.
 	if len(produced) == 0 {
-		d.logger.Warn(
-			"transaction has no produced outputs",
-			"txHash", hex.EncodeToString(ledgerHashPrefix(txHash)),
-			"slot", point.Slot,
-		)
+		// Each accessor is read once into a local: every era's Outputs()
+		// allocates a fresh slice per call, and reading CollateralReturn()
+		// once closes the gap between the nil test and the dereference.
+		outputs := tx.Outputs()
+		collateralReturn := tx.CollateralReturn()
+		txHashHex := hex.EncodeToString(ledgerHashPrefix(txHash))
+		switch {
+		case tx.IsValid() && len(outputs) > 0:
+			d.logger.Warn(
+				"valid transaction produced no UTxOs despite declaring outputs",
+				"txHash", txHashHex,
+				"outputs", len(outputs),
+				"slot", point.Slot,
+			)
+		case !tx.IsValid() && collateralReturn != nil:
+			d.logger.Warn(
+				"invalid transaction produced no UTxOs despite "+
+					"declaring a collateral return",
+				"txHash", txHashHex,
+				"collateralReturnLovelace", collateralReturn.Amount().String(),
+				"slot", point.Slot,
+			)
+		}
 	}
 	for _, utxo := range produced {
 		txId := ledgerInputIDBytes(utxo.Id)
@@ -143,14 +379,37 @@ func (d *Database) SetTransaction(
 		}
 	}
 
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, BatchedTxIngestOpts{}); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
-	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+	// On the Leios endorser-block closure path (SkipConsumedInputRecovery), a
+	// consumed input already spent by a different certified endorser-block
+	// transaction is a no-op, matching the reference ledger's applyLeiosClosure
+	// (ValidateNone), rather than wedging the pipeline with ErrUtxoConflict on a
+	// legitimate cross-EB double-consume. Ranking-block application keeps the
+	// hard conflict check.
+	setTxErr := error(nil)
+	if opts.SkipConsumedInputRecovery {
+		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite,
+			txn.Metadata(),
+		)
+	} else {
+		setTxErr = d.transactionStore().SetTransaction(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite,
+			txn.Metadata(),
+		)
+	}
+	if setTxErr != nil {
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, setTxErr,
+		)
 	}
 
-	if updateEpoch > 0 && tx.IsValid() {
+	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(genesisHash.Bytes(), update.Cbor(), point.Slot, updateEpoch, txn); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
@@ -167,15 +426,71 @@ func (d *Database) SetTransaction(
 	return nil
 }
 
+// SetTransactionMetadataOnly records transaction metadata, certificates, and
+// other non-UTxO metadata without writing blob offsets, produced outputs, spent
+// inputs, collateral, reference inputs, reward withdrawals, or pparam updates.
+//
+// This is a general primitive for recording a transaction's certificate and
+// governance data without applying its UTxO effects. It is no longer on the
+// Leios endorser-block apply path: the Musashi path now applies endorser
+// transactions with their full effects (see ledger/leios_apply.go and
+// SetTransactionWithOpts), matching the reference ledger.
+func (d *Database) SetTransactionMetadataOnly(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	certDeposits map[int]uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return types.ErrNilTxn
+	}
+	if err := d.transactionStore().SetTransaction(
+		metadataOnlyTransaction{Transaction: tx},
+		point,
+		idx,
+		certDeposits,
+		// skipWithdrawalWitness: value is moot since
+		// metadataOnlyTransaction.Withdrawals() is always empty, so the loop
+		// it would gate never runs either way. false (rather than true) for
+		// readability: it reads as the honest "do it normally" default
+		// instead of implying real gate logic applies here.
+		false,
+		metadataTxn,
+	); err != nil {
+		return fmt.Errorf(
+			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(),
+			idx,
+			point.Slot,
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetGapBlockTransaction stores a transaction from a mithril gap block.
-// It records blob offsets (TX and UTxO) for CBOR resolution and creates
-// a minimal metadata record, but does NOT look up or consume input
-// UTxOs because the mithril snapshot already reflects the correct
-// spent/unspent state.
+// It records blob offsets (TX and UTxO) for CBOR resolution and creates the
+// transaction, certificate, and output metadata records, but does NOT look
+// up or consume input UTxOs because the mithril snapshot already reflects the
+// correct spent/unspent state.
 func (d *Database) SetGapBlockTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
+	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
 ) error {
@@ -186,7 +501,7 @@ func (d *Database) SetGapBlockTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -246,19 +561,35 @@ func (d *Database) SetGapBlockTransaction(
 		}
 	}
 
-	if err := d.metadata.SetGapBlockTransaction(
-		tx, point, idx, txn.Metadata(),
+	if err := d.transactionStore().SetGapBlockTransaction(
+		tx, point, idx, certDeposits, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
 		)
 	}
+	// ensureGapConsumedUtxos must run after SetGapBlockTransaction: it marks
+	// the consumed inputs spent by this tx (utxo.spent_at_tx_id is a FK to
+	// transaction.hash), so the transaction row has to exist first.
 	if err := d.ensureGapConsumedUtxos(
 		tx,
 		point,
 		txn,
 	); err != nil {
 		return err
+	}
+	// For a phase-2-invalid transaction the consumed set is its collateral
+	// inputs. SetGapBlockTransaction above computed the collateral fee before
+	// ensureGapConsumedUtxos recovered those inputs from the blob store, so
+	// when the tx declares no total collateral the fee was computed from an
+	// incomplete UTxO view and undercounts. Recompute it now that the inputs
+	// are materialized so the epoch fee pot is correct.
+	if err := d.transactionStore().RecomputeGapCollateralFee(
+		tx, point, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"recompute gap block collateral fee: %w", err,
+		)
 	}
 
 	if owned {
@@ -304,15 +635,19 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	inFlight, _ := acc.(inFlightProducerLookup)
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
-	seen := make(map[string]struct{}, len(consumed))
+	seen := make(map[consumedInputKey]struct{}, len(consumed))
+	// Read the Mithril trust boundary once: below it, absent producer rows are
+	// legitimately expected (the snapshot does not carry pre-boundary history);
+	// past it the node should hold complete producer history.
+	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
-		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		inputKey := newConsumedInputKey(input)
 		if _, ok := seen[inputKey]; ok {
 			continue
 		}
 		seen[inputKey] = struct{}{}
-		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
+		existingUtxo, err := d.utxoStore().GetUtxoIncludingSpent(
 			inputTxId,
 			input.Index(),
 			txn.Metadata(),
@@ -333,7 +668,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// could not restore the row.
 			if existingUtxo.SpentAtTxId == nil &&
 				existingUtxo.DeletedSlot == point.Slot {
-				if err := d.metadata.SetUtxoDeletedAtSlot(
+				if err := d.utxoStore().SetUtxoDeletedAtSlot(
 					input,
 					point.Slot,
 					spenderTxHash,
@@ -365,11 +700,33 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
 			continue
 		}
+		// For a validated block past the Mithril trust boundary, recover a
+		// missing producer only when its block is still on the applied primary
+		// chain (issue #3005). Core-mode cleanup can remove a spent row before a
+		// rollback needs to restore it, even though the producer itself remains
+		// canonical (issue #3170). The primary-chain check preserves the
+		// input-conservation guard: an abandoned-fork producer is still refused.
 		recoveredUtxo, err := d.recoverConsumedUtxo(
 			input,
 			txn,
+			d.config.StrictUtxoValidation && point.Slot > mithrilBoundarySlot,
 		)
 		if err != nil {
+			// Past the Mithril trust boundary the node should have complete
+			// producer history for every input it is asked to spend, so an
+			// unrecoverable UTxO there indicates real corruption or a bug
+			// rather than an expected gap. Below the boundary (or when none
+			// is recorded and we did not sync from genesis) the UTxO may
+			// legitimately predate the data we imported.
+			if d.config.StrictUtxoValidation &&
+				point.Slot > mithrilBoundarySlot {
+				return fmt.Errorf(
+					"consumed utxo %s not found at slot %d and could not be recovered: %w",
+					input.String(),
+					point.Slot,
+					err,
+				)
+			}
 			d.logger.Debug(
 				"skipping unrecoverable transaction input utxo repair",
 				"input",
@@ -384,7 +741,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	if len(recoveredUtxos) == 0 {
 		return nil
 	}
-	if err := d.metadata.ImportUtxos(
+	if err := d.utxoStore().ImportUtxos(
 		recoveredUtxos,
 		txn.Metadata(),
 	); err != nil {
@@ -407,15 +764,15 @@ func (d *Database) ensureGapConsumedUtxos(
 	}
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
-	seen := make(map[string]struct{}, len(consumed))
+	seen := make(map[consumedInputKey]struct{}, len(consumed))
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
-		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
+		inputKey := newConsumedInputKey(input)
 		if _, ok := seen[inputKey]; ok {
 			continue
 		}
 		seen[inputKey] = struct{}{}
-		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
+		existingUtxo, err := d.utxoStore().GetUtxoIncludingSpent(
 			inputTxId,
 			input.Index(),
 			txn.Metadata(),
@@ -441,7 +798,7 @@ func (d *Database) ensureGapConsumedUtxos(
 			if existingUtxo.SpentAtTxId == nil &&
 				(existingUtxo.DeletedSlot == 0 ||
 					existingUtxo.DeletedSlot == point.Slot) {
-				if err := d.metadata.SetUtxoDeletedAtSlot(
+				if err := d.utxoStore().SetUtxoDeletedAtSlot(
 					input,
 					point.Slot,
 					spenderTxHash,
@@ -476,7 +833,10 @@ func (d *Database) ensureGapConsumedUtxos(
 				continue
 			}
 		}
-		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn)
+		// Mithril gap-closure recovers producers from imported history that
+		// legitimately has no block-index entry, so the primary-chain
+		// membership check is not applied on this path.
+		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn, false)
 		if err != nil {
 			return fmt.Errorf(
 				"recover gap input utxo %s at slot %d: %w",
@@ -495,7 +855,7 @@ func (d *Database) ensureGapConsumedUtxos(
 	if len(recoveredUtxos) == 0 {
 		return nil
 	}
-	if err := d.metadata.ImportUtxos(
+	if err := d.utxoStore().ImportUtxos(
 		recoveredUtxos,
 		txn.Metadata(),
 	); err != nil {
@@ -508,11 +868,80 @@ func (d *Database) ensureGapConsumedUtxos(
 	return nil
 }
 
+// recoveredProducerOnPrimaryChain reports whether the block that produced a
+// blob-recovered UTxO is the block currently indexed on the applied primary
+// chain at that height. The append-only blob store retains blocks from
+// abandoned forks, so a producer found in the blob is not necessarily on the
+// applied chain. Mirrors LedgerState.primaryChainContainsPoint at the database
+// layer: BlockByIndex reveals which block is canonical at the producer's
+// height, and a hash mismatch means the producer was abandoned.
+//
+// The producer's block ID is supplied by the caller rather than resolved here.
+// Every recovery path has already loaded the producer -- from the blob's block
+// metadata in the offset case, or as a *models.Block in the others -- so
+// looking it up again by point would download the same full block CBOR from
+// cold cloud storage a second time, once per recovered input, on exactly the
+// Mithril catch-up path this check runs on.
+func (d *Database) recoveredProducerOnPrimaryChain(
+	txn *Txn,
+	producerID uint64,
+	hash []byte,
+) (bool, error) {
+	indexed, err := d.BlockByIndex(producerID, txn)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return bytes.Equal(indexed.Hash, hash), nil
+}
+
+// refuseOffPrimaryChainProducer returns a wrapped ErrUtxoNotFound when the
+// producer block of a blob-recovered consumed input is not on the applied
+// primary chain. Recovering such a producer would splice in a UTxO the applied
+// chain never produced (issue #3005 cross-fork input-conservation violation).
+// It is enforced for validated blocks past the Mithril trust boundary, where
+// the producer must be a live, applied, on-chain UTxO, so an abandoned-fork
+// producer is never legitimate. Below the boundary and on the Mithril
+// gap-closure path the check is not applied, because imported history need not
+// carry a block-index entry for the producer.
+func (d *Database) refuseOffPrimaryChainProducer(
+	txn *Txn,
+	producerID uint64,
+	slot uint64,
+	hash []byte,
+	input lcommon.TransactionInput,
+) error {
+	onChain, err := d.recoveredProducerOnPrimaryChain(txn, producerID, hash)
+	if err != nil {
+		return fmt.Errorf(
+			"check producer primary-chain membership for %s: %w",
+			input.String(),
+			err,
+		)
+	}
+	if !onChain {
+		return fmt.Errorf(
+			"producer block %x at slot %d for consumed utxo %s is not on the "+
+				"applied primary chain: refusing abandoned-fork blob recovery "+
+				"that would persist an input-conservation violation "+
+				"(issue #3005): %w",
+			hash,
+			slot,
+			input.String(),
+			ErrUtxoNotFound,
+		)
+	}
+	return nil
+}
+
 func (d *Database) recoverConsumedUtxo(
 	input lcommon.TransactionInput,
 	txn *Txn,
+	enforcePrimaryChain bool,
 ) (*models.Utxo, error) {
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
@@ -536,7 +965,7 @@ func (d *Database) recoverConsumedUtxo(
 		if err != nil {
 			return nil, fmt.Errorf("decode utxo offset: %w", err)
 		}
-		blockCbor, _, err := blob.GetBlock(
+		blockCbor, producerMeta, err := blob.GetBlock(
 			blobTxn,
 			offset.BlockSlot,
 			offset.BlockHash[:],
@@ -555,6 +984,17 @@ func (d *Database) recoverConsumedUtxo(
 		}
 		outputCbor = blockCbor[offset.ByteOffset:end]
 		addedSlot = offset.BlockSlot
+		if enforcePrimaryChain {
+			if err := d.refuseOffPrimaryChainProducer(
+				txn,
+				producerMeta.ID,
+				offset.BlockSlot,
+				offset.BlockHash[:],
+				input,
+			); err != nil {
+				return nil, err
+			}
+		}
 	case err == nil:
 		// Legacy format: raw output CBOR is already present in utxoData.
 		// Resolve the producer slot so addedSlot reflects when the UTxO
@@ -578,6 +1018,29 @@ func (d *Database) recoverConsumedUtxo(
 			return nil, ErrUtxoNotFound
 		}
 		addedSlot = slot
+		if enforcePrimaryChain {
+			// The legacy metadata slot lookup yields neither the producer
+			// block hash nor its ID, so resolve the producer block to check
+			// primary-chain membership. Legacy raw-CBOR blob entries do not
+			// occur past the Mithril boundary in practice, so this extra
+			// lookup is exceptional.
+			prodBlock, bErr := utxoRecoveryBlockForTx(
+				txn.DB(), txn, ledgerInputIDBytes(input),
+			)
+			if bErr != nil {
+				return nil, fmt.Errorf(
+					"resolve producer block for primary-chain check: %w", bErr,
+				)
+			}
+			if prodBlock == nil {
+				return nil, ErrUtxoNotFound
+			}
+			if err := d.refuseOffPrimaryChainProducer(
+				txn, prodBlock.ID, prodBlock.Slot, prodBlock.Hash, input,
+			); err != nil {
+				return nil, err
+			}
+		}
 	default:
 		block, err := utxoRecoveryBlockForTx(
 			txn.DB(),
@@ -607,6 +1070,13 @@ func (d *Database) recoverConsumedUtxo(
 			return nil, err
 		}
 		addedSlot = block.Slot
+		if enforcePrimaryChain {
+			if err := d.refuseOffPrimaryChainProducer(
+				txn, block.ID, block.Slot, block.Hash, input,
+			); err != nil {
+				return nil, err
+			}
+		}
 		indexer := NewBlockIndexer(block.Slot, block.Hash)
 		offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
 		if indexErr == nil {
@@ -636,13 +1106,16 @@ func (d *Database) recoverConsumedUtxo(
 	if err != nil {
 		return nil, fmt.Errorf("decode transaction output: %w", err)
 	}
-	ret := models.UtxoLedgerToModel(
+	ret, err := models.UtxoLedgerToModel(
 		lcommon.Utxo{
 			Id:     input,
 			Output: output,
 		},
 		addedSlot,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("convert recovered utxo: %w", err)
+	}
 	// Populate the producer transaction FK so that joins on
 	// utxo.transaction_id and Preload("Outputs") from the producer
 	// Transaction see this row after a rollback reanimates it. The
@@ -650,7 +1123,7 @@ func (d *Database) recoverConsumedUtxo(
 	// that drove recovery in some branches); in that case we leave
 	// the FK nil and the row stays unjoinable until backfilled by a
 	// later path that has the producer.
-	producerID, found, lookupErr := d.metadata.GetTransactionIDByHash(
+	producerID, found, lookupErr := d.transactionStore().GetTransactionIDByHash(
 		ledgerInputIDBytes(input),
 		txn.Metadata(),
 	)
@@ -685,7 +1158,7 @@ func (d *Database) SetGenesisTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -729,15 +1202,29 @@ func (d *Database) SetGenesisTransaction(
 		}
 
 		// Build model for metadata store
-		utxoModels[i] = models.UtxoLedgerToModel(utxo, 0)
+		model, err := models.UtxoLedgerToModel(utxo, 0)
+		if err != nil {
+			return fmt.Errorf(
+				"convert genesis utxo %x:%d: %w",
+				bytePrefix(txId),
+				outputIdx,
+				err,
+			)
+		}
+		utxoModels[i] = model
 	}
 
 	// Store transaction in metadata
-	if err := d.metadata.SetGenesisTransaction(txHash, blockHash, utxoModels, txn.Metadata()); err != nil {
+	if err := d.transactionStore().SetGenesisTransaction(
+		txHash,
+		blockHash,
+		utxoModels,
+		txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf(
 			"SetGenesisTransaction failed for tx %x block %x: %w",
-			txHash[:8],
-			blockHash[:8],
+			bytePrefix(txHash),
+			bytePrefix(blockHash),
 			err,
 		)
 	}
@@ -756,6 +1243,7 @@ func (d *Database) SetGenesisTransaction(
 func (d *Database) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
+	keyDeposit uint64,
 	blockHash []byte,
 	txn *Txn,
 ) error {
@@ -763,6 +1251,7 @@ func (d *Database) SetGenesisStaking(
 		if err := d.metadata.SetGenesisStaking(
 			pools,
 			stakeDelegations,
+			keyDeposit,
 			blockHash,
 			nil,
 		); err != nil {
@@ -773,6 +1262,7 @@ func (d *Database) SetGenesisStaking(
 	if err := d.metadata.SetGenesisStaking(
 		pools,
 		stakeDelegations,
+		keyDeposit,
 		blockHash,
 		txn.Metadata(),
 	); err != nil {
@@ -822,7 +1312,25 @@ func (d *Database) GetTransactionByHash(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
+	return d.transactionStore().GetTransactionByHash(hash, txn.Metadata())
+}
+
+// GetTransactionMetadataByHash returns only the stored metadata blob for the
+// transaction with the given hash, without loading any associations. Returns
+// (nil, nil) when no such transaction exists or it carries no metadata.
+func (d *Database) GetTransactionMetadataByHash(
+	hash []byte,
+	txn *Txn,
+) ([]byte, error) {
+	if len(hash) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.transactionStore().
+		GetTransactionMetadataByHash(hash, txn.Metadata())
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -837,7 +1345,10 @@ func (d *Database) GetTransactionsByHashes(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByHashes(hashes, txn.Metadata())
+	txs, err := d.transactionStore().GetTransactionsByHashes(
+		hashes,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get txs by hashes: %w", err)
 	}
@@ -857,7 +1368,7 @@ func (d *Database) GetTransactionsByBlockHash(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByBlockHash(
+	txs, err := d.transactionStore().GetTransactionsByBlockHash(
 		blockHash,
 		txn.Metadata(),
 	)
@@ -878,18 +1389,8 @@ func (d *Database) GetTransactionsByAddress(
 	offset int,
 	txn *Txn,
 ) ([]models.Transaction, error) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	var paymentKey []byte
-	var stakingKey []byte
-	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-		paymentKey = pkh.Bytes()
-	}
-	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		stakingKey = skh.Bytes()
-	}
-	return d.GetTransactionsByAddressKeys(
-		paymentKey,
-		stakingKey,
+	return d.getTransactionsByExactAddress(
+		addr,
 		limit,
 		offset,
 		"desc",
@@ -906,18 +1407,8 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 	order string,
 	txn *Txn,
 ) ([]models.Transaction, error) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	var paymentKey []byte
-	var stakingKey []byte
-	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-		paymentKey = pkh.Bytes()
-	}
-	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		stakingKey = skh.Bytes()
-	}
-	return d.GetTransactionsByAddressKeys(
-		paymentKey,
-		stakingKey,
+	return d.getTransactionsByExactAddress(
+		addr,
 		limit,
 		offset,
 		order,
@@ -925,10 +1416,167 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 	)
 }
 
-// GetTransactionsByAddressKeys returns transactions for a payment/staking key
-// tuple with pagination and explicit order (asc|desc).
+func addressTransactionKeys(
+	addr lcommon.Address,
+) ([]byte, uint8, []byte, error) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	var paymentKey []byte
+	var credentialTag uint8
+	var stakingKey []byte
+	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
+		paymentKey = pkh.Bytes()
+	}
+	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		var ok bool
+		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return nil, 0, nil, errors.New(
+				"derive stake credential tag from address",
+			)
+		}
+		stakingKey = skh.Bytes()
+	}
+	return paymentKey, credentialTag, stakingKey, nil
+}
+
+func (d *Database) getTransactionsByExactAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	paymentKey, credentialTag, stakingKey, err := addressTransactionKeys(addr)
+	if err != nil {
+		return nil, err
+	}
+	exactAddress, err := addr.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encode exact transaction address: %w", err)
+	}
+
+	const candidateBatchSize = 128
+	initialCapacity := min(max(limit, 0), candidateBatchSize)
+	ret := make([]models.Transaction, 0, initialCapacity)
+	candidateOffset := 0
+	candidatesProcessed := 0
+	matchesSkipped := 0
+	for {
+		remainingCandidates := exactAddressCandidateScanLimit -
+			candidatesProcessed
+		if remainingCandidates <= 0 {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		batchSize := min(candidateBatchSize, remainingCandidates)
+		candidates, err := d.transactionStore().GetTransactionsByAddress(
+			paymentKey,
+			credentialTag,
+			stakingKey,
+			batchSize,
+			candidateOffset,
+			order,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get exact-address transaction candidates: %w",
+				err,
+			)
+		}
+		candidatesProcessed += len(candidates)
+		for i := range candidates {
+			match, err := transactionContainsExactAddress(
+				&candidates[i],
+				exactAddress,
+				txn,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !match {
+				continue
+			}
+			if matchesSkipped < offset {
+				matchesSkipped++
+				continue
+			}
+			ret = append(ret, candidates[i])
+			if limit > 0 && len(ret) == limit {
+				return ret, nil
+			}
+		}
+		if len(candidates) < batchSize {
+			return ret, nil
+		}
+		if candidatesProcessed >= exactAddressCandidateScanLimit {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		candidateOffset += len(candidates)
+	}
+}
+
+func transactionContainsExactAddress(
+	tx *models.Transaction,
+	exactAddress []byte,
+	txn *Txn,
+) (bool, error) {
+	utxos := make([]*models.Utxo, 0,
+		len(tx.Inputs)+len(tx.Outputs)+len(tx.Collateral)+
+			len(tx.ReferenceInputs)+1,
+	)
+	for i := range tx.Inputs {
+		utxos = append(utxos, &tx.Inputs[i])
+	}
+	for i := range tx.Outputs {
+		utxos = append(utxos, &tx.Outputs[i])
+	}
+	for i := range tx.Collateral {
+		utxos = append(utxos, &tx.Collateral[i])
+	}
+	for i := range tx.ReferenceInputs {
+		utxos = append(utxos, &tx.ReferenceInputs[i])
+	}
+	if tx.CollateralReturn != nil {
+		utxos = append(utxos, tx.CollateralReturn)
+	}
+	for _, utxo := range utxos {
+		if err := loadCbor(utxo, txn); err != nil {
+			return false, fmt.Errorf(
+				"load transaction UTxO %x#%d for exact address match: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		output, err := utxo.Decode()
+		if err != nil {
+			return false, fmt.Errorf(
+				"decode transaction UTxO %x#%d for exact address match: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		addressBytes, err := output.Address().Bytes()
+		if err != nil {
+			return false, fmt.Errorf("encode transaction UTxO address: %w", err)
+		}
+		if bytes.Equal(addressBytes, exactAddress) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// GetTransactionsByAddressKeys returns transactions for a payment/staking
+// credential tuple with pagination and explicit order (asc|desc).
 func (d *Database) GetTransactionsByAddressKeys(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -939,8 +1587,9 @@ func (d *Database) GetTransactionsByAddressKeys(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByAddress(
+	txs, err := d.transactionStore().GetTransactionsByAddress(
 		paymentKey,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -967,26 +1616,43 @@ func (d *Database) CountTransactionsByAddress(
 	addr lcommon.Address,
 	txn *Txn,
 ) (int, error) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	var paymentKey []byte
-	var stakingKey []byte
-	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-		paymentKey = pkh.Bytes()
-	}
-	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		stakingKey = skh.Bytes()
-	}
-	return d.CountTransactionsByAddressKeys(
-		paymentKey,
-		stakingKey,
+	txs, err := d.getTransactionsByExactAddress(
+		addr,
+		0,
+		0,
+		"desc",
 		txn,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return len(txs), nil
+}
+
+// HasTransactionsByAddress reports whether at least one transaction involves
+// the given exact address.
+func (d *Database) HasTransactionsByAddress(
+	addr lcommon.Address,
+	txn *Txn,
+) (bool, error) {
+	txs, err := d.getTransactionsByExactAddress(
+		addr,
+		1,
+		0,
+		"desc",
+		txn,
+	)
+	if err != nil {
+		return false, err
+	}
+	return len(txs) > 0, nil
 }
 
 // CountTransactionsByAddressKeys returns the total number
-// of transactions for a payment/staking key tuple.
+// of transactions for a payment/staking credential tuple.
 func (d *Database) CountTransactionsByAddressKeys(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (int, error) {
@@ -994,8 +1660,9 @@ func (d *Database) CountTransactionsByAddressKeys(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountTransactionsByAddress(
+	count, err := d.transactionStore().CountTransactionsByAddress(
 		paymentKey,
+		credentialTag,
 		stakingKey,
 		txn.Metadata(),
 	)
@@ -1010,8 +1677,34 @@ func (d *Database) CountTransactionsByAddressKeys(
 	return count, nil
 }
 
-// GetAddressesByStakingKey returns distinct address mappings for a staking key.
-func (d *Database) GetAddressesByStakingKey(
+// CountTransactionsByPaymentCred returns the total number of transactions
+// involving a payment credential across every address that carries it,
+// regardless of staking part.
+func (d *Database) CountTransactionsByPaymentCred(
+	paymentKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.transactionStore().CountTransactionsByPaymentCred(
+		paymentKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count txs by payment cred %x: %w",
+			paymentKey,
+			err,
+		)
+	}
+	return count, nil
+}
+
+// GetAddressesByCredential returns distinct address mappings for a stake credential.
+func (d *Database) GetAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -1022,7 +1715,8 @@ func (d *Database) GetAddressesByStakingKey(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	addresses, err := d.metadata.GetAddressesByStakingKey(
+	addresses, err := d.transactionStore().GetAddressesByCredential(
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -1031,7 +1725,8 @@ func (d *Database) GetAddressesByStakingKey(
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"get addresses by staking key=%x limit=%d offset=%d: %w",
+			"get addresses by credential tag=%d key=%x limit=%d offset=%d: %w",
+			credentialTag,
 			stakingKey,
 			limit,
 			offset,
@@ -1041,8 +1736,9 @@ func (d *Database) GetAddressesByStakingKey(
 	return addresses, nil
 }
 
-// CountAddressesByStakingKey returns the total number of distinct address mappings for a staking key.
-func (d *Database) CountAddressesByStakingKey(
+// CountAddressesByCredential returns the total number of distinct address mappings for a stake credential.
+func (d *Database) CountAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (int, error) {
@@ -1050,13 +1746,15 @@ func (d *Database) CountAddressesByStakingKey(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAddressesByStakingKey(
+	count, err := d.transactionStore().CountAddressesByCredential(
+		credentialTag,
 		stakingKey,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"count addresses by staking key=%x: %w",
+			"count addresses by credential tag=%d key=%x: %w",
+			credentialTag,
 			stakingKey,
 			err,
 		)
@@ -1077,7 +1775,7 @@ func (d *Database) GetTransactionsByMetadataLabel(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	txs, err := d.metadata.GetTransactionsByMetadataLabel(
+	txs, err := d.transactionStore().GetTransactionsByMetadataLabel(
 		label,
 		limit,
 		offset,
@@ -1107,7 +1805,7 @@ func (d *Database) CountTransactionsByMetadataLabel(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountTransactionsByMetadataLabel(
+	count, err := d.transactionStore().CountTransactionsByMetadataLabel(
 		label,
 		txn.Metadata(),
 	)
@@ -1127,48 +1825,55 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		defer txn.Rollback() //nolint:errcheck
-		if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(slot, txn.Metadata()); err != nil {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
+			slot,
+			txn.Metadata(),
+		); err != nil {
 			return fmt.Errorf(
 				"delete transaction metadata labels after slot %d: %w",
 				slot,
 				err,
 			)
 		}
-		return txn.Commit()
-	}
-	if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(slot, txn.Metadata()); err != nil {
-		return fmt.Errorf(
-			"delete transaction metadata labels after slot %d: %w",
-			slot,
-			err,
-		)
-	}
-	return nil
+		return nil
+	})
 }
 
-// deleteTxBlobs attempts to delete blob data for the given transaction hashes.
-// This is a best-effort operation; metadata remains the source of truth. When
-// the caller provides a blob transaction, deletions stay coupled to that outer
-// commit. A temporary blob-only transaction is used only as a fallback when no
-// blob handle is available.
+// deleteTxBlobs deletes blob data for the given transaction hashes. Metadata
+// remains the source of truth. When the caller provides a blob transaction,
+// deletions stay coupled to that outer commit. A temporary blob-only
+// transaction is used only as a fallback when no blob handle is available.
+//
+// Failures do not stop the remaining deletes, but they are counted and
+// reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
+// metadata that names these objects, after which nothing can reach them
+// again. The count is deferred to the enclosing transaction's commit for the
+// reason given on deleteUtxoBlobs.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	const batchSize = 500
-	blob := d.Blob()
-	if blob == nil {
+	// Report an absent blob store up front, so an empty txHashes slice
+	// reports it the same way a populated one does rather than silently
+	// succeeding because the batch loop never ran.
+	if d.Blob() == nil {
 		return types.ErrBlobStoreUnavailable
+	}
+	if len(txHashes) == 0 {
+		return nil
 	}
 
 	var deleteErrors int
-	deleteBatch := func(blobTxn types.Txn, batch [][]byte) int {
+	deleteBatch := func(
+		store blob.BlobStore,
+		blobTxn types.Txn,
+		batch [][]byte,
+	) int {
 		var batchDeleteErrors int
 		for _, txHash := range batch {
-			if err := blob.DeleteTx(blobTxn, txHash); err != nil {
+			if err := store.DeleteTx(blobTxn, txHash); err != nil {
 				deleteErrors++
 				batchDeleteErrors++
-				d.logger.Debug(
+				d.logger.Warn(
 					"failed to delete TX blob data",
 					"txHash", hex.EncodeToString(txHash),
 					"error", err,
@@ -1178,31 +1883,82 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		return batchDeleteErrors
 	}
 
+	// The store used for each delete comes from whichever transaction owns
+	// the handle that delete runs through, so a concurrent SetBlobStore
+	// cannot leave a handle from one store being deleted through another.
 	if txn != nil && txn.Blob() != nil {
-		deleteBatch(txn.Blob(), txHashes)
+		blob := txn.BlobStore()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		// Stage only what this transaction can still hold. Past its budget
+		// the store rejects every further staged write, including the
+		// commit timestamp Txn.Commit puts into this same transaction, so
+		// an unbounded stage costs the caller its whole commit rather than
+		// just the tail of this set (blinklabs-io/dingo#4657). What is left
+		// unstaged is counted with the deletes that failed and reported
+		// through ErrBlobDeleteIncomplete below: the metadata naming these
+		// objects goes away either way, so both are orphans rather than
+		// silently dropped work.
+		staged := len(txHashes)
+		staged = stagedBlobDeleteLimit(
+			blob,
+			txn.Blob(),
+			len(types.TxBlobKey(txHashes[0])),
+			staged,
+		)
+		deleteBatch(blob, txn.Blob(), txHashes[:staged])
+		if skipped := len(txHashes) - staged; skipped > 0 {
+			deleteErrors += skipped
+			d.logger.Warn(
+				"TX blob deletes left unstaged to keep the transaction committable",
+				"skipped", skipped,
+				"staged", staged,
+				"total", len(txHashes),
+			)
+		}
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
 			end := min(start+batchSize, len(txHashes))
 			batch := txHashes[start:end]
 			batchTxn := NewBlobOnlyTxn(d, true)
+			blob := batchTxn.BlobStore()
+			if blob == nil {
+				batchTxn.Release()
+				return types.ErrBlobStoreUnavailable
+			}
 			batchBlobTxn := batchTxn.Blob()
 			if batchBlobTxn == nil {
+				batchTxn.Release()
 				return types.ErrNilTxn
 			}
-			batchDeleteErrors := deleteBatch(batchBlobTxn, batch)
+			batchDeleteErrors := deleteBatch(blob, batchBlobTxn, batch)
 			if err := batchTxn.Commit(); err != nil {
 				deleteErrors += len(batch) - batchDeleteErrors
 				_ = batchTxn.Rollback()
-				d.logger.Debug("tx blob delete batch commit failed", "error", err)
+				d.logger.Warn(
+					"TX blob delete batch commit failed",
+					"batch_start", start,
+					"batch_end", end,
+					"batch_size", len(batch),
+					"error", err,
+				)
 			}
 		}
 	}
 	if deleteErrors > 0 {
-		d.logger.Debug(
-			"tx blob deletion completed with errors",
+		recordBlobOrphansOnCommit(txn, deleteErrors)
+		d.logger.Warn(
+			"TX blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
+			len(txHashes),
+		)
+		return fmt.Errorf(
+			"%w: %d of %d transaction blobs",
+			ErrBlobDeleteIncomplete,
+			deleteErrors,
 			len(txHashes),
 		)
 	}
@@ -1229,7 +1985,7 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Get transaction hashes that will be deleted
-	txHashes, err := d.metadata.GetTransactionHashesAfterSlot(
+	txHashes, err := d.transactionStore().GetTransactionHashesAfterSlot(
 		slot,
 		txn.Metadata(),
 	)
@@ -1242,17 +1998,30 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Delete blob data first (best effort)
-	_ = deleteTxBlobs(d, txHashes, txn)
+	// A blob delete failure must not stop the metadata cleanup below: a
+	// rolled-back transaction cannot stay addressable. The objects it strands
+	// are counted and logged rather than dropped.
+	if blobErr := deleteTxBlobs(d, txHashes, txn); blobErr != nil {
+		d.logger.Error(
+			"rolled-back transaction blob delete left unreachable objects",
+			"error", blobErr,
+			"slot", slot,
+			"transactions", len(txHashes),
+		)
+	}
 
 	// Then delete metadata (source of truth)
-	if err := d.metadata.DeleteAddressTransactionsAfterSlot(slot, txn.Metadata()); err != nil {
+	if err := d.transactionStore().DeleteAddressTransactionsAfterSlot(
+		slot,
+		txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf(
 			"failed to delete address transaction mappings after slot %d: %w",
 			slot,
 			err,
 		)
 	}
-	if err := d.metadata.DeleteTransactionMetadataLabelsAfterSlot(
+	if err := d.transactionStore().DeleteTransactionMetadataLabelsAfterSlot(
 		slot,
 		txn.Metadata(),
 	); err != nil {
@@ -1263,7 +2032,7 @@ func (d *Database) TransactionsDeleteRolledback(
 		)
 	}
 
-	err = d.metadata.DeleteTransactionsAfterSlot(slot, txn.Metadata())
+	err = d.transactionStore().DeleteTransactionsAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return fmt.Errorf(
 			"failed to delete transactions after slot %d: %w",

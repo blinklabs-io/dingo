@@ -8,6 +8,7 @@ const statusEl = $("#status");
 const metadataNotice = $("#metadata-notice");
 const proposalRows = $("#proposal-rows");
 const drepRows = $("#drep-rows");
+const epochRows = $("#epoch-rows");
 const dialog = $("#detail-dialog");
 const detailContent = $("#detail-content");
 
@@ -32,27 +33,22 @@ $("#refresh").addEventListener("click", asyncHandler(refresh));
 $("#proposal-lifecycle").addEventListener("change", asyncHandler(loadProposals));
 $("#proposal-type").addEventListener("change", asyncHandler(loadProposals));
 $("#drep-active").addEventListener("change", asyncHandler(loadDreps));
+$("#drep-expiry").addEventListener("change", asyncHandler(loadDreps));
 $("#wallet-connect").addEventListener("click", asyncHandler(connectWallet, showStakeError));
 $("#stake-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const credential = $("#stake-credential").value.trim().toLowerCase();
+  const credentialTag = $("#stake-credential-tag").value;
   const result = $("#stake-result");
   if (!credential) {
     result.innerHTML = `<div class="empty">Enter a stake credential hex value.</div>`;
     return;
   }
   try {
-    const data = await api(`/api/stake/${encodeURIComponent(credential)}`);
-    result.innerHTML = `
-      <div class="detail-grid">
-        ${metric("Stake", shortHex(data.stakingKey))}
-        ${metric("Active", data.active ? "yes" : "no")}
-        ${metric("Reward", lovelace(data.reward))}
-        ${metric("DRep type", data.drepType)}
-      </div>
-      <p class="mono">Pool: ${data.pool || "none"}</p>
-      <p class="mono">DRep: ${data.drep || "none"}</p>
-    `;
+    const data = await api(
+      `/api/stake/${encodeURIComponent(credential)}?credential_tag=${encodeURIComponent(credentialTag)}`,
+    );
+    result.innerHTML = renderStakeAccount(data);
   } catch (error) {
     result.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
   }
@@ -66,6 +62,8 @@ async function refresh() {
     await loadProposals();
   } else if (state.view === "dreps") {
     await loadDreps();
+  } else if (state.view === "epochs") {
+    await loadEpochs();
   }
 }
 
@@ -80,6 +78,8 @@ async function loadStatus() {
     metric("Actions", number(data.proposalCount)),
     metric("Votes", number(data.governanceVoteCount)),
     metric("Active DReps", number(data.activeDrepCount)),
+    metric("Expired DReps", number(data.expiredDrepCount)),
+    metric("Reward epoch", number(data.latestRewardEpoch)),
     metric("Backfill", data.backfill?.completed ? "complete" : number(data.backfill?.lastSlot)),
   ].join("");
   renderMetadataNotice(data);
@@ -167,25 +167,29 @@ async function showProposal(txHash, index) {
 }
 
 async function loadDreps() {
-  drepRows.innerHTML = loadingRow(5);
+  drepRows.innerHTML = loadingRow(6);
   const params = new URLSearchParams();
   const active = $("#drep-active").value;
+  const expiry = $("#drep-expiry").value;
   if (active) params.set("active", active);
+  if (expiry) params.set("expiry", expiry);
   const rows = await api(`/api/dreps?${params.toString()}`);
   if (!rows.length) {
-    drepRows.innerHTML = emptyRow(5, "No matching DReps.");
+    drepRows.innerHTML = emptyRow(6, "No matching DReps.");
     return;
   }
   drepRows.innerHTML = rows
     .map((row) => `
       <tr>
         <td>
-          <button class="link-button" data-drep="${row.credential}" type="button">
+          <button class="link-button" data-drep="${row.credential}" data-credential-tag="${row.credentialTag}" type="button">
             <span class="mono">${shortHex(row.credential)}</span>
           </button>
+          <br /><span class="muted">${credentialTypeName(row.credentialTag)}</span>
           ${renderAnchorBreak(row.anchorUrl)}
         </td>
         <td><span class="pill ${row.active ? "active" : "inactive"}">${row.active ? "active" : "inactive"}</span></td>
+        <td>${expiryPill(row)}</td>
         <td>activity ${number(row.lastActivityEpoch)}<br />expiry ${number(row.expiryEpoch)}</td>
         <td>${number(row.delegatorCount)}</td>
         <td>${number(row.voteCount)}</td>
@@ -193,21 +197,30 @@ async function loadDreps() {
     `)
     .join("");
   drepRows.querySelectorAll("[data-drep]").forEach((button) => {
-    button.addEventListener("click", asyncHandler(() => showDrep(button.dataset.drep)));
+    button.addEventListener(
+      "click",
+      asyncHandler(() => showDrep(button.dataset.drep, button.dataset.credentialTag)),
+    );
   });
 }
 
-async function showDrep(credential) {
-  const data = await api(`/api/dreps/${credential}`);
+async function showDrep(credential, credentialTag) {
+  const data = await api(
+    `/api/dreps/${credential}?credential_tag=${encodeURIComponent(credentialTag)}`,
+  );
   const d = data.drep;
   detailContent.innerHTML = `
     <h2>DRep</h2>
     <p class="mono">${d.credential}</p>
     <div class="detail-grid">
+      ${metric("Type", credentialTypeName(d.credentialTag))}
       ${metric("Status", d.active ? "active" : "inactive")}
       ${metric("Delegators", number(d.delegatorCount))}
       ${metric("Votes", number(d.voteCount))}
       ${metric("Expiry", number(d.expiryEpoch))}
+      ${metric("Inactivity", expiryText(d))}
+      ${metric("First seen slot", number(d.firstSeenSlot))}
+      ${metric("Last registration slot", d.lastRegistrationSlot ? number(d.lastRegistrationSlot) : "none")}
     </div>
     ${d.anchorUrl ? `<p>Anchor: ${renderLinkedUrl(d.anchorUrl)}</p>` : ""}
     <div class="detail-section">
@@ -232,21 +245,144 @@ async function showDrep(credential) {
       <h3>Recent delegators</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Stake credential</th><th>Reward</th><th>Active</th></tr></thead>
+          <thead><tr><th>Stake credential</th><th>Created slot</th><th>Reward</th><th>Active</th></tr></thead>
           <tbody>
             ${data.delegations.length ? data.delegations.map((account) => `
               <tr>
-                <td class="mono">${shortHex(account.stakingKey)}</td>
+                <td><span class="mono">${shortHex(account.stakingKey)}</span><br /><span class="muted">${credentialTypeName(account.credentialTag)}</span></td>
+                <td>${number(account.createdSlot)}</td>
                 <td>${lovelace(account.reward)}</td>
                 <td>${account.active ? "yes" : "no"}</td>
               </tr>
-            `).join("") : emptyRow(3, "No active delegators returned.")}
+            `).join("") : emptyRow(4, "No active delegators returned.")}
           </tbody>
         </table>
       </div>
     </div>
   `;
   dialog.showModal();
+}
+
+async function loadEpochs() {
+  epochRows.innerHTML = loadingRow(8);
+  const rows = await api("/api/epochs");
+  if (!rows.length) {
+    epochRows.innerHTML = emptyRow(8, "No epochs recorded yet.");
+    return;
+  }
+  epochRows.innerHTML = rows
+    .map((row) => `
+      <tr>
+        <td>${number(row.epochId)}<br /><span class="muted">era ${number(row.eraId)}</span></td>
+        <td>${lovelace(row.treasury)}</td>
+        <td>${lovelace(row.reserves)}</td>
+        <td>${lovelace(row.fees)}</td>
+        <td>${lovelace(row.rewards)}</td>
+        <td>${lovelace(row.activeStake)}<br /><span class="muted">reward basis ${lovelace(row.rewardBasisStake)}</span></td>
+        <td>${number(row.poolCount)} / ${number(row.delegatorCount)}</td>
+        <td>${captureCell(row)}</td>
+      </tr>
+    `)
+    .join("");
+}
+
+function captureCell(row) {
+  const pills = [];
+  if (row.snapshotReady) {
+    pills.push(`<span class="pill active">snapshot</span>`);
+  }
+  if (row.authoritative) {
+    pills.push(`<span class="pill active">authoritative</span>`);
+  } else if (row.snapshotReady) {
+    pills.push(`<span class="pill pending">provisional</span>`);
+  }
+  if (!pills.length) {
+    pills.push(`<span class="pill inactive">not captured</span>`);
+  }
+  return `${pills.join(" ")}<br /><span class="muted">${number(row.poolOutputCount)} pool results</span>`;
+}
+
+function renderStakeAccount(data) {
+  return `
+    <div class="detail-grid">
+      ${metric("Stake", shortHex(data.stakingKey))}
+      ${metric("Type", credentialTypeName(data.credentialTag))}
+      ${metric("Created slot", number(data.createdSlot))}
+      ${metric("Active", data.active ? "yes" : "no")}
+      ${metric("Reward", lovelace(data.reward))}
+      ${metric("DRep type", data.drepType)}
+      ${metric("Inactivity expiry", accountExpiryText(data))}
+    </div>
+    <p class="mono">Pool: ${escapeHtml(data.pool || "none")}</p>
+    <p class="mono">DRep: ${escapeHtml(data.drep || "none")}</p>
+    <div class="detail-section">
+      <h3>Reward outputs</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Epoch</th><th>Type</th><th>Pool</th><th>Amount</th><th>Spendable</th></tr></thead>
+          <tbody>
+            ${(data.rewards || []).length ? data.rewards.map((reward) => `
+              <tr>
+                <td>${number(reward.epoch)}</td>
+                <td>${escapeHtml(reward.rewardType)}</td>
+                <td class="mono">${escapeHtml(shortHex(reward.poolKeyHash))}</td>
+                <td>${lovelace(reward.amount)}</td>
+                <td>${reward.spendable ? "yes" : "no"}</td>
+              </tr>
+            `).join("") : emptyRow(5, "No per-epoch reward rows in the retained four-epoch window.")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="detail-section">
+      <h3>Withdrawal witnesses</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Slot</th><th>Transaction</th><th>Amount</th></tr></thead>
+          <tbody>
+            ${(data.withdrawals || []).length ? data.withdrawals.map((withdrawal) => `
+              <tr>
+                <td>${number(withdrawal.addedSlot)}</td>
+                <td class="mono">${escapeHtml(shortHex(withdrawal.txHash))}</td>
+                <td>${withdrawal.zeroAmount
+                  ? `<span class="pill">zero amount</span>`
+                  : lovelace(withdrawal.amount)}</td>
+              </tr>
+            `).join("") : emptyRow(3, "No reward withdrawals recorded.")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function accountExpiryText(data) {
+  if (!state.status?.accountInactivity?.activated) {
+    return "not enabled";
+  }
+  if (!Number(data.expirationEpoch)) {
+    return "unset";
+  }
+  const activated = data.inactivityActivated ? " (activated)" : "";
+  return `epoch ${number(data.expirationEpoch)}${activated}`;
+}
+
+function expiryPill(row) {
+  const status = row.expiryStatus || "unknown";
+  const label = status === "unknown" ? "no activity" : status;
+  return `<span class="pill ${status === "active" ? "active" : status === "expired" ? "expired" : "pending"}">${escapeHtml(label)}</span>` +
+    `${status === "active" ? `<br /><span class="muted">${number(row.epochsUntilExpiry)} epochs left</span>` : ""}`;
+}
+
+function expiryText(row) {
+  const status = row.expiryStatus || "unknown";
+  if (status === "active") {
+    return `active, ${number(row.epochsUntilExpiry)} epochs left`;
+  }
+  if (status === "expired") {
+    return "expired";
+  }
+  return "no activity recorded";
 }
 
 async function api(path) {
@@ -323,6 +459,10 @@ function metric(label, value) {
       <div class="metric-value">${escapeHtml(String(value ?? "n/a"))}</div>
     </div>
   `;
+}
+
+function credentialTypeName(value) {
+  return Number(value) === 1 ? "Script" : "Key";
 }
 
 function voteGrid(votes) {
@@ -441,6 +581,7 @@ async function connectWallet() {
     return;
   }
   $("#stake-credential").value = rewardAddress.slice(2, 58);
+  $("#stake-credential-tag").value = rewardAddress.slice(0, 1) === "f" ? "1" : "0";
   $("#stake-form").requestSubmit();
 }
 

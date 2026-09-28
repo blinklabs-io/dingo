@@ -36,7 +36,9 @@ func FuzzNewCardanoNodeConfigFromReader(f *testing.F) {
 			return
 		}
 		if cfg == nil {
-			t.Fatalf("NewCardanoNodeConfigFromReader returned nil without an error")
+			t.Fatalf(
+				"NewCardanoNodeConfigFromReader returned nil without an error",
+			)
 		}
 
 		encoded, err := yaml.Marshal(cfg)

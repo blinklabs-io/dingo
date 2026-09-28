@@ -20,8 +20,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
-// GetAccountDelegationHistory returns delegation history rows for a staking key.
-func (d *Database) GetAccountDelegationHistory(
+// GetAccountDelegationHistoryByCredential returns delegation history rows for
+// a stake credential.
+func (d *Database) GetAccountDelegationHistoryByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	limit int,
 	offset int,
@@ -32,7 +34,8 @@ func (d *Database) GetAccountDelegationHistory(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	rows, err := d.metadata.GetAccountDelegationHistory(
+	rows, err := d.certificateStore().GetAccountDelegationHistoryByCredential(
+		credentialTag,
 		stakeKey,
 		limit,
 		offset,
@@ -48,9 +51,10 @@ func (d *Database) GetAccountDelegationHistory(
 	return rows, nil
 }
 
-// CountAccountDelegationHistory returns the total number of delegation
-// history rows for a staking key.
-func (d *Database) CountAccountDelegationHistory(
+// CountAccountDelegationHistoryByCredential returns the total number of
+// delegation history rows for a stake credential.
+func (d *Database) CountAccountDelegationHistoryByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
@@ -58,10 +62,12 @@ func (d *Database) CountAccountDelegationHistory(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAccountDelegationHistory(
-		stakeKey,
-		txn.Metadata(),
-	)
+	count, err := d.certificateStore().
+		CountAccountDelegationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			txn.Metadata(),
+		)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account delegation history: %w",
@@ -71,8 +77,10 @@ func (d *Database) CountAccountDelegationHistory(
 	return count, nil
 }
 
-// GetAccountRegistrationHistory returns registration history rows for a staking key.
-func (d *Database) GetAccountRegistrationHistory(
+// GetAccountRegistrationHistoryByCredential returns registration history rows
+// for a stake credential.
+func (d *Database) GetAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	limit int,
 	offset int,
@@ -83,7 +91,8 @@ func (d *Database) GetAccountRegistrationHistory(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	rows, err := d.metadata.GetAccountRegistrationHistory(
+	rows, err := d.certificateStore().GetAccountRegistrationHistoryByCredential(
+		credentialTag,
 		stakeKey,
 		limit,
 		offset,
@@ -99,9 +108,10 @@ func (d *Database) GetAccountRegistrationHistory(
 	return rows, nil
 }
 
-// CountAccountRegistrationHistory returns the total number of
-// registration history rows for a staking key.
-func (d *Database) CountAccountRegistrationHistory(
+// CountAccountRegistrationHistoryByCredential returns the total number of
+// registration history rows for a stake credential.
+func (d *Database) CountAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
@@ -109,10 +119,12 @@ func (d *Database) CountAccountRegistrationHistory(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAccountRegistrationHistory(
-		stakeKey,
-		txn.Metadata(),
-	)
+	count, err := d.certificateStore().
+		CountAccountRegistrationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			txn.Metadata(),
+		)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account registration history: %w",
@@ -120,4 +132,173 @@ func (d *Database) CountAccountRegistrationHistory(
 		)
 	}
 	return count, nil
+}
+
+// GetAccountImportRegistrationByCredential returns the virtual registration
+// stored with a snapshot-imported account baseline.
+func (d *Database) GetAccountImportRegistrationByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (*models.AccountImportRegistration, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	registration, err := d.metadata.GetAccountImportRegistrationByCredential(
+		credentialTag,
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get account import registration: %w", err)
+	}
+	return registration, nil
+}
+
+// GetAccountWithdrawalHistoryByCredential returns withdrawal history rows for
+// a stake credential.
+func (d *Database) GetAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.AccountWithdrawalHistoryRow, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	rows, err := d.metadata.GetAccountWithdrawalHistoryByCredential(
+		credentialTag,
+		stakeKey,
+		limit,
+		offset,
+		order,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get account withdrawal history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAccountWithdrawalHistoryByCredential returns the total number of
+// withdrawal history rows for a stake credential.
+func (d *Database) CountAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountAccountWithdrawalHistoryByCredential(
+		credentialTag,
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account withdrawal history: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
+// GetAddressTransactionsByCredential returns one page of (payment address,
+// transaction) association rows for a stake credential, optionally bounded
+// by an inclusive from/to (slot, tx_index) range.
+func (d *Database) GetAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn *Txn,
+) ([]models.AccountTransactionAssociationRow, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	rows, err := d.transactionStore().GetAddressTransactionsByCredential(
+		credentialTag,
+		stakeKey,
+		limit,
+		offset,
+		order,
+		from,
+		to,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get address transactions by credential: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAddressTransactionsByCredential returns the total number of
+// (payment address, transaction) association rows for a stake credential
+// within the same optional from/to range.
+func (d *Database) CountAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.transactionStore().CountAddressTransactionsByCredential(
+		credentialTag,
+		stakeKey,
+		from,
+		to,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count address transactions by credential: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
+// GetAccountSumsByCredential returns the aggregated withdrawal, reserves, and
+// treasury lovelace totals for a stake credential.
+func (d *Database) GetAccountSumsByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (models.AccountSums, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	sums, err := d.metadata.GetAccountSumsByCredential(
+		credentialTag,
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return models.NewAccountSums(), fmt.Errorf(
+			"get account sums: %w",
+			err,
+		)
+	}
+	return sums, nil
 }

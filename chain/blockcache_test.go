@@ -27,6 +27,17 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
+func mustNewBlockCache(
+	t *testing.T,
+	capacity int,
+	promRegistry prometheus.Registerer,
+) *blockCache {
+	t.Helper()
+	cache, err := newBlockCache(capacity, promRegistry)
+	require.NoError(t, err)
+	return cache
+}
+
 // testHash returns a deterministic 32-byte hash derived from a label.
 func testHash(label string) []byte {
 	h := sha256.Sum256([]byte(label))
@@ -34,7 +45,9 @@ func testHash(label string) []byte {
 }
 
 func TestBlockCache_BasicOperations(t *testing.T) {
-	cache := newBlockCache(3, nil)
+	t.Parallel()
+
+	cache := mustNewBlockCache(t, 3, nil)
 
 	// Test empty cache
 	_, ok := cache.Get(testHash("nonexistent"))
@@ -56,7 +69,9 @@ func TestBlockCache_BasicOperations(t *testing.T) {
 }
 
 func TestBlockCache_LRUEviction(t *testing.T) {
-	cache := newBlockCache(3, nil)
+	t.Parallel()
+
+	cache := mustNewBlockCache(t, 3, nil)
 
 	// Add 3 blocks
 	block1 := models.Block{
@@ -109,7 +124,9 @@ func TestBlockCache_LRUEviction(t *testing.T) {
 }
 
 func TestBlockCache_UpdateExisting(t *testing.T) {
-	cache := newBlockCache(3, nil)
+	t.Parallel()
+
+	cache := mustNewBlockCache(t, 3, nil)
 
 	// Add a block
 	block1 := models.Block{
@@ -135,7 +152,9 @@ func TestBlockCache_UpdateExisting(t *testing.T) {
 }
 
 func TestBlockCache_AccessMovesToFront(t *testing.T) {
-	cache := newBlockCache(3, nil)
+	t.Parallel()
+
+	cache := mustNewBlockCache(t, 3, nil)
 
 	// Add 3 blocks in order
 	block1 := models.Block{
@@ -182,8 +201,10 @@ func TestBlockCache_AccessMovesToFront(t *testing.T) {
 }
 
 func TestBlockCache_DefaultCapacity(t *testing.T) {
+	t.Parallel()
+
 	// Test that 0 capacity uses default
-	cache := newBlockCache(0, nil)
+	cache := mustNewBlockCache(t, 0, nil)
 	assert.Equal(
 		t,
 		DefaultBlockCacheCapacity,
@@ -191,7 +212,7 @@ func TestBlockCache_DefaultCapacity(t *testing.T) {
 	)
 
 	// Test that negative capacity uses default
-	cache = newBlockCache(-1, nil)
+	cache = mustNewBlockCache(t, -1, nil)
 	assert.Equal(
 		t,
 		DefaultBlockCacheCapacity,
@@ -200,7 +221,9 @@ func TestBlockCache_DefaultCapacity(t *testing.T) {
 }
 
 func TestBlockCache_Delete(t *testing.T) {
-	cache := newBlockCache(5, nil)
+	t.Parallel()
+
+	cache := mustNewBlockCache(t, 5, nil)
 
 	// Add blocks
 	block1 := models.Block{
@@ -240,7 +263,9 @@ func TestBlockCache_Delete(t *testing.T) {
 }
 
 func TestBlockCache_ConcurrentAccess(t *testing.T) {
-	cache := newBlockCache(100, nil)
+	t.Parallel()
+
+	cache := mustNewBlockCache(t, 100, nil)
 	const goroutines = 10
 	const opsPerGoroutine = 100
 
@@ -307,8 +332,10 @@ func TestBlockCache_ConcurrentAccess(t *testing.T) {
 }
 
 func TestBlockCache_PrometheusMetric(t *testing.T) {
+	t.Parallel()
+
 	registry := prometheus.NewRegistry()
-	cache := newBlockCache(5, registry)
+	cache := mustNewBlockCache(t, 5, registry)
 
 	// Add blocks and verify metric is registered
 	block1 := models.Block{

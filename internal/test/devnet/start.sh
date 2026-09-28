@@ -19,26 +19,154 @@
 # The configurator service generates genesis files and pool keys
 # automatically before nodes start (via depends_on in docker-compose.yml).
 #
-# Usage: ./start.sh
+# Usage:
+#   ./start.sh               # all-dingo network (default)
+#   ./start.sh --conformance # dingo + cardano-node reference network
+#   ./start.sh --accelerated # bring the network up on the accelerated spec
+#   ./start.sh --leios       # Dijkstra/Leios producer-to-peer network
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=compose-project.sh
+source "${SCRIPT_DIR}/compose-project.sh"
+devnet_compose_project
+export DEVNET_COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME}"
+devnet_render_topology
+devnet_ports
 
-echo "Starting DevNet containers..."
-docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
+# Mode selection precedence: CLI, COMPOSE_PROFILES, then dingo.
+MODE=""
+ACCELERATED=false
+LEIOS=false
+for arg in "$@"; do
+  case "${arg}" in
+    --conformance) MODE="conformance" ;;
+    --accelerated) ACCELERATED=true ;;
+    --leios)       LEIOS=true ;;
+    *)
+      echo "Unknown argument: ${arg}" >&2
+      exit 1
+      ;;
+  esac
+done
+MODE="${MODE:-${COMPOSE_PROFILES:-dingo}}"
+if [[ "${LEIOS}" == "true" && "${MODE}" != "dingo" ]]; then
+  echo "--leios requires the all-Dingo profile" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" == "true" && "${ACCELERATED}" == "true" ]]; then
+  echo "--leios selects its own accelerated Dijkstra spec; do not combine it with --accelerated" >&2
+  exit 1
+fi
+case "${MODE}" in
+  conformance) export COMPOSE_PROFILES="conformance" ;;
+  dingo)       export COMPOSE_PROFILES="dingo" ;;
+  *)
+    echo "Unsupported COMPOSE_PROFILES mode: ${MODE}" >&2
+    exit 1
+    ;;
+esac
 
-# Mirror docker-compose.yml's host-port defaults so the printed addresses
-# match the actual mappings (and respect any DEVNET_*_PORT overrides).
-DINGO_PORT="${DEVNET_DINGO_PORT:-3010}"
-CARDANO_PORT="${DEVNET_CARDANO_PORT:-3011}"
-RELAY_PORT="${DEVNET_RELAY_PORT:-3012}"
+# Mirror docker-compose.yml's host-port defaults so anything printed below
+# matches the actual mappings, whether devnet_ports derived a worktree
+# block or the caller overrode individual DEVNET_*_PORT variables.
+if [[ "${MODE}" == "conformance" ]]; then
+  DINGO_PORT="${DEVNET_DINGO_PORT:-3010}"
+  CARDANO_PORT="${DEVNET_CARDANO_PORT:-3011}"
+  RELAY_PORT="${DEVNET_RELAY_PORT:-3012}"
+else
+  DINGO1_PORT="${DEVNET_DINGO1_PORT:-3010}"
+  DINGO2_PORT="${DEVNET_DINGO2_PORT:-3013}"
+  DINGO3_PORT="${DEVNET_DINGO3_PORT:-3014}"
+  DINGO_RELAY_PORT="${DEVNET_DINGO_RELAY_PORT:-3015}"
+fi
+
+# Pick the network spec the configurator generates genesis from. The
+# accelerated spec compresses slot, epoch and security-parameter timing so
+# a full scenario fits the reference-runner budget; the canonical spec is
+# what soak and canary runs use.
+if [[ "${LEIOS}" == "true" ]]; then
+  export DEVNET_DINGO_SPEC="./testnet-dingo-leios.yaml"
+  export DEVNET_LEIOS_ENABLED=1
+  export DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE="/configs/keys/leios-vote.skey"
+  export DEVNET_DINGO_RUN_MODE=leios
+  export DEVNET_DINGO_START_ERA=dijkstra
+  export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
+  # Keep EB outputs in the tx pump's wallet quarantine until the scenario
+  # queries the relay ledger; this delay is not proof of on-chain confirmation.
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
+  ACTIVE_SPEC="${DEVNET_DINGO_SPEC}"
+  echo "Using Dijkstra/Leios network spec: ${ACTIVE_SPEC}"
+  echo "Run the producer-to-peer scenario with:"
+  echo "  DEVNET_LEIOS_ENABLED=1 \\"
+  echo "  DEVNET_TESTNET_YAML=${SCRIPT_DIR}/${ACTIVE_SPEC#./} \\"
+  echo "  DEVNET_COMPOSE_FILE=${SCRIPT_DIR}/docker-compose.yml \\"
+  echo "  DEVNET_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME} \\"
+  echo "  DEVNET_DINGO1_ADDR=localhost:${DINGO1_PORT} \\"
+  echo "  DEVNET_DINGO2_ADDR=localhost:${DINGO2_PORT} \\"
+  echo "  DEVNET_DINGO3_ADDR=localhost:${DINGO3_PORT} \\"
+  echo "  DEVNET_DINGO_RELAY_ADDR=localhost:${DINGO_RELAY_PORT} \\"
+  echo "  DEVNET_DINGO_RELAY_NTC_ADDR=localhost:${DEVNET_DINGO_RELAY_NTC_PORT:-3023} \\"
+  echo "  go test -tags devnet -run '^TestLeiosEndorserBlockProducerToPeer$' \\"
+  echo "    -timeout 12m ./internal/test/devnet/scenarios/"
+elif [[ "${ACCELERATED}" == "true" ]]; then
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=100
+  if [[ "${MODE}" == "conformance" ]]; then
+    export DEVNET_CONFORMANCE_SPEC="./testnet-accelerated.yaml"
+    ACTIVE_SPEC="${DEVNET_CONFORMANCE_SPEC}"
+  else
+    export DEVNET_DINGO_SPEC="./testnet-dingo-accelerated.yaml"
+    ACTIVE_SPEC="${DEVNET_DINGO_SPEC}"
+  fi
+  echo "Using accelerated network spec: ${ACTIVE_SPEC}"
+  echo "Run the scenario with:"
+  echo "  COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} \\"
+  echo "  DEVNET_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME} \\"
+  echo "  DEVNET_ACCELERATED=1 \\"
+  echo "  DEVNET_TESTNET_YAML=${SCRIPT_DIR}/${ACTIVE_SPEC#./} \\"
+  echo "  DEVNET_COMPOSE_FILE=${SCRIPT_DIR}/docker-compose.yml \\"
+  # The Go harness reads full host:port DEVNET_*_ADDR variables, not the
+  # DEVNET_*_PORT variables docker-compose.yml reads — devnet_ports may
+  # have derived non-default ports, so these have to be spelled out here
+  # or the copy-pasted command below would connect to the wrong ports.
+  if [[ "${MODE}" == "conformance" ]]; then
+    echo "  DEVNET_DINGO_ADDR=localhost:${DINGO_PORT} \\"
+    echo "  DEVNET_CARDANO_ADDR=localhost:${CARDANO_PORT} \\"
+    echo "  DEVNET_RELAY_ADDR=localhost:${RELAY_PORT} \\"
+  else
+    echo "  DEVNET_DINGO1_ADDR=localhost:${DINGO1_PORT} \\"
+    echo "  DEVNET_DINGO2_ADDR=localhost:${DINGO2_PORT} \\"
+    echo "  DEVNET_DINGO3_ADDR=localhost:${DINGO3_PORT} \\"
+    echo "  DEVNET_DINGO_RELAY_ADDR=localhost:${DINGO_RELAY_PORT} \\"
+  fi
+  echo "  go test -tags devnet -run TestAcceleratedScenarioTimeline \\"
+  echo "    -timeout 8m ./internal/test/devnet/scenarios/"
+else
+  unset DEVNET_LEIOS_ENABLED DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE
+  unset DEVNET_DINGO_RUN_MODE
+  unset DEVNET_DINGO_START_ERA
+  unset DEVNET_TXPUMP_TRANSACTION_ERA
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
+fi
+
+echo "Starting DevNet containers (mode: ${MODE}, project: ${COMPOSE_PROJECT_NAME}, net: ${DEVNET_NET_BASE}.0/24)..."
+devnet_compose_up "${SCRIPT_DIR}/docker-compose.yml"
+echo "Compose network (final): ${DEVNET_NET_BASE}.0/24"
 
 echo ""
-echo "DevNet started."
-echo "  Dingo producer:   localhost:${DINGO_PORT}"
-echo "  Cardano producer: localhost:${CARDANO_PORT}"
-echo "  Cardano relay:    localhost:${RELAY_PORT}"
+if [[ "${MODE}" == "conformance" ]]; then
+  echo "DevNet started (conformance mode)."
+  echo "  Dingo producer:   localhost:${DINGO_PORT}"
+  echo "  Cardano producer: localhost:${CARDANO_PORT}"
+  echo "  Cardano relay:    localhost:${RELAY_PORT}"
+else
+  echo "DevNet started (dingo mode)."
+  echo "  dingo-1:     localhost:${DINGO1_PORT}"
+  echo "  dingo-2:     localhost:${DINGO2_PORT}"
+  echo "  dingo-3:     localhost:${DINGO3_PORT}"
+  echo "  dingo-relay: localhost:${DINGO_RELAY_PORT}"
+fi
 echo ""
-echo "View logs:  docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs -f"
-echo "Stop:       ${SCRIPT_DIR}/stop.sh"
+echo "View logs:  COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} docker compose -f ${SCRIPT_DIR}/docker-compose.yml logs -f"
+echo "Stop:       COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} ${SCRIPT_DIR}/stop.sh"

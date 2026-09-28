@@ -16,23 +16,205 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
+
+const (
+	// maxHardForkDuration is the largest value a time.Duration can hold.
+	maxHardForkDuration = time.Duration(1<<63 - 1)
+	// maxHardForkDurationNanoseconds is maxHardForkDuration expressed as an
+	// unsigned nanosecond count, for bounds checks against unsigned cached
+	// epoch values.
+	maxHardForkDurationNanoseconds = uint64(1<<63 - 1)
+	// maxHardForkSlotLengthMilliseconds is the largest cached slot length, in
+	// milliseconds, that fits in a time.Duration.
+	maxHardForkSlotLengthMilliseconds = maxHardForkDurationNanoseconds / uint64(time.Millisecond)
+)
+
+// hardForkCachedEraParams converts one cached epoch row into hardfork.EraParams,
+// rejecting only a slot length that cannot be represented as a time.Duration.
+//
+// It deliberately does not call EraParams.Validate. A cached epoch row carries
+// a zero EpochSize/SlotLength when the epoch record has not been populated yet
+// (epochRollover treats SlotLength == 0 as exactly that sentinel), and summary
+// construction accepted such rows before durations were bounded. Where valid
+// era parameters are actually required, hardfork.BuildSummary validates the
+// current era's params and returns an error of its own.
+func hardForkCachedEraParams(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (hardfork.EraParams, error) {
+	if uint64(slotLengthMilliseconds) > maxHardForkSlotLengthMilliseconds {
+		return hardfork.EraParams{}, fmt.Errorf(
+			"slot length %dms overflows time.Duration",
+			slotLengthMilliseconds,
+		)
+	}
+	return hardfork.EraParams{
+		EpochSize:  uint64(lengthInSlots),
+		SlotLength: time.Duration(slotLengthMilliseconds) * time.Millisecond,
+	}, nil
+}
+
+func hardForkCachedEpochDuration(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (time.Duration, error) {
+	params, err := hardForkCachedEraParams(
+		lengthInSlots,
+		slotLengthMilliseconds,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if slotLengthMilliseconds == 0 {
+		// An unpopulated epoch row contributes no wall-clock time, which is
+		// what the unbounded arithmetic this replaced also produced. Returning
+		// early also keeps the division below away from a zero divisor.
+		return 0, nil
+	}
+	slotLengthNanoseconds := uint64(slotLengthMilliseconds) *
+		uint64(time.Millisecond)
+	if uint64(lengthInSlots) >
+		maxHardForkDurationNanoseconds/slotLengthNanoseconds {
+		return 0, fmt.Errorf(
+			"epoch duration overflows time.Duration: length=%d slots, slot length=%s",
+			lengthInSlots,
+			params.SlotLength,
+		)
+	}
+	// #nosec G115 -- the checked product is bounded by MaxInt64.
+	return time.Duration(uint64(lengthInSlots) * slotLengthNanoseconds), nil
+}
+
+// hardForkSummaryCacheKey identifies the exact published state and requested
+// horizon anchor a cached hardfork.Summary was built for.
+//
+// generation is the shared consensus/tip snapshot publication counter (see
+// LedgerState.publishSnapshotsLocked and loadStateSnapshots): every trigger
+// that can change hardForkSummaryAnchoredAt's result -- epoch rollover, era
+// transition, rollback, and any transitionInfo state change -- mutates
+// writer-owned state under ls.Lock() and always calls publishSnapshotsLocked
+// before Unlock, which bumps generation and publishes a new immutable
+// consensusSnapshot/tipSnapshot pair. A cache entry keyed on generation is
+// therefore invalidated by construction on every one of those triggers: it is
+// impossible for the underlying epochCache, transitionInfo, or currentTip to
+// change while generation stays the same, because every writer path already
+// goes through that single publish point. This is the same invariant every
+// other lock-free reader of consensusSnapshot/tipSnapshot already relies on;
+// this cache adds no new one.
+//
+// horizonAnchorSlot is part of the key because callers legitimately request
+// different horizons against the same published generation (mempool/near-tip
+// queries via HardForkSummary's anchor of 0, and per-block transaction
+// validation via a LedgerView's pinned predecessor-slot anchor); collapsing
+// those into one cache slot would silently serve one caller's horizon to
+// another using a different anchor at the same generation
+// (TestHardForkSummary_HorizonAnchoredAtAppliedParent exercises exactly this
+// by calling three different anchors against one published generation).
+type hardForkSummaryCacheKey struct {
+	generation        uint64
+	horizonAnchorSlot uint64
+}
+
+// hardForkSummaryCacheEntry is the value atomically published in
+// LedgerState.hardForkSummaryCache.
+//
+// A build for a stale key can race a concurrent build for a newer one and
+// overwrite it; the key comparison in hardForkSummaryAnchoredAt always checks
+// against the *current* snapshot generation (not against whatever the cache
+// happens to hold), so a clobbered entry only costs one extra rebuild on the
+// next call -- it can never serve a wrong answer.
+type hardForkSummaryCacheEntry struct {
+	key     hardForkSummaryCacheKey
+	summary *hardfork.Summary
+	err     error
+}
 
 // HardForkSummary constructs a hardfork.Summary describing the chain's era
 // history from the LedgerState's current epoch cache, tip, current era, and
 // transition info.
 //
 // The returned Summary's past eras are closed with bounds computed by walking
-// the epoch cache grouped by EraId. The current era (the last group) is left
-// unbounded (SafeZoneSlots == 0), preserving the existing "project forward
-// using the current era's parameters" behavior of LedgerState.SlotToTime and
-// friends. Once dingo tracks per-era safe zones end-to-end, this will flip to
-// a bounded end sourced from BuildSummary + the real TransitionInfo.
+// the epoch cache grouped by EraId. The current era is passed through
+// hardfork.BuildSummary with the safe zone from the configured era Shape and
+// the ledger's current TransitionInfo. This gives in-memory callers the same
+// bounded forecast inputs used by the NtC HardForkEraHistory query.
+//
+// The forecast horizon is measured from the published tip. Callers that know a
+// more recent applied block must use hardForkSummaryAnchoredAt instead.
+//
+// The result is cached per hardForkSummaryCacheKey (see its doc comment); the
+// underlying epoch-cache walk is O(known epochs), which otherwise grows
+// without bound as the chain ages (issue #2093).
+//
+// The returned Summary is shared by every caller holding the same cache entry
+// and must be treated as read only. Callers must not assign to its fields,
+// append to Eras, or write through an interior pointer such as the one
+// CurrentEra returns; doing so would corrupt the era boundaries every
+// concurrent reader sees. Copy it first if a mutable Summary is needed. The
+// alternative — returning a deep copy per call — would restore the per-call
+// allocation this cache exists to remove.
 func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
+	return ls.hardForkSummaryAnchoredAt(0)
+}
+
+// hardForkSummaryAnchoredAt is HardForkSummary with the current era's forecast
+// horizon measured from max(published tip slot, horizonAnchorSlot).
+//
+// The published tip only advances when a whole block batch commits (batchSize
+// blocks), so during replay it can trail the block actually being applied by
+// up to a full batch. The reference implementation measures the safe zone from
+// the applied block's immediate predecessor
+// (Ouroboros.Consensus.HardFork.Combinator.State.Infra.reconstructSummary,
+// reached from applyChainTickLedgerResult's epochInfoLedger on the state left
+// by that predecessor). Because applySafeZone snaps the bound up to an epoch
+// boundary, a tip that trails by even one block can cost a whole epoch of
+// horizon and reject a transaction the reference accepts (issue #3844).
+//
+// horizonAnchorSlot 0 keeps the published tip, which is what every caller
+// without an applied block in hand wants.
+//
+// The returned Summary is cached and shared; see HardForkSummary for the
+// read-only contract every caller of either method is bound by.
+func (ls *LedgerState) hardForkSummaryAnchoredAt(
+	horizonAnchorSlot uint64,
+) (*hardfork.Summary, error) {
+	consensusState, tipState := ls.loadStateSnapshots()
+	key := hardForkSummaryCacheKey{
+		generation:        consensusState.generation,
+		horizonAnchorSlot: horizonAnchorSlot,
+	}
+	if cached := ls.hardForkSummaryCache.Load(); cached != nil &&
+		cached.key == key {
+		return cached.summary, cached.err
+	}
+
+	summary, err := ls.buildHardForkSummary(
+		consensusState,
+		tipState,
+		horizonAnchorSlot,
+	)
+	ls.hardForkSummaryCache.Store(&hardForkSummaryCacheEntry{
+		key:     key,
+		summary: summary,
+		err:     err,
+	})
+	return summary, err
+}
+
+// buildHardForkSummary is hardForkSummaryAnchoredAt's uncached body: it walks
+// the given (already-published, immutable) consensus/tip snapshot pair and
+// constructs a fresh hardfork.Summary. Callers must not mutate consensusState
+// or tipState, or any slice they own.
+func (ls *LedgerState) buildHardForkSummary(
+	consensusState *consensusSnapshot,
+	tipState *tipSnapshot,
+	horizonAnchorSlot uint64,
+) (*hardfork.Summary, error) {
 	// SystemStart is sourced from the Shelley genesis when available. When it
 	// isn't (e.g. SlotToEpoch-style callers that work from the epoch cache
 	// alone), SystemStart stays at the zero time.Time and callers must avoid
@@ -44,11 +226,9 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		}
 	}
 
-	ls.RLock()
-	cache := make([]models.Epoch, len(ls.epochCache))
-	copy(cache, ls.epochCache)
-	transitionInfo := ls.transitionInfo
-	ls.RUnlock()
+	cache := consensusState.epochCache
+	transitionInfo := consensusState.transitionInfo
+	tipSlot := max(tipState.currentTip.Point.Slot, horizonAnchorSlot)
 
 	if len(cache) == 0 {
 		return nil, errors.New("ledger: no epochs in cache")
@@ -57,7 +237,7 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	// Walk the epoch cache grouping contiguous epochs by EraId. Each group
 	// becomes one EraSummary; its Start is derived from the first epoch of
 	// the group, and its End (for past eras) is the Start of the next group.
-	var eras []hardfork.EraSummary
+	eraSummaries := make([]hardfork.EraSummary, 0, len(cache))
 	relTime := time.Duration(0)
 
 	i := 0
@@ -66,10 +246,20 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		eraID := first.EraId
 		// Per-epoch params within an era are expected to be constant; we use
 		// the first epoch's values as the era-level params.
-		// first.SlotLength is protocol-bounded (milliseconds per slot).
-		// #nosec G115
-		slotLen := time.Duration(first.SlotLength) * time.Millisecond
-		epochSize := uint64(first.LengthInSlots)
+		eraParams, err := hardForkCachedEraParams(
+			first.LengthInSlots,
+			first.SlotLength,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"ledger: cached epoch %d (era %d) params invalid: %w",
+				first.EpochId,
+				eraID,
+				err,
+			)
+		}
+		slotLen := eraParams.SlotLength
+		epochSize := eraParams.EpochSize
 
 		start := hardfork.Bound{
 			RelativeTime: relTime,
@@ -82,10 +272,26 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		j := i
 		for j < len(cache) && cache[j].EraId == eraID {
 			ep := cache[j]
-			// LengthInSlots and SlotLength are protocol-bounded uints.
-			// #nosec G115
-			relTime += time.Duration(ep.LengthInSlots) *
-				time.Duration(ep.SlotLength) * time.Millisecond
+			epochDuration, err := hardForkCachedEpochDuration(
+				ep.LengthInSlots,
+				ep.SlotLength,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"ledger: cached epoch %d (era %d) params invalid: %w",
+					ep.EpochId,
+					eraID,
+					err,
+				)
+			}
+			if epochDuration > maxHardForkDuration-relTime {
+				return nil, fmt.Errorf(
+					"ledger: cumulative cached epoch duration overflows time.Duration at epoch %d (era %d)",
+					ep.EpochId,
+					eraID,
+				)
+			}
+			relTime += epochDuration
 			j++
 		}
 
@@ -96,13 +302,13 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 			Epoch:        last.EpochId + 1,
 		}
 
-		era := hardfork.EraSummary{
+		eraSummary := hardfork.EraSummary{
 			EraID: eraID,
 			Start: start,
 			Params: hardfork.EraParams{
 				EpochSize:     epochSize,
 				SlotLength:    slotLen,
-				SafeZoneSlots: 0, // UnsafeIndefiniteSafeZone — preserve projection
+				SafeZoneSlots: 0,
 				GenesisWindow: 0,
 			},
 		}
@@ -110,16 +316,164 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		isLast := j == len(cache)
 		if !isLast {
 			// Close this era at the next era's start.
-			era.End = &end
+			eraSummary.End = &end
 		}
-		eras = append(eras, era)
+		eraSummaries = append(eraSummaries, eraSummary)
 
 		i = j
 	}
 
-	return &hardfork.Summary{
-		SystemStart: systemStart,
-		Eras:        eras,
-		Transition:  transitionInfo,
-	}, nil
+	current := eraSummaries[len(eraSummaries)-1]
+	past := eraSummaries[:len(eraSummaries)-1]
+
+	// Use the same configured safe-zone source as the NtC era-history query.
+	// A missing shape or current-era entry cannot safely supply a forecast:
+	// the cache-derived current era has a zero safe zone and no end bound.
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %w",
+			err,
+		)
+	}
+	shapeEntry, shapeAvailable := shape.EraForID(current.EraID)
+	if shapeAvailable {
+		current.Params.SafeZoneSlots = shapeEntry.Params.SafeZoneSlots
+		current.Params.GenesisWindow = shapeEntry.Params.GenesisWindow
+		if !shape.SystemStart.IsZero() {
+			systemStart = shape.SystemStart
+		}
+	}
+	if !shapeAvailable {
+		eraName := consensusState.currentEra.Name
+		if eraName == "" {
+			eraName = fmt.Sprintf("ID %d", current.EraID)
+		}
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %s era is unavailable "+
+				"in the hard-fork shape",
+			eraName,
+		)
+	}
+
+	effectiveTransition := transitionInfo
+	if transitionInfo.State == hardfork.TransitionImpossible {
+		// queryHardForkEraHistory can stop at the confirmed current epoch
+		// boundary because it serves a point-in-time answer. Live slot and
+		// header processing must remain able to cross that boundary in the
+		// same era. Apply the rolling safe zone from the tip while preserving
+		// TransitionImpossible on the returned Summary.
+		effectiveTransition = hardfork.NewTransitionUnknown()
+	}
+
+	summary, err := hardfork.BuildSummary(
+		hardfork.Shape{SystemStart: systemStart},
+		past,
+		current,
+		tipSlot,
+		effectiveTransition,
+	)
+	if err != nil {
+		return nil, err
+	}
+	summary.Transition = transitionInfo
+
+	// When a known transition is armed, BuildSummary bounds the current era at
+	// the announced epoch boundary (mkUpperBound) and appends no successor era.
+	// That leaves the summary's last era bounded, so eraForSlot / SlotToEpoch
+	// return ErrPastHorizon for every slot at or past the boundary. The header
+	// forecast-horizon gate in verify_header.go then hard-rejects the first
+	// header of the post-boundary epoch, and the node can never apply the block
+	// that would consume the transition and extend era history — a liveness
+	// deadlock at the boundary. Unlike the NtC era-history query, which serves a
+	// point-in-time answer and is intentionally bounded, live header
+	// verification must see the horizon extend at least one epoch past a known
+	// transition, because the rollover is deterministic within the stability
+	// window. Append the successor era starting at the announced boundary so the
+	// horizon covers the first post-boundary epoch. hardfork.SuccessorEra bounds
+	// it by the successor's own safe zone measured from max(tipSlot+1,
+	// boundary) -- the same tipSlot BuildSummary used for the bounded era
+	// above -- which always snaps up to at least the next epoch boundary; the
+	// successor stays open only when the resolved safe zone is zero
+	// (UnsafeIndefiniteSafeZone), the same rule BuildSummary applies to the
+	// current era. Passing tipSlot here, rather than measuring only from the
+	// boundary, is what keeps the successor's horizon rolling forward with the
+	// live tip once the boundary is behind it instead of freezing at
+	// boundary+safeZone. Take the successor by shape order rather than EraID+1 so
+	// non-contiguous EraID values still resolve; when the current era is the
+	// last modeled era (the transition re-arms an era the ledger already
+	// occupies), reuse the current era's params — epoch length and slot length
+	// are constant across post-Byron eras, which is all SlotToEpoch needs.
+	// Mirrors the successor-era recursion in Haskell HFC reconstructSummary.
+	if transitionInfo.State == hardfork.TransitionKnown &&
+		len(summary.Eras) > 0 {
+		bounded := summary.Eras[len(summary.Eras)-1]
+		if bounded.End != nil {
+			succEraID := bounded.EraID
+			succParams := bounded.Params
+			if idx, ok := shape.EraIndex(bounded.EraID); ok &&
+				idx+1 < len(shape.Eras) {
+				next := shape.Eras[idx+1]
+				succEraID = next.EraID
+				succParams = next.Params
+			}
+			summary.Eras = append(summary.Eras, hardfork.SuccessorEra(
+				*bounded.End,
+				succEraID,
+				hardfork.EraParams{
+					EpochSize:     succParams.EpochSize,
+					SlotLength:    succParams.SlotLength,
+					SafeZoneSlots: succParams.SafeZoneSlots,
+					GenesisWindow: succParams.GenesisWindow,
+				},
+				tipSlot,
+			))
+		}
+	}
+	return &summary, nil
+}
+
+// WallClockSlotFromConfirmedHistory returns the absolute slot corresponding to
+// the current wall-clock time derived only from the confirmed era history, and
+// false when the wall clock falls past that history's forecast horizon.
+//
+// Only the past-horizon case reports false. Any other failure -- an empty
+// epoch cache, a summary that will not build, a wall clock before genesis --
+// is returned as an error instead. The distinction matters to the block
+// producer: false means "cannot judge yet, defer and let the per-slot gate
+// enforce", so conflating a genuine internal failure with it would silently
+// downgrade a hard startup failure into a warning. Note that before-genesis
+// reaches here as hardfork.ErrBeforeGenesis, a different sentinel from
+// ledger.ErrBeforeGenesis, and returning it as an error keeps that case a
+// hard failure regardless of which sentinel a caller happens to check.
+//
+// In the false case CurrentSlot can only extrapolate the wall clock through
+// the newest confirmed era's slot length, which does not reflect chains whose
+// later eras have not been applied yet: a mainnet node importing from genesis
+// judges the wall clock with Byron's 20s slots even though the real chain
+// moved to one-second slots at epoch 208. Operational callers that must make a
+// time-sensitive judgement against the wall-clock slot — such as the block
+// producer's operational-certificate KES-period preflight — should use this
+// instead of the extrapolated CurrentSlot, and defer the judgement until the
+// confirmed era history spans the wall clock again.
+func (ls *LedgerState) WallClockSlotFromConfirmedHistory() (
+	uint64,
+	bool,
+	error,
+) {
+	sum, err := ls.HardForkSummary()
+	if err != nil {
+		return 0, false, fmt.Errorf("build confirmed era summary: %w", err)
+	}
+	slot, err := sum.TimeToSlot(time.Now())
+	switch {
+	case errors.Is(err, hardfork.ErrPastHorizon):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf(
+			"resolve wall-clock slot from confirmed history: %w",
+			err,
+		)
+	}
+	return slot, true, nil
 }

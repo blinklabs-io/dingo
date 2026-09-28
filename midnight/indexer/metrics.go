@@ -1,0 +1,121 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package indexer
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// indexerMetrics holds the Prometheus instruments for the Midnight indexer's
+// block-scan path.
+type indexerMetrics struct {
+	blocksIndexed prometheus.Counter
+	eventsTotal   *prometheus.CounterVec
+	// Catch-up view. Unlike the counters above these are gauges describing
+	// where the indexer currently stands, so they are safe to read as an
+	// absolute position rather than a rate.
+	checkpointSlot     prometheus.Gauge
+	backfillTargetSlot prometheus.Gauge
+	backfillInProgress prometheus.Gauge
+}
+
+// newIndexerMetrics registers the indexer's counters against reg. reg may be
+// nil (promauto skips registration but still returns usable instruments), or
+// it may be node.go's rebuildableRegisterer wrapper -- a live restore/
+// truncate reconstructs the indexer via New, and node_lifecycle.go's
+// unregisterAll() runs first, so the re-registration here never collides
+// with the previous instance's collectors (see metrics_registerer.go).
+//
+// Both counters are cumulative processing counts, not a live view of what
+// midnight_* rows currently exist in the database, and are never
+// decremented -- see recordBlockEvents and rollbackBlock.
+func newIndexerMetrics(reg prometheus.Registerer) *indexerMetrics {
+	factory := promauto.With(reg)
+	return &indexerMetrics{
+		blocksIndexed: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_midnight_blocks_indexed_total",
+			Help: "cumulative blocks committed by the Midnight indexer; not decremented when a later chain reorg rolls one back (see rollbackBlock)",
+		}),
+		eventsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "dingo_midnight_events_total",
+			Help: "cumulative Midnight events committed, by type (create, spend, registration, deregistration); not decremented on chain-reorg rollback, and may include idempotent-replay recounts after a crash restart (see processTx/processOutput)",
+		}, []string{"type"}),
+		checkpointSlot: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_midnight_indexer_checkpoint_slot",
+			Help: "slot of the last block the Midnight indexer committed, from either the startup backfill or a live block event",
+		}),
+		backfillTargetSlot: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_midnight_backfill_target_slot",
+			Help: "applied ledger tip slot the Midnight startup backfill targets; subtract dingo_midnight_indexer_checkpoint_slot for remaining catch-up. 0 when no ledger-tip resolver is configured",
+		}),
+		backfillInProgress: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_midnight_backfill_in_progress",
+			Help: "1 while the Midnight startup backfill is scanning stored blocks, 0 otherwise",
+		}),
+	}
+}
+
+// setCheckpoint publishes the indexer's last committed slot. Called from
+// updateCheckpoint so backfill and live block events share one gauge:
+// subtracting it from backfillTargetSlot gives remaining catch-up.
+func (m *indexerMetrics) setCheckpoint(slot uint64) {
+	m.checkpointSlot.Set(float64(slot))
+}
+
+// setBackfillTarget publishes the resolved catch-up target. It is set even
+// when the node starts already caught up, so backfillTargetSlot minus
+// checkpointSlot is a meaningful remaining-catch-up figure at all times
+// rather than only during a sweep. Left in place afterwards so the range the
+// sweep covered stays visible.
+func (m *indexerMetrics) setBackfillTarget(slot uint64) {
+	m.backfillTargetSlot.Set(float64(slot))
+}
+
+// beginBackfill / endBackfill bracket the sweep itself.
+func (m *indexerMetrics) beginBackfill() {
+	m.backfillInProgress.Set(1)
+}
+
+func (m *indexerMetrics) endBackfill() {
+	m.backfillInProgress.Set(0)
+}
+
+// recordBlockEvents applies one committed block's tallies: one blocksIndexed
+// increment, plus each entry in counts added to eventsTotal by type. Called
+// only after processBlock's transaction commits, so a block that fails and
+// rolls back *within processBlock itself* (a write later in the same block
+// failed) never contributes to either metric -- counts is a plain map
+// accumulated during scanning specifically so nothing touches Prometheus
+// until the block's rows are actually durable.
+//
+// This is a different rollback than rollbackBlock's chain-reorg undo, which
+// runs after this function already ran for the block being undone. Both
+// counters are standard monotonic Prometheus _total counters (their value
+// is meant to feed rate()/increase(), which assume a counter only goes up --
+// an occasional decrease reads as a process restart, not real data), so a
+// chain reorg that deletes previously-committed midnight_* rows via
+// rollbackBlock intentionally does not decrement either counter here. They
+// answer "how much has the indexer ever committed," not "how many midnight_*
+// rows exist right now" -- query the tables directly for the latter.
+func (m *indexerMetrics) recordBlockEvents(counts map[string]int) {
+	m.blocksIndexed.Inc()
+	for eventType, n := range counts {
+		if n <= 0 {
+			continue
+		}
+		m.eventsTotal.WithLabelValues(eventType).Add(float64(n))
+	}
+}

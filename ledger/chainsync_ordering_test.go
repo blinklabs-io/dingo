@@ -23,37 +23,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestProcessEpochRollover_OrderingInvariant pins the EPOCH→HARDFORK call
-// sequence inside processEpochRollover. The order matters for correctness
-// (see the long-form comment at the top of processEpochRollover's body)
-// but is otherwise hard to test through observable side effects without
-// substantial governance + pparams + cert fixture setup.
-//
-// This is a structural lock-in test: it parses chainsync.go's AST, locates
-// the body of processEpochRollover, and asserts that the named call
-// expressions appear in the expected source order. A future refactor that
-// reorders these calls — even if all unit tests pass — will fail this
-// test loudly. The error message points to the comment block that
-// documents the invariant.
-//
-// Markers are matched by suffix on the call's selector expression so that
-// receiver renames (`ls.db` → `ls.metadata`) don't churn the test.
-func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
-	const targetFunc = "processEpochRollover"
-
-	// In source order, the calls that must appear inside processEpochRollover.
-	// Each entry is the trailing identifier of a SelectorExpr (or a bare
-	// Ident for unqualified calls).
-	wantOrder := []string{
-		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
-		"ProcessEpoch",                 // (2) Conway-style governance enact
-		"SetPParams",                   // (3) persist enacted pparams
-		"isHardForkTransition",         // (4) inter-era boundary detection
-		"applyIntraEraHardForkRule",    // (5) per-major-version HARDFORK rule
-	}
+// observeProcessEpochRolloverCallOrder parses chainsync.go, locates the body of
+// targetFunc, and reports the source-order appearance of the calls named in
+// wantOrder. It returns seen (which markers were found) and observed (the
+// markers in source order by first occurrence). Only the markers present in
+// wantOrder are considered.
+func observeProcessEpochRolloverCallOrder(
+	t *testing.T,
+	targetFunc string,
+	wantOrder []string,
+) (seen map[string]bool, observed []string) {
+	t.Helper()
 
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "chainsync.go", nil, parser.SkipObjectResolution)
+	file, err := parser.ParseFile(
+		fset,
+		"chainsync.go",
+		nil,
+		parser.SkipObjectResolution,
+	)
 	require.NoError(t, err, "parse chainsync.go")
 
 	var fnDecl *ast.FuncDecl
@@ -103,8 +91,7 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 
 	// Build the observed order by first occurrence (a marker can appear
 	// in nested branches; we only care about its first appearance).
-	seen := make(map[string]bool, len(wantOrder))
-	var observed []string
+	seen = make(map[string]bool, len(wantOrder))
 	for _, h := range hits {
 		if seen[h.marker] {
 			continue
@@ -112,6 +99,55 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 		seen[h.marker] = true
 		observed = append(observed, h.marker)
 	}
+	return seen, observed
+}
+
+// TestProcessEpochRollover_OrderingInvariant pins the EPOCH→HARDFORK call
+// sequence inside processEpochRollover. The order matters for correctness
+// (see the long-form comment at the top of processEpochRollover's body)
+// but is otherwise hard to test through observable side effects without
+// substantial governance + pparams + cert fixture setup.
+//
+// This is a structural lock-in test: it parses chainsync.go's AST, locates
+// the body of processEpochRollover, and asserts that the named call
+// expressions appear in the expected source order. A future refactor that
+// reorders these calls — even if all unit tests pass — will fail this
+// test loudly. The error message points to the comment block that
+// documents the invariant.
+//
+// Markers are matched by suffix on the call's selector expression so that
+// receiver renames (`ls.db` → `ls.metadata`) don't churn the test.
+func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
+	t.Parallel()
+
+	const targetFunc = "processEpochRollover"
+
+	// In source order, the calls that must appear inside processEpochRollover.
+	// Each entry is the trailing identifier of a SelectorExpr (or a bare
+	// Ident for unqualified calls).
+	//
+	// applyMIRCerts precedes applyPoolRetirements because that is the reference
+	// sequence: Shelley's NEWEPOCH rule embeds MIR between applyRUpd and EPOCH,
+	// and EPOCH's own sub-rules are SNAP then POOLREAP. MIR is therefore both
+	// pre-SNAP (its credits belong in the mark snapshot) and pre-POOLREAP (its
+	// pot movements are visible to the deposit refunds). dingo ran POOLREAP
+	// before MIR until the epoch-boundary snapshot semantics were corrected.
+	wantOrder := []string{
+		"applyMIRCerts",                       // (1) Shelley-era INSTANT rule, pre-SNAP
+		"ComputeAndApplyPParamUpdates",        // (2) Shelley-style pparam updates
+		"applyPoolRetirements",                // (3) embedded POOLREAP deposit refunds
+		"activateDelegatorInactivityIfNeeded", // (4) CIP-0163 activation
+		"ProcessEpoch",                        // (5) Conway-style governance enact
+		"SetPParams",                          // (6) persist enacted pparams
+		"isHardForkTransition",                // (7) inter-era boundary detection
+		"applyIntraEraHardForkRule",           // (8) per-major-version HARDFORK rule
+	}
+
+	seen, observed := observeProcessEpochRolloverCallOrder(
+		t,
+		targetFunc,
+		wantOrder,
+	)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],
@@ -132,4 +168,48 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 			"reorder is intentional, update both the comment and "+
 			"wantOrder in this test.",
 		targetFunc, wantOrder, observedFiltered)
+}
+
+// TestProcessEpochRollover_RewardOrdering pins the placement of the stake
+// reward application and the ADA-pot capture relative to the rest of the
+// epoch boundary. The delayed reward update (applyStakeRewards) must run
+// before governance reads the treasury, and the ADA-pot snapshot
+// (saveRewardAdaPotsForEpoch) must run after every boundary treasury/reserves
+// mutation so it observes the fully settled pots. It uses the same structural
+// AST approach as TestProcessEpochRollover_OrderingInvariant so a reorder
+// fails loudly even when unit tests pass.
+func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
+	t.Parallel()
+
+	const targetFunc = "processEpochRollover"
+
+	// In source order: reward application first, then the governance/pparam
+	// core, then the ADA-pot capture last.
+	wantOrder := []string{
+		"applyStakeRewards",            // (1) delayed reward update, pre-governance
+		"ComputeAndApplyPParamUpdates", // pparam updates
+		"ProcessEpoch",                 // governance enact (reads treasury)
+		"applyIntraEraHardForkRule",    // last treasury/reserves mutation
+		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
+	}
+
+	seen, observed := observeProcessEpochRolloverCallOrder(
+		t,
+		targetFunc,
+		wantOrder,
+	)
+
+	for _, m := range wantOrder {
+		require.True(t, seen[m],
+			"reward marker %q not found in %s body — was it renamed or "+
+				"removed? Stake reward application and ADA-pot capture must "+
+				"stay wired into the epoch rollover.",
+			m, targetFunc)
+	}
+
+	require.Equal(t, wantOrder, observed,
+		"reward call sequence in %s drifted. applyStakeRewards must precede "+
+			"governance and saveRewardAdaPotsForEpoch must follow every "+
+			"boundary treasury/reserves mutation. Expected %v, observed %v.",
+		targetFunc, wantOrder, observed)
 }

@@ -15,9 +15,19 @@
 // Package mempool implements Dingo's transaction pool. It accepts
 // transactions from local clients (N2C) and relayed txsubmission
 // traffic (N2N), validates them against the current ledger state,
-// and holds them until they are included in a block or evicted.
+// and holds them until they are included in a block, evicted, or expired.
 //
-// Mempool is the top-level type. It validates every submitted
+// Service is the backend-neutral node contract. FIFO is the default backend
+// and orders transactions by successful admission: independent submissions
+// retain arrival order, and a duplicate refresh does not move a transaction.
+// DAG is the alternative backend. It indexes pending producers plus
+// parent/child edges, and caches successful-admission order, which is
+// topological because a pending parent must exist before a child can be
+// admitted. DAG never watermark-evicts; network intake waits for admission
+// headroom instead. Mempool remains the shared engine embedded by both backends
+// for source compatibility.
+//
+// Both backends validate every submitted
 // transaction through the ledger package — UTxO resolution, fees,
 // ExUnit budgets, validity interval, size, and the full UTxO validation
 // rules enforced by the ledger package — before admitting it. Transactions
@@ -26,16 +36,21 @@
 //
 // # Eviction and watermarks
 //
-// The pool uses a two-level watermark scheme:
+// FIFO uses a two-level watermark scheme:
 //
-//   - EvictionWatermark  — above this fill level, lowest-priority txs
-//     are evicted to make room for higher-priority ones
+//   - EvictionWatermark  — above this fill level, oldest pending txs are
+//     evicted from the front of the queue; a value of 0
+//     disables eviction entirely
 //   - RejectionWatermark — above this fill level, new submissions are
 //     rejected outright
 //
-// Eviction is driven by transaction priority (fee density), not
-// arrival order. This keeps the pool stable under burst submission
-// without unfairly discarding high-value txs.
+// When eviction is enabled, it is FIFO/oldest-first rather than priority-
+// based. With the default configuration, Dingo instead applies backpressure at
+// full mempool capacity and removes transactions only when they are confirmed,
+// invalidated, or expired.
+// DAG ignores EvictionWatermark, preserves admitted transactions, and exposes
+// admission headroom so network intake pauses before the rejection watermark.
+// Direct submissions above that watermark receive MempoolFullError.
 //
 // # Events
 //

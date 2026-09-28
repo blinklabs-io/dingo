@@ -19,33 +19,95 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
+	"maps"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 )
 
-// leiosForgedEBEntry holds one locally-forged endorser block ready to
-// be announced to peers via LeiosNotify.
-type leiosForgedEBEntry struct {
-	point ocommon.Point
+// LeiosAnnouncementLedger is the synchronous, read-only ledger boundary used
+// when a LeiosNotify peer sends a dangling ranking-block announcement.
+// Implementations validate all header crypto before returning only the OCIN
+// freshness fact; Ouroboros retains ownership of record and relay policy.
+type LeiosAnnouncementLedger interface {
+	CurrentSlot() (uint64, error)
+	SlotToTime(uint64) (time.Time, error)
+	ValidateLeiosAnnouncementHeader(
+		gledger.BlockHeader,
+	) (ledger.LeiosAnnouncementOCINStaleness, error)
+	ValidateLeiosEndorserBlockTransactions(
+		context.Context,
+		gledger.BlockHeader,
+		[][]byte,
+	) error
 }
 
-// leiosForgedEBLog is an append-only log of locally-forged EBs with
+// leiosForgedEBEntry holds an endorser-block offer ready to be announced to
+// peers via LeiosNotify.
+type leiosForgedEBEntry struct {
+	point          *ocommon.Point
+	size           uint64
+	txOffer        *ocommon.Point
+	vote           *lcommon.LeiosPrototypeVote
+	excludeConnKey string
+	// announcement is the raw Dijkstra ranking-block header sent in the
+	// w31 BlockAnnouncement message.
+	announcement []byte
+}
+
+// prototype-2026w31 accepts announcements for up to ten minutes, and only
+// relays them while they are at most five minutes old. The reference node
+// measures these bounds from the announced slot's wall-clock onset. Dingo
+// uses the ledger's era-aware slot-time conversion below.
+const (
+	leiosNotifyMaxAnnouncementAge   = 10 * time.Minute
+	leiosNotifyRelayAnnouncementAge = 5 * time.Minute
+)
+
+type leiosAnnouncement struct {
+	raw    []byte
+	ebHash lcommon.Blake2b256
+	ebSize uint64
+	slot   uint64
+	// electionKey lets pruning rebuild the bounded per-election index.
+	electionKey string
+}
+
+type leiosDeferredAnnouncement struct {
+	raw    []byte
+	source string
+}
+
+const leiosMaxDeferredAnnouncements = 128
+
+type leiosDeliveryReservation struct {
+	index int
+	retry bool
+}
+
+// leiosForgedEBLog is an append-only log of endorser-block offers with
 // per-connection cursors owned by the log itself.
 //
 // Head entries are pruned whenever every registered connection's cursor
 // has advanced past them, so memory scales with the largest per-connection
-// backlog rather than total uptime. When no connections are registered the
-// log is always empty. A new connection registers at the current tail and
-// does not receive EBs forged before it connected. Connections are
-// removed via removeConn, which triggers an immediate prune.
+// backlog rather than total uptime. When no connections are registered, the
+// log is empty unless a failed delivery is pinned for retry. A new connection
+// normally registers at the current tail, or at the oldest pinned retry.
+// Connections are removed via removeConn, which triggers an immediate prune.
 //
 // The wake channel is closed and replaced on every append so all server
 // goroutines waiting for new entries unblock at once.
@@ -54,22 +116,45 @@ type leiosForgedEBLog struct {
 	items   []leiosForgedEBEntry
 	base    int            // logical index of items[0]
 	cursors map[string]int // connKey → next logical index to serve
-	wakeCh  chan struct{}
+	// owners distinguish connection lifetimes that reuse an address pair.
+	owners map[string]*oleiosnotify.Server
+	// reservations are entries returned to RequestNext but not yet confirmed
+	// sent by the mini-protocol server. retries pin failed reservations until a
+	// subsequently connected peer successfully receives them.
+	reservations map[string]leiosDeliveryReservation
+	// retries counts failed deliveries still owed for each logical entry.
+	// retryCursors marks connections consuming one of those retry claims, so a
+	// normal successful delivery to another peer cannot erase the failed
+	// peer's reconnect retry.
+	retries      map[int]int
+	retryCursors map[string]int
+	wakeCh       chan struct{}
 }
 
 func newLeiosForgedEBLog() *leiosForgedEBLog {
 	return &leiosForgedEBLog{
-		cursors: make(map[string]int),
-		wakeCh:  make(chan struct{}),
+		cursors:      make(map[string]int),
+		owners:       make(map[string]*oleiosnotify.Server),
+		reservations: make(map[string]leiosDeliveryReservation),
+		retries:      make(map[int]int),
+		retryCursors: make(map[string]int),
+		wakeCh:       make(chan struct{}),
 	}
 }
 
 // append adds an entry, prunes head entries that all registered connections
-// have advanced past (or all entries when none are registered), and signals
-// all server goroutines waiting for new entries to wake and retry.
+// have advanced past (or all unpinned entries when none are registered), and
+// signals all server goroutines waiting for new entries to wake and retry.
 func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	l.mu.Lock()
 	l.items = append(l.items, entry)
+	// A caught-up origin already has the entry, so do not retain it waiting
+	// for that connection to issue another RequestNext. Origins that are
+	// behind advance across the exclusion when their preceding delivery is
+	// completed.
+	if entry.excludeConnKey != "" {
+		l.skipExcludedLocked(entry.excludeConnKey)
+	}
 	l.pruneLocked()
 	wake := l.wakeCh
 	l.wakeCh = make(chan struct{})
@@ -77,47 +162,232 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	close(wake)
 }
 
-// next returns the next unserved entry for connKey and the current wake
-// channel. If no entry is available it returns (nil, wakeCh); the caller
-// should wait on wakeCh and retry. A connKey that has never called next
-// is registered at the current tail so it does not receive stale EBs.
-func (l *leiosForgedEBLog) next(connKey string) (*leiosForgedEBEntry, chan struct{}) {
+// nextWhileConnected reserves the next unserved entry and returns the wake
+// channel when none is available. Cancellation is checked under the cursor
+// lock so a closed request cannot recreate a cursor removed by disconnect.
+func (l *leiosForgedEBLog) nextWhileConnected(
+	connKey string,
+	owner *oleiosnotify.Server,
+	connectionDone <-chan any,
+) (*leiosForgedEBEntry, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	cursor, exists := l.cursors[connKey]
-	if !exists {
-		// New connection: start at the current tail.
-		cursor = l.base + len(l.items)
-		l.cursors[connKey] = cursor
+	select {
+	case <-connectionDone:
+		return nil, l.wakeCh
+	default:
 	}
+	if owner != nil {
+		if existing := l.owners[connKey]; existing != nil && existing != owner {
+			return nil, l.wakeCh
+		}
+		l.owners[connKey] = owner
+	}
+	if reserved, ok := l.reservations[connKey]; ok {
+		idx := reserved.index - l.base
+		if idx >= 0 && idx < len(l.items) {
+			entry := l.items[idx]
+			return &entry, l.wakeCh
+		}
+		delete(l.reservations, connKey)
+	}
+	if _, exists := l.cursors[connKey]; !exists {
+		// New connection: start at the current tail.
+		l.cursors[connKey] = l.base + len(l.items)
+	}
+	if l.skipExcludedLocked(connKey) {
+		l.pruneLocked()
+	}
+	cursor := l.cursors[connKey]
 	idx := cursor - l.base
 	if idx < len(l.items) {
 		entry := l.items[idx]
-		l.cursors[connKey] = cursor + 1
-		l.pruneLocked()
+		retryIndex, retry := l.retryCursors[connKey]
+		retry = retry && retryIndex == cursor
+		l.reservations[connKey] = leiosDeliveryReservation{
+			index: cursor,
+			retry: retry,
+		}
 		return &entry, l.wakeCh
 	}
 	return nil, l.wakeCh
 }
 
-// removeConn unregisters a connection cursor and prunes newly freed entries.
-func (l *leiosForgedEBLog) removeConn(connKey string) {
+// complete commits a reserved cursor only after the LeiosNotify server has
+// successfully sent its response. A failed send leaves the cursor in place
+// and pins the entry for a reconnect to retry.
+func (l *leiosForgedEBLog) complete(
+	connKey string,
+	owner *oleiosnotify.Server,
+	delivered bool,
+) {
 	l.mu.Lock()
-	delete(l.cursors, connKey)
+	defer l.mu.Unlock()
+	if owner != nil && l.owners[connKey] != owner {
+		return
+	}
+	reserved, ok := l.reservations[connKey]
+	if !ok {
+		return
+	}
+	delete(l.reservations, connKey)
+	if delivered {
+		if l.cursors[connKey] == reserved.index {
+			l.cursors[connKey] = reserved.index + 1
+		}
+		if reserved.retry {
+			l.retries[reserved.index]--
+			if l.retries[reserved.index] <= 0 {
+				delete(l.retries, reserved.index)
+			}
+			l.advanceRetryCursorLocked(
+				connKey,
+				l.cursors[connKey],
+			)
+		}
+		l.skipExcludedLocked(connKey)
+	} else {
+		if !reserved.retry {
+			l.retries[reserved.index]++
+		}
+		l.retryCursors[connKey] = reserved.index
+	}
 	l.pruneLocked()
-	l.mu.Unlock()
 }
 
-// registerConn pre-registers connKey at the current tail so that EBs
-// appended between connection open and the peer's first RequestNext are
-// not pruned before the cursor is established. It is a no-op when connKey
-// is already registered (e.g. on reconnect within the same session).
-func (l *leiosForgedEBLog) registerConn(connKey string) {
-	l.mu.Lock()
-	if _, exists := l.cursors[connKey]; !exists {
-		l.cursors[connKey] = l.base + len(l.items)
+// skipExcludedLocked advances connKey across consecutive entries that it
+// originated. It never creates a delivery reservation or retry claim: these
+// entries have already crossed this connection in the opposite direction.
+// Callers must hold l.mu. When a reservation exists, its entry precedes the
+// excluded cursor position and remains untouched.
+func (l *leiosForgedEBLog) skipExcludedLocked(connKey string) bool {
+	cursor, exists := l.cursors[connKey]
+	if !exists {
+		return false
 	}
-	l.mu.Unlock()
+	advanced := false
+	for {
+		idx := cursor - l.base
+		if idx < 0 || idx >= len(l.items) ||
+			l.items[idx].excludeConnKey != connKey {
+			break
+		}
+		cursor++
+		advanced = true
+	}
+	if advanced {
+		l.cursors[connKey] = cursor
+		if retry, ok := l.retryCursors[connKey]; ok && retry < cursor {
+			// The skipped retry is still owed globally, but this connection
+			// cannot satisfy it because it originated the entry. Move only
+			// this connection's claim to its next eligible retry.
+			l.advanceRetryCursorLocked(connKey, cursor)
+		}
+	}
+	return advanced
+}
+
+// advanceRetryCursorLocked moves connKey's retry claim to the oldest pending
+// retry at or after cursor. A reconnect may need to discharge several failed
+// entries from the same stream; retaining the claim makes each such delivery
+// decrement its corresponding retry count.
+// Callers must hold l.mu.
+func (l *leiosForgedEBLog) advanceRetryCursorLocked(
+	connKey string,
+	cursor int,
+) {
+	delete(l.retryCursors, connKey)
+	if nextRetry, found := l.nextRetryLocked(connKey, cursor); found {
+		l.retryCursors[connKey] = nextRetry
+	}
+}
+
+// nextRetryLocked returns the oldest failed delivery at or after cursor that
+// connKey is eligible to receive. A connection cannot discharge a retry for
+// an entry it originally supplied.
+// Callers must hold l.mu.
+func (l *leiosForgedEBLog) nextRetryLocked(
+	connKey string,
+	cursor int,
+) (int, bool) {
+	nextRetry := l.base + len(l.items)
+	found := false
+	for retry := range l.retries {
+		idx := retry - l.base
+		if retry >= cursor && retry < nextRetry && idx >= 0 &&
+			idx < len(l.items) &&
+			l.items[idx].excludeConnKey != connKey {
+			nextRetry = retry
+			found = true
+		}
+	}
+	return nextRetry, found
+}
+
+func (l *leiosForgedEBLog) removeConnOwned(
+	connKey string,
+	owner *oleiosnotify.Server,
+) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if owner != nil && l.owners[connKey] == owner {
+		l.removeConnLocked(connKey)
+	}
+}
+
+func (l *leiosForgedEBLog) removeConnLocked(connKey string) {
+	if reserved, ok := l.reservations[connKey]; ok {
+		if !reserved.retry {
+			l.retries[reserved.index]++
+		}
+		delete(l.reservations, connKey)
+	}
+	delete(l.cursors, connKey)
+	delete(l.owners, connKey)
+	delete(l.retryCursors, connKey)
+	l.pruneLocked()
+}
+
+// registerConn pre-registers connKey at the current tail, or at the oldest
+// failed delivery, so entries appended between connection open and the peer's
+// first RequestNext are not pruned before the cursor is established. It is a
+// preserves the cursor for the same owner. It also wakes parked requests so a
+// replacement can observe the ownership change. A replacement releases the
+// old owner's reservation into the retry queue before registering its cursor.
+func (l *leiosForgedEBLog) registerConn(
+	connKey string,
+	owner *oleiosnotify.Server,
+	isCurrent func() bool,
+) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// Validate manager ownership under the cursor lock. This is the only path
+	// that takes the connection-manager lock while holding l.mu; close callbacks
+	// invoke this code after releasing the manager lock, preserving the order.
+	if isCurrent != nil && !isCurrent() {
+		return
+	}
+	if existing := l.owners[connKey]; existing != nil && existing != owner {
+		l.removeConnLocked(connKey)
+	}
+	if _, exists := l.cursors[connKey]; !exists {
+		cursor := l.base + len(l.items)
+		if retry, found := l.nextRetryLocked(connKey, l.base); found {
+			cursor = retry
+		}
+		l.cursors[connKey] = cursor
+		if l.retries[cursor] > 0 {
+			l.retryCursors[connKey] = cursor
+		}
+	}
+	if owner != nil {
+		// Registration identifies the current connection lifetime. A delayed
+		// close callback for an older lifetime is owner-guarded below.
+		l.owners[connKey] = owner
+	}
+	wake := l.wakeCh
+	l.wakeCh = make(chan struct{})
+	close(wake)
 }
 
 // leiosEBLogMaxEntries is the maximum number of forged-EB entries the log
@@ -127,11 +397,10 @@ func (l *leiosForgedEBLog) registerConn(connKey string) {
 const leiosEBLogMaxEntries = 64
 
 // pruneLocked drops head entries whose logical index falls below every
-// registered connection's cursor (i.e. all connections have advanced past
-// them, whether by consuming the entry or by registering after it). When
-// no connections are registered the entire log is pruned. If the log still
-// exceeds leiosEBLogMaxEntries after cursor-based pruning, the oldest
-// entries are evicted and lagging cursors are advanced to the new base.
+// registered connection's cursor and every failed-delivery retry. When no
+// connections or retries remain, the entire log is pruned. If the log still
+// exceeds leiosEBLogMaxEntries after cursor-based pruning, the oldest entries
+// are evicted and lagging cursors are advanced to the new base.
 // Callers must hold l.mu.
 func (l *leiosForgedEBLog) pruneLocked() {
 	if len(l.items) == 0 {
@@ -142,6 +411,11 @@ func (l *leiosForgedEBLog) pruneLocked() {
 	for _, c := range l.cursors {
 		if c < minCursor {
 			minCursor = c
+		}
+	}
+	for retry := range l.retries {
+		if retry < minCursor {
+			minCursor = retry
 		}
 	}
 	prunable := minCursor - l.base
@@ -166,21 +440,58 @@ func (l *leiosForgedEBLog) pruneLocked() {
 	clear(l.items[:prunable])
 	l.items = l.items[prunable:]
 	l.base += prunable
+	for retry := range l.retries {
+		if retry < l.base {
+			delete(l.retries, retry)
+		}
+	}
+	for connKey, retry := range l.retryCursors {
+		if retry < l.base {
+			delete(l.retryCursors, connKey)
+		}
+	}
 }
 
 // BroadcastEndorserBlock stores a locally-forged EB and notifies waiting
-// LeiosNotify server goroutines so they can announce it to peers.
-// It satisfies forging.EndorserBlockBroadcaster.
+// LeiosNotify server goroutines so they can announce its manifest and
+// transactions to peers. txBodies are the referenced transactions' raw CBOR
+// in manifest order; they are stored in the endorser block's tx cache so the EB
+// can be served over leios-fetch. It satisfies forging.EndorserBlockBroadcaster.
 func (o *Ouroboros) BroadcastEndorserBlock(
 	slot uint64,
 	hash []byte,
 	data []byte,
+	txBodies [][]byte,
 ) error {
 	point := ocommon.Point{Slot: slot, Hash: hash}
-	if err := o.storeLeiosEndorserBlock(point, data, nil); err != nil {
+	// Match the on-the-wire form fetched EB transactions are stored in: each
+	// transaction is a CBOR byte string wrapping its CBOR (LeiosTx =
+	// encodeBytes(txCbor)), so served forged-EB bodies decode identically.
+	var txsRaw []cbor.RawMessage
+	if len(txBodies) > 0 {
+		txsRaw = make([]cbor.RawMessage, 0, len(txBodies))
+		for i, body := range txBodies {
+			wrapped, err := cbor.Encode(body)
+			if err != nil {
+				return fmt.Errorf("encode forged EB tx %d: %w", i, err)
+			}
+			txsRaw = append(txsRaw, cbor.RawMessage(wrapped))
+		}
+	}
+	// Locally forged: dingo chose this slot itself, so the binding is
+	// authoritative without waiting for the announcement it queues next.
+	if err := o.storeLeiosEndorserBlock(
+		point,
+		data,
+		txsRaw,
+		leiosStoreAuthoritative,
+	); err != nil {
 		return fmt.Errorf("store forged endorser block: %w", err)
 	}
-	o.leiosEBLog.append(leiosForgedEBEntry{point: point})
+	o.leiosEBLog.append(
+		leiosForgedEBEntry{point: &point, size: uint64(len(data))},
+	)
+	o.leiosEBLog.append(leiosForgedEBEntry{txOffer: &point})
 	return nil
 }
 
@@ -189,14 +500,34 @@ func (o *Ouroboros) leiosnotifyServerConnOpts() []oleiosnotify.LeiosNotifyOption
 		oleiosnotify.WithRequestNextFunc(
 			o.instrumentLeiosnotifyRequestNext(o.leiosnotifyServerRequestNext),
 		),
+		oleiosnotify.WithResponseSentFunc(o.leiosnotifyServerResponseSent),
 	}
+}
+
+func (o *Ouroboros) leiosnotifyServerResponseSent(
+	ctx oleiosnotify.CallbackContext,
+	_ protocol.Message,
+	err error,
+) {
+	o.leiosEBLog.complete(
+		leiosConnectionIdString(ctx.ConnectionId),
+		ctx.Server,
+		err == nil,
+	)
 }
 
 func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
 	return []oleiosnotify.LeiosNotifyOptionFunc{
 		oleiosnotify.WithNotificationFunc(
-			o.instrumentLeiosnotifyNotification(o.leiosnotifyClientNotification),
+			o.instrumentLeiosnotifyNotification(
+				o.leiosnotifyClientNotification,
+			),
 		),
+		// Keep the bounded request window full. This is the gouroboros
+		// equivalent of the prototype's Lookahead server mode: the server can
+		// hold each request until a notification is available, while the client
+		// keeps several requests outstanding.
+		oleiosnotify.WithPipelineLimit(oleiosnotify.MaxPipelineLimit),
 		// Disable the Busy-state timeout. LeiosNotify is a push-based
 		// notification protocol where the server only sends when it has
 		// something to announce. Idle waits of arbitrary length are
@@ -205,8 +536,10 @@ func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOption
 	}
 }
 
-func (o *Ouroboros) leiosnotifyClientStart(connId ouroboros.ConnectionId) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+func (o *Ouroboros) leiosnotifyClientStart(
+	connId ouroboros.ConnectionId,
+) error {
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf(
 			"failed to lookup connection ID: %s",
@@ -221,9 +554,11 @@ func (o *Ouroboros) leiosnotifyClientStart(connId ouroboros.ConnectionId) error 
 	// Pre-register the server-side cursor now that we know the peer
 	// supports LeiosNotify. This ensures EBs forged between here and
 	// the peer's first RequestNext are not pruned.
-	o.leiosEBLog.registerConn(connKey)
+	o.leiosEBLog.registerConn(connKey, conn.LeiosNotify().Server, func() bool {
+		return o.connManager.GetConnectionById(connId) == conn
+	})
 	if err := conn.LeiosNotify().Client.Sync(); err != nil {
-		o.leiosEBLog.removeConn(connKey)
+		o.leiosEBLog.removeConnOwned(connKey, conn.LeiosNotify().Server)
 		return err
 	}
 	return nil
@@ -258,104 +593,1385 @@ func (o *Ouroboros) instrumentLeiosnotifyRequestNext(
 	}
 }
 
+// leiosTipPrefetchMaxLagSlots is how far behind the wall-clock head the applied
+// ledger may be before dingo stops prefetching endorser blocks offered over
+// leios-notify. Notify offers describe endorser blocks at the live head; while
+// the ledger is replaying a deep backlog those blocks would expire from the
+// endorser-block cache (10 minute TTL, ~600 slots at 1s slots) long before the
+// ledger reaches them, and prefetching them only starves the chain-driven
+// historical backfill for the relay's few connections. While behind, the ledger
+// fetches the endorser block each ranking block references by point as it
+// applies the chain, matching the prototype's ranking-block-driven fetch.
+const leiosTipPrefetchMaxLagSlots = 600
+
+// leiosTipPrefetchEnabled reports whether the node is caught up enough that
+// prefetching a head endorser block offered over leios-notify is worthwhile (it
+// will be applied before it expires from the cache). It is false during a deep
+// catch-up so all fetch capacity serves the historical backfill.
+func (o *Ouroboros) leiosTipPrefetchEnabled() bool {
+	if o.ledgerState == nil {
+		return true
+	}
+	return o.ledgerState.SlotsBehindHead() <= leiosTipPrefetchMaxLagSlots
+}
+
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
 ) error {
-	conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+	conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 	connId := leiosConnectionIdString(ctx.ConnectionId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId)
 	}
 	switch m := msg.(type) {
+	case *oleiosnotify.MsgBlockAnnouncement:
+		// w31 carries the full ranking-block header. Validate before accepting
+		// it into the relay log; invalid announcements are deliberately
+		// suppressed so a peer cannot tear down a shared connection with a
+		// malformed or stale experimental message.
+		if err := o.acceptLeiosAnnouncement(m.BlockHeaderRaw, connId); err != nil {
+			o.config.Logger.Debug(
+				"suppressing invalid leios announcement",
+				"component", "network",
+				"protocol", "leios-notify",
+				"connection_id", connId,
+				"error", err,
+			)
+		}
+		return nil
 	case *oleiosnotify.MsgBlockOffer:
+		o.markLeiosEndorserBlockRelayOffer(m.Point)
+		// While the ledger is deeply behind the head, do not prefetch this
+		// head endorser block: it would expire before the ledger reaches it and
+		// would starve the chain-driven historical backfill for connections. The
+		// ledger fetches the endorser blocks it needs by point as it catches up.
+		if !o.leiosTipPrefetchEnabled() {
+			return nil
+		}
 		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
 			return errors.New("leios-fetch client unavailable")
 		}
-		resp, err := conn.LeiosFetch().Client.BlockRequest(m.Point)
-		if err != nil {
-			return err
+		client := conn.LeiosFetch().Client
+		point := m.Point
+		declaredSize := m.Size
+		// The relay offers each endorser block on every connection. The
+		// manifest is content-addressed, so once any peer's copy of this
+		// exact (slot, hash) occurrence is cached a refetch returns identical
+		// bytes: skip it instead of spending a fetch slot and the manifest's
+		// bandwidth once per connected peer. Mirrors the same guard on the
+		// txs offer below. The lookup is keyed by point, not hash alone: the
+		// same hash can be a live, independently required occurrence at
+		// another slot at the same time (issue #3513), and that other
+		// occurrence being cached must not suppress fetching this one.
+		if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
+			return nil
 		}
-		respBlock, ok := resp.(*leiosfetch.MsgBlock)
-		if !ok {
-			return fmt.Errorf(
-				"unexpected leios-fetch Block response type %T",
-				resp,
+		// Reject an offer that already declares more than the cache's
+		// per-entry byte budget instead of spending a fetch on a body
+		// storeLeiosEndorserBlock would reject anyway.
+		// leiosEndorserBlockCacheMaxEntryBytes is a non-negative byte budget
+		// (16 MiB default; only tests lower it, always to a positive value).
+		if declaredSize > uint64(leiosEndorserBlockCacheMaxEntryBytes) { // #nosec G115
+			o.config.Logger.Debug(
+				"rejecting leios EB offer exceeding max entry size",
+				"component", "network",
+				"protocol", "leios-notify",
+				"connection_id", connId,
+				"slot", point.Slot,
+				"declared_size", declaredSize,
+				"max_size", leiosEndorserBlockCacheMaxEntryBytes,
 			)
+			return nil
 		}
-		if err := o.storeLeiosEndorserBlock(
-			m.Point,
-			respBlock.BlockRaw,
-			nil,
-		); err != nil {
-			return err
+		// Fetch the manifest off the handler so a slow fetch cannot head-of-line
+		// block later offers on this connection. The transactions arrive as a
+		// separate notify offer (MsgBlockTxsOffer): the prototype diffuses an
+		// endorser block's manifest and its transactions as two distinct offers,
+		// and fetching the transactions before the txs-offer arrives makes the
+		// relay reset the connection, so tx-body fetch is driven from the
+		// txs-offer below. Failures are best-effort: a transient manifest fetch
+		// error must not tear down the shared connection.
+		manifestKey := leiosBlockKey(point.Slot, point.Hash)
+		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if !admitted {
+			return nil
 		}
-		o.config.Logger.Info(
-			fmt.Sprintf(
-				"fetched EB %d.%x with size %d and %d txs",
-				m.Point.Slot,
-				m.Point.Hash,
-				len(respBlock.BlockRaw),
-				0,
-			),
-			"component", "network",
-			"protocol", "leios-fetch",
-			"role", "client",
-			"connection_id", connId,
-		)
-	case *oleiosnotify.MsgBlockTxsOffer:
-		txsRaw, err := o.fetchCachedLeiosEndorserBlockTxs(m.Point)
-		if err != nil {
-			level := slog.LevelWarn
-			msg := "failed to fetch Leios EB transactions"
-			if errors.Is(err, errLeiosEndorserBlockNotCached) {
-				level = slog.LevelDebug
-				msg = "skipping Leios EB transactions offer for uncached block"
+		if _, loaded := o.leiosManifestFetchInProgress.LoadOrStore(
+			manifestKey, struct{}{},
+		); loaded {
+			guard.inflight.Add(-1)
+			return nil
+		}
+		if o.leiosFetchClaimPublished != nil {
+			o.leiosFetchClaimPublished()
+		}
+		o.dispatchLeiosFetchReserved(guard, func() {
+			defer o.leiosManifestFetchInProgress.Delete(manifestKey)
+			// A transaction offer or historical backfill may have populated
+			// this occurrence while this work waited for its connection guard.
+			if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
+				return
 			}
-			o.config.Logger.Log(
+			reqCtx, cancel := leiosFetchRequestContext(
 				context.Background(),
-				level,
-				msg,
+				time.Time{},
+			)
+			blockRaw, err := fetchAndValidateLeiosEbManifest(
+				reqCtx,
+				client,
+				point,
+				declaredSize,
+			)
+			cancel()
+			if err != nil {
+				o.config.Logger.Debug(
+					"leios EB manifest fetch failed",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
+			if err := o.storeLeiosEndorserBlock(
+				point,
+				blockRaw,
+				nil,
+				leiosStorePeerOffered,
+			); err != nil {
+				o.config.Logger.Debug(
+					"failed to store leios EB manifest",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
+			txCount := 0
+			if data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
+				txCount = data.txCount
+			}
+			o.config.Logger.Info(
+				fmt.Sprintf(
+					"fetched EB manifest %d.%x size %d txs %d",
+					point.Slot,
+					point.Hash,
+					len(blockRaw),
+					txCount,
+				),
 				"component", "network",
 				"protocol", "leios-fetch",
 				"role", "client",
 				"connection_id", connId,
-				"slot", m.Point.Slot,
-				"hash", hex.EncodeToString(m.Point.Hash),
-				"error", err,
 			)
+		})
+	case *oleiosnotify.MsgBlockTxsOffer:
+		o.markLeiosEndorserBlockRelayOffer(m.Point)
+		// The peer is offering the transactions for this endorser block. Fetch
+		// them over leios-fetch (off the handler, serialized per connection, and
+		// deduped across connections) so the EB becomes complete and its outputs
+		// can be applied to the ledger. Best-effort and gated
+		// (EnableLeiosTxFetch): a failure must not tear down the shared
+		// connection.
+		if !o.config.EnableLeiosTxFetch {
 			return nil
 		}
+		// See MsgBlockOffer above: skip head-block prefetch while deeply behind.
+		if !o.leiosTipPrefetchEnabled() {
+			return nil
+		}
+		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
+			return nil
+		}
+		client := conn.LeiosFetch().Client
+		point := m.Point
+		// Common case: a repeated offer for an EB already fully fetched (or
+		// empty) at this offer's point. Skip without spawning a fetch. The
+		// lookup is keyed by point, not hash alone, for the same reason as
+		// MsgBlockOffer above: a different, unrelated occurrence of this hash
+		// being complete must not satisfy this offer's point (issue #3513).
+		if data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok &&
+			(data.txCount == 0 || data.completeTxCache()) {
+			return nil
+		}
+		// The relay offers each EB on every connection; claim it so it is
+		// fetched once. The claim is keyed by slot and hash, not hash alone, so
+		// an in-flight fetch for one occurrence of a hash does not suppress a
+		// legitimate offer of the same content-addressed hash recurring at a
+		// different slot. Reserve the local fetch slot before publishing the
+		// cross-connection claim, so a full connection cannot transiently hide
+		// this occurrence from a healthy peer.
+		hashKey := leiosBlockKey(point.Slot, point.Hash)
+		guard, admitted := o.reserveLeiosFetch(ctx.ConnectionId)
+		if !admitted {
+			return nil
+		}
+		if _, loaded := o.leiosFetchInProgress.LoadOrStore(
+			hashKey,
+			struct{}{},
+		); loaded {
+			guard.inflight.Add(-1)
+			return nil
+		}
+		if o.leiosFetchClaimPublished != nil {
+			o.leiosFetchClaimPublished()
+		}
+		o.dispatchLeiosFetchReserved(guard, func() {
+			defer o.leiosFetchInProgress.Delete(hashKey)
+			data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+			if !ok {
+				// Manifest not cached yet (txs offered before/without a block
+				// offer): fetch the manifest first to learn the tx count.
+				reqCtx, cancel := leiosFetchRequestContext(
+					context.Background(),
+					time.Time{},
+				)
+				resp, err := client.BlockRequest(reqCtx, point)
+				cancel()
+				if err != nil {
+					o.config.Logger.Debug(
+						"leios EB manifest fetch failed on txs offer",
+						"error", err,
+						"connection_id", connId,
+						"slot", point.Slot,
+					)
+					return
+				}
+				respBlock, ok := resp.(*leiosfetch.MsgBlock)
+				if !ok {
+					return
+				}
+				if err := o.storeLeiosEndorserBlock(
+					point,
+					respBlock.BlockRaw,
+					nil,
+					leiosStorePeerOffered,
+				); err != nil {
+					o.config.Logger.Debug(
+						"failed to store leios EB manifest on txs offer",
+						"error", err,
+						"connection_id", connId,
+						"slot", point.Slot,
+					)
+					return
+				}
+				if data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash); !ok {
+					return
+				}
+			}
+			if data.txCount == 0 || data.completeTxCache() {
+				return
+			}
+			txs, err := o.fetchLeiosEbTxsBatched(
+				client,
+				point,
+				data.txCount,
+				data.blockRaw,
+			)
+			if err != nil {
+				// The transactions gathered by this attempt are retained
+				// against the cached endorser block, so a later offer of the
+				// same block completes it instead of starting over. Log what
+				// survived to make that progress visible across attempts.
+				retained := 0
+				if cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
+					retained = cached.partialTxCount()
+				}
+				o.config.Logger.Debug(
+					"leios EB transaction fetch failed",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
+					"hash", hex.EncodeToString(point.Hash),
+					"fetched", len(txs),
+					"retained", retained,
+					"tx_count", data.txCount,
+				)
+				return
+			}
+			if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
+				o.config.Logger.Debug(
+					"leios EB transaction references mismatch",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
+			if err := o.storeLeiosEndorserBlock(
+				point,
+				data.blockRaw,
+				txs,
+				leiosStorePeerOffered,
+			); err != nil {
+				o.config.Logger.Debug(
+					"failed to store leios EB transactions",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
+			o.config.Logger.Info(
+				fmt.Sprintf(
+					"fetched EB txs %d.%x %d/%d",
+					point.Slot,
+					point.Hash,
+					len(txs),
+					data.txCount,
+				),
+				"component", "network",
+				"protocol", "leios-fetch",
+				"role", "client",
+				"connection_id", connId,
+			)
+		})
+	case *oleiosnotify.MsgVotesOffer:
+		// The Leios prototype diffuses full votes inline over leios-notify
+		// (rather than the standalone leios-votes protocol). Feed them to the
+		// vote manager, which validates each vote (structure, window, committee
+		// membership, dedup, BLS) and builds an endorser-block certificate on
+		// quorum. (m.Votes carries vote IDs offered by non-prototype peers and
+		// is fetched separately; only pushed FullVotes are handled here.)
+		if o.leiosVotes == nil {
+			return nil
+		}
+		for _, vote := range m.FullVotes {
+			if err := o.leiosVotes.HandleVote(connId, vote); err != nil {
+				o.config.Logger.Debug(
+					"failed to handle pushed leios vote",
+					"component", "network",
+					"protocol", "leios-notify",
+					"connection_id", connId,
+					"slot", vote.SlotNo,
+					"voter_id", vote.VoterId,
+					"error", err,
+				)
+			}
+		}
+		for _, vote := range m.PrototypeVotes {
+			if err := o.leiosVotes.HandlePrototypeVote(connId, vote); err != nil {
+				o.config.Logger.Debug(
+					"failed to handle pushed prototype leios vote",
+					"component", "network",
+					"protocol", "leios-notify",
+					"connection_id", connId,
+					"announcing_rb_hash", vote.AnnouncingRbHash.String(),
+					"voter_id", vote.VoterId,
+					"error", err,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// leiosBlockRequester is the subset of the leios-fetch client used to fetch an
+// endorser block's manifest in response to a MsgBlockOffer. It mirrors
+// leiosBlockTxsRequester below so fetchAndValidateLeiosEbManifest can be
+// unit-tested without a live connection.
+type leiosBlockRequester interface {
+	BlockRequest(
+		ctx context.Context,
+		point ocommon.Point,
+	) (protocol.Message, error)
+}
+
+// fetchAndValidateLeiosEbManifest fetches the endorser-block manifest offered
+// by a MsgBlockOffer and binds the fetched body to the offer's declared size
+// before the caller stores it. A peer that offers one size and serves another
+// is a fetch/serving mismatch, not a cacheable result, so it is rejected here
+// rather than admitted under a byte budget the offer misrepresented (issue
+// #3512).
+func fetchAndValidateLeiosEbManifest(
+	ctx context.Context,
+	client leiosBlockRequester,
+	point ocommon.Point,
+	declaredSize uint64,
+) ([]byte, error) {
+	resp, err := client.BlockRequest(ctx, point)
+	if err != nil {
+		return nil, fmt.Errorf("leios-fetch block request: %w", err)
+	}
+	respBlock, ok := resp.(*leiosfetch.MsgBlock)
+	if !ok {
+		return nil, fmt.Errorf(
+			"unexpected leios-fetch Block response type: %T",
+			resp,
+		)
+	}
+	if actualSize := uint64(len(respBlock.BlockRaw)); actualSize != declaredSize {
+		return nil, fmt.Errorf(
+			"leios EB manifest size mismatch with offer: declared %d, got %d",
+			declaredSize,
+			actualSize,
+		)
+	}
+	return respBlock.BlockRaw, nil
+}
+
+// leiosBlockTxsRequester is the subset of the leios-fetch client used to fetch
+// endorser-block transactions. It is an interface so the re-request logic below
+// can be unit-tested without a live connection.
+type leiosBlockTxsRequester interface {
+	BlockTxsRequest(
+		ctx context.Context,
+		point ocommon.Point,
+		bitmaps map[uint16]uint64,
+	) (protocol.Message, error)
+}
+
+const (
+	leiosTxFetchWindowSize = 64
+	leiosTxFetchMaxWindows = 1 << 16
+	// leiosTxFetchWindowsPerRequest bounds how many 64-tx windows of
+	// still-missing transactions are requested in a single BlockTxsRequest.
+	// The leios-fetch state machine is strict request/response (no protocol
+	// pipelining), so overlapping round-trips means asking for more per
+	// request: the request bitmap carries several windows at once and the
+	// relay serves up to its per-message cap, cutting the round-trips a large
+	// endorser block needs from O(txCount/64) toward O(txCount/cap). It stays
+	// bounded rather than requesting the whole block, because the prototype
+	// relay resets the connection when asked for everything at once.
+	leiosTxFetchWindowsPerRequest = 8
+)
+
+// leiosTxFetchTailPoll is how often the fetch re-requests an endorser block's
+// still-missing tail while stalled, within OuroborosConfig.LeiosTxFetchTailBudget.
+// It is a re-check cadence, not a protocol parameter.
+const leiosTxFetchTailPoll = 300 * time.Millisecond
+
+// leiosFetchMaxInflightPerConn bounds how many leios-fetch operations may be
+// queued or running on a single connection. The per-connection mutex
+// serializes them (the client is strict request/response), so this caps the
+// goroutines a burst of offers can spawn; excess offers are dropped (the relay
+// re-offers, and the same EB is fetched on whichever connection is free).
+const leiosFetchMaxInflightPerConn = 4
+
+// leiosFetchGuard serializes leios-fetch client operations on one connection
+// and bounds how many are outstanding.
+type leiosFetchGuard struct {
+	mu       sync.Mutex
+	inflight atomic.Int32
+	// cooledUntilNano is a unix-nano deadline before which the backfill
+	// connection selector should skip this connection after a failed or
+	// timed-out fetch, so it prefers healthy connections instead of repeatedly
+	// retrying a stalled or flaky one.
+	cooledUntilNano atomic.Int64
+	// consecutiveFailures counts back-to-back failed/timed-out backfill
+	// fetches on this connection with no intervening success. It escalates the
+	// cooldown (see markFetchFailed) so a connection that repeatedly returns
+	// wrong (hash-mismatching) or unservable/stalling responses is
+	// deprioritized for progressively longer; markFetchOK resets it.
+	consecutiveFailures atomic.Int32
+	// lastOKNano is the unix-nano time of this connection's most recent
+	// successful backfill fetch, used for positive peer affinity: the backfill
+	// connection selector prefers a connection that recently served an endorser
+	// block over never-tried ones (see recentlySucceeded). markFetchOK sets it;
+	// markFetchFailed clears it so a now-flaky connection loses the preference.
+	lastOKNano atomic.Int64
+	// protocolDead records that this connection's leios-fetch mini-protocol can
+	// no longer complete a request for the rest of the connection's life. The
+	// gouroboros client's request slot stays busy-and-abandoned once a request's
+	// context expires before the peer answers, and only the late response (or
+	// protocol shutdown) can drain it, so every later request on the same bearer
+	// returns ErrRequestSlotAbandoned after its grace period. A cooldown cannot
+	// repair that -- the connection has to be replaced -- so a dead connection is
+	// ordered last and recycled (dingo #3552).
+	protocolDead atomic.Bool
+	// recycleRequested records that a recycle has already been published for this
+	// connection, so a burst of failing fetches raises one request rather than one
+	// per fetch.
+	recycleRequested    atomic.Bool
+	recycleEventPending atomic.Bool
+}
+
+// markProtocolDead records that this connection's leios-fetch protocol can no
+// longer complete a request. It returns true the first time it is called for a
+// connection, so the caller publishes exactly one recycle request.
+func (g *leiosFetchGuard) markProtocolDead() bool {
+	g.protocolDead.Store(true)
+	return g.recycleRequested.CompareAndSwap(false, true)
+}
+
+func (g *leiosFetchGuard) takeRecycleEvent() bool {
+	return g.recycleEventPending.CompareAndSwap(true, false)
+}
+
+// isProtocolDead reports whether this connection's leios-fetch protocol has
+// been diagnosed as unable to complete any further request.
+func (g *leiosFetchGuard) isProtocolDead() bool {
+	return g.protocolDead.Load()
+}
+
+// markFetchFailed puts this connection on a cooldown after a failed or
+// timed-out backfill fetch. Consecutive failures on the same connection
+// escalate the cooldown exponentially from base, capped at
+// leiosBackfillConnCooldownMax, so a connection that repeatedly returns wrong
+// (hash-mismatching) or unservable/stalling responses is deprioritized for
+// progressively longer and the backfill prefers other connections/backends.
+// The cooldown only reorders connection preference -- FetchEndorserBlockByPoint
+// still falls back to cooled connections when none are healthy -- so a
+// persistently-bad connection is deprioritized but never permanently starved.
+func (g *leiosFetchGuard) markFetchFailed(now time.Time, base time.Duration) {
+	// A fresh failure drops the positive-affinity preference so a connection
+	// that just started failing is no longer treated as recently-proven.
+	g.lastOKNano.Store(0)
+	n := g.consecutiveFailures.Add(1)
+	d := base
+	if n > 1 {
+		shift := min(n-1, leiosBackfillConnCooldownMaxShift)
+		d = base << uint(shift)
+	}
+	// Guard against overflow (d <= 0) and clamp to the cap.
+	if d <= 0 || d > leiosBackfillConnCooldownMax {
+		d = leiosBackfillConnCooldownMax
+	}
+	g.cooledUntilNano.Store(now.Add(d).UnixNano())
+}
+
+// markFetchOK clears any cooldown, resets the failure escalation, and records
+// the success time (for positive peer affinity) after a successful fetch on this
+// connection.
+func (g *leiosFetchGuard) markFetchOK() {
+	g.consecutiveFailures.Store(0)
+	g.cooledUntilNano.Store(0)
+	g.lastOKNano.Store(time.Now().UnixNano())
+}
+
+// recentlySucceeded reports whether this connection served a backfill fetch
+// within window as of now. The backfill connection selector uses it for
+// positive peer affinity, preferring a recently-proven connection over
+// never-tried ones. A window <= 0 treats any past success as recent.
+func (g *leiosFetchGuard) recentlySucceeded(
+	now time.Time,
+	window time.Duration,
+) bool {
+	last := g.lastOKNano.Load()
+	if last <= 0 {
+		return false
+	}
+	if window <= 0 {
+		return true
+	}
+	return now.UnixNano()-last < int64(window)
+}
+
+// inCooldown reports whether this connection is still cooling down from a
+// recent failed fetch as of now.
+func (g *leiosFetchGuard) inCooldown(now time.Time) bool {
+	until := g.cooledUntilNano.Load()
+	return until > 0 && now.UnixNano() < until
+}
+
+func (o *Ouroboros) leiosFetchGuardFor(
+	connId ouroboros.ConnectionId,
+) *leiosFetchGuard {
+	g, _ := o.leiosFetchGuards.LoadOrStore(connId, &leiosFetchGuard{})
+	return g.(*leiosFetchGuard)
+}
+
+// reserveLeiosFetch reserves one per-connection fetch slot without publishing
+// any cross-connection work claim. Callers that publish such a claim must
+// reserve first, then release the slot if another caller already owns it.
+func (o *Ouroboros) reserveLeiosFetch(
+	connId ouroboros.ConnectionId,
+) (*leiosFetchGuard, bool) {
+	g := o.leiosFetchGuardFor(connId)
+	for {
+		current := g.inflight.Load()
+		if current >= leiosFetchMaxInflightPerConn {
+			return g, false
+		}
+		if g.inflight.CompareAndSwap(current, current+1) {
+			return g, true
+		}
+	}
+}
+
+// dispatchLeiosFetchReserved starts work for a slot already reserved by
+// reserveLeiosFetch. It never performs a second admission check.
+func (o *Ouroboros) dispatchLeiosFetchReserved(g *leiosFetchGuard, fn func()) {
+	go func() {
+		defer g.inflight.Add(-1)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		fn()
+	}()
+}
+
+// leiosTxFetchMaxRoundsPerWindow bounds how many BlockTxsRequest rounds are
+// spent completing a single window, so a relay that never serves a particular
+// transaction cannot loop forever. A response that serves no new transaction
+// already aborts the window (the progress==0 guard below), so this cap only
+// bounds slow-but-steady progress: a relay that dribbles a single new
+// transaction per round needs one round per transaction, so the cap is the
+// window size. A lower cap would abort fetches that were still making valid
+// partial progress and leave the endorser block permanently incomplete.
+const leiosTxFetchMaxRoundsPerWindow = leiosTxFetchWindowSize
+
+// fetchLeiosEbTxsBatched fetches all txCount transactions of an endorser block
+// over leios-fetch, requesting up to leiosTxFetchWindowsPerRequest 64-tx
+// windows of still-missing transactions per BlockTxsRequest. Batching several
+// windows per request overlaps the relay's per-response work and cuts the
+// round-trips a large endorser block needs (a sequential one-window-per-request
+// fetch took 5-17s for 1000+ tx blocks, far past the Leios diffusion window).
+// The batch stays bounded — not the whole block — because the prototype relay
+// resets the connection if asked for all transactions at once, and the relay
+// serves a request only partially when the response would exceed its
+// per-message size cap, so still-missing transactions are re-requested until
+// complete. Which transactions a response carried is taken from the response's
+// own bitmaps, falling back to "the relay served a prefix of the requested
+// indices in ascending order" when the response omits them. Transactions are
+// placed at their absolute index, so the result is in index order; on an error
+// or a no-progress request it returns the contiguous prefix fetched so far,
+// letting callers treat the fetch as best-effort.
+//
+// This is the tip-driven entry point (no per-attempt deadline); the by-point
+// backfill path uses fetchLeiosEbTxsBatchedUntil to bound one connection's
+// attempt so it can fail over to another peer.
+func (o *Ouroboros) fetchLeiosEbTxsBatched(
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	manifestRaw []byte,
+) ([]cbor.RawMessage, error) {
+	var validate func(int, cbor.RawMessage) error
+	if len(manifestRaw) > 0 {
+		var err error
+		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		context.Background(),
+		client,
+		point,
+		txCount,
+		time.Time{},
+		validate,
+	)
+}
+
+// fetchLeiosEbTxsBatchedUntil is fetchLeiosEbTxsBatched with an optional
+// per-attempt deadline. When deadline is non-zero the fetch abandons the attempt
+// and returns the contiguous prefix fetched so far (with a deadline error) once
+// it elapses, instead of continuing to re-request from a slow-but-alive relay
+// that keeps dribbling transactions yet never promptly completes. The check is
+// between request rounds — each individual round is bounded by the request context from
+// leiosFetchRequestContext, not by a protocol state timeout (leios-fetch
+// deliberately has none for Block/BlockTxs) — so an attempt overshoots the
+// deadline by at most one round;
+// this lets the by-point backfill fail over to another connection rather than
+// parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
+// disables the bound, preserving the tip-path behavior.
+func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
+	ctx context.Context,
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	manifestRaw []byte,
+	deadline time.Time,
+) ([]cbor.RawMessage, error) {
+	var validate func(int, cbor.RawMessage) error
+	if len(manifestRaw) > 0 {
+		var err error
+		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		ctx,
+		client,
+		point,
+		txCount,
+		deadline,
+		validate,
+	)
+}
+
+func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
+	ctx context.Context,
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	deadline time.Time,
+	validate func(int, cbor.RawMessage) error,
+) ([]cbor.RawMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if client == nil {
+		return nil, errors.New("leios-fetch client unavailable")
+	}
+	if txCount <= 0 {
+		return nil, nil
+	}
+	numWindows := (txCount-1)/leiosTxFetchWindowSize + 1
+	if numWindows > leiosTxFetchMaxWindows {
+		return nil, fmt.Errorf(
+			"leios-fetch tx count %d requires %d bitmap windows, max %d",
+			txCount,
+			numWindows,
+			leiosTxFetchMaxWindows,
+		)
+	}
+	result := make([]cbor.RawMessage, txCount)
+	// Resume from whatever this endorser block already holds. The relay
+	// diffuses transactions over several seconds, so a fetch near the live tip
+	// often ends before the block is whole; the prefix it gathered is retained
+	// against the cached block (below) and seeded back here, so a re-offer
+	// requests only the still-missing tail instead of re-fetching transactions
+	// dingo already has (issue #2629).
+	o.seedLeiosPartialTxs(point.Slot, point.Hash, result, validate)
+	// Retain whatever this attempt ends up holding, so an attempt that stops
+	// short (tail budget, per-attempt deadline, protocol error) leaves the
+	// connection free while its progress survives for the next offer. A
+	// completing attempt's caller stores the whole set, which clears this.
+	defer func() {
+		o.retainLeiosPartialTxs(point.Slot, point.Hash, result, validate)
+	}()
+	// The no-progress guard below guarantees termination (each non-final round
+	// places at least one new transaction, and there are txCount of them); this
+	// is an absolute backstop against a relay that dribbles already-held txs.
+	maxRounds := numWindows * leiosTxFetchMaxRoundsPerWindow
+	// tailStall marks when the fetch first stalled (a round served no new
+	// transactions). The relay diffuses an endorser block's transactions over
+	// several seconds, so the last (partial) window may not be served yet;
+	// rather than abort on the first miss, re-request it until the tail-retry
+	// budget elapses. Reset on any progress.
+	var tailStall time.Time
+	for round := 0; ; round++ {
+		needed := leiosNeededBitmap(
+			result,
+			txCount,
+			leiosTxFetchWindowsPerRequest,
+		)
+		if len(needed) == 0 {
+			break // every transaction fetched
+		}
+		if err := ctx.Err(); err != nil {
+			got := leiosCollectTxs(result)
+			return got, fmt.Errorf(
+				"leios-fetch attempt cancelled after %d/%d transactions: %w",
+				len(got),
+				txCount,
+				err,
+			)
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			got := leiosCollectTxs(result)
+			return got, fmt.Errorf(
+				"leios-fetch attempt deadline exceeded after %d/%d transactions",
+				len(got),
+				txCount,
+			)
+		}
+		if round >= maxRounds {
+			return leiosCollectTxs(result), fmt.Errorf(
+				"leios-fetch could not complete %d transactions after %d rounds",
+				txCount,
+				round,
+			)
+		}
+		reqCtx, cancel := leiosFetchRequestContext(ctx, deadline)
+		resp, err := client.BlockTxsRequest(reqCtx, point, needed)
+		cancel()
+		if err != nil {
+			return leiosCollectTxs(result), err
+		}
+		respTxs, ok := resp.(*leiosfetch.MsgBlockTxs)
+		if !ok {
+			return leiosCollectTxs(result), fmt.Errorf(
+				"unexpected leios-fetch BlockTxs response type %T", resp,
+			)
+		}
+		if err := validateLeiosTxBitmap(txCount, respTxs.Bitmaps); err != nil {
+			// A relay-declared bitmap referencing an index beyond this
+			// endorser block's txCount is rejected before it is expanded: a
+			// small txCount must not license decoding a disproportionately
+			// large index list (issue #3523).
+			return leiosCollectTxs(result), fmt.Errorf(
+				"leios-fetch response bitmap: %w",
+				err,
+			)
+		}
+		served := leiosBitmapTxIndices(respTxs.Bitmaps)
+		if len(served) != len(respTxs.TxsRaw) {
+			// Response omitted bitmaps: assume the relay served a prefix of the
+			// requested indices in ascending order.
+			served = leiosBitmapTxIndices(needed)
+		}
+		progress := 0
+		for k, raw := range respTxs.TxsRaw {
+			if k >= len(served) {
+				break
+			}
+			idx := served[k]
+			if idx >= 0 && idx < txCount && result[idx] == nil {
+				if validate != nil {
+					if err := validate(idx, raw); err != nil {
+						return leiosCollectTxs(result), fmt.Errorf(
+							"validate fetched transaction: %w",
+							err,
+						)
+					}
+				}
+				result[idx] = slices.Clone(raw)
+				progress++
+			}
+		}
+		if progress == 0 {
+			// No new transactions this round. With no tail-retry budget (e.g.
+			// unit tests) abort immediately, preserving prior behavior.
+			// Otherwise keep re-requesting the still-diffusing tail until the
+			// budget elapses.
+			if o.config.LeiosTxFetchTailBudget <= 0 {
+				return leiosCollectTxs(result), errors.New(
+					"leios-fetch served no new transactions",
+				)
+			}
+			if tailStall.IsZero() {
+				tailStall = time.Now()
+			} else if time.Since(tailStall) >= o.config.LeiosTxFetchTailBudget {
+				return leiosCollectTxs(result), errors.New(
+					"leios-fetch served no new transactions within tail budget",
+				)
+			}
+			timer := time.NewTimer(leiosTxFetchTailPoll)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+			}
+			continue
+		}
+		tailStall = time.Time{}
+	}
+	return leiosCollectTxs(result), nil
+}
+
+// leiosNeededBitmap returns the still-missing transaction indices grouped into
+// up to maxWindows lowest-indexed 64-tx windows, as a leios-fetch request
+// bitmap. Selecting the lowest windows first keeps the fetched prefix
+// contiguous (so leiosCollectTxs yields the longest usable run as the fetch
+// progresses).
+func leiosNeededBitmap(
+	result []cbor.RawMessage,
+	txCount, maxWindows int,
+) map[uint16]uint64 {
+	numWindows := (txCount-1)/leiosTxFetchWindowSize + 1
+	bitmap := make(map[uint16]uint64)
+	for w := 0; w < numWindows && len(bitmap) < maxWindows; w++ {
+		if mask := leiosWindowNeededMask(result, w, txCount); mask != 0 {
+			bitmap[uint16(w)] = mask // #nosec G115 -- w < numWindows <= 1<<16
+		}
+	}
+	return bitmap
+}
+
+// leiosWindowNeededMask returns the bitmap of transaction indices in 64-tx
+// window w that are within txCount and not yet present in result.
+//
+// The bitmap is numbered MSB-first: the transaction at window offset 0 is bit
+// 63, offset 1 is bit 62, ..., offset 63 is bit 0. This matches the IOG Leios
+// relay (the big-endian reading of CIP-0164's per-chunk 8-octet bitmap). An
+// LSB-first mask only round-trips for full (all-64-bit) windows; for a partial
+// window of k<64 txs it made the relay serve just max(0, 2k-64) of them (the
+// relay read the high bits), so a final window of <=32 txs was never served
+// and from-genesis catch-up stalled mid-epoch (issue #2656).
+func leiosWindowNeededMask(result []cbor.RawMessage, w, txCount int) uint64 {
+	var mask uint64
+	base := w * 64
+	for off := 0; off < 64 && base+off < txCount; off++ {
+		if result[base+off] == nil {
+			mask |= 1 << uint(63-off)
+		}
+	}
+	return mask
+}
+
+// leiosBitmapTxIndices returns the transaction indices of all set bits across
+// the bitmap windows, in ascending index order. Bits are numbered MSB-first to
+// match leiosWindowNeededMask: bit 63 is window offset 0, bit 0 is offset 63.
+func leiosBitmapTxIndices(bitmaps map[uint16]uint64) []int {
+	windows := make([]uint16, 0, len(bitmaps))
+	for w := range bitmaps {
+		windows = append(windows, w)
+	}
+	slices.Sort(windows)
+	var idx []int
+	for _, w := range windows {
+		mask := bitmaps[w]
+		// Iterate high bit to low so the decoded indices come out ascending,
+		// matching the relay serving transactions in ascending index order.
+		for bit := 63; bit >= 0; bit-- {
+			if mask&(1<<uint(bit)) != 0 {
+				idx = append(idx, int(w)*64+(63-bit))
+			}
+		}
+	}
+	return idx
+}
+
+// leiosCollectTxs returns the contiguous run of fetched transactions from the
+// start. A gap (a still-missing transaction) ends the run: endorser blocks are
+// only usable when complete and their transactions are positional, so a prefix
+// keeps the indices aligned.
+func leiosCollectTxs(result []cbor.RawMessage) []cbor.RawMessage {
+	out := make([]cbor.RawMessage, 0, len(result))
+	for _, r := range result {
+		if r == nil {
+			break
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// leiosForgedEBOffer builds the LeiosNotify offer for a queued log entry: a
+// votes-offer for a locally emitted vote, or a block offer for a forged or
+// relayed endorser block. Both go through the gouroboros constructors so the
+// message MessageType (and, for a block offer, the EB size) are set. A bare
+// struct literal would leave MessageType at its zero value, which the leios-
+// notify state machine rejects when the server has agency in the Busy state,
+// so the EB would never be offered, fetched, voted on, or certified.
+func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
+	switch {
+	case entry.txOffer != nil:
+		return oleiosnotify.NewMsgBlockTxsOffer(*entry.txOffer)
+	case entry.announcement != nil:
+		return oleiosnotify.NewMsgBlockAnnouncement(
+			cbor.RawMessage(entry.announcement),
+		)
+	case entry.vote != nil:
+		return oleiosnotify.NewMsgVotesOfferPrototype(
+			[]lcommon.LeiosPrototypeVote{*entry.vote},
+		)
+	case entry.point != nil:
+		return oleiosnotify.NewMsgBlockOffer(*entry.point, entry.size)
+	default:
+		return nil
+	}
+}
+
+// acceptLeiosAnnouncement validates and records one w31 announcement, then
+// queues it for diffusion to all connected LeiosNotify peers when it is within
+// the w31 relay-age bound. The raw header is retained so the relay preserves
+// the producer's signed bytes.
+func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
+	return o.acceptLeiosAnnouncementInternal(raw, source, true)
+}
+
+func (o *Ouroboros) acceptLeiosAnnouncementInternal(
+	raw []byte,
+	source string,
+	deferVerification bool,
+) error {
+	if isNilInterface(o.leiosAnnouncementLedger) {
+		return errors.New(
+			"cannot accept leios announcement without announcement ledger",
+		)
+	}
+	// raw is the header bytes a LeiosNotify peer put on the wire, decoded on
+	// the connection's own goroutine with no recover above it. This is also
+	// the first statement to touch peer data here -- no lock is held and
+	// nothing shared has been mutated -- so a contained decode panic leaves
+	// no half-updated state behind and simply drops the announcement.
+	header, err := decodeLeiosAnnouncementHeader(raw)
+	if err != nil {
+		return fmt.Errorf("decode ranking-block header: %w", err)
+	}
+	ebHash, ebSize, ok := header.LeiosAnnouncement()
+	if !ok {
+		return errors.New(
+			"ranking-block header has no valid endorser-block announcement",
+		)
+	}
+	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
+	if slotErr != nil {
+		return fmt.Errorf(
+			"read current slot for announcement validation: %w",
+			slotErr,
+		)
+	}
+	if header.SlotNumber() > currentSlot {
+		return fmt.Errorf(
+			"announcement slot %d is ahead of current slot %d",
+			header.SlotNumber(),
+			currentSlot,
+		)
+	}
+	announcementStart, timeErr := o.leiosAnnouncementLedger.SlotToTime(
+		header.SlotNumber(),
+	)
+	if timeErr != nil {
+		return fmt.Errorf("read announcement slot time: %w", timeErr)
+	}
+	age := time.Since(announcementStart)
+	if age < 0 {
+		return fmt.Errorf(
+			"announcement slot %d is in the future",
+			header.SlotNumber(),
+		)
+	}
+	if age > leiosNotifyMaxAnnouncementAge {
+		return fmt.Errorf("announcement is stale by %s", age)
+	}
+	staleness, err := o.leiosAnnouncementLedger.ValidateLeiosAnnouncementHeader(
+		header,
+	)
+	if err != nil {
+		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
+			o.deferLeiosAnnouncement(header, raw, source)
+		}
+		return fmt.Errorf("validate ranking-block header: %w", err)
+	}
+	if staleness == ledger.LeiosAnnouncementStaleOCIN {
 		o.config.Logger.Debug(
-			"fetched Leios EB transactions",
+			"ignoring leios announcement with stale opcert counter",
 			"component", "network",
-			"protocol", "leios-fetch",
-			"role", "client",
-			"connection_id", connId,
-			"slot", m.Point.Slot,
-			"hash", hex.EncodeToString(m.Point.Hash),
-			"tx_count", len(txsRaw),
+			"protocol", "leios-notify",
+			"connection_id", source,
+			"slot", header.SlotNumber(),
+		)
+		return nil
+	}
+	// Drop announcements that can no longer affect the acceptance window
+	// before adding this one. This is deliberately done for local and peer
+	// announcements alike; otherwise a long-lived node retains every RB
+	// header it has ever seen.
+	o.pruneLeiosAnnouncements()
+	o.config.Logger.Debug(
+		"accepted leios announcement",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", source,
+		"slot", header.SlotNumber(),
+		"lateness", age,
+	)
+	if age > leiosNotifyRelayAnnouncementAge {
+		// The announcement is still valid for the receiver, but the w31
+		// relay bound prevents an old message from propagating indefinitely.
+		return o.recordLeiosAnnouncement(
+			raw,
+			ebHash,
+			ebSize,
+			header,
+			source,
+			false,
+		)
+	}
+	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
+}
+
+func (o *Ouroboros) deferLeiosAnnouncement(
+	header *gdijkstra.DijkstraBlockHeader,
+	raw []byte,
+	source string,
+) {
+	key := fmt.Sprintf("%s:%x", source, header.Hash().Bytes())
+	o.leiosDeferredMu.Lock()
+	defer o.leiosDeferredMu.Unlock()
+	if len(o.leiosDeferredAnnouncements) >= leiosMaxDeferredAnnouncements {
+		return
+	}
+	if _, exists := o.leiosDeferredAnnouncements[key]; !exists {
+		o.leiosDeferredAnnouncements[key] = leiosDeferredAnnouncement{
+			raw: append([]byte(nil), raw...), source: source,
+		}
+	}
+}
+
+// retryDeferredLeiosAnnouncements retries headers after ledger activity has
+// had an opportunity to populate the epoch cache. Deferred headers are never
+// relayed before this validation succeeds.
+func (o *Ouroboros) retryDeferredLeiosAnnouncements() {
+	o.leiosDeferredMu.Lock()
+	pending := make(
+		map[string]leiosDeferredAnnouncement,
+		len(o.leiosDeferredAnnouncements),
+	)
+	maps.Copy(pending, o.leiosDeferredAnnouncements)
+	o.leiosDeferredMu.Unlock()
+	for key, announcement := range pending {
+		err := o.acceptLeiosAnnouncementInternal(
+			announcement.raw,
+			announcement.source,
+			false,
+		)
+		if err == nil || !ledger.IsHeaderVerificationDeferred(err) {
+			o.leiosDeferredMu.Lock()
+			delete(o.leiosDeferredAnnouncements, key)
+			o.leiosDeferredMu.Unlock()
+		}
+	}
+}
+
+func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
+	if !o.config.EnableLeios || o.eventBus == nil {
+		return
+	}
+	retry := func(event.Event) {
+		o.retryDeferredLeiosAnnouncements()
+		o.retryLeiosEndorserBlockValidations()
+	}
+	o.subscribeTracked(chain.ChainUpdateEventType, retry)
+	o.subscribeTracked(event.EpochTransitionEventType, retry)
+}
+
+// pruneLeiosAnnouncements bounds announcement deduplication state to the
+// same ten-minute window used by acceptLeiosAnnouncement. The size index is
+// rebuilt from the retained announcements so an old EB cannot keep its size
+// invariant alive after its announcements expire.
+func (o *Ouroboros) pruneLeiosAnnouncements() {
+	if isNilInterface(o.leiosAnnouncementLedger) {
+		return
+	}
+	now := time.Now()
+	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
+	for key, announcement := range o.leiosAnnouncements {
+		start, err := o.leiosAnnouncementLedger.SlotToTime(announcement.slot)
+		if err != nil || now.Sub(start) > leiosNotifyMaxAnnouncementAge {
+			delete(o.leiosAnnouncements, key)
+		}
+	}
+	o.leiosAnnouncementSizes = make(
+		map[string]uint64,
+		len(o.leiosAnnouncements),
+	)
+	o.leiosAnnouncementSlots = make(
+		map[string]map[uint64]struct{},
+		len(o.leiosAnnouncements),
+	)
+	o.leiosAnnouncementElections = make(map[string]map[string]struct{})
+	for key, announcement := range o.leiosAnnouncements {
+		ebKey := string(announcement.ebHash.Bytes())
+		o.leiosAnnouncementSizes[ebKey] = announcement.ebSize
+		slots := o.leiosAnnouncementSlots[ebKey]
+		if slots == nil {
+			slots = make(map[uint64]struct{})
+			o.leiosAnnouncementSlots[ebKey] = slots
+		}
+		slots[announcement.slot] = struct{}{}
+		election := o.leiosAnnouncementElections[announcement.electionKey]
+		if election == nil {
+			election = make(map[string]struct{})
+			o.leiosAnnouncementElections[announcement.electionKey] = election
+		}
+		election[key] = struct{}{}
+	}
+}
+
+// recordLeiosAnnouncement performs the consistency checks shared by local
+// announcements and peer announcements, and optionally queues a valid
+// announcement for relay. A recorded announcement is authoritative for its
+// endorser block's slot, so it also reconciles any endorser block cached before
+// it arrived: the relay (and dingo's own forge path) offer the block before
+// announcing it, so the cached entry routinely carries an as-yet-unverified
+// peer-supplied slot (issue #3513).
+func (o *Ouroboros) recordLeiosAnnouncement(
+	raw []byte,
+	ebHash lcommon.Blake2b256,
+	ebSize uint64,
+	header *gdijkstra.DijkstraBlockHeader,
+	source string,
+	relay bool,
+) error {
+	// leiosAnnouncementsMu is held across both the record and the
+	// reconciliation below, not just the record: bindLeiosEndorserBlockSlot
+	// runs at most once per distinct announcement (a re-announcement of an
+	// already-recorded header returns nil without re-binding), so if a
+	// concurrent storeLeiosEndorserBlock could observe "not yet announced"
+	// after this record commits but reconcile before this call reaches it,
+	// the resulting entry would never be verified by anything. Holding the
+	// lock across both closes that window; storeLeiosEndorserBlock takes the
+	// same lock (announcementsMu before leiosMu) across its own check and
+	// insertion for the same reason (issue #3513 review).
+	o.leiosAnnouncementsMu.Lock()
+	err := o.recordLeiosAnnouncementLocked(
+		raw,
+		ebHash,
+		ebSize,
+		header,
+		source,
+		relay,
+	)
+	// bindLeiosEndorserBlockSlot's reconciliation runs while
+	// leiosAnnouncementsMu is still held, for the atomicity reasons above; its
+	// returned publish step runs only after the unlock below, so vote,
+	// pipeline, and persistence handlers never run under a mutex shared by
+	// every concurrent announcement.
+	var publish func()
+	if err == nil {
+		publish = o.bindLeiosEndorserBlockSlot(
+			ebHash.Bytes(),
+			header.SlotNumber(),
+			raw,
+		)
+	}
+	o.leiosAnnouncementsMu.Unlock()
+	if publish != nil {
+		publish()
+	}
+	return err
+}
+
+// recordLeiosAnnouncementLocked is recordLeiosAnnouncement's implementation.
+// The caller must hold leiosAnnouncementsMu.
+func (o *Ouroboros) recordLeiosAnnouncementLocked(
+	raw []byte,
+	ebHash lcommon.Blake2b256,
+	ebSize uint64,
+	header *gdijkstra.DijkstraBlockHeader,
+	_ string,
+	relay bool,
+) error {
+	key := string(header.Hash().Bytes())
+	if o.leiosAnnouncements == nil {
+		o.leiosAnnouncements = make(map[string]leiosAnnouncement)
+	}
+	if o.leiosAnnouncementSizes == nil {
+		o.leiosAnnouncementSizes = make(map[string]uint64)
+	}
+	if o.leiosAnnouncementSlots == nil {
+		o.leiosAnnouncementSlots = make(map[string]map[uint64]struct{})
+	}
+	if o.leiosAnnouncementElections == nil {
+		o.leiosAnnouncementElections = make(map[string]map[string]struct{})
+	}
+	ebKey := string(ebHash.Bytes())
+	if previousSize, exists := o.leiosAnnouncementSizes[ebKey]; exists &&
+		previousSize != ebSize {
+		return errors.New(
+			"announcement size is inconsistent with a previously observed endorser block",
+		)
+	}
+	// Unlike ebSize (a property of the content-addressed bytes the hash
+	// commits to, so always identical across every legitimate occurrence),
+	// the slot is extrinsic: the manifest is content-addressed, so the same
+	// hash can be a live, independently required occurrence at more than one
+	// slot at once (two elections producing an identical transaction-
+	// reference set). There is nothing to reject here -- a second live
+	// announcement of the same hash at a different slot is added to the set
+	// below rather than compared against a single scalar (cubic review;
+	// issue #3513 review).
+	slot := header.SlotNumber()
+	if previous, exists := o.leiosAnnouncements[key]; exists {
+		if previous.ebHash != ebHash || previous.ebSize != ebSize ||
+			string(previous.raw) != string(raw) {
+			return errors.New(
+				"announcement is inconsistent with a previously observed ranking block",
+			)
+		}
+		return nil
+	}
+	issuer := header.IssuerVkey()
+	// An election belongs to its slot and issuer, not the relaying peer.
+	// Changing connections must not reset its distinct-announcement budget.
+	electionKey := fmt.Sprintf("%d:%x", slot, issuer)
+	electionAnnouncements := o.leiosAnnouncementElections[electionKey]
+	if electionAnnouncements == nil {
+		electionAnnouncements = make(map[string]struct{})
+		o.leiosAnnouncementElections[electionKey] = electionAnnouncements
+	}
+	if len(electionAnnouncements) >= 2 {
+		return errors.New(
+			"announcement is the third distinct message for a previously observed election",
+		)
+	}
+	electionAnnouncements[key] = struct{}{}
+	o.leiosAnnouncements[key] = leiosAnnouncement{
+		raw:         append([]byte(nil), raw...),
+		ebHash:      ebHash,
+		ebSize:      ebSize,
+		slot:        slot,
+		electionKey: electionKey,
+	}
+	o.leiosAnnouncementSizes[ebKey] = ebSize
+	slots := o.leiosAnnouncementSlots[ebKey]
+	if slots == nil {
+		slots = make(map[uint64]struct{})
+		o.leiosAnnouncementSlots[ebKey] = slots
+	}
+	slots[slot] = struct{}{}
+	if relay {
+		o.leiosEBLog.append(
+			leiosForgedEBEntry{announcement: append([]byte(nil), raw...)},
 		)
 	}
 	return nil
 }
 
-func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
-	point ocommon.Point,
-) ([]cbor.RawMessage, error) {
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
-	if !ok {
-		return nil, fmt.Errorf(
-			"%w: %d.%x",
-			errLeiosEndorserBlockNotCached,
-			point.Slot,
-			point.Hash,
+// leiosAnnouncementBindsSlotLocked reports whether a previously observed,
+// still-live ranking-block announcement vouches for ebHash at exactly slot.
+// It lets a leios-fetch offer or store be bound to a point its own
+// announcement actually vouched for, rather than trusting whatever point the
+// offering connection supplies (issue #3513). It is a membership check, not
+// a single-scalar comparison, because the manifest is content-addressed: the
+// same hash can be a live, independently required occurrence at more than
+// one slot at once, so the presence of a *different* live slot for this hash
+// says nothing about whether this one is bound (issue #3513 review). The
+// caller must hold leiosAnnouncementsMu: every caller already needs it held
+// across a wider check-then-act sequence (storeLeiosEndorserBlock's
+// announcement check through its cache insertion; recordLeiosAnnouncement's
+// record through its reconciliation), so this has no separate
+// lock-acquiring wrapper.
+func (o *Ouroboros) leiosAnnouncementBindsSlotLocked(
+	ebHash []byte,
+	slot uint64,
+) bool {
+	slots := o.leiosAnnouncementSlots[string(ebHash)]
+	if _, ok := slots[slot]; !ok {
+		return false
+	}
+	// leiosAnnouncementSlots is only actively pruned when pruneLeiosAnnouncements
+	// runs, and that runs solely as a side effect of a new announcement being
+	// accepted -- so an idle node retains a stale binding well past the
+	// leiosNotifyMaxAnnouncementAge window this same check enforces
+	// elsewhere. Treating an expired binding as still authoritative would
+	// reject a later offer or announcement for the same hash as a conflict
+	// forever, instead of just leaving it unverified like a hash with no
+	// binding at all (issue #3513 review). Entries recorded without a ledger
+	// wired (unit tests) never expire, matching pruneLeiosAnnouncements' own
+	// no-op when the ledger is absent.
+	if !isNilInterface(o.leiosAnnouncementLedger) {
+		start, err := o.leiosAnnouncementLedger.SlotToTime(slot)
+		if err != nil || time.Since(start) > leiosNotifyMaxAnnouncementAge {
+			return false
+		}
+	}
+	return true
+}
+
+// leiosAnnouncementHeaderLocked returns the exact announcement header that
+// binds one endorser-block occurrence. The caller holds leiosAnnouncementsMu.
+func (o *Ouroboros) leiosAnnouncementHeaderLocked(
+	ebHash []byte,
+	slot uint64,
+) []byte {
+	for _, announcement := range o.leiosAnnouncements {
+		if announcement.slot == slot &&
+			slices.Equal(announcement.ebHash.Bytes(), ebHash) {
+			return slices.Clone(announcement.raw)
+		}
+	}
+	return nil
+}
+
+// EnqueueLeiosBlockAnnouncement validates and queues a locally forged
+// ranking-block header for LeiosNotify diffusion.
+func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
+	if err := o.acceptLeiosAnnouncement(raw, "local"); err != nil {
+		o.config.Logger.Debug(
+			"suppressing local leios announcement",
+			"error",
+			err,
 		)
 	}
-	// In gouroboros v0.180.0 the Leios aliases decode as Dijkstra blocks.
-	// The current Dijkstra CDDL has no transaction-reference list, so there
-	// is no extra BlockTxsRequest to make here.
-	return cloneRawMessages(data.txsRaw), nil
 }
 
 func (o *Ouroboros) leiosnotifyServerRequestNext(
@@ -365,7 +1981,18 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		return nil, nil
 	}
 	connKey := leiosConnectionIdString(ctx.ConnectionId)
-	done := ctx.Server.DoneChan()
+	// Protocol completion waits for this callback to return. The owning
+	// connection can close before connmanager publishes it, so observe its
+	// independent lifecycle channel.
+	done := ctx.ConnectionDoneChan
+	protocolDone := ctx.Server.DoneChan()
+	defer func() {
+		select {
+		case <-ctx.ConnectionDoneChan:
+			o.RemoveLeiosNotifyConnectionOwner(ctx.ConnectionId, ctx.Server)
+		default:
+		}
+	}()
 
 	// If the connection is already closing, return without touching the
 	// cursor map. This prevents re-registering a stale cursor after
@@ -373,19 +2000,113 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	select {
 	case <-done:
 		return nil, nil
+	case <-protocolDone:
+		return nil, nil
 	default:
 	}
+	o.observeLeiosNotifyConnectionOwner(ctx)
 
 	for {
-		entry, wakeCh := o.leiosEBLog.next(connKey)
+		entry, wakeCh := o.leiosEBLog.nextWhileConnected(
+			connKey,
+			ctx.Server,
+			ctx.ConnectionDoneChan,
+		)
 		if entry != nil {
-			return &oleiosnotify.MsgBlockOffer{Point: entry.point}, nil
+			if msg := leiosForgedEBOffer(entry); msg != nil {
+				return msg, nil
+			}
 		}
 		select {
 		case <-wakeCh:
 			// new EB appended — re-check
 		case <-done:
 			return nil, nil
+		case <-protocolDone:
+			return nil, errors.New("leios-notify protocol closed")
 		}
 	}
+}
+
+func (o *Ouroboros) observeLeiosNotifyConnectionOwner(
+	ctx oleiosnotify.CallbackContext,
+) {
+	if ctx.Server == nil || ctx.ConnectionDoneChan == nil {
+		return
+	}
+	o.leiosNotifyObserversMu.Lock()
+	if o.leiosNotifyObservers == nil {
+		o.leiosNotifyObservers = make(map[*oleiosnotify.Server]struct{})
+	}
+	if _, exists := o.leiosNotifyObservers[ctx.Server]; exists {
+		o.leiosNotifyObserversMu.Unlock()
+		return
+	}
+	o.leiosNotifyObservers[ctx.Server] = struct{}{}
+	o.leiosNotifyObserversMu.Unlock()
+
+	go func() {
+		select {
+		case <-ctx.ConnectionDoneChan:
+		case <-ctx.Server.DoneChan():
+		}
+		o.RemoveLeiosNotifyConnectionOwner(ctx.ConnectionId, ctx.Server)
+		o.leiosNotifyObserversMu.Lock()
+		delete(o.leiosNotifyObservers, ctx.Server)
+		o.leiosNotifyObserversMu.Unlock()
+	}()
+}
+
+// RemoveLeiosNotifyConnectionOwner removes only the cursor owned by conn.
+func (o *Ouroboros) RemoveLeiosNotifyConnectionOwner(
+	connId ouroboros.ConnectionId,
+	owner *oleiosnotify.Server,
+) {
+	if o.leiosEBLog != nil {
+		o.leiosEBLog.removeConnOwned(leiosConnectionIdString(connId), owner)
+	}
+}
+
+// EnqueueLeiosPrototypeVote queues a locally emitted vote for diffusion to
+// every registered peer over the LeiosNotify stream used by the reference
+// implementation.
+func (o *Ouroboros) EnqueueLeiosPrototypeVote(vote lcommon.LeiosPrototypeVote) {
+	o.enqueueLeiosPrototypeVote(vote, "")
+}
+
+// EnqueueLeiosPrototypeVoteFromPeer queues a newly accepted peer vote for
+// diffusion to every registered LeiosNotify peer except the connection that
+// supplied it.
+func (o *Ouroboros) EnqueueLeiosPrototypeVoteFromPeer(
+	vote lcommon.LeiosPrototypeVote,
+	originConnKey string,
+) {
+	o.enqueueLeiosPrototypeVote(vote, originConnKey)
+}
+
+func (o *Ouroboros) enqueueLeiosPrototypeVote(
+	vote lcommon.LeiosPrototypeVote,
+	excludeConnKey string,
+) {
+	o.leiosVoteEnqueueCount.Add(1)
+	copyVote := vote
+	copyVote.VoteSignature = slices.Clone(vote.VoteSignature)
+	o.leiosEBLog.append(leiosForgedEBEntry{
+		vote:           &copyVote,
+		excludeConnKey: excludeConnKey,
+	})
+}
+
+// LeiosVoteEnqueueCount reports how many local or peer-originated votes have
+// been enqueued for diffusion. A queue-depth check on the underlying log
+// doesn't work for this: with no peer connections registered
+// (leiosForgedEBLog.pruneLocked
+// treats every entry as immediately prunable when no cursor holds it), an
+// entry is pruned again within the same append call that added it. This
+// counter is unaffected by that pruning, so it can actually distinguish
+// "one call per emitted vote" from "one call per accumulated stale
+// EventBus subscription" -- see node_leios_test.go's
+// repeated-live-lifecycle-cycle regression.
+func (o *Ouroboros) LeiosVoteEnqueueCount() uint64 {
+	return o.leiosVoteEnqueueCount.Load()
 }

@@ -15,14 +15,17 @@
 package ouroboros
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
@@ -30,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	oprotocol "github.com/blinklabs-io/gouroboros/protocol"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -52,6 +56,17 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+// Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
+// this interface local prevents networking from depending on FIFO internals.
+type Mempool interface {
+	AddTransaction(txType uint, txBytes []byte) error
+	Transactions() []mempool.MempoolTransaction
+	CapacityBytes() int64
+	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+	RemoveConsumer(connId ouroboros.ConnectionId)
+	Consumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+}
+
 func blockfetchConfig(
 	opts ...oblockfetch.BlockFetchOptionFunc,
 ) oblockfetch.Config {
@@ -63,23 +78,110 @@ func blockfetchConfig(
 }
 
 type Ouroboros struct {
-	ConnManager              *connmanager.ConnectionManager
-	PeerGov                  *peergov.PeerGovernor
-	ChainsyncState           *chainsync.State
-	EventBus                 *event.EventBus
-	Mempool                  *mempool.Mempool
-	LedgerState              *ledger.LedgerState
-	LeiosVotes               LeiosVoteHandler
-	LeiosPipeline            LeiosPipelineHandler
-	config                   OuroborosConfig
-	blockfetchMetrics        *blockfetchMetrics
-	protocolMetrics          *protocolMetrics
-	blockFetchStarts         map[ouroboros.ConnectionId]time.Time
-	blockFetchMutex          sync.Mutex
-	blockfetchNoBlocksCounts map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	// Dependencies are supplied to NewOuroboros, validated there, and never
+	// reassigned. They are unexported and exposed read-only by the accessors
+	// in wiring.go, so an Ouroboros cannot be observed partially wired.
+	//
+	// ledger, connmanager and peergov each consume callbacks from this type,
+	// which looks like it forces post-construction assignment. It does not:
+	// the node passes closures that resolve n.ouroboros when the callback
+	// fires, and gives connmanager lazy listener providers, so all three can
+	// be built before the Ouroboros they refer to.
+	connManager    *connmanager.ConnectionManager
+	peerGov        *peergov.PeerGovernor
+	chainsyncState *chainsync.State
+	eventBus       *event.EventBus
+	mempool        mempool.Service
+	ledgerState    *ledger.LedgerState
+	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
+	// Unix nanoseconds; 0 means "never warned".
+	lastOriginOnlyIntersectWarn atomic.Int64
+	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
+	// LeiosNotify. It returns validation facts only; this package owns peer,
+	// publication, and relay semantics.
+	leiosAnnouncementLedger LeiosAnnouncementLedger
+	leiosVotes              LeiosVoteHandler
+	leiosPipeline           LeiosPipelineHandler
+	leiosValidationCtx      context.Context
+	leiosValidationCancel   context.CancelFunc
+	leiosValidationSlots    chan struct{}
+	leiosValidationWG       sync.WaitGroup
+	leiosValidationMu       sync.Mutex
+	leiosValidationClosed   bool
+	config                  OuroborosConfig
+	// registerer wraps config.PromRegistry and tracks every collector this
+	// instance registers, so Close can hand them all back. See lifecycle.go.
+	registerer *trackingRegisterer
+	// subscriptions records the EventBus registrations this instance made on
+	// its own behalf, so Close can remove them from a bus that outlives it.
+	subscriptionsMu   sync.Mutex
+	subscriptions     []subscription
+	blockfetchMetrics *blockfetchMetrics
+	protocolMetrics   *protocolMetrics
+	// Shared cache of decoded blocks/headers keyed by content hash, so
+	// multiple connections delivering byte-identical data (the common case
+	// when several peers relay the same block) decode once instead of once
+	// per connection. See #489 and decode_cache.go.
+	blockDecodeCache   *decodeCache[gledger.Block]
+	headerDecodeCache  *decodeCache[gledger.BlockHeader]
+	decodeCacheMetrics *decodeCacheMetrics
+	// blockFetchStarts is keyed by (connId, requestId) rather than connId
+	// alone: pipelining allows more than one RequestRange call to be
+	// outstanding on the same connection at once, and a connId-only key would
+	// have one request's start time silently overwrite another's.
+	blockFetchStarts map[blockFetchKey]time.Time
+	// blockFetchDoneEarly holds the keys of requests whose RangeDoneFunc ran
+	// before BlockfetchClientRequestRange recorded their start time.
+	// RequestRange returns once the request is on the wire, so the peer's
+	// terminal reply can reach blockfetchClientRangeDone on the protocol's
+	// receive goroutine while the requester is still between that return and
+	// its blockFetchStarts insert. The insert consumes the marker instead of
+	// adding an entry that nothing would ever delete, since the request's
+	// one and only terminal callback has already run.
+	blockFetchDoneEarly map[blockFetchKey]struct{}
+	blockFetchMutex     sync.Mutex
+	// blockfetchConnClient resolves the live request-range client for a
+	// connection. Defaults to blockfetchConnClientLive; tests override it to
+	// exercise BlockfetchClientRequestRange without a live connection.
+	blockfetchConnClient blockfetchConnClientFunc
+	// localstatequeryAcquiredPoints records the pinned point (zero value =
+	// no pin, answer from live state) an NtC client acquired on this
+	// connection's LocalStateQuery session, keyed by ConnectionId so
+	// multiple simultaneous NtC clients don't share state. Populated by
+	// localstatequeryServerAcquire when the client names a specific point
+	// (blinklabs-io/dingo#382), read by localstatequeryServerQuery, and
+	// cleared by localstatequeryServerRelease and on connection close.
+	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
+	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
+	localstatequeryAcquireMutex   sync.Mutex
+	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
+	// Future-header admission runs on the per-peer ChainSync callback before
+	// any observed-tip, dedup, or ledger mutation. Resync timers recover the
+	// protocol cursor after a deliberate beyond-skew drop without recycling
+	// the connection; one earliest-onset timer is retained per connection.
+	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
+	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
+	// gate whether a peer-reported header may influence Genesis chain-selection
+	// density or corroboration before its VRF/KES cryptography (and, once local
+	// state has caught up, leader eligibility) has been checked (dingo #3517).
+	// Derived from ledgerState the same way chainsyncHeaderAdmission is, so
+	// tests exercising a single protocol handler can override either seam
+	// directly instead of standing up a full LedgerState.
+	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
+	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) error
+	chainsyncScheduleAt                    chainsyncScheduleAtFunc
+	// chainsyncArrivalNow is an instance-local clock seam for deterministic
+	// arrival-order tests. Production instances use time.Now.
+	chainsyncArrivalNow      func() time.Time
+	futureHeaderResyncMu     sync.Mutex
+	futureHeaderResyncs      map[ouroboros.ConnectionId]*scheduledChainsyncResync
+	futureHeaderResyncCtx    context.Context
+	futureHeaderResyncCancel context.CancelFunc
+	futureHeaderResyncClosed bool
 	// Per-connection mutex to serialize chainsync restarts
 	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
@@ -89,9 +191,121 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// leiosMaxVerifiedEbSlot is the highest slot for which an endorser block
+	// has been corroborated -- see publishLeiosEndorserBlock. It is proof that
+	// a ranking block exists at that slot, which the forge gate uses as a
+	// lower bound on the header frontier.
+	//
+	// VERIFIED occurrences only. A peer-offered manifest carries that
+	// connection's unverified claim about which slot it belongs to, and this
+	// value can only ever make the node REFUSE to forge, so trusting an
+	// unverified claim would let one peer suppress block production by
+	// offering a manifest bound to a slot near the current one. Corroboration
+	// comes from a validated ranking-block announcement or the ledger's own
+	// chain-derived reference, neither of which a peer controls.
+	leiosMaxVerifiedEbSlot atomic.Uint64
+	// leiosEndorserBlockSeq is a monotonic counter assigned to a cache entry
+	// while leiosMu is held, so eviction order reflects actual insertion order
+	// even when a delayed goroutine captured an earlier wall-clock insertedAt
+	// but loses the race for the lock. See leiosEndorserBlockData.seq.
+	leiosEndorserBlockSeq uint64
+	// Waiters blocked in the NtC serving path until an endorser block's
+	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
+	// channel is closed once a complete closure is stored for that key.
+	leiosClosureWaiters map[string][]chan struct{}
+	// Waiters blocked in the NtC serving path, keyed by the serving
+	// connection rather than by endorser block. Closed when that connection
+	// goes away, so a closure wait cannot outlive the connection it serves.
+	// The chainsync server callback owns gouroboros's receive loop while it
+	// runs, so Protocol.DoneChan() cannot close underneath it; the release
+	// signal has to come from connmanager's per-connection ErrorChan watcher
+	// instead. Live close handling uses ReleaseLeiosServeWaitersOwner so a
+	// delayed callback cannot release a replacement connection's waiter.
+	leiosServeWaiters      map[ouroboros.ConnectionId][]leiosServeWaiter
+	leiosServeWaitersMu    sync.Mutex
+	leiosNotifyObservers   map[*oleiosnotify.Server]struct{}
+	leiosNotifyObserversMu sync.Mutex
+	// NtC CertRB closure-resolution metrics.
+	leiosMetrics *leiosMetrics
+
+	// Per-connection serialization and bound for asynchronous leios-fetch
+	// client operations (manifest and EB-tx fetches). The leios-fetch client
+	// is strict request/response, so operations on one connection are
+	// serialized; running them off the leios-notify handler keeps a
+	// multi-second EB fetch from head-of-line blocking every later offer on
+	// the connection.
+	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
+	// (slot, EB hash) occurrences with a transaction-offer fetch in progress,
+	// deduplicating that work across all connections (it is
+	// offered on every connection). Keyed by slot and hash together, not hash
+	// alone, so an in-flight fetch for one occurrence does not suppress a
+	// legitimate offer of the same content-addressed hash recurring at a
+	// different slot (issue #3513).
+	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// Manifest offers have their own claim: a pending manifest fetch must not
+	// suppress a transaction offer needed to complete the same occurrence.
+	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	// leiosFetchClaimPublished is an instance-local test seam used to hold a
+	// claimed offer before dispatch and expose admission ordering deterministically.
+	leiosFetchClaimPublished func()
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
+	// leiosVoteEnqueueCount counts EnqueueLeiosPrototypeVote calls -- see
+	// LeiosVoteEnqueueCount's doc comment for why this, not a queue-depth
+	// check, is what tests must use.
+	leiosVoteEnqueueCount atomic.Uint64
+	// LeiosNotify ranking-block announcements observed on this node. The map
+	// is keyed by announcing ranking-block hash and prevents an inconsistent
+	// second description of the same ranking block from being relayed.
+	leiosAnnouncementsMu       sync.Mutex
+	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosDeferredMu            sync.Mutex
+	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
+	leiosAnnouncementSizes     map[string]uint64
+	// leiosAnnouncementSlots records, for each announced endorser-block hash,
+	// the set of slots a live (unexpired) announcement has declared it at, so
+	// a later leios-fetch offer or store can be bound to a point its own
+	// announcement actually vouched for instead of trusting whatever point
+	// the offering connection supplies (issue #3513). It is a set rather than
+	// a single scalar because the manifest is content-addressed: the same
+	// hash can be a live, independently required occurrence at more than one
+	// slot at once (two elections producing an identical transaction-
+	// reference set), and a scalar would let a second live, legitimate
+	// announcement be rejected as "inconsistent" with the first (issue #3513
+	// review).
+	leiosAnnouncementSlots map[string]map[uint64]struct{}
+	// LeiosNotify permits at most two distinct announcements for one election
+	// (slot plus issuer), shared across all sources so relays and reconnects
+	// cannot reset the distinct-announcement budget.
+	leiosAnnouncementElections map[string]map[string]struct{}
+
+	// Asynchronous best-effort persistence of fetched endorser blocks to the
+	// blob store for historical serving. The blob write (CBOR encode + commit)
+	// is moved off the leios-fetch hot path onto a single background writer so
+	// it does not serialize against block application during catch-up. Jobs
+	// coalesce by (slot, hash), not hash alone — a complete job (with txs)
+	// supersedes a manifest-only one for the same occurrence — which also
+	// elides the backfiller's duplicate manifest write, while two live
+	// occurrences of the same hash at different slots persist independently.
+	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
+	leiosPersistOnce     sync.Once
+	leiosPersistStopOnce sync.Once
+	leiosPersistStarted  atomic.Bool
+	leiosPersistMu       sync.Mutex
+	leiosPersistPending  map[string]*leiosPersistJob
+	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
+	// of leiosPersistPending's job sizes plus every reservation whose payload
+	// copy is still in flight. leiosPersistReserved counts those in-flight
+	// reservations so they also occupy a leiosPersistMaxPending slot. Both
+	// are guarded by leiosPersistMu and are reset with the pending map in
+	// startLeiosPersistWriter; see leiosPersistMaxQueueBytes.
+	leiosPersistBytes    int
+	leiosPersistReserved int
+	leiosPersistSignal   chan struct{}
+	leiosPersistStop     chan struct{}
+	leiosPersistDone     chan struct{}
+	leiosPersistDropped  atomic.Uint64
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -100,8 +314,16 @@ type chainsyncPeerStats struct {
 	headerCount         int64
 }
 
+// OuroborosConfig carries both the settings NewOuroboros applies at
+// construction and the node dependencies Wire installs afterwards. The two
+// groups are read at different points in the lifecycle and are not
+// interchangeable — see the dependency block at the bottom of the struct and
+// the field-ownership table on Wire.
 type OuroborosConfig struct {
-	Logger          *slog.Logger
+	Logger *slog.Logger
+	// EventBus and ConnManager are read by both NewOuroboros and Wire.
+	// Supplying them at construction is optional; Wire requires ConnManager
+	// and requires that an EventBus was supplied by one of the two.
 	EventBus        *event.EventBus
 	ConnManager     *connmanager.ConnectionManager
 	IntersectPoints []ocommon.Point
@@ -125,8 +347,105 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncApplyEligible reports whether a peer's chainsync headers
+	// and rollbacks may be APPLIED to the ledger. It is a second gate,
+	// stricter than ChainsyncIngressEligible: a peer can be ingress-
+	// eligible (so its tips are observed for chain selection) yet not
+	// apply-eligible, so its blocks are not applied. This enforces the
+	// Ouroboros Genesis corroboration stall — an uncorroborated fast source
+	// is observed but cannot steer the ledger. When nil, every ingress-
+	// eligible peer is apply-eligible (no behavior change).
+	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerTipUpdateEvent (avoids a double update). This
+	// lets the node update chain-selection state synchronously before the
+	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
+	// currently being admitted (closing the race where an async tip update that
+	// revokes corroboration is not yet processed). Returning false (or nil hook)
+	// falls back to the async PeerTipUpdateEvent path.
+	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
+	// peer-tip event. Its result is carried with that event into ledger
+	// admission; ledger must not reread mutable selector state.
+	ChainsyncSyncTarget func(chainselection.PeerTipUpdateEvent) (ochainsync.Tip, bool)
+	// ChainsyncObservePeerRollback observes a peer rollback. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerRollbackEvent (avoids a double update). It
+	// mirrors ChainsyncObservePeerTip for the roll-backward path: a rollback
+	// trims the peer's observed frontier (ApplyRollback) and can therefore
+	// change its corroboration status, so the node applies it to chain selection
+	// synchronously before the ChainsyncApplyEligible gate runs, so the rollback
+	// apply decision reflects the post-rollback state. Returning false (or nil
+	// hook) falls back to the async PeerRollbackEvent path.
+	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
+	// server waits for a certifying ranking block's endorser block transaction
+	// closure to become available before closing the connection. When 0 (the
+	// default) the wait is derived from the ledger's Leios pipeline timing
+	// (EndorserBlockWaitSlots × slot length), matching ledger application.
+	LeiosClosureWaitTimeout time.Duration
+	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol
+	// (protocol 20) toward peers. This is a dingo extension that is ahead
+	// of the IOG Leios prototype: the prototype Haskell node does not run a
+	// leios-votes responder, so sending on protocol 20 makes its muxer tear
+	// down the whole bearer (observed as "connection reset by peer"). On the
+	// prototype network, votes are instead pushed inline over leios-notify
+	// (MsgVotes, tag 4). Keep this disabled when talking to the prototype;
+	// enable it only for peers known to support the standalone protocol.
+	EnableLeiosVotes bool
+	// EnableLeiosTxFetch requests endorser-block transaction bodies over
+	// leios-fetch in response to the peer's transactions offer
+	// (MsgBlockTxsOffer) — the relay's signal that the EB's transactions are
+	// ready. It is enabled on the Leios network (wired from
+	// enableLeiosNetworking in node.go). Fetching before that offer (e.g. right
+	// after the EB manifest) makes the IOG prototype relay reset the
+	// connection, so the fetch is gated on the txs offer rather than disabled
+	// outright. Best-effort: a fetch failure never tears down the shared
+	// connection.
+	EnableLeiosTxFetch bool
+	// LeiosTxFetchTailBudget bounds how long an endorser-block tx fetch keeps
+	// re-requesting the still-diffusing tail (the relay diffuses an EB's
+	// transactions over several seconds, so the last partial window may lag)
+	// before giving up, instead of aborting on the first no-progress round.
+	// Zero disables tail-retry (fetch aborts on the first miss). Sourced from
+	// the Leios diffusion window in node.go.
+	LeiosTxFetchTailBudget time.Duration
+	// KeepAliveTimeout overrides how long the keep-alive client waits for a
+	// peer's pong before treating the connection as failed. Zero uses the
+	// gouroboros default (10s). It is raised on the Musashi prototype network
+	// (to okeepalive.ServerTimeout) so a pong delayed by the single relay's
+	// saturated shared muxer does not trigger a false-positive drop and an
+	// expensive reconnect + fork rollback; see keepaliveConnOpts. Values above
+	// that bound are clamped there. Unset (0) on other networks, so dead peers
+	// are still evicted quickly.
+	KeepAliveTimeout time.Duration
+
+	// Node dependencies, installed and validated by Wire rather than by
+	// NewOuroboros. They live here rather than in a separate type so there is
+	// one struct describing everything Ouroboros is given, but they are read
+	// at a different point in the lifecycle than the settings above: see
+	// Wire, and the field-ownership table in its doc comment. NewOuroboros
+	// ignores every field in this group, with the documented exception of
+	// EventBus and ConnManager above, which it also accepts so a caller that
+	// already holds them (chiefly tests) can supply them up front.
+	//
+	// These cannot be constructor arguments because the wiring graph is
+	// cyclic: ledger construction takes EndorserBlockTxsByHash,
+	// FetchEndorserBlockByPoint and BlockfetchClientRequestRange from
+	// Ouroboros, connmanager takes ConfigureListeners and OutboundConnOpts,
+	// and peergov takes RequestPeersFromPeer. Ouroboros must therefore be
+	// built before any of them exists.
+	LedgerState *ledger.LedgerState
+	// LeiosAnnouncementLedger is the narrow ledger read/validation boundary
+	// required when EnableLeios is true. Node composition supplies the same
+	// LedgerState instance through this restricted surface.
+	LeiosAnnouncementLedger LeiosAnnouncementLedger
+	Mempool                 mempool.Service
+	ChainsyncState          *chainsync.State
+	PeerGov                 *peergov.PeerGovernor
 }
 
 type blockfetchMetrics struct {
@@ -140,9 +459,47 @@ type blockfetchMetrics struct {
 	blocksUnder1s      atomic.Int64
 	blocksUnder3s      atomic.Int64
 	blocksUnder5s      atomic.Int64
+	// Ring of the last N at-tip block delays, exported by block slot so a
+	// per-block chart sees every block; blockDelay above keeps only the most
+	// recent one, which a scrape interval longer than the block gap misses.
+	recentDelays *recentBlockDelays
+	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
+	// into a gledger.Block, by stage ("decode"). Only observed on a
+	// decode-cache miss, since a hit reuses another connection's already
+	// decoded result and does no decode work of its own. See
+	// dingo_ledger_block_stage_duration_seconds in the ledger package for
+	// the header-verify/validate/apply stages that follow once a decoded
+	// block reaches the ledger.
+	stageDuration *prometheus.HistogramVec
+	stageDecode   prometheus.Observer
 }
 
-func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
+// NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
+// front and validated here, so the returned instance can never be observed in
+// a partially-wired state.
+//
+// The node satisfies the apparent cycle — ledger, connmanager and peergov each
+// consume callbacks from Ouroboros — by passing closures that resolve
+// n.ouroboros at call time rather than method values bound at construction,
+// and by giving connmanager lazy listener providers. See the composition
+// order in Node.Run.
+//
+// The returned instance owns EventBus subscriptions and Prometheus collectors
+// on registries that outlive it, so callers must Close it. The live
+// snapshot/restore path depends on that: it discards this instance along with
+// the dependencies it was built from and constructs a replacement.
+func NewOuroboros(cfg OuroborosConfig) (*Ouroboros, error) {
+	if err := cfg.validateDependencies(); err != nil {
+		return nil, err
+	}
+	return newOuroboros(cfg), nil
+}
+
+// newOuroboros constructs without validating dependencies. Production code
+// goes through NewOuroboros; this exists for in-package tests that exercise a
+// single protocol handler and would otherwise have to stand up a database,
+// mempool, connection manager and peer governor to do it.
+func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -150,15 +507,66 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	cfg.ChainsyncBlockTimeout = effectiveChainsyncBlockTimeout(
 		cfg.ChainsyncBlockTimeout,
 	)
+	futureHeaderResyncCtx, futureHeaderResyncCancel := context.WithCancel(
+		context.Background(),
+	)
+	leiosValidationCtx, leiosValidationCancel := context.WithCancel(
+		context.Background(),
+	)
 	o := &Ouroboros{
-		config:                   cfg,
-		EventBus:                 cfg.EventBus,
-		ConnManager:              cfg.ConnManager,
-		blockFetchStarts:         make(map[ouroboros.ConnectionId]time.Time),
-		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
-		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		config:                  cfg,
+		registerer:              newTrackingRegisterer(cfg.PromRegistry),
+		eventBus:                cfg.EventBus,
+		connManager:             cfg.ConnManager,
+		ledgerState:             cfg.LedgerState,
+		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		leiosValidationCtx:      leiosValidationCtx,
+		leiosValidationCancel:   leiosValidationCancel,
+		leiosValidationSlots:    make(chan struct{}, 2),
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly:     make(map[blockFetchKey]struct{}),
+		localstatequeryAcquiredPoints: make(
+			map[ouroboros.ConnectionId]ledger.QueryPoint,
+		),
+		localstatequeryOwners: make(
+			map[ouroboros.ConnectionId]*olocalstatequery.Server,
+		),
+		blockfetchNoBlocksCounts: make(
+			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
+		),
+		chainsyncStats: make(
+			map[ouroboros.ConnectionId]*chainsyncPeerStats,
+		),
+		chainsyncScheduleAt: defaultChainsyncScheduleAt,
+		chainsyncArrivalNow: time.Now,
+		futureHeaderResyncs: make(
+			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
+		),
+		futureHeaderResyncCtx:    futureHeaderResyncCtx,
+		futureHeaderResyncCancel: futureHeaderResyncCancel,
+		blockDecodeCache:         newDecodeCache[gledger.Block](),
+		headerDecodeCache:        newDecodeCache[gledger.BlockHeader](),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosEBLog:               newLeiosForgedEBLog(),
+		leiosClosureWaiters:      make(map[string][]chan struct{}),
+		leiosServeWaiters: make(
+			map[ouroboros.ConnectionId][]leiosServeWaiter,
+		),
+		leiosEBLog:                 newLeiosForgedEBLog(),
+		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
+		leiosAnnouncementSizes:     make(map[string]uint64),
+		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
+		leiosAnnouncementElections: make(map[string]map[string]struct{}),
+	}
+	o.blockfetchConnClient = o.blockfetchConnClientLive
+	if o.ledgerState != nil {
+		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
+		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
+		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -173,12 +581,16 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
+		o.initLeiosMetrics()
+		o.initDecodeCacheMetrics()
 	}
+	o.subscribeLeiosAnnouncementRetries()
+	o.restoreLeiosVerifiedEbSlot()
 	return o
 }
 
 func (o *Ouroboros) initBlockfetchMetrics() {
-	promautoFactory := promauto.With(o.config.PromRegistry)
+	promautoFactory := promauto.With(o.registerer)
 	o.blockfetchMetrics = &blockfetchMetrics{}
 	o.blockfetchMetrics.servedBlockCount = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
@@ -186,28 +598,85 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "total blocks served to clients",
 		},
 	)
-	o.blockfetchMetrics.blockDelay = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
-		Help: "delay in seconds for the most recent block fetch",
-	})
-	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(prometheus.CounterOpts{
-		Name: "cardano_node_metrics_blockfetchclient_lateblocks",
-		Help: "blocks that took more than 5 seconds to fetch",
-	})
-	o.blockfetchMetrics.blockDelayCdfOne = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
-		Help: "percentage of blocks fetched in less than 1 second",
-	})
+	o.blockfetchMetrics.blockDelay = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
+			Help: "delay in seconds for the most recent block fetch",
+		},
+	)
+	o.blockfetchMetrics.recentDelays = newRecentBlockDelays()
+	o.registerer.MustRegister(o.blockfetchMetrics.recentDelays)
+	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_blockfetchclient_lateblocks",
+			Help: "blocks that took more than 5 seconds to fetch",
+		},
+	)
+	o.blockfetchMetrics.blockDelayCdfOne = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
+			Help: "percentage of blocks fetched in less than 1 second",
+		},
+	)
 	o.blockfetchMetrics.blockDelayCdfThree = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree",
 			Help: "percentage of blocks fetched in less than 3 seconds",
 		},
 	)
-	o.blockfetchMetrics.blockDelayCdfFive = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
-		Help: "percentage of blocks fetched in less than 5 seconds",
-	})
+	o.blockfetchMetrics.blockDelayCdfFive = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
+			Help: "percentage of blocks fetched in less than 5 seconds",
+		},
+	)
+	o.blockfetchMetrics.stageDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_blockfetch_stage_duration_seconds",
+			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
+			// 100us to ~419s, matching
+			// dingo_ledger_block_stage_duration_seconds's bucket range (see
+			// its doc comment for why) so the two histograms stay
+			// comparable across the same block's stages.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
+		},
+		[]string{"stage"},
+	)
+	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("decode")
+}
+
+// isTrustedNtCListener reports whether l is verified reachable only from
+// this machine, the actual property the relaxed mux/query timeouts and
+// reassembly buffer in ConfigureListeners/localstatequeryServerConnOpts
+// depend on for safety (blinklabs-io/dingo#4183 review) -- "NtC" alone does
+// not imply this: internal/node/node.go builds a UseNtC listener for both
+// cfg.SocketPath (a Unix socket, always local-only by construction) and
+// cfg.PrivateBindAddr:cfg.PrivatePort (an operator-configurable TCP
+// address, defaulting to loopback but not code-enforced to stay there).
+//
+// A Unix-domain listener is trusted unconditionally: reaching it at all
+// already requires filesystem access to this machine, the same trust
+// boundary a TCP loopback bind provides. A TCP listener is trusted only
+// when every address it could actually be reached at resolves to a
+// loopback IP -- net.ResolveTCPAddr is used (not a string compare against
+// "127.0.0.1"/"localhost") so a hostname, IPv6 "::1", or "localhost" are
+// all recognised the same way a client connecting to this listener would
+// resolve them. Anything else (including a wildcard bind like "0.0.0.0",
+// which resolves to the unspecified address, not a loopback one) is
+// untrusted, and gets gouroboros' own anti-DoS defaults instead.
+func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
+	if l.ListenNetwork == "unix" {
+		return true
+	}
+	if l.ListenNetwork != "tcp" {
+		return false
+	}
+	addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress)
+	if err != nil || addr.IP == nil {
+		return false
+	}
+	return addr.IP.IsLoopback()
 }
 
 func (o *Ouroboros) ConfigureListeners(
@@ -216,18 +685,44 @@ func (o *Ouroboros) ConfigureListeners(
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
 	for idx, l := range listeners {
 		if l.UseNtC {
-			// Node-to-client
-			l.ConnectionOpts = append(
-				l.ConnectionOpts,
+			// Node-to-client. trusted gates the relaxed mux/query timeouts
+			// and reassembly buffer to a listener verified local-only (a
+			// Unix socket, or TCP actually bound to loopback) -- see
+			// isTrustedNtCListener's doc comment. Those exist to let a
+			// large, legitimate query (a whole-UTxO-set walk) run past
+			// gouroboros' anti-DoS defaults, which is only safe to grant
+			// unconditionally to a listener no non-local caller can reach
+			// (blinklabs-io/dingo#4183 review): a PrivateBindAddr an
+			// operator has pointed at a non-loopback address gets
+			// gouroboros' own defaults instead, same as any other NtC
+			// server would for an address reachable beyond this machine.
+			//
+			// A TCP address is resolved and rewritten to its numeric form
+			// here, before classification, so the address
+			// isTrustedNtCListener judges and the address startListener
+			// later binds (connmanager/listener.go) are the exact same
+			// literal string. Resolving the original hostname/"localhost"
+			// independently in each place would let two separate DNS
+			// lookups disagree -- a listener classified trusted from one
+			// answer could then bind to a different, non-loopback address
+			// DNS gives on the second lookup, handing that non-loopback
+			// listener the relaxed timeouts and 2GiB reassembly buffer
+			// meant only for a verified-local one (blinklabs-io/dingo#4183
+			// review). A resolution failure here is left for
+			// startListener's own bind to report -- isTrustedNtCListener
+			// treats it as untrusted either way.
+			if l.ListenNetwork == "tcp" {
+				if addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress); err == nil {
+					l.ListenAddress = addr.String()
+				}
+			}
+			trusted := isTrustedNtCListener(l)
+			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						o.chainsyncServerConnOpts()...,
-					),
-				),
+				o.chainsyncConnectionConfigOption(false),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
-						o.localstatequeryServerConnOpts()...,
+						o.localstatequeryServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxMonitorConfig(
@@ -240,7 +735,26 @@ func (o *Ouroboros) ConfigureListeners(
 						o.localtxsubmissionServerConnOpts()...,
 					),
 				),
-			)
+			}
+			if trusted {
+				// LocalStateQuery has no protocol-level timeout at all
+				// (Ouroboros Network Specification section 3.13.4: "No
+				// timeouts") -- a large query, like a whole-UTxO-set walk
+				// against this node's disk-backed store, can legitimately
+				// take minutes. gouroboros' mux applies a fixed 120s
+				// segment-read timeout by default as an anti-DoS guard
+				// against an untrusted remote peer, which does not describe
+				// a verified-local-only NtC client; disabling it here is
+				// what stops a slow-but-legitimate reply from getting the
+				// connection killed mid-flight (blinklabs-io/dingo#4082).
+				// Real cardano-node's own mux applies no equivalent timeout
+				// on local NtC connections either.
+				ntcOpts = append(
+					ntcOpts,
+					ouroboros.WithMuxerSegmentReadTimeout(0),
+				)
+			}
+			l.ConnectionOpts = append(l.ConnectionOpts, ntcOpts...)
 		} else {
 			// Node-to-node config: full duplex with both client and
 			// server handlers, matching cardano-node behavior. This
@@ -266,14 +780,7 @@ func (o *Ouroboros) ConfigureListeners(
 						)...,
 					),
 				),
-				ouroboros.WithChainSyncConfig(
-					ochainsync.NewConfig(
-						slices.Concat(
-							o.chainsyncClientConnOpts(),
-							o.chainsyncServerConnOpts(),
-						)...,
-					),
-				),
+				o.chainsyncConnectionConfigOption(true),
 				ouroboros.WithBlockFetchConfig(
 					blockfetchConfig(
 						slices.Concat(
@@ -339,14 +846,7 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				)...,
 			),
 		),
-		ouroboros.WithChainSyncConfig(
-			ochainsync.NewConfig(
-				slices.Concat(
-					o.chainsyncClientConnOpts(),
-					o.chainsyncServerConnOpts(),
-				)...,
-			),
-		),
+		o.chainsyncConnectionConfigOption(true),
 		ouroboros.WithBlockFetchConfig(
 			blockfetchConfig(
 				slices.Concat(
@@ -399,26 +899,46 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		return
 	}
 	connId := e.ConnectionId
+	o.cancelFutureHeaderResync(connId)
 
 	// Record connection stability observation for peer scoring
 	// Connection closure indicates reduced stability
-	if o.PeerGov != nil {
+	if o.peerGov != nil {
 		// Treat connection closure as negative stability signal (0.0)
-		o.PeerGov.UpdatePeerConnectionStability(connId, 0.0)
+		o.peerGov.UpdatePeerConnectionStability(connId, 0.0)
 	}
 
-	// Remove any chainsync client state
-	if o.ChainsyncState != nil {
-		o.ChainsyncState.RemoveClient(connId)
-		o.ChainsyncState.RemoveClientConnId(connId)
+	// Remove outbound chainsync selection state. Server-side state is removed
+	// by the connection-owner callback so a delayed close cannot delete a
+	// replacement connection that shares the same ConnectionId.
+	if o.chainsyncState != nil {
+		o.chainsyncState.RemoveClientConnId(connId)
 	}
 	// Remove mempool consumer
-	if o.Mempool != nil {
-		o.Mempool.RemoveConsumer(connId)
+	if o.mempool != nil {
+		o.mempool.RemoveConsumer(connId)
 	}
-	// Clean up any pending block fetch start times and NoBlocks counters
+	// Clean up any pending block fetch start times and NoBlocks counters.
+	// blockFetchStarts is keyed by (connId, requestId), and pipelining can
+	// leave more than one entry outstanding for this connId, so every
+	// matching key must be removed rather than a single connId-only key.
 	o.blockFetchMutex.Lock()
-	delete(o.blockFetchStarts, connId)
+	for key := range o.blockFetchStarts {
+		if key.connId == connId {
+			delete(o.blockFetchStarts, key)
+		}
+	}
+	// A terminal-before-registration marker is normally consumed by the
+	// dispatching call itself. It survives only when that call ends up
+	// returning an error instead -- gouroboros can fail an already-queued
+	// request during protocol shutdown, so its RangeDoneFunc runs while the
+	// send that queued it is still on its way to failing -- which is a
+	// teardown, and is therefore exactly this path.
+	for key := range o.blockFetchDoneEarly {
+		if key.connId == connId {
+			delete(o.blockFetchDoneEarly, key)
+		}
+	}
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
 	// Clean up chainsync stats
@@ -432,12 +952,12 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
 	}
 	// Clean up Leios vote serving state
-	if o.LeiosVotes != nil {
-		o.LeiosVotes.RemoveConnection(leiosConnectionIdString(connId))
+	if o.leiosVotes != nil {
+		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
-	// Release the EB log cursor for this connection; frees any log
-	// entries that were only being held for this connection.
-	o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
+	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
+	// hold their own reference, so they finish safely after this.
+	o.leiosFetchGuards.Delete(connId)
 }
 
 func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
@@ -445,8 +965,10 @@ func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
 	if !ok {
 		o.config.Logger.Warn(
 			"received unexpected event data type for peer eligibility change event",
-			"expected", "peergov.PeerEligibilityChangedEvent",
-			"got", fmt.Sprintf("%T", evt.Data),
+			"expected",
+			"peergov.PeerEligibilityChangedEvent",
+			"got",
+			fmt.Sprintf("%T", evt.Data),
 		)
 		return
 	}
@@ -468,11 +990,54 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 
+	// The node subscribes this handler before Wire runs, so an event that
+	// arrives early must be dropped with a diagnostic. Without this the
+	// o.connManager dereference below panics: GetConnectionById locks a mutex
+	// on its receiver, so a nil connection manager is a nil dereference, not
+	// a nil result.
+	if !o.hasDependencies() {
+		o.config.Logger.Error(
+			"dropping outbound connection event received before wiring completed",
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
+		)
+		return
+	}
+
 	// Record connection stability observation for peer scoring
 	// Successful outbound connection establishment indicates good stability
-	if o.PeerGov != nil {
+	if o.peerGov != nil {
 		// Treat successful connection as positive stability signal (1.0)
-		o.PeerGov.UpdatePeerConnectionStability(connId, 1.0)
+		o.peerGov.UpdatePeerConnectionStability(connId, 1.0)
+	}
+
+	// Log the negotiated node-to-node protocol version and diffusion mode for
+	// this connection. This is the key diagnostic for Leios mini-protocol
+	// interop: it tells us which NtN version the peer agreed to, which
+	// determines whether the peer runs responders for the Leios protocol IDs.
+	if conn := o.connManager.GetConnectionById(connId); conn != nil {
+		ver, verData := conn.ProtocolVersion()
+		fullDuplex := false
+		peerSharing := false
+		if verData != nil {
+			// DiffusionMode() returns the raw wire bool, where true means
+			// initiator-only (half duplex) and false means
+			// initiator-and-responder (full duplex). Compare against the
+			// constant so the log reports the negotiated mode correctly.
+			fullDuplex = verData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder
+			peerSharing = verData.PeerSharing()
+		}
+		o.config.Logger.Debug(
+			"outbound connection handshake negotiated",
+			"component", "network",
+			"connection_id", connId.String(),
+			"ntn_version", ver,
+			"full_duplex", fullDuplex,
+			"peer_sharing", peerSharing,
+			"enable_leios", o.config.EnableLeios,
+		)
 	}
 
 	// Start chainsync client for this connection if not already tracking it.
@@ -480,7 +1045,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	// txsubmission -- the connection is unusable if chainsync fails because
 	// the Ouroboros handshake/protocol negotiation has already failed and the
 	// peer will reject further mini-protocol starts on this connection.
-	if o.ChainsyncState != nil {
+	if o.chainsyncState != nil {
 		// Registration runs before the tracked client exists, so the
 		// direction-aware fallback in shouldPublishChainsyncToLedger
 		// cannot see us yet. Outbound keeps its legacy default of
@@ -495,22 +1060,52 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			true, // startedAsOutbound
 		)
 		if shouldStartChainsync {
+			// Capture the connection we are about to start chainsync on.
+			// The failure path below must close *this* connection, not
+			// whatever holds the id by the time the start returns: a
+			// reconnect can reuse the same local/remote address pair, and
+			// ConnectionId is exactly that pair, so a replacement can take
+			// over the id while the start is in flight.
+			startedConn := o.connManager.GetConnectionById(connId)
 			if err := o.chainsyncClientStart(connId); err != nil {
 				// Roll back the registration on failure
-				o.ChainsyncState.RemoveClientConnId(connId)
+				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
-					"failed to start chainsync client",
+					"failed to start chainsync client, closing outbound connection",
+					"component",
+					"network",
+					"connection_id",
+					connId.String(),
 					"error",
 					err,
+				)
+				// Close the connection so peer governance observes the
+				// failure and applies its reconnect backoff.
+				//
+				// Returning while the connection is still open strands the
+				// peer half-connected: TCP is up and peergov still counts it
+				// as connected, but no chainsync client is tracked and this
+				// function returns before txsubmission starts, so nothing
+				// retries and the peer is never replaced. Any transient
+				// failure -- an intersect-point or rollback-anchor lookup
+				// hitting a storage fault, not just a negotiation failure --
+				// would silently cost us the peer for the lifetime of the
+				// connection.
+				//
+				// The inbound handler already closes on this same failure;
+				// this makes the outbound path consistent with it.
+				o.closeOutboundConnAfterChainsyncFailure(
+					connId,
+					startedConn,
 				)
 				return
 			}
 			o.config.Logger.Debug(
 				"started chainsync client",
 				"connection_id", connId.String(),
-				"total_clients", o.ChainsyncState.ClientConnCount(),
+				"total_clients", o.chainsyncState.ClientConnCount(),
 			)
-		} else if !o.ChainsyncState.HasClientConnId(connId) {
+		} else if !o.chainsyncState.HasClientConnId(connId) {
 			// Not already tracked and TryAdd failed means limit reached
 			o.config.Logger.Debug(
 				"chainsync client limit reached, skipping eligible admission",
@@ -537,15 +1132,59 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			)
 			return
 		}
-		// Start leiosvotes client
-		if err := o.leiosvotesClientStart(connId); err != nil {
-			o.config.Logger.Error(
-				"failed to start leiosvotes client",
-				"error",
-				err,
-			)
-			return
+		// Start leiosvotes client only when the standalone leios-votes
+		// protocol is enabled. The Leios prototype relays do not run a
+		// protocol-20 responder, so initiating it resets the connection;
+		// there, votes arrive inline over leios-notify instead.
+		if o.config.EnableLeiosVotes {
+			if err := o.leiosvotesClientStart(connId); err != nil {
+				o.config.Logger.Error(
+					"failed to start leiosvotes client",
+					"error",
+					err,
+				)
+				return
+			}
 		}
+	}
+}
+
+// closeOutboundConnAfterChainsyncFailure closes the connection that chainsync
+// failed to start on, so peer governance observes the failure and applies its
+// reconnect backoff.
+//
+// It closes startedConn only if that is still the connection manager's current
+// connection for this id. ConnectionId is a (local addr, remote addr) pair, so
+// a reconnect to the same peer can legitimately produce the same id: looking
+// the connection up again after the start returned could hand back a healthy
+// replacement, and closing that would tear down a good peer for a failure that
+// belonged to its predecessor.
+func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
+	connId ouroboros.ConnectionId,
+	startedConn *ouroboros.Connection,
+) {
+	if startedConn == nil {
+		return
+	}
+	if current := o.connManager.GetConnectionById(connId); current != startedConn {
+		o.config.Logger.Debug(
+			"outbound connection no longer current after chainsync start failure, not closing",
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
+			"replaced",
+			current != nil,
+		)
+		return
+	}
+	if closeErr := startedConn.Close(); closeErr != nil {
+		o.config.Logger.Debug(
+			"failed to close outbound connection after chainsync start failure",
+			"component", "network",
+			"connection_id", connId.String(),
+			"error", closeErr,
+		)
 	}
 }
 
@@ -570,8 +1209,21 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 
+	// Subscribed before Wire runs, so drop early events rather than
+	// dereferencing a nil connection manager. See HandleOutboundConnEvent.
+	if !o.hasDependencies() {
+		o.config.Logger.Error(
+			"dropping inbound connection event received before wiring completed",
+			"component",
+			"network",
+			"connection_id",
+			connId.String(),
+		)
+		return
+	}
+
 	// Look up the connection to check its negotiated diffusion mode
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		o.config.Logger.Debug(
 			"inbound connection not found, skipping client start",
@@ -582,7 +1234,8 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 
 	// Only start client protocols if the peer negotiated full duplex
 	_, versionData := conn.ProtocolVersion()
-	if versionData == nil || versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
+	if versionData == nil ||
+		versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
 		o.config.Logger.Debug(
 			"inbound connection is not full-duplex, skipping client start",
 			"connection_id", connId.String(),
@@ -609,18 +1262,20 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	// peergov filters them at chainSelectionEligible. The default when no
 	// policy is wired is fail-closed for inbound: we will not feed the
 	// ledger from a peer we never decided to trust.
-	if o.ChainsyncState != nil {
+	if o.chainsyncState != nil {
 		ingressEligible := false
 		if o.config.ChainsyncIngressEligible != nil {
 			ingressEligible = o.config.ChainsyncIngressEligible(connId)
 		}
 		if o.registerTrackedChainsyncClient(connId, ingressEligible, false) {
 			if err := o.chainsyncClientStart(connId); err != nil {
-				o.ChainsyncState.RemoveClientConnId(connId)
+				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(
 					"chainsync client failed on inbound connection, closing to free per-IP slot",
-					"error", err,
-					"connection_id", connId.String(),
+					"error",
+					err,
+					"connection_id",
+					connId.String(),
 				)
 				conn.Close()
 				return
@@ -628,7 +1283,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 				o.config.Logger.Debug(
 					"started chainsync client on inbound connection",
 					"connection_id", connId.String(),
-					"total_clients", o.ChainsyncState.ClientConnCount(),
+					"total_clients", o.chainsyncState.ClientConnCount(),
 				)
 			}
 		}
@@ -644,7 +1299,7 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	// either side starts mini-protocol messages — the remote's
 	// NewConnection() has finished and all protocol handlers are
 	// registered by the time our InboundConnectionEvent fires.
-	if o.Mempool != nil {
+	if o.mempool != nil {
 		if err := o.txsubmissionClientStart(connId); err != nil {
 			o.config.Logger.Warn(
 				"txsubmission client failed on inbound connection",
@@ -673,17 +1328,19 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 				"connection_id", connId.String(),
 			)
 		}
-		if err := o.leiosvotesClientStart(connId); err != nil {
-			o.config.Logger.Warn(
-				"leiosvotes client failed on inbound connection",
-				"error", err,
-				"connection_id", connId.String(),
-			)
-		} else {
-			o.config.Logger.Debug(
-				"started leiosvotes client on inbound connection",
-				"connection_id", connId.String(),
-			)
+		if o.config.EnableLeiosVotes {
+			if err := o.leiosvotesClientStart(connId); err != nil {
+				o.config.Logger.Warn(
+					"leiosvotes client failed on inbound connection",
+					"error", err,
+					"connection_id", connId.String(),
+				)
+			} else {
+				o.config.Logger.Debug(
+					"started leiosvotes client on inbound connection",
+					"connection_id", connId.String(),
+				)
+			}
 		}
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ func BenchmarkTransactionCreate(b *testing.B) {
 	config := &Config{
 		DataDir: "", // In-memory
 	}
-	db, err := New(config)
+	db, err := newTestDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}

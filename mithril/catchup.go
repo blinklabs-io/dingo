@@ -1,0 +1,290 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package mithril
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+)
+
+// errCatchUpLocalAhead reports that the local chain is a strict descendant of
+// the target artifact's chain: its tip is above the artifact's sealed range and
+// the artifact's tip block is present on the local chain. There is nothing to
+// catch up; importing the (older) artifact would rewind the database.
+var errCatchUpLocalAhead = errors.New(
+	"local chain is ahead of the target Mithril artifact",
+)
+
+// ErrRewardStateRepairWaitingForSnapshot means the latest certified state is
+// an ancestor of the local chain, so repair must wait for a newer artifact.
+var ErrRewardStateRepairWaitingForSnapshot = errors.New(
+	"reward-state repair is waiting for a certified snapshot that covers the local chain tip",
+)
+
+// openBootstrappedImmutable opens the ImmutableDB a bootstrap produced, through
+// the handle the bootstrap vetted the directory under and held open. What gets
+// loaded is then the tree the bootstrap accepted, not whatever holds its name
+// by the time the load runs.
+//
+// A result without that handle is refused rather than opened by pathname. Both
+// bootstrap paths set it, so a missing one means the result did not come from a
+// vetted lookup — and falling back would silently reinstate the name-resolved
+// open this exists to replace, which is the kind of downgrade nobody notices
+// until it matters.
+//
+// Where the result also carries per-file digests, every file is checked against
+// them as it is opened, from the descriptor the read then goes through. The
+// handle and the digests answer different questions: the handle says the tip
+// read, the catch-up check and the blob copy are about the directory the
+// bootstrap vetted, and the digests say the bytes in it are the certified
+// bytes. Without the second, a writer sharing the download directory renames a
+// file of their own over a verified one — never leaving the directory the
+// handle refers to — and the copy loads what they wrote.
+//
+// v2 always carries them. v1 does not: it certifies one archive rather than the
+// files inside it, so after extraction there is nothing to re-check against and
+// its reads are bound to the directory alone.
+//
+// The absence of a map, not its emptiness, is what selects that unverified
+// read. A map that is present but empty is a v2 result that lost its digests,
+// and treating it as v1 would answer "verify nothing" to a question nobody
+// asked — reachable by removing something, which is the direction a fail-open
+// always comes from. NewFromRootVerified refuses it instead.
+func openBootstrappedImmutable(
+	result *BootstrapResult,
+) (*immutable.ImmutableDb, error) {
+	if result.ImmutableRoot == nil {
+		return nil, fmt.Errorf(
+			"opening certified ImmutableDB %s: bootstrap result carries no "+
+				"verified directory handle",
+			result.ImmutableDir,
+		)
+	}
+	var imm *immutable.ImmutableDb
+	var err error
+	if result.ImmutableDigests != nil {
+		imm, err = immutable.NewFromRootVerified(
+			result.ImmutableRoot, result.ImmutableDigests, "",
+		)
+	} else {
+		imm, err = immutable.NewFromRoot(result.ImmutableRoot)
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"opening certified ImmutableDB: %w", err,
+		)
+	}
+	return imm, nil
+}
+
+// verifyCatchupBeforeImport wraps verifyCatchupIntersection for Sync: a
+// strictly-ahead local chain is mapped to (upToDate=true) after advancing the
+// import marker to targetImmutable, so later runs no-op without re-downloading.
+//
+// resuming reports that this run is completing an interrupted sync
+// (sync_status is still in_progress). A strictly-ahead local chain is then
+// expected — the interrupted run's volatile gap-fill stored blocks past the
+// artifact's sealed immutable range — and must NOT map to upToDate: the
+// short-circuit return in Sync would skip the completion bookkeeping, leaving
+// sync_status set (so `dingo serve` refuses to start), deferred indexes
+// unbuilt, and possibly gap blocks whose transactions were never processed.
+// The import proceeds instead; every phase is idempotent and the run ends
+// with the normal completion path.
+func verifyCatchupBeforeImport(
+	db *database.Database,
+	imm *immutable.ImmutableDb,
+	targetImmutable uint64,
+	resuming bool,
+	logger *slog.Logger,
+) (upToDate bool, err error) {
+	verifyErr := verifyCatchupIntersection(db, imm, logger)
+	if verifyErr == nil {
+		return false, nil
+	}
+	if !errors.Is(verifyErr, errCatchUpLocalAhead) {
+		return false, verifyErr
+	}
+	if resuming {
+		logger.Info(
+			"catch-up: local chain is ahead of the target artifact while "+
+				"resuming an interrupted sync; continuing to complete it",
+			"component", "mithril",
+		)
+		return false, nil
+	}
+	// The local chain already contains every block the artifact seals, so the
+	// database supersedes the artifact. Advance the import marker so later
+	// runs no-op before downloading anything.
+	if targetImmutable > 0 {
+		if markErr := setImmutableImportMarker(
+			db, targetImmutable,
+		); markErr != nil {
+			return false, markErr
+		}
+	}
+	return true, nil
+}
+
+// verifyCatchupIntersection confirms the local chain tip is present, with a
+// matching hash, in the freshly-downloaded target immutable data — i.e. the
+// local chain is an ancestor of the target artifact's chain. It MUST run before
+// any state mutation so a divergent database is left untouched and the operator
+// is told to perform a full resync.
+//
+// When the local tip is above the target's sealed immutable range (its block is
+// not yet in an immutable file of the artifact), the check is reversed: the
+// artifact's tip block must be an ancestor of the local tip, proving the local
+// chain a strict descendant with nothing to catch up (errCatchUpLocalAhead).
+// Anything else is a divergence. Importing would otherwise apply an OLDER
+// snapshot over a newer database: the reconcile pass would tombstone every
+// live row created after the artifact tip and the volatile cleanup would
+// rewind the chain, permanently corrupting the database.
+//
+// The ImmutableDB is passed in already open rather than opened from a pathname
+// here, so this reads whatever the caller vetted. Opening by name would make
+// the check about whichever tree holds that name now, which is not necessarily
+// the one the import is about to read.
+func verifyCatchupIntersection(
+	db *database.Database,
+	imm *immutable.ImmutableDb,
+	logger *slog.Logger,
+) error {
+	recent, err := database.BlocksRecent(db, 1)
+	if err != nil {
+		return fmt.Errorf("reading local chain tip: %w", err)
+	}
+	if len(recent) == 0 {
+		return errors.New("catch-up: local database has no chain tip")
+	}
+	tip := recent[0]
+
+	iter, err := imm.BlocksFromPoint(
+		ocommon.Point{Slot: tip.Slot, Hash: tip.Hash},
+	)
+	if err != nil {
+		if errors.Is(err, immutable.ErrPointBeyondLastChunk) {
+			return verifyLocalAheadOfArtifactTip(db, imm, tip, logger)
+		}
+		return fmt.Errorf("locating local tip in target immutable DB: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	first, err := iter.Next()
+	if err != nil {
+		return fmt.Errorf("reading target immutable at local tip: %w", err)
+	}
+	if first == nil {
+		return verifyLocalAheadOfArtifactTip(db, imm, tip, logger)
+	}
+	if first.Slot != tip.Slot || !bytes.Equal(first.Hash, tip.Hash) {
+		return fmt.Errorf(
+			"local chain diverges from the target Mithril v2 artifact at "+
+				"slot %d (local block %x; artifact has slot %d block %x); "+
+				"the existing database was left untouched because catch-up "+
+				"cannot safely reconcile divergent chains",
+			tip.Slot, tip.Hash, first.Slot, first.Hash,
+		)
+	}
+	logger.Info(
+		"catch-up: local chain tip confirmed on the target artifact chain",
+		"component", "mithril",
+		"tip_slot", tip.Slot,
+	)
+	return nil
+}
+
+func verifyLocalAheadOfArtifactTip(
+	db *database.Database,
+	imm *immutable.ImmutableDb,
+	localTip models.Block,
+	logger *slog.Logger,
+) error {
+	artifactTip, err := imm.GetTip()
+	if err != nil {
+		return fmt.Errorf("reading target immutable tip: %w", err)
+	}
+	if artifactTip == nil {
+		return errors.New("catch-up: target immutable DB has no chain tip")
+	}
+	containsArtifactTip, err := localChainDescendsFromPoint(
+		db, localTip, *artifactTip,
+	)
+	if err != nil {
+		return fmt.Errorf("checking local chain ancestry: %w", err)
+	}
+	if containsArtifactTip {
+		logger.Info(
+			"catch-up: local chain is ahead of the target artifact",
+			"component", "mithril",
+			"local_tip_slot", localTip.Slot,
+			"artifact_tip_slot", artifactTip.Slot,
+		)
+		return errCatchUpLocalAhead
+	}
+	return fmt.Errorf(
+		"local chain diverges from the target Mithril v2 artifact above "+
+			"slot %d (local tip slot %d block %x; artifact tip block %x "+
+			"is not an ancestor of the local tip); the existing database was "+
+			"left untouched because catch-up cannot safely reconcile divergent "+
+			"chains",
+		artifactTip.Slot, localTip.Slot, localTip.Hash, artifactTip.Hash,
+	)
+}
+
+func localChainDescendsFromPoint(
+	db *database.Database,
+	localTip models.Block,
+	ancestor ocommon.Point,
+) (bool, error) {
+	seen := make(map[string]struct{})
+	for cur := localTip; ; {
+		if cur.Slot < ancestor.Slot {
+			return false, nil
+		}
+		if cur.Slot == ancestor.Slot && bytes.Equal(cur.Hash, ancestor.Hash) {
+			return true, nil
+		}
+		if len(cur.PrevHash) == 0 {
+			return false, nil
+		}
+		key := string(cur.Hash)
+		if _, ok := seen[key]; ok {
+			return false, fmt.Errorf(
+				"cycle while walking back from local tip slot %d block %x",
+				localTip.Slot, localTip.Hash,
+			)
+		}
+		seen[key] = struct{}{}
+
+		prev, err := database.BlockByHash(db, cur.PrevHash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return false, nil
+			}
+			return false, fmt.Errorf(
+				"looking up parent block %x for slot %d block %x: %w",
+				cur.PrevHash, cur.Slot, cur.Hash, err,
+			)
+		}
+		cur = prev
+	}
+}

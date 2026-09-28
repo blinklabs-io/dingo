@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -25,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -34,9 +36,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	protocol "github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -58,11 +63,102 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
+	err = cfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(shelleyGenesisJSON),
+	)
 	require.NoError(t, err)
 	return cfg
+}
+
+func TestGenesisConfigResultUsesNegotiatedLayout(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	genesis := cfg.ShelleyGenesis()
+	require.NotNil(t, genesis.ExtraConfig)
+	ls := &LedgerState{config: LedgerStateConfig{CardanoNodeConfig: cfg}}
+	legacyResult, err := ls.queryShelleyGenesisConfig(
+		20 + protocol.ProtocolVersionNtCOffset,
+	)
+	require.NoError(t, err)
+	legacyValues, ok := legacyResult.([]any)
+	require.True(t, ok)
+	require.Len(t, legacyValues, 1)
+	require.Same(t, genesis, legacyValues[0])
+	currentResult, err := ls.queryShelleyGenesisConfig(
+		21 + protocol.ProtocolVersionNtCOffset,
+	)
+	require.NoError(t, err)
+	currentValues, ok := currentResult.([]any)
+	require.True(t, ok)
+	require.Len(t, currentValues, 1)
+	currentGenesis, ok := currentValues[0].(olocalstatequery.GenesisConfigResult)
+	require.True(t, ok)
+	require.NotNil(t, currentGenesis.ExtraConfig)
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyGenesisConfigQuery{},
+		},
+	}
+	queried, err := ls.QueryWithProtocolVersion(
+		query,
+		QueryPoint{},
+		21+protocol.ProtocolVersionNtCOffset,
+	)
+	require.NoError(t, err)
+	queriedValues, ok := queried.([]any)
+	require.True(t, ok)
+	queriedGenesis, ok := queriedValues[0].(olocalstatequery.GenesisConfigResult)
+	require.True(t, ok)
+	require.NotNil(t, queriedGenesis.ExtraConfig)
+
+	legacy, err := genesis.MarshalCBOR()
+	require.NoError(t, err)
+	var legacyFields []cbor.RawMessage
+	_, err = cbor.Decode(legacy, &legacyFields)
+	require.NoError(t, err)
+	require.Len(t, legacyFields, 15)
+
+	result, err := genesisConfigResult(genesis)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var currentFields []cbor.RawMessage
+	_, err = cbor.Decode(encoded, &currentFields)
+	require.NoError(t, err)
+	require.Len(t, currentFields, 16)
+	var currentPParams []cbor.RawMessage
+	_, err = cbor.Decode(currentFields[11], &currentPParams)
+	require.NoError(t, err)
+	require.Len(t, currentPParams, 17)
+	var extra []cbor.RawMessage
+	_, err = cbor.Decode(currentFields[15], &extra)
+	require.NoError(t, err)
+	require.Len(t, extra, 1)
+	var decodedCurrent olocalstatequery.GenesisConfigResult
+	_, err = cbor.Decode(encoded, &decodedCurrent)
+	require.NoError(t, err)
+	require.NotEmpty(t, decodedCurrent.ExtraConfig)
+	var decodedInitialFunds []cbor.RawMessage
+	_, err = cbor.Decode(decodedCurrent.InitialFunds, &decodedInitialFunds)
+	require.NoError(t, err)
+	require.Empty(t, decodedInitialFunds)
+	var decodedStaking []cbor.RawMessage
+	_, err = cbor.Decode(decodedCurrent.Staking, &decodedStaking)
+	require.NoError(t, err)
+	require.Len(t, decodedStaking, 2)
+
+	var legacyWireValues []any
+	_, err = cbor.Decode(legacy, &legacyWireValues)
+	require.NoError(t, err)
+	require.Len(t, legacyWireValues, 15)
 }
 
 func requireEraDesc(t testing.TB, eraId uint) eras.EraDesc {
@@ -85,6 +181,8 @@ func requireEraDesc(t testing.TB, eraId uint) eras.EraDesc {
 //
 // Expected EraEnd slot: 532_000 (epoch end), epoch number: 501
 func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -116,6 +214,7 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -138,9 +237,13 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 	actualEraEndEpoch, ok := eraEnd[2].(uint64)
 	require.True(t, ok, "EraEnd epoch should be uint64")
 
-	assert.Equal(t, expectedEraEndSlot, actualEraEndSlot,
+	assert.Equal(
+		t,
+		expectedEraEndSlot,
+		actualEraEndSlot,
 		"open era EraEnd slot should snap to epoch boundary (%d), not mid-epoch safeEndSlot (%d)",
-		expectedEraEndSlot, tipSlot+expectedSafeZone,
+		expectedEraEndSlot,
+		tipSlot+expectedSafeZone,
 	)
 	assert.Equal(t, epochId+1, actualEraEndEpoch,
 		"open era EraEnd epoch number should be epochId+1 (%d)", epochId+1,
@@ -148,6 +251,8 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 }
 
 func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	result, err := ls.queryShelleyUtxoByAddress(nil)
 	require.NoError(t, err)
@@ -160,9 +265,78 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 	require.Empty(t, m)
 }
 
+// TestQueryShelleyUtxoByAddress_MultipleAddresses proves the local-state-query
+// handler resolves UTxOs for every address in the request, not just the
+// first (#391) -- the wire query already carries the full set via q.Addrs.
+func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	seedAddressUtxo := func(
+		addr lcommon.Address,
+		txId []byte,
+		amount uint64,
+	) {
+		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+			TxId:       txId,
+			OutputIdx:  0,
+			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			AddedSlot:  1,
+			Amount:     types.Uint64(amount),
+		}))
+		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  amount,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded)
+		}))
+	}
+
+	addr1, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	addr2, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+
+	txId1 := bytes.Repeat([]byte{0x01}, 32)
+	txId2 := bytes.Repeat([]byte{0x02}, 32)
+	seedAddressUtxo(addr1, txId1, 1_000_000)
+	seedAddressUtxo(addr2, txId2, 2_000_000)
+
+	ls := &LedgerState{db: db}
+	result, err := ls.queryShelleyUtxoByAddress([]ledger.Address{addr1, addr2})
+	require.NoError(t, err)
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any result")
+	require.Len(t, arr, 1)
+	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	require.True(t, ok, "expected UtxoId map")
+	require.Len(
+		t,
+		m,
+		2,
+		"must include UTxOs for both addresses, not just addrs[0]",
+	)
+}
+
 func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyUtxoByTxIn(nil)
+	result, err := ls.queryShelleyUtxoByTxIn(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Should return []any{empty map}
 	arr, ok := result.([]any)
@@ -171,6 +345,112 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
 	require.Empty(t, m)
+}
+
+// TestQueryShelleyUtxoByTxIn_MultipleInputs proves the GetUTxOByTxIn query
+// resolves every requested TxIn in one call (#392), not just the first, and
+// silently omits a requested TxIn that has no matching live UTxO instead of
+// failing the whole query.
+//
+// The two real TxIns are deliberately drawn from two distinct blocks'
+// (rather than a single transaction's) produced outputs so the test does
+// not depend on any one fixture transaction producing more than one UTxO:
+// with only one genuinely resolvable input, a regression back to resolving
+// just txIns[0] would still pass a count-based assertion.
+//
+// Blocks are stored in chain order, so a later block's transaction could
+// spend an earlier block's collected candidate output before the test gets
+// to use it. Liveness of every collected candidate is re-checked after each
+// new block is stored, and only candidates still live at that point are
+// kept; the loop stops as soon as two remain, so no further block storage
+// (and thus no further spends) can happen before they're used below.
+func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
+	t.Parallel()
+
+	db := newUtxoStorageTestDB(t)
+	iter := newUtxoStorageTestIterator(t)
+
+	utxoIdKey := func(id models.UtxoId) string {
+		return fmt.Sprintf("%x:%d", id.Hash, id.Idx)
+	}
+
+	var candidates []models.UtxoId
+	var live []models.UtxoId
+	for len(live) < 2 {
+		block, blockCbor := nextProducingBlock(t, db, iter)
+		txn := db.Transaction(true)
+		var produced lcommon.Utxo
+		err := txn.Do(func(txn *database.Txn) error {
+			tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
+			produced = tx.Produced()[0]
+			return nil
+		})
+		require.NoError(t, err)
+		candidates = append(candidates, models.UtxoId{
+			Hash: produced.Id.Id().Bytes(),
+			Idx:  produced.Id.Index(),
+		})
+
+		results, err := db.UtxosByRefs(candidates, nil)
+		require.NoError(t, err)
+		liveSet := make(map[string]struct{}, len(results))
+		for _, u := range results {
+			liveSet[utxoIdKey(models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})] = struct{}{}
+		}
+		live = live[:0]
+		for _, c := range candidates {
+			if _, ok := liveSet[utxoIdKey(c)]; ok {
+				live = append(live, c)
+			}
+		}
+	}
+	live = live[:2]
+
+	realTxIns := make([]ledger.ShelleyTransactionInput, len(live))
+	for i, ref := range live {
+		realTxIns[i] = ledger.NewShelleyTransactionInput(
+			hex.EncodeToString(ref.Hash),
+			int(ref.Idx),
+		)
+	}
+
+	// A TxIn with no matching live UTxO must be silently omitted from the
+	// result, not fail the whole batch.
+	txIns := append(
+		realTxIns,
+		ledger.NewShelleyTransactionInput(strings.Repeat("00", 32), 9999),
+	)
+
+	ls := &LedgerState{db: db}
+	result, err := ls.queryShelleyUtxoByTxIn(txIns, QueryPoint{}, nil)
+	require.NoError(t, err)
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any result")
+	require.Len(t, arr, 1)
+	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	require.True(t, ok, "expected UtxoId map")
+	require.Len(
+		t,
+		m,
+		len(realTxIns),
+		"exactly the real TxIns should resolve; bogus TxIn should be silently omitted",
+	)
+
+	for _, txIn := range realTxIns {
+		utxoId := olocalstatequery.UtxoId{
+			Hash: ledger.NewBlake2b256(txIn.Id().Bytes()),
+			Idx:  int(txIn.Index()),
+		}
+		_, ok := m[utxoId]
+		require.True(
+			t,
+			ok,
+			"missing result for %s#%d",
+			txIn.Id().String(),
+			txIn.Index(),
+		)
+	}
 }
 
 // --- GetStakePools (ShelleyStakePoolsQuery) ---------------------------------
@@ -192,6 +472,8 @@ func poolHash28(b byte) []byte {
 // unsorted set is rejected by cardano-cli ("expected tag" / "Canonicity
 // violation while decoding Set").
 func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
+	t.Parallel()
+
 	// Deliberately unsorted input.
 	keyHashes := [][]byte{
 		poolHash28(0xCC),
@@ -231,6 +513,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 // TestStakePoolsResult_Empty verifies an empty pool set still produces the
 // tagged, wrapped wire shape (an empty set), not a bare/absent value.
 func TestStakePoolsResult_Empty(t *testing.T) {
+	t.Parallel()
+
 	result := stakePoolsResult(nil)
 	require.Len(t, result, 1)
 	set, ok := result[0].(cbor.Set)
@@ -253,8 +537,11 @@ func TestStakePoolsResult_Empty(t *testing.T) {
 // result is a bare CBOR map that round-trips through gouroboros'
 // DRepStateResult (the type cardano clients decode into).
 func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(nil)
 	require.NoError(t, err)
@@ -270,8 +557,60 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 
 	encoded, err := cbor.Encode(result)
 	require.NoError(t, err)
-	assert.Equal(t, "81a0", hex.EncodeToString(encoded),
-		"empty GetDRepState result must encode to [ {} ] (matches cardano-node)")
+	assert.Equal(
+		t,
+		"81a0",
+		hex.EncodeToString(encoded),
+		"empty GetDRepState result must encode to [ {} ] (matches cardano-node)",
+	)
+}
+
+// TestQueryShelleyDRepState_Populated pins the per-DRep value to cardano-node's
+// 4-element shape [ expiry, anchor, deposit, delegators ]: anchor is a
+// StrictMaybe encoded as a list (empty for none, not CBOR null) and delegators
+// is a tag-258 set of the delegating stake credentials. A 3-element value (or a
+// null anchor) makes cardano-cli fail with "Size mismatch when decoding Record
+// RecD. Expected 3, but found 4" while balancing a transaction.
+func TestQueryShelleyDRepState_Populated(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	drepCred := stakeCred28(0xC1)
+	delegKey := stakeCred28(0xD2)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:    drepCred,
+		CredentialTag: 0,
+		ExpiryEpoch:   22,
+		Active:        true,
+		AddedSlot:     10,
+	}))
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey:    delegKey,
+		CredentialTag: 0,
+		Drep:          drepCred,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Active:        true,
+		AddedSlot:     100,
+	}))
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryShelleyDRepState(nil)
+	require.NoError(t, err)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+
+	// [ { [0, drepCred] : [22, [], 0, set([ [0, delegKey] ]) ] } ]
+	//   81 a1  8200 581c<drep>  84 16 80 00  d90102 81 8200 581c<deleg>
+	// deposit is 0 here because no pparams are loaded in the bare test ledger.
+	want := "81a1" +
+		"8200581c" + strings.Repeat("c1", 28) +
+		"84" + "16" + "80" + "00" +
+		"d9010281" + "8200581c" + strings.Repeat("d2", 28)
+	assert.Equal(t, want, hex.EncodeToString(encoded),
+		"populated GetDRepState must encode the 4-element value with a "+
+			"StrictMaybe-list anchor and a tag-258 delegators set (matches cardano-node)")
 }
 
 // --- GetAccountState (ShelleyAccountStateQuery) -----------------------------
@@ -281,6 +620,8 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 // (zeros). The wire shape is [ [treasury, reserves] ] (CBOR 81 82 00 00),
 // verified against cardano-node's GetAccountState reply.
 func TestQueryShelleyAccountState_Empty(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -296,25 +637,12 @@ func TestQueryShelleyAccountState_Empty(t *testing.T) {
 
 	encoded, err := cbor.Encode(result)
 	require.NoError(t, err)
-	assert.Equal(t, "81820000", hex.EncodeToString(encoded),
-		"empty GetAccountState must encode to [ [0, 0] ] (matches cardano-node)")
-}
-
-// TestAccountStateResult_SignedRoundTrip confirms the [ [treasury, reserves] ]
-// wire shape round-trips through gouroboros' AccountStateResult, including a
-// negative reserves value (Coin is signed; a misconfigured network can drive
-// reserves below zero, as observed on the devnet's cardano-node).
-func TestAccountStateResult_SignedRoundTrip(t *testing.T) {
-	result := []any{
-		olocalstatequery.AccountState{Treasury: 500_000_000, Reserves: -1234},
-	}
-	encoded, err := cbor.Encode(result)
-	require.NoError(t, err)
-	var decoded olocalstatequery.AccountStateResult
-	_, err = cbor.Decode(encoded, &decoded)
-	require.NoError(t, err)
-	assert.Equal(t, int64(500_000_000), decoded.State.Treasury)
-	assert.Equal(t, int64(-1234), decoded.State.Reserves)
+	assert.Equal(
+		t,
+		"81820000",
+		hex.EncodeToString(encoded),
+		"empty GetAccountState must encode to [ [0, 0] ] (matches cardano-node)",
+	)
 }
 
 // --- ShelleyFilteredDelegationAndRewardAccountsQuery -----------------------
@@ -358,7 +686,11 @@ func unwrapFilteredDelegationResult(
 	return dels, rwds
 }
 
-func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(t *testing.T) {
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(nil)
 	require.NoError(t, err)
@@ -367,7 +699,11 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(t *testing.T
 	assert.Empty(t, rwds, "rewards map should be empty for empty input")
 }
 
-func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(t *testing.T) {
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -384,7 +720,11 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(t *testing.
 	assert.Empty(t, rwds, "unknown cred should not appear in rewards")
 }
 
-func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(t *testing.T) {
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xAA)
 	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
@@ -411,7 +751,51 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(t
 		"reward balance must be returned for registered account")
 }
 
-func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(t *testing.T) {
+// TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal verifies
+// LocalStateQuery observes the persisted reward balance after a withdrawal.
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0xAB)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey,
+		Reward:     types.Uint64(1_000_000),
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
+		0,
+		stakeKey,
+		1_000_000,
+		42,
+		bytes.Repeat([]byte{0x55}, 32),
+		nil,
+	))
+	ls := &LedgerState{db: db}
+
+	cred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: toBlake2b224(stakeKey),
+	}
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		[]olocalstatequery.StakeCredential{cred},
+	)
+	require.NoError(t, err)
+	_, rwds := unwrapFilteredDelegationResult(t, result)
+
+	require.Contains(t, rwds, cred,
+		"queried credential must be present in rewards map")
+	assert.Equal(t, uint64(0), rwds[cred],
+		"withdrawn reward balance must be reflected in LocalStateQuery")
+}
+
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xBB)
 	poolHash := stakeCred28(0xCC) // 28 bytes is also pool key hash size
@@ -440,6 +824,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(t *
 }
 
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	delegatedKey := stakeCred28(0x01)
@@ -488,7 +874,226 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 	assert.Len(t, rwds, 2, "exactly two reward entries expected")
 }
 
+// TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware verifies that
+// filtered account lookup treats key and script credentials with the same hash
+// as distinct reward accounts.
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0x44)
+	keyPool := stakeCred28(0x45)
+	scriptPool := stakeCred28(0x46)
+
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Pool:          keyPool,
+		Reward:        types.Uint64(100),
+		Active:        true,
+	}))
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Pool:          scriptPool,
+		Reward:        types.Uint64(200),
+		Active:        true,
+	}))
+
+	ls := &LedgerState{db: db}
+	keyCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: toBlake2b224(stakeKey),
+	}
+	scriptCred := olocalstatequery.StakeCredential{
+		Tag:   1,
+		Bytes: toBlake2b224(stakeKey),
+	}
+
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		[]olocalstatequery.StakeCredential{keyCred, scriptCred},
+	)
+	require.NoError(t, err)
+	dels, rwds := unwrapFilteredDelegationResult(t, result)
+
+	assert.Equal(t, toBlake2b224(keyPool), dels[keyCred])
+	assert.Equal(t, uint64(100), rwds[keyCred])
+	assert.Equal(t, toBlake2b224(scriptPool), dels[scriptCred])
+	assert.Equal(t, uint64(200), rwds[scriptCred])
+}
+
+func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0x51)
+	cred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(stakeKey),
+	}
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0x52}, 32))
+	txBuilder.WithValid(true)
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0x54}, 32),
+		0,
+	)
+	require.NoError(t, err)
+	txBuilder.WithInputs(input)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(
+			"addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd",
+		).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder.WithOutputs(output)
+	txBuilder.WithCertificates(&lcommon.StakeRegistrationCertificate{
+		StakeCredential: cred,
+	})
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		ocommon.NewPoint(100, bytes.Repeat([]byte{0x53}, 32)),
+		0,
+		map[int]uint64{0: 2_000_000},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	queryCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(stakeKey),
+	}
+	unknownCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(stakeCred28(0x55)),
+	}
+	result, err := ls.queryShelleyStakeDelegDeposits(
+		[]olocalstatequery.StakeCredential{queryCred, unknownCred},
+	)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	deposits, ok := outer[0].(olocalstatequery.StakeDelegDepositsResult)
+	require.True(t, ok)
+	assert.Equal(t, uint64(2_000_000), deposits[queryCred])
+	assert.NotContains(t, deposits, unknownCred)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.StakeDelegDepositsResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2_000_000), decoded[queryCred])
+}
+
+func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0x61)
+	drepKey := stakeCred28(0x62)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Drep:          drepKey,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Active:        true,
+	}))
+	ls := &LedgerState{db: db}
+	cred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(stakeKey),
+	}
+
+	result, err := ls.queryShelleyFilteredVoteDelegatees(
+		[]lcommon.Credential{cred},
+	)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	delegatees, ok := outer[0].(olocalstatequery.FilteredVoteDelegateesResult)
+	require.True(t, ok)
+	queryCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(stakeKey),
+	}
+	require.Contains(t, delegatees, queryCred)
+	assert.Equal(t, int(models.DrepTypeAddrKeyHash), delegatees[queryCred].Type)
+	assert.Equal(t, drepKey, delegatees[queryCred].Credential)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.FilteredVoteDelegateesResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(t, delegatees[queryCred], decoded[queryCred])
+}
+
+func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	txHash := bytes.Repeat([]byte{0x71}, 32)
+	returnAddressBytes := append(
+		[]byte{0xe0},
+		bytes.Repeat([]byte{0x72}, 28)...,
+	)
+	govAction, err := cbor.Encode([]any{uint64(lcommon.GovActionTypeInfo)})
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   1,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 0,
+		ExpiresEpoch:  10,
+		AnchorURL:     "https://example.com/proposal.json",
+		AnchorHash:    bytes.Repeat([]byte{0x73}, 32),
+		Deposit:       100_000_000,
+		ReturnAddress: returnAddressBytes,
+		GovActionCbor: govAction,
+		AddedSlot:     100,
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          models.VoterTypeDRep,
+		VoterCredentialTag: 0,
+		VoterCredential:    stakeCred28(0x74),
+		Vote:               models.VoteYes,
+		AddedSlot:          101,
+	}, nil))
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryShelleyGetProposals(nil)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	proposals, ok := outer[0].(olocalstatequery.ProposalsResult)
+	require.True(t, ok)
+	require.Len(t, proposals, 1)
+	assert.Len(t, proposals[0].DRepVotes, 1)
+
+	var procedure conway.ConwayProposalProcedure
+	_, err = cbor.Decode(proposals[0].ProposalProcedure, &procedure)
+	require.NoError(t, err)
+	assert.Equal(t, proposal.Deposit, procedure.Deposit())
+	gotReturnAddress, err := procedure.RewardAccount().Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, returnAddressBytes, gotReturnAddress)
+}
+
 func TestEpochPicoseconds(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		slotLength    uint
@@ -572,6 +1177,8 @@ func TestEpochPicoseconds(t *testing.T) {
 }
 
 func TestEpochPicoseconds_OverflowSafe(t *testing.T) {
+	t.Parallel()
+
 	// Verify that large values that would overflow uint64
 	// in naive multiplication are handled correctly by
 	// big.Int arithmetic.
@@ -624,6 +1231,8 @@ func TestEpochPicoseconds_OverflowSafe(t *testing.T) {
 // Expected EraEnd slot: 532_000 (epoch 501's StartSlot — the exact boundary)
 // Without TransitionKnown: EraEnd would be 200_000 + 25_920 = 225_920
 func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
+	t.Parallel()
+
 	const (
 		tipSlot       = uint64(200_000)
 		epoch500Start = uint64(100_000)
@@ -663,6 +1272,7 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -681,7 +1291,10 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 
 	actualSlot, ok := eraEnd[1].(uint64)
 	require.True(t, ok, "EraEnd slot should be uint64")
-	assert.Equal(t, epoch501Start, actualSlot,
+	assert.Equal(
+		t,
+		epoch501Start,
+		actualSlot,
 		"TransitionKnown: EraEnd slot should be transition epoch's StartSlot (%d), not safe-zone cap",
 		epoch501Start,
 	)
@@ -700,7 +1313,11 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 //
 // Setup: one Conway epoch (500), transitionInfo.KnownEpoch = 999 (not in DB).
 // Expected: falls back to epoch-end snap (532_000), epoch number 501.
-func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone(t *testing.T) {
+func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -710,7 +1327,9 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 		missingEpoch   = uint64(999) // deliberately absent from DB
 	)
 	const expectedSafeZone = uint64(25_920)
-	expectedEraEndSlot := epochStartSlot + uint64(epochLen) // 532_000 (epoch end)
+	expectedEraEndSlot := epochStartSlot + uint64(
+		epochLen,
+	) // 532_000 (epoch end)
 
 	db := newTestDB(t)
 	require.NoError(t, db.SetEpoch(
@@ -733,6 +1352,7 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -750,7 +1370,10 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 	actualEpoch, ok := eraEnd[2].(uint64)
 	require.True(t, ok, "EraEnd epoch should be uint64")
 
-	assert.Equal(t, expectedEraEndSlot, actualSlot,
+	assert.Equal(
+		t,
+		expectedEraEndSlot,
+		actualSlot,
 		"TransitionKnown with missing KnownEpoch must fall back to epoch-end snap (%d)",
 		expectedEraEndSlot,
 	)
@@ -762,7 +1385,11 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 // TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone confirms
 // that TransitionUnknown snaps to the epoch-end boundary (not the raw
 // safeEndSlot), matching Haskell's slotToEpochBound behaviour.
-func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testing.T) {
+func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -795,6 +1422,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -810,9 +1438,13 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 	require.True(t, ok)
 	actualEpoch, ok := eraEnd[2].(uint64)
 	require.True(t, ok)
-	assert.Equal(t, expectedEraEndSlot, actualSlot,
+	assert.Equal(
+		t,
+		expectedEraEndSlot,
+		actualSlot,
 		"TransitionUnknown: EraEnd slot should snap to epoch end (%d), not mid-epoch safeEndSlot (%d)",
-		expectedEraEndSlot, tipSlot+expectedSafeZone,
+		expectedEraEndSlot,
+		tipSlot+expectedSafeZone,
 	)
 	assert.Equal(t, epochId+1, actualEpoch,
 		"TransitionUnknown: EraEnd epoch should be epochId+1 (%d)", epochId+1,
@@ -829,7 +1461,11 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 //   - transitionInfo = TransitionImpossible
 //
 // Expected EraEnd slot: 532_000 (confirmed epoch end, no cap)
-func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.T) {
+func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -861,6 +1497,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -875,7 +1512,10 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.
 	actualSlot, ok := eraEnd[1].(uint64)
 	require.True(t, ok, "EraEnd slot should be uint64")
 
-	assert.Equal(t, epochEndSlot, actualSlot,
+	assert.Equal(
+		t,
+		epochEndSlot,
+		actualSlot,
 		"TransitionImpossible: EraEnd slot should be the confirmed epoch end (%d), not a safeZone cap",
 		epochEndSlot,
 	)
@@ -884,7 +1524,11 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.
 // TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch
 // verifies that the EraEnd epoch number is epochId+1 when TransitionImpossible
 // is set (the epoch-loop sets tmpEnd with epochId+1 for the last epoch).
-func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *testing.T) {
+func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -902,9 +1546,11 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 	))
 
 	ls := &LedgerState{
-		db:             db,
-		currentEra:     eras.ConwayEraDesc,
-		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
 		transitionInfo: hardfork.NewTransitionImpossible(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
@@ -912,6 +1558,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -921,8 +1568,13 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 
 	actualEpoch, ok := eraEnd[2].(uint64)
 	require.True(t, ok, "EraEnd epoch should be uint64")
-	assert.Equal(t, epochId+1, actualEpoch,
-		"TransitionImpossible: EraEnd epoch should be epochId+1 (%d)", epochId+1)
+	assert.Equal(
+		t,
+		epochId+1,
+		actualEpoch,
+		"TransitionImpossible: EraEnd epoch should be epochId+1 (%d)",
+		epochId+1,
+	)
 }
 
 // TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison
@@ -933,7 +1585,11 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 // Divergence at late-in-epoch tips (tip + safeZone crossing into the next
 // epoch) is covered by TransitionUnknown_FallsBackToSafeZone and matches
 // Haskell HFC's slotToEpochBound semantics.
-func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *testing.T) {
+func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -952,16 +1608,22 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 			eras.ConwayEraDesc.Id, slotLenMs, epochLen,
 			nil,
 		))
-		return &LedgerState{
-			db:             db,
-			currentEra:     eras.ConwayEraDesc,
-			currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+		ls := &LedgerState{
+			db:         db,
+			currentEra: eras.ConwayEraDesc,
+			currentTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+			},
 			transitionInfo: hardfork.TransitionInfo{State: state},
 			config: LedgerStateConfig{
 				CardanoNodeConfig: newTestEraHistoryCfg(t),
-				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
 			},
 		}
+		ls.publishSnapshotsLocked()
+		return ls
 	}
 
 	eraEndSlot := func(ls *LedgerState) uint64 {
@@ -980,13 +1642,19 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 
 	assert.Equal(t, uint64(532_000), impossibleSlot,
 		"TransitionImpossible must serve the epoch end")
-	assert.Equal(t, uint64(532_000), unknownSlot,
-		"TransitionUnknown snaps to epoch end when tip+safeZone stays in the same epoch")
+	assert.Equal(
+		t,
+		uint64(532_000),
+		unknownSlot,
+		"TransitionUnknown snaps to epoch end when tip+safeZone stays in the same epoch",
+	)
 	assert.Equal(t, impossibleSlot, unknownSlot,
 		"both states return the same epoch-end slot")
 }
 
 func TestCheckedSlotAdd(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		startSlot uint64
@@ -1070,6 +1738,8 @@ func TestCheckedSlotAdd(t *testing.T) {
 // stopped in the window between an epoch-rollover version bump and the first
 // block of the new era.
 func TestReconstructTransitionInfo(t *testing.T) {
+	t.Parallel()
+
 	babbageEra := eras.GetEraById(eras.BabbageEraDesc.Id)
 	require.NotNil(t, babbageEra)
 	conwayEra := eras.GetEraById(eras.ConwayEraDesc.Id)
@@ -1127,9 +1797,12 @@ func TestReconstructTransitionInfo(t *testing.T) {
 		},
 		{
 			// Nil pparams: must not panic, leave TransitionUnknown.
-			name:           "nil pparams → TransitionUnknown",
-			currentEra:     *babbageEra,
-			currentEpoch:   models.Epoch{EpochId: 400, EraId: eras.BabbageEraDesc.Id},
+			name:       "nil pparams → TransitionUnknown",
+			currentEra: *babbageEra,
+			currentEpoch: models.Epoch{
+				EpochId: 400,
+				EraId:   eras.BabbageEraDesc.Id,
+			},
 			currentPParams: nil,
 			expectedState:  hardfork.TransitionUnknown,
 		},
@@ -1165,6 +1838,8 @@ func TestReconstructTransitionInfo(t *testing.T) {
 //
 // Expected Babbage EraEnd slot: 64_432_000
 func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochId    = uint64(499)
 		epochStart = uint64(64_000_000)
@@ -1206,6 +1881,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1237,12 +1913,19 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 			break
 		}
 	}
-	require.NotNil(t, babbageEraEnd,
+	require.NotNil(
+		t,
+		babbageEraEnd,
 		"expected to find Babbage EraEnd with slot=%d, epochNo=%d in era history",
-		rawEraEnd, epochId+1,
+		rawEraEnd,
+		epochId+1,
 	)
-	assert.Equal(t, rawEraEnd, babbageEraEnd[1].(uint64),
-		"past era with normal pparams version: EraEnd slot should be raw boundary (%d)", rawEraEnd,
+	assert.Equal(
+		t,
+		rawEraEnd,
+		babbageEraEnd[1].(uint64),
+		"past era with normal pparams version: EraEnd slot should be raw boundary (%d)",
+		rawEraEnd,
 	)
 }
 
@@ -1263,6 +1946,8 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 //
 // Expected Babbage EraEnd slot: 64_000_000 (epoch 499's StartSlot)
 func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochId    = uint64(499)
 		epochStart = uint64(64_000_000)
@@ -1304,6 +1989,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1354,8 +2040,12 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 		epochId, epochId+1,
 	)
 	// Sanity: the raw boundary must NOT appear as the EraEnd slot.
-	assert.NotEqual(t, rawEraEnd, babbageEraEnd[1].(uint64),
-		"raw EraEnd slot (%d) must not be used for a transition epoch", rawEraEnd,
+	assert.NotEqual(
+		t,
+		rawEraEnd,
+		babbageEraEnd[1].(uint64),
+		"raw EraEnd slot (%d) must not be used for a transition epoch",
+		rawEraEnd,
 	)
 }
 
@@ -1377,7 +2067,11 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 //     slotLen=1_000ms, length=432_000
 //
 // Expected: babbageEraEnd.relTime == conwayEraStart.relTime
-func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T) {
+func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	const (
 		babbageEpochId    = uint64(499)
 		babbageEpochStart = uint64(64_000_000)
@@ -1429,6 +2123,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1479,17 +2174,77 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 		}
 	}
 
-	require.NotNil(t, babbageEnd,
-		"Babbage EraEnd with epochNo=%d not found in era history", babbageEpochId)
-	require.NotNil(t, conwayStart,
-		"Conway EraStart with epochNo=%d not found in era history", conwayEpochId)
+	require.NotNil(
+		t,
+		babbageEnd,
+		"Babbage EraEnd with epochNo=%d not found in era history",
+		babbageEpochId,
+	)
+	require.NotNil(
+		t,
+		conwayStart,
+		"Conway EraStart with epochNo=%d not found in era history",
+		conwayEpochId,
+	)
 
 	babbageEndTime := relTime(babbageEnd)
 	conwayStartTime := relTime(conwayStart)
 
-	assert.Equal(t, 0, babbageEndTime.Cmp(conwayStartTime),
+	assert.Equal(
+		t,
+		0,
+		babbageEndTime.Cmp(conwayStartTime),
 		"era boundaries must be contiguous: Babbage EraEnd.relTime (%s) != Conway EraStart.relTime (%s); "+
 			"timespan was not rolled back after correcting the transition-epoch EraEnd",
-		babbageEndTime.String(), conwayStartTime.String(),
+		babbageEndTime.String(),
+		conwayStartTime.String(),
 	)
+}
+
+// TestQueryChainBlockNoAtGenesis verifies origin is encoded as WithOrigin [0].
+func TestQueryChainBlockNoAtGenesis(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
+	result, err := ls.queryChainBlockNo()
+	assert.NoError(t, err)
+	// WithOrigin at genesis: [0]
+	assert.Equal(t, []any{0}, result)
+}
+
+// TestQueryChainBlockNoAtBlock verifies a non-origin tip is encoded as [1, blockNo].
+func TestQueryChainBlockNoAtBlock(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.Point{
+			Hash: []byte("tip-hash"),
+		},
+		BlockNumber: 12345,
+	}
+	ls.publishSnapshotsLocked()
+	result, err := ls.queryChainBlockNo()
+	assert.NoError(t, err)
+	// WithOrigin at block: [1, blockNo]
+	assert.Equal(t, []any{1, uint64(12345)}, result)
+}
+
+// TestQueryChainBlockNoAtFirstBlock verifies BlockNo 0 is not treated as origin.
+func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.Point{
+			Hash: []byte("first-block-hash"),
+		},
+		BlockNumber: 0,
+	}
+	ls.publishSnapshotsLocked()
+	result, err := ls.queryChainBlockNo()
+	assert.NoError(t, err)
+	// Cardano block numbers are 0-indexed, so block 0 is not origin.
+	assert.Equal(t, []any{1, uint64(0)}, result)
 }

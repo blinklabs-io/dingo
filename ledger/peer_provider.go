@@ -42,6 +42,15 @@ type PoolRelayProvider struct {
 	ledgerState *LedgerState
 	db          *database.Database
 
+	// eventBus and subID let Close unsubscribe the cache-invalidation
+	// handler below. Without this, a live database restore/truncate
+	// (node_lifecycle.go), which constructs a fresh PoolRelayProvider on
+	// every cycle, leaks one more permanently-active EventBus subscription
+	// per cycle -- each pointing at an otherwise-unreachable, abandoned
+	// provider instance.
+	eventBus *event.EventBus
+	subID    event.EventSubscriberId
+
 	// Cache for pool relays
 	cacheMu      sync.RWMutex
 	cachedRelays []PoolRelay
@@ -67,9 +76,10 @@ func NewPoolRelayProvider(
 		ledgerState: ledgerState,
 		db:          db,
 		cacheTTL:    defaultRelayCacheTTL,
+		eventBus:    eventBus,
 	}
 	if eventBus != nil {
-		eventBus.SubscribeFunc(
+		provider.subID = eventBus.SubscribeFunc(
 			PoolStateRestoredEventType,
 			func(_ event.Event) {
 				provider.InvalidateCache()
@@ -77,6 +87,17 @@ func NewPoolRelayProvider(
 		)
 	}
 	return provider, nil
+}
+
+// Close unsubscribes the cache-invalidation handler registered in
+// NewPoolRelayProvider. Safe to call on a provider constructed with a nil
+// eventBus (no-op) and safe to call more than once.
+func (p *PoolRelayProvider) Close() {
+	if p.eventBus == nil || p.subID == 0 {
+		return
+	}
+	p.eventBus.UnsubscribeAndWait(PoolStateRestoredEventType, p.subID)
+	p.subID = 0
 }
 
 // GetPoolRelays returns all active pool relays from the ledger.

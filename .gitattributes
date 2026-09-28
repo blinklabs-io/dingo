@@ -1,0 +1,9 @@
+# Assets embedded with go:embed are hashed or compared byte-for-byte, so their
+# checked-out bytes must not vary by platform. Migration checksums are recorded
+# in schema_migrations and rejected as drift on mismatch, and genesis/guardrails
+# hashes are chain constants that must be computed over the canonical bytes. A
+# CRLF checkout on Windows changes both.
+*.sql text eol=lf
+*.json text eol=lf
+*.plutus text eol=lf
+*.vkey text eol=lf

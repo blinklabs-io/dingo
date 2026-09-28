@@ -49,7 +49,12 @@ func TestFollowTipResponse_ResetActionStructure(t *testing.T) {
 	require.Equal(t, rollbackPoint.Slot, reset.Reset_.Slot, "slot should match")
 	require.Equal(t, rollbackPoint.Hash, reset.Reset_.Hash, "hash should match")
 	require.Equal(t, uint64(100), reset.Reset_.Height, "height should be set")
-	require.Equal(t, uint64(1234567890000), reset.Reset_.Timestamp, "timestamp should be set")
+	require.Equal(
+		t,
+		uint64(1234567890000),
+		reset.Reset_.Timestamp,
+		"timestamp should be set",
+	)
 }
 
 // TestFollowTipResponse_ApplyActionStructure verifies that the Apply action
@@ -90,8 +95,18 @@ func TestFollowTipResponse_TipFieldStructure(t *testing.T) {
 	require.NotNil(t, resp.Tip, "Tip should not be nil")
 	require.Equal(t, tip.Point.Slot, resp.Tip.Slot, "Tip slot should match")
 	require.Equal(t, tip.Point.Hash, resp.Tip.Hash, "Tip hash should match")
-	require.Equal(t, tip.BlockNumber, resp.Tip.Height, "Tip height should match")
-	require.Equal(t, uint64(1234567890000), resp.Tip.Timestamp, "Tip timestamp should be set")
+	require.Equal(
+		t,
+		tip.BlockNumber,
+		resp.Tip.Height,
+		"Tip height should match",
+	)
+	require.Equal(
+		t,
+		uint64(1234567890000),
+		resp.Tip.Timestamp,
+		"Tip timestamp should be set",
+	)
 }
 
 // TestChainIteratorResult_RollbackField verifies that ChainIteratorResult
@@ -114,7 +129,11 @@ func TestChainIteratorResult_RollbackField(t *testing.T) {
 		Rollback: false,
 	}
 	require.False(t, forwardResult.Rollback, "Rollback should be false")
-	require.NotEmpty(t, forwardResult.Block.Cbor, "Block CBOR should not be empty")
+	require.NotEmpty(
+		t,
+		forwardResult.Block.Cbor,
+		"Block CBOR should not be empty",
+	)
 }
 
 // TestFollowTip_LogicFlow documents the expected logic flow for FollowTip.
@@ -164,18 +183,42 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 		reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
 		require.True(t, ok, "should be Reset action")
 		require.NotNil(t, reset.Reset_, "Reset_ should not be nil")
-		require.Equal(t, uint64(100), reset.Reset_.Slot, "Reset slot should be 100")
-		require.Equal(t, uint64(100), reset.Reset_.Height, "Reset height should be 100")
-		require.NotZero(t, reset.Reset_.Timestamp, "Reset timestamp should be set")
+		require.Equal(
+			t,
+			uint64(100),
+			reset.Reset_.Slot,
+			"Reset slot should be 100",
+		)
+		require.Equal(
+			t,
+			uint64(100),
+			reset.Reset_.Height,
+			"Reset height should be 100",
+		)
+		require.NotZero(
+			t,
+			reset.Reset_.Timestamp,
+			"Reset timestamp should be set",
+		)
 
 		// Verify Tip field
 		require.NotNil(t, resp.Tip, "Tip should be populated")
 		require.Equal(t, uint64(200), resp.Tip.Slot, "Tip slot should be 200")
-		require.Equal(t, uint64(200), resp.Tip.Height, "Tip height should be 200")
+		require.Equal(
+			t,
+			uint64(200),
+			resp.Tip.Height,
+			"Tip height should be 200",
+		)
 		require.NotZero(t, resp.Tip.Timestamp, "Tip timestamp should be set")
 
 		// Verify Reset and Tip can be different (concurrent updates)
-		require.NotEqual(t, reset.Reset_.Slot, resp.Tip.Slot, "Reset and Tip can differ")
+		require.NotEqual(
+			t,
+			reset.Reset_.Slot,
+			resp.Tip.Slot,
+			"Reset and Tip can differ",
+		)
 	})
 
 	// Case 2: Forward block scenario
@@ -221,7 +264,12 @@ func TestFollowTip_LogicFlow(t *testing.T) {
 		// Verify Tip field
 		require.NotNil(t, resp.Tip, "Tip should be populated")
 		require.Equal(t, uint64(200), resp.Tip.Slot, "Tip slot should be 200")
-		require.Equal(t, uint64(200), resp.Tip.Height, "Tip height should be 200")
+		require.Equal(
+			t,
+			uint64(200),
+			resp.Tip.Height,
+			"Tip height should be 200",
+		)
 		require.NotZero(t, resp.Tip.Timestamp, "Tip timestamp should be set")
 	})
 }
@@ -270,6 +318,16 @@ func TestFollowTip_RollbackToOrigin(t *testing.T) {
 	require.NotNil(t, reset.Reset_, "Reset_ should not be nil")
 	require.Equal(t, uint64(0), reset.Reset_.Slot, "origin slot should be 0")
 	require.Empty(t, reset.Reset_.Hash, "origin hash should be empty")
-	require.Equal(t, uint64(0), reset.Reset_.Height, "origin height should be 0")
-	require.Equal(t, uint64(0), reset.Reset_.Timestamp, "origin timestamp should be 0")
+	require.Equal(
+		t,
+		uint64(0),
+		reset.Reset_.Height,
+		"origin height should be 0",
+	)
+	require.Equal(
+		t,
+		uint64(0),
+		reset.Reset_.Timestamp,
+		"origin timestamp should be 0",
+	)
 }

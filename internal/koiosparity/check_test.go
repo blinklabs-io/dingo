@@ -1,0 +1,2782 @@
+// Copyright 2025 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package koiosparity
+
+import (
+	"context"
+	"database/sql"
+	"encoding/hex"
+	"log/slog"
+	"math/big"
+	"path/filepath"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// newTestDingoDataDir creates an empty-but-valid Dingo metadata.sqlite (WAL
+// mode, schema migrated) and returns its containing directory, suitable for
+// CheckConfig.DingoDB.DataDir. OpenDingoDB always opens read-only, so the
+// journal mode must already be WAL before Check's read-only connection
+// attaches — mirroring how a live Dingo node's own writable connection would
+// have left it.
+func newTestDingoDataDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	gdb := openTestSQLDB(t, dir, false)
+	require.NoError(t, gdb.Close())
+	return dir
+}
+
+// seedFreshStatus caches a Koios epoch_info row and a persisted
+// CheckEpochStatus whose LastCheckedAt is newer than the epoch's FetchedAt —
+// i.e. "fresh" per GetEpochsNeedingCheck, so Check will not select it for
+// re-checking.
+func seedFreshStatus(
+	t *testing.T,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	status string,
+) {
+	t.Helper()
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "100",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, nil))
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:       network,
+		Epoch:         epoch,
+		LastCheckedAt: fetchedAt.Add(time.Minute), // after FetchedAt: not stale
+		Status:        status,
+		MismatchCount: 1,
+	}))
+}
+
+// TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking guards against the
+// false-success bug where a fresh cached FAIL (its reference row hasn't
+// changed since the last check, so GetEpochsNeedingCheck returns nothing)
+// produced an empty CheckResult — silently dropping the persisted failure
+// because nothing was freshly (re)checked this run.
+func TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	seedFreshStatus(t, cache, "preview", 100, StatusFail)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network: "preview",
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		0,
+		result.EpochsChecked,
+		"nothing should have needed rechecking",
+	)
+	require.Equal(
+		t,
+		[]uint64{100},
+		result.FailEpochs,
+		"a persisted FAIL must surface even though no epoch was freshly checked",
+	)
+	require.Empty(t, result.ErrorEpochs)
+}
+
+// TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking is the ERROR-status
+// counterpart to TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking.
+func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	seedFreshStatus(t, cache, "preview", 200, StatusError)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network: "preview",
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 0, result.EpochsChecked)
+	require.Equal(
+		t,
+		[]uint64{200},
+		result.ErrorEpochs,
+		"a persisted ERROR must surface even though no epoch was freshly checked",
+	)
+	require.Empty(t, result.FailEpochs)
+}
+
+// TestCheckReselectsPoolOnlyEpochMissingAccountCoverage is the regression
+// test for the account-coverage-blind epoch-selection bug found in review of
+// #3097: an epoch fetched/checked before #3097 existed (pool-level Koios
+// data cached, a fresh persisted PASS, and no koios_account_coverage row at
+// all — the realistic pre-#3097-to-post-#3097 upgrade path for a Dingo
+// deployment that already ran koios-parity) must be reselected by
+// GetEpochsNeedingCheck/Check once AccountsEnabled is turned on, purely
+// because its account coverage is missing — not left at its stale pool-only
+// PASS forever just because nothing about its pool/aggregate data changed.
+//
+// Before the fix, GetEpochsNeedingCheck ignored koios_account_coverage
+// entirely: this epoch's koios_epoch_info.fetched_at never changes and its
+// check_epoch_status.last_checked_at is already newer, so it would never be
+// reselected and compareEpochAccounts would never run for it — the persisted
+// PASS would be reported forever with zero account-level validation ever
+// attempted.
+func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	const network = "preview"
+	const epoch = uint64(50)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+
+	// Seed a complete pool-level cache (epoch_info + totals, matching a real
+	// pre-#3097 fetchEpoch commit) and a fresh persisted PASS — deliberately
+	// with NO koios_account_coverage row, simulating an epoch that was
+	// fetched/checked before #3097's per-account fetch/check phases existed.
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "100",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Treasury:  "1",
+		Reserves:  "1",
+		Fees:      "1",
+		Reward:    "1",
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network: network,
+		Epoch:   epoch,
+		LastCheckedAt: fetchedAt.Add(
+			time.Minute,
+		), // fresh relative to fetched_at
+		Status: StatusPass,
+	}))
+
+	// Sanity check: pool-only mode (AccountsEnabled=false, the standalone
+	// CLI's default) must NOT change behavior — this is the existing,
+	// already-correct case the fix must not regress.
+	needingPoolOnly, err := cache.GetEpochsNeedingCheck(network, false)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		needingPoolOnly,
+		"pool-only mode must not reselect a fresh persisted PASS",
+	)
+
+	// This is the actual bug: with accounts enabled, the epoch must be
+	// reselected purely because koios_account_coverage is absent, even though
+	// nothing about its pool data or check status changed.
+	needingWithAccounts, err := cache.GetEpochsNeedingCheck(network, true)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		[]uint64{epoch},
+		needingWithAccounts,
+		"an epoch with no account coverage row must be reselected when accounts are enabled",
+	)
+
+	// Running Check end-to-end must actually invoke compareEpochAccounts for
+	// this epoch (via GetEpochsNeedingCheck's selection above) rather than
+	// silently leaving the stale PASS untouched. It has no account coverage
+	// fetched yet, so it must surface a real acct_coverage_incomplete ERROR —
+	// proof the account comparison phase actually ran — rather than reporting
+	// the old PASS forever.
+	result, err := Check(context.Background(), CheckConfig{
+		Network: network,
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		1,
+		result.EpochsChecked,
+		"the epoch must actually be (re)checked, not silently skipped",
+	)
+	require.Equal(t, []uint64{epoch}, result.ErrorEpochs)
+	require.Empty(t, result.FailEpochs)
+
+	mismatches, err := cache.GetMismatches(network, epoch, "")
+	require.NoError(t, err)
+	var sawAcctCoverageIncomplete bool
+	for _, m := range mismatches {
+		if m.Category == CategoryAcctCoverageIncomplete {
+			sawAcctCoverageIncomplete = true
+		}
+	}
+	require.True(
+		t,
+		sawAcctCoverageIncomplete,
+		"a real acct_coverage_incomplete mismatch must be recorded — proof the account phase actually ran, not a silently-preserved stale PASS",
+	)
+
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(
+		t,
+		StatusError,
+		statuses[0].Status,
+		"the stale pool-only PASS must be overwritten by a real account-aware result",
+	)
+}
+
+// TestCheckScopesPersistedOutcomeToFromThroughEpoch covers the 'check'
+// subcommand's --from-epoch/--through-epoch scoping: a persisted FAIL outside
+// the requested range must not fail the run, but one inside it must — the
+// same effective-status computation Check performs must respect the caller's
+// requested scope, not just the whole network's cache.
+func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	seedFreshStatus(
+		t,
+		cache,
+		"preview",
+		100,
+		StatusFail,
+	) // outside requested scope below
+	seedFreshStatus(
+		t,
+		cache,
+		"preview",
+		300,
+		StatusFail,
+	) // inside requested scope below
+
+	dingoDir := newTestDingoDataDir(t)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:      "preview",
+		DingoDB:      DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:    cachePath,
+		FromEpoch:    250,
+		ThroughEpoch: 350,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		[]uint64{300},
+		result.FailEpochs,
+		"only the persisted FAIL within [FromEpoch, ThroughEpoch] should surface",
+	)
+}
+
+// TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch documents the
+// invariant `explain --live` relies on to detect a mistyped or out-of-range
+// --epoch: with All:true and FromEpoch==ThroughEpoch==epoch, an epoch that
+// was never fetched is simply absent from GetAllFetchedEpochs, so
+// EpochsChecked stays 0 — as opposed to some other "nothing to do" reason
+// that would also need distinguishing.
+func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// Only epoch 100 is fetched; 999 never appears in the cache.
+	seedFreshStatus(t, cache, "preview", 100, StatusPass)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network: "preview",
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
+		CachePath:    cachePath,
+		All:          true,
+		FromEpoch:    999,
+		ThroughEpoch: 999,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 0, result.EpochsChecked, "epoch 999 was never fetched")
+}
+
+// newTestDingoDB creates an empty, WAL-mode, schema-migrated Dingo
+// metadata.sqlite (matching newTestDingoDataDir) but returns a writable SQL
+// handle to it too, so a test can seed reward_pool_input/reward_pool_output/
+// epoch_summary rows directly before Check opens its own read-only
+// connection against the same file.
+func newTestDingoDB(t *testing.T) (dataDir string, gdb *testDB) {
+	t.Helper()
+	dir := t.TempDir()
+	return dir, openTestSQLDB(t, dir, true)
+}
+
+// TestCheckAlignsRewardScheduleEpochsEndToEnd is an end-to-end boundary test
+// for the check.go/dingo_db.go epoch-alignment fix, built from Dingo's real
+// snapshot/reward lifecycle layout rather than two same-epoch structs with
+// equal fields (see koiosStakeEpoch/koiosParamEpoch's doc comments and
+// TestGetPoolEpochDataMapAlignsRewardScheduleEpochs in dingo_db_test.go for
+// the field-by-field derivation). For Koios reporting epoch K=10 it seeds:
+//
+//   - epoch_summary at epoch 9 (K-1): the mark stake distribution Praos used
+//     as epoch 10's active-stake basis.
+//   - reward_pool_input at epoch 9 (K-1): DelegatedStake/DelegatorCount,
+//     plus Margin/FixedCost — the parameters in force for epoch 10.
+//   - reward_pool_output at epoch 9 (K-1): MemberRewardTotal.
+//   - reward_pool_input at epoch 11 (K+1): BlocksProduced alone, describing
+//     epoch 10 per rotation.go's buildRewardStateInputs.
+//   - reward_ada_pots at epoch 10 (unshifted — a point-in-time pot balance,
+//     not a delayed reward-calculation input; see ARCHITECTURE.md).
+//   - a decoy reward_pool_input row at epoch 10 itself with wrong values in
+//     every field, so a regression to the naive same-epoch read fails loudly.
+//
+// The cached Koios reference row for epoch 10 is built to match this real
+// data exactly, so a fully correct field-level epoch mapping is the only way
+// Check reports PASS.
+func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	poolHash := testPoolKeyHash(t, 0x03)
+	poolBech32, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolHash))
+	require.NoError(t, err)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	// Decoy at the naive "same epoch as Koios" (10): wrong in every field.
+	badBlocks := uint64(999)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          koiosEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(1),
+		DelegatorCount: 1,
+		Cost:           types.Uint64(1),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 2)},
+		BlocksProduced: &badBlocks,
+	}).Error)
+
+	// Stake epoch (9 = K-1).
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          9,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(5_000_000),
+		DelegatorCount: 7,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             9,
+		PoolKeyHash:       poolHash,
+		MemberRewardTotal: types.Uint64(123_456),
+	}).Error)
+
+	// Param epoch (11 = K+1): blocks only. Its own stake and pool params
+	// belong to a later epoch and must not surface.
+	realBlocks := uint64(4)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          11,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(2), // irrelevant at this epoch
+		Cost:           types.Uint64(999_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 2)},
+		BlocksProduced: &realBlocks,
+	}).Error)
+
+	// reward_ada_pots stays at koiosEpoch itself (unshifted).
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		[]KoiosPoolEpoch{{
+			Network:       network,
+			Epoch:         koiosEpoch,
+			PoolBech32:    poolBech32,
+			ActiveStake:   "5000000",
+			BlockCnt:      4,
+			Delegators:    7,
+			Margin:        "0.1",
+			FixedCost:     "340000000",
+			MemberRewards: "123456",
+			FetchedAt:     fetchedAt,
+		}},
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			Treasury:  "1000",
+			Reserves:  "2000",
+			Fees:      "300",
+			FetchedAt: fetchedAt,
+		},
+	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 1, result.EpochsChecked)
+	require.Empty(t, result.FailEpochs)
+	require.Empty(t, result.ErrorEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		mismatches,
+		"correct field-level epoch mapping must produce zero mismatches",
+	)
+}
+
+// TestCheckDetectsMissingKoiosTotalsOnUpgradedCache is a regression test for
+// the "upgraded cache" scenario: a cache.db that has a koios_epoch_info row
+// (from before /totals fetching was added to this tool, or from a
+// --skip-fetch run against such a cache) but no koios_totals row for the
+// same epoch. CompareEpochTotals must not silently skip comparison whenever
+// koiosTotals is nil -- doing so would let an epoch like this report a
+// clean PASS despite treasury/reserves/fees never actually being validated.
+// This confirms Check surfaces it as ERROR instead.
+func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	// Stake epoch (9 = K-1): total_active_stake matches Koios exactly so this
+	// path alone contributes no mismatches.
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// epoch_summary at koiosEpoch itself (unshifted) — GetEpochData reads this
+	// row (not the stakeEpoch one above) to decide whether reward_ada_pots is
+	// ready to compare at all.
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            koiosEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// reward_ada_pots at koiosEpoch itself (unshifted), matching what will be
+	// committed to the cache below — so the only mismatch produced is the
+	// missing /totals reference row, not a value divergence.
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	// Protocol parameters are seeded on both sides so the ONE mismatch this
+	// test asserts on stays the missing /totals row. The equivalent
+	// upgraded-cache case for /epoch_params has its own test:
+	// TestCheckDetectsMissingKoiosEpochParamsOnUpgradedCache.
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	// totals is deliberately nil here — simulating a cache that has never
+	// fetched /totals for this epoch (pre-upgrade cache, or --skip-fetch).
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		nil,
+		nil,
+	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 1, result.EpochsChecked)
+	require.Empty(t, result.FailEpochs)
+	require.Equal(
+		t,
+		[]uint64{koiosEpoch},
+		result.ErrorEpochs,
+		"a missing Koios /totals reference row must surface as ERROR, not a silent PASS",
+	)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "koios_totals", mismatches[0].Field)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusError, statuses[0].Status)
+}
+
+// TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure guards
+// against #3410: checkEpoch used to clear an epoch's persisted mismatch rows
+// before every fallible Dingo/cache read for that epoch had completed, so a
+// later read failure (here, cache.GetTotals erroring instead of returning
+// sql.ErrNoRows) erased the last known evidence and left nothing behind. The
+// koios_totals table is dropped after seeding to force GetTotals to fail
+// with a real DB error partway through checkEpoch, well after the point
+// where the old code had already deleted the prior rows.
+func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            koiosEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		nil,
+		nil,
+	))
+
+	// Prior evidence from an earlier successful check of this epoch.
+	priorEvidence := []CheckMismatch{{
+		Network:    network,
+		Epoch:      koiosEpoch,
+		Field:      "prior_evidence",
+		DingoValue: "1",
+		KoiosValue: "2",
+		Category:   CategoryDBError,
+		CheckedAt:  fetchedAt,
+	}}
+	require.NoError(
+		t,
+		cache.CommitEpochMismatches(network, koiosEpoch, priorEvidence),
+	)
+
+	// Force cache.GetTotals to fail with a real DB error (not sql.ErrNoRows),
+	// simulating the koios_totals read failing partway through checkEpoch.
+	_, err = cache.db.Exec("DROP TABLE koios_totals")
+	require.NoError(t, err)
+
+	dingoSource, err := OpenDingoDB(
+		DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+	)
+	require.NoError(t, err)
+	defer dingoSource.Close() //nolint:errcheck
+
+	_, err = CheckEpoch(
+		context.Background(),
+		cache,
+		dingoSource,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.Error(t, err, "a failed koios_totals read must surface as an error")
+
+	got, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(
+		t,
+		got,
+		1,
+		"a later read failure must never erase the prior mismatch evidence",
+	)
+	require.Equal(t, "prior_evidence", got[0].Field)
+}
+
+// TestCheckAccountsCoverageIncompleteIsError proves that enabling
+// CheckConfig.AccountsEnabled without ever having run a successful account
+// fetch (no koios_account_coverage row for the epoch) surfaces as ERROR
+// (CategoryAcctCoverageIncomplete), never a silent PASS — the coverage gate
+// compareEpochAccounts must consult before treating koios_account_rewards as
+// a complete reference set.
+func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{Network: network, Epoch: koiosEpoch, FetchedAt: fetchedAt}))
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs)
+	require.Empty(t, result.FailEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	found := false
+	for _, m := range mismatches {
+		if m.Category == CategoryAcctCoverageIncomplete {
+			found = true
+		}
+	}
+	require.True(t, found, "expected a CategoryAcctCoverageIncomplete mismatch")
+}
+
+// TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage guards
+// against compareEpochAccounts treating a genuine koios_account_coverage
+// query failure (e.g. a corrupted cache) the same as "no account fetch has
+// been attempted yet" (sql.ErrNoRows). Replacing the table with one missing
+// the "requested_count" column produces a real, non-ErrNoRows error from
+// GetAccountCoverage's own SELECT — unlike a dropped table (which Check's own
+// OpenCache call would silently recreate via "CREATE TABLE IF NOT EXISTS",
+// a no-op once a table of that name already exists — the same reason
+// TestAccountRewardsAdditiveColumnMigration builds its pre-migration table
+// directly rather than relying on OpenCache) — while leaving
+// GetEpochsNeedingCheck's own join (which never selects requested_count)
+// unaffected, so this epoch is still selected for checking in the first
+// place. This must surface as an explicit CategoryDBError
+// ("koios_account_coverage" / dingo_db_error), not the
+// CategoryAcctCoverageIncomplete this same field can also report for the
+// legitimate "not fetched yet" case (see
+// TestCheckAccountsCoverageIncompleteIsError).
+func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{Network: network, Epoch: koiosEpoch, FetchedAt: fetchedAt}))
+
+	// Simulate a genuine cache/DB failure distinct from "no fetch attempted
+	// yet": replace koios_account_coverage with a table missing the
+	// "requested_count" column GetAccountCoverage's SELECT requires, so that
+	// specific query errors instead of returning sql.ErrNoRows.
+	// GetEpochsNeedingCheck's own join never selects requested_count, so this
+	// epoch is still correctly selected for (re)checking.
+	_, err = cache.db.Exec("DROP TABLE koios_account_coverage")
+	require.NoError(t, err)
+	_, err = cache.db.Exec(`CREATE TABLE koios_account_coverage (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+		fetched_count INTEGER NOT NULL DEFAULT 0,
+		complete INTEGER NOT NULL DEFAULT 0, fetched_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs)
+	require.Empty(t, result.FailEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var found *CheckMismatch
+	for i := range mismatches {
+		if mismatches[i].Field == "koios_account_coverage" {
+			found = &mismatches[i]
+		}
+	}
+	require.NotNil(t, found, "expected a koios_account_coverage mismatch")
+	require.Equal(
+		t,
+		CategoryDBError,
+		found.Category,
+		"a genuine DB error querying coverage must be dingo_db_error, not acct_coverage_incomplete",
+	)
+}
+
+// TestCheckAccountsEndToEndExactMatchAndMismatch is an end-to-end #3097 test:
+// with account coverage marked complete, an exact-match account produces no
+// mismatch and a 1-lovelace-off account produces a value_mismatch — proving
+// the full path from CheckConfig.AccountsEnabled through checkEpoch's
+// coverage gate, StakeAddressFromCredential resolution, and
+// CompareAccountEpoch.
+func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	okKey := testPoolKeyHash(t, 0x41)
+	badKey := testPoolKeyHash(t, 0x42)
+	poolKeyHash := testPoolKeyHash(t, 0x22)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  okKey,
+		PoolKeyHash: poolKeyHash,
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  badKey,
+		PoolKeyHash: poolKeyHash,
+		RewardType:  "member",
+		Amount:      types.Uint64(2_000_000), // will differ from koios below
+		Spendable:   true,
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	okAddr, err := StakeAddressFromCredential(okKey, 0)
+	require.NoError(t, err)
+	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	require.NoError(t, err)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{Network: network, Epoch: koiosEpoch, FetchedAt: fetchedAt}))
+
+	require.NoError(
+		t,
+		cache.CommitAccountRewardsForEpoch(
+			network,
+			koiosEpoch,
+			[]KoiosAccountRewards{
+				{
+					StakeAddress: okAddr,
+					RewardType:   "member",
+					Earned:       "1000000",
+					FetchedAt:    fetchedAt,
+				},
+				{
+					StakeAddress: badAddr,
+					RewardType:   "member",
+					Earned:       "2000001",
+					FetchedAt:    fetchedAt,
+				},
+			},
+			2,
+			true,
+			fetchedAt,
+		),
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.FailEpochs)
+	require.Empty(t, result.ErrorEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var acctMismatches []CheckMismatch
+	for _, m := range mismatches {
+		if m.Field == "account_reward_amount" {
+			acctMismatches = append(acctMismatches, m)
+		}
+	}
+	require.Len(t, acctMismatches, 1)
+	require.Equal(t, badAddr, acctMismatches[0].StakeAddress)
+	require.Equal(t, "2000000", acctMismatches[0].DingoValue)
+	require.Equal(t, "2000001", acctMismatches[0].KoiosValue)
+}
+
+// TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts covers the
+// raw reward_account_output boundary. Dingo stores one row per pool
+// contribution, including rewards that were computed but not credited;
+// Koios reports only credited rewards at the account/type level. The parity
+// comparison must therefore discard withheld rows and aggregate contributions
+// from different pools before matching the Koios total.
+func TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(100)
+	const stakeEpoch = uint64(99)
+
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	stakingKey := testPoolKeyHash(t, 0x41)
+	poolOne := testPoolKeyHash(t, 0x01)
+	poolTwo := testPoolKeyHash(t, 0x02)
+	poolThree := testPoolKeyHash(t, 0x03)
+	poolFour := testPoolKeyHash(t, 0x04)
+	for _, row := range []*models.RewardAccountOutput{
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolOne,
+			RewardType: "member", Amount: types.Uint64(100), Spendable: true,
+		},
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolTwo,
+			RewardType: "member", Amount: types.Uint64(200), Spendable: true,
+		},
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolThree,
+			RewardType: "member", Amount: types.Uint64(50), Spendable: false,
+		},
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolFour,
+			RewardType: "member", Amount: types.Uint64(75), Spendable: true,
+			Guarded: true,
+		},
+	} {
+		require.NoError(t, gdb.Create(row).Error)
+	}
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+	poolOneID, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolOne))
+	require.NoError(t, err)
+	poolTwoID, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolTwo))
+	require.NoError(t, err)
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{
+			{StakeAddress: addr, RewardType: "member", Earned: "100", PoolIDBech32: poolOneID},
+			{StakeAddress: addr, RewardType: "member", Earned: "200", PoolIDBech32: poolTwoID},
+		},
+		1,
+		true,
+		time.Now(),
+	))
+
+	mismatches := compareEpochAccounts(
+		context.Background(),
+		cache,
+		dingo,
+		network,
+		koiosEpoch,
+		stakeEpoch,
+		time.Now(),
+		0,
+		time.Time{},
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.Equal(t, StatusPass, DetermineStatus(mismatches))
+	for _, mismatch := range mismatches {
+		require.NotEqual(t, CategoryAcctOnlyDingo, mismatch.Category)
+		require.NotEqual(t, CategoryAcctOnlyKoios, mismatch.Category)
+		require.NotEqual(t, CategoryAcctDuplicate, mismatch.Category)
+	}
+}
+
+func TestEffectiveCheckOutcome(t *testing.T) {
+	t.Parallel()
+
+	statuses := []CheckEpochStatus{
+		{Epoch: 1, Status: StatusPass},
+		{Epoch: 2, Status: StatusFail},
+		{Epoch: 3, Status: StatusError},
+		{Epoch: 4, Status: StatusFail},
+	}
+
+	all := EffectiveCheckOutcome(statuses, 0, 0)
+	require.Equal(t, []uint64{2, 4}, all.FailEpochs)
+	require.Equal(t, []uint64{3}, all.ErrorEpochs)
+
+	bounded := EffectiveCheckOutcome(statuses, 2, 3)
+	require.Equal(t, []uint64{2}, bounded.FailEpochs)
+	require.Equal(t, []uint64{3}, bounded.ErrorEpochs)
+}
+
+// seedPoolPresenceFixture builds the shared Koios-epoch-K fixture for the two
+// pool-presence tests below: one established pool that matches Koios exactly
+// at every field, plus a second pool seeded only where the caller asks for it.
+// It returns the Dingo data dir and cache path ready for Check.
+func seedPoolPresenceFixture(
+	t *testing.T,
+	network string,
+	koiosEpoch uint64,
+	secondPoolStakeEpochRow bool,
+	secondPoolHash []byte,
+) (dingoDir, cachePath string) {
+	t.Helper()
+	stakeEpoch := koiosEpoch - 1
+	paramEpoch := koiosEpoch + 1
+
+	poolHash := testPoolKeyHash(t, 0x03)
+	poolBech32, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolHash))
+	require.NoError(t, err)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	// Established pool: complete rows at both epochs.
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(5_000_000),
+		DelegatorCount: 7,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             stakeEpoch,
+		PoolKeyHash:       poolHash,
+		MemberRewardTotal: types.Uint64(123_456),
+	}).Error)
+	realBlocks := uint64(4)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          paramEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(2),
+		Cost:           types.Uint64(999_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 2)},
+		BlocksProduced: &realBlocks,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	// Second pool. Its param-epoch row always exists; the stake-epoch row is
+	// what distinguishes "registered during K, not yet in K's stake basis"
+	// from "in K's stake basis but absent from Koios".
+	if secondPoolStakeEpochRow {
+		require.NoError(t, gdb.Create(&models.RewardPoolInput{
+			Epoch:          stakeEpoch,
+			PoolKeyHash:    secondPoolHash,
+			DelegatedStake: types.Uint64(9_497_623_854),
+			DelegatorCount: 1,
+		}).Error)
+	}
+	newBlocks := uint64(0)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          paramEpoch,
+		PoolKeyHash:    secondPoolHash,
+		DelegatedStake: types.Uint64(9_497_623_854),
+		DelegatorCount: 1,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+		BlocksProduced: &newBlocks,
+	}).Error)
+
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath = filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	// Koios lists only the established pool for epoch K.
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		[]KoiosPoolEpoch{{
+			Network:       network,
+			Epoch:         koiosEpoch,
+			PoolBech32:    poolBech32,
+			ActiveStake:   "5000000",
+			BlockCnt:      4,
+			Delegators:    7,
+			Margin:        "0.1",
+			FixedCost:     "340000000",
+			MemberRewards: "123456",
+			FetchedAt:     fetchedAt,
+		}},
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			Treasury:  "1000",
+			Reserves:  "2000",
+			Fees:      "300",
+			FetchedAt: fetchedAt,
+		},
+	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+	return dingoDir, cachePath
+}
+
+// TestCheckIgnoresParamEpochOnlyPoolForPresence covers a pool that registered
+// during Koios epoch K. Its first mark snapshot is captured at the boundary
+// into K+1, so Dingo has a reward_pool_input row at the param epoch (K+1) but
+// none at the stake epoch (K-1) — it is not part of K's active-stake basis at
+// all. Koios has no pool_history row for it until K+2.
+//
+// The presence check must therefore ignore it. Flagging it pool_only_dingo
+// reports a Dingo defect where both sides in fact agree: the pool simply did
+// not exist yet for the epoch being compared. Observed on preview epoch 7,
+// where two pools registered mid-epoch failed the strict observer (dingo
+// #3483).
+func TestCheckIgnoresParamEpochOnlyPoolForPresence(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	newPoolHash := testPoolKeyHash(t, 0x07)
+
+	dingoDir, cachePath := seedPoolPresenceFixture(
+		t, network, koiosEpoch, false, newPoolHash,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		mismatches,
+		"a pool known only through the param epoch is not part of epoch "+
+			"%d's stake basis and must not be reported as present only in "+
+			"Dingo", koiosEpoch,
+	)
+}
+
+// TestCheckFlagsStakeEpochPoolMissingFromKoios is the negative case: a pool
+// that IS in epoch K's stake basis but absent from Koios's pool set is a real
+// divergence and must still be flagged, so the fix above cannot be widened
+// into suppressing genuine pool_only_dingo findings.
+func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	newPoolHash := testPoolKeyHash(t, 0x07)
+
+	dingoDir, cachePath := seedPoolPresenceFixture(
+		t, network, koiosEpoch, true, newPoolHash,
+	)
+
+	_, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+
+	var found bool
+	for _, m := range mismatches {
+		if m.Field == "pool_presence" &&
+			m.Category == CategoryPoolOnlyDingo {
+			found = true
+		}
+	}
+	require.True(
+		t,
+		found,
+		"a pool in epoch %d's stake basis but absent from Koios is a real "+
+			"divergence and must stay flagged", koiosEpoch,
+	)
+}
+
+// TestCheckDepartedPoolDoesNotErrorEpoch is the end-to-end counterpart of
+// compare_test.go's TestComparePoolEpochDepartedPoolIsInformational: it proves
+// checkEpoch resolves the K+1 snapshot's readiness for itself, which the
+// ComparePoolEpoch unit tests cannot.
+//
+// The fixture mirrors preview epoch 14. The pool is in epoch K's stake basis
+// (a K-1 reward_pool_input row) and absent from the K+1 snapshot, which is
+// itself committed — a ready epoch_summary row at K+1. That combination means
+// the pool left the pool set, so the epoch must still report PASS rather than
+// halting a strict-mode node (dingo #3485).
+func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// The pool is absent from the K+1 pool set: it left, so its epoch-K block
+	// count has no row to live on and the gap is informational.
+	dingoDir, cachePath, _ := seedDepartureFixture(
+		t, network, koiosEpoch, false,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"a departed pool must not put epoch %d into ERROR", koiosEpoch,
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "reward_pool_input_params", mismatches[0].Field)
+	require.Equal(
+		t,
+		CategoryPoolDeparted,
+		mismatches[0].Category,
+		"the uncomparable block count is recorded, not silently skipped",
+	)
+}
+
+// seedDepartureFixture builds the epoch-K comparison fixture used by the
+// departure tests. paramEpochPoolInSet controls whether the pool still appears
+// in the K+1 mark pool_stake_snapshot, which is what separates a pool that
+// left the pool set from one whose reward inputs are missing.
+func seedDepartureFixture(
+	t *testing.T,
+	network string,
+	koiosEpoch uint64,
+	paramEpochPoolInSet bool,
+) (dingoDir, cachePath string, poolBech32 string) {
+	t.Helper()
+	return seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, paramEpochPoolInSet, 0,
+	)
+}
+
+// seedDepartureFixtureWithCount is seedDepartureFixture with control over the
+// K+1 epoch_summary's declared TotalPoolCount. declaredPools of 0 means "match
+// the mark rows actually written", i.e. a complete set; a larger value
+// simulates a set that was only partially read.
+func seedDepartureFixtureWithCount(
+	t *testing.T,
+	network string,
+	koiosEpoch uint64,
+	paramEpochPoolInSet bool,
+	declaredPools uint64,
+) (dingoDir, cachePath string, poolBech32 string) {
+	t.Helper()
+	stakeEpoch := koiosEpoch - 1
+	paramEpoch := koiosEpoch + 1
+
+	poolHash := testPoolKeyHash(t, 0x09)
+	poolBech32, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolHash))
+	require.NoError(t, err)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	// One mark row is always written for another pool; the subject pool adds
+	// a second when it is still in the set. The summary declares that same
+	// count unless the caller is simulating a partial read.
+	markRows := uint64(1)
+	if paramEpochPoolInSet {
+		markRows = 2
+	}
+	if declaredPools == 0 {
+		declaredPools = markRows
+	}
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            paramEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		TotalPoolCount:   declaredPools,
+		BoundarySlot:     departureBoundarySlot,
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          stakeEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(5_000_000),
+		DelegatorCount: 7,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             stakeEpoch,
+		PoolKeyHash:       poolHash,
+		MemberRewardTotal: types.Uint64(123_456),
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	// Another pool always sits in the K+1 set, so membership is established
+	// either way and the two cases differ only in this pool's presence.
+	require.NoError(t, gdb.Create(&models.PoolStakeSnapshot{
+		Epoch:        paramEpoch,
+		SnapshotType: "mark",
+		PoolKeyHash:  testPoolKeyHash(t, 0x0a),
+		TotalStake:   types.Uint64(1_000),
+	}).Error)
+	if paramEpochPoolInSet {
+		require.NoError(t, gdb.Create(&models.PoolStakeSnapshot{
+			Epoch:        paramEpoch,
+			SnapshotType: "mark",
+			PoolKeyHash:  poolHash,
+			TotalStake:   types.Uint64(5_000_000),
+		}).Error)
+	}
+
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath = filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		[]KoiosPoolEpoch{{
+			Network:       network,
+			Epoch:         koiosEpoch,
+			PoolBech32:    poolBech32,
+			ActiveStake:   "5000000",
+			BlockCnt:      15,
+			Delegators:    7,
+			Margin:        "0.1",
+			FixedCost:     "340000000",
+			MemberRewards: "123456",
+			FetchedAt:     fetchedAt,
+		}},
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			Treasury:  "1000",
+			Reserves:  "2000",
+			Fees:      "300",
+			FetchedAt: fetchedAt,
+		},
+	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+	require.NoError(t, cache.Close())
+	return dingoDir, cachePath, poolBech32
+}
+
+// TestCheckDegradedActivePoolStillErrors covers the degraded-active-pool
+// case. buildRewardStateInputs (ledger/snapshot/rotation.go) drops a pool with
+// stale registration data from reward_pool_input so one bad pool cannot wedge
+// the whole boundary capture, and says so explicitly: degraded pools are
+// excluded "and only from it — PoolStakeSnapshot and EpochSummary still
+// reflect the true observed stake".
+//
+// Such a pool is still in the K+1 pool set, so its missing reward-input row is
+// genuine missing input, not departure. Classifying it as pool_departed would
+// turn a real ERROR into a PASS, which is why departure is decided from
+// per-pool pool_stake_snapshot membership rather than from
+// epoch_summary.SnapshotReady (dingo #3485).
+func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixture(t, network, koiosEpoch, true)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a pool still in the K+1 pool set with no reward-input row is "+
+			"missing input, not a departure",
+	)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckMissingRewardBundleStillErrors covers the no-bundle case.
+// saveSnapshotInTxn persists the mark pool_stake_snapshot and epoch summary on
+// every transition "regardless of reward-input availability", so a ready
+// epoch_summary at K+1 is compatible with the entire reward-input bundle
+// having been skipped. Every pool then looks absent from reward_pool_input at
+// once, and none of them departed.
+//
+// The pool set at K+1 still lists them, so each stays an ERROR.
+func TestCheckMissingRewardBundleStillErrors(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// paramEpochPoolInSet: the whole bundle is missing, so no pool has a K+1
+	// reward_pool_input row while all of them remain in the pool set.
+	dingoDir, cachePath, _ := seedDepartureFixture(t, network, koiosEpoch, true)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a skipped reward-input bundle must not read as every pool departing",
+	)
+}
+
+// TestCheckIncompleteParamEpochPoolSetStillErrors is the completeness case: a
+// non-empty pool-set read does not prove the set was fully recorded or fully
+// read.
+//
+// The K+1 epoch summary here declares two pools while only one mark row is
+// present. The absent pool would look departed against that partial set, which
+// would pass the epoch and hide a dingo_db_missing. Membership is only trusted
+// when the number of readable mark rows equals the count the summary declares,
+// both being written from the same StakeDistribution (dingo #3485).
+func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// The pool is absent from the mark rows — which alone would read as
+	// departure — but the summary declares a pool that was never recorded, so
+	// the set is incomplete and absence proves nothing.
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"an incomplete K+1 pool set must not let absence read as departure",
+	)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckDepartedPoolSurvivesSnapshotRetentionPrune covers a departure
+// checked after `pool_stake_snapshot` retention has already removed the K+1
+// mark rows. `Manager.cleanupOldSnapshots` (ledger/snapshot/rotation.go) prunes
+// that table to `currentEpoch - 3`, and a Preview genesis replay closes an
+// epoch roughly every 25 seconds, so an observer only has to run about 75
+// seconds behind the node to lose the evidence for every epoch it checks.
+//
+// Absence of the mark rows is not evidence of anything, so departure has to be
+// established from state that outlives them: `epoch_summary` and
+// `reward_pool_input` are both retained for the life of the database, and a K+1
+// reward-input set whose size matches the K+1 summary's declared pool count
+// accounts for every pool in that pool set. A pool missing from a complete set
+// left it (dingo #3795).
+func TestCheckDepartedPoolSurvivesSnapshotRetentionPrune(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixture(
+		t, network, koiosEpoch, false,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"pruned snapshots must not turn a departure into an ERROR",
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryPoolDeparted, mismatches[0].Category)
+}
+
+// TestCheckIncompleteRewardInputSetStillErrorsAfterPrune is the fail-closed
+// half. With the mark rows pruned and the K+1 reward-input set short of the
+// declared pool count, some pool in that pool set has no reward-input row, so
+// absence proves nothing and the strict classification has to stand.
+func TestCheckIncompleteRewardInputSetStillErrorsAfterPrune(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// Two pools declared at K+1, but only the one reward-input row the prune
+	// helper writes, so the set is incomplete.
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(t, result.ErrorEpochs, koiosEpoch)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// pruneParamEpochSnapshots reproduces what snapshot retention leaves behind at
+// paramEpoch: the mark pool_stake_snapshot rows are gone, and the durable
+// reward_pool_input row for the pool that stayed in the set remains. The
+// subject pool of the departure fixture deliberately gets no row.
+func pruneParamEpochSnapshots(
+	t *testing.T,
+	dingoDir string,
+	paramEpoch uint64,
+) {
+	t.Helper()
+	path := filepath.Join(dingoDir, "metadata.sqlite")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+	_, err = db.Exec(
+		`DELETE FROM pool_stake_snapshot WHERE epoch = ?`,
+		paramEpoch,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+INSERT INTO reward_pool_input (
+    pool_key_hash, epoch, blocks_produced, total_blocks_in_epoch
+) VALUES (?, ?, ?, ?)`,
+		testPoolKeyHash(t, 0x0a),
+		paramEpoch,
+		3,
+		100,
+	)
+	require.NoError(t, err)
+	// The omitted columns are either nullable (margin, reward_account),
+	// auto-generated (id), or NOT NULL with a default (pledge,
+	// delegated_stake, owner_stake, cost, delegator_count,
+	// reward_account_credential_tag, captured_slot, boundary_slot), so the
+	// partial insert above is a complete row. Asserted rather than assumed — a
+	// fixture that silently wrote nothing would make the departure tests pass
+	// for the wrong reason.
+	var rows, params int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*), COUNT(blocks_produced) FROM reward_pool_input
+		 WHERE epoch = ?`,
+		paramEpoch,
+	).Scan(&rows, &params))
+	require.Equal(t, 1, rows, "the param-epoch reward input must exist")
+	require.Equal(t, 1, params, "with its block count populated")
+	var snapshots int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM pool_stake_snapshot WHERE epoch = ?`,
+		paramEpoch,
+	).Scan(&snapshots))
+	require.Zero(t, snapshots, "the mark rows must be gone")
+}
+
+// seedRewardSnapshotForZeroStakeProof writes the mark reward_snapshot row at
+// paramEpoch that checkEpoch's paramEpochPositiveStakeProven route (dingo
+// #4691) reads. excludedKnown mirrors
+// DingoRewardSnapshotSummary.ExcludedActiveStakeKnown: false leaves the
+// column NULL, reproducing a snapshot captured before dingo #4025 added the
+// tracking.
+func seedRewardSnapshotForZeroStakeProof(
+	t *testing.T,
+	dingoDir string,
+	paramEpoch uint64,
+	totalPoolCount uint64,
+	excludedKnown bool,
+	excludedActiveStake uint64,
+) {
+	t.Helper()
+	path := filepath.Join(dingoDir, "metadata.sqlite")
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
+	)
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+	var excluded any
+	if excludedKnown {
+		excluded = strconv.FormatUint(excludedActiveStake, 10)
+	}
+	_, err = db.Exec(`
+INSERT INTO reward_snapshot (
+    epoch, snapshot_type, total_active_stake, total_pool_count,
+    total_delegators, captured_slot, boundary_slot, protocol_version,
+    excluded_active_stake
+) VALUES (?, 'mark', '5000000', ?, 0, 0, ?, 0, ?)`,
+		paramEpoch, totalPoolCount, departureBoundarySlot, excluded,
+	)
+	require.NoError(t, err)
+}
+
+// TestCheckZeroStakePoolNotDBMissingWhenSnapshotPruned is the dingo #4691
+// case: a registered, non-retired pool whose delegated stake reaches zero at
+// the K+1 boundary (its only delegator redelegated away or deregistered) gets
+// no K+1 reward_pool_input row, because rewardStakeDistribution correctly
+// drops zero-stake inputs (ledger/snapshot/rotation.go) -- this is not pool
+// retirement. With the K+1 mark pool_stake_snapshot pruned (route 1 closed,
+// as TestCheckIncompleteRewardInputSetStillErrorsAfterPrune reproduces) and
+// the K+1 epoch_summary declaring more pools than have reward-input rows
+// because a zero-stake-but-delegated pool inflates its count (route 2's
+// epoch_summary-based fallback can structurally never close on such a
+// network -- dingo #4691's Preview evidence: epoch 160 declared 113 pools
+// against 111 real reward-input rows), the pool must not read as
+// dingo_db_missing, nor as pool_departed, since it never left the network.
+// reward_snapshot's own (smaller, correct) pool count with a known-zero
+// ExcludedActiveStake is what proves the K+1 reward-input set is nonetheless
+// the network's complete positive-stake set.
+func TestCheckZeroStakePoolNotDBMissingWhenSnapshotPruned(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	// declaredPools=2 reproduces the exact structural gap: epoch_summary
+	// counts a zero-stake-but-delegated pool alongside pool 0x0a, but only
+	// 0x0a gets a K+1 reward-input row after the prune below.
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	// reward_snapshot's TotalPoolCount (1) matches the real K+1 reward-input
+	// row count (pool 0x0a alone) exactly, with no degraded exclusion.
+	seedRewardSnapshotForZeroStakeProof(
+		t, dingoDir, koiosEpoch+1, 1, true, 0,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"a zero-stake pool proven complete via reward_snapshot must not ERROR",
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "reward_pool_input_params", mismatches[0].Field)
+	require.Equal(
+		t,
+		CategoryPoolZeroStake,
+		mismatches[0].Category,
+		"a zero-stake pool must be distinguished from a departed one",
+	)
+}
+
+// TestCheckZeroStakeProofDoesNotMaskDegradedPoolExclusion is the negative case
+// the issue calls out explicitly: reward_snapshot's own pool count must only
+// prove K+1 completeness when ExcludedActiveStake is known zero. A nonzero
+// value means a degraded pool's stake was excluded from reward_pool_input
+// (dingo #4025), so the same count match proves nothing about whether this
+// particular pool's absence is safe, and classification must stay
+// dingo_db_missing -- over-widening the new route to accept this case would
+// silently hide a real gap in Dingo's own computation.
+func TestCheckZeroStakeProofDoesNotMaskDegradedPoolExclusion(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	seedRewardSnapshotForZeroStakeProof(
+		t, dingoDir, koiosEpoch+1, 1, true, 900_000,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a nonzero ExcludedActiveStake must keep the strict classification",
+	)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckZeroStakeProofDoesNotMaskUnknownExclusion is
+// TestCheckZeroStakeProofDoesNotMaskDegradedPoolExclusion's other half: a
+// reward_snapshot row captured before dingo #4025 added ExcludedActiveStake
+// tracking has the column NULL rather than zero, and that must be treated the
+// same as "unknown, so unproven" -- never as "known zero".
+func TestCheckZeroStakeProofDoesNotMaskUnknownExclusion(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	seedRewardSnapshotForZeroStakeProof(
+		t, dingoDir, koiosEpoch+1, 1, false, 0,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"an unknown ExcludedActiveStake must keep the strict classification",
+	)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckZeroStakeProofRequiresMatchingSnapshotCount covers the count half
+// of the dingo #4691 proof: a known-zero ExcludedActiveStake is not enough on
+// its own. When reward_snapshot.TotalPoolCount (2) exceeds the K+1
+// reward-input rows actually present (1), a row is missing from Dingo's own
+// computation and the absent pool must stay dingo_db_missing.
+func TestCheckZeroStakeProofRequiresMatchingSnapshotCount(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	seedRewardSnapshotForZeroStakeProof(
+		t, dingoDir, koiosEpoch+1, 2, true, 0,
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a reward_snapshot count above the row count must not prove completeness",
+	)
+
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestCheckAccountRewardsPendingWiring is the other half of
+// TestAccountRewardsPendingFold: that fold pins what checkEpoch decides, this
+// pins that checkEpoch's decision is the one the account comparison actually
+// receives. Neither test alone would notice a call site that passed a
+// constant.
+//
+// The two subtests differ only in the chain tip. Below the pool's applying
+// boundary the epoch's rewards are not computed yet, so an account amount
+// difference is a statement about timing and is reported as reference_lag; at
+// the boundary the same fixture is a real disagreement and stays
+// value_mismatch. Everything else — the Dingo rows, the cached Koios rows,
+// the epoch — is identical between them.
+func TestCheckAccountRewardsPendingWiring(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = koiosEpoch - 1
+	const boundarySlot = uint64(1_000_000)
+
+	run := func(t *testing.T, tipSlot uint64) []CheckMismatch {
+		t.Helper()
+		dingoDir, gdb := newTestDingoDB(t)
+		poolHash := testPoolKeyHash(t, 0x03)
+		stakingKey := testPoolKeyHash(t, 0x42)
+
+		require.NoError(t, gdb.Create(&models.EpochSummary{
+			Epoch:            stakeEpoch,
+			TotalActiveStake: types.Uint64(5_000_000),
+			SnapshotReady:    true,
+		}).Error)
+		require.NoError(t, gdb.Create(&models.RewardPoolInput{
+			Epoch:          stakeEpoch,
+			PoolKeyHash:    poolHash,
+			DelegatedStake: types.Uint64(5_000_000),
+			DelegatorCount: 1,
+		}).Error)
+		// The pool's own reward output carries the applying boundary, which
+		// is what GetPoolEpochDataMap compares the tip against.
+		require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+			Epoch:             stakeEpoch,
+			PoolKeyHash:       poolHash,
+			MemberRewardTotal: types.Uint64(2_000_000),
+			BoundarySlot:      boundarySlot,
+		}).Error)
+		require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+			Epoch:       stakeEpoch,
+			StakingKey:  stakingKey,
+			PoolKeyHash: poolHash,
+			RewardType:  "member",
+			Amount:      types.Uint64(2_000_000),
+			Spendable:   true,
+		}).Error)
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{0x01}, tipSlot, 1,
+		).Error)
+
+		sqlDB, err := gdb.DB()
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
+
+		addr, err := StakeAddressFromCredential(stakingKey, 0)
+		require.NoError(t, err)
+
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		cache, err := openTestCache(cachePath, nil)
+		require.NoError(t, err)
+		defer cache.Close() //nolint:errcheck
+
+		fetchedAt := time.Now().Add(-time.Hour).UTC()
+		require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		}, nil, &KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			FetchedAt: fetchedAt,
+		}))
+		require.NoError(t, cache.CommitAccountRewardsForEpoch(
+			network,
+			koiosEpoch,
+			[]KoiosAccountRewards{{
+				StakeAddress: addr,
+				RewardType:   "member",
+				Earned:       "2000001", // one lovelace off
+				FetchedAt:    fetchedAt,
+			}},
+			1,
+			true,
+			fetchedAt,
+		))
+
+		_, err = Check(context.Background(), CheckConfig{
+			Network:         network,
+			DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+			CachePath:       cachePath,
+			AccountsEnabled: true,
+			// No grace window, so the wall-clock path cannot be what
+			// downgrades the mismatch.
+			GraceHours: 0,
+		}, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+
+		all, err := cache.GetMismatches(network, koiosEpoch, "")
+		require.NoError(t, err)
+		var acct []CheckMismatch
+		for _, m := range all {
+			if m.Field == "account_reward_amount" {
+				acct = append(acct, m)
+			}
+		}
+		return acct
+	}
+
+	t.Run(
+		"before the boundary the amount difference is a lag",
+		func(t *testing.T) {
+			acct := run(t, boundarySlot-1)
+			require.Len(t, acct, 1)
+			assert.Equal(
+				t,
+				CategoryReferenceLag,
+				acct[0].Category,
+				"checkEpoch must pass the pending answer to the account comparison",
+			)
+		},
+	)
+
+	t.Run(
+		"at the boundary the same difference is a divergence",
+		func(t *testing.T) {
+			acct := run(t, boundarySlot)
+			require.Len(t, acct, 1)
+			assert.Equal(t, CategoryValueMismatch, acct[0].Category,
+				"once the rewards are applied the comparison must stay strict")
+		},
+	)
+}
+
+// TestCheckUncreditedDingoRowStillFailsAgainstKoios is the case that decides
+// whether this narrowing is safe, and it runs through compareEpochAccounts
+// rather than the helper: an uncredited Dingo row whose Koios counterpart
+// exists at the same (stake_address, reward_type) must still be reported.
+//
+// The filter drops only Dingo rows, so such a row cannot go quiet — it moves
+// from the value path to the presence path and comes out as acct_only_koios,
+// a FAIL. A narrowing that also swallowed the Koios side would turn a genuine
+// divergence into a PASS, which is the one outcome a parity checker must
+// never produce.
+func TestCheckUncreditedDingoRowStillFailsAgainstKoios(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = koiosEpoch - 1
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	stakingKey := testPoolKeyHash(t, 0x41)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  stakingKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x22),
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   false, // the ledger never credited it
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Network:   network,
+		Epoch:     koiosEpoch,
+		FetchedAt: fetchedAt,
+	}))
+	// Koios reports a reward for exactly the address Dingo's uncredited row
+	// names. Dingo owes an explanation for it either way.
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{{
+			StakeAddress: addr,
+			RewardType:   "member",
+			Earned:       "1000000",
+			FetchedAt:    fetchedAt,
+		}},
+		1,
+		true,
+		fetchedAt,
+	))
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.FailEpochs,
+		"a Koios row Dingo cannot account for must still fail the epoch")
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var presence []CheckMismatch
+	for _, m := range mismatches {
+		if m.Field == "account_reward_presence" {
+			presence = append(presence, m)
+		}
+	}
+	require.Len(t, presence, 1)
+	assert.Equal(t, CategoryAcctOnlyKoios, presence[0].Category)
+	assert.Equal(t, addr, presence[0].StakeAddress)
+}
+
+// TestCheckAccountDecodeErrorReachesOutput pins that the restructured decode
+// path still reports. compareEpochAccounts now appends every decode mismatch
+// ahead of the comparison rows instead of interleaving them, and nothing else
+// proved a CategoryDBError still reaches its output at all.
+//
+// Both subtests matter, and for different reasons. The credited row is the
+// behaviour the inline loop had. The uncredited row is the one this PR could
+// have lost: accountLifecycleMismatches reports only the *previous* stake
+// epoch's decode failures and, for the current epoch, merely suppresses the
+// lifecycle diff on the stated assumption that compareEpochAccounts already
+// reported it — so a filter applied before decoding would drop the row and
+// silently disable the diff with it.
+func TestCheckAccountDecodeErrorReachesOutput(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = koiosEpoch - 1
+
+	for _, tc := range []struct {
+		name      string
+		spendable bool
+	}{
+		{"credited row", true},
+		{"uncredited row", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dingoDir, gdb := newTestDingoDB(t)
+			require.NoError(t, gdb.Create(&models.EpochSummary{
+				Epoch:            stakeEpoch,
+				TotalActiveStake: types.Uint64(5_000_000),
+				SnapshotReady:    true,
+			}).Error)
+			// Two bytes is not a credential any address can be built from.
+			require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+				Epoch:       stakeEpoch,
+				StakingKey:  []byte{0x01, 0x02},
+				PoolKeyHash: testPoolKeyHash(t, 0x22),
+				RewardType:  "member",
+				Amount:      types.Uint64(1_000_000),
+				Spendable:   tc.spendable,
+			}).Error)
+
+			sqlDB, err := gdb.DB()
+			require.NoError(t, err)
+			require.NoError(t, sqlDB.Close())
+
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			cache, err := openTestCache(cachePath, nil)
+			require.NoError(t, err)
+			defer cache.Close() //nolint:errcheck
+
+			fetchedAt := time.Now().Add(-time.Hour).UTC()
+			require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+				Network:      network,
+				Epoch:        koiosEpoch,
+				ActiveStake:  "5000000",
+				EpochEndTime: fetchedAt,
+				FetchedAt:    fetchedAt,
+			}, nil, &KoiosTotals{
+				Network:   network,
+				Epoch:     koiosEpoch,
+				FetchedAt: fetchedAt,
+			}))
+			require.NoError(t, cache.CommitAccountRewardsForEpoch(
+				network, koiosEpoch, nil, 0, true, fetchedAt,
+			))
+
+			result, err := Check(context.Background(), CheckConfig{
+				Network: network,
+				DingoDB: DingoDBConfig{
+					Plugin:  "sqlite",
+					DataDir: dingoDir,
+				},
+				CachePath:       cachePath,
+				AccountsEnabled: true,
+			}, slog.New(slog.DiscardHandler))
+			require.NoError(t, err)
+			require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs,
+				"an undecodable credential is a database error, not a pass")
+
+			mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+			require.NoError(t, err)
+			var decodeRows []CheckMismatch
+			for _, m := range mismatches {
+				if m.Field == "account_reward_address_decode" {
+					decodeRows = append(decodeRows, m)
+				}
+			}
+			require.Len(t, decodeRows, 1)
+			assert.Equal(t, CategoryDBError, decodeRows[0].Category)
+		})
+	}
+}
+
+// TestCheckAccountPoolDecodeErrorIsNotAnAddressError pins that a corrupt
+// pool_key_hash is reported as a pool-decode failure rather than as a
+// credential one. The two are different columns with different causes, and
+// reporting a pool failure under account_reward_address_decode sends triage
+// to the stake credential, which decoded correctly.
+func TestCheckAccountPoolDecodeErrorIsNotAnAddressError(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = koiosEpoch - 1
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	// A credential that decodes cleanly, carrying a pool hash that does not:
+	// two bytes is not a 28-byte pool key hash.
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch: stakeEpoch,
+		StakingKey: mustDecodeHex(
+			t,
+			"F8ADA2B9A94FDD95D35D482BDDDF5A66FFA5B330B539B4613255C1DC",
+		),
+		PoolKeyHash: []byte{0x01, 0x02},
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   true,
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Network:   network,
+		Epoch:     koiosEpoch,
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network, koiosEpoch, nil, 0, true, fetchedAt,
+	))
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network: network,
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: dingoDir,
+		},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs,
+		"an undecodable pool hash is a database error, not a pass")
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var poolRows, addressRows []CheckMismatch
+	for _, m := range mismatches {
+		switch m.Field {
+		case "account_reward_pool_decode":
+			poolRows = append(poolRows, m)
+		case "account_reward_address_decode":
+			addressRows = append(addressRows, m)
+		}
+	}
+	require.Len(t, poolRows, 1)
+	assert.Equal(t, CategoryDBError, poolRows[0].Category)
+	assert.Empty(t, addressRows,
+		"the credential decoded; only the pool hash did not")
+}
+
+// departureBoundarySlot is the slot the departure fixture stamps on the K+1
+// epoch_summary. Every certificate the retirement helpers seed is placed
+// before it, so it is the boundary a real epoch transition would resolve pool
+// state at.
+const departureBoundarySlot = uint64(1_000)
+
+// seedPoolCertificateHistory writes a pool row, its registrations and its
+// retirements straight into the fixture's metadata database, so a departure
+// test can control the certificate history GetPoolsRetiredByEpoch resolves.
+// Slots are given in certificate order; the caller keeps them below
+// departureBoundarySlot for the history to be visible at the boundary.
+func seedPoolCertificateHistory(
+	t *testing.T,
+	dingoDir string,
+	poolHash []byte,
+	regSlots []uint64,
+	retirements map[uint64]uint64, // added_slot -> effective epoch
+) {
+	t.Helper()
+	path := filepath.Join(dingoDir, "metadata.sqlite")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
+	require.NoError(t, err)
+	defer db.Close() //nolint:errcheck
+
+	res, err := db.Exec(`INSERT INTO pool (pool_key_hash) VALUES (?)`, poolHash)
+	require.NoError(t, err)
+	poolID, err := res.LastInsertId()
+	require.NoError(t, err)
+	for _, slot := range regSlots {
+		_, err := db.Exec(`
+INSERT INTO pool_registration (pool_id, pool_key_hash, added_slot)
+VALUES (?, ?, ?)`,
+			poolID, poolHash, slot,
+		)
+		require.NoError(t, err)
+	}
+	for slot, epoch := range retirements {
+		_, err := db.Exec(`
+INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
+VALUES (?, ?, ?, ?)`,
+			poolID, poolHash, epoch, slot,
+		)
+		require.NoError(t, err)
+	}
+}
+
+// TestCheckRetiredPoolIsDepartedWithoutAnyPoolSetEvidence is the dingo #3925
+// case, reproduced with both routes to pool-set proof closed off exactly as
+// the Preview replay left them:
+//
+//   - the K+1 mark pool_stake_snapshot rows are pruned (retention keeps only
+//     currentEpoch-3, and the observer trails the node by far more than that);
+//   - the K+1 reward_pool_input set is short of the summary's declared pool
+//     count, because buildRewardStateInputs omits a degraded active pool from
+//     that table while keeping it in the pool set — so #3795's exact-match
+//     fallback cannot fire either.
+//
+// That combination is TestCheckIncompleteRewardInputSetStillErrorsAfterPrune,
+// which is an ERROR and must stay one. The only thing added here is the pool's
+// own retirement certificate, effective at the reporting epoch. Certificate
+// history is retained for the life of the database, and a retirement not
+// cancelled by a later registration is direct per-pool evidence that the pool
+// left, needing no argument about whether some *set* was completely recorded.
+func TestCheckRetiredPoolIsDepartedWithoutAnyPoolSetEvidence(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	seedPoolCertificateHistory(
+		t,
+		dingoDir,
+		testPoolKeyHash(t, 0x09),
+		[]uint64{100},
+		map[uint64]uint64{200: koiosEpoch},
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"an uncancelled retirement must classify the pool as departed",
+	)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "reward_pool_input_params", mismatches[0].Field)
+	require.Equal(t, CategoryPoolDeparted, mismatches[0].Category)
+}
+
+// TestCheckRetiredPoolStaysDepartedInLaterEpochs is the "at or before" half.
+// The observed pool retired effective epoch 243 and was still misclassified at
+// param epochs 244 and 245, so matching only retirements landing exactly on
+// the param epoch — which is what GetPoolsRetiringAtEpoch does for POOLREAP —
+// would fix the first epoch and leave every later one an ERROR.
+func TestCheckRetiredPoolStaysDepartedInLaterEpochs(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	// Effective several epochs before the K+1 param epoch this check
+	// resolves departure at.
+	seedPoolCertificateHistory(
+		t,
+		dingoDir,
+		testPoolKeyHash(t, 0x09),
+		[]uint64{100},
+		map[uint64]uint64{200: koiosEpoch - 3},
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		result.ErrorEpochs,
+		"a pool that left several epochs ago is still departed",
+	)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryPoolDeparted, mismatches[0].Category)
+}
+
+// TestCheckReregisteredPoolStillErrors is the fail-closed half, and the reason
+// "a retirement certificate exists" cannot be the predicate. A later
+// registration cancels a pending retirement, and a re-registration after one
+// has taken effect puts the pool back — this fixture has one pool with a
+// registration filed after a retirement certificate. Such a pool is still in
+// the pool set, so its absent K+1 reward-input row is genuine missing input,
+// and downgrading it would turn a real ERROR into a PASS.
+func TestCheckReregisteredPoolStillErrors(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(14)
+
+	dingoDir, cachePath, _ := seedDepartureFixtureWithCount(
+		t, network, koiosEpoch, false, 2,
+	)
+	pruneParamEpochSnapshots(t, dingoDir, koiosEpoch+1)
+	// Identical to the departure case above except for the registration at
+	// slot 300, which lands after the retirement certificate at slot 200.
+	seedPoolCertificateHistory(
+		t,
+		dingoDir,
+		testPoolKeyHash(t, 0x09),
+		[]uint64{100, 300},
+		map[uint64]uint64{200: koiosEpoch},
+	)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		result.ErrorEpochs,
+		koiosEpoch,
+		"a re-registration cancels the retirement, so the pool is back",
+	)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// earliestAvailableEpochStub wraps a RewardParitySource and overrides
+// GetEarliestAvailableEpoch with a fixed value, so a test can exercise
+// checkEpoch/CheckEpoch's earliest-available-epoch short-circuit (dingo
+// #4172) without simulating real Mithril boundary sync_state/epoch rows for
+// every scenario.
+type earliestAvailableEpochStub struct {
+	RewardParitySource
+	epoch uint64
+	ok    bool
+}
+
+func (s *earliestAvailableEpochStub) GetEarliestAvailableEpoch(
+	context.Context,
+) (uint64, bool, error) {
+	return s.epoch, s.ok, nil
+}
+
+// TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch guards against dingo
+// #4172: a Mithril-bootstrapped node has zero local reward-calculation state
+// for any epoch before its own bootstrap boundary, even for a koios epoch
+// well above preStakingThroughEpoch, where Koios itself (full protocol
+// history) has real reference data. Before the fix, checkEpoch read Dingo's
+// total local absence as every field mismatching and returned FAIL; the fix
+// must instead record the same PASS-with-nothing-compared verdict checkEpoch
+// already gives a pre-staking epoch.
+func TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(3) // above preStakingThroughEpoch (1)
+
+	db := newTestDatabaseSourceDB(t)
+	base, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	// This node's own earliest available ledger epoch (5) is above the
+	// koios epoch under test (3), simulating a Mithril bootstrap boundary
+	// past it.
+	source := &earliestAvailableEpochStub{
+		RewardParitySource: base,
+		epoch:              5,
+		ok:                 true,
+	}
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// Koios genuinely has real, non-pre-staking data for this epoch --
+	// closed long ago, well outside any grace window.
+	closedLongAgo := time.Now().Add(-24 * time.Hour * 400).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "123456789",
+		EpochEndTime: closedLongAgo,
+		FetchedAt:    closedLongAgo,
+	}, nil, nil))
+
+	result, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		StatusPass,
+		result.Status,
+		"epoch predating this node's earliest available ledger epoch must "+
+			"pass without comparison, not fail as if every field mismatched",
+	)
+	require.Empty(t, result.Mismatches)
+
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	found := false
+	for _, s := range statuses {
+		if s.Epoch == koiosEpoch {
+			found = true
+			require.Equal(t, StatusPass, s.Status)
+		}
+	}
+	require.True(t, found, "epoch should have a persisted check status")
+}
+
+// TestCheckEpochResultNamesOnlyThePhasesItRan pins the verdict boundary the
+// two observer queues (dingo #4339) created: the aggregate queue and the
+// account queue both return an EpochCompareResult for the same epoch, and the
+// aggregate queue's check never looks at account data. Without CheckedScopes
+// its PASS is indistinguishable from the epoch's real verdict, so a consumer
+// reading Status alone would report an epoch clean while a recorded account
+// failure stands — the callback-side form of the stored-status defect
+// UpsertCheckEpochStatus fixes.
+func TestCheckEpochResultNamesOnlyThePhasesItRan(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	sqlDB := sourceSQLDB(t, db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// One account whose Dingo reward differs from the Koios reference below,
+	// so the account phase fails while the aggregate phase has nothing to
+	// disagree about.
+	badKey := testPoolKeyHash(t, 0x42)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  badKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x22),
+		RewardType:  "member",
+		Amount:      types.Uint64(2_000_000),
+		Spendable:   true,
+	}).Error)
+	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	require.NoError(t, err)
+	seedDingoBabbageProtocolParams(t, sqlDB, koiosEpoch)
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Network:   network,
+		Epoch:     koiosEpoch,
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{{
+			StakeAddress: badAddr,
+			RewardType:   "member",
+			Earned:       "2000001",
+			FetchedAt:    fetchedAt,
+		}},
+		1,
+		true,
+		fetchedAt,
+	))
+
+	withAccounts, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		true,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusFail, withAccounts.Status)
+	require.True(t, withAccounts.CoversScope(ScopeAggregate))
+	require.True(t, withAccounts.CoversScope(ScopeAccount),
+		"a check that ran the account comparison must say so")
+
+	aggregateOnly, err := CheckEpoch(
+		context.Background(),
+		cache,
+		source,
+		network,
+		koiosEpoch,
+		0,
+		false,
+		slog.New(slog.DiscardHandler),
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusPass, aggregateOnly.Status,
+		"the scenario must hold a passing aggregate phase, or the "+
+			"assertion below proves nothing")
+	require.True(t, aggregateOnly.CoversScope(ScopeAggregate))
+	require.False(t, aggregateOnly.CoversScope(ScopeAccount),
+		"an aggregate-only check must not present its verdict as the "+
+			"account phase's")
+
+	// The stored verdict is the merge of both phases, so the account failure
+	// the aggregate-only re-check never looked at still stands.
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusFail, statuses[0].Status)
+	require.Equal(t, StatusFail, statuses[0].AccountStatus)
+}

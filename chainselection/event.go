@@ -28,16 +28,56 @@ const (
 	ChainSwitchEventType    event.EventType = "chainselection.chain_switch"
 	ChainSelectionEventType event.EventType = "chainselection.selection"
 	PeerEvictedEventType    event.EventType = "chainselection.peer_evicted"
+
+	// GenesisCorroborationFailedEventType is published when the densest
+	// Genesis fast source cannot be corroborated by the configured minimum
+	// number of independent peers, so it is denied chain selection (stalls)
+	// rather than steering the local chain. Subscribers (peer governance,
+	// operators) can use this to demote or investigate the source.
+	GenesisCorroborationFailedEventType event.EventType = "chainselection.genesis_corroboration_failed"
+
+	// GenesisModeExitedEventType is published when the selector transitions
+	// from Genesis density-based selection back to Praos selection because the
+	// local tip has caught up to within the Genesis window of the best known
+	// peer tip.
+	GenesisModeExitedEventType event.EventType = "chainselection.genesis_mode_exited"
+
+	// ChainSelectedNoneEventType is published when the selector transitions to
+	// having no selectable best peer (e.g. an uncorroborated Genesis fast source
+	// is denied). It is the explicit selected-to-none transition that the
+	// ChainSwitchEvent (which always carries a non-nil replacement) cannot
+	// express, so subscribers can observe that selection has stalled. Ledger
+	// application from uncorroborated peers is separately gated via
+	// ShouldApplyIngress; this event is for observability of the stall.
+	ChainSelectedNoneEventType event.EventType = "chainselection.selected_none"
+
+	// PeerRollbackHandlerPanicEventType is published when the
+	// PeerRollbackEvent handler registered in NewChainSelector panics. The
+	// EventBus subscription that delivers PeerRollbackEvent is torn down
+	// immediately afterward (see event.EventBus.SubscribeFuncStrict), so
+	// this is the durable signal that rollback handling for this selector
+	// has stopped rather than a swallowed panic followed by business as
+	// usual.
+	PeerRollbackHandlerPanicEventType event.EventType = "chainselection.peer_rollback_handler_panic"
+
+	// EvaluationPanicEventType is published when a background evaluation
+	// tick or triggered evaluation panics. The evaluation loop itself keeps
+	// running (see ChainSelector.recoverEvaluationPanic), but the specific
+	// best-peer transition that evaluation would have produced is dropped;
+	// this event is the only remaining signal that it happened.
+	EvaluationPanicEventType event.EventType = "chainselection.evaluation_panic"
 )
 
 // PeerTipUpdateEvent is published when a peer's chain tip is updated via
 // chainsync roll forward.
 type PeerTipUpdateEvent struct {
 	ConnectionId ouroboros.ConnectionId
-	Tip          ochainsync.Tip
-	ObservedTip  ochainsync.Tip
-	VRFOutput    []byte // VRF output from observed block header for tie-breaking
-	PraosView    PraosTiebreakerView
+	// Tip is the untrusted remote advertised tip.
+	Tip ochainsync.Tip
+	// ObservedTip is the header frontier actually delivered by the peer.
+	ObservedTip ochainsync.Tip
+	VRFOutput   []byte // VRF output from observed block header for tie-breaking
+	PraosView   PraosTiebreakerView
 }
 
 // PeerActivityEvent is published when a peer has recent protocol activity
@@ -62,8 +102,15 @@ type PeerRollbackEvent struct {
 // Fields:
 //   - PreviousConnectionId: The connection ID of the peer we were following.
 //   - NewConnectionId: The connection ID of the peer we are now following.
-//   - NewTip: The chain tip of the new peer.
-//   - PreviousTip: The chain tip of the previous peer at the time of the switch.
+//   - NewTip: The advertised chain tip of the new peer.
+//   - PreviousTip: The advertised chain tip of the previous peer at switch time.
+//   - NewObservedTip: The delivered frontier of the new peer. A zero value
+//     means the peer delivered nothing, which is distinct from absent.
+//   - NewObservedTipSet: Whether NewObservedTip was populated. Producers in
+//     this package always set it. Events built elsewhere (older producers,
+//     direct unit-test and integration constructors) leave it false, and only
+//     those fall back to the advertised NewTip.
+//   - PreviousObservedTip: The delivered frontier of the previous peer.
 //   - ComparisonResult: Why the new chain is better than the previous chain.
 //   - BlockDifference: NewTip.BlockNumber - PreviousTip.BlockNumber.
 type ChainSwitchEvent struct {
@@ -71,6 +118,9 @@ type ChainSwitchEvent struct {
 	NewConnectionId      ouroboros.ConnectionId
 	NewTip               ochainsync.Tip
 	PreviousTip          ochainsync.Tip
+	NewObservedTip       ochainsync.Tip
+	NewObservedTipSet    bool
+	PreviousObservedTip  ochainsync.Tip
 	ComparisonResult     ChainComparisonResult
 	BlockDifference      int64
 }
@@ -88,4 +138,71 @@ type ChainSelectionEvent struct {
 // manager) can use this to close the evicted peer's connection.
 type PeerEvictedEvent struct {
 	ConnectionId ouroboros.ConnectionId
+}
+
+// GenesisCorroborationFailedEvent is published when the densest Genesis fast
+// source lacks the configured minimum corroboration from independent peers.
+//
+// Fields:
+//   - ConnectionId: the uncorroborated fast source that was denied selection.
+//   - ObservedDensity: its observed block density within the Genesis window.
+//   - CorroboratingPeers: how many independent peers actually corroborate it.
+//   - RequiredPeers: the configured MinCorroboratingPeers threshold.
+//   - GenesisWindowSlots: the active Genesis density window in slots.
+type GenesisCorroborationFailedEvent struct {
+	ConnectionId       ouroboros.ConnectionId
+	ObservedDensity    uint64
+	CorroboratingPeers int
+	RequiredPeers      int
+	GenesisWindowSlots uint64
+}
+
+// ChainSelectedNoneEvent is published when best-peer selection transitions from
+// some peer to none (selection stalled).
+//
+// Fields:
+//   - PreviousConnectionId: the peer that was selected before the stall (zero
+//     value if none was selected).
+//   - GenesisCorroboration: true when the stall is due to the Genesis
+//     corroboration gate (no corroborated peer), as opposed to simply having no
+//     eligible peers.
+type ChainSelectedNoneEvent struct {
+	PreviousConnectionId ouroboros.ConnectionId
+	GenesisCorroboration bool
+}
+
+// GenesisModeExitedEvent is published when the selector leaves Genesis mode.
+//
+// Fields:
+//   - LocalSlot: the local tip slot at the time of exit.
+//   - BestKnownSlot: the best known selectable peer tip slot.
+//   - GenesisWindowSlots: the active Genesis density window in slots.
+type GenesisModeExitedEvent struct {
+	LocalSlot          uint64
+	BestKnownSlot      uint64
+	GenesisWindowSlots uint64
+}
+
+// PeerRollbackHandlerPanicEvent is published when HandlePeerRollbackEvent
+// panics. Panic carries the recovered panic value for diagnostics.
+type PeerRollbackHandlerPanicEvent struct {
+	Panic any
+}
+
+// EvaluationPanicEvent is published when a background evaluation tick or
+// triggered evaluation panics.
+//
+// Fields:
+//   - Panic: the recovered panic value, for diagnostics.
+//   - Triggered: true when the panic occurred in runTriggeredEvaluation (the
+//     evaluationLoop select case draining evaluationTrigger, fed by
+//     SetConnectionEligible/SetConnectionPriority's triggerEvaluation calls);
+//     false for the periodic ticker tick (runEvaluationTick), which also
+//     runs cleanupStalePeers first. Panics from EvaluateAndSwitch called
+//     directly outside evaluationLoop (e.g. from UpdatePeerTip, RemovePeer,
+//     SetLocalTip, or an event handler) are not covered by this event --
+//     only the two evaluationLoop paths recover and surface panics here.
+type EvaluationPanicEvent struct {
+	Panic     any
+	Triggered bool
 }

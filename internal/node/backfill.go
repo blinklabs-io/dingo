@@ -31,6 +31,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -65,12 +66,18 @@ type BackfillProgress struct {
 // It is triggered automatically during Mithril sync when
 // storageMode is "api".
 type Backfill struct {
-	db           *database.Database
-	nodeCfg      *cardano.CardanoNodeConfig
-	logger       *slog.Logger
-	epochs       []models.Epoch
-	pparamsCache map[uint64]lcommon.ProtocolParameters
-	batchSize    int
+	db             *database.Database
+	nodeCfg        *cardano.CardanoNodeConfig
+	logger         *slog.Logger
+	epochs         []models.Epoch
+	pparamsCache   map[uint64]lcommon.ProtocolParameters
+	batchSize      int
+	computeOffsets func(
+		uint64,
+		[]byte,
+		[]byte,
+		gledger.Block,
+	) (*database.BlockIngestionResult, error)
 
 	// Running state tracked across blocks.
 	currentPParams lcommon.ProtocolParameters
@@ -92,10 +99,41 @@ type Backfill struct {
 	// field; auto-detect from the sync-state key".
 	immutableUtxoOffsetsTipSet bool
 
+	// endSlot optionally bounds historical metadata replay. Mithril imports
+	// use the stable ledger-state anchor here so blocks from the artifact's
+	// volatile suffix are left for the normal validating ledger pipeline.
+	endSlot    uint64
+	endSlotSet bool
+	// useRunningTotalsFinalization is enabled only by the Mithril API import
+	// path, whose preceding ledger-state import established a complete live
+	// UTxO running total. Ordinary API backfill may start from a database that
+	// never had that invariant, so it retains the authoritative rebuild.
+	useRunningTotalsFinalization bool
+
 	// Counters surfaced in the completion log to make the optimisation
 	// observable.
 	skippedBlocks   uint64
 	skippedUtxoRefs uint64
+
+	// delegatorInactivityEnabled mirrors the operator's CIP-0163
+	// DelegatorInactivityEnabled setting. It gates the CIP-0163
+	// account_withdrawal_witness write the same way the live-apply path does
+	// (ledger/delta.go): !delegatorInactivityEnabled skips the write.
+	//
+	// The zero value (false, skip) is NOT a safety guarantee about this
+	// path's callers -- it is just what "unset" happens to mean. Both current
+	// callers always call SetDelegatorInactivityEnabled explicitly instead of
+	// relying on it: mithril/sync.go hardcodes false (SyncConfig has no gate
+	// field, and the gate can never be on for that path -- see its call site's
+	// comment), while cmd/dingo/serve.go's resumeBackfill passes the real
+	// cfg.DelegatorInactivityEnabled, which CAN be true (it resumes any
+	// pending API-mode backfill checkpoint, not only a Mithril-originated
+	// one, and does not itself check the gate). A future caller that skips
+	// SetDelegatorInactivityEnabled and relies on this default would silently
+	// drop withdrawal-witness rows if the gate happens to be on for it --
+	// always call the setter explicitly rather than assuming the default is
+	// safe for a new call site.
+	delegatorInactivityEnabled bool
 
 	onProgress func(BackfillProgress)
 }
@@ -113,6 +151,16 @@ func NewBackfill(
 		batchSize:     DefaultBackfillBatchSize,
 		computeNonces: nodeCfg != nil,
 	}
+}
+
+// SetDelegatorInactivityEnabled reports the operator's CIP-0163
+// DelegatorInactivityEnabled setting so the account_withdrawal_witness write
+// is gated identically to the live-apply path (ledger/delta.go). Every caller
+// of this path must call this with the real config value -- see the
+// delegatorInactivityEnabled field doc for why the zero-value default must
+// never be assumed safe for a new call site.
+func (b *Backfill) SetDelegatorInactivityEnabled(enabled bool) {
+	b.delegatorInactivityEnabled = enabled
 }
 
 // SetBatchSize overrides the number of processed blocks accumulated before
@@ -149,6 +197,21 @@ func (b *Backfill) SetProgressFunc(onProgress func(BackfillProgress)) {
 func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
 	b.immutableUtxoOffsetsTipSlot = slot
 	b.immutableUtxoOffsetsTipSet = true
+}
+
+// SetEndSlot limits backfill to blocks at or below slot. The checkpoint is
+// completed at that boundary; later blocks are intentionally handled by the
+// normal ledger replay path.
+func (b *Backfill) SetEndSlot(slot uint64) {
+	b.endSlot = slot
+	b.endSlotSet = true
+}
+
+// SetUseRunningTotalsFinalization enables the Mithril-only final aggregate
+// merge. Callers must have populated reward_live_stake from a complete trusted
+// ledger-state UTxO import before running historical backfill.
+func (b *Backfill) SetUseRunningTotalsFinalization(enabled bool) {
+	b.useRunningTotalsFinalization = enabled
 }
 
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
@@ -352,12 +415,12 @@ func (b *Backfill) resolvePParams(
 			if era != nil &&
 				era.DecodePParamsUpdateFunc != nil &&
 				era.PParamsUpdateFunc != nil {
-				newPP, ppErr := b.db.ComputeAndApplyPParamUpdates(
+				newPP, _, ppErr := b.db.ComputeAndApplyPParamUpdates(
 					ep.StartSlot, ep.EpochId,
 					ep.EraId, quorum,
 					b.currentPParams,
 					era.DecodePParamsUpdateFunc,
-					era.PParamsUpdateFunc, nil,
+					era.PParamsUpdateFunc, nil, nil,
 				)
 				if ppErr != nil {
 					b.logger.Warn(
@@ -517,6 +580,14 @@ func (b *Backfill) getPParams(
 
 // calculateCertDeposits computes deposit amounts for each
 // certificate in the transaction.
+//
+// An index is omitted whenever the deposit cannot be computed -- no protocol
+// parameters, an era with no CertDepositFunc, ErrIncompatibleProtocolParams,
+// or any other calculation failure. Omission is the wire for "unknown": the
+// store records NULL for an absent index rather than an authoritative zero,
+// so a later legacy stake deregistration falls back to the current KeyDeposit
+// in UtxoValidateValueNotConservedUtxo instead of being refunded zero. Do not
+// "fix" a missing entry by inserting 0 here.
 func (b *Backfill) calculateCertDeposits(
 	tx lcommon.Transaction,
 	eraId uint,
@@ -552,8 +623,8 @@ func (b *Backfill) calculateCertDeposits(
 	return certDeposits
 }
 
-// processBlockGovernance calls governance processing for
-// valid Conway-era transactions that have proposals or votes.
+// processBlockGovernance calls governance processing for valid Conway-era
+// transactions that have proposals, votes, or DRep activity certificates.
 func (b *Backfill) processBlockGovernance(
 	tx lcommon.Transaction,
 	point ocommon.Point,
@@ -566,11 +637,20 @@ func (b *Backfill) processBlockGovernance(
 	}
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
-	if len(proposals) == 0 && len(votes) == 0 {
+	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
 		return nil
 	}
-	conwayPP, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	var conwayPP *conway.ConwayProtocolParameters
+	switch p := pp.(type) {
+	case *conway.ConwayProtocolParameters:
+		conwayPP = p
+	case *dijkstra.DijkstraProtocolParameters:
+		if p != nil {
+			conwayPP = &p.ConwayProtocolParameters
+		}
+	}
+	if conwayPP == nil {
 		return nil
 	}
 	if len(proposals) > 0 {
@@ -592,6 +672,19 @@ func (b *Backfill) processBlockGovernance(
 		); err != nil {
 			return fmt.Errorf(
 				"governance votes: %w", err,
+			)
+		}
+	}
+	if hasDRepActivityCerts {
+		if err := governance.ProcessDRepActivityCertificates(
+			tx,
+			epochId,
+			conwayPP.DRepInactivityPeriod,
+			b.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"DRep activity certificates: %w", err,
 			)
 		}
 	}
@@ -671,6 +764,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return nil
 	}
 	tipSlot := tipBlocks[0].Slot
+	if b.endSlotSet && b.endSlot < tipSlot {
+		tipSlot = b.endSlot
+	}
 
 	// Load epoch boundaries for slot-to-epoch mapping.
 	if err := b.loadEpochs(); err != nil {
@@ -721,6 +817,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// misinterpret the first block as an era change.
 		b.initializeFromFirstEpoch()
 	} else {
+		cp.TotalSlots = tipSlot
 		startSlot = cp.LastSlot + 1
 		if cp.LastSlot == 0 {
 			// LastSlot 0 is ambiguous: it can mean either
@@ -863,6 +960,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if blk == nil {
 			break // iteration complete
 		}
+		if blk.Slot > tipSlot {
+			break
+		}
 		ensureBatchTxn()
 
 		epochId, eraId := b.slotToEpoch(blk.Slot)
@@ -879,8 +979,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		pp := b.getPParams(epochId)
 
-		// Process block. Nesting avoids early-continue so
-		// every path reaches the common tail below.
 		var blockTxCount int
 
 		parsedBlock, parseErr := gledger.NewBlockFromCbor(
@@ -892,11 +990,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		intervalStats.BlockReadDecode += time.Since(readDecodeStart)
 		intervalStats.Blocks++
 		if parseErr != nil {
-			b.logger.Warn(
-				"skipping unparseable block",
-				"component", "backfill",
-				"slot", blk.Slot,
-				"error", parseErr,
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"parsing block at slot %d: %w",
+				blk.Slot, parseErr,
 			)
 		} else {
 			point := ocommon.NewPoint(
@@ -917,21 +1014,17 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 			txs := parsedBlock.Transactions()
 			if len(txs) > 0 {
-				indexer := database.NewBlockIndexer(
-					blk.Slot, blk.Hash,
-				)
 				offsetStart := time.Now()
-				offsets, oErr := indexer.ComputeOffsets(
-					blk.Cbor, parsedBlock,
+				offsets, oErr := b.computeBlockOffsets(
+					blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
 				)
 				// Track CBOR offset discovery for txs and produced UTxOs.
 				intervalStats.OffsetComputation += time.Since(offsetStart)
 				if oErr != nil {
-					b.logger.Warn(
-						"skipping block with offset error",
-						"component", "backfill",
-						"slot", blk.Slot,
-						"error", oErr,
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"computing offsets for block at slot %d: %w",
+						blk.Slot, oErr,
 					)
 				} else {
 					// Store transaction metadata into the shared batch
@@ -1003,6 +1096,35 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return fmt.Errorf("flushing final backfill batch: %w", err)
 	}
+	// Do not start the potentially expensive aggregate rebuild after a caller
+	// has canceled the backfill. Re-check after it returns as well so callers
+	// observe cancellation before the completion checkpoint is persisted.
+	if err := ctx.Err(); err != nil {
+		saveCommittedCheckpoint()
+		return err
+	}
+	var rebuildErr error
+	if b.useRunningTotalsFinalization {
+		// Historical replay intentionally leaves the imported snapshot live UTxO
+		// set untouched and skips per-transaction live-stake refreshes. The
+		// ledger-state importer already maintained one running total per live
+		// credential, so merge the final account/delegation state into those
+		// totals instead of scanning every live UTxO again.
+		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(tipSlot, nil)
+	} else {
+		rebuildErr = b.db.RebuildRewardLiveStake(tipSlot, nil)
+	}
+	if err := rebuildErr; err != nil {
+		saveCommittedCheckpoint()
+		return fmt.Errorf(
+			"rebuilding reward live stake after backfill: %w",
+			err,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		saveCommittedCheckpoint()
+		return err
+	}
 	b.maybeLogProgress(
 		cp, processedBlocks, processedTxs,
 		tipSlot, startSlot, startTime, &lastLogTime,
@@ -1032,6 +1154,20 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)
 	return nil
+}
+
+func (b *Backfill) computeBlockOffsets(
+	slot uint64,
+	hash, blockCbor []byte,
+	block gledger.Block,
+) (*database.BlockIngestionResult, error) {
+	if b.computeOffsets != nil {
+		return b.computeOffsets(slot, hash, blockCbor, block)
+	}
+	return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
 }
 
 // processBlockTxsBatched stores transactions into an existing database
@@ -1076,6 +1212,19 @@ func (b *Backfill) processBlockTxsBatched(
 				// that need repair via the recovery path.
 				SkipConsumedInputRecovery: isFreshStart,
 				Stats:                     stats,
+				// Mirrors the live-apply path (ledger/delta.go): derived from
+				// the operator's real gate setting via
+				// SetDelegatorInactivityEnabled, not hardcoded, so a future
+				// caller of this path is correct by construction rather than
+				// relying on the Mithril-only invariant enforced separately by
+				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
+				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
+				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
+				// Historical replay follows the snapshot's complete reward
+				// state, not the balance at each historical slot. Preserve
+				// withdrawal history without applying the live-path balance
+				// sufficiency check.
+				HistoricalBackfill: true,
 			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)
@@ -1186,32 +1335,59 @@ func appendBackfillStatsAttrs(
 ) []any {
 	return append(
 		attrs,
-		"interval_blocks", stats.Blocks,
-		"interval_txs", stats.Txs,
-		"interval_utxos", stats.Utxos,
-		"interval_input_refs", stats.InputRefs,
-		"blob_tx_offset_writes", stats.BlobTxOffsetWrites,
-		"blob_utxo_offset_writes", stats.BlobUtxoOffsetWrites,
-		"skipped_utxo_offsets", stats.SkippedUtxoOffsets,
-		"address_txs", stats.AddressTxs,
-		"witnesses", stats.Witnesses,
-		"witness_scripts", stats.WitnessScripts,
-		"scripts", stats.Scripts,
-		"plutus_data", stats.PlutusData,
-		"redeemers", stats.Redeemers,
-		"utxo_spends", stats.UtxoSpends,
-		"collateral_returns", stats.CollateralRets,
-		"certificates", stats.Certificates,
-		"metadata_labels", stats.MetadataLabels,
-		"pparam_updates", stats.PParamUpdates,
-		"block_read_decode_ms", stats.BlockReadDecode.Milliseconds(),
-		"offset_compute_ms", stats.OffsetComputation.Milliseconds(),
-		"blob_offset_write_ms", stats.BlobOffsetWrites.Milliseconds(),
-		"set_transaction_batched_ms", stats.SetTransactionBatched.Milliseconds(),
-		"consumed_input_recovery_ms", stats.ConsumedInputRecovery.Milliseconds(),
-		"utxo_address_lookup_ms", stats.UtxoAddressLookup.Milliseconds(),
-		"address_index_ms", stats.AddressIndex.Milliseconds(),
-		"flush_batch_ms", stats.FlushBatch.Milliseconds(),
-		"checkpoint_write_ms", stats.CheckpointWrites.Milliseconds(),
+		"interval_blocks",
+		stats.Blocks,
+		"interval_txs",
+		stats.Txs,
+		"interval_utxos",
+		stats.Utxos,
+		"interval_input_refs",
+		stats.InputRefs,
+		"blob_tx_offset_writes",
+		stats.BlobTxOffsetWrites,
+		"blob_utxo_offset_writes",
+		stats.BlobUtxoOffsetWrites,
+		"skipped_utxo_offsets",
+		stats.SkippedUtxoOffsets,
+		"address_txs",
+		stats.AddressTxs,
+		"witnesses",
+		stats.Witnesses,
+		"witness_scripts",
+		stats.WitnessScripts,
+		"scripts",
+		stats.Scripts,
+		"plutus_data",
+		stats.PlutusData,
+		"redeemers",
+		stats.Redeemers,
+		"utxo_spends",
+		stats.UtxoSpends,
+		"collateral_returns",
+		stats.CollateralRets,
+		"certificates",
+		stats.Certificates,
+		"metadata_labels",
+		stats.MetadataLabels,
+		"pparam_updates",
+		stats.PParamUpdates,
+		"block_read_decode_ms",
+		stats.BlockReadDecode.Milliseconds(),
+		"offset_compute_ms",
+		stats.OffsetComputation.Milliseconds(),
+		"blob_offset_write_ms",
+		stats.BlobOffsetWrites.Milliseconds(),
+		"set_transaction_batched_ms",
+		stats.SetTransactionBatched.Milliseconds(),
+		"consumed_input_recovery_ms",
+		stats.ConsumedInputRecovery.Milliseconds(),
+		"utxo_address_lookup_ms",
+		stats.UtxoAddressLookup.Milliseconds(),
+		"address_index_ms",
+		stats.AddressIndex.Milliseconds(),
+		"flush_batch_ms",
+		stats.FlushBatch.Milliseconds(),
+		"checkpoint_write_ms",
+		stats.CheckpointWrites.Milliseconds(),
 	)
 }

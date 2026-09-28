@@ -30,57 +30,72 @@ var (
 )
 
 type Drep struct {
-	AnchorURL  string `gorm:"column:anchor_url;size:128"`
-	Credential []byte `gorm:"uniqueIndex;size:28"`
-	AnchorHash []byte
-	ID         uint   `gorm:"primarykey"`
-	AddedSlot  uint64 `gorm:"index"`
+	AnchorURL     string
+	Credential    []byte
+	AnchorHash    []byte
+	ID            uint
+	AddedSlot     uint64
+	CredentialTag uint8
 	// Last activity epoch (vote, register, update).
-	LastActivityEpoch uint64 `gorm:"index;default:0"`
+	LastActivityEpoch uint64
 	// Epoch when DRep expires (activity + inactivity).
-	ExpiryEpoch uint64 `gorm:"index;default:0"`
-	Active      bool   `gorm:"default:true"`
+	ExpiryEpoch uint64
+	Active      bool
 }
 
-func (d *Drep) TableName() string {
-	return "drep"
+// DrepDepositKey builds the map key that GetDrepLastRegistrationDeposits
+// returns deposits under. A DRep is identified by the credential bytes
+// together with their tag -- the same bytes can appear under a key-hash and
+// a script-hash credential -- so both have to be in the key.
+func DrepDepositKey(credentialTag uint8, credential []byte) string {
+	return string([]byte{credentialTag}) + string(credential)
+}
+
+// DrepListRow is a Drep row extended with the credential's first
+// on-chain appearance slot, as returned by GetDreps for
+// registration-order listings.
+type DrepListRow struct {
+	AnchorURL         string
+	Credential        []byte
+	AnchorHash        []byte
+	ID                uint
+	AddedSlot         uint64
+	CredentialTag     uint8
+	LastActivityEpoch uint64
+	ExpiryEpoch       uint64
+	Active            bool
+	FirstSeenSlot     uint64
+	// LastRegistrationSlot is the added_slot of the most recent
+	// registration certificate, 0 when no cert history exists.
+	LastRegistrationSlot uint64
 }
 
 type DeregistrationDrep struct {
-	DrepCredential []byte `gorm:"index;size:28"`
-	CertificateID  uint   `gorm:"index"`
-	ID             uint   `gorm:"primarykey"`
-	AddedSlot      uint64 `gorm:"index"`
+	DrepCredential []byte
+	CertificateID  uint
+	ID             uint
+	CredentialTag  uint8
+	AddedSlot      uint64
 	DepositAmount  types.Uint64
-}
-
-func (DeregistrationDrep) TableName() string {
-	return "deregistration_drep"
 }
 
 type RegistrationDrep struct {
-	AnchorURL      string `gorm:"column:anchor_url;size:128"`
-	DrepCredential []byte `gorm:"uniqueIndex:idx_drep_reg_cred_slot;size:28"`
+	AnchorURL      string
+	DrepCredential []byte
 	AnchorHash     []byte
-	CertificateID  uint   `gorm:"index"`
-	ID             uint   `gorm:"primarykey"`
-	AddedSlot      uint64 `gorm:"uniqueIndex:idx_drep_reg_cred_slot"`
+	CertificateID  uint
+	ID             uint
+	CredentialTag  uint8
+	AddedSlot      uint64
 	DepositAmount  types.Uint64
 }
 
-func (RegistrationDrep) TableName() string {
-	return "registration_drep"
-}
-
 type UpdateDrep struct {
-	AnchorURL     string `gorm:"column:anchor_url;size:128"`
-	Credential    []byte `gorm:"index;size:28"`
+	AnchorURL     string
+	Credential    []byte
 	AnchorHash    []byte
-	CertificateID uint   `gorm:"index"`
-	ID            uint   `gorm:"primarykey"`
-	AddedSlot     uint64 `gorm:"index"`
-}
-
-func (UpdateDrep) TableName() string {
-	return "update_drep"
+	CertificateID uint
+	ID            uint
+	CredentialTag uint8
+	AddedSlot     uint64
 }

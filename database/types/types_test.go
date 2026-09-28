@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/binary"
 	"errors"
 	"math/big"
 	"reflect"
@@ -94,27 +95,11 @@ func TestBlockTombstoneMarker(t *testing.T) {
 		t.Fatal("IsBlockTombstone returned false for BlockTombstone()")
 	}
 	if !bytes.Equal(enc[:4], types.BlockTombstoneMagic[:]) {
-		t.Fatalf("marker prefix = %x, want %x", enc[:4], types.BlockTombstoneMagic[:])
-	}
-}
-
-func TestParseBlockBlobKeyRoundTrip(t *testing.T) {
-	const slot uint64 = 0x0102030405060708
-	hash := bytes.Repeat([]byte{0xAB}, 32)
-
-	key := types.BlockBlobKey(slot, hash)
-	if len(key) != types.BlockBlobKeySize {
-		t.Fatalf("encoded key length %d, want %d", len(key), types.BlockBlobKeySize)
-	}
-	gotSlot, gotHash, err := types.ParseBlockBlobKey(key)
-	if err != nil {
-		t.Fatalf("ParseBlockBlobKey: %v", err)
-	}
-	if gotSlot != slot {
-		t.Fatalf("slot = %d, want %d", gotSlot, slot)
-	}
-	if !bytes.Equal(gotHash, hash) {
-		t.Fatalf("hash = %x, want %x", gotHash, hash)
+		t.Fatalf(
+			"marker prefix = %x, want %x",
+			enc[:4],
+			types.BlockTombstoneMagic[:],
+		)
 	}
 }
 
@@ -161,3 +146,135 @@ func TestHistoryExpiredErrorWraps(t *testing.T) {
 		t.Fatalf("extracted = %+v, want slot=42 hash=%x", extracted, hash)
 	}
 }
+
+// TestNullableHashValueEmptyIsNull verifies that an empty (nil or zero-length)
+// NullableHash serializes to SQL NULL, not an empty blob. This is the property
+// that keeps nullable hash FK columns (e.g. utxo.spent_at_tx_id) from failing
+// their FK to transaction(hash) for unspent/unreferenced UTxOs.
+func TestNullableHashValueEmptyIsNull(t *testing.T) {
+	cases := []struct {
+		name string
+		in   types.NullableHash
+	}{
+		{"nil", nil},
+		{"empty", types.NullableHash{}},
+		{"zero-len", types.NullableHash([]byte(""))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := tc.in.Value()
+			if err != nil {
+				t.Fatalf("Value() error: %v", err)
+			}
+			if v != nil {
+				t.Fatalf("Value() = %#v, want nil (SQL NULL)", v)
+			}
+		})
+	}
+}
+
+// TestNullableHashValueNonEmpty verifies a non-empty NullableHash serializes to
+// its bytes.
+func TestNullableHashValueNonEmpty(t *testing.T) {
+	in := types.NullableHash(bytes.Repeat([]byte{0xAB}, 32))
+	v, err := in.Value()
+	if err != nil {
+		t.Fatalf("Value() error: %v", err)
+	}
+	b, ok := v.([]byte)
+	if !ok {
+		t.Fatalf("Value() type = %T, want []byte", v)
+	}
+	if !bytes.Equal(b, in) {
+		t.Fatalf("Value() = %x, want %x", b, in)
+	}
+}
+
+// TestNullableHashScan round-trips NULL, []byte, and string sources.
+func TestNullableHashScan(t *testing.T) {
+	h := new(types.NullableHash)
+
+	if err := h.Scan(nil); err != nil {
+		t.Fatalf("Scan(nil) error: %v", err)
+	}
+	if *h != nil {
+		t.Fatalf("Scan(nil) = %#v, want nil", *h)
+	}
+
+	if err := h.Scan([]byte{}); err != nil {
+		t.Fatalf("Scan(empty []byte) error: %v", err)
+	}
+	if *h != nil {
+		t.Fatalf("Scan(empty []byte) = %#v, want nil", *h)
+	}
+
+	want := bytes.Repeat([]byte{0x01}, 32)
+	if err := h.Scan(want); err != nil {
+		t.Fatalf("Scan([]byte) error: %v", err)
+	}
+	if !bytes.Equal(*h, want) {
+		t.Fatalf("Scan([]byte) = %x, want %x", *h, want)
+	}
+
+	if err := h.Scan("xyz"); err != nil {
+		t.Fatalf("Scan(string) error: %v", err)
+	}
+	if string(*h) != "xyz" {
+		t.Fatalf("Scan(string) = %q, want %q", string(*h), "xyz")
+	}
+
+	if err := h.Scan(123); err == nil {
+		t.Fatal("Scan(int) should error")
+	}
+}
+
+// TestUnmarshalBlockMetadataRejectsOversizedPrevHash pins the decoder half
+// of the previous-hash bound. MarshalBlockMetadataInto refuses to write one
+// longer than a block hash, but a stored value can also be corrupt, and a
+// decoder that trusted the length prefix would hand its caller a
+// BlockMetadata the encoder could never have produced -- which then
+// propagates into a block record as if it were real.
+func TestUnmarshalBlockMetadataRejectsOversizedPrevHash(t *testing.T) {
+	const oversized = types.BlockMetadataPrevHashMaxLen + 1
+	data := make([]byte, types.BlockMetadataBinaryHeaderLen+oversized)
+	copy(data[:4], types.BlockMetadataBinaryMagic[:])
+	binary.BigEndian.PutUint64(data[4:12], 7)
+	binary.BigEndian.PutUint64(data[12:20], 1)
+	binary.BigEndian.PutUint64(data[20:28], 42)
+	binary.BigEndian.PutUint32(data[28:32], oversized)
+
+	// The value is self-consistent -- its declared length matches its
+	// actual length -- so only the bound rejects it.
+	if _, err := types.UnmarshalBlockMetadata(data); err == nil {
+		t.Fatal("UnmarshalBlockMetadata accepted an oversized prev hash")
+	}
+}
+
+// TestBlockMetadataCompactRoundTrip pins the encoding both the badger
+// plugin and the block-number search depend on, at the shared boundary
+// they now share it across.
+func TestBlockMetadataCompactRoundTrip(t *testing.T) {
+	want := types.BlockMetadata{
+		ID:       9,
+		Type:     4,
+		Height:   1234,
+		PrevHash: bytes.Repeat([]byte{0xab}, 32),
+	}
+	buf := make([]byte, types.BlockMetadataBinarySize(want.PrevHash))
+	if err := types.MarshalBlockMetadataInto(buf, want); err != nil {
+		t.Fatalf("MarshalBlockMetadataInto: %v", err)
+	}
+	got, err := types.UnmarshalBlockMetadata(buf)
+	if err != nil {
+		t.Fatalf("UnmarshalBlockMetadata: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+// Ensure NullableHash implements the driver interfaces.
+var (
+	_ driver.Valuer = types.NullableHash(nil)
+	_ sql.Scanner   = (*types.NullableHash)(nil)
+)

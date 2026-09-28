@@ -32,10 +32,18 @@ func FuzzNormalizeRunMode(f *testing.F) {
 			return
 		}
 		if normalized != strings.ToLower(value) {
-			t.Fatalf("normalizeRunMode(%q) = %q, want lowercase input", value, normalized)
+			t.Fatalf(
+				"normalizeRunMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
 		}
 		switch normalized {
-		case "", string(RunModeServe), string(RunModeLoad), string(RunModeDev), string(RunModeLeios):
+		case "",
+			string(RunModeServe),
+			string(RunModeLoad),
+			string(RunModeDev),
+			string(RunModeLeios):
 		default:
 			t.Fatalf("normalizeRunMode accepted unknown mode %q", normalized)
 		}
@@ -53,7 +61,11 @@ func FuzzNormalizeStartEra(f *testing.F) {
 			return
 		}
 		if normalized != strings.ToLower(value) {
-			t.Fatalf("normalizeStartEra(%q) = %q, want lowercase input", value, normalized)
+			t.Fatalf(
+				"normalizeStartEra(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
 		}
 		switch normalized {
 		case string(StartEraDefault), string(StartEraDijkstra):
@@ -74,12 +86,19 @@ func FuzzNormalizeStorageMode(f *testing.F) {
 			return
 		}
 		if normalized != strings.ToLower(value) {
-			t.Fatalf("normalizeStorageMode(%q) = %q, want lowercase input", value, normalized)
+			t.Fatalf(
+				"normalizeStorageMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
 		}
 		switch normalized {
 		case storageModeCore, storageModeAPI:
 		default:
-			t.Fatalf("normalizeStorageMode accepted unknown mode %q", normalized)
+			t.Fatalf(
+				"normalizeStorageMode accepted unknown mode %q",
+				normalized,
+			)
 		}
 	})
 }

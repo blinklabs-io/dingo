@@ -24,13 +24,14 @@ import (
 )
 
 func TestCloseIsIdempotentWithSizeMetrics(t *testing.T) {
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		PromRegistry:   prometheus.NewRegistry(),
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir:      t.TempDir(),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
 	})
+
 	require.NoError(t, err)
 	require.NotNil(t, db.sizeMetricsStop)
 

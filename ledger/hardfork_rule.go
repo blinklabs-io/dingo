@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/blinklabs-io/dingo/database"
 )
@@ -67,8 +68,24 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 	boundarySlot uint64,
 	newEpoch uint64,
 ) error {
+	if txn == nil {
+		return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+			return ls.applyIntraEraHardForkRule(
+				txn, newMajor, boundarySlot, newEpoch,
+			)
+		})
+	}
 	switch newMajor {
 	case 3:
+		state, err := ls.db.Metadata().GetNetworkState(txn.Metadata())
+		if err != nil {
+			return fmt.Errorf("get network state before AVVM return: %w", err)
+		}
+		var treasury, reserves uint64
+		if state != nil {
+			treasury = uint64(state.Treasury)
+			reserves = uint64(state.Reserves)
+		}
 		count, total, err := ls.removeAvvmUtxos(txn, boundarySlot)
 		if err != nil {
 			return fmt.Errorf(
@@ -76,12 +93,24 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 				boundarySlot, err,
 			)
 		}
+		if count > 0 {
+			if total > math.MaxUint64-reserves {
+				return fmt.Errorf(
+					"AVVM reserve credit overflows uint64: reserves %d, credit %d",
+					reserves,
+					total,
+				)
+			}
+			if err := ls.db.Metadata().SetNetworkState(
+				treasury, reserves+total, boundarySlot, txn.Metadata(),
+			); err != nil {
+				return fmt.Errorf("credit AVVM value to reserves: %w", err)
+			}
+		}
 		// Reserves are not maintained on every epoch-rollover in dingo
-		// today — governance enactment is the only caller that writes
-		// NetworkState — so we log the reclaimed total rather than
-		// writing a partial, likely-misleading reserves value. When
-		// full reserves tracking lands, consume the reclaimed total
-		// from removeAvvmUtxos here.
+		// today — this transition is the exception because the reclaimed
+		// value is a direct return to reserves. Keep the write in the
+		// enclosing transition transaction so rollback is atomic.
 		ls.config.Logger.Info(
 			"applied Allegra HARDFORK rule (pv3 AVVM return)",
 			"removed_avvm_utxos", count,

@@ -17,7 +17,9 @@ package txpump
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -38,6 +40,8 @@ activeSlotsCoeff: 0.4
 securityParam: 100
 `
 
+// TestLoadConfig_LoadsGenesisSystemStartUnix verifies that txpump loads the
+// network magic, epoch length, slot length, and system start from genesis.
 func TestLoadConfig_LoadsGenesisSystemStartUnix(t *testing.T) {
 	clearTxpumpEnv(t)
 
@@ -53,7 +57,110 @@ func TestLoadConfig_LoadsGenesisSystemStartUnix(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(314159), cfg.NetworkMagic)
 	require.Equal(t, uint64(1500), cfg.EpochLength)
+	require.Equal(t, time.Second, cfg.SlotLength)
 	require.Equal(t, int64(1700000000), cfg.SystemStartUnix)
+}
+
+// TestConfigConfirmationDelay verifies that the output-quarantine duration is
+// derived from confirmation slots and the genesis slot length, and that zero
+// confirmation slots preserve the explicitly requested immediate behavior.
+func TestConfigConfirmationDelay(t *testing.T) {
+	cfg := Config{ConfirmationSlots: 30, SlotLength: 500 * time.Millisecond}
+	require.Equal(t, 15*time.Second, cfg.confirmationDelay())
+
+	cfg.ConfirmationSlots = 0
+	require.Zero(t, cfg.confirmationDelay())
+}
+
+func TestLoadConfig_LoadsConfirmationSlots(t *testing.T) {
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_CONFIRMATION_SLOTS", "42")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), cfg.ConfirmationSlots)
+}
+
+func TestLoadConfigTransactionEra(t *testing.T) {
+	clearTxpumpEnv(t)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, "conway", cfg.TransactionEra)
+
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_TRANSACTION_ERA", "dijkstra")
+	t.Setenv("TXPUMP_TYPES", "payment")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, "dijkstra", cfg.TransactionEra)
+
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_TRANSACTION_ERA", "dijkstra")
+	t.Setenv("TXPUMP_TYPES", "payment,delegation")
+	_, err = LoadConfig()
+	require.ErrorContains(t, err, "supports payment only")
+
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_TRANSACTION_ERA", "unknown")
+	_, err = LoadConfig()
+	require.ErrorContains(t, err, "TXPUMP_TRANSACTION_ERA")
+}
+
+func TestLoadConfig_StartUpTimeout(t *testing.T) {
+	clearTxpumpEnv(t)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 60*time.Second, cfg.StartupTimeout)
+
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "7")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 7*time.Second, cfg.StartupTimeout)
+
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "0")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Zero(t, cfg.StartupTimeout)
+}
+
+func TestLoadConfig_RejectsInvalidStartupTimeout(t *testing.T) {
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "-1")
+
+	_, err := LoadConfig()
+	require.ErrorContains(t, err, "TXPUMP_STARTUP_TIMEOUT")
+}
+
+func TestParseStartupTimeoutBounds(t *testing.T) {
+	timeout, err := parseStartupTimeout(
+		strconv.FormatInt(maxStartupTimeoutSeconds, 10),
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		time.Duration(maxStartupTimeoutSeconds)*time.Second,
+		timeout,
+	)
+
+	_, err = parseStartupTimeout(
+		strconv.FormatInt(maxStartupTimeoutSeconds+1, 10),
+	)
+	require.Error(t, err)
+	_, err = parseStartupTimeout("-1")
+	require.Error(t, err)
+}
+
+func TestStopStartupTimeoutRemainsDisabledPastDeadline(t *testing.T) {
+	timer := time.NewTimer(10 * time.Millisecond)
+	deadline := timer.C
+	stopStartupTimeout(&timer, &deadline)
+
+	select {
+	case <-deadline:
+		t.Fatal("startup deadline remained active after readiness")
+	case <-time.After(30 * time.Millisecond):
+	}
 }
 
 func clearTxpumpEnv(t *testing.T) {
@@ -66,7 +173,10 @@ func clearTxpumpEnv(t *testing.T) {
 		"TXPUMP_TX_COUNT_MAX",
 		"TXPUMP_COOLDOWN_MIN",
 		"TXPUMP_COOLDOWN_MAX",
+		"TXPUMP_CONFIRMATION_SLOTS",
+		"TXPUMP_STARTUP_TIMEOUT",
 		"TXPUMP_TYPES",
+		"TXPUMP_TRANSACTION_ERA",
 		"TXPUMP_LOG_DIR",
 		"TXPUMP_FALLBACK_ADDR",
 		"TXPUMP_GENESIS_UTXO_FILE",

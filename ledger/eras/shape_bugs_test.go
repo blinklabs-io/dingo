@@ -41,8 +41,14 @@ func TestStabilityWindowForEra_RejectsActiveSlotsCoeffAbove1(t *testing.T) {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)))
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+	)
 	_, err := eras.StabilityWindowForEra(cfg, eras.ShelleyEraDesc.Id)
-	assert.Error(t, err,
-		"StabilityWindowForEra must reject ActiveSlotsCoeff > 1 (would silently shrink safe zone)")
+	assert.Error(
+		t,
+		err,
+		"StabilityWindowForEra must reject ActiveSlotsCoeff > 1 (would silently shrink safe zone)",
+	)
 }

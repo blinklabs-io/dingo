@@ -1,0 +1,866 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package migrations
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
+)
+
+var addColumnPattern = regexp.MustCompile(
+	"(?is)^ALTER\\s+TABLE\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?\\s+" +
+		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s+(.*))?$",
+)
+
+// testDBPragmas relaxes durability for throwaway per-test SQLite databases:
+// each one is created, migrated, asserted against, and deleted inside a
+// single test, so an fsync'd rollback journal buys nothing and is expensive
+// on a contended CI runner (dingo#4171). No test in this package kills a
+// connection mid-transaction, simulates crash recovery, or inspects a
+// journal/WAL file -- "interruption" tests resume from a schema_migrations
+// row an in-process UPDATE or a returned error puts into the dirty state, not
+// from an actual process crash -- so relaxing durability does not change what
+// any assertion observes.
+const testDBPragmas = "_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)"
+
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(t.TempDir(), "metadata.sqlite")+
+			"?_pragma=foreign_keys(1)&"+testDBPragmas,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+	return db
+}
+
+func TestMySQLLockTimeoutSeconds(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, int64(-1), mysqlLockTimeoutSeconds(0))
+	require.Equal(t, int64(-1), mysqlLockTimeoutSeconds(-time.Second))
+	require.Equal(t, int64(1), mysqlLockTimeoutSeconds(time.Millisecond))
+	require.Equal(t, int64(30), mysqlLockTimeoutSeconds(30*time.Second))
+}
+
+func testMigration(backfill Backfill) Migration {
+	return Migration{
+		Version:          1,
+		Name:             "initial_schema",
+		BackfillRevision: "1",
+		BatchSize:        2,
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					`CREATE TABLE IF NOT EXISTS item (
+						id INTEGER PRIMARY KEY,
+						done BOOLEAN NOT NULL DEFAULT FALSE
+					)`,
+					"INSERT OR IGNORE INTO item (id) VALUES (1), (2), (3), (4)",
+				},
+				Contract: []string{
+					"CREATE INDEX IF NOT EXISTS idx_item_done ON item (done)",
+				},
+			},
+		},
+		Backfill: backfill,
+	}
+}
+
+func itemBackfill(
+	beforeBatch func() error,
+) Backfill {
+	return func(
+		ctx context.Context,
+		batch Batch,
+	) (BatchResult, error) {
+		if beforeBatch != nil {
+			if err := beforeBatch(); err != nil {
+				return BatchResult{}, err
+			}
+		}
+		cursor := 0
+		if batch.Cursor != "" {
+			parsed, err := strconv.Atoi(batch.Cursor)
+			if err != nil {
+				return BatchResult{}, err
+			}
+			cursor = parsed
+		}
+		rows, err := batch.Tx.QueryContext(
+			ctx,
+			"SELECT id FROM item WHERE id > ? ORDER BY id LIMIT ?",
+			cursor,
+			batch.Limit,
+		)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		var ids []int
+		for rows.Next() {
+			var id int
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return BatchResult{}, err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			return BatchResult{}, err
+		}
+		if len(ids) == 0 {
+			return BatchResult{
+				Cursor: batch.Cursor,
+				Done:   true,
+			}, nil
+		}
+		for _, id := range ids {
+			if _, err := batch.Tx.ExecContext(
+				ctx,
+				"UPDATE item SET done = TRUE WHERE id = ?",
+				id,
+			); err != nil {
+				return BatchResult{}, err
+			}
+		}
+		return BatchResult{
+			Cursor: strconv.Itoa(ids[len(ids)-1]),
+			Rows:   int64(len(ids)),
+		}, nil
+	}
+}
+
+func testRunner(db *sql.DB, migration Migration) *Runner {
+	return &Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: []Migration{migration},
+		Locker:   NewProcessLocker(),
+	}
+}
+
+func TestRunnerFreshDatabaseAndIdempotentRerun(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	runner := testRunner(db, testMigration(itemBackfill(nil)))
+	require.NoError(t, runner.Run(context.Background()))
+	require.NoError(t, runner.Run(context.Background()))
+
+	var done, total int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FILTER (WHERE done), COUNT(*) FROM item",
+	).Scan(&done, &total))
+	require.Equal(t, 4, done)
+	require.Equal(t, 4, total)
+
+	var phase string
+	var dirty bool
+	var completed sql.NullInt64
+	require.NoError(t, db.QueryRow(
+		"SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 1",
+	).Scan(&phase, &dirty, &completed))
+	require.Equal(t, string(PhaseComplete), phase)
+	require.False(t, dirty)
+	require.True(t, completed.Valid)
+}
+
+func TestImportedLeiosKeyMigrationKeepsAgeUnknown(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	_, err := db.Exec(`CREATE TABLE pool_registration (
+		id INTEGER PRIMARY KEY,
+		certificate_id INTEGER,
+		added_slot INTEGER,
+		leios_key_public BLOB,
+		leios_key_possession_proof BLOB
+	)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO pool_registration (
+		id, certificate_id, added_slot, leios_key_public,
+		leios_key_possession_proof
+	) VALUES
+		(1, NULL, 100, X'01', X'02'),
+		(2, 7, 100, X'03', X'04'),
+		(3, NULL, 0, X'05', X'06'),
+		(4, NULL, 100, NULL, NULL),
+		(5, 0, 100, X'07', X'08')`)
+	require.NoError(t, err)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	for _, statement := range registry[26].SQL["sqlite"].Expand {
+		_, err := db.Exec(statement)
+		require.NoError(t, err)
+	}
+	rows, err := db.Query(`
+SELECT id, leios_key_registration_age_unknown
+FROM pool_registration ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []struct {
+		id      int
+		unknown bool
+	}
+	for rows.Next() {
+		var row struct {
+			id      int
+			unknown bool
+		}
+		require.NoError(t, rows.Scan(&row.id, &row.unknown))
+		got = append(got, row)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []struct {
+		id      int
+		unknown bool
+	}{{1, true}, {2, false}, {3, false}, {4, false}, {5, true}}, got)
+}
+
+func TestRatificationHistoryMigrationBackfillsExistingMarker(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	runner := &Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: registry[:5],
+		Locker:   NewProcessLocker(),
+	}
+	require.NoError(t, runner.Run(context.Background()))
+	_, err = db.Exec(`
+INSERT INTO governance_proposal (
+    tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
+    ratified_epoch, ratified_slot, anchor_url, anchor_hash, deposit,
+    return_address, added_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[]byte("pre-history-proposal"),
+		0,
+		6,
+		1,
+		100,
+		5,
+		550,
+		"https://example.invalid/governance",
+		[]byte("pre-history-anchor"),
+		0,
+		[]byte("pre-history-return-address"),
+		500,
+	)
+	require.NoError(t, err)
+
+	runner.Registry = registry
+	require.NoError(t, runner.Run(context.Background()))
+	var transitionSlot, ratifiedEpoch, ratifiedSlot uint64
+	require.NoError(t, db.QueryRow(`
+SELECT transition_slot, ratified_epoch, ratified_slot
+FROM governance_proposal_ratification_history`).Scan(
+		&transitionSlot,
+		&ratifiedEpoch,
+		&ratifiedSlot,
+	))
+	require.Equal(t, uint64(550), transitionSlot)
+	require.Equal(t, uint64(5), ratifiedEpoch)
+	require.Equal(t, uint64(550), ratifiedSlot)
+	_, err = db.Exec(registry[5].SQL["sqlite"].Expand[3])
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM governance_proposal_ratification_history",
+	).Scan(&count))
+	require.Equal(t, 1, count, "migration backfill must be re-runnable")
+}
+
+func TestRunnerResumesBackfillCursor(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	calls := 0
+	fault := errors.New("injected batch failure")
+	failingBackfill := itemBackfill(func() error {
+		calls++
+		if calls == 2 {
+			return fault
+		}
+		return nil
+	})
+	runner := testRunner(db, testMigration(failingBackfill))
+	err := runner.Run(context.Background())
+	require.ErrorIs(t, err, fault)
+
+	var cursor, phase string
+	var dirty bool
+	require.NoError(t, db.QueryRow(
+		"SELECT cursor, phase, dirty FROM schema_migrations WHERE version = 1",
+	).Scan(&cursor, &phase, &dirty))
+	require.Equal(t, "2", cursor)
+	require.Equal(t, string(PhaseBackfill), phase)
+	require.True(t, dirty)
+
+	runner.Registry[0].Backfill = itemBackfill(nil)
+	require.NoError(t, runner.Run(context.Background()))
+	var done int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM item WHERE done = TRUE",
+	).Scan(&done))
+	require.Equal(t, 4, done)
+}
+
+func TestRunnerRejectsChecksumDrift(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	runner := testRunner(db, testMigration(nil))
+	require.NoError(t, runner.Run(context.Background()))
+	runner.Registry[0].SQL["sqlite"] = SQL{
+		Expand: []string{"CREATE TABLE changed (id INTEGER)"},
+	}
+	require.ErrorIs(
+		t,
+		runner.Run(context.Background()),
+		ErrChecksumDrift,
+	)
+}
+
+func TestRunnerRejectsUnversionedDatabase(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	_, err := db.Exec("CREATE TABLE mystery (id INTEGER)")
+	require.NoError(t, err)
+	err = testRunner(db, testMigration(nil)).Run(context.Background())
+	require.ErrorIs(t, err, ErrLegacySchema)
+	if err != nil {
+		require.Contains(t, err.Error(), "delete the data directory")
+	}
+	var stateTables int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+	).Scan(&stateTables))
+	require.Zero(t, stateTables)
+}
+
+func TestValidateRegistryRequiresContiguousVersions(t *testing.T) {
+	t.Parallel()
+	migration := testMigration(nil)
+	migration.Version = 2
+	require.ErrorIs(
+		t,
+		validateRegistry([]Migration{migration}, "sqlite"),
+		ErrInvalidRegistry,
+	)
+}
+
+func TestProcessLockerCancellation(t *testing.T) {
+	t.Parallel()
+	locker := NewProcessLocker()
+	release, err := locker.Acquire(context.Background(), nil)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = locker.Acquire(ctx, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, release())
+}
+
+func TestRunnerRejectsNewerSchema(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	runner := testRunner(db, testMigration(nil))
+	require.NoError(t, runner.Run(context.Background()))
+	_, err := db.Exec(
+		`INSERT INTO schema_migrations
+			(version, name, checksum, phase, cursor, dirty, started_at, updated_at, completed_at)
+		 VALUES (2, 'future', ?, 'complete', '', FALSE, 1, 1, 1)`,
+		fmt.Sprintf("%064d", 0),
+	)
+	require.NoError(t, err)
+	require.ErrorIs(t, runner.Run(context.Background()), ErrNewerSchema)
+}
+
+// addColumnMigration adds a column to a table an earlier statement in the same
+// expand phase creates, the shape versions 2, 5, and 7 all use.
+func addColumnMigration() Migration {
+	return Migration{
+		Version:          1,
+		Name:             "add_column",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"CREATE TABLE IF NOT EXISTS item (id INTEGER PRIMARY KEY)",
+					"ALTER TABLE `item` ADD COLUMN `note` text",
+					"INSERT INTO item (id, note) VALUES (1, 'seeded') " +
+						"ON CONFLICT (id) DO NOTHING",
+				},
+			},
+		},
+	}
+}
+
+// Runner releases before SQLite expand phases became transactional could leave
+// an added column behind while the migration state still named PhaseExpand.
+// Preserve compatibility with such databases by recognizing the matching
+// already-added column when the whole phase replays.
+func TestRunnerReplaysExpandPhaseWithAppliedAddColumn(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	runner := testRunner(db, addColumnMigration())
+	require.NoError(t, runner.Run(context.Background()))
+
+	_, err := db.Exec(`
+UPDATE schema_migrations
+SET phase = 'expand', dirty = 1, completed_at = NULL
+WHERE version = 1`)
+	require.NoError(t, err)
+	_, err = db.Exec("DELETE FROM item")
+	require.NoError(t, err)
+
+	require.NoError(t, runner.Run(context.Background()))
+
+	var note string
+	require.NoError(t, db.QueryRow(
+		"SELECT note FROM item WHERE id = 1",
+	).Scan(&note))
+	require.Equal(t, "seeded", note)
+}
+
+// The replay tolerance is verified against the live schema, so an ALTER TABLE
+// ADD COLUMN that fails for any reason other than the column already being
+// there still fails the migration.
+func TestRunnerReportsAddColumnFailureOnMissingTable(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	migration := Migration{
+		Version:          1,
+		Name:             "add_column_missing_table",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"ALTER TABLE `absent` ADD COLUMN `note` text",
+				},
+			},
+		},
+	}
+	err := testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+}
+
+func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	migration := Migration{
+		Version:          1,
+		Name:             "add_column_type_mismatch",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"CREATE TABLE item (id INTEGER PRIMARY KEY, note blob)",
+					"ALTER TABLE item ADD COLUMN note text",
+					"INSERT INTO item (id, note) VALUES (1, 'unreachable')",
+				},
+			},
+		},
+	}
+	err := testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+	require.ErrorContains(t, err, "statement 2")
+	var count int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item'",
+	).Scan(&count))
+	require.Zero(t, count)
+}
+
+// Every ALTER TABLE ADD COLUMN the shipped registries produce has to be
+// recognizable to the replay guard in each dialect's quoting, or an upgrade
+// interrupted between the committed DDL and its phase advance would still fail
+// on a duplicate column. The registry translates SQLite-authored statements per
+// dialect, so this pins the guard against that translation drifting.
+func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
+	t.Parallel()
+	// v2 adds four columns, v5 adds two, and later migrations add thirteen.
+	const shippedAddColumns = 19
+	// The replay guard compares the type the statement declares with the type
+	// the live schema reports, so every shipped ADD COLUMN has to declare a
+	// type whose two spellings are already known to agree after
+	// normalizeColumnType. A migration that adds a column of another type must
+	// confirm what information_schema and pragma_table_info report for it and
+	// extend columnTypeAliases when the two differ.
+	verifiedColumnTypes := map[string]struct{}{
+		"blob":    {},
+		"boolean": {},
+		"bytea":   {},
+		"bigint":  {},
+		"integer": {},
+		"text":    {},
+	}
+	for _, dialect := range []struct {
+		name string
+		load func() ([]Migration, error)
+	}{
+		{name: "sqlite", load: SQLiteRegistry},
+		{name: "postgres", load: PostgresRegistry},
+		{name: "mysql", load: MySQLRegistry},
+	} {
+		registry, err := dialect.load()
+		require.NoError(t, err)
+		matched := 0
+		for _, migration := range registry {
+			phases := migration.SQL[dialect.name]
+			for _, statement := range append(
+				append([]string{}, phases.Expand...),
+				phases.Contract...,
+			) {
+				if !strings.Contains(
+					strings.ToUpper(statement),
+					"ADD COLUMN",
+				) {
+					continue
+				}
+				match := addColumnPattern.FindStringSubmatch(statement)
+				require.Len(
+					t,
+					match,
+					4,
+					"%s: unrecognized ADD COLUMN: %s",
+					dialect.name,
+					statement,
+				)
+				require.NotEmpty(t, match[1], dialect.name)
+				require.NotEmpty(t, match[2], dialect.name)
+				declared := normalizeColumnType(declaredColumnType(match[3]))
+				require.Contains(
+					t,
+					verifiedColumnTypes,
+					declared,
+					"%s: ADD COLUMN declares an unverified type %q: %s",
+					dialect.name,
+					declared,
+					statement,
+				)
+				matched++
+			}
+		}
+		require.Equal(t, shippedAddColumns, matched, dialect.name)
+	}
+
+	// SQLite and MySQL keep backticks and PostgreSQL is requoted to double
+	// quotes, but nothing forces a future migration to quote at all, and the
+	// resource may wrap the statement across lines.
+	for _, statement := range []string{
+		"ALTER TABLE pool_registration ADD COLUMN deposit_held text",
+		"alter table `x` add column `y` blob",
+		`ALTER TABLE "x" ADD COLUMN "y" BYTEA`,
+		"ALTER TABLE `x` ADD COLUMN `y` text NOT NULL DEFAULT '0'",
+		"ALTER TABLE  `x`   ADD   COLUMN   `y`  text",
+		"ALTER TABLE `x`\n  ADD COLUMN `y` text",
+	} {
+		require.Len(
+			t,
+			addColumnPattern.FindStringSubmatch(statement),
+			4,
+			"must recognize: %s",
+			statement,
+		)
+	}
+
+	// The declared type is everything between the column name and the first
+	// column constraint, and it is compared without case, length or precision
+	// arguments, or the spellings information_schema substitutes.
+	for _, expected := range []struct {
+		definition string
+		typeName   string
+	}{
+		{definition: "text", typeName: "text"},
+		{definition: "BYTEA", typeName: "bytea"},
+		{definition: "text NOT NULL DEFAULT '0'", typeName: "text"},
+		{definition: "VARCHAR(255) NOT NULL", typeName: "varchar"},
+		{definition: "double precision", typeName: "double precision"},
+		{definition: "timestamp with time zone", typeName: "timestamptz"},
+		{definition: "character varying(64)", typeName: "varchar"},
+		// SQLite allows a column with no declared type, and reports the empty
+		// string for it.
+		{definition: "", typeName: ""},
+	} {
+		require.Equal(
+			t,
+			expected.typeName,
+			normalizeColumnType(declaredColumnType(expected.definition)),
+			"definition: %q",
+			expected.definition,
+		)
+	}
+
+	require.True(
+		t,
+		mysqlColumnTypeMatches(
+			sql.NullString{Valid: true, String: "tinyint"},
+			"BOOLEAN NOT NULL",
+		),
+	)
+	require.False(
+		t,
+		mysqlColumnTypeMatches(
+			sql.NullString{Valid: true, String: "varchar"},
+			"BOOLEAN NOT NULL",
+		),
+	)
+
+	// The guard must not claim any other failing DDL, or a real failure would
+	// be skipped whenever the named column happens to exist.
+	for _, statement := range []string{
+		"ALTER TABLE `x` ADD CONSTRAINT `c` FOREIGN KEY (`a`) " +
+			"REFERENCES `b`(`i`)",
+		"ALTER TABLE `x` DROP COLUMN `y`",
+		"ALTER TABLE `x` RENAME COLUMN `y` TO `z`",
+		"CREATE TABLE `x` (`y` text)",
+		"CREATE INDEX `i` ON `x` (`y`)",
+		"UPDATE `x` SET `y` = 1",
+	} {
+		require.Empty(
+			t,
+			addColumnPattern.FindStringSubmatch(statement),
+			"must not recognize: %s",
+			statement,
+		)
+	}
+}
+
+// The skip is gated on the statement being an ALTER TABLE ADD COLUMN, so a
+// different statement that fails against a table already carrying that column
+// still fails the migration.
+func TestRunnerDoesNotSkipNonAddColumnFailure(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	migration := Migration{
+		Version:          1,
+		Name:             "non_add_column_failure",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"CREATE TABLE IF NOT EXISTS item (id INTEGER PRIMARY KEY)",
+					"ALTER TABLE `item` ADD COLUMN `note` text",
+					// `note` exists, but this statement is not an ADD COLUMN
+					// and fails on its own terms.
+					"UPDATE item SET note = no_such_column",
+				},
+			},
+		},
+	}
+	err := testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+	require.ErrorContains(t, err, "statement 3")
+
+	// The version must stay unfinished rather than being marked complete.
+	var phase string
+	require.NoError(t, db.QueryRow(
+		"SELECT phase FROM schema_migrations WHERE version = 1",
+	).Scan(&phase))
+	require.Equal(t, string(PhaseExpand), phase)
+}
+
+func TestRunnerRollsBackFailedSQLiteExpand(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	runner := testRunner(db, Migration{})
+	require.NoError(t, runner.ensureStateTable(context.Background(), conn))
+	require.NoError(t, conn.Close())
+	_, err = db.Exec("CREATE TABLE item (id INTEGER PRIMARY KEY)")
+	require.NoError(t, err)
+	migration := Migration{
+		Version:          1,
+		Name:             "atomic_expand",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"ALTER TABLE item RENAME TO item_old",
+					"CREATE TABLE item (id INTEGER PRIMARY KEY)",
+					"INSERT INTO missing_table VALUES (1)",
+				},
+			},
+		},
+	}
+
+	err = testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "statement 3")
+
+	var original, renamed int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item'",
+	).Scan(&original))
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'item_old'",
+	).Scan(&renamed))
+	require.Equal(t, 1, original)
+	require.Zero(t, renamed)
+}
+
+func TestRunnerRestoresSQLiteForeignKeysAfterCancellation(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	migration := testMigration(itemBackfill(nil))
+	migration.Backfill = func(context.Context, Batch) (BatchResult, error) {
+		cancel()
+		return BatchResult{}, context.Canceled
+	}
+
+	err := testRunner(db, migration).Run(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	var enabled int
+	require.NoError(t, db.QueryRow("PRAGMA foreign_keys").Scan(&enabled))
+	require.Equal(t, 1, enabled)
+}
+
+// Replaying expand also replays backfill and contract, so this covers every
+// phase of every shipped version against a database that already has the
+// version's full effect applied. It also retains compatibility with databases
+// left in PhaseExpand by runner releases that predate atomic SQLite expansion.
+//
+// Every subtest's first Run() call was byte-for-byte identical work -- same
+// fresh database, same full registry, same stateless NewProcessLocker -- so it
+// is built once here and shared as a byte copy instead of being replayed by
+// every subtest. That first replay is ~400 individually autocommitted
+// DDL/state writes (13 migrations, each a separate transaction); sharing it
+// avoids redoing that work in every one of the ~13 parallel subtests, and
+// testDBPragmas removes the per-write fsync from both the shared baseline and
+// each subtest's own per-version replay (dingo#4171). The per-migration
+// replay under test -- resetting one version to PhaseExpand and calling
+// Run() again -- still runs against each subtest's own independent copy, so
+// the coverage this test exists for is unchanged.
+func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
+	t.Parallel()
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	// Each version replays against a database migrated exactly through that
+	// version, not through the latest one: that is the only state a crash
+	// mid-expand can actually leave behind, since a version only starts once
+	// every earlier one reached PhaseComplete and no version reopens after a
+	// later one has run. A single shared "migrated to latest" baseline worked
+	// for every version before v19 only because versions 1-18 are all purely
+	// additive (ADD COLUMN/CREATE TABLE/CREATE INDEX): replaying an old
+	// version's DDL against the newest schema was harmless. v19 (dingo#4464)
+	// drops a column and index a later replay can no longer see, so
+	// replaying v1's CREATE INDEX on `asset`(`name_hex`) against a database
+	// that already ran v19 fails with "no such column" -- a state v1 can
+	// never actually be found in.
+	baselines := perVersionBaselines(t, registry)
+	for i, migration := range registry {
+		t.Run(migration.Name, func(t *testing.T) {
+			t.Parallel()
+			db := openTestDBFromBaseline(t, baselines[i])
+			runner := &Runner{
+				DB:       db,
+				Dialect:  "sqlite",
+				Registry: registry,
+				Locker:   NewProcessLocker(),
+			}
+
+			_, err := db.Exec(`
+UPDATE schema_migrations
+SET phase = 'expand', dirty = 1, completed_at = NULL
+WHERE version = ?`, migration.Version)
+			require.NoError(t, err)
+
+			require.NoError(
+				t,
+				runner.Run(context.Background()),
+				"version %d must replay its expand phase",
+				migration.Version,
+			)
+
+			var phase string
+			var dirty bool
+			var completed sql.NullInt64
+			require.NoError(t, db.QueryRow(`
+SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = ?`,
+				migration.Version,
+			).Scan(&phase, &dirty, &completed))
+			require.Equal(t, string(PhaseComplete), phase)
+			require.False(t, dirty)
+			require.True(t, completed.Valid)
+		})
+	}
+}
+
+// perVersionBaselines runs the registry once, incrementally, and returns the
+// database file bytes captured immediately after each version reaches
+// PhaseComplete -- baselines[i] is migrated exactly through registry[i], not
+// through the latest version. Calling Run repeatedly with a growing Registry
+// slice is the same incremental-upgrade path a real node takes release over
+// release, so this applies every migration's DDL only once in total, the
+// same total work fullyMigratedBaseline's single shared baseline did.
+func perVersionBaselines(t *testing.T, registry []Migration) [][]byte {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "baseline.sqlite")
+	baselines := make([][]byte, len(registry))
+	for i := range registry {
+		db, err := sql.Open(
+			"sqlite",
+			"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
+		)
+		require.NoError(t, err)
+		runner := &Runner{
+			DB:       db,
+			Dialect:  "sqlite",
+			Registry: registry[:i+1],
+			Locker:   NewProcessLocker(),
+		}
+		require.NoError(t, runner.Run(context.Background()))
+		require.NoError(t, db.Close())
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		baselines[i] = data
+	}
+	return baselines
+}
+
+// openTestDBFromBaseline seeds a subtest's own database file from a byte copy
+// of an already fully-migrated database, replacing a second full 13-migration
+// replay with one file write.
+func openTestDBFromBaseline(t *testing.T, baseline []byte) *sql.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "metadata.sqlite")
+	require.NoError(t, os.WriteFile(path, baseline, 0o600))
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+	return db
+}

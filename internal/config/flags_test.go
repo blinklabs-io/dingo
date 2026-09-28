@@ -20,9 +20,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
@@ -32,6 +36,25 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	RegisterFlags(cmd)
 
 	specFields := map[string]string{}
+	yamlOnlyFields := map[string]struct{}{
+		"Plugins.Storage.Blob.Config":          {},
+		"Plugins.Storage.Metadata.Config":      {},
+		"Plugins.Mempool.Config":               {},
+		"Plugins.API.Blockfrost.Config":        {},
+		"Plugins.API.Mesh.Config":              {},
+		"Plugins.API.Utxorpc.Config":           {},
+		"Midnight.CNightPolicyID":              {},
+		"Midnight.CNightAssetName":             {},
+		"Midnight.MappingValidatorAddress":     {},
+		"Midnight.AuthTokenPolicyID":           {},
+		"Midnight.AuthTokenAssetName":          {},
+		"Midnight.CommitteeCandidateAddress":   {},
+		"Midnight.TechnicalCommitteeAddress":   {},
+		"Midnight.TechnicalCommitteePolicyID":  {},
+		"Midnight.CouncilAddress":              {},
+		"Midnight.CouncilPolicyID":             {},
+		"Midnight.PermissionedCandidatePolicy": {},
+	}
 	for _, spec := range flagSpecs {
 		if prev, ok := specFields[spec.field]; ok {
 			t.Fatalf(
@@ -52,6 +75,9 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	collectExportedLeafFields(reflect.TypeFor[Config](), "", leafFields)
 
 	for fieldPath := range leafFields {
+		if _, ok := yamlOnlyFields[fieldPath]; ok {
+			continue
+		}
 		if _, ok := specFields[fieldPath]; !ok {
 			t.Fatalf("config field %q has no flag spec", fieldPath)
 		}
@@ -66,18 +92,11 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	}
 }
 
-func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
+func TestPledgeLeverageEnvBinding(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CARDANO_MEMPOOL_CAPACITY", "123456")
-	t.Setenv("DINGO_DATABASE_WORKERS", "9")
-	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
-	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "15m")
-	t.Setenv("DINGO_OFFCHAIN_METADATA_MAX_BYTES", "1024")
-	t.Setenv(
-		"DINGO_OFFCHAIN_METADATA_IPFS_GATEWAY_URL",
-		"https://env.example/ipfs/",
-	)
+	t.Setenv("DINGO_PLEDGE_LEVERAGE_ENABLED", "true")
+	t.Setenv("DINGO_PLEDGE_LEVERAGE", "42")
 
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
@@ -89,10 +108,339 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
-	if cfg.MempoolCapacity != 123456 {
+	if !cfg.PledgeLeverageEnabled {
+		t.Fatal("expected env var to enable pledge leverage")
+	}
+	if cfg.PledgeLeverage != 42 {
+		t.Fatalf(
+			"expected env var to set pledgeLeverage=42, got %d",
+			cfg.PledgeLeverage,
+		)
+	}
+}
+
+func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
+	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(t, "0.0.0.0", cfg.BindAddr)
+	require.Equal(t, DefaultDebugBindAddr, cfg.DebugBindAddr)
+	require.Equal(t, "127.0.0.1:0", cfg.DebugListenAddress())
+	require.Equal(
+		t,
+		"127.0.0.1:6060",
+		(&Config{DebugPort: 6060}).DebugListenAddress(),
+	)
+}
+
+// TestValidateForgedBlockDefaultsToTrue is a regression test for a
+// human-review finding: DefaultConfig's ValidateForgedBlock: true literal
+// (issue #3528's fail-closed forging default) had no test on the actual
+// operator path -- LoadConfig -> GetConfig -> RegisterFlags -- unlike the
+// separate NewConfig literal covered by
+// TestNewConfigDefaultsValidateForgedBlock in the parent package. Deleting
+// or flipping this literal previously left every test in this package and
+// ./cmd/... green.
+func TestValidateForgedBlockDefaultsToTrue(t *testing.T) {
+	// Pins the real production literal directly (internal/config/config.go's
+	// newDefaultConfig), independent of resetGlobalConfig's own separately
+	// hand-maintained copy below and of whatever state earlier tests left
+	// package-level globalConfig in.
+	require.True(t, newDefaultConfig().ValidateForgedBlock)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.True(
+		t,
+		cfg.ValidateForgedBlock,
+		"LoadConfig+ApplyDefaults must enable self-validation of forged blocks by default",
+	)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	got, err := cmd.PersistentFlags().GetBool("validate-forged-block")
+	require.NoError(t, err)
+	require.True(
+		t,
+		got,
+		"the --validate-forged-block flag's registered default must match DefaultConfig.ValidateForgedBlock",
+	)
+}
+
+// TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral
+// guards the same failure class as TestValidateForgedBlockDefaultsToTrue
+// above, for the forging knob added in issue #3973. Merging main's
+// newDefaultConfig() rewrite could have dropped this field's line from that
+// literal silently: ApplyDefaults fills a zero
+// ForgePrimaryChainTipToleranceSlots with the same constant, so every test
+// that reaches the value through LoadConfig+ApplyDefaults stays green with
+// the literal gone, and resetGlobalConfig's separate copy (config_test.go)
+// carries its own line. The gap only shows on the two paths that read the
+// production literal without defaulting: globalConfig as flag registration
+// sees it, and newDefaultConfig() itself.
+func TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral(
+	t *testing.T,
+) {
+	// Pins internal/config/config.go's newDefaultConfig directly, with no
+	// ApplyDefaults in the path to refill a dropped field.
+	require.Equal(
+		t,
+		uint64(DefaultForgePrimaryChainTipToleranceSlots),
+		newDefaultConfig().ForgePrimaryChainTipToleranceSlots,
+		"newDefaultConfig must carry the primary-chain-tip tolerance default; ApplyDefaults refilling it hides a dropped literal",
+	)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(
+		t,
+		uint64(DefaultForgePrimaryChainTipToleranceSlots),
+		cfg.ForgePrimaryChainTipToleranceSlots,
+	)
+
+	// RegisterFlags takes each flag's default from globalConfig, which is
+	// seeded from newDefaultConfig and never passes through ApplyDefaults,
+	// so this is the operator-visible half of the same guarantee.
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	got, err := cmd.PersistentFlags().
+		GetUint64("forge-primary-chain-tip-tolerance-slots")
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(DefaultForgePrimaryChainTipToleranceSlots),
+		got,
+		"the --forge-primary-chain-tip-tolerance-slots flag's registered default must match the production literal",
+	)
+}
+
+func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("debugBindAddr: 127.0.0.2\ndebugPort: 6060\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.2", cfg.DebugBindAddr)
+
+	t.Setenv("DINGO_DEBUG_BIND_ADDR", "127.0.0.3")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.3", cfg.DebugBindAddr)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--debug-bind-addr=0.0.0.0",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "0.0.0.0", cfg.DebugBindAddr)
+	require.Equal(t, "0.0.0.0:6060", cfg.DebugListenAddress())
+}
+
+func TestFullPotRewardsEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_FULL_POT_REWARDS_ENABLED", "true")
+	t.Setenv("DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.FullPotRewardsEnabled {
+		t.Fatal("expected env var to enable full-pot rewards")
+	}
+	if !cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		t.Fatal("expected env var to enable unsafe full-pot rewards override")
+	}
+}
+
+func TestBlockPipelineEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCK_PIPELINE_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockPipelineEnabled {
+		t.Fatal("expected env var to enable the block-decode pipeline")
+	}
+}
+
+func TestBlockPipelineValidateEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockPipelineValidateEnabled {
+		t.Fatal("expected env var to enable the block-pipeline validate stage")
+	}
+}
+
+// TestSkipRewardLiveStakeBackfillCheckEnvBinding pins the environment
+// variable that controls the reward_live_stake startup check. The field
+// carries split_words with no explicit envconfig tag, so envconfig derives
+// the name from the field name under the "cardano" prefix -- CARDANO_, not
+// the DINGO_ prefix some neighbouring options use via an explicit tag.
+func TestSkipRewardLiveStakeBackfillCheckEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.SkipRewardLiveStakeBackfillCheck {
+		t.Fatal("expected env var to skip the reward_live_stake check")
+	}
+}
+
+// TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck pins the
+// safe default. The check is what catches a stale or pre-migration
+// reward_live_stake table, so an operator has to opt out deliberately; it
+// must never become skipped by default.
+//
+// The variable is explicitly cleared rather than assumed absent. A developer
+// who exported it to work around a slow startup would otherwise see this test
+// fail for reasons that have nothing to do with the default it pins.
+// t.Setenv cannot express "unset", so the previous value is saved and
+// restored by hand; t.Setenv("HOME", ...) below already bars t.Parallel, so
+// mutating the process environment directly is safe here.
+func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(
+	t *testing.T,
+) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	const skipEnvVar = "CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK"
+	if prev, ok := os.LookupEnv(skipEnvVar); ok {
+		t.Cleanup(func() { os.Setenv(skipEnvVar, prev) })
+	} else {
+		t.Cleanup(func() { os.Unsetenv(skipEnvVar) })
+	}
+	if err := os.Unsetenv(skipEnvVar); err != nil {
+		t.Fatalf("failed to clear %s: %v", skipEnvVar, err)
+	}
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.SkipRewardLiveStakeBackfillCheck {
+		t.Fatal("the reward_live_stake check must run unless opted out")
+	}
+}
+
+func TestDatabasePathEnvironmentShortcut(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	want := t.TempDir()
+	t.Setenv("CARDANO_DATABASE_PATH", want)
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.DatabasePath != want {
+		t.Fatalf(
+			"expected CARDANO_DATABASE_PATH to set databasePath to %q, got %q",
+			want,
+			cfg.DatabasePath,
+		)
+	}
+}
+
+func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_CONFIG_CAPACITY", "123456")
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_PROVIDER", "environment")
+	t.Setenv("DINGO_DATABASE_WORKERS", "9")
+	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
+	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "15m")
+	t.Setenv("DINGO_OFFCHAIN_METADATA_MAX_BYTES", "1024")
+	t.Setenv(
+		"DINGO_OFFCHAIN_METADATA_IPFS_GATEWAY_URL",
+		"https://env.example/ipfs/",
+	)
+	t.Setenv("DINGO_MIDNIGHT_PORT", "50070")
+	t.Setenv("DINGO_MIDNIGHT_HOST", "127.0.0.3")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	cfg.ApplyDefaults()
+	capacity, _, _ := cfg.MempoolSettings()
+	if capacity != 123456 {
 		t.Fatalf(
 			"expected env var to set mempoolCapacity=123456, got %d",
-			cfg.MempoolCapacity,
+			capacity,
 		)
 	}
 	if cfg.DatabaseWorkers != 9 {
@@ -125,17 +473,31 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.OffchainMetadata.IPFSGatewayURL,
 		)
 	}
+	if cfg.Midnight.Port != 50070 {
+		t.Fatalf(
+			"expected env var to set midnight port=50070, got %d",
+			cfg.Midnight.Port,
+		)
+	}
+	if cfg.Midnight.Host != "127.0.0.3" {
+		t.Fatalf(
+			"expected env var to set midnight host, got %q",
+			cfg.Midnight.Host,
+		)
+	}
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
 	if err := cmd.ParseFlags([]string{
-		"--mempool-capacity=7890",
+		"--mempool=default",
 		"--data-dir=/tmp/override",
 		"--backfill-batch-size=200",
 		"--history-expiry-enabled=true",
 		"--history-expiry-frequency=30m",
 		"--offchain-metadata-max-bytes=2048",
 		"--offchain-metadata-ipfs-gateway-url=https://flag.example/ipfs/",
+		"--midnight-port=50080",
+		"--midnight-host=127.0.0.4",
 	}); err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
@@ -144,10 +506,17 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		t.Fatalf("failed to apply flags: %v", err)
 	}
 
-	if cfg.MempoolCapacity != 7890 {
+	if cfg.Plugins.Mempool.Provider != "default" {
 		t.Fatalf(
-			"expected flag to override env mempoolCapacity to 7890, got %d",
-			cfg.MempoolCapacity,
+			"expected CLI mempool provider override, got %q",
+			cfg.Plugins.Mempool.Provider,
+		)
+	}
+	capacity, _, _ = cfg.MempoolSettings()
+	if capacity != 123456 {
+		t.Fatalf(
+			"expected environment mempool capacity to remain 123456, got %d",
+			capacity,
 		)
 	}
 	if cfg.DatabaseWorkers != 9 {
@@ -189,6 +558,357 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.OffchainMetadata.IPFSGatewayURL,
 		)
 	}
+	if cfg.Midnight.Port != 50080 {
+		t.Fatalf(
+			"expected flag to override midnight port to 50080, got %d",
+			cfg.Midnight.Port,
+		)
+	}
+	if cfg.Midnight.Host != "127.0.0.4" {
+		t.Fatalf(
+			"expected flag to override midnight host, got %q",
+			cfg.Midnight.Host,
+		)
+	}
+}
+
+func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES", "1001")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES", "1002")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES", "1003")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES", "1004")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, int64(1001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 1002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 1003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(1004), cfg.TokenRegistry.MaxBatchBytes)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--token-registry-max-decompressed-bytes=2001",
+		"--token-registry-max-archive-entries=2002",
+		"--token-registry-max-accepted-entries=2003",
+		"--token-registry-max-batch-bytes=2004",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, int64(2001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 2002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 2003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(2004), cfg.TokenRegistry.MaxBatchBytes)
+}
+
+func TestTokenRegistryAggregateBoundsYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`
+tokenRegistry:
+  maxDecompressedBytes: 3001
+  maxArchiveEntries: 3002
+  maxAcceptedEntries: 3003
+  maxBatchBytes: 3004
+`), 0o600))
+
+	cfg, err := LoadConfig(configFile)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(3001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 3002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 3003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(3004), cfg.TokenRegistry.MaxBatchBytes)
+}
+
+func TestMempoolProviderSourcePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_PROVIDER", "environment")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(
+		t,
+		os.WriteFile(
+			configFile,
+			[]byte("plugins:\n  mempool:\n    provider: yaml\n"),
+			0o600,
+		),
+	)
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"environment",
+		cfg.Plugins.Mempool.Provider,
+		"environment overrides YAML",
+	)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{"--mempool=cli"}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	assert.Equal(
+		t,
+		"cli",
+		cfg.Plugins.Mempool.Provider,
+		"CLI overrides environment",
+	)
+}
+
+func TestDelegatorInactivityEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_DELEGATOR_INACTIVITY_ENABLED", "true")
+	t.Setenv("DINGO_DELEGATOR_INACTIVITY", "90")
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.DelegatorInactivityEnabled {
+		t.Fatal("expected env var to enable delegator inactivity")
+	}
+	if cfg.DelegatorInactivity != 90 {
+		t.Fatalf(
+			"expected delegatorInactivity=90, got %d",
+			cfg.DelegatorInactivity,
+		)
+	}
+}
+
+func TestRegisterFlags_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
+	resetGlobalConfig()
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+
+	yamlOnlyFlags := []string{
+		"midnight-cnight-policy-id",
+		"midnight-cnight-asset-name",
+		"midnight-mapping-validator-address",
+		"midnight-auth-token-policy-id",
+		"midnight-auth-token-asset-name",
+		"midnight-committee-candidate-address",
+		"midnight-technical-committee-address",
+		"midnight-technical-committee-policy-id",
+		"midnight-council-address",
+		"midnight-council-policy-id",
+		"midnight-permissioned-candidate-policy",
+	}
+	for _, flag := range yamlOnlyFlags {
+		if cmd.PersistentFlags().Lookup(flag) != nil {
+			t.Fatalf("expected --%s to be YAML/env only", flag)
+		}
+	}
+}
+
+// TestApplyFlags_MidnightEnabledFlag pins --midnight-enabled/
+// DINGO_MIDNIGHT_ENABLED end to end: default false, a flag can turn it on,
+// the env var can turn it on without any flag, and (mirroring the other
+// Midnight flags) a registered-but-unparsed flag never overrides whatever
+// LoadConfig already resolved from the env var.
+func TestApplyFlags_MidnightEnabledFlag(t *testing.T) {
+	t.Run("defaults to false", func(t *testing.T) {
+		resetGlobalConfig()
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if cfg.Midnight.Enabled {
+			t.Fatal("expected midnight.enabled to default to false")
+		}
+	})
+
+	t.Run("flag passed enables it", func(t *testing.T) {
+		resetGlobalConfig()
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		if err := cmd.ParseFlags([]string{"--midnight-enabled=true"}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+		if err := ApplyFlags(cmd, cfg); err != nil {
+			t.Fatalf("failed to apply flags: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal("expected --midnight-enabled=true to enable Midnight")
+		}
+	})
+
+	t.Run("env var enables it without any flag", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_MIDNIGHT_ENABLED", "true")
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal("expected DINGO_MIDNIGHT_ENABLED=true to enable Midnight")
+		}
+	})
+
+	t.Run("unparsed flag does not override the env var", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_MIDNIGHT_ENABLED", "true")
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		// --midnight-enabled is registered but deliberately never parsed
+		// here, the same as a real run where the operator never passes it.
+		// ApplyFlags's Changed(name) gate must leave cfg exactly as
+		// LoadConfig resolved it from the env var above, not reset it to
+		// the flag's own default.
+		if err := ApplyFlags(cmd, cfg); err != nil {
+			t.Fatalf("failed to apply flags: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal(
+				"expected ApplyFlags to leave midnight.enabled=true from " +
+					"the env var alone when --midnight-enabled was never passed",
+			)
+		}
+	})
+}
+
+func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "false")
+	t.Setenv("DINGO_MIDNIGHT_REFLECTION_ENABLED", "false")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(
+		"midnight:\n"+
+			"  serverEnabled: true\n"+
+			"  reflectionEnabled: true\n",
+	), 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.False(t, cfg.Midnight.ServerEnabled, "environment overrides YAML")
+	require.False(
+		t,
+		cfg.Midnight.ReflectionEnabled,
+		"environment overrides YAML",
+	)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--midnight-server-enabled=true",
+		"--midnight-reflection-enabled=true",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.True(t, cfg.Midnight.ServerEnabled, "CLI overrides environment")
+	require.True(t, cfg.Midnight.ReflectionEnabled, "CLI overrides environment")
+}
+
+func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
+	resetGlobalConfig()
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Fatalf("expected initial network preview, got %q", cfg.Network)
+	}
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["preview"].CNightPolicyID {
+		t.Fatalf(
+			"expected preview Midnight default before flags, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--network=mainnet"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("failed to apply flags: %v", err)
+	}
+
+	if cfg.Network != "mainnet" {
+		t.Fatalf("expected network mainnet, got %q", cfg.Network)
+	}
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["mainnet"].CNightPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight policy default, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight council policy default, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
+}
+
+func TestApplyFlags_NetworkOverridePreservesExplicitMidnightYAML(t *testing.T) {
+	resetGlobalConfig()
+	previewPolicy := midnightNetworkDefaults["preview"].CNightPolicyID
+	yamlContent := `
+network: "preview"
+midnight:
+  cnightPolicyId: "` + previewPolicy + `"
+`
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--network=mainnet"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("failed to apply flags: %v", err)
+	}
+
+	if cfg.Midnight.CNightPolicyID != previewPolicy {
+		t.Fatalf(
+			"expected explicit Midnight YAML policy to be preserved, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected remaining Midnight defaults to switch to mainnet, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
 }
 
 func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
@@ -210,7 +930,11 @@ func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
 	}
 }
 
-func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
+// TestTopologyResolvesFromNetworkFlag pins topology resolution to the
+// final merged configuration: LoadTopologyConfig runs only after
+// ApplyFlags (see cmd/dingo), so a --network override determines which
+// network's topology is loaded.
+func TestTopologyResolvesFromNetworkFlag(t *testing.T) {
 	resetGlobalConfig()
 
 	cfg, err := LoadConfig("")
@@ -234,15 +958,328 @@ func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
 	if cfg.Network != "preprod" {
 		t.Fatalf("expected network preprod, got %q", cfg.Network)
 	}
+	if _, err := LoadTopologyConfig(); err != nil {
+		t.Fatalf("failed to load topology: %v", err)
+	}
 	topologyConfig := GetTopologyConfig()
 	if topologyConfig.PeerSnapshot == nil {
-		t.Fatal("expected topology reload to load preprod peer snapshot")
+		t.Fatal("expected topology load to use the preprod peer snapshot")
 	}
 	if topologyConfig.PeerSnapshot.NetworkMagic != 1 {
 		t.Fatalf(
 			"expected preprod peer snapshot network magic 1, got %d",
 			topologyConfig.PeerSnapshot.NetworkMagic,
 		)
+	}
+}
+
+// loadConfigThroughPipeline runs the full cmd/dingo configuration
+// pipeline — LoadConfig, ApplyFlags, ApplyDefaults, validate, and
+// topology resolution — on the given YAML and CLI arguments and returns
+// the merged config alongside the validation/topology result, mirroring
+// PersistentPreRunE in cmd/dingo.
+func loadConfigThroughPipeline(
+	t *testing.T,
+	yaml string,
+	args []string,
+) (*Config, error) {
+	t.Helper()
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("ApplyFlags: %v", err)
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.validate(cfg.RunMode, minUnprivilegedPort); err != nil {
+		return cfg, err
+	}
+	if _, err := LoadTopologyConfig(); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+// TestPipeline_KESAgentSignTimeoutBounds pins the CLI enforcement of the
+// slot-boundary bound on shelleyKesAgentSignTimeout end to end through
+// loadConfigThroughPipeline, rather than only through cfg.validate directly.
+//
+// Not t.Parallel: loadConfigThroughPipeline's resetGlobalConfig writes the
+// package-level globalConfig directly with no synchronization of its own,
+// like every other loadConfigThroughPipeline-based test in this file.
+func TestPipeline_KESAgentSignTimeoutBounds(t *testing.T) {
+	_, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=1s"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "shelleyKesAgentSignTimeout") {
+		t.Fatalf("CLI accepted a one-slot KES agent sign timeout: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=999ms"},
+	)
+	if err != nil {
+		t.Fatalf("CLI rejected a sub-slot KES agent sign timeout: %v", err)
+	}
+	if cfg.ShelleyKESAgentSignTimeout != 999*time.Millisecond {
+		t.Fatalf(
+			"CLI sign timeout = %s, want 999ms",
+			cfg.ShelleyKESAgentSignTimeout,
+		)
+	}
+}
+
+// TestPipeline_EmptyMidnightHostUsesLoopbackDefault pins the merged-config
+// defaulting contract: an explicitly empty higher-precedence environment value
+// must resolve to the same safe loopback host that the Midnight server uses.
+func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
+	t.Setenv("DINGO_MIDNIGHT_SERVER_ENABLED", "true")
+	t.Setenv("DINGO_MIDNIGHT_HOST", "")
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"bindAddr: 127.0.0.1\nstorageMode: \"api\"\n",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf(
+			"expected empty Midnight host to use loopback default: %v",
+			err,
+		)
+	}
+	wantHost := DefaultMidnightConfig().Host
+	if cfg.Midnight.Host != wantHost {
+		t.Errorf(
+			"Midnight.Host = %q, want %q",
+			cfg.Midnight.Host,
+			wantHost,
+		)
+	}
+}
+
+// TestPipeline_FlagOverridesInvalidYAMLRunMode is a precedence
+// regression test: a higher-precedence CLI flag must be able to replace
+// an invalid YAML runMode, so LoadConfig cannot reject the value before
+// flags are merged.
+func TestPipeline_FlagOverridesInvalidYAMLRunMode(t *testing.T) {
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"runMode: \"bogus\"\n",
+		[]string{"--run-mode=serve"},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.RunMode != RunModeServe {
+		t.Errorf("RunMode = %q, want %q", cfg.RunMode, RunModeServe)
+	}
+}
+
+// TestPipeline_InvalidYAMLRunModeRejectedWithoutOverride pins the other
+// side of the precedence fix: with no flag override, the invalid YAML
+// value must still be rejected — by Validate on the merged config, not
+// by LoadConfig.
+func TestPipeline_InvalidYAMLRunModeRejectedWithoutOverride(t *testing.T) {
+	_, err := loadConfigThroughPipeline(t, "runMode: \"bogus\"\n", nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid runMode") {
+		t.Fatalf("expected invalid runMode error, got: %v", err)
+	}
+}
+
+// TestPipeline_MempoolCapacityDefaultsFromFlagRunMode is a defaulting
+// regression test: the run-mode-derived MempoolCapacity default must be
+// chosen from the final merged mode, including one set only by a CLI
+// flag.
+func TestPipeline_MempoolCapacityDefaultsFromFlagRunMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		expected int64
+	}{
+		{
+			name:     "leios via flag",
+			args:     []string{"--run-mode=leios"},
+			expected: DefaultMempoolCapacityLeios,
+		},
+		{
+			name:     "serve via flag",
+			args:     []string{"--run-mode=serve"},
+			expected: DefaultMempoolCapacityPraos,
+		},
+		{
+			name:     "no mode configured anywhere",
+			args:     nil,
+			expected: DefaultMempoolCapacityPraos,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfigThroughPipeline(t, "", tc.args)
+			if err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+			capacity, _, _ := cfg.MempoolSettings()
+			if capacity != tc.expected {
+				t.Errorf(
+					"MempoolCapacity = %d, want %d",
+					capacity, tc.expected,
+				)
+			}
+		})
+	}
+}
+
+// TestPipeline_NetworkFlagRepairsInvalidYAMLNetwork is a precedence
+// regression test for topology ordering: a traversal-shaped YAML
+// network must not abort config loading or topology resolution before
+// a --network flag replaces it. Without the override the same value
+// must still be rejected — by Validate, not LoadConfig.
+func TestPipeline_NetworkFlagRepairsInvalidYAMLNetwork(t *testing.T) {
+	yaml := "network: \"../bad\"\n"
+
+	cfg, err := loadConfigThroughPipeline(
+		t, yaml, []string{"--network=preview"},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Errorf("Network = %q, want %q", cfg.Network, "preview")
+	}
+
+	_, err = loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid network name") {
+		t.Fatalf("expected invalid network name error, got: %v", err)
+	}
+}
+
+// TestPipeline_TopologyFlagRepairsMissingYAMLTopology pins the same
+// ordering for the topology file itself: a missing YAML topology path
+// must not abort before a --topology flag replaces it, and must still
+// fail topology resolution without the override.
+func TestPipeline_TopologyFlagRepairsMissingYAMLTopology(t *testing.T) {
+	yaml := "topology: \"/nonexistent/topology.json\"\n"
+	validTopology := filepath.Join(t.TempDir(), "topology.json")
+	if err := os.WriteFile(
+		validTopology,
+		[]byte(`{"localRoots": [], "publicRoots": []}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("failed to write topology file: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t, yaml, []string{"--topology=" + validTopology},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.Topology != validTopology {
+		t.Errorf("Topology = %q, want %q", cfg.Topology, validTopology)
+	}
+
+	_, err = loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil || !strings.Contains(err.Error(), "topology") {
+		t.Fatalf("expected topology load error, got: %v", err)
+	}
+}
+
+// TestPipeline_NegativeHistoryExpiryFrequencyRejected pins the
+// explicit-negative-frequency contract for every configuration source:
+// ApplyDefaults only fills in an unset (zero) historyExpiry.frequency,
+// so a configured negative value must survive defaulting and fail
+// validation instead of silently starting the expiry worker on the
+// one-hour default cadence.
+func TestPipeline_NegativeHistoryExpiryFrequencyRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		env  map[string]string
+		args []string
+	}{
+		{
+			name: "yaml",
+			yaml: "historyExpiry:\n  enabled: true\n  frequency: -1s\n",
+		},
+		{
+			name: "environment",
+			env: map[string]string{
+				"DINGO_HISTORY_EXPIRY_ENABLED":   "true",
+				"DINGO_HISTORY_EXPIRY_FREQUENCY": "-1s",
+			},
+		},
+		{
+			name: "flag",
+			args: []string{
+				"--history-expiry-enabled=true",
+				"--history-expiry-frequency=-1s",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := loadConfigThroughPipeline(t, tc.yaml, tc.args)
+			if err == nil ||
+				!strings.Contains(
+					err.Error(),
+					"invalid historyExpiry.frequency",
+				) {
+				t.Fatalf(
+					"expected invalid historyExpiry.frequency error, got: %v",
+					err,
+				)
+			}
+			if cfg.HistoryExpiry.Frequency != -time.Second {
+				t.Errorf(
+					"Frequency = %s, want -1s preserved through defaulting",
+					cfg.HistoryExpiry.Frequency,
+				)
+			}
+		})
+	}
+}
+
+// TestPipeline_AggregatesErrorsAcrossSettings pins error aggregation on
+// the merged config: LoadConfig no longer fails on the first bad value,
+// so every problem must surface together in the single Validate pass.
+func TestPipeline_AggregatesErrorsAcrossSettings(t *testing.T) {
+	yaml := "runMode: \"bogus\"\n" +
+		"plugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 1048576\n      evictionWatermark: 2.0\n      rejectionWatermark: 0.95\n" +
+		"blockProducer: true\n" +
+		"chainsync:\n  strategy: \"fastest\"\n"
+	_, err := loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil {
+		t.Fatal("expected validation errors, got nil")
+	}
+	for _, want := range []string{
+		"invalid runMode",
+		"invalid plugins.mempool.config.evictionWatermark",
+		"blockProducer enabled but missing required key paths",
+		"invalid chainsync.strategy",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q, got: %v", want, err)
+		}
 	}
 }
 
@@ -264,5 +1301,27 @@ func collectExportedLeafFields(
 			continue
 		}
 		out[path] = struct{}{}
+	}
+}
+
+func TestMinPoolMarginEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MIN_POOL_MARGIN", "150")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.MinPoolMargin != 150 {
+		t.Fatalf(
+			"expected env var to set minPoolMargin=150, got %d",
+			cfg.MinPoolMargin,
+		)
 	}
 }

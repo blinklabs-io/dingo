@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -29,7 +30,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
 
 func TestIsExpectedConnectionCloseError(t *testing.T) {
@@ -187,6 +190,48 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 			want: true,
 		},
 		{
+			// ENETUNREACH: an IPv6 relay record on a host with no IPv6
+			// route. A local reachability fact, not a node fault.
+			name: "net op error wrapping ENETUNREACH",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: &os.SyscallError{
+					Syscall: "connect",
+					Err:     syscall.ENETUNREACH,
+				},
+			},
+			want: true,
+		},
+		{
+			// EAFNOSUPPORT: same cause, reported by the socket call
+			// instead of the route lookup.
+			name: "net op error wrapping EAFNOSUPPORT",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: &os.SyscallError{
+					Syscall: "socket",
+					Err:     syscall.EAFNOSUPPORT,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "network is unreachable string",
+			err: errors.New(
+				"dial tcp [2001:db8::1]:3001: connect: network is unreachable",
+			),
+			want: true,
+		},
+		{
+			name: "address family not supported string",
+			err: errors.New(
+				"dial tcp: connect: address family not supported by protocol family",
+			),
+			want: true,
+		},
+		{
 			name: "net op error wrapping no route",
 			err: &net.OpError{
 				Op:  "dial",
@@ -203,6 +248,22 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 		{
 			name: "io eof",
 			err:  io.EOF,
+			want: false,
+		},
+		{
+			// gouroboros closes the muxer with this error when a crossing
+			// duplicate connection is pruned during the handshake (duplex
+			// connection-manager dedup). It is benign, not a dial failure.
+			name: "connection shutdown initiated eof (duplex dedup)",
+			err: fmt.Errorf(
+				"connection shutdown initiated: %w",
+				io.EOF,
+			),
+			want: true,
+		},
+		{
+			name: "connection shutdown initiated without eof",
+			err:  errors.New("connection shutdown initiated: handshake failed"),
 			want: false,
 		},
 		{
@@ -224,6 +285,394 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsPermanentNetworkMagicMismatch(t *testing.T) {
+	mismatchMessage := "version data mismatch: " +
+		"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 764824073}, diffusionMode = InitiatorOnlyDiffusionMode} " +
+		"/= NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 2}, diffusionMode = InitiatorAndResponderDiffusionMode}"
+	sameMagicMessage := "version data mismatch: " +
+		"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 2}, peerSharing = PeerSharingDisabled} " +
+		"/= NodeToNodeVersionData {networkMagic = NetworkMagic " +
+		"{unNetworkMagic = 2}, peerSharing = PeerSharingEnabled}"
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "wrapped typed refusal with different magic",
+			err: fmt.Errorf(
+				"outbound handshake: %w",
+				&handshake.RefusedError{Version: 13, Message: mismatchMessage},
+			),
+			want: true,
+		},
+		{
+			name: "same magic version data mismatch",
+			err: &handshake.RefusedError{
+				Version: 13,
+				Message: sameMagicMessage,
+			},
+			want: false,
+		},
+		{
+			name: "untyped lookalike",
+			err:  errors.New(mismatchMessage),
+			want: false,
+		},
+		{
+			name: "sanitized refusal without both values",
+			err: &handshake.RefusedError{
+				Version: 13,
+				Message: "network magic mismatch",
+			},
+			want: false,
+		},
+		{
+			name: "other refusal containing two magic fields",
+			err: &handshake.RefusedError{
+				Version: 13,
+				Message: strings.Replace(
+					mismatchMessage,
+					"version data mismatch",
+					"connection not allowed",
+					1,
+				),
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPermanentNetworkMagicMismatch(tc.err); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration verifies the
+// network-mismatch denial is a distinct, longer-lived bound than the
+// ordinary transient deny list: it stays in effect after the transient
+// entry for the same address has already expired and been cleaned up, and
+// only clears early via an in-memory restart (TestNetworkMismatchDenialExpiresAfterDuration
+// covers it clearing on its own bound, without a restart).
+func TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration(
+	t *testing.T,
+) {
+	const address = "44.0.0.10:3001"
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pg := NewPeerGovernor(PeerGovernorConfig{Logger: logger})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 764824073}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	pg.mu.Lock()
+	pg.denyList[address] = time.Now().Add(-time.Minute)
+	pg.cleanupDenyList()
+	deniedAfterTransientExpiry := pg.isDeniedLocked(address)
+	peerCount := len(pg.peers)
+	pg.mu.Unlock()
+	if !deniedAfterTransientExpiry {
+		t.Fatal("network-mismatch denial expired with the transient deny list")
+	}
+	if peerCount != 0 {
+		t.Fatalf(
+			"ledger peer count = %d, want 0 after network-mismatch denial",
+			peerCount,
+		)
+	}
+
+	if pg.addLedgerPeer(address) {
+		t.Fatal("ledger discovery reported adding a still-denied peer")
+	}
+	pg.mu.Lock()
+	peerCount = len(pg.peers)
+	pg.mu.Unlock()
+	if peerCount != 0 {
+		t.Fatalf("ledger rediscovery re-added a still-denied peer")
+	}
+
+	restarted := NewPeerGovernor(PeerGovernorConfig{Logger: logger})
+	if !restarted.addLedgerPeer(address) {
+		t.Fatal("ledger discovery did not add peer after restart")
+	}
+	restarted.mu.Lock()
+	restartedPeerCount := len(restarted.peers)
+	restarted.mu.Unlock()
+	if restartedPeerCount != 1 {
+		t.Fatalf(
+			"peer count after restart = %d, want 1",
+			restartedPeerCount,
+		)
+	}
+}
+
+// TestNetworkMismatchDenialExpiresAfterDuration verifies that a
+// network-magic-mismatch denial is bounded by NetworkMismatchDenyDuration
+// rather than held for the rest of the process's life: once that duration
+// elapses, the address becomes eligible for rediscovery again without
+// requiring a restart. It also exercises the repeated-operation path: a
+// second denial of the same address after expiry re-establishes the denial
+// exactly as the first one did.
+func TestNetworkMismatchDenialExpiresAfterDuration(t *testing.T) {
+	const address = "44.0.0.20:3001"
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                      logger,
+		NetworkMismatchDenyDuration: time.Minute,
+	})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 764824073}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	pg.mu.Lock()
+	stillDenied := pg.isDeniedLocked(address)
+	pg.mu.Unlock()
+	if !stillDenied {
+		t.Fatal("network-mismatch denial expired before its bounded duration")
+	}
+
+	// Backdate the recorded expiry (white-box: same package) instead of
+	// sleeping in the test. isDeniedLocked must recognize the expiry itself,
+	// on the very next check, rather than depending on the periodic
+	// cleanupNetworkMismatchDenyList sweep (run only once per reconcile) to
+	// have already run: without its own lazy check, a caller between
+	// reconcile passes would see a stale "still denied" answer for up to a
+	// full ReconcileInterval after the bound elapsed.
+	pg.mu.Lock()
+	pg.networkMismatchDenyList[address] = time.Now().Add(-time.Minute)
+	expired := pg.isDeniedLocked(address)
+	_, deletedByLazyCheck := pg.networkMismatchDenyList[address]
+	pg.mu.Unlock()
+	if expired {
+		t.Fatal(
+			"network-mismatch denial did not expire after its bounded duration",
+		)
+	}
+	if deletedByLazyCheck {
+		t.Fatal("isDeniedLocked did not lazily remove the expired entry")
+	}
+
+	// cleanupNetworkMismatchDenyList is the separate periodic sweep
+	// (analogous to cleanupDenyList) that reconcile() calls every round; it
+	// must independently remove an expired entry that isDeniedLocked has not
+	// yet been asked about.
+	pg.mu.Lock()
+	pg.networkMismatchDenyList[address] = time.Now().Add(-time.Minute)
+	pg.cleanupNetworkMismatchDenyList()
+	_, stillTracked := pg.networkMismatchDenyList[address]
+	pg.mu.Unlock()
+	if stillTracked {
+		t.Fatal("cleanupNetworkMismatchDenyList left an expired entry behind")
+	}
+
+	// A repeated denial after expiry must re-establish it exactly like the
+	// first one did, rather than being a no-op or erroring.
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("repeated denial after expiry was not handled as permanent")
+	}
+	pg.mu.Lock()
+	redenied := pg.isDeniedLocked(address)
+	pg.mu.Unlock()
+	if !redenied {
+		t.Fatal("repeated denial after expiry did not deny the address again")
+	}
+}
+
+// TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry is the
+// end-to-end replacement counterpart to
+// TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration: it proves
+// that once NetworkMismatchDenyDuration elapses, ledger discovery
+// can actually add a real peer back at the denied address, without needing
+// a process restart to get there. TestNetworkMismatchDenialExpiresAfterDuration
+// only checks the internal isDeniedLocked/cleanup bookkeeping; this checks
+// the outward behavior operators actually care about.
+func TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry(t *testing.T) {
+	const address = "44.0.0.21:3001"
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                      logger,
+		NetworkMismatchDenyDuration: time.Minute,
+	})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 764824073}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	// Still within the bounded duration: rediscovery must be blocked.
+	if pg.addLedgerPeer(address) {
+		t.Fatal(
+			"ledger discovery re-added a peer still within its denial window",
+		)
+	}
+
+	// Backdate every recorded expiry past the bound (white-box: same
+	// package) instead of sleeping in the test.
+	pg.mu.Lock()
+	for addr := range pg.networkMismatchDenyList {
+		pg.networkMismatchDenyList[addr] = time.Now().Add(-time.Minute)
+	}
+	pg.mu.Unlock()
+
+	// Without any restart, a real peer must now be rediscoverable at the
+	// same address: this is the actual point of making the denial bounded
+	// instead of permanent.
+	if !pg.addLedgerPeer(address) {
+		t.Fatal(
+			"ledger discovery did not re-add the peer after its denial expired",
+		)
+	}
+	pg.mu.Lock()
+	peerCount := len(pg.peers)
+	pg.mu.Unlock()
+	if peerCount != 1 {
+		t.Fatalf("peer count after rediscovery = %d, want 1", peerCount)
+	}
+}
+
+func TestNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
+	t *testing.T,
+) {
+	const (
+		configuredAddress = "relay.invalid:3001"
+		dialAddress       = "44.0.0.12:3001"
+	)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	stalePeer := &Peer{
+		Address:           configuredAddress,
+		NormalizedAddress: dialAddress,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	// Model removal while CreateOutboundConn is still completing its handshake.
+	pg.mu.Lock()
+	pg.peers = nil
+	pg.mu.Unlock()
+
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 1}} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}}",
+	}
+	if !pg.denyNetworkMagicMismatch(stalePeer, dialAddress, err) {
+		t.Fatal("different-network refusal was not handled as permanent")
+	}
+
+	pg.mu.Lock()
+	_, configuredDenied := pg.networkMismatchDenyList[configuredAddress]
+	_, normalizedDenied := pg.networkMismatchDenyList[dialAddress]
+	pg.mu.Unlock()
+	if !configuredDenied || !normalizedDenied {
+		t.Fatalf(
+			"stale refusal keys: configured=%v normalized=%v, want both true",
+			configuredDenied,
+			normalizedDenied,
+		)
+	}
+	if pg.addLedgerPeer(dialAddress) {
+		t.Fatal("ledger discovery re-added peer removed during its handshake")
+	}
+}
+
+func TestSameMagicVersionDataMismatchRemainsTransient(t *testing.T) {
+	const address = "44.0.0.11:3001"
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	peer := &Peer{
+		Address:           address,
+		NormalizedAddress: address,
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+	err := &handshake.RefusedError{
+		Version: 13,
+		Message: "version data mismatch: " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}, peerSharing = PeerSharingDisabled} /= " +
+			"NodeToNodeVersionData {networkMagic = NetworkMagic " +
+			"{unNetworkMagic = 2}, peerSharing = PeerSharingEnabled}",
+	}
+	if pg.denyNetworkMagicMismatch(peer, address, err) {
+		t.Fatal("same-magic negotiation mismatch was treated as permanent")
+	}
+	pg.mu.Lock()
+	_, permanentlyDenied := pg.networkMismatchDenyList[address]
+	peerCount := len(pg.peers)
+	pg.mu.Unlock()
+	if permanentlyDenied {
+		t.Fatal("same-magic mismatch populated network-mismatch deny list")
+	}
+	if peerCount != 1 {
+		t.Fatalf("same-magic mismatch removed peer, count = %d", peerCount)
 	}
 }
 
@@ -278,7 +727,8 @@ func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
 			Id:       connId,
 			IsClient: true,
 		},
-		ConnectedAt:    time.Now().Add(-minStableConnectionDuration - time.Second),
+		ConnectedAt: time.Now().
+			Add(-minStableConnectionDuration - time.Second),
 		ReconnectCount: 5,
 		ReconnectDelay: 8 * time.Second,
 		// Suppress reconnect goroutine; this test only checks close accounting.
@@ -317,7 +767,9 @@ func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
 	}
 }
 
-func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(t *testing.T) {
+func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(
+	t *testing.T,
+) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -358,7 +810,9 @@ func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(t *testing
 	}
 }
 
-func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(t *testing.T) {
+func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(
+	t *testing.T,
+) {
 	var logBuf bytes.Buffer
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
@@ -409,7 +863,9 @@ func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(t *te
 	}
 }
 
-func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesValency(t *testing.T) {
+func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesValency(
+	t *testing.T,
+) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -438,13 +894,15 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 
 	done := make(chan struct{})
 	go func() {
-		pg.createOutboundConnection(topologyPeer)
+		pg.createOutboundConnection(topologyPeer, false)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("createOutboundConnection should return when inbound valency is satisfied")
+		t.Fatal(
+			"createOutboundConnection should return when inbound valency is satisfied",
+		)
 	}
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
@@ -452,7 +910,10 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 		t.Fatal("reconnecting flag should be cleared after early suppression")
 	}
 	if topologyPeer.ReconnectCount != 0 {
-		t.Fatalf("reconnect count changed unexpectedly: %d", topologyPeer.ReconnectCount)
+		t.Fatalf(
+			"reconnect count changed unexpectedly: %d",
+			topologyPeer.ReconnectCount,
+		)
 	}
 }
 
@@ -473,18 +934,162 @@ func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
 	pg.stopCh = nil
 	pg.mu.Unlock()
 
-	pg.createOutboundConnection(peer)
+	pg.createOutboundConnection(peer, false)
 
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
 	if peer.Reconnecting {
-		t.Fatal("reconnecting flag should remain clear when governor is stopped")
+		t.Fatal(
+			"reconnecting flag should remain clear when governor is stopped",
+		)
 	}
 	if peer.ReconnectCount != 0 {
-		t.Fatalf("reconnect count changed unexpectedly: %d", peer.ReconnectCount)
+		t.Fatalf(
+			"reconnect count changed unexpectedly: %d",
+			peer.ReconnectCount,
+		)
 	}
 	if peer.ReconnectDelay != time.Nanosecond {
-		t.Fatalf("reconnect delay changed unexpectedly: %s", peer.ReconnectDelay)
+		t.Fatalf(
+			"reconnect delay changed unexpectedly: %s",
+			peer.ReconnectDelay,
+		)
+	}
+}
+
+// TestSpawnOutboundConnectionLockedReservesBeforeScheduling verifies duplicate
+// close events cannot schedule parallel reconnect workers for the same peer.
+func TestSpawnOutboundConnectionLockedReservesBeforeScheduling(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	peer := &Peer{
+		Address:           "127.0.0.1:1",
+		NormalizedAddress: "127.0.0.1:1",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+	}
+	stopCh := make(chan struct{})
+	close(stopCh)
+
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.stopCh = stopCh
+	pg.spawnOutboundConnectionLocked(peer)
+	if !peer.Reconnecting {
+		pg.mu.Unlock()
+		t.Fatal("first spawn should reserve the peer before scheduling")
+	}
+	pg.spawnOutboundConnectionLocked(peer)
+	pg.mu.Unlock()
+
+	pg.wg.Wait()
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if peer.Reconnecting {
+		t.Fatal("reconnect reservation should clear when the worker exits")
+	}
+}
+
+// TestStop_WaitsForInFlightOutboundDial reproduces a dial launched via
+// startOutboundConnections (the same path Start uses) that is still in
+// flight when Stop is called, and asserts Stop's p.wg.Wait() actually
+// blocks until that dial goroutine exits rather than returning while it is
+// still running.
+//
+// This matters beyond a clean shutdown: the live database restore/truncate
+// quiesce path (node_lifecycle.go's quiesceForLiveLifecycleOp) calls
+// PeerGovernor.Stop(context.Background()) expecting every background goroutine -- including
+// in-flight outbound dials -- to have exited before it tears down and
+// replaces the node's ConnectionManager. A dial goroutine not tracked by
+// p.wg could finish its handshake after Stop returns and attach to (or
+// publish events against) a connection manager that no longer belongs to
+// this PeerGovernor incarnation.
+//
+// The fake TCP server below accepts the dial's TCP connection but never
+// writes a handshake response, so createOutboundConnection blocks inside
+// ouroboros.NewConnection's handshake -- a real "dial in flight" state --
+// until the test closes the server-side socket.
+func TestStop_WaitsForInFlightOutboundDial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start fake server: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+
+	connMgr := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			// A valid network magic is required for the client to proceed
+			// past local validation into the actual on-wire handshake, which
+			// is what leaves the dial blocked (in flight) against a fake
+			// server that never answers.
+			OutboundConnOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(764824073),
+			},
+		},
+	)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ConnManager: connMgr,
+	})
+	peer := &Peer{
+		Address:           ln.Addr().String(),
+		NormalizedAddress: ln.Addr().String(),
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.stopCh = make(chan struct{})
+	pg.ctx = context.Background()
+	pg.mu.Unlock()
+
+	// Launch the outbound dial exactly as Start does.
+	pg.startOutboundConnections()
+
+	// Wait for the dial to reach the fake server. At that point the
+	// tracked goroutine is blocked inside the ouroboros handshake --
+	// genuinely "in flight" -- since the server never responds.
+	var serverConn net.Conn
+	select {
+	case serverConn = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outbound dial never reached the fake server")
+	}
+	defer serverConn.Close()
+
+	stopped := make(chan struct{})
+	go func() {
+		_ = pg.Stop(context.Background())
+		close(stopped)
+	}()
+
+	// Stop must not return while the dial goroutine is still blocked in
+	// the handshake.
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an outbound dial was still in flight")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Unblock the in-flight dial: closing the server side fails the
+	// handshake, and createOutboundConnection's loop observes the
+	// already-closed stopCh and returns.
+	serverConn.Close()
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight dial finished")
 	}
 }
 
@@ -520,8 +1125,17 @@ func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsume
 		// Suppress reconnect goroutine; this test only checks close accounting.
 		Reconnecting: true,
 	}
+	// The short-lived backoff escalates only while the hot pool is healthy; the
+	// issue #2765 cap engages when hot peers <= criticalHotPeerThreshold. Add
+	// hot fillers so this test exercises the escalation path rather than the
+	// critically-low cap (which has its own test below).
 	pg.mu.Lock()
-	pg.peers = []*Peer{peer}
+	pg.peers = []*Peer{
+		peer,
+		{Address: "10.0.0.1:3001", State: PeerStateHot},
+		{Address: "10.0.0.2:3001", State: PeerStateHot},
+		{Address: "10.0.0.3:3001", State: PeerStateHot},
+	}
 	pg.mu.Unlock()
 
 	wantDelays := []time.Duration{
@@ -565,5 +1179,216 @@ func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsume
 				i+1, got, want,
 			)
 		}
+	}
+}
+
+// TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff verifies the
+// issue #2765 fix: when the hot pool is at or below criticalHotPeerThreshold,
+// the short-lived reconnect backoff is capped at emergencyReconnectDelay rather
+// than escalating toward maxReconnectDelay, so the node keeps reconnecting to
+// its known peers instead of collapsing to a single stalled upstream on a
+// network of few, flaky relays.
+func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.101:3003",
+		NormalizedAddress: "192.168.12.101:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		// Suppress reconnect goroutine; this test only checks close accounting.
+		Reconnecting: true,
+	}
+	// No hot peers: the pool is critically low, so the cap must engage.
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	// Unbounded escalation would reach 1,2,4,8,16,32s; the cap holds the delay
+	// at emergencyReconnectDelay once it would exceed that, and never above it.
+	for i := range 6 {
+		pg.mu.Lock()
+		peer.ReconnectDelay = 0
+		peer.Connection = &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		}
+		peer.State = PeerStateWarm
+		peer.ConnectedAt = time.Now().Add(-600 * time.Millisecond)
+		pg.mu.Unlock()
+
+		pg.handleConnectionClosedEvent(event.NewEvent(
+			connmanager.ConnectionClosedEventType,
+			connmanager.ConnectionClosedEvent{
+				ConnectionId: connId,
+			},
+		))
+
+		pg.mu.Lock()
+		got := peer.ReconnectDelay
+		pg.mu.Unlock()
+		if got > emergencyReconnectDelay {
+			t.Fatalf(
+				"close %d: ReconnectDelay = %s, want <= %s (critically-low cap)",
+				i+1,
+				got,
+				emergencyReconnectDelay,
+			)
+		}
+	}
+	// After enough short-lived closes to exceed the cap, the delay must sit at
+	// the emergency cap, not the escalated value it would otherwise reach.
+	pg.mu.Lock()
+	got := peer.ReconnectDelay
+	pg.mu.Unlock()
+	if got != emergencyReconnectDelay {
+		t.Fatalf(
+			"final ReconnectDelay = %s, want %s (emergency cap)",
+			got, emergencyReconnectDelay,
+		)
+	}
+}
+
+// The peergov logger already carries component=peergov, so a call site that
+// passes the attribute again emits it twice in every record. See issue #3262.
+func TestHandleConnectionClosedEvent_CriticalHotPeerLogHasSingleComponent(
+	t *testing.T,
+) {
+	var logBuf bytes.Buffer
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.102:3003",
+		NormalizedAddress: "192.168.12.102:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		// Suppress reconnect goroutine; this test only checks the log record.
+		Reconnecting: true,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	// Repeated short-lived closes escalate the backoff past
+	// emergencyReconnectDelay, which is what engages the critically-low cap
+	// and emits the log line under test.
+	for range 6 {
+		pg.mu.Lock()
+		peer.ReconnectDelay = 0
+		peer.Connection = &PeerConnection{Id: connId, IsClient: true}
+		peer.State = PeerStateWarm
+		peer.ConnectedAt = time.Now().Add(-600 * time.Millisecond)
+		pg.mu.Unlock()
+
+		pg.handleConnectionClosedEvent(event.NewEvent(
+			connmanager.ConnectionClosedEventType,
+			connmanager.ConnectionClosedEvent{ConnectionId: connId},
+		))
+	}
+
+	var found string
+	for line := range strings.SplitSeq(logBuf.String(), "\n") {
+		if strings.Contains(line, "hot peer pool critically low") {
+			found = line
+			break
+		}
+	}
+	if found == "" {
+		t.Fatal("expected the critically-low backoff cap log line")
+	}
+	if got := strings.Count(found, `"component"`); got != 1 {
+		t.Fatalf(
+			"component attribute appears %d times, want 1: %s",
+			got,
+			found,
+		)
+	}
+}
+
+// TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer
+// covers a race between reconcile's isStaleTestOnlyPeerLocked (which prunes a
+// stale TestPeer-only probe entry) and a slow, outside-lock re-test still
+// running against that same address: TestPeer's completion re-finds its
+// target by address only, so if the probe entry is pruned and a real peer is
+// admitted at the same address while the test is in flight, the completion
+// must not silently overwrite that unrelated real peer's test result or deny
+// its address.
+func TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer(
+	t *testing.T,
+) {
+	const address = "44.0.0.30:3001"
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: time.Hour,
+		PeerTestFunc: func(addr string) error {
+			close(entered)
+			<-release
+			return errors.New("simulated failure")
+		},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = pg.TestPeer(address)
+	}()
+
+	// Wait until the outside-lock test has actually started: the probe
+	// entry now exists with LastTestTime still zero.
+	testutil.RequireReceive(t, entered, time.Second, "test did not start")
+
+	// Simulate reconcile pruning this now-stale probe concurrently with the
+	// in-flight test above, and a real peer being admitted at the same
+	// address in between (the same replacement scenario
+	// TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement exercises,
+	// but here concurrently with a still-running test against the old entry).
+	pg.mu.Lock()
+	for i, existing := range pg.peers {
+		if existing != nil && existing.Address == address {
+			pg.peers = append(pg.peers[:i], pg.peers[i+1:]...)
+			break
+		}
+	}
+	pg.mu.Unlock()
+	if err := pg.AddPeer(address, PeerSourceP2PGossip); err != nil {
+		t.Fatalf("AddPeer failed: %v", err)
+	}
+
+	// Let the stale in-flight test complete, with a failure result.
+	close(release)
+	testutil.RequireReceive(t, done, time.Second, "TestPeer did not return")
+
+	// The real, replacement peer must be untouched by the stale probe's
+	// result: no LastTestResult/LastTestTime mutation, and its address must
+	// not have been denied.
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	idx := pg.peerIndexByAddress(address)
+	if idx == -1 {
+		t.Fatal("replacement peer is missing after the stale test completed")
+	}
+	peer := pg.peers[idx]
+	if peer.Source != PeerSourceP2PGossip {
+		t.Fatalf("replacement peer source changed to %v", peer.Source)
+	}
+	if peer.LastTestResult != TestResultUnknown {
+		t.Fatalf(
+			"replacement peer's LastTestResult was mutated to %v",
+			peer.LastTestResult,
+		)
+	}
+	if !peer.LastTestTime.IsZero() {
+		t.Fatal("replacement peer's LastTestTime was mutated")
+	}
+	if pg.isDeniedLocked(address) {
+		t.Fatal(
+			"stale probe's failure incorrectly denied the replacement peer's address",
+		)
 	}
 }

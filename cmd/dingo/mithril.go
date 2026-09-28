@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -66,22 +67,31 @@ func resolveAggregatorURL(
 	return url, nil
 }
 
-// resolveMithrilBackend normalizes the configured Mithril artifact
-// backend, applying the node default (v2) when unset.
-func resolveMithrilBackend(backend string) (string, error) {
-	switch backend {
-	case "":
-		return mithril.BackendV2, nil
-	case mithril.BackendV1, mithril.BackendV2:
-		return backend, nil
-	default:
-		return "", fmt.Errorf(
-			"unsupported Mithril backend %q (expected %q or %q)",
-			backend,
-			mithril.BackendV1,
-			mithril.BackendV2,
-		)
+// mithrilClientOptions builds the mithril.ClientOption set implied by
+// config, currently just the insecure-HTTP escape hatch.
+func mithrilClientOptions(cfg *config.Config) []mithril.ClientOption {
+	if cfg.Mithril.AllowInsecureHTTP {
+		return []mithril.ClientOption{mithril.WithAllowInsecureHTTP()}
 	}
+	return nil
+}
+
+// resolveMithrilBackend normalizes the configured Mithril artifact
+// backend, applying the node default (v2) when unset. The accepted set
+// comes from mithril.AcceptedBackends so a backend added there is
+// recognized here without a manual update.
+func resolveMithrilBackend(backend string) (string, error) {
+	if backend == "" {
+		return mithril.BackendV2, nil
+	}
+	if slices.Contains(mithril.AcceptedBackends(), backend) {
+		return backend, nil
+	}
+	return "", fmt.Errorf(
+		"unsupported Mithril backend %q (expected one of %q)",
+		backend,
+		mithril.AcceptedBackends(),
+	)
 }
 
 func mithrilListCommand() *cobra.Command {
@@ -113,7 +123,9 @@ func mithrilListCommand() *cobra.Command {
 				return err
 			}
 
-			client := mithril.NewClient(aggregatorURL)
+			client := mithril.NewClient(
+				aggregatorURL, mithrilClientOptions(cfg)...,
+			)
 			if backend == mithril.BackendV2 {
 				return runMithrilListV2(cmd.Context(), client)
 			}
@@ -234,7 +246,9 @@ func mithrilShowCommand() *cobra.Command {
 				return err
 			}
 
-			client := mithril.NewClient(aggregatorURL)
+			client := mithril.NewClient(
+				aggregatorURL, mithrilClientOptions(cfg)...,
+			)
 			if backend == mithril.BackendV2 {
 				return runMithrilShowV2(
 					cmd.Context(), client, args[0],
@@ -258,7 +272,10 @@ func mithrilShowCommand() *cobra.Command {
 				"Immutable File Number: %d\n",
 				snapshot.Beacon.ImmutableFileNumber,
 			)
-			fmt.Printf("Size:                  %s\n", mithril.HumanBytes(snapshot.Size))
+			fmt.Printf(
+				"Size:                  %s\n",
+				mithril.HumanBytes(snapshot.Size),
+			)
 			fmt.Printf(
 				"Certificate Hash:      %s\n",
 				snapshot.CertificateHash,
@@ -358,19 +375,87 @@ func mithrilSyncRunE(
 	if cfg == nil {
 		return errors.New("no config found in context")
 	}
-	logger := commonRun(cfg)
+	// CIP-0163: a Mithril bootstrap cannot carry reward-account expiration
+	// state (see errMithrilInactivityIncompatible), so refuse before touching
+	// the network or the database.
+	if cfg.DelegatorInactivityEnabled {
+		return errMithrilInactivityIncompatible()
+	}
+	logger, err := commonRun(cfg)
+	if err != nil {
+		return err
+	}
 	network := cfg.Network
 	if network == "" {
 		network = "preview"
 	}
-	return runMithrilSync(cmd.Context(), cfg, logger, network)
+	// Bind the probe here, in the command, so the socket production serves
+	// on is the one the tests hand over too. A bind failure is not fatal to
+	// a bootstrap: it loses the probe, not the snapshot.
+	healthProbe, healthErr := bindHealthProbe(cfg)
+	if healthErr != nil {
+		logger.Warn(
+			"failed to start health probe server; continuing",
+			"component", "mithril",
+			"port", cfg.HealthPort,
+			"error", healthErr,
+		)
+	}
+	return runMithrilSync(cmd.Context(), cfg, logger, network, healthProbe)
 }
 
+// errMithrilInactivityIncompatible reports why Mithril bootstrap and the
+// CIP-0163 delegator-inactivity gate cannot be combined on the same node.
+// Account.ExpirationEpoch is dingo-only ledger state with no representation in
+// the cardano-ledger Mithril snapshot dingo imports, and it cannot be
+// reconstructed from post-import witness history (a long-inactive account --
+// exactly what CIP-0163 targets -- may have last witnessed before the import
+// point). A Mithril-bootstrapped node would therefore compute different
+// expiry-dependent stake, rewards, and governance than a genesis-synced node.
+func errMithrilInactivityIncompatible() error {
+	return errors.New(
+		"cannot use Mithril bootstrap when delegatorInactivityEnabled " +
+			"(CIP-0163) is set: reward-account expiration state is absent from " +
+			"the cardano-ledger Mithril snapshot and cannot be reconstructed " +
+			"after import, so a Mithril-bootstrapped node would diverge from a " +
+			"genesis-synced one; sync from genesis instead",
+	)
+}
+
+// runMithrilSync bootstraps from a Mithril snapshot, serving the metrics,
+// health and pprof listeners for as long as it runs.
+//
+// healthProbe carries the already-bound health socket from the caller; nil
+// means the operator disabled the probe or its port could not be bound, and
+// the bootstrap runs without it.
 func runMithrilSync(
 	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 	network string,
+	healthProbe *boundHealthProbe,
+) (err error) {
+	return runMithrilSyncWithRepair(
+		ctx, cfg, logger, network, healthProbe, false,
+	)
+}
+
+func runMithrilSyncForRewardRepair(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	network string,
+) error {
+	return runMithrilSyncWithRepair(ctx, cfg, logger, network, nil, true)
+}
+
+func runMithrilSyncWithRepair(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	network string,
+	healthProbe *boundHealthProbe,
+	repairRewardState bool,
 ) (err error) {
 	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
 	metricsServer, err := startPrometheusMetricsServerWithHandler(
@@ -421,10 +506,38 @@ func runMithrilSync(
 			}
 		}()
 	}
+	healthServer := serveHealthProbe(logger, "mithril", healthProbe)
+	defer func() {
+		if healthServer == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if shutdownErr := healthServer.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Warn(
+				"failed to stop health probe server",
+				"component", "mithril",
+				"error", shutdownErr,
+			)
+		}
+	}()
+	if healthServer != nil {
+		go func() {
+			if serverErr := <-healthServer.Err(); serverErr != nil {
+				logger.Error(
+					"health probe server stopped",
+					"component", "mithril",
+					"error", serverErr,
+				)
+			}
+		}()
+	}
 	debugServer, debugErr := startDebugPprofServer(
 		logger,
-		cfg.BindAddr,
-		cfg.DebugPort,
+		cfg,
 		"mithril",
 	)
 	if debugErr != nil {
@@ -509,7 +622,8 @@ func runMithrilSync(
 		case mithril.PhaseIndexRebuild:
 			// SyncProgress carries the rebuild duration as Description = d.String(),
 			// which is guaranteed round-trippable by time.ParseDuration.
-			if d, err := time.ParseDuration(p.Description); err == nil && d > 0 {
+			if d, err := time.ParseDuration(p.Description); err == nil &&
+				d > 0 {
 				metrics.recordIndexRebuildDuration(d)
 			}
 		case mithril.PhasePostLedger:
@@ -524,24 +638,30 @@ func runMithrilSync(
 	}
 
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
-		Network:                network,
-		DataDir:                cfg.DatabasePath,
-		StorageMode:            cfg.StorageMode,
-		CardanoConfigPath:      cfg.CardanoConfig,
-		Backend:                backend,
-		AggregatorURL:          cfg.Mithril.AggregatorURL,
-		DownloadDir:            cfg.Mithril.DownloadDir,
-		DownloadIdleTimeout:    cfg.Mithril.DownloadIdleTimeout,
-		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
-		VerifyCertChain:        cfg.Mithril.VerifyCertificates,
-		CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
-		BlobPlugin:             cfg.BlobPlugin,
-		MetadataPlugin:         cfg.MetadataPlugin,
-		RunMode:                string(cfg.RunMode),
-		BackfillBatchSize:      cfg.BackfillBatchSize,
-		DatabaseWorkers:        cfg.DatabaseWorkers,
-		Logger:                 logger,
-		OnProgress:             onProgress,
+		Network:                 network,
+		DataDir:                 cfg.DatabasePath,
+		StorageMode:             cfg.StorageMode,
+		CardanoConfigPath:       cfg.CardanoConfig,
+		Backend:                 backend,
+		AggregatorURL:           cfg.Mithril.AggregatorURL,
+		AllowInsecureHTTP:       cfg.Mithril.AllowInsecureHTTP,
+		DownloadDir:             cfg.Mithril.DownloadDir,
+		PinnedDigest:            cfg.Mithril.PinnedDigest,
+		DownloadIdleTimeout:     cfg.Mithril.DownloadIdleTimeout,
+		DownloadMaxIdleRetries:  cfg.Mithril.DownloadMaxIdleRetries,
+		VerifyCertChain:         cfg.Mithril.VerifyCertificates,
+		CleanupAfterLoad:        cfg.Mithril.CleanupAfterLoad,
+		RepairLegacyRewardState: repairRewardState,
+		StoragePlugins: mithril.StoragePlugins{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		RunMode:           string(config.RunModeLoad),
+		BackfillBatchSize: cfg.BackfillBatchSize,
+		DatabaseWorkers:   cfg.DatabaseWorkers,
+		Tracing:           cfg.Tracing,
+		Logger:            logger,
+		OnProgress:        onProgress,
 	})
 	if err != nil {
 		return err

@@ -1,0 +1,126 @@
+{
+  "name": "amaru-single-pool-reward-vector",
+  "source": {
+    "implementation": "PRAGMA Amaru",
+    "repository": "https://github.com/pragma-org/amaru",
+    "commit": "18b79961df0abbb83231850457242ebf6d3d5364",
+    "path": "crates/amaru-ledger/src/summary/rewards.rs",
+    "functions": [
+      "RewardsSummary::new",
+      "PoolState::optimal_rewards",
+      "PoolState::pool_rewards",
+      "PoolState::leader_rewards",
+      "PoolState::member_rewards"
+    ]
+  },
+  "parameters": {
+    "monetary_expansion": "1/100",
+    "treasury_expansion": "1/5",
+    "decentralization": "0/1",
+    "pledge_influence": "1/2",
+    "active_slots_coeff": "1/10",
+    "optimal_pool_count": 10,
+    "epoch_length": 100,
+    "max_lovelace_supply": 100010000,
+    "protocol_major_version": 9
+  },
+  "pots": {
+    "reserves": 100000000,
+    "treasury": 10,
+    "fees": 2000
+  },
+  "snapshot": {
+    "total_active_stake": 1000,
+    "pools": [
+      {
+        "id": "01010101010101010101010101010101010101010101010101010101",
+        "reward_account": {
+          "tag": 0,
+          "hash": "02020202020202020202020202020202020202020202020202020202"
+        },
+        "margin": "1/10",
+        "pledge": 500,
+        "cost": 1000,
+        "delegated_stake": 1000,
+        "owner_stake": 500,
+        "blocks_produced": 10,
+        "total_blocks": 10,
+        "reward_account_registered": true,
+        "reward_account_eligible": true,
+        "owners": [
+          {
+            "tag": 0,
+            "hash": "02020202020202020202020202020202020202020202020202020202"
+          }
+        ],
+        "delegators": [
+          {
+            "credential": {
+              "tag": 0,
+              "hash": "02020202020202020202020202020202020202020202020202020202"
+            },
+            "stake": 500,
+            "registered": true,
+            "eligible": true
+          },
+          {
+            "credential": {
+              "tag": 0,
+              "hash": "03030303030303030303030303030303030303030303030303030303"
+            },
+            "stake": 500,
+            "registered": true,
+            "eligible": true
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "incentives": 1000000,
+    "total_reward_pot": 1002000,
+    "treasury_tax": 200400,
+    "available_rewards": 801600,
+    "effective_rewards": 66800,
+    "undistributed": 734800,
+    "updated_pots": {
+      "reserves": 99734800,
+      "treasury": 200410,
+      "fees": 0
+    },
+    "pool_rewards": [
+      {
+        "pool_id": "01010101010101010101010101010101010101010101010101010101",
+        "optimal_reward": 66800,
+        "pool_reward": 66800,
+        "leader_reward": 37190,
+        "member_reward_total": 29610,
+        "owner_stake": 500,
+        "undistributed": 0,
+        "unspendable": 0
+      }
+    ],
+    "account_rewards": [
+      {
+        "credential": {
+          "tag": 0,
+          "hash": "02020202020202020202020202020202020202020202020202020202"
+        },
+        "pool_id": "01010101010101010101010101010101010101010101010101010101",
+        "type": "leader",
+        "amount": 37190,
+        "spendable": true
+      },
+      {
+        "credential": {
+          "tag": 0,
+          "hash": "03030303030303030303030303030303030303030303030303030303"
+        },
+        "pool_id": "01010101010101010101010101010101010101010101010101010101",
+        "type": "member",
+        "amount": 29610,
+        "spendable": true
+      }
+    ]
+  }
+}

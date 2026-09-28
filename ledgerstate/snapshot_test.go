@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lbabbage "github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -32,6 +33,8 @@ import (
 )
 
 func TestFindLedgerStateFileLegacy(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -48,6 +51,8 @@ func TestFindLedgerStateFileLegacy(t *testing.T) {
 }
 
 func TestFindLedgerStateFileUTxOHD(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "67890")
 	err := os.MkdirAll(slotDir, 0o750)
@@ -63,6 +68,8 @@ func TestFindLedgerStateFileUTxOHD(t *testing.T) {
 }
 
 func TestFindLedgerStateFilePreferUTxOHD(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -88,6 +95,8 @@ func TestFindLedgerStateFilePreferUTxOHD(t *testing.T) {
 }
 
 func TestFindLedgerStateFileDBSubdir(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "db", "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -103,6 +112,8 @@ func TestFindLedgerStateFileDBSubdir(t *testing.T) {
 }
 
 func TestFindLedgerStateFileUTxOHDHighestSlot(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	// Create two UTxO-HD slot subdirectories with state files
@@ -124,13 +135,63 @@ func TestFindLedgerStateFileUTxOHDHighestSlot(t *testing.T) {
 	require.Equal(t, expectedPath, found)
 }
 
+func TestFindLedgerStateFileAtOrBefore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	for _, slot := range []string{"100", "200", "300"} {
+		slotDir := filepath.Join(dir, "ledger", slot)
+		require.NoError(t, os.MkdirAll(slotDir, 0o750))
+		require.NoError(
+			t,
+			os.WriteFile(
+				filepath.Join(slotDir, "state"),
+				[]byte("data"),
+				0o640,
+			),
+		)
+	}
+
+	found, err := FindLedgerStateFileAtOrBefore(dir, 250)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		filepath.Join(dir, "ledger", "200", "state"),
+		found,
+	)
+}
+
+func TestFindLedgerStateFileAtOrBeforeRejectsVolatileOnlyState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	slotDir := filepath.Join(dir, "ledger", "300")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(slotDir, "state"),
+			[]byte("data"),
+			0o640,
+		),
+	)
+
+	_, err := FindLedgerStateFileAtOrBefore(dir, 250)
+	require.ErrorContains(t, err, "at or before slot 250")
+}
+
 func TestFindLedgerStateFileNotFound(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	_, err := FindLedgerStateFile(dir)
 	require.ErrorIs(t, err, ErrLedgerDirNotFound)
 }
 
 func TestFindUTxOTableFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	tablesDir := filepath.Join(dir, "ledger", "99999", "tables")
 	err := os.MkdirAll(tablesDir, 0o750)
@@ -144,7 +205,29 @@ func TestFindUTxOTableFile(t *testing.T) {
 	require.Equal(t, tvarPath, found)
 }
 
+func TestFindUTxOTableFileForState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	slotDir := filepath.Join(dir, "ledger", "99999")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	statePath := filepath.Join(slotDir, "state")
+	require.NoError(t, os.WriteFile(statePath, []byte("state"), 0o640))
+	tablesPath := filepath.Join(slotDir, "tables")
+	require.NoError(t, os.WriteFile(tablesPath, []byte("table"), 0o640))
+
+	require.Equal(t, tablesPath, FindUTxOTableFileForState(statePath))
+	require.Empty(
+		t,
+		FindUTxOTableFileForState(
+			filepath.Join(dir, "ledger", "99999.lstate"),
+		),
+	)
+}
+
 func TestFindUTxOTableFileCurrentTablesFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "99999")
 	err := os.MkdirAll(slotDir, 0o750)
@@ -159,6 +242,8 @@ func TestFindUTxOTableFileCurrentTablesFile(t *testing.T) {
 }
 
 func TestFindUTxOTableFileNotFound(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
 	err := os.MkdirAll(ledgerDir, 0o750)
@@ -169,6 +254,8 @@ func TestFindUTxOTableFileNotFound(t *testing.T) {
 }
 
 func TestIsLedgerStateFile(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		filename string
@@ -194,6 +281,8 @@ func TestIsLedgerStateFile(t *testing.T) {
 }
 
 func TestEraName(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, "Byron", EraName(EraByron))
 	require.Equal(t, "Shelley", EraName(EraShelley))
 	require.Equal(t, "Allegra", EraName(EraAllegra))
@@ -205,6 +294,8 @@ func TestEraName(t *testing.T) {
 }
 
 func TestParseSnapShotsAcceptsTwoElementSnapshots(t *testing.T) {
+	t.Parallel()
+
 	emptyMap, err := cbor.Encode(map[uint64]uint64{})
 	require.NoError(t, err)
 
@@ -230,6 +321,8 @@ func TestParseSnapShotsAcceptsTwoElementSnapshots(t *testing.T) {
 }
 
 func TestParseSnapShotsAcceptsUTxOHDStakeWithPool(t *testing.T) {
+	t.Parallel()
+
 	credHash := toFixed28([]byte("credential hash for snapshot"))
 	poolHash := toFixed28([]byte("pool hash for snapshot"))
 	stakeMap := encodeCredentialMapEntry(
@@ -267,6 +360,8 @@ func TestParseSnapShotsAcceptsUTxOHDStakeWithPool(t *testing.T) {
 }
 
 func TestParsePoolParamsMapAcceptsPoolDistrEntry(t *testing.T) {
+	t.Parallel()
+
 	poolHash := toFixed28([]byte("pool hash for distribution"))
 	vrfHash := [32]byte{}
 	copy(vrfHash[:], []byte("vrf hash for distribution entry"))
@@ -297,7 +392,332 @@ func TestParsePoolParamsMapAcceptsPoolDistrEntry(t *testing.T) {
 	require.Equal(t, vrfHash[:], pool.VrfKeyHash)
 }
 
+func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("w32 snapshot pool key hash"))
+	credentialHash := toFixed28([]byte("w32 snapshot credential"))
+	rewardHash := toFixed28([]byte("w32 snapshot reward account"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("w32 snapshot vrf key hash"))
+	publicKey := make([]byte, 96)
+	copy(publicKey, []byte("w32 snapshot Leios public key"))
+	possessionProof := make([]byte, 48)
+	copy(possessionProof, []byte("w32 snapshot Leios possession proof"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			uint64(42),
+			&cbor.Rat{Rat: big.NewRat(1, 1)},
+			[]any{},
+			uint64(0),
+			vrfHash[:],
+			[]any{[]any{publicKey, possessionProof}, uint64(7)},
+			uint64(1),
+			uint64(2),
+			&cbor.Rat{Rat: big.NewRat(1, 100)},
+			uint64(1),
+			[]any{uint64(0), rewardHash[:]},
+		},
+	)
+	pools, err := parsePoolParamsMap(poolMap)
+	require.NoError(t, err)
+	pool := pools[hex.EncodeToString(poolHash[:])]
+	require.NotNil(t, pool)
+	require.Equal(t, publicKey, pool.LeiosKeyPublic)
+	require.Equal(t, possessionProof, pool.LeiosKeyPossessionProof)
+	require.NotNil(t, pool.LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *pool.LeiosKeyRegistrationEpoch)
+
+	credentialHex := hex.EncodeToString(credentialHash[:])
+	rows := AggregatePoolStake(&ParsedSnapShot{
+		Stake:       map[string]uint64{credentialHex: 42},
+		Delegations: map[string][]byte{credentialHex: poolHash[:]},
+		PoolParams:  pools,
+	}, 9, "mark", 99)
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *rows[0].LeiosKeyRegistrationEpoch)
+	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
+	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
+
+	// The row owns its bytes independently of the decoded pool parameters.
+	pool.LeiosKeyPublic[0] ^= 0xff
+	pool.LeiosKeyPossessionProof[0] ^= 0xff
+	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
+	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
+}
+
+// TestAggregatePoolStakeKeepsZeroStakePool is the blinklabs-io/dingo#4152
+// regression: a pool whose only delegator has zero stake at snapshot time
+// (registered and delegated, but with no lovelace behind the credential --
+// e.g. its UTxOs spent and no reward balance) must still get a
+// PoolStakeSnapshot row. A real cardano-node reports such a pool in
+// GetStakeDistribution with an explicit zero fraction rather than omitting
+// it (confirmed live against a real Preview cardano-node during #4152's
+// investigation), and dingo's own live snapshot-rotation path
+// (calculateLiveStakeDistributionInTxn) already does the same. Before the
+// fix, AggregatePoolStake silently dropped this pool's row entirely --
+// exactly the "pool present on a real node, completely absent from dingo's
+// answer" symptom #4152 reported for 36 real Preview pools after a Mithril
+// bootstrap.
+func TestAggregatePoolStakeKeepsZeroStakePool(t *testing.T) {
+	t.Parallel()
+
+	zeroStakePool := toFixed28([]byte("4152 zero stake pool"))
+	zeroStakeCred := toFixed28([]byte("4152 zero stake delegator"))
+
+	mixedPool := toFixed28([]byte("4152 mixed pool"))
+	mixedZeroCred := toFixed28([]byte("4152 mixed pool zero delegator"))
+	mixedPaidCred := toFixed28([]byte("4152 mixed pool paid delegator"))
+
+	zeroStakeCredHex := hex.EncodeToString(zeroStakeCred[:])
+	mixedZeroCredHex := hex.EncodeToString(mixedZeroCred[:])
+	mixedPaidCredHex := hex.EncodeToString(mixedPaidCred[:])
+
+	snap := &ParsedSnapShot{
+		// zeroStakeCredHex is deliberately absent from Stake entirely (as
+		// well as being reachable with an explicit 0 entry, exercised by
+		// mixedZeroCredHex below) -- both are ways a real snapshot can leave
+		// a delegated credential with nothing behind it.
+		Stake: map[string]uint64{
+			mixedZeroCredHex: 0,
+			mixedPaidCredHex: 42,
+		},
+		Delegations: map[string][]byte{
+			zeroStakeCredHex: zeroStakePool[:],
+			mixedZeroCredHex: mixedPool[:],
+			mixedPaidCredHex: mixedPool[:],
+		},
+	}
+
+	rows := AggregatePoolStake(snap, 9, "mark", 99)
+
+	byPool := make(map[string]*models.PoolStakeSnapshot, len(rows))
+	for _, row := range rows {
+		byPool[hex.EncodeToString(row.PoolKeyHash)] = row
+	}
+
+	zeroRow := byPool[hex.EncodeToString(zeroStakePool[:])]
+	require.NotNil(
+		t,
+		zeroRow,
+		"pool with a single zero-stake delegator must still get a row",
+	)
+	require.Equal(t, uint64(0), uint64(zeroRow.TotalStake))
+	require.Equal(t, uint64(1), zeroRow.DelegatorCount)
+
+	mixedRow := byPool[hex.EncodeToString(mixedPool[:])]
+	require.NotNil(t, mixedRow)
+	require.Equal(t, uint64(42), uint64(mixedRow.TotalStake))
+	require.Equal(
+		t,
+		uint64(2),
+		mixedRow.DelegatorCount,
+		"a zero-stake delegator must still be counted alongside a paid one",
+	)
+}
+
+func TestParseW32SnapshotPoolParamsRejectsMalformedLeiosKey(t *testing.T) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("malformed snapshot pool key"))
+	vrfHash := make([]byte, 32)
+	rewardHash := toFixed28([]byte("malformed snapshot reward"))
+	record, err := cbor.Encode([]any{
+		uint64(42),
+		&cbor.Rat{Rat: big.NewRat(1, 1)},
+		[]any{},
+		uint64(0),
+		vrfHash,
+		[]any{[]any{[]byte{0x01}, make([]byte, 48)}},
+		uint64(1),
+		uint64(2),
+		&cbor.Rat{Rat: big.NewRat(1, 100)},
+		uint64(1),
+		[]any{uint64(0), rewardHash[:]},
+	})
+	require.NoError(t, err)
+	fields, err := decodeRawArray(record)
+	require.NoError(t, err)
+	_, err = parseSnapshotPoolParams(poolHash[:], fields)
+	require.ErrorContains(t, err, "decoding Leios key")
+}
+
+func TestParseActivePoolDistribution(t *testing.T) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	data := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(3, 10)},
+			vrfHash[:],
+		},
+	)
+
+	pools, err := ParseActivePoolDistribution(data)
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, poolHash[:], pools[0].PoolKeyHash)
+	require.Equal(t, uint64(3), pools[0].StakeNumerator)
+	require.Equal(t, uint64(10), pools[0].StakeDenominator)
+	require.Equal(t, vrfHash[:], pools[0].VrfKeyHash)
+}
+
+func TestParseActivePoolDistributionContainer(t *testing.T) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(3, 10)},
+			uint64(3),
+			vrfHash[:],
+		},
+	)
+	totalStake, err := cbor.Encode(uint64(10))
+	require.NoError(t, err)
+	data := append([]byte{0x82}, poolMap...)
+	data = append(data, totalStake...)
+
+	pools, err := ParseActivePoolDistribution(data)
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, poolHash[:], pools[0].PoolKeyHash)
+	require.Equal(t, uint64(3), pools[0].StakeNumerator)
+	require.Equal(t, uint64(10), pools[0].StakeDenominator)
+	require.Equal(t, vrfHash[:], pools[0].VrfKeyHash)
+}
+
+func TestParseW32ActivePoolDistributionCarriesLeiosKey(t *testing.T) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("w32 active pool distribution"))
+	vrfHash := make([]byte, 32)
+	copy(vrfHash, []byte("w32 active vrf key hash"))
+	publicKey := make([]byte, 96)
+	copy(publicKey, []byte("w32 active Leios public key"))
+	possessionProof := make([]byte, 48)
+	copy(possessionProof, []byte("w32 active Leios proof"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(3, 10)},
+			uint64(3),
+			vrfHash,
+			[]any{[]any{publicKey, possessionProof}, uint64(7)},
+		},
+	)
+	totalStake, err := cbor.Encode(uint64(10))
+	require.NoError(t, err)
+	data := append([]byte{0x82}, poolMap...)
+	data = append(data, totalStake...)
+
+	pools, err := ParseActivePoolDistribution(data)
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, publicKey, pools[0].LeiosKeyPublic)
+	require.Equal(t, possessionProof, pools[0].LeiosKeyPossessionProof)
+	require.NotNil(t, pools[0].LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *pools[0].LeiosKeyRegistrationEpoch)
+	rows := ActivePoolDistributionSnapshots(pools, 12, 120)
+	require.Len(t, rows, 1)
+	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
+	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
+	require.NotNil(t, rows[0].LeiosKeyRegistrationEpoch)
+	require.Equal(t, uint64(7), *rows[0].LeiosKeyRegistrationEpoch)
+}
+
+func TestParseActivePoolDistributionContainerRejectsStakeMismatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(3, 10)},
+			uint64(4),
+			vrfHash[:],
+		},
+	)
+	totalStake, err := cbor.Encode(uint64(10))
+	require.NoError(t, err)
+	data := append([]byte{0x82}, poolMap...)
+	data = append(data, totalStake...)
+
+	_, err = ParseActivePoolDistribution(data)
+	require.ErrorContains(t, err, "does not match active stake")
+}
+
+func TestParseActivePoolDistributionContainerAllowsZeroStake(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(0, 1)},
+			uint64(0),
+			vrfHash[:],
+		},
+	)
+	totalStake, err := cbor.Encode(uint64(10))
+	require.NoError(t, err)
+	data := append([]byte{0x82}, poolMap...)
+	data = append(data, totalStake...)
+
+	pools, err := ParseActivePoolDistribution(data)
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, uint64(0), pools[0].StakeNumerator)
+	require.Equal(t, uint64(10), pools[0].StakeDenominator)
+}
+
+func TestParseActivePoolDistributionRejectsMalformedEntry(t *testing.T) {
+	t.Parallel()
+
+	poolHash := toFixed28([]byte("active pool distribution"))
+	data := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{uint64(1)},
+	)
+
+	_, err := ParseActivePoolDistribution(data)
+	require.ErrorContains(t, err, "expected 2, 3, or 4")
+}
+
 func TestVerifySnapshotDigest(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("test snapshot content for hashing")
 	h := sha256.Sum256(content)
 	expectedDigest := hex.EncodeToString(h[:])
@@ -312,6 +732,8 @@ func TestVerifySnapshotDigest(t *testing.T) {
 }
 
 func TestVerifySnapshotDigestMismatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("test snapshot content")
 
 	tmpDir := t.TempDir()
@@ -328,6 +750,8 @@ func TestVerifySnapshotDigestMismatch(t *testing.T) {
 }
 
 func TestVerifyChecksumFileNoChecksum(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -339,6 +763,8 @@ func TestVerifyChecksumFileNoChecksum(t *testing.T) {
 }
 
 func TestVerifyChecksumFileEmptyChecksum(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -354,6 +780,8 @@ func TestVerifyChecksumFileEmptyChecksum(t *testing.T) {
 }
 
 func TestVerifyChecksumFileMismatch(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -372,26 +800,39 @@ func TestVerifyChecksumFileMismatch(t *testing.T) {
 }
 
 func TestExtractPParamsDataBabbageGovState(t *testing.T) {
+	t.Parallel()
+
 	pparams := testBabbagePParams()
 	pparamsData, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	previous := *pparams
+	previous.MinFeeA++
+	previousData, err := cbor.Encode(&previous)
 	require.NoError(t, err)
 
 	govStateData, err := cbor.Encode([]any{
 		uint64(1),
 		uint64(2),
 		cbor.RawMessage(pparamsData),
-		uint64(4),
+		cbor.RawMessage(previousData),
 	})
 	require.NoError(t, err)
 
-	got, err := extractPParamsData(EraBabbage, govStateData)
+	got, gotPrevious, err := extractPParamsData(EraBabbage, govStateData)
 	require.NoError(t, err)
 	require.Equal(t, pparamsData, []byte(got))
+	require.Equal(t, previousData, []byte(gotPrevious))
 }
 
 func TestExtractPParamsDataConwayGovStateMap(t *testing.T) {
+	t.Parallel()
+
 	pparams := testConwayPParams()
 	pparamsData, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	previous := *pparams
+	previous.MinFeeA++
+	previousData, err := cbor.Encode(&previous)
 	require.NoError(t, err)
 
 	govStateData, err := cbor.Encode(map[uint64]any{
@@ -399,16 +840,19 @@ func TestExtractPParamsDataConwayGovStateMap(t *testing.T) {
 		1: uint64(2),
 		2: uint64(3),
 		3: cbor.RawMessage(pparamsData),
-		4: uint64(5),
+		4: cbor.RawMessage(previousData),
 	})
 	require.NoError(t, err)
 
-	got, err := extractPParamsData(EraConway, govStateData)
+	got, gotPrevious, err := extractPParamsData(EraConway, govStateData)
 	require.NoError(t, err)
 	require.Equal(t, pparamsData, []byte(got))
+	require.Equal(t, previousData, []byte(gotPrevious))
 }
 
 func TestExtractPParamsDataDetectsEraSpecificType(t *testing.T) {
+	t.Parallel()
+
 	alonzoData, err := cbor.Encode(testBabbagePParams())
 	require.NoError(t, err)
 	conwayData, err := cbor.Encode(testConwayPParams())
@@ -422,7 +866,7 @@ func TestExtractPParamsDataDetectsEraSpecificType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, err := extractPParamsData(EraConway, govStateData)
+	got, _, err := extractPParamsData(EraConway, govStateData)
 	require.NoError(t, err)
 	require.Equal(t, conwayData, []byte(got))
 }
@@ -532,6 +976,8 @@ func testConwayPParams() *lconway.ConwayProtocolParameters {
 }
 
 func TestVerifyChecksumFileWrongLength(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -552,6 +998,8 @@ func TestVerifyChecksumFileWrongLength(t *testing.T) {
 }
 
 func TestVerifyChecksumFileInvalidHex(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	err := os.WriteFile(lstatePath, []byte("data"), 0o640)
@@ -571,6 +1019,8 @@ func TestVerifyChecksumFileInvalidHex(t *testing.T) {
 }
 
 func TestVerifyChecksumFileValid(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	lstatePath := filepath.Join(tmpDir, "12345.lstate")
 	content := []byte("test data for crc32")

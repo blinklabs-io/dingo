@@ -1,46 +1,75 @@
 # AGENTS.md
 
+Plugin composition uses the instance-owned top-level `plugin.Host`; providers
+register explicitly from composition code. Do not add package-init registration
+or process-global provider option destinations.
+
 Go Cardano node (Ouroboros). See `CLAUDE.md` for detailed rules; this file has additional content (Build/test section, `make golines` in pre-commit, Key events table) and a different structure — the two are related but not exact copies. Package layout, targets, and flags are derivable from `Makefile`, `go.mod`, `node.go`.
 
 ## Build / test
 
 ```
-make              # fmt, test, build
+make              # format and build
 make test         # tests with -race
 go test -v -race -run TestName ./path/to/pkg/
 ```
 
+The default target formats and builds; tests are a separate target.
+
 ## Pre-commit
 
 ```
-golangci-lint run ./...
-nilaway ./...
-modernize ./...
+make lint         # import-boundaries, all modules, windows, nilaway, modernize
+make docs-parity
+make config-parity
 make golines
+make sql-check    # only when database/sql queries or sqlc.yaml changed
+make govulncheck  # reachable Go vulnerabilities; needs network
 ```
 
 ## Testing rules
 
 - No `time.Sleep()` for sync — use `internal/test/testutil/` (`WaitForCondition`, `RequireReceive`, `context.WithTimeout`).
+- Top-level tests call `t.Parallel()` in most packages, including every one that dominates the suite: `ledger`, `database`, `ouroboros`, `mithril`, `ledgerstate`, `internal/koiosparity`, `event`, `bark`, `database/lifecycle`, `internal/node`, `chain`, `ledger/{governance,snapshot,leios}`, `api/{blockfrost,mesh}`, `connmanager`, `cmd/dingo`, `config/cardano` and the root package. A new test there should too.
+- Keep a test sequential — with a `// Not t.Parallel: ...` comment saying why — when it reaches process-global state. The classes seen here: swapping a package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`, `deliveryStallWarnInterval`, `afterDeferredMarkerDeleteHook`, `leiosPersistMaxQueueBytes`); swapping another package's variable (`ledger.Close*Timeout`); replacing a process-global (`slog.SetDefault`, `config.PublishConfig`, which `settingsresolve.Apply` ends in); asserting a delta of a process-wide counter (`BlobOrphanCount`, whose before/after window a concurrent `recordBlobOrphans` lands in); and process-wide measurement (`testing.AllocsPerRun`, `runtime.NumGoroutine`, `testing.Benchmark`, `goleak.VerifyNone`).
+- Sequential tests finish, cleanups included, before any parallel test in the package resumes, so a save/restore around a global is safe only while every test that touches it is sequential. A fixture that instead serializes for the whole test — `database/lifecycle`'s `setFakeCloudBackingDir` holds `fakeCloudFixtureMu` until `t.Cleanup` — is parallel-safe, and its tests do call `t.Parallel()`. `goleak.VerifyNone` additionally sees the runner goroutine parked waiting for the parallel batch, so a goleak test cannot itself be parallel.
+- `internal/settingsresolve` and `bark/database_cloud_test.go` are fully sequential. `settingsresolve.Apply` replaces `internal/config`'s process-global `globalConfig` and the assertions read it back; `barkFakeCloudDir` is a process-global the registered fake scheme resolves against with no such gate, so concurrent tests would see each other's directory.
+- A test that opens an on-disk badger blob store passes `testutil.BadgerBlobConfig()` as the provider config (or `badger.WithValueLogFileSize`/`WithMemTableSize` for a direct `badger.New`); `dbtest.NewDatabase` already does. badger maps the value log at twice `ValueLogFileSize`, so a default store reserves 2 GiB the moment it opens — sparse on Linux and macOS, really reserved on Windows, where enough concurrent stores fill the CI runner's disk. `dbtest.NewDatabaseWithOptions` merges those sizes into a caller-supplied `Blob.Config` key by key, so a config that sets some other knob still gets them. `TestNewDatabaseBoundsBadgerFileReservation` and `TestBoundedBadgerSizesSurviveAPartialCallerConfig` guard the fixture.
+- Live two-node lifecycle integration tests use the shared `dingo_db_integration` build tag; run them with `make test-live-lifecycle`.
 - Integration tests: `internal/integration/` + `database/immutable/testdata/` (real blocks, slots 0–1.3M).
 - Mock fixtures come from `github.com/blinklabs-io/ouroboros-mock` (`fixtures/`, `ledger/`, `conformance/`). Never duplicate mocks inside dingo — extend the shared library so every Blink Labs app (dingo, gouroboros, adder, ...) reuses the same test surface.
-- DevNet end-to-end (`internal/test/devnet/run-tests.sh`): validate any change touching consensus, block production, header/VRF/KES/OpCert verification, chain selection, mempool, tx submission, NtN/NtC protocols, epoch boundaries, or nonce computation. Brings up Dingo + cardano-node side by side with `txpump` driving the mempool, so it catches divergence from the reference implementation that unit tests miss. Conformance tests in `internal/test/conformance/` are still mandatory after every change — DevNet is the additional bar for consensus-affecting work.
+- DevNet end-to-end (`internal/test/devnet/run-tests.sh`): default run is an all-dingo network (three Dingo producers + relay) with `txpump` driving the mempool; it validates the generic consensus and liveness suite dingo-vs-dingo and hosts dingo-only feature tests (CIP-50 pledge leverage) that have no cardano-node reference. Use it for any change touching consensus, block production, header/VRF/KES/OpCert verification, chain selection, mempool, tx submission, NtN/NtC protocols, epoch boundaries, or nonce computation. `./run-tests.sh --conformance` runs Dingo beside `cardano-node` for compatibility and conformance with the reference. Conformance tests in `internal/test/conformance/` are still mandatory after every change.
 
 ## Documentation requirements
 
+- Start repository research at `docs/README.md`. It maps the versioned project
+  documents, package `doc.go` comments, `go doc` commands, and public
+  documentation sources.
 - Treat `DATABASE.md` and `ARCHITECTURE.md` as part of the change bar, like tests. Before finishing any code change, decide whether either document needs an update; update it in the same change when it does.
-- Update `DATABASE.md` for any change to GORM models, migrated tables, table relationships, SQL query/API surfaces in `metadata.MetadataStore`, blob-store key layout, CBOR/offset encodings, storage plugins, pruning/tombstone behavior, or anything external Postgres/MySQL/SQLite/blob users rely on.
+- Update `DATABASE.md` for any change to metadata schemas, migrated tables, table relationships, SQL query/API surfaces in `metadata.MetadataStore`, blob-store key layout, CBOR/offset encodings, storage plugins, pruning/tombstone behavior, or anything external Postgres/MySQL/SQLite/blob users rely on.
 - Update `ARCHITECTURE.md` for any change to component responsibilities, package boundaries, startup/composition, EventBus topics/payloads, plugin interfaces, lifecycle/concurrency behavior, or cross-component flows among ledger, database, mempool, networking, API, and node wiring.
 - In final responses, report documentation status the same way tests are reported: either list the docs updated or explicitly state that `DATABASE.md`/`ARCHITECTURE.md` were checked and not affected.
+
+## Comments
+
+Comments explain an invariant, a non-obvious algorithm, or a gotcha: why this
+order, why this bound, why the obvious thing is wrong. Delete comments that
+restate the code below them, label sections, or narrate a change's history.
+Prose explaining how a system works belongs in documentation.
+
+Doc comments on exported identifiers are the exception. They are published API
+documentation: keep them accurate and in `// Name ...` form.
 
 ## Non-obvious invariants
 
 - EventBus for async cross-component notifications: use `event.EventBus.SubscribeFunc()` for block/chain/mempool/peer events. Synchronous state queries between components still use direct method calls.
 - CBOR offsets: UTxOs/txs stored as 52-byte refs (magic `"DOFF"` + slot + hash + offset + length), resolved by `TieredCborCache` (hot → block LRU → cold extract). See `database/cbor_offset.go`.
+- gouroboros types embedding `DecodeStoreCbor` (blocks, tx bodies, etc.) return the original decoded bytes verbatim from `MarshalCBOR()` whenever `Cbor()` is non-nil — mutating a decoded struct's fields and re-marshaling silently re-emits the pre-mutation bytes. Call `SetCbor(nil)` before marshaling after mutating fields, or the change is dropped.
 - Cert ordering: `Order("added_slot DESC, block_index DESC, cert_index DESC")` — `cert_index` resets per tx, so `block_index` is required to disambiguate across txs in the same block.
 - Rollbacks: delivered on `chain.update` as a `chain.ChainRollbackEvent` payload (no separate `chain.rollback` topic); also subscribe to `chain.fork_detected` for fork metrics. Check `TransactionEvent.Rollback` for undo.
 - Stake snapshots: mark/set/go rotation at epoch boundaries (Praos). `LedgerView.GetStakeDistribution(epoch)` for leader election. Per-pool stake in `PoolStakeSnapshot`; aggregates in `EpochSummary`.
-- Plugins (`database/plugin/`): blob = `badger` | `gcs` | `s3`; metadata = `sqlite` | `mysql` | `postgres`.
+- Plugins (`database/plugin/`): blob = `badger` | `gcs` | `s3`; metadata = `sqlite` | `mysql` | `postgres`. Mempool = `fifo` | `dag`; API = `blockfrost` | `mesh` | `utxorpc`. Non-default storage providers build only under `-tags dingo_extra_plugins`.
+- Metadata storage is typed `database/sql` generated by sqlc, not an ORM. Regenerate with `make sql` after changing queries.
 
 ## Isolation requirements
 
@@ -61,9 +90,10 @@ make golines
 | `chainselection.chain_switch` | active peer changed |
 | `epoch.transition` | epoch boundary — triggers stake snapshot |
 | `mempool.add_tx` / `mempool.remove_tx` | tx lifecycle |
+| `dmq.add_message` / `dmq.remove_message` | CIP-0137 DMQ message pool lifecycle |
 | `connmanager.conn_closed` | connection closed |
 | `peergov.peer_churn` | peer rotation |
 
 ## Config
 
-Priority: CLI > env > YAML > defaults. Key env vars: `CARDANO_NETWORK`, `CARDANO_DATABASE_PATH`, `DINGO_DATABASE_BLOB_PLUGIN`, `DINGO_DATABASE_METADATA_PLUGIN`.
+Priority: CLI provider selector > generic plugin env > YAML > provider defaults. Key env vars include `CARDANO_NETWORK`, `CARDANO_DATABASE_PATH`, and `DINGO_PLUGINS_<CAPABILITY>_{PROVIDER,CONFIG_*}`.

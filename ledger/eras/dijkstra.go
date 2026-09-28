@@ -18,11 +18,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -35,12 +37,19 @@ var DijkstraEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsDijkstra,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateDijkstra,
 	PParamsUpdateFunc:       PParamsUpdateDijkstra,
-	HardForkFunc:            HardForkDijkstra,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVDijkstra,
-	CertDepositFunc:         CertDepositDijkstra,
-	ValidateTxFunc:          ValidateTxDijkstra,
-	EvaluateTxFunc:          EvaluateTxDijkstra,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(gdijkstra.DijkstraProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkDijkstra,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVDijkstra,
+	CertDepositFunc:   CertDepositDijkstra,
+	ValidateTxFunc:    ValidateTxDijkstra,
+	EvaluateTxFunc:    EvaluateTxDijkstra,
 }
 
 func DecodePParamsDijkstra(data []byte) (lcommon.ProtocolParameters, error) {
@@ -77,6 +86,12 @@ func PParamsUpdateDijkstra(
 			pparamsUpdate,
 		)
 	}
+	// ParameterChange must never change protocol version; only
+	// HardForkInitiation may (dingo#4439). Transaction validation already
+	// rejects a ParameterChange carrying key 14 before it can be persisted,
+	// so this only guards an already-stored malformed proposal that reaches
+	// enactment some other way (e.g. replay of pre-fix data).
+	dijkstraPParamsUpdate.ProtocolVersion = nil
 	if err := dijkstraPParams.ApplyUpdate(&dijkstraPParamsUpdate); err != nil {
 		return nil, err
 	}
@@ -97,6 +112,7 @@ func HardForkDijkstra(
 	ret := gdijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: *conwayPParams,
 	}
+	ret.CostModels = cloneCostModels(ret.CostModels)
 	if nodeConfig != nil {
 		dijkstraGenesis := nodeConfig.DijkstraGenesis()
 		if !isEmptyDijkstraGenesis(dijkstraGenesis) {
@@ -194,7 +210,11 @@ func CertDepositDijkstra(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
+	// The nil check is part of the guard, not redundant with it: a typed-nil
+	// *DijkstraProtocolParameters satisfies the assertion, so testing only ok
+	// lets every case below dereference nil. CertDepositConway has always
+	// spelled it this way; this one had not.
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
@@ -223,7 +243,8 @@ func ValidateTxDijkstra(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	if _, ok := pp.(*gdijkstra.DijkstraProtocolParameters); !ok {
+	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
+	if !ok || tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -232,7 +253,10 @@ func ValidateTxDijkstra(
 	}
 	tx = normalizedTx
 	errs := []error{}
-	for _, validationRule := range dijkstraValidationRules(ls) {
+	// Phase-1 rules apply to every transaction regardless of its declared
+	// phase-2 result. A declared-invalid transaction still has to prove its
+	// collateral, redeemers, and other UTXO invariants.
+	for _, validationRule := range dijkstraPhase1ValidationRules() {
 		err = validationRule.validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
@@ -245,43 +269,327 @@ func ValidateTxDijkstra(
 			)
 		}
 	}
+	// CIP-23: reject pool registration certificates whose margin is below the
+	// operator-configured minimum pool margin. No-op when disabled (nil floor).
+	// Wired only here, so Conway and earlier eras are unaffected.
+	if err := checkPoolMarginFloor(
+		tx.Certificates(),
+		minPoolMarginFromLedgerState(ls),
+	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
+		errs = append(
+			errs,
+			fmt.Errorf("dijkstra parameter-change validation: %w", err),
+		)
+	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
+	}
+	// Applied before the skip-phase-2 shortcut below, and before delegating
+	// to gdijkstra.UtxoValidatePlutusScripts, so a transaction using a
+	// synthetic-cost-model PlutusV2 script cannot slip through either path
+	// -- see dijkstraSyntheticV2CostModelGuard.
+	if syntheticV2CostModelInEffect(ls) {
+		if err := dijkstraSyntheticV2CostModelGuard(
+			tx,
+			slot,
+			ls,
+			tmpPparams,
+		); err != nil {
+			return err
+		}
+	}
+	if shouldSkipPhase2Validation(ls) {
+		return nil
+	}
+
+	// gdijkstra.UtxoValidatePlutusScripts deliberately skips transactions whose
+	// IsValid flag is false. Re-evaluate with a copied concrete transaction set
+	// valid so phase-2 is independent of the block producer's declaration. The
+	// concrete *DijkstraTransaction is essential: the upstream evaluator uses it
+	// for Dijkstra guarding redeemers and sub-transaction witness scripts.
+	phase2Tx, err := dijkstraTransactionForPhase2(tx)
+	if err != nil {
+		return err
+	}
+	if err := validateDijkstraPlutusV4ReferenceInputOverlap(phase2Tx, ls); err != nil {
+		return err
+	}
+	phase2Err := gdijkstra.UtxoValidatePlutusScripts(
+		phase2Tx,
+		slot,
+		ls,
+		tmpPparams,
+	)
+	return validatePlutusOutcome(tx, phase2Err)
+}
+
+// dijkstraSyntheticV2CostModelGuard rejects a transaction that uses --
+// directly witnesses, or resolves via a reference script or a Dijkstra
+// sub-transaction -- a PlutusV2 script while HardForkBabbage's fabricated
+// default is still the only PlutusV2 cost model in force; see
+// ErrNoCostModelForPlutusV2. ValidateTxDijkstra delegates phase-2 validation
+// entirely to gdijkstra.UtxoValidatePlutusScripts, and skips it outright
+// when phase-2 validation is disabled -- neither path knows about Dingo's
+// synthetic marker. Rather than reimplementing gdijkstra's reference-script
+// and sub-transaction script resolution locally, this reuses its own
+// exported UtxoValidateCostModelsPresent (the same NoCostModel rule
+// Babbage/Conway's local phase-2 evaluation encodes by hand) against a
+// pruned copy of pp with the PlutusV2 entry (map key 1) removed.
+func dijkstraSyntheticV2CostModelGuard(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp *gdijkstra.DijkstraProtocolParameters,
+) error {
+	prunedCostModels := make(map[uint][]int64, len(pp.CostModels))
+	for version, model := range pp.CostModels {
+		if version == 1 {
+			continue
+		}
+		prunedCostModels[version] = model
+	}
+	prunedPParams := *pp
+	prunedPParams.CostModels = prunedCostModels
+	err := gdijkstra.UtxoValidateCostModelsPresent(tx, slot, ls, &prunedPParams)
+	if err == nil {
+		return nil
+	}
+	var missing lcommon.MissingCostModelError
+	if errors.As(err, &missing) && missing.Version == 1 {
+		return fmt.Errorf(
+			"dijkstra plutus validation: %w",
+			ErrNoCostModelForPlutusV2,
+		)
+	}
+	return err
+}
+
+var dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules()
+
+func buildDijkstraValidationRules() []indexedUtxoValidationRule {
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// Dijkstra reimplements several rules that Conway owned in earlier
+	// releases, so the package a rule's function lives in is not stable
+	// either.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
+	}
+	descriptors := gdijkstra.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			descriptors, gdijkstra.UtxoValidationRules, skipRuleIds[i],
+		)
+	}
+	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
+		gdijkstra.UtxoValidationRules,
+		skipRuleIds,
+	)
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[1],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[2],
+			validationFunc: validateUnknownVoters,
+		},
+	)
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
+	return ret
+}
+
+func dijkstraPhase1ValidationRules() []indexedUtxoValidationRule {
+	return dijkstraPhase1UtxoValidationRules
+}
+
+func dijkstraTransactionForPhase2(
+	tx lcommon.Transaction,
+) (*gdijkstra.DijkstraTransaction, error) {
+	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
+	if !ok || dijkstraTx == nil {
+		return nil, fmt.Errorf(
+			"dijkstra phase-2 validation requires *dijkstra.DijkstraTransaction, got %T",
+			tx,
+		)
+	}
+	phase2Tx := *dijkstraTx
+	phase2Tx.TxIsValid = true
+	return &phase2Tx, nil
+}
+
+type dijkstraPlutusScriptLevel struct {
+	body       lcommon.TransactionBody
+	witnesses  lcommon.TransactionWitnessSet
+	resolved   []lcommon.Utxo
+	overlap    lcommon.TransactionInput
+	hasOverlap bool
+}
+
+// validateDijkstraPlutusV4ReferenceInputOverlap supplies the Plutus V4
+// context-construction check missing from gOuroboros v0.208.0. It checks each
+// transaction level only when that level has a redeemer for an available V4
+// script, matching the script execution boundary in the ledger rules.
+func validateDijkstraPlutusV4ReferenceInputOverlap(
+	tx *gdijkstra.DijkstraTransaction,
+	ls lcommon.LedgerState,
+) error {
+	subTransactions := tx.Body.TxSubTransactions.Items()
+	levels := make([]dijkstraPlutusScriptLevel, 0, len(subTransactions)+1)
+	for index := range subTransactions {
+		levels = append(levels, dijkstraPlutusScriptLevel{
+			body:      &subTransactions[index].Body,
+			witnesses: subTransactions[index].WitnessSet,
+		})
+	}
+	levels = append(levels, dijkstraPlutusScriptLevel{
+		body:      &tx.Body,
+		witnesses: tx.WitnessSet,
+	})
+	hasOverlap := false
+	for levelIndex := range levels {
+		level := &levels[levelIndex]
+		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(level.body)
+		hasOverlap = hasOverlap || level.hasOverlap
+	}
+	if !hasOverlap {
+		return nil
+	}
+	if !dijkstraLevelsHaveRedeemers(levels) {
+		return nil
+	}
+	if ls == nil {
+		return errors.New("ledger state is required for Dijkstra script validation")
+	}
+
+	available := make(map[lcommon.ScriptHash]lcommon.Script)
+	for levelIndex := range levels {
+		level := &levels[levelIndex]
+		inputs, referenceInputs, err := resolveDijkstraScriptLevelInputs(
+			level.body,
+			ls,
+		)
+		if err != nil {
+			return err
+		}
+		level.resolved = script.ConcatResolvedInputs(inputs, referenceInputs)
+		for hash, candidate := range script.PlutusWitnessScripts(level.witnesses) {
+			available[hash] = candidate
+		}
+		for _, utxo := range level.resolved {
+			if utxo.Output == nil {
+				continue
+			}
+			candidate := utxo.Output.ScriptRef()
+			if candidate == nil {
+				continue
+			}
+			if _, ok := lcommon.PlutusScriptVersion(candidate); ok {
+				available[candidate.Hash()] = candidate
+			}
+		}
+	}
+
+	for _, level := range levels {
+		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
+			continue
+		}
+		redeemers := make(map[lcommon.RedeemerKey]struct{})
+		for key := range level.witnesses.Redeemers().Iter() {
+			redeemers[key] = struct{}{}
+		}
+		if !level.hasOverlap {
+			continue
+		}
+		for _, needed := range script.ScriptPurposes(level.body, level.resolved) {
+			if _, ok := redeemers[needed.Key]; !ok {
+				continue
+			}
+			candidate, ok := available[needed.Purpose.ScriptHash()]
+			if !ok {
+				continue
+			}
+			version, ok := lcommon.PlutusScriptVersion(candidate)
+			if !ok || version != 3 {
+				continue
+			}
+			return conway.ScriptContextConstructionError{
+				Err: fmt.Errorf(
+					"plutus V4 reference input %s is also a regular input",
+					level.overlap.String(),
+				),
+			}
+		}
 	}
 	return nil
 }
 
-var (
-	dijkstraUtxoValidationRules       = buildDijkstraValidationRules(false)
-	dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules(true)
-)
-
-func dijkstraValidationRules(
-	ls lcommon.LedgerState,
-) []indexedUtxoValidationRule {
-	if shouldSkipPhase2Validation(ls) {
-		return dijkstraPhase1UtxoValidationRules
+func dijkstraLevelsHaveRedeemers(levels []dijkstraPlutusScriptLevel) bool {
+	for _, level := range levels {
+		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
+			continue
+		}
+		for range level.witnesses.Redeemers().Iter() {
+			return true
+		}
 	}
-	return dijkstraUtxoValidationRules
+	return false
 }
 
-func buildDijkstraValidationRules(
-	skipPhase2 bool,
-) []indexedUtxoValidationRule {
-	if skipPhase2 {
-		return buildIndexedUtxoValidationRules(
-			gdijkstra.UtxoValidationRules,
-			dijkstraUtxoValidatePlutusScriptsRuleIndex,
-			gdijkstra.UtxoValidatePlutusScripts,
-			"dijkstra.UtxoValidatePlutusScripts",
-		)
+func resolveDijkstraScriptLevelInputs(
+	body lcommon.TransactionBody,
+	ls lcommon.LedgerState,
+) (inputs, referenceInputs []lcommon.Utxo, err error) {
+	inputs = make([]lcommon.Utxo, 0, len(body.Inputs()))
+	for _, input := range body.Inputs() {
+		utxo, err := ls.UtxoById(input)
+		if err != nil {
+			return nil, nil, lcommon.InputResolutionError{
+				Input: input,
+				Err:   err,
+			}
+		}
+		inputs = append(inputs, utxo)
 	}
-	return buildIndexedUtxoValidationRules(
-		gdijkstra.UtxoValidationRules,
-		noUtxoValidationRuleIndex,
-		nil,
-		"",
+	referenceInputs = make(
+		[]lcommon.Utxo,
+		0,
+		len(body.ReferenceInputs()),
 	)
+	for _, input := range body.ReferenceInputs() {
+		utxo, err := ls.UtxoById(input)
+		if err != nil {
+			return nil, nil, lcommon.ReferenceInputResolutionError{
+				Input: input,
+				Err:   err,
+			}
+		}
+		referenceInputs = append(referenceInputs, utxo)
+	}
+	return inputs, referenceInputs, nil
+}
+
+func dijkstraReferenceInputOverlap(
+	body lcommon.TransactionBody,
+) (lcommon.TransactionInput, bool) {
+	inputs := make(map[string]struct{}, len(body.Inputs()))
+	for _, input := range body.Inputs() {
+		inputs[input.String()] = struct{}{}
+	}
+	for _, input := range body.ReferenceInputs() {
+		if _, ok := inputs[input.String()]; ok {
+			return input, true
+		}
+	}
+	return nil, false
 }
 
 func EvaluateTxDijkstra(

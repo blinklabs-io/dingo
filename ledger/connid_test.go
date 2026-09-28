@@ -22,6 +22,8 @@ import (
 )
 
 func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
+	t.Parallel()
+
 	remoteAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001}
 	remoteOnly := ouroboros.ConnectionId{RemoteAddr: remoteAddr}
 	remoteOnlySame := ouroboros.ConnectionId{
@@ -37,26 +39,38 @@ func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
 	}
 
 	if !sameConnectionId(remoteOnly, remoteOnly) {
-		t.Fatal("sameConnectionId() = false, want true for identical remote-only ids")
+		t.Fatal(
+			"sameConnectionId() = false, want true for identical remote-only ids",
+		)
 	}
 	if !sameConnectionId(remoteOnly, remoteOnlySame) {
-		t.Fatal("sameConnectionId() = false, want true for equal remote-only ids")
+		t.Fatal(
+			"sameConnectionId() = false, want true for equal remote-only ids",
+		)
 	}
 	if sameConnectionId(remoteOnly, remoteOnlyOther) {
-		t.Fatal("sameConnectionId() = true, want false for differing remote-only ids")
+		t.Fatal(
+			"sameConnectionId() = true, want false for differing remote-only ids",
+		)
 	}
 	if sameConnectionId(remoteOnly, localOnly) {
-		t.Fatal("sameConnectionId() = true, want false for remote-only vs local-only")
+		t.Fatal(
+			"sameConnectionId() = true, want false for remote-only vs local-only",
+		)
 	}
 	if sameConnectionId(remoteOnly, ouroboros.ConnectionId{}) {
 		t.Fatal("sameConnectionId() = true, want false for remote-only vs zero")
 	}
 	if sameConnectionId(remoteOnly, fullId) {
-		t.Fatal("sameConnectionId() = true, want false for remote-only vs full id")
+		t.Fatal(
+			"sameConnectionId() = true, want false for remote-only vs full id",
+		)
 	}
 }
 
 func TestConnIdKeyHandlesPartialNilAddrs(t *testing.T) {
+	t.Parallel()
+
 	remoteOnly := ouroboros.ConnectionId{
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 	}
@@ -71,6 +85,8 @@ func TestConnIdKeyHandlesPartialNilAddrs(t *testing.T) {
 		t.Fatal("connIdKey() = \"\" for remote-only id, want non-empty")
 	}
 	if connIdKey(remoteOnly) == connIdKey(localOnly) {
-		t.Fatal("connIdKey() equal for remote-only vs local-only, want distinct")
+		t.Fatal(
+			"connIdKey() equal for remote-only vs local-only, want distinct",
+		)
 	}
 }

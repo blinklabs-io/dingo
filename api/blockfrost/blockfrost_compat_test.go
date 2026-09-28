@@ -26,6 +26,8 @@ import (
 // TestCompatBlockResponse verifies that our BlockResponse
 // round-trips through blockfrost-go's Block type.
 func TestCompatBlockResponse(t *testing.T) {
+	t.Parallel()
+
 	output := "12345"
 	fees := "678"
 	blockVRF := "vrf_vk1abc"
@@ -88,6 +90,8 @@ func TestCompatBlockResponse(t *testing.T) {
 // TestCompatBlockResponseNilFields verifies that null
 // pointer fields round-trip correctly.
 func TestCompatBlockResponseNilFields(t *testing.T) {
+	t.Parallel()
+
 	output := "0"
 	fees := "0"
 	ours := BlockResponse{
@@ -113,6 +117,8 @@ func TestCompatBlockResponseNilFields(t *testing.T) {
 // EpochResponse round-trips through blockfrost-go's
 // Epoch type.
 func TestCompatEpochResponse(t *testing.T) {
+	t.Parallel()
+
 	activeStake := "1000000"
 	ours := EpochResponse{
 		Epoch:          100,
@@ -150,6 +156,8 @@ func TestCompatEpochResponse(t *testing.T) {
 // TestCompatAssetResponse verifies that our AssetResponse
 // round-trips through blockfrost-go's Asset type.
 func TestCompatAssetResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := AssetResponse{
 		Asset:             "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
 		PolicyID:          "00112233445566778899aabbccddeeff00112233445566778899aabb",
@@ -185,6 +193,8 @@ func TestCompatAssetResponse(t *testing.T) {
 // ProtocolParamsResponse round-trips through
 // blockfrost-go's EpochParameters type.
 func TestCompatProtocolParamsResponse(t *testing.T) {
+	t.Parallel()
+
 	coinsPerUtxoSize := "4310"
 	priceMem := 0.0577
 	priceStep := 0.0000721
@@ -295,9 +305,13 @@ func TestCompatProtocolParamsResponse(t *testing.T) {
 }
 
 func TestCompatMetadataTransactionJSONResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := MetadataTransactionJSONResponse{
-		TxHash:       "abc123",
-		JSONMetadata: json.RawMessage(`{"name":"nft-one","image":"ipfs://cid"}`),
+		TxHash: "abc123",
+		JSONMetadata: json.RawMessage(
+			`{"name":"nft-one","image":"ipfs://cid"}`,
+		),
 	}
 
 	data, err := json.Marshal(ours)
@@ -316,6 +330,8 @@ func TestCompatMetadataTransactionJSONResponse(t *testing.T) {
 }
 
 func TestCompatMetadataTransactionCBORResponse(t *testing.T) {
+	t.Parallel()
+
 	cborMetadata := "a1646e616d65676e66742d6f6e65"
 	ours := MetadataTransactionCBORResponse{
 		TxHash:       "abc123",
@@ -336,16 +352,20 @@ func TestCompatMetadataTransactionCBORResponse(t *testing.T) {
 }
 
 func TestCompatTransactionResponse(t *testing.T) {
+	t.Parallel()
+
 	invalidBefore := "100"
 	invalidHereafter := "200"
 	ours := TransactionResponse{
-		Hash:             "txhash1",
-		Block:            "blockhash1",
-		Slot:             123,
-		BlockHeight:      45,
-		BlockTime:        1700000000,
-		Index:            2,
-		OutputAmount:     []AddressAmountResponse{{Unit: "lovelace", Quantity: "5000"}},
+		Hash:        "txhash1",
+		Block:       "blockhash1",
+		Slot:        123,
+		BlockHeight: 45,
+		BlockTime:   1700000000,
+		Index:       2,
+		OutputAmount: []AddressAmountResponse{
+			{Unit: "lovelace", Quantity: "5000"},
+		},
 		Fees:             "170000",
 		Deposit:          "0",
 		Size:             512,
@@ -382,6 +402,8 @@ func TestCompatTransactionResponse(t *testing.T) {
 }
 
 func TestCompatAddressUTXOResponse(t *testing.T) {
+	t.Parallel()
+
 	dataHash := "datumhash1"
 	inlineDatum := "d8799f"
 	refScriptHash := "scripthash1"
@@ -422,6 +444,8 @@ func TestCompatAddressUTXOResponse(t *testing.T) {
 }
 
 func TestCompatAddressTransactionResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := AddressTransactionResponse{
 		TxHash:      "txhash1",
 		TxIndex:     3,
@@ -446,6 +470,8 @@ func TestCompatAddressTransactionResponse(t *testing.T) {
 // HealthResponse round-trips through blockfrost-go's
 // Health type.
 func TestCompatHealthResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := HealthResponse{IsHealthy: true}
 
 	data, err := json.Marshal(ours)
@@ -462,6 +488,8 @@ func TestCompatHealthResponse(t *testing.T) {
 // RootResponse round-trips through blockfrost-go's
 // Info type.
 func TestCompatRootResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := RootResponse{
 		URL:     "https://blockfrost.io/",
 		Version: "0.1.0",
@@ -484,6 +512,8 @@ func TestCompatRootResponse(t *testing.T) {
 // NetworkResponse round-trips through blockfrost-go's
 // NetworkInfo type.
 func TestCompatNetworkResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := NetworkResponse{
 		Supply: NetworkSupply{
 			Max:         "45000000000000000",
@@ -532,8 +562,11 @@ func TestCompatNetworkResponse(t *testing.T) {
 // AccountResponse round-trips through blockfrost-go's
 // Account type.
 func TestCompatAccountResponse(t *testing.T) {
+	t.Parallel()
+
 	activeEpoch := int64(42)
 	poolID := "pool1xyz"
+	drepID := "drep1y2v8nygzdll2krgvw5dzqpkncvj3y"
 	ours := AccountResponse{
 		StakeAddress:       "stake_test1upugeuz3jdy0a7hncusutadavzcetdzylgxcldz39hp9n0s0xy0n5",
 		Active:             true,
@@ -545,6 +578,8 @@ func TestCompatAccountResponse(t *testing.T) {
 		TreasurySum:        "7",
 		WithdrawableAmount: "89",
 		PoolID:             &poolID,
+		DrepID:             &drepID,
+		Registered:         true,
 	}
 
 	data, err := json.Marshal(ours)
@@ -572,12 +607,17 @@ func TestCompatAccountResponse(t *testing.T) {
 	)
 	require.NotNil(t, theirs.PoolID)
 	assert.Equal(t, poolID, *theirs.PoolID)
+	require.NotNil(t, theirs.DrepID)
+	assert.Equal(t, drepID, *theirs.DrepID)
+	assert.Equal(t, ours.Registered, theirs.Registered)
 }
 
 // TestCompatAccountAssociatedAddressesResponse verifies
 // that our AccountAssociatedAddressResponse round-trips
 // through blockfrost-go's AccountAssociatedAddress type.
 func TestCompatAccountAssociatedAddressesResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := []AccountAssociatedAddressResponse{
 		{Address: "addr_test1qqqexample"},
 		{Address: "addr_test1qqqexample2"},
@@ -599,12 +639,17 @@ func TestCompatAccountAssociatedAddressesResponse(t *testing.T) {
 // that our AccountDelegationHistoryResponse round-trips
 // through blockfrost-go's AccountDelegationHistory type.
 func TestCompatAccountDelegationHistoryResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := []AccountDelegationHistoryResponse{
 		{
 			ActiveEpoch: 7,
 			TxHash:      "abc123",
 			Amount:      "1000000",
 			PoolID:      "pool1xyz",
+			TxSlot:      123456,
+			BlockTime:   1700000000,
+			BlockHeight: 9876,
 		},
 	}
 
@@ -622,6 +667,9 @@ func TestCompatAccountDelegationHistoryResponse(t *testing.T) {
 	assert.Equal(t, ours[0].TxHash, theirs[0].TXHash)
 	assert.Equal(t, ours[0].Amount, theirs[0].Amount)
 	assert.Equal(t, ours[0].PoolID, theirs[0].PoolID)
+	assert.Equal(t, int(ours[0].TxSlot), theirs[0].TxSlot)
+	assert.Equal(t, int(ours[0].BlockTime), theirs[0].BlockTime)
+	assert.Equal(t, int(ours[0].BlockHeight), theirs[0].BlockHeight)
 }
 
 // TestCompatAccountRegistrationHistoryResponse verifies
@@ -631,14 +679,24 @@ func TestCompatAccountDelegationHistoryResponse(t *testing.T) {
 func TestCompatAccountRegistrationHistoryResponse(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ours := []AccountRegistrationHistoryResponse{
 		{
-			TxHash: "abc123",
-			Action: "registered",
+			TxHash:      "abc123",
+			Action:      "registered",
+			Deposit:     "2000000",
+			TxSlot:      123456,
+			BlockTime:   1700000000,
+			BlockHeight: 9876,
 		},
 		{
-			TxHash: "def456",
-			Action: "deregistered",
+			TxHash:      "def456",
+			Action:      "deregistered",
+			Deposit:     "2000000",
+			TxSlot:      223456,
+			BlockTime:   1700000100,
+			BlockHeight: 9999,
 		},
 	}
 
@@ -652,14 +710,30 @@ func TestCompatAccountRegistrationHistoryResponse(
 	require.Len(t, theirs, 2)
 	assert.Equal(t, ours[0].TxHash, theirs[0].TXHash)
 	assert.Equal(t, ours[0].Action, theirs[0].Action)
+	assert.Equal(t, int(ours[0].TxSlot), theirs[0].TxSlot)
+	assert.Equal(t, int(ours[0].BlockTime), theirs[0].BlockTime)
+	assert.Equal(t, int(ours[0].BlockHeight), theirs[0].BlockHeight)
 	assert.Equal(t, ours[1].TxHash, theirs[1].TXHash)
 	assert.Equal(t, ours[1].Action, theirs[1].Action)
+	assert.Equal(t, int(ours[1].TxSlot), theirs[1].TxSlot)
+	assert.Equal(t, int(ours[1].BlockTime), theirs[1].BlockTime)
+	assert.Equal(t, int(ours[1].BlockHeight), theirs[1].BlockHeight)
+
+	// bfgo.AccountRegistrationHistory has no Deposit field; assert via raw
+	// JSON so a serialization regression on the "deposit" key is caught.
+	var rawItems []map[string]any
+	require.NoError(t, json.Unmarshal(data, &rawItems))
+	require.Len(t, rawItems, 2)
+	assert.Equal(t, ours[0].Deposit, rawItems[0]["deposit"])
+	assert.Equal(t, ours[1].Deposit, rawItems[1]["deposit"])
 }
 
 // TestCompatAccountRewardHistoryResponse verifies that
 // our AccountRewardHistoryResponse round-trips through
 // blockfrost-go's AccountRewardsHistory type.
 func TestCompatAccountRewardHistoryResponse(t *testing.T) {
+	t.Parallel()
+
 	ours := []AccountRewardHistoryResponse{
 		{
 			Epoch:  11,

@@ -1,0 +1,1047 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"io"
+	"log/slog"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
+)
+
+func newLeiosApplyTestLedger(
+	t *testing.T,
+) (*LedgerState, *database.Database, *sql.DB) {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	return ls, db, raw
+}
+
+func leiosApplyTestTx(
+	t *testing.T,
+	seed byte,
+) (cbor.RawMessage, []byte, lcommon.Transaction) {
+	t.Helper()
+	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: cbor.Tag{Number: 258, Content: []any{[]any{bytes.Repeat([]byte{seed}, 32), uint64(0)}}},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
+		2: 200_000 + uint64(seed),
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(bodyCbor),
+		map[uint]any{},
+		true,
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(
+		gledger.TxTypeDijkstra,
+		txCbor,
+	)
+	require.NoError(t, err)
+	return cbor.RawMessage(txCbor), bodyCbor, tx
+}
+
+func leiosApplyTestEbHash(seed byte) []byte {
+	return bytes.Repeat([]byte{seed}, lcommon.Blake2b256Size)
+}
+
+func leiosApplyTestRankingPoint(seed byte) ocommon.Point {
+	return ocommon.Point{
+		Slot: 10_000 + uint64(seed),
+		Hash: bytes.Repeat([]byte{seed}, lcommon.Blake2b256Size),
+	}
+}
+
+func requireLeiosApplyTestTxCount(
+	t *testing.T,
+	raw *sql.DB,
+	want int64,
+) {
+	t.Helper()
+	var got int64
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM "transaction"`,
+	).Scan(&got))
+	require.Equal(t, want, got)
+}
+
+func requireLeiosApplyTestEndorserBlob(
+	t *testing.T,
+	db *database.Database,
+	slot uint64,
+	hash []byte,
+	want []byte,
+) {
+	t.Helper()
+	txn := db.BlobTxn(false)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		got, _, err := db.Blob().GetBlock(txn.Blob(), slot, hash)
+		if err != nil {
+			return err
+		}
+		require.Equal(t, want, got)
+		return nil
+	}))
+}
+
+func leiosApplyTestBlob(body []byte, tx lcommon.Transaction) []byte {
+	blob := append([]byte(nil), body...)
+	for _, utxo := range tx.Produced() {
+		blob = append(blob, utxo.Output.Cbor()...)
+	}
+	return blob
+}
+
+func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
+	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x01)
+
+	const ebSlot = uint64(200)
+	ebHash := leiosApplyTestEbHash(0x22)
+	applied := -1
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		applied, _, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x33),
+			1,
+			ebSlot,
+			ebHash,
+			[]cbor.RawMessage{rawTx},
+		)
+		return err
+	}))
+
+	require.Equal(t, 1, applied)
+	requireLeiosApplyTestTxCount(t, gdb, 1)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, leiosApplyTestBlob(bodyCbor, tx))
+	// The transaction is recorded under the ranking block's point.
+	var got int64
+	require.NoError(t, gdb.QueryRow(
+		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&got))
+	require.Equal(t, int64(1), got)
+}
+
+func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
+	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x02)
+	rawTx2, body2, tx2 := leiosApplyTestTx(t, 0x03)
+
+	const ebSlot = uint64(300)
+	ebHash := leiosApplyTestEbHash(0x44)
+	applied := -1
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		applied, _, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x55),
+			1,
+			ebSlot,
+			ebHash,
+			[]cbor.RawMessage{rawTx1, rawTx2},
+		)
+		return err
+	}))
+
+	require.Equal(t, 2, applied)
+	requireLeiosApplyTestTxCount(t, gdb, 2)
+	// The blob contains each body followed by its produced output CBOR.
+	want := append(leiosApplyTestBlob(body1, tx1), leiosApplyTestBlob(body2, tx2)...)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, want)
+}
+
+func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
+	rawTx1, body1, tx1 := leiosApplyTestTx(t, 0x04)
+	rawTx2, _, _ := leiosApplyTestTx(t, 0x05)
+
+	appliedFirst := -1
+	appliedSameTxnDuplicate := -1
+	appliedSecondUnique := -1
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		appliedFirst, _, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x81),
+			1,
+			500,
+			leiosApplyTestEbHash(0x82),
+			[]cbor.RawMessage{rawTx1, rawTx1},
+		)
+		if err != nil {
+			return err
+		}
+		appliedSameTxnDuplicate, _, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x83),
+			2,
+			501,
+			leiosApplyTestEbHash(0x84),
+			[]cbor.RawMessage{rawTx1},
+		)
+		if err != nil {
+			return err
+		}
+		appliedSecondUnique, _, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x85),
+			3,
+			502,
+			leiosApplyTestEbHash(0x86),
+			[]cbor.RawMessage{rawTx2},
+		)
+		return err
+	}))
+
+	require.Equal(t, 1, appliedFirst)
+	require.Equal(t, 0, appliedSameTxnDuplicate)
+	require.Equal(t, 1, appliedSecondUnique)
+	requireLeiosApplyTestTxCount(t, gdb, 2)
+	requireLeiosApplyTestEndorserBlob(
+		t,
+		db,
+		500,
+		leiosApplyTestEbHash(0x82),
+		leiosApplyTestBlob(body1, tx1),
+	)
+
+	appliedCommittedDuplicate := -1
+	txn = db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		appliedCommittedDuplicate, _, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x87),
+			4,
+			503,
+			leiosApplyTestEbHash(0x88),
+			[]cbor.RawMessage{rawTx1},
+		)
+		return err
+	}))
+	require.Equal(t, 0, appliedCommittedDuplicate)
+	requireLeiosApplyTestTxCount(t, gdb, 2)
+}
+
+// On the Haskell-conformant path (Musashi prototype) the endorser block's
+// transactions are applied to the ledger with their full effects, matching the
+// reference ledger's applyLeiosClosure (ValidateNone), and its metadata and blob
+// are stored. Previously this path stored metadata only and did not apply the
+// transactions, which diverged the UTxO set from the reference.
+func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
+	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x06)
+
+	const ebSlot = uint64(400)
+	ebHash := leiosApplyTestEbHash(0x66)
+	applied := -1
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		applied, _, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x77),
+			1,
+			ebSlot,
+			ebHash,
+			[]cbor.RawMessage{rawTx},
+		)
+		return err
+	}))
+
+	// The transaction is applied and recorded under the ranking block's point,
+	// and the endorser blob is stored.
+	require.Equal(t, 1, applied)
+	requireLeiosApplyTestTxCount(t, gdb, 1)
+	var gotTx models.Transaction
+	require.NoError(t, gdb.QueryRow(
+		`SELECT slot FROM "transaction" WHERE hash = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&gotTx.Slot))
+	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, leiosApplyTestBlob(bodyCbor, tx))
+}
+
+// leiosApplyTestTxWithOutput builds a Dijkstra endorser transaction that
+// produces a single output to an enterprise (payment-only) testnet address, so
+// tests can assert the produced UTxO is applied to the store.
+func leiosApplyTestTxWithOutput(
+	t *testing.T,
+	seed byte,
+) (cbor.RawMessage, lcommon.Transaction) {
+	t.Helper()
+	// Enterprise testnet address: header byte 0x60 + 28-byte payment key hash.
+	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
+	bodyCbor, err := cbor.Encode(map[uint]any{
+		0: cbor.Tag{Number: 258, Content: []any{}},
+		1: []any{ // outputs
+			map[uint]any{
+				0: addr,
+				1: uint64(1_000_000),
+			},
+		},
+		2: uint64(200_000), // fee
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(bodyCbor),
+		map[uint]any{},
+		true,
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	return cbor.RawMessage(txCbor), tx
+}
+
+// The Haskell-conformant path applies endorser-block transactions with their
+// full UTxO effects: an endorser transaction's produced output becomes a live
+// UTxO in the store, stamped at the ranking block's slot so it rolls back with
+// the ranking block. This is the fix that keeps the UTxO set — and the stake
+// distribution derived from it — complete, matching the reference ledger;
+// recording metadata only left the produced outputs missing, which zeroed
+// delegator stake and drove the "pool has no stake in epoch snapshot" rejection.
+func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
+	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6a)
+	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
+
+	rbPoint := leiosApplyTestRankingPoint(0x79)
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		applied, _, err := ls.applyEndorserBlock(
+			txn,
+			rbPoint,
+			1,
+			420,
+			leiosApplyTestEbHash(0x6b),
+			[]cbor.RawMessage{rawTx},
+		)
+		if err != nil {
+			return err
+		}
+		require.Equal(t, 1, applied)
+		return nil
+	}))
+
+	// The endorser transaction's produced output is a live UTxO stamped at the
+	// ranking block's slot (rollback-safe) and not marked spent.
+	var utxo models.Utxo
+	require.NoError(t, gdb.QueryRow(`
+SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&utxo.AddedSlot, &utxo.DeletedSlot))
+	require.Equal(t, rbPoint.Slot, utxo.AddedSlot)
+	require.Equal(t, uint64(0), utxo.DeletedSlot)
+}
+
+func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x07)
+	firstPoint := leiosApplyTestRankingPoint(0x91)
+	replayPoint := leiosApplyTestRankingPoint(0x93)
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			firstPoint,
+			1,
+			600,
+			leiosApplyTestEbHash(0x92),
+			[]cbor.RawMessage{rawTx, rawTx},
+		)
+		return err
+	}))
+
+	txn = db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			replayPoint,
+			2,
+			601,
+			leiosApplyTestEbHash(0x94),
+			[]cbor.RawMessage{rawTx},
+		)
+		return err
+	}))
+
+	requireLeiosApplyTestTxCount(t, gdb, 1)
+	var gotTx models.Transaction
+	require.NoError(t, gdb.QueryRow(`
+SELECT slot, block_index FROM "transaction" WHERE hash = ?`,
+		tx.Hash().Bytes(),
+	).Scan(&gotTx.Slot, &gotTx.BlockIndex))
+	require.Equal(t, firstPoint.Slot, gotTx.Slot)
+	require.Equal(t, uint32(0), gotTx.BlockIndex)
+	requireLeiosApplyTestEndorserBlob(
+		t,
+		db,
+		600,
+		leiosApplyTestEbHash(0x92),
+		append(leiosApplyTestBlob(bodyCbor, tx), leiosApplyTestBlob(bodyCbor, tx)...),
+	)
+	requireLeiosApplyTestEndorserBlob(
+		t,
+		db,
+		601,
+		leiosApplyTestEbHash(0x94),
+		leiosApplyTestBlob(bodyCbor, tx),
+	)
+}
+
+// leiosTestHash returns a distinct 32-byte hash whose bytes are all b, usable
+// as both a map key (string form) and an endorser-block hash.
+func leiosTestHash(b byte) []byte {
+	return bytes.Repeat([]byte{b}, lcommon.Blake2b256Size)
+}
+
+func leiosTestRaw(t *testing.T, value any) cbor.RawMessage {
+	t.Helper()
+	raw, err := cbor.Encode(value)
+	require.NoError(t, err)
+	return cbor.RawMessage(raw)
+}
+
+func leiosTestCertifiedBlockPair(
+	t *testing.T,
+) (*dijkstra.DijkstraBlock, *dijkstra.DijkstraBlock, lcommon.Blake2b256) {
+	t.Helper()
+	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE1))
+	parent := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 1,
+					Slot:        100,
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{
+				leiosTestRaw(t, false),
+				leiosTestRaw(t, []any{ebHash.Bytes(), uint64(4096)}),
+			},
+		},
+	}
+	certifier := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 2,
+					Slot:        140,
+					PrevHash:    parent.Hash(),
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{
+				leiosTestRaw(t, true),
+				{0xf6},
+			},
+		},
+	}
+	return parent, certifier, ebHash
+}
+
+func leiosTestEnableCertifiedBlock(
+	t *testing.T,
+	ls *LedgerState,
+	certifier *dijkstra.DijkstraBlock,
+) {
+	t.Helper()
+	certifier.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
+		Signers:             []byte{0x80},
+		AggregatedSignature: make([]byte, 48),
+	}
+	ls.config.ValidateLeiosCertificate = func(uint64, []byte, []byte, []byte) error {
+		return nil
+	}
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{{
+			EpochId:       5,
+			StartSlot:     0,
+			LengthInSlots: 200,
+		}},
+	})
+}
+
+func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
+	available := false
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				hash []byte,
+				_ uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, available && bytes.Equal(hash, ebHash.Bytes())
+			},
+			// A zero wait disables best-effort announcement waiting. It must
+			// not disable the certified-closure consistency check.
+			EndorserBlockWaitSlots: 0,
+		},
+	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+
+	available = true
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	))
+
+	ls.config.EndorserBlockProvider = nil
+	err = ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.Contains(t, err.Error(), "no endorser block provider configured")
+}
+
+// TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot is the
+// P1 regression from review, adapted for EndorserBlockProviderFunc's slot
+// parameter: ensureReferencedEndorserBlocks (via endorserBlockAvailableAt)
+// must pass the certified reference's own required slot to the provider, not
+// some other slot, so the provider resolves exactly the (slot, hash)
+// occurrence the reference needs rather than whichever one happens to be
+// cached for the hash. The manifest is content-addressed, so the same hash
+// can legitimately be a distinct occurrence at another slot; a provider that
+// only holds that other occurrence must correctly report unavailable when
+// asked about this one.
+func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				hash []byte,
+				slot uint64,
+			) ([]cbor.RawMessage, bool) {
+				// Only holds a different occurrence of this hash, at a slot
+				// other than the one the certified reference
+				// (parent.SlotNumber(), 100) actually requires.
+				if !bytes.Equal(hash, ebHash.Bytes()) ||
+					slot != parent.SlotNumber()+1 {
+					return nil, false
+				}
+				return nil, true
+			},
+			EndorserBlockWaitSlots: 0,
+		},
+	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+}
+
+func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				[]byte,
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
+			},
+			EndorserBlockWaitSlots:     0,
+			LeiosApplyEndorserBlockTxs: true,
+		},
+	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
+
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	))
+}
+
+func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	_, certifier, _ := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				[]byte,
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
+			},
+		},
+	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.Contains(t, err.Error(), "resolve certified parent announcement")
+}
+
+// TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently is the concurrency
+// regression from review: the manifest is content-addressed, so the same
+// hash can legitimately be required at two different slots at once (issue
+// #3513). Deduping in-flight fetches by hash alone let a still-in-flight
+// fetch for one slot silently suppress spawn for a different slot of the
+// same hash; awaitFetch's "not in flight" skip-fast then fired the moment
+// the *first* slot's fetch cleared the shared key, leaving the second slot's
+// requirement never fetched at all.
+func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var calls []uint64
+	release := make(chan struct{})
+
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xAB))
+	b := &leiosBackfiller{
+		fetch: func(_ context.Context, slot uint64, _ []byte) error {
+			mu.Lock()
+			calls = append(calls, slot)
+			mu.Unlock()
+			<-release
+			return nil
+		},
+		provider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+	defer close(release)
+
+	callCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(calls)
+	}
+
+	// Slot 100's fetch starts and blocks inside fetch (simulating a live
+	// in-flight network request).
+	b.spawn(context.Background(), leiosEbRef{slot: 100, hash: hash})
+	require.Eventually(
+		t,
+		func() bool { return callCount() == 1 },
+		testutil.AsyncWait,
+		time.Millisecond,
+	)
+
+	// Slot 200 requires the same hash while slot 100's fetch is still in
+	// flight. It must be dispatched independently, not suppressed.
+	b.spawn(context.Background(), leiosEbRef{slot: 200, hash: hash})
+	require.Eventually(
+		t,
+		func() bool { return callCount() == 2 },
+		testutil.AsyncWait,
+		time.Millisecond,
+	)
+
+	mu.Lock()
+	require.ElementsMatch(t, []uint64{100, 200}, calls)
+	mu.Unlock()
+}
+
+// TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight verifies that the
+// mandatory retry path observes the best-effort fetch marker for the same
+// (slot, hash) reference instead of starting a redundant fetch.
+func TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	calls := 0
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	fetchDone := make(chan struct{})
+
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xEE))
+	r := leiosEbRef{slot: 100, hash: hash}
+	b := &leiosBackfiller{
+		fetch: func(_ context.Context, _ uint64, _ []byte) error {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			started <- struct{}{}
+			<-release
+			return nil
+		},
+		provider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+
+	b.spawn(t.Context(), r)
+	testutil.RequireReceive(
+		t,
+		started,
+		testutil.AsyncWait,
+		"spawn fetch never started",
+	)
+	go func() {
+		defer close(fetchDone)
+		_ = b.fetchOnce(t.Context(), r, time.Millisecond)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		started,
+		200*time.Millisecond,
+		"fetchOnce started a redundant fetch for spawn's in-flight reference",
+	)
+
+	mu.Lock()
+	require.Equal(t, 1, calls)
+	mu.Unlock()
+	close(release)
+	testutil.RequireReceive(
+		t,
+		fetchDone,
+		testutil.AsyncWait,
+		"fetchOnce did not finish",
+	)
+}
+
+// TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion is the
+// companion regression targeting awaitFetch directly: with both slots' fetches
+// genuinely in flight at once, slot 100 finishing (and clearing its own
+// in-flight marker) must not make awaitFetch for slot 200 -- a different
+// reference to the same hash -- skip-fast and report completion before slot
+// 200's own fetch has actually finished.
+func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	completed := map[uint64]bool{}
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xCD))
+
+	b := &leiosBackfiller{
+		fetch: func(_ context.Context, slot uint64, _ []byte) error {
+			switch slot {
+			case 100:
+				<-releaseA
+			case 200:
+				<-releaseB
+			}
+			mu.Lock()
+			completed[slot] = true
+			mu.Unlock()
+			return nil
+		},
+		provider: func(_ []byte, slot uint64) ([]cbor.RawMessage, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			if completed[slot] {
+				return nil, true
+			}
+			return nil, false
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+
+	// Both slots' fetches are genuinely in flight at once.
+	b.spawn(context.Background(), leiosEbRef{slot: 100, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 200, hash: hash})
+
+	// Slot 100 finishes first, while slot 200 is still in flight.
+	close(releaseA)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return completed[100]
+	}, testutil.AsyncWait, time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		b.awaitFetch(
+			t.Context(),
+			leiosEbRef{slot: 200, hash: hash},
+			time.Millisecond,
+			leiosBackfillMaxWait,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal(
+			"awaitFetch for slot 200 returned before slot 200 actually completed",
+		)
+	case <-time.After(150 * time.Millisecond):
+		// Still correctly waiting on slot 200's own fetch.
+	}
+
+	close(releaseB)
+	select {
+	case <-done:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("awaitFetch for slot 200 did not return after it completed")
+	}
+}
+
+// TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash is the
+// companion regression to TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots
+// for classifyEndorserBlockFetches: two historical blocks announcing the
+// same hash at different slots must both reach backfill, not collapse to
+// one via the hash-only seen-map dedup (issue #3513 review).
+func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	sameHash := lcommon.NewBlake2b256(leiosTestHash(0xFE))
+	hashX := leiosTestHash(0x11)
+	hashY := leiosTestHash(0x22)
+	infos := []leiosBlockInfo{
+		{hash: string(hashX), slot: 100, announces: true, ebHash: sameHash},
+		{hash: string(hashY), slot: 200, announces: true, ebHash: sameHash},
+	}
+	neverCached := func(leiosEbRef) bool { return false }
+
+	// wallSlot 100_050 with waitSlots 100 puts both well into settled
+	// backlog; certDrivenHistorical=false (CIP path) fetches every
+	// referenced historical endorser block.
+	backfill, tipWait := classifyEndorserBlockFetches(
+		infos, nil, 100_050, true, 100, false, neverCached,
+	)
+	require.Empty(t, tipWait)
+	require.ElementsMatch(t, []leiosEbRef{
+		{slot: 100, hash: sameHash},
+		{slot: 200, hash: sameHash},
+	}, backfill)
+}
+
+// TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
+// current announcements and certified parent announcements are both fetched;
+// in the settled backlog only certified parent announcements are fetched and
+// uncertified historical announcements are skipped.
+func TestClassifyEndorserBlockFetches(t *testing.T) {
+	t.Parallel()
+
+	var (
+		hashA = leiosTestHash(0xA1) // announces ebA (historical)
+		hashC = leiosTestHash(0xC1) // certifies, parent = A (historical)
+		hashD = leiosTestHash(0xD1) // announces ebB (near head)
+		hashE = leiosTestHash(0xE1) // announces ebE (historical, uncertified)
+		ebA   = lcommon.NewBlake2b256(leiosTestHash(0x0A))
+		ebB   = lcommon.NewBlake2b256(leiosTestHash(0x0B))
+		ebE   = lcommon.NewBlake2b256(leiosTestHash(0x0E))
+	)
+	infos := []leiosBlockInfo{
+		{hash: string(hashA), slot: 100, announces: true, ebHash: ebA},
+		{
+			hash:      string(hashC),
+			prevHash:  string(hashA),
+			slot:      140,
+			certifies: true,
+		},
+		{hash: string(hashD), slot: 100_000, announces: true, ebHash: ebB},
+		{hash: string(hashE), slot: 200, announces: true, ebHash: ebE},
+	}
+	annByHash := map[string]leiosEbRef{
+		string(hashA): {slot: 100, hash: ebA},
+		string(hashD): {slot: 100_000, hash: ebB},
+		string(hashE): {slot: 200, hash: ebE},
+	}
+	neverCached := func(leiosEbRef) bool { return false }
+
+	// Haskell/cert-driven path. wallSlot 100050, waitSlots 100: slots 100/140/200
+	// are settled backlog, slot 100000 is within the head window.
+	backfill, tipWait := classifyEndorserBlockFetches(
+		infos, annByHash, 100_050, true, 100, true, neverCached,
+	)
+	// Only the certified endorser block (ebA, via CertRB C's parent A) is
+	// backfilled; the uncertified historical announcement (ebE) is skipped.
+	require.Len(t, backfill, 1)
+	require.Equal(t, ebA, backfill[0].hash)
+	require.Equal(t, uint64(100), backfill[0].slot)
+	// Only the near-head announcement (ebB) is fetched on announcement.
+	require.Len(t, tipWait, 1)
+	require.Equal(t, ebB, tipWait[0].hash)
+
+	// prototype-2026w29 permits one near-head block to certify its parent's EB
+	// and announce a new EB. Both references must be available, but only the
+	// parent's EB is applied by the certifying block.
+	nearParentHash := leiosTestHash(0xF1)
+	nearCombinedHash := leiosTestHash(0xF2)
+	nearParentEb := lcommon.NewBlake2b256(leiosTestHash(0x1F))
+	nearCurrentEb := lcommon.NewBlake2b256(leiosTestHash(0x2F))
+	backfill, tipWait = classifyEndorserBlockFetches(
+		[]leiosBlockInfo{
+			{
+				hash:      string(nearParentHash),
+				slot:      100_000,
+				announces: true,
+				ebHash:    nearParentEb,
+			},
+			{
+				hash: string(
+					nearCombinedHash,
+				), prevHash: string(nearParentHash),
+				slot: 100_001, announces: true, ebHash: nearCurrentEb, certifies: true,
+			},
+		},
+		map[string]leiosEbRef{
+			string(nearParentHash): {slot: 100_000, hash: nearParentEb},
+		},
+		100_050, true, 100, true, neverCached,
+	)
+	require.Empty(t, backfill)
+	require.Len(t, tipWait, 2)
+	require.ElementsMatch(
+		t,
+		[]lcommon.Blake2b256{nearParentEb, nearCurrentEb},
+		[]lcommon.Blake2b256{tipWait[0].hash, tipWait[1].hash},
+	)
+
+	// A cached endorser block is not refetched.
+	backfill, _ = classifyEndorserBlockFetches(
+		infos, annByHash, 100_050, true, 100, true,
+		func(r leiosEbRef) bool { return r.hash == ebA },
+	)
+	require.Empty(t, backfill)
+
+	// CIP path (certDrivenHistorical=false): the settled backlog is
+	// announcement-driven, so every referenced historical endorser block is
+	// backfilled (ebA and ebE), not just certified ones, and the near-head
+	// announcement (ebB) still goes to tipWait.
+	backfill, tipWait = classifyEndorserBlockFetches(
+		infos, annByHash, 100_050, true, 100, false, neverCached,
+	)
+	backfillHashes := make([]lcommon.Blake2b256, 0, len(backfill))
+	for _, ref := range backfill {
+		backfillHashes = append(backfillHashes, ref.hash)
+	}
+	require.ElementsMatch(
+		t,
+		[]lcommon.Blake2b256{ebA, ebE},
+		backfillHashes,
+	)
+	require.Len(t, tipWait, 1)
+	require.Equal(t, ebB, tipWait[0].hash)
+
+	// With an unknown wall-clock slot every block is treated as near-head, so
+	// all announcements fetch on announcement and none go to backfill.
+	backfill, tipWait = classifyEndorserBlockFetches(
+		infos, annByHash, 0, false, 100, true, neverCached,
+	)
+	require.Empty(t, backfill)
+	require.Len(t, tipWait, 3) // ebA, ebB, ebE (all announcements)
+}
+
+func TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots(t *testing.T) {
+	t.Parallel()
+
+	parentA := leiosTestHash(0xA2)
+	parentB := leiosTestHash(0xB2)
+	sharedHash := lcommon.NewBlake2b256(leiosTestHash(0xC2))
+	required, err := requiredCertifiedEndorserBlocks(
+		[]leiosBlockInfo{
+			{prevHash: string(parentA), slot: 100, certifies: true},
+			{prevHash: string(parentB), slot: 200, certifies: true},
+		},
+		map[string]leiosEbRef{
+			string(parentA): {slot: 100, hash: sharedHash},
+			string(parentB): {slot: 200, hash: sharedHash},
+		},
+		true,
+	)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []leiosEbRef{
+		{slot: 100, hash: sharedHash},
+		{slot: 200, hash: sharedHash},
+	}, required)
+}

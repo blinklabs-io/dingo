@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -75,6 +76,10 @@ func (d *Database) SetPParams(
 	return nil
 }
 
+// ApplyPParamUpdates enacts, for the boundary INTO epoch, the update the
+// Shelley update system agreed on among the proposals targeting epoch-1 (see
+// selectClassicPParamUpdate), mutating *currentPParams and persisting the
+// result for epoch.
 func (d *Database) ApplyPParamUpdates(
 	slot, epoch uint64,
 	era uint,
@@ -98,46 +103,43 @@ func (d *Database) ApplyPParamUpdates(
 		}
 		return nil
 	}
-	// Check for pparam updates that apply at the end of the epoch
-	pparamUpdates, err := d.metadata.GetPParamUpdates(epoch, txn.Metadata())
-	if err != nil {
-		return fmt.Errorf("get pparam updates for epoch %d: %w", epoch, err)
-	}
-	if len(pparamUpdates) == 0 {
-		// nothing to do
+	if epoch == 0 {
+		// No prior (submission) epoch, so nothing to enact.
 		return nil
 	}
-	// Filter to only updates targeting this specific epoch and count
-	// unique genesis key delegates
-	uniqueGenesis := make(map[string]struct{})
-	var latestUpdate *models.PParamUpdate
-	for i := range pparamUpdates {
-		if pparamUpdates[i].Epoch != epoch {
-			continue
-		}
-		genesisKey := string(pparamUpdates[i].GenesisHash)
-		uniqueGenesis[genesisKey] = struct{}{}
-		if latestUpdate == nil {
-			latestUpdate = &pparamUpdates[i]
-		}
+	// Fetch proposals submitted in the prior epoch; they are what gets enacted
+	// as epoch's parameters.
+	submissionEpoch := epoch - 1
+	pparamUpdates, err := d.metadata.GetPParamUpdates(
+		submissionEpoch, txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"get pparam updates for epoch %d: %w", submissionEpoch, err,
+		)
 	}
-	// Check quorum: need at least 'quorum' unique genesis key delegates
-	if len(uniqueGenesis) < quorum {
+	submissionStart, err := d.classicSubmissionEpochStart(
+		pparamUpdates, epoch, decodeFunc, txn.Metadata(),
+	)
+	if err != nil {
+		return err
+	}
+	enactment, err := selectClassicPParamUpdate(
+		pparamUpdates, epoch, submissionStart, quorum,
+		*currentPParams, decodeFunc,
+	)
+	if err != nil {
+		return err
+	}
+	if enactment == nil {
 		d.logger.Debug(
-			"pparam update quorum not met, skipping",
-			"epoch", epoch,
-			"uniqueProposals", len(uniqueGenesis),
+			"no pparam update reached quorum, skipping",
+			"enact_epoch", epoch,
+			"submission_epoch", submissionEpoch,
+			"proposers", classicPParamProposers(pparamUpdates, submissionEpoch),
 			"quorum", quorum,
 		)
 		return nil
-	}
-	if latestUpdate == nil {
-		// No updates for this specific epoch
-		return nil
-	}
-	tmpPParamUpdate, err := decodeFunc(latestUpdate.Cbor)
-	if err != nil {
-		return fmt.Errorf("decode pparam update: %w", err)
 	}
 	// Update current pparams
 	if *currentPParams == nil {
@@ -148,7 +150,7 @@ func (d *Database) ApplyPParamUpdates(
 	}
 	newPParams, err := updateFunc(
 		*currentPParams,
-		tmpPParamUpdate,
+		enactment.update,
 	)
 	if err != nil {
 		return fmt.Errorf("apply pparam update: %w", err)
@@ -156,8 +158,9 @@ func (d *Database) ApplyPParamUpdates(
 	*currentPParams = newPParams
 	d.logger.Debug(
 		"updated protocol params",
-		"epoch", epoch,
-		"uniqueProposals", len(uniqueGenesis),
+		"enact_epoch", epoch,
+		"submission_epoch", submissionEpoch,
+		"votes", enactment.votes,
 		"quorum", quorum,
 		"pparams", fmt.Sprintf("%#v", currentPParams),
 	)
@@ -176,15 +179,84 @@ func (d *Database) ApplyPParamUpdates(
 	)
 }
 
+// pparamEnactmentPending reports whether ComputeAndApplyPParamUpdates would
+// actually enact a protocol parameter update for epoch, using a read-only
+// metadata transaction.
+//
+// It exists so the txn == nil path can answer that question without holding
+// the single metadata writer connection. Reads issued through a read-write
+// transaction execute on that transaction's own connection, so probing inside
+// one occupies the writer for the duration and contends with block
+// processing on SQLite.
+func (d *Database) pparamEnactmentPending(
+	epoch uint64,
+	quorum int,
+) (bool, error) {
+	if epoch == 0 {
+		// No prior (submission) epoch, so nothing to enact.
+		return false, nil
+	}
+	submissionEpoch := epoch - 1
+	var (
+		pending     bool
+		uniqueCount int
+	)
+	if err := d.MetadataTxn(false).Do(func(txn *Txn) error {
+		pparamUpdates, err := d.metadata.GetPParamUpdates(
+			submissionEpoch, txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"get pparam updates for epoch %d: %w",
+				submissionEpoch,
+				err,
+			)
+		}
+		uniqueCount = classicPParamProposers(pparamUpdates, submissionEpoch)
+		pending = uniqueCount > 0 && uniqueCount >= quorum
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	if !pending {
+		d.logger.Debug(
+			"pparam update quorum not met or none pending, skipping",
+			"enact_epoch", epoch,
+			"submission_epoch", submissionEpoch,
+			"uniqueProposals", uniqueCount,
+			"quorum", quorum,
+		)
+	}
+	return pending, nil
+}
+
 // ComputeAndApplyPParamUpdates computes the new protocol parameters by applying
-// pending updates for the given target epoch. The epoch parameter should be the
-// epoch where updates take effect (currentEpoch + 1 during epoch rollover).
-// The quorum parameter specifies the minimum number of unique genesis key
-// delegates that must have submitted update proposals for the update to be
-// applied (from shelley-genesis.json updateQuorum).
-// This function takes currentPParams as a value and returns the updated parameters
-// without mutating the input. This allows callers to capture the result in a
-// transaction and apply it to in-memory state after the transaction commits.
+// the pending update to enact for the given epoch, and persists the result for
+// that epoch. The epoch parameter is the epoch where the updates take effect
+// (currentEpoch + 1 during epoch rollover); per the Shelley update system the
+// enacted update is the one at least quorum genesis keys proposed, with
+// identical values, for epoch-1 (see selectClassicPParamUpdate). The quorum
+// parameter comes from shelley-genesis.json updateQuorum. The epoch-1 record
+// must exist when a proposal for it carries a protocol version update.
+// Although the interface is passed by value, era-specific update functions may
+// mutate its underlying concrete protocol-parameter pointer in place. Callers
+// that need the original value preserved must pass an independently owned copy;
+// the returned value is the authoritative updated parameter set.
+//
+// hasPlutusV2CostModelFunc reports whether the enacted update itself (not the
+// merged result) explicitly specifies a PlutusV2 cost model (map key 1). This
+// is the pre-Conway equivalent of governance.EnactmentResult's
+// PlutusV2CostModelWritten: on a network that forks into Babbage before
+// receiving a real PlutusV2 cost model, that model can arrive through this
+// classic Shelley-style update system (as it did on real mainnet, well before
+// CIP-1694 governance existed), and the caller needs the same real-write
+// provenance signal here that governance.EnactProposal provides for the
+// Conway/Dijkstra path -- comparing the merged result's value before and
+// after is unsound for the same reason it is there: HardForkBabbage's
+// synthetic default is the real, canonical mainnet value, so a real update
+// writing that exact value would otherwise look unchanged. See
+// blinklabs-io/dingo#3825's PR review. May be nil (no signal available for
+// this era, e.g. Byron), in which case the returned bool is always false.
 func (d *Database) ComputeAndApplyPParamUpdates(
 	slot, epoch uint64,
 	era uint,
@@ -195,93 +267,105 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		lcommon.ProtocolParameters,
 		any,
 	) (lcommon.ProtocolParameters, error),
+	hasPlutusV2CostModelFunc func(any) bool,
 	txn *Txn,
-) (lcommon.ProtocolParameters, error) {
+) (lcommon.ProtocolParameters, bool, error) {
 	if txn == nil {
+		// Deciding whether anything will be enacted is a pure read, and in the
+		// overwhelming majority of epochs it enacts nothing. Probe it on the
+		// read connection first and take the single metadata writer only when
+		// a write will actually follow: internal/node/backfill.go calls this
+		// once per epoch for the whole of a rebootstrap backfill, so holding
+		// the writer for the probe costs one writer acquisition per epoch of
+		// chain history to answer a question that is almost always "no".
+		pending, err := d.pparamEnactmentPending(epoch, quorum)
+		if err != nil {
+			return nil, false, err
+		}
+		if !pending {
+			return currentPParams, false, nil
+		}
 		tmpTxn := d.MetadataTxn(true)
 		defer tmpTxn.Release()
-		result, err := d.ComputeAndApplyPParamUpdates(
+		result, plutusV2CostModelWritten, err := d.ComputeAndApplyPParamUpdates(
 			slot, epoch, era, quorum, currentPParams,
-			decodeFunc, updateFunc, tmpTxn,
+			decodeFunc, updateFunc, hasPlutusV2CostModelFunc, tmpTxn,
 		)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if err := tmpTxn.Commit(); err != nil {
-			return nil, fmt.Errorf("commit pparams update: %w", err)
+			return nil, false, fmt.Errorf("commit pparams update: %w", err)
 		}
-		return result, nil
+		return result, plutusV2CostModelWritten, nil
 	}
-	// Check for pparam updates that apply at the end of the epoch
-	pparamUpdates, err := d.metadata.GetPParamUpdates(epoch, txn.Metadata())
+	if epoch == 0 {
+		// No prior (submission) epoch, so nothing to enact.
+		return currentPParams, false, nil
+	}
+	// Fetch proposals submitted in the prior epoch; they are what gets enacted
+	// as epoch's parameters.
+	submissionEpoch := epoch - 1
+	pparamUpdates, err := d.metadata.GetPParamUpdates(
+		submissionEpoch, txn.Metadata(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"get pparam updates for epoch %d: %w",
-			epoch,
+			submissionEpoch,
 			err,
 		)
 	}
-	if len(pparamUpdates) == 0 {
-		// nothing to do, return current params unchanged
-		return currentPParams, nil
+	submissionStart, err := d.classicSubmissionEpochStart(
+		pparamUpdates, epoch, decodeFunc, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, false, err
 	}
-	// Filter to only updates targeting this specific epoch and count
-	// unique genesis key delegates
-	uniqueGenesis := make(map[string]struct{})
-	var latestUpdate *models.PParamUpdate
-	for i := range pparamUpdates {
-		if pparamUpdates[i].Epoch != epoch {
-			continue
-		}
-		genesisKey := string(pparamUpdates[i].GenesisHash)
-		uniqueGenesis[genesisKey] = struct{}{}
-		if latestUpdate == nil {
-			latestUpdate = &pparamUpdates[i]
-		}
+	enactment, err := selectClassicPParamUpdate(
+		pparamUpdates, epoch, submissionStart, quorum,
+		currentPParams, decodeFunc,
+	)
+	if err != nil {
+		return nil, false, err
 	}
-	// Check quorum: need at least 'quorum' unique genesis key delegates
-	if len(uniqueGenesis) < quorum {
+	if enactment == nil {
 		d.logger.Debug(
-			"pparam update quorum not met, skipping",
-			"epoch", epoch,
-			"uniqueProposals", len(uniqueGenesis),
+			"no pparam update reached quorum, skipping",
+			"enact_epoch", epoch,
+			"submission_epoch", submissionEpoch,
+			"proposers", classicPParamProposers(pparamUpdates, submissionEpoch),
 			"quorum", quorum,
 		)
-		return currentPParams, nil
-	}
-	if latestUpdate == nil {
-		// No updates for this specific epoch
-		return currentPParams, nil
-	}
-	tmpPParamUpdate, err := decodeFunc(latestUpdate.Cbor)
-	if err != nil {
-		return nil, fmt.Errorf("decode pparam update: %w", err)
+		return currentPParams, false, nil
 	}
 	// Compute updated pparams
 	if currentPParams == nil {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"current PParams is nil - cannot apply protocol parameter updates for epoch %d",
 			epoch,
 		)
 	}
+	tmpPParamUpdate := enactment.update
 	newPParams, err := updateFunc(
 		currentPParams,
 		tmpPParamUpdate,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("apply pparam update: %w", err)
+		return nil, false, fmt.Errorf("apply pparam update: %w", err)
 	}
 	d.logger.Debug(
 		"computed updated protocol params",
-		"epoch", epoch,
-		"uniqueProposals", len(uniqueGenesis),
+		"enact_epoch", epoch,
+		"submission_epoch", submissionEpoch,
+		"votes", enactment.votes,
 		"quorum", quorum,
 		"pparams", fmt.Sprintf("%#v", newPParams),
 	)
 	// Write pparams update to DB
 	pparamsCbor, err := cbor.Encode(newPParams)
 	if err != nil {
-		return nil, fmt.Errorf("encode updated pparams: %w", err)
+		return nil, false, fmt.Errorf("encode updated pparams: %w", err)
 	}
 	// Store params for the target epoch (epoch) where they take effect
 	err = d.metadata.SetPParams(
@@ -292,7 +376,101 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("set pparams: %w", err)
+		return nil, false, fmt.Errorf("set pparams: %w", err)
+	}
+	plutusV2CostModelWritten := hasPlutusV2CostModelFunc != nil &&
+		hasPlutusV2CostModelFunc(tmpPParamUpdate)
+	return newPParams, plutusV2CostModelWritten, nil
+}
+
+// ForecastPParamUpdates computes the protocol parameters that the epoch
+// rollover will enact for the given epoch by applying the pending proposed
+// protocol-parameter update already collected in ledger state, WITHOUT
+// persisting anything. It selects the update with selectClassicPParamUpdate,
+// exactly as ComputeAndApplyPParamUpdates does, but performs no writes, so it
+// is safe to call from header verification and concurrently.
+//
+// It does not mutate currentPParams: era update functions mutate their
+// concrete pointer in place (see PParamsUpdateShelley), so before applying
+// an update it clones currentPParams via cloneFunc and mutates the clone.
+// The clone happens only when an update will actually be enacted, so the
+// common no-op forecast pays no clone cost and returns the original
+// currentPParams pointer. When no pending update meets quorum for the
+// epoch — no proposals, quorum not met, or epoch is 0 — it returns
+// currentPParams unchanged, matching the "nothing enacted" forecast.
+func (d *Database) ForecastPParamUpdates(
+	epoch uint64,
+	quorum int,
+	currentPParams lcommon.ProtocolParameters,
+	decodeFunc func([]byte) (any, error),
+	updateFunc func(
+		lcommon.ProtocolParameters,
+		any,
+	) (lcommon.ProtocolParameters, error),
+	cloneFunc func(lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error),
+	txn *Txn,
+) (lcommon.ProtocolParameters, error) {
+	if currentPParams == nil ||
+		decodeFunc == nil ||
+		updateFunc == nil ||
+		cloneFunc == nil ||
+		epoch == 0 {
+		return currentPParams, nil
+	}
+	// Fetch proposals submitted in the prior epoch; they are what will be
+	// enacted as epoch's parameters.
+	submissionEpoch := epoch - 1
+	var (
+		pparamUpdates []models.PParamUpdate
+		err           error
+	)
+	if txn == nil {
+		pparamUpdates, err = d.metadata.GetPParamUpdates(submissionEpoch, nil)
+	} else {
+		pparamUpdates, err = d.metadata.GetPParamUpdates(
+			submissionEpoch, txn.Metadata(),
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get pparam updates for epoch %d: %w",
+			submissionEpoch,
+			err,
+		)
+	}
+	var metadataTxn types.Txn
+	if txn != nil {
+		metadataTxn = txn.Metadata()
+	}
+	submissionStart, err := d.classicSubmissionEpochStart(
+		pparamUpdates, epoch, decodeFunc, metadataTxn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	enactment, err := selectClassicPParamUpdate(
+		pparamUpdates, epoch, submissionStart, quorum,
+		currentPParams, decodeFunc,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if enactment == nil {
+		return currentPParams, nil
+	}
+	tmpPParamUpdate := enactment.update
+	// Clone before applying: updateFunc mutates its concrete pointer in
+	// place, and this forecast must not touch the caller's currentPParams.
+	owned, err := cloneFunc(currentPParams)
+	if err != nil {
+		return nil, fmt.Errorf("clone pparams for forecast: %w", err)
+	}
+	if owned == nil {
+		return currentPParams, nil
+	}
+	newPParams, err := updateFunc(owned, tmpPParamUpdate)
+	if err != nil {
+		return nil, fmt.Errorf("apply pparam update: %w", err)
 	}
 	return newPParams, nil
 }
@@ -303,33 +481,19 @@ func (d *Database) DeletePParamsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.DeletePParamsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete pparams after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.DeletePParamsAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete pparams after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // DeletePParamUpdatesAfterSlot removes protocol parameter update records
@@ -338,33 +502,19 @@ func (d *Database) DeletePParamUpdatesAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.DeletePParamUpdatesAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete pparam updates after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.DeletePParamUpdatesAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete pparam updates after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 func (d *Database) SetPParamUpdate(

@@ -16,14 +16,31 @@ package leios
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLeiosDSTsMatchReferenceMinSigDomains(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(
+		t,
+		"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
+		LeiosVoteDST,
+	)
+	assert.Equal(
+		t,
+		"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
+		LeiosPoPDST,
+	)
+}
 
 // testSigningKey returns a signing key built from a small non-zero scalar.
 func testSigningKey(t *testing.T, scalar byte) *VoteSigningKey {
@@ -37,6 +54,8 @@ func testSigningKey(t *testing.T, scalar byte) *VoteSigningKey {
 }
 
 func TestVoteMessageBytes(t *testing.T) {
+	t.Parallel()
+
 	ebHash := lcommon.NewBlake2b256([]byte("endorser block"))
 	msg := VoteMessageBytes(0x0102030405060708, ebHash)
 	require.Len(t, msg, 40)
@@ -48,7 +67,28 @@ func TestVoteMessageBytes(t *testing.T) {
 	assert.Equal(t, ebHash.Bytes(), msg[8:])
 }
 
+// TestPrototypeVoteMessageBytesIsCborByteString pins the signed preimage to
+// the reference's SignableRepresentation for RbHash, which is the CBOR
+// byte-string encoding of the 32-byte hash (0x58 0x20 followed by the hash)
+// rather than the bare hash.
+func TestPrototypeVoteMessageBytesIsCborByteString(t *testing.T) {
+	t.Parallel()
+
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	msg := PrototypeVoteMessageBytes(rbHash)
+	require.Len(t, msg, 34)
+	assert.Equal(t, []byte{0x58, 0x20}, msg[:2])
+	assert.Equal(t, rbHash.Bytes(), msg[2:])
+	// The constant header must stay identical to what the CBOR encoder
+	// produces for the same 32-byte payload.
+	encoded, err := cbor.Encode(rbHash.Bytes())
+	require.NoError(t, err)
+	assert.Equal(t, encoded, msg)
+}
+
 func TestSignVoteVerifyRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	msg := VoteMessageBytes(
 		1234,
@@ -60,7 +100,49 @@ func TestSignVoteVerifyRoundTrip(t *testing.T) {
 	require.NoError(t, VerifyVoteSignature(key.PublicKey(), msg, sig))
 }
 
+func TestPrototypeVoteMusashiVector(t *testing.T) {
+	t.Parallel()
+
+	// Fixed MinSig/PoP vector cross-checked with supranational/blst, the
+	// independent BLS12-381 implementation the reference signs with.
+	// Keeping the expected bytes literal makes this test fail if either the
+	// Musashi message shape or cardano-crypto-leios ciphersuite DST changes
+	// accidentally.
+	rbHashBytes, err := hex.DecodeString(
+		"000102030405060708090a0b0c0d0e0f" +
+			"101112131415161718191a1b1c1d1e1f",
+	)
+	require.NoError(t, err)
+	var rbHash lcommon.Blake2b256
+	copy(rbHash[:], rbHashBytes)
+	msg := PrototypeVoteMessageBytes(rbHash)
+	// The reference signs the CBOR byte-string encoding of the hash, not the
+	// bare hash bytes.
+	assert.Equal(t, append([]byte{0x58, 0x20}, rbHashBytes...), msg)
+
+	key := testSigningKey(t, 42)
+	sig, err := SignVote(key, msg)
+	require.NoError(t, err)
+	expectedSig, err := hex.DecodeString(
+		"807cbcaf3514d73af215e7734202ab7f08e912d9b10fe8b7" +
+			"96a948c0b196856568912818135bcd23d70b0faba48ad214",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, expectedSig, sig)
+
+	publicKey, err := ParseVoterPublicKey(
+		"ac7fa63dfc38bbf3712e27a180391bca4ccabf609c5967a0" +
+			"592eff420b6235f3f2b323051cb099acc3969aca310f7ff4" +
+			"191b2d6db43fafc2c9592f7e5f73981107975d3d92b8438" +
+			"91e724dbc9f05b5eee5a3b2b1fc782ede8149f30830b84444",
+	)
+	require.NoError(t, err)
+	require.NoError(t, VerifyVoteSignature(publicKey, msg, expectedSig))
+}
+
 func TestVerifyVoteSignatureWrongMessage(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	msg := VoteMessageBytes(1234, lcommon.NewBlake2b256([]byte("eb")))
 	sig, err := SignVote(key, msg)
@@ -77,6 +159,8 @@ func TestVerifyVoteSignatureWrongMessage(t *testing.T) {
 }
 
 func TestVerifyVoteSignatureWrongKey(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	otherKey := testSigningKey(t, 43)
 	msg := VoteMessageBytes(1234, lcommon.NewBlake2b256([]byte("eb")))
@@ -90,6 +174,8 @@ func TestVerifyVoteSignatureWrongKey(t *testing.T) {
 }
 
 func TestVerifyVoteSignatureMalformed(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	msg := VoteMessageBytes(1234, lcommon.NewBlake2b256([]byte("eb")))
 	// Wrong size
@@ -107,6 +193,8 @@ func TestVerifyVoteSignatureMalformed(t *testing.T) {
 }
 
 func TestAggregateSignaturesVerify(t *testing.T) {
+	t.Parallel()
+
 	msg := VoteMessageBytes(99, lcommon.NewBlake2b256([]byte("eb")))
 	sigs := make([][]byte, 0, 3)
 	pubs := make([]*bls12381.G2Affine, 0, 3)
@@ -124,6 +212,8 @@ func TestAggregateSignaturesVerify(t *testing.T) {
 }
 
 func TestVerifyAggregateSignatureCorrupted(t *testing.T) {
+	t.Parallel()
+
 	msg := VoteMessageBytes(99, lcommon.NewBlake2b256([]byte("eb")))
 	key1 := testSigningKey(t, 11)
 	key2 := testSigningKey(t, 22)
@@ -152,6 +242,8 @@ func TestVerifyAggregateSignatureCorrupted(t *testing.T) {
 }
 
 func TestAggregateSignaturesInvalidInput(t *testing.T) {
+	t.Parallel()
+
 	_, err := AggregateSignatures(nil)
 	assert.Error(t, err)
 	_, err = AggregateSignatures([][]byte{{1, 2, 3}})
@@ -159,9 +251,79 @@ func TestAggregateSignaturesInvalidInput(t *testing.T) {
 }
 
 func TestVerifyAggregateSignatureNoKeys(t *testing.T) {
+	t.Parallel()
+
 	msg := VoteMessageBytes(99, lcommon.NewBlake2b256([]byte("eb")))
 	key := testSigningKey(t, 11)
 	sig, err := SignVote(key, msg)
 	require.NoError(t, err)
 	assert.Error(t, VerifyAggregateSignature(nil, msg, sig))
+}
+
+// testLeiosKey builds a LeiosKey with a proof over its public key under the
+// dedicated proof-of-possession domain.
+func testLeiosKey(t *testing.T, scalar byte) *lcommon.LeiosKey {
+	t.Helper()
+	key := testSigningKey(t, scalar)
+	pub := key.PublicKeyBytes()
+	proof, err := signWithDST(key, pub, LeiosPoPDST)
+	require.NoError(t, err)
+	return &lcommon.LeiosKey{PublicKey: pub, PossessionProof: proof}
+}
+
+func TestVerifyLeiosKeyProofOfPossession(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, VerifyLeiosKeyProofOfPossession(testLeiosKey(t, 7)))
+}
+
+func TestVerifyLeiosKeyProofOfPossessionNil(t *testing.T) {
+	t.Parallel()
+
+	assert.Error(t, VerifyLeiosKeyProofOfPossession(nil))
+}
+
+func TestVerifyLeiosKeyProofOfPossessionWrongPublicKeyLength(t *testing.T) {
+	t.Parallel()
+
+	key := testLeiosKey(t, 7)
+	key.PublicKey = key.PublicKey[:len(key.PublicKey)-1]
+	assert.Error(t, VerifyLeiosKeyProofOfPossession(key))
+}
+
+// TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof covers a
+// possession proof genuinely produced by a different key: upstream's
+// "invalid proofs are treated as absent" rule depends on this failing.
+func TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof(t *testing.T) {
+	t.Parallel()
+
+	honest := testLeiosKey(t, 7)
+	other := testLeiosKey(t, 9)
+	tampered := &lcommon.LeiosKey{
+		PublicKey:       honest.PublicKey,
+		PossessionProof: other.PossessionProof,
+	}
+	assert.ErrorIs(
+		t,
+		VerifyLeiosKeyProofOfPossession(tampered),
+		ErrInvalidSignature,
+	)
+}
+
+// TestVerifyLeiosKeyProofOfPossessionRejectsVoteDomainProof pins the
+// dedicated BLS_POP domain and rejects proofs made with the vote BLS_SIG
+// domain, even when the message is the serialized public key.
+func TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	key := testSigningKey(t, 7)
+	pub := key.PublicKeyBytes()
+	voteSig, err := SignVote(key, pub)
+	require.NoError(t, err)
+	assert.Error(t, VerifyLeiosKeyProofOfPossession(&lcommon.LeiosKey{
+		PublicKey:       pub,
+		PossessionProof: voteSig,
+	}))
 }

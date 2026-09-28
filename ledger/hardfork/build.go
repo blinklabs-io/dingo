@@ -42,7 +42,10 @@ func BuildSummary(
 	transition TransitionInfo,
 ) (Summary, error) {
 	if err := current.Params.Validate(); err != nil {
-		return Summary{}, fmt.Errorf("hardfork: current era params invalid: %w", err)
+		return Summary{}, fmt.Errorf(
+			"hardfork: current era params invalid: %w",
+			err,
+		)
 	}
 	for i, p := range past {
 		if p.End == nil {
@@ -60,7 +63,8 @@ func BuildSummary(
 		if transition.KnownEpoch <= current.Start.Epoch {
 			return Summary{}, fmt.Errorf(
 				"hardfork: TransitionKnown epoch %d must be > era start epoch %d",
-				transition.KnownEpoch, current.Start.Epoch,
+				transition.KnownEpoch,
+				current.Start.Epoch,
 			)
 		}
 		b := mkUpperBound(current.Params, current.Start, transition.KnownEpoch)
@@ -88,6 +92,50 @@ func BuildSummary(
 		Eras:        eras,
 		Transition:  transition,
 	}, nil
+}
+
+// SuccessorEra builds the era that follows a bounded era whose End is an
+// announced transition boundary. anchorSlot is the same live tip/horizon
+// anchor BuildSummary receives (the published tip, or a block-apply caller's
+// more recent applied predecessor); the safe zone is measured from
+// max(anchorSlot+1, start.Slot), exactly mirroring BuildSummary's
+// TransitionUnknown branch. While the tip has not yet reached the boundary
+// (the ordinary case: TransitionKnown announces a future era before it
+// starts), anchorSlot+1 <= start.Slot and this reduces to the safe zone
+// measured from start, identical to what BuildSummary computes for
+// TransitionImpossible.
+//
+// The anchor matters once the boundary itself is at or behind the live tip:
+// a caller reconstructing a Summary for a slot beyond the boundary (this
+// era's own epoch-cache group has not been populated yet, so BuildSummary
+// cannot compute this era as "current" the ordinary way, but the events that
+// would flip TransitionKnown back to TransitionUnknown for it have not run
+// either) must still roll the successor's horizon forward with the tip the
+// same way BuildSummary does for every other era, or the horizon freezes at
+// boundary+safeZone forever regardless of how far the chain has actually
+// progressed past the boundary. Measuring only from start (the previous
+// behavior) reproduced that freeze.
+//
+// The bound always snaps up to at least the next epoch boundary, so the
+// successor covers the whole first post-boundary epoch even when anchorSlot
+// is behind start. A zero SafeZoneSlots means UnsafeIndefiniteSafeZone and
+// leaves the successor open, matching BuildSummary.
+//
+// Mirrors the recursion into the next era in
+// Ouroboros.Consensus.HardFork.Combinator.State.Infra.reconstructSummary.
+func SuccessorEra(
+	start Bound,
+	eraID uint,
+	params EraParams,
+	anchorSlot uint64,
+) EraSummary {
+	fromSlot := max(anchorSlot+1, start.Slot)
+	return EraSummary{
+		EraID:  eraID,
+		Start:  start,
+		End:    applySafeZone(params, start, fromSlot),
+		Params: params,
+	}
 }
 
 // mkUpperBound computes a Bound at the start of hiEpoch, given the era's

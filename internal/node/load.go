@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,16 +20,23 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -41,13 +48,169 @@ import (
 // larger import batches, so keep the runtime load batch size aligned with the
 // chain import batch cap.
 const (
-	loadBlockBatchSize  = 50
-	progressLogInterval = 10 * time.Second
+	loadBlockBatchSize   = 50
+	progressLogInterval  = 10 * time.Second
+	loadDecodeMinWorkers = 2
+	loadDecodeMaxWorkers = 8
 
 	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
 
-func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
+// loadDecodeWorkerCount bounds the parallel full-block decoder used by the
+// trusted Mithril load path. Chain insertion and ledger replay remain serial;
+// only the CPU-heavy CBOR decode is parallelized.
+func loadDecodeWorkerCount() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < loadDecodeMinWorkers {
+		return loadDecodeMinWorkers
+	}
+	if n > loadDecodeMaxWorkers {
+		return loadDecodeMaxWorkers
+	}
+	return n
+}
+
+// newLedgerStateForLoad is replaceable in tests so load-mode composition can
+// be verified without replaying a full ImmutableDB fixture.
+var newLedgerStateForLoad = ledger.NewLedgerState
+
+type loadSecurityParam int
+
+func (k loadSecurityParam) SecurityParam() int {
+	return int(k)
+}
+
+func configureLoadChainSecurityParam(
+	cm *chain.ChainManager,
+	nodeCfg *cardano.CardanoNodeConfig,
+) error {
+	k, err := loadSecurityParamForConfig(nodeCfg)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to configure chain security parameter for load: %w",
+			err,
+		)
+	}
+	if err := cm.SetLedger(loadSecurityParam(k)); err != nil {
+		return fmt.Errorf(
+			"failed to configure chain security parameter for load: %w",
+			err,
+		)
+	}
+	return nil
+}
+
+// loadSecurityParamForConfig validates the raw genesis K values that replay
+// can reach and returns the one for the era where replay starts. It must not
+// use LedgerState.SecurityParam: before Start that method samples the
+// zero-value Byron era and intentionally substitutes its runtime fallback for
+// unavailable or invalid values.
+func loadSecurityParamForConfig(
+	nodeCfg *cardano.CardanoNodeConfig,
+) (int, error) {
+	if nodeCfg == nil {
+		return 0, fmt.Errorf(
+			"%w: cardano node config is required",
+			chain.ErrInvalidSecurityParam,
+		)
+	}
+
+	shelleyGenesis := nodeCfg.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return 0, fmt.Errorf(
+			"%w: Shelley genesis is required",
+			chain.ErrInvalidSecurityParam,
+		)
+	}
+	if shelleyGenesis.SecurityParam <= 0 {
+		return 0, fmt.Errorf(
+			"%w: Shelley security parameter K must be positive: got %d",
+			chain.ErrInvalidSecurityParam,
+			shelleyGenesis.SecurityParam,
+		)
+	}
+
+	shelleyAtGenesis := false
+	if epoch, declared := nodeCfg.DeclaredHardForkEpoch("shelley"); declared {
+		shelleyAtGenesis = epoch == 0
+	}
+	byronGenesis := nodeCfg.ByronGenesis()
+	if byronGenesis == nil || shelleyAtGenesis {
+		return shelleyGenesis.SecurityParam, nil
+	}
+	if byronGenesis.ProtocolConsts.K <= 0 {
+		return 0, fmt.Errorf(
+			"%w: Byron security parameter K must be positive: got %d",
+			chain.ErrInvalidSecurityParam,
+			byronGenesis.ProtocolConsts.K,
+		)
+	}
+	return byronGenesis.ProtocolConsts.K, nil
+}
+
+// installEpochBoundarySnapshotHookForLoad is replaceable in tests so load-mode
+// composition can verify the hook is installed without starting ledger workers.
+var installEpochBoundarySnapshotHookForLoad = func(
+	ls *ledger.LedgerState,
+	fn func(*database.Txn, event.EpochTransitionEvent) error,
+) error {
+	ls.SetEpochBoundarySnapshotHook(fn)
+	return nil
+}
+
+// loadCaptureFailureTracker records authoritative epoch-boundary snapshot
+// capture failures so `dingo load` can surface them after replay.
+//
+// Load has no event-driven snapshot fallback: LoadWithDB builds the snapshot
+// manager with a nil EventBus and never starts it, and the load ledger runs
+// without an EventBus, so no EpochTransitionEvents are ever published. The
+// ledger deliberately suppresses a failed authoritative capture (rolling back
+// its savepoint and deferring to the fallback) so an epoch boundary is never
+// wedged. During normal operation the event-driven fallback re-captures the
+// snapshot; during load there is no fallback, so a suppressed capture error
+// would silently drop that epoch's mark/reward snapshot and load would still
+// report success if both capture phases fail. The persist phase has a
+// boundary-aware historical fallback; this tracker surfaces a failure of that
+// complete capture so load cannot finish with an incomplete DB.
+type loadCaptureFailureTracker struct {
+	mu     sync.Mutex
+	first  error
+	epochs []uint64
+}
+
+// record notes a failed capture for the given epoch. The first error is kept as
+// the representative cause; every failed epoch is accumulated for reporting.
+func (t *loadCaptureFailureTracker) record(epoch uint64, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.first == nil {
+		t.first = err
+	}
+	t.epochs = append(t.epochs, epoch)
+}
+
+// err returns a wrapped error naming every epoch whose authoritative snapshot
+// capture failed, or nil if all captures succeeded.
+func (t *loadCaptureFailureTracker) err() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.first == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"epoch-boundary snapshot capture failed for epoch(s) %v during load; "+
+			"load has no event-driven snapshot fallback, so the database is "+
+			"missing mark/reward snapshots and must be re-imported: %w",
+		t.epochs, t.first,
+	)
+}
+
+func Load(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	immutableDir string,
+) error {
 	return LoadWithDB(ctx, cfg, logger, immutableDir, nil)
 }
 
@@ -63,35 +226,81 @@ func ensureDB(
 		return db, func() {}, nil
 	}
 	dbConfig := &database.Config{
-		DataDir:        cfg.DatabasePath,
-		Logger:         logger,
-		PromRegistry:   nil,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        string(cfg.RunMode),
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
+		DataDir: cfg.DatabasePath, Logger: logger,
+		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
+		NetworkMagic:   cfg.NetworkMagic,
+		StartEra:       string(cfg.StartEra),
+		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			nil, cfg.CardanoConfig, cfg.Network,
+		),
 	}
-	newDB, err := database.New(dbConfig)
+	runtime, err := internalplugins.OpenDatabase(
+		context.Background(),
+		dbConfig,
+		internalplugins.StorageSelections{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		internalplugins.StorageDependencies{
+			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
+			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
+			Logger: logger, TracingEnabled: cfg.Tracing,
+		},
+	)
 	if err != nil {
+		return nil, nil, fmt.Errorf("creating database: %w", err)
+	}
+	if runtime == nil || runtime.Database == nil {
+		return nil, nil, errors.New(
+			"creating database: runtime did not provide a database",
+		)
+	}
+	newDB := runtime.Database
+	cleanup := func() {
+		_ = runtime.Close(context.Background())
+	}
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Bootstrap paths (load / mithril sync) tolerate a recoverable
 		// commit-timestamp mismatch: the import work that follows
 		// writes through full transactions which heal the timestamps.
 		// Returning the error here would leave the user unable to
 		// re-run a load / re-bootstrap from a previous interrupted
 		// import.
-		var cte database.CommitTimestampError
-		if errors.As(err, &cte) && newDB != nil {
+		if cte, ok := errors.AsType[database.CommitTimestampError](
+			recoveryErr,
+		); ok {
 			logger.Warn(
 				"opened database with commit timestamp mismatch; "+
 					"continuing — import will heal it",
 				"metadata_timestamp", cte.MetadataTimestamp,
 				"blob_timestamp", cte.BlobTimestamp,
 			)
-			return newDB, func() { newDB.Close() }, nil
+			return newDB, cleanup, nil
 		}
-		return nil, nil, fmt.Errorf("creating database: %w", err)
+		return nil, nil, fmt.Errorf("creating database: %w", recoveryErr)
 	}
-	return newDB, func() { newDB.Close() }, nil
+	return newDB, cleanup, nil
+}
+
+// captureLoadGenesisSnapshot captures the genesis (epoch 0) mark stake
+// snapshot during a `dingo load` replay, mirroring the guard node.go applies
+// around the equivalent call (see handleGenesisSnapshotError): a block
+// producer cannot elect leaders without this snapshot, so a capture failure
+// is fatal, while a relay or replay-only load only warns and continues.
+func captureLoadGenesisSnapshot(
+	ctx context.Context,
+	snapshotMgr *snapshot.Manager,
+	cfg *config.Config,
+	logger *slog.Logger,
+) error {
+	return snapshot.HandleGenesisSnapshotError(
+		cfg.BlockProducer,
+		logger,
+		snapshotMgr.CaptureGenesisSnapshot(ctx),
+	)
 }
 
 // WithBulkLoadPragmas enables bulk-load optimizations on the metadata
@@ -141,6 +350,7 @@ func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
 // and clears the pending marker.
 type DeferredIndexRebuilder struct {
 	manager metadata.DeferredIndexManager
+	logger  *slog.Logger
 }
 
 func (r *DeferredIndexRebuilder) BuildCritical() error {
@@ -157,7 +367,11 @@ func (r *DeferredIndexRebuilder) BuildAll() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	if err := r.manager.BuildDeferredIndexes(); err != nil {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if err := ensureAllDeferredIndexes(r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding deferred indexes: %w", err)
 	}
 	return nil
@@ -187,15 +401,178 @@ func WithDeferredIndexes(
 				"continuing and repairing during rebuild phases",
 			"error", err,
 		)
-		return &DeferredIndexRebuilder{manager: manager}
+		return &DeferredIndexRebuilder{manager: manager, logger: logger}
 	}
-	return &DeferredIndexRebuilder{manager: manager}
+	return &DeferredIndexRebuilder{manager: manager, logger: logger}
 }
 
-// RepairCriticalDeferredIndexes rebuilds the API/rollback-critical
-// subset if a prior run left deferred indexes pending. It leaves the
-// pending marker in place so RepairDeferredIndexes can finish the
-// lazy remainder later.
+// criticalIndexRebuildLogThreshold is how long the critical-index check
+// may take before it is reported even though nothing in the critical subset
+// was missing. A complete manifest costs one catalog lookup per entry and
+// stays well under it; anything slower did work an operator watching a
+// startup should see attributed.
+const criticalIndexRebuildLogThreshold = time.Second
+
+// ensureCriticalDeferredIndexes rebuilds every missing critical manifest
+// entry, whether or not a drop/rebuild cycle is outstanding.
+//
+// The pending marker records that a cycle was interrupted; it does not
+// record which indexes exist, and it is not durable across a Mithril sync:
+// mithril/sync.go rebuilds the critical subset and then calls
+// updateMithrilReadyState, whose db.ClearSyncState is an unqualified
+// DELETE FROM sync_state. Until that clear learned to carry
+// deferred.SyncStateKey across it (mithril/sync_import.go), every completed
+// Mithril sync erased the marker moments after BuildCritical set it, leaving
+// the database with the critical subset built, the lazy remainder dropped,
+// and nothing recording either — the state two Mithril-bootstrapped preview
+// nodes were found in, missing the utxo child index the rollback DELETE
+// cascades through. Databases bootstrapped by any binary released so far are
+// still in it, and nothing else recreates those indexes: the schema migration
+// that created them is recorded complete, so its CREATE INDEX IF NOT EXISTS
+// never runs again, and the manifest is only consulted by a cycle that is no
+// longer pending.
+//
+// BuildCriticalDeferredIndexes skips indexes that are present, so this is a
+// catalog lookup per entry on a healthy database, and it never touches the
+// marker.
+func ensureCriticalDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	missing, listed := missingCriticalDeferredIndexes(manager, logger)
+	if listed && len(missing) > 0 {
+		// Logged before the build: building one index on a
+		// multi-million-row table takes minutes, and the rebuild itself
+		// is silent while it runs.
+		logger.Info(
+			"rebuilding missing critical deferred metadata indexes",
+			"indexes", strings.Join(missing, ","),
+			"count", len(missing),
+		)
+	}
+	start := time.Now()
+	if err := manager.BuildCriticalDeferredIndexes(); err != nil {
+		return err
+	}
+	elapsed := time.Since(start)
+	if (listed && len(missing) > 0) ||
+		elapsed >= criticalIndexRebuildLogThreshold {
+		attrs := []any{
+			"duration", elapsed,
+			// The store runs the critical rebuild inside
+			// withDeferredIndexWrite, which restores any missing
+			// deferred.Retained index first. Both halves are inside
+			// this measurement.
+			"duration_covers",
+			"critical rebuild and retained-index restore",
+		}
+		if listed {
+			indexes := "none"
+			if len(missing) > 0 {
+				indexes = strings.Join(missing, ",")
+			}
+			attrs = append(attrs, "critical_indexes_built", indexes)
+		}
+		logger.Info(
+			"critical deferred metadata index check complete",
+			attrs...,
+		)
+	}
+	return nil
+}
+
+// ensureAllDeferredIndexes rebuilds the complete manifest, naming the entries
+// it is about to build and reporting how long the build took.
+//
+// BuildDeferredIndexes is as silent as BuildCriticalDeferredIndexes and has
+// the whole manifest to get through, so without this an operator watching a
+// restored database start up sees the critical announcement, then nothing at
+// all for however long the remaining entries take on a multi-million-row
+// table.
+func ensureAllDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	missing, listed := missingDeferredIndexes(manager, logger)
+	if listed && len(missing) > 0 {
+		logger.Info(
+			"rebuilding missing deferred metadata indexes",
+			"indexes", strings.Join(missing, ","),
+			"count", len(missing),
+		)
+	}
+	start := time.Now()
+	if err := manager.BuildDeferredIndexes(); err != nil {
+		return err
+	}
+	elapsed := time.Since(start)
+	if (listed && len(missing) > 0) ||
+		elapsed >= criticalIndexRebuildLogThreshold {
+		attrs := []any{"duration", elapsed}
+		if listed {
+			indexes := "none"
+			if len(missing) > 0 {
+				indexes = strings.Join(missing, ",")
+			}
+			attrs = append(attrs, "deferred_indexes_built", indexes)
+		}
+		logger.Info("deferred metadata index check complete", attrs...)
+	}
+	return nil
+}
+
+// missingDeferredIndexes names the manifest entries absent from the schema.
+// The second return reports whether the store could answer, on the same terms
+// as missingCriticalDeferredIndexes.
+func missingDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) ([]string, bool) {
+	lister, ok := manager.(metadata.MissingDeferredIndexLister)
+	if !ok {
+		return nil, false
+	}
+	missing, err := lister.MissingDeferredIndexes()
+	if err != nil {
+		logger.Warn(
+			"could not list missing deferred metadata indexes; "+
+				"rebuilding without naming them",
+			"error", err,
+		)
+		return nil, false
+	}
+	return missing, true
+}
+
+// missingCriticalDeferredIndexes names the critical manifest entries absent
+// from the schema. The second return reports whether the store could answer:
+// stores that do not implement the lister, and read errors on the catalog
+// query, fall back to logging after the rebuild rather than failing a startup
+// over a log line.
+func missingCriticalDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) ([]string, bool) {
+	lister, ok := manager.(metadata.MissingCriticalDeferredIndexLister)
+	if !ok {
+		return nil, false
+	}
+	missing, err := lister.MissingCriticalDeferredIndexes()
+	if err != nil {
+		logger.Warn(
+			"could not list missing critical deferred metadata indexes; "+
+				"rebuilding without naming them",
+			"error", err,
+		)
+		return nil, false
+	}
+	return missing, true
+}
+
+// RepairCriticalDeferredIndexes rebuilds the full manifest when no bulk-load
+// cycle is pending. During a pending cycle, it preserves that marker and
+// rebuilds only the API/rollback-critical subset so RepairDeferredIndexes can
+// finish the lazy remainder later.
 func RepairCriticalDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -208,20 +585,29 @@ func RepairCriticalDeferredIndexes(
 	if err != nil {
 		return err
 	}
-	if !pending {
-		return nil
+	if pending {
+		logger.Warn(
+			"critical deferred metadata indexes pending from a prior run; " +
+				"rebuilding before serving API traffic",
+		)
+		return ensureCriticalDeferredIndexes(manager, logger)
 	}
-	logger.Warn(
-		"critical deferred metadata indexes pending from a prior run; " +
-			"rebuilding before serving API traffic",
-	)
-	return manager.BuildCriticalDeferredIndexes()
+	// A clear marker means no bulk-load cycle is active. Restore copies can
+	// still be missing any manifest entry because their recorded migrations do
+	// not re-run, so finish the whole manifest before accepting traffic.
+	if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+		return err
+	}
+	return ensureAllDeferredIndexes(manager, logger)
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
 // recorded as pending by a prior interrupted run. It is safe to call
 // when no rebuild is outstanding: BuildDeferredIndexes is itself
 // idempotent and clears the marker.
+//
+// With no cycle outstanding it restores the complete manifest because a
+// restored database can have recorded migrations but missing index entries.
 func RepairDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -235,13 +621,19 @@ func RepairDeferredIndexes(
 		return err
 	}
 	if !pending {
-		return nil
+		// A restore can carry missing deferred indexes without the pending
+		// marker. Rebuild the complete manifest before any rollback or query
+		// runs; BuildDeferredIndexes is idempotent on a healthy database.
+		if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+			return err
+		}
+		return ensureAllDeferredIndexes(manager, logger)
 	}
 	logger.Warn(
 		"deferred metadata indexes pending from a prior run; " +
 			"rebuilding before continuing",
 	)
-	return manager.BuildDeferredIndexes()
+	return ensureAllDeferredIndexes(manager, logger)
 }
 
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,
@@ -260,9 +652,8 @@ func LoadWithDB(
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
-
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
 		network,
@@ -273,13 +664,48 @@ func LoadWithDB(
 			"loading cardano node config: %w", err,
 		)
 	}
+	if cfg.FullPotRewardsEnabled &&
+		!cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		var genesisNetworkMagic uint32
+		if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil {
+			genesisNetworkMagic = shelleyGenesis.NetworkMagic
+		}
+		if network == "" && cfg.NetworkMagic == 0 && genesisNetworkMagic == 0 {
+			return errors.New(
+				"fullPotRewardsEnabled requires a resolvable network identity",
+			)
+		}
+		if networkName, ok := config.FullPotRewardsStandardNetwork(
+			network,
+			cfg.NetworkMagic,
+		); ok {
+			return fmt.Errorf(
+				"fullPotRewardsEnabled is not permitted on standard network %q "+
+					"without unsafeFullPotRewardsOnStandardNetworks",
+				networkName,
+			)
+		}
+		// The Shelley genesis drives ledger state during load, so validate its
+		// identity independently. Otherwise a custom configured name or magic
+		// could disguise a standard-network Cardano config and bypass the gate.
+		if networkName, ok := config.FullPotRewardsStandardNetwork(
+			"",
+			genesisNetworkMagic,
+		); ok {
+			return fmt.Errorf(
+				"fullPotRewardsEnabled is not permitted on standard network %q "+
+					"without unsafeFullPotRewardsOnStandardNetworks",
+				networkName,
+			)
+		}
+	}
 	logger.Debug(
 		"cardano network config",
 		"component", "node",
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db)
+	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
@@ -299,16 +725,44 @@ func LoadWithDB(
 	if c == nil {
 		return errors.New("primary chain not available")
 	}
+	snapshotMgr := snapshot.NewManager(db, nil, logger)
+	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
+	// so replay matches serve mode (node.go) on the same DB.
+	if err := snapshotMgr.SetDelegatorInactivity(
+		cfg.DelegatorInactivityEnabled,
+		cfg.DelegatorInactivity,
+	); err != nil {
+		return fmt.Errorf("configuring snapshot manager: %w", err)
+	}
 	// Load state
-	ls, err := ledger.NewLedgerState(
+	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
-			Database:              db,
-			ChainManager:          cm,
-			Logger:                logger,
-			CardanoNodeConfig:     nodeCfg,
-			ValidateHistorical:    cfg.ValidateHistorical,
+			Database:           db,
+			ChainManager:       cm,
+			Logger:             logger,
+			CardanoNodeConfig:  nodeCfg,
+			Network:            cfg.Network,
+			ValidateHistorical: cfg.ValidateHistorical,
+			// CIP-0163 full-pot reward distribution is consensus-affecting and
+			// deterministically changes the reward state written during replay,
+			// so load must honor the same operator flag as serve mode; otherwise
+			// an import with the feature enabled would persist legacy
+			// residual-to-reserves reward state that disagrees with an enabled
+			// serve node.
+			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
+			// Immutable load replays blocks already accepted into the trusted
+			// database. Structural Leios certificate checks still run;
+			// cryptographic verification belongs to live admission, where the
+			// vote manager is available.
+			ValidateLeiosCertificate: func(uint64, []byte, []byte, []byte) error {
+				return nil
+			},
 			ManualBlockProcessing: true,
+			// CIP-0163 reward-account inactivity expiry: consensus-affecting,
+			// must match serve mode (node.go) on replay of the same DB.
+			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
+			DelegatorInactivity:        cfg.DelegatorInactivity,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -319,10 +773,66 @@ func LoadWithDB(
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
+	if err := configureLoadChainSecurityParam(cm, nodeCfg); err != nil {
+		return err
+	}
+	captureFailures := &loadCaptureFailureTracker{}
+	// SNAP-point stake read: runs after MIR and before POOLREAP/enactment so the
+	// mark snapshot includes pre-SNAP credits but excludes post-SNAP credits. If
+	// that read fails, the persist hook uses boundary-aware historical
+	// reconstruction; the tracker reports only failure of the complete capture.
+	ls.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	)
+	// Governance's same-boundary SPO stake read (dingo#4441): RATIFY tallies
+	// mark[NewEpoch] -- this same boundary's own mark snapshot -- which is not
+	// durably written until the capture hook below runs, later in the same
+	// rollover. Load replays the exact same governance.ProcessEpoch path as
+	// serve mode, so it needs this wired too; without it, every SPO-gated
+	// action would silently see zero stake at every replayed boundary.
+	ls.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return snapshotMgr.CurrentBoundarySPOStakeRows(ctx, txn, evt)
+		},
+	)
+	if err := installEpochBoundarySnapshotHookForLoad(
+		ls,
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			// The ledger suppresses a failed authoritative capture and defers
+			// to the event-driven fallback, which does not exist in load mode.
+			// Record the failure so LoadWithDB can surface it after replay
+			// instead of completing with a missing mark/reward snapshot.
+			if err := snapshotMgr.CaptureEpochBoundarySnapshot(
+				ctx, txn, evt,
+			); err != nil {
+				captureFailures.record(evt.NewEpoch, err)
+				return err
+			}
+			return nil
+		},
+	); err != nil {
+		return fmt.Errorf("installing epoch-boundary snapshot hook: %w", err)
+	}
 	if err := ls.Start(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	defer ls.Close()
+
+	// Capture the genesis stake snapshot (epoch 0) now that ls.Start has
+	// applied genesis (including any Shelley-genesis staking), mirroring
+	// node.go's normal startup path. Without this, replaying a devnet chain
+	// with genesis staking through `dingo load` never creates the epoch-0
+	// mark RewardSnapshot, silently skipping the first reward round applied
+	// at the epoch-3 boundary (#1959). This must run before any epoch
+	// boundaries are processed below.
+	if err := captureLoadGenesisSnapshot(ctx, snapshotMgr, cfg, logger); err != nil {
+		return err
+	}
 
 	replayCtx, cancelReplay := context.WithCancel(ctx)
 	defer cancelReplay()
@@ -348,7 +858,16 @@ func LoadWithDB(
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()
-		<-replayErrCh
+		// A non-nil, non-context.Canceled replayErr here is the real
+		// cause: it's what made ProcessTrustedBlockBatches call
+		// cancelReplay in the first place, which is what unblocked
+		// copyBlocksDirect's channel send and produced err (usually
+		// just "context canceled"). Join both so the operator sees the
+		// actual failure instead of only its downstream symptom.
+		replayErr := <-replayErrCh
+		if replayErr != nil && !errors.Is(replayErr, context.Canceled) {
+			return errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr)
+		}
 		return fmt.Errorf("loading blocks: %w", err)
 	}
 	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
@@ -359,6 +878,12 @@ func LoadWithDB(
 		"blocks_copied", blocksCopied,
 		"tip_slot", immutableTipSlot,
 	)
+	// Surface any authoritative epoch-boundary capture the ledger suppressed:
+	// load has no fallback to recapture it, so a silent success here would leave
+	// the database missing mark/reward snapshots for those epochs.
+	if err := captureFailures.err(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -378,7 +903,9 @@ type LoadBlobsProgress struct {
 }
 
 type loadBlobsOptions struct {
-	onProgress func(LoadBlobsProgress)
+	onProgress     func(LoadBlobsProgress)
+	immutableDB    *immutable.ImmutableDb
+	immutableDBSet bool
 }
 
 // LoadBlobsOption customizes LoadBlobsWithDB behavior.
@@ -390,6 +917,28 @@ func WithLoadBlobsProgress(
 ) LoadBlobsOption {
 	return func(opts *loadBlobsOptions) {
 		opts.onProgress = onProgress
+	}
+}
+
+// WithImmutableDB supplies an already-open ImmutableDB to copy from, instead of
+// opening immutableDir by pathname.
+//
+// Callers that vetted the directory before handing it over need this: opening
+// the pathname here would let a tree substituted in the meantime be read as
+// though it were the one that was checked. Passing the open database rather
+// than a directory handle also leaves one place where the decision how to
+// resolve the directory was made, so it cannot be made differently twice.
+//
+// A nil argument is an error rather than a fallback to the pathname — a caller
+// that meant to supply a vetted database and passed nothing must not silently
+// get the open it was avoiding. Omit the option entirely to open by pathname.
+//
+// The caller keeps ownership and must keep the database usable for the duration
+// of the call.
+func WithImmutableDB(imm *immutable.ImmutableDb) LoadBlobsOption {
+	return func(opts *loadBlobsOptions) {
+		opts.immutableDB = imm
+		opts.immutableDBSet = true
 	}
 }
 
@@ -413,9 +962,22 @@ func LoadBlobsWithDB(
 		}
 		option(&opts)
 	}
+	if opts.immutableDBSet && opts.immutableDB == nil {
+		return nil, errors.New(
+			"WithImmutableDB was given no ImmutableDB; refusing to fall " +
+				"back to opening the directory by pathname",
+		)
+	}
+	imm := opts.immutableDB
+	if imm == nil {
+		var err error
+		if imm, err = immutable.New(immutableDir); err != nil {
+			return nil, fmt.Errorf("failed to read immutable DB: %w", err)
+		}
+	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db)
+	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +1001,7 @@ func LoadBlobsWithDB(
 
 	var utxoOffsetsStored int
 	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
-		ctx, logger, immutableDir, db, c,
+		ctx, logger, imm, db, c,
 		func(rb chain.RawBlock, txn *database.Txn) error {
 			stored, err := storeRawBlockUtxoOffsets(txn, rb)
 			if err != nil {
@@ -474,11 +1036,11 @@ func copyBlocksDirect(
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
 ) (int, uint64, error) {
-	immutable, err := immutable.New(immutableDir)
+	immDB, err := immutable.New(immutableDir)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
 	}
-	immutableTip, err := immutable.GetTip()
+	immutableTip, err := immDB.GetTip()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
 	}
@@ -490,12 +1052,14 @@ func copyBlocksDirect(
 	if chainTip.Point.Slot > immutableTip.Slot {
 		logger.Info(
 			"chain tip already beyond immutable DB tip; skipping immutable copy",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"immutable_tip_slot", immutableTip.Slot,
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"immutable_tip_slot",
+			immutableTip.Slot,
 		)
 		return 0, immutableTip.Slot, nil
 	}
-	iter, err := immutable.BlocksFromPoint(chainTip.Point)
+	iter, err := immDB.BlocksFromPoint(chainTip.Point)
 	if err != nil {
 		return 0, 0, fmt.Errorf(
 			"failed to get immutable DB iterator: %w",
@@ -507,11 +1071,11 @@ func copyBlocksDirect(
 	startTime := time.Now()
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
-	blockBatch := make([]gledger.Block, 0, loadBlockBatchSize)
 	verifyCfg := lcommon.VerifyConfig{
 		SkipBodyHashValidation: true,
 	}
 	for {
+		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)
 		for {
 			next, err := iter.Next()
 			if err != nil {
@@ -522,28 +1086,31 @@ func copyBlocksDirect(
 			if next == nil {
 				break
 			}
-			tmpBlock, err := gledger.NewBlockFromCbor(
-				next.Type,
-				next.Cbor,
-				verifyCfg,
-			)
-			if err != nil {
-				return blocksCopied, immutableTip.Slot, fmt.Errorf(
-					"decoding block CBOR: %w", err,
-				)
-			}
 			if blocksCopied == 0 &&
 				next.Slot == chainTip.Point.Slot &&
 				bytes.Equal(next.Hash, chainTip.Point.Hash) {
 				continue
 			}
-			blockBatch = append(blockBatch, tmpBlock)
-			if len(blockBatch) == cap(blockBatch) {
+			rawBatch = append(rawBatch, *next)
+			if len(rawBatch) == cap(rawBatch) {
 				break
 			}
 		}
-		if len(blockBatch) == 0 {
+		if len(rawBatch) == 0 {
 			break
+		}
+		blockBatch, err := decodeImmutableBlockBatch(
+			ctx, rawBatch, verifyCfg, loadDecodeWorkerCount(),
+		)
+		if err != nil {
+			return blocksCopied, immutableTip.Slot, fmt.Errorf(
+				"decoding block CBOR: %w", err,
+			)
+		}
+		if len(blockBatch) == 0 {
+			return blocksCopied, immutableTip.Slot, errors.New(
+				"decoding block CBOR: non-empty batch decoded to no blocks",
+			)
 		}
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
@@ -565,7 +1132,6 @@ func copyBlocksDirect(
 		}
 		blocksCopied += len(blockBatch)
 		lastProgressSlot = replayBatch[len(replayBatch)-1].SlotNumber()
-		blockBatch = blockBatch[:0]
 		maybeLogBlockCopyProgress(
 			logger,
 			"copying blocks from immutable DB",
@@ -583,6 +1149,259 @@ func copyBlocksDirect(
 	return blocksCopied, immutableTip.Slot, nil
 }
 
+type immutableDecodeResult struct {
+	index int
+	block gledger.Block
+	err   error
+}
+
+type immutableDecodeJob struct {
+	index int
+	block immutable.Block
+}
+
+// immutableBlockDecoder is a test seam: production decoding ignores the
+// context and index, while tests can fail a selected job and observe the
+// derived cancellation context. NewBlockFromCbor itself is not cancellable.
+type immutableBlockDecoder func(
+	context.Context,
+	int,
+	immutable.Block,
+	lcommon.VerifyConfig,
+) (gledger.Block, error)
+
+func decodeImmutableBlock(
+	_ context.Context,
+	_ int,
+	block immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+) (gledger.Block, error) {
+	return gledger.NewBlockFromCbor(block.Type, block.Cbor, verifyCfg)
+}
+
+// decodeImmutableBlockBatch decodes a bounded batch with ordered results.
+// Sending jobs through a small buffered channel provides backpressure, while
+// the result index prevents completion order from changing chain order. A
+// cancellation stops both the dispatcher and workers without leaving a
+// goroutine blocked on a full channel.
+func decodeImmutableBlockBatch(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+	workerCount int,
+) ([]gledger.Block, error) {
+	return decodeImmutableBlockBatchWithDecoder(
+		ctx, rawBlocks, verifyCfg, workerCount, decodeImmutableBlock,
+	)
+}
+
+func decodeImmutableBlockBatchWithDecoder(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+	workerCount int,
+	decoder immutableBlockDecoder,
+) ([]gledger.Block, error) {
+	if len(rawBlocks) == 0 {
+		return nil, nil
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if workerCount > len(rawBlocks) {
+		workerCount = len(rawBlocks)
+	}
+	decodeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	queueSize := min(workerCount*2, len(rawBlocks))
+	jobs := make(chan immutableDecodeJob, queueSize)
+	results := make(chan immutableDecodeResult, queueSize)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-decodeCtx.Done():
+					return
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					block, err := decoder(
+						decodeCtx, job.index, job.block, verifyCfg,
+					)
+					select {
+					case results <- immutableDecodeResult{
+						index: job.index, block: block, err: err,
+					}:
+					case <-decodeCtx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for index, block := range rawBlocks {
+			select {
+			case jobs <- immutableDecodeJob{index: index, block: block}:
+			case <-decodeCtx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	decoded := make([]gledger.Block, len(rawBlocks))
+	seen := 0
+	var firstErr error
+	for result := range results {
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+			cancel()
+			continue
+		}
+		if result.err == nil {
+			decoded[result.index] = result.block
+			seen++
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if seen != len(rawBlocks) {
+		return nil, errors.New("parallel immutable block decode ended early")
+	}
+	return decoded, nil
+}
+
+// CopyImmutableBlobsBounded copies immutable blocks into the blob store from
+// the current chain tip up to and including maxSlot, storing produced-UTxO
+// offsets per block. maxSlot of 0 copies to the immutable tip. It reuses a
+// caller-opened ImmutableDb and Chain so it can be invoked repeatedly during a
+// download to overlap the copy with fetching (parallel fetch, sequenced
+// processing). Returns the number of blocks copied and the highest slot copied.
+//
+// Safe against chunks that arrive out of order: bounding by maxSlot (the last
+// slot of a known-contiguous chunk prefix) stops the copy before it can reach a
+// higher out-of-order chunk past a gap. Blocks above maxSlot are left for a
+// later call with a higher bound.
+func CopyImmutableBlobsBounded(
+	ctx context.Context,
+	logger *slog.Logger,
+	imm *immutable.ImmutableDb,
+	c *chain.Chain,
+	maxSlot uint64,
+	onProgress func(LoadBlobsProgress),
+) (int, uint64, error) {
+	callback := func(rb chain.RawBlock, txn *database.Txn) error {
+		_, err := storeRawBlockUtxoOffsets(txn, rb)
+		return err
+	}
+
+	startPoint := c.Tip().Point
+	if maxSlot > 0 && startPoint.Slot >= maxSlot {
+		return 0, startPoint.Slot, nil
+	}
+
+	// Progress denominator: the bound when set, else the immutable tip.
+	tipSlot := maxSlot
+	if tipSlot == 0 {
+		immutableTip, err := imm.GetTip()
+		if err != nil {
+			return 0, startPoint.Slot, fmt.Errorf(
+				"reading immutable DB tip: %w", err,
+			)
+		}
+		if immutableTip != nil {
+			tipSlot = immutableTip.Slot
+		}
+	}
+
+	iter, err := imm.BlocksFromPoint(startPoint)
+	if err != nil {
+		return 0, startPoint.Slot, fmt.Errorf(
+			"failed to get immutable DB iterator: %w", err,
+		)
+	}
+	defer iter.Close()
+
+	blockBatch := make([]chain.RawBlock, 0, loadBlockBatchSize)
+	blocksCopied := 0
+	lastSlot := startPoint.Slot
+	startTime := time.Now()
+	lastProgressLog := time.Time{}
+	done := false
+	for !done {
+		for {
+			next, err := iter.Next()
+			if err != nil {
+				return blocksCopied, lastSlot, fmt.Errorf(
+					"reading next block: %w", err,
+				)
+			}
+			if next == nil {
+				done = true
+				break
+			}
+			// Skip the resume anchor block (already in the chain).
+			if blocksCopied == 0 && len(blockBatch) == 0 &&
+				next.Slot == startPoint.Slot &&
+				bytes.Equal(next.Hash, startPoint.Hash) {
+				continue
+			}
+			// Stop at the contiguous bound BEFORE decoding the block. next.Slot
+			// comes from the secondary index, so this defers a higher
+			// out-of-order chunk's block without decoding it (decoding could
+			// otherwise fail or waste work on a block meant for a later call).
+			if maxSlot > 0 && next.Slot > maxSlot {
+				done = true
+				break
+			}
+			rawBlock, err := rawBlockFromImmutableBlock(next)
+			if err != nil {
+				return blocksCopied, lastSlot, fmt.Errorf(
+					"building raw block: %w", err,
+				)
+			}
+			blockBatch = append(blockBatch, rawBlock)
+			if len(blockBatch) == cap(blockBatch) {
+				break
+			}
+		}
+		if len(blockBatch) > 0 {
+			if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+				return blocksCopied, lastSlot, fmt.Errorf(
+					"failed to import block: %w", err,
+				)
+			}
+			blocksCopied += len(blockBatch)
+			lastSlot = blockBatch[len(blockBatch)-1].Slot
+			blockBatch = blockBatch[:0]
+			reportLoadBlobsProgress(
+				onProgress, blocksCopied, lastSlot, tipSlot, startTime,
+			)
+			maybeLogBlockCopyProgress(
+				logger, "copying blocks from immutable DB (pipelined)",
+				blocksCopied, lastSlot, tipSlot, startTime, &lastProgressLog,
+			)
+		}
+		if err := ctx.Err(); err != nil {
+			return blocksCopied, lastSlot, fmt.Errorf("loading blocks: %w", err)
+		}
+	}
+	return blocksCopied, lastSlot, nil
+}
+
 // copyBlocksRawWithCallback is a lightweight variant of copyBlocks that
 // decodes only block headers instead of full blocks. This is significantly
 // faster for bulk loading since it skips decoding transaction bodies and
@@ -590,19 +1409,19 @@ func copyBlocksDirect(
 // ~200-500 byte header needed for chain indexing. The optional callback
 // runs in the same transaction after each block is persisted, giving
 // callers a hook to attach derived blob-side state such as UTxO offsets.
+//
+// The ImmutableDB is passed in already open so the caller decides how its
+// directory was resolved — by pathname, or through a handle that binds the
+// reads to a directory somebody else cannot repoint. See WithImmutableDB.
 func copyBlocksRawWithCallback(
 	ctx context.Context,
 	logger *slog.Logger,
-	immutableDir string,
+	imm *immutable.ImmutableDb,
 	db *database.Database,
 	c *chain.Chain,
 	callback func(chain.RawBlock, *database.Txn) error,
 	onProgress func(LoadBlobsProgress),
 ) (int, uint64, error) {
-	imm, err := immutable.New(immutableDir)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
-	}
 	immutableTip, err := imm.GetTip()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)
@@ -615,8 +1434,10 @@ func copyBlocksRawWithCallback(
 	if chainTip.Point.Slot > immutableTip.Slot {
 		logger.Info(
 			"chain tip already beyond immutable DB tip; skipping immutable copy",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"immutable_tip_slot", immutableTip.Slot,
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"immutable_tip_slot",
+			immutableTip.Slot,
 		)
 		if callback != nil && db != nil {
 			complete, err := immutableUtxoOffsetsComplete(
@@ -800,6 +1621,19 @@ func ImmutableUtxoOffsetsTipSlot(
 	return slot, true, nil
 }
 
+// MarkImmutableUtxoOffsetsComplete records that produced-UTxO offset references
+// are stored for every immutable block up to immutableTipSlot, so a later API
+// backfill can skip re-writing them. It is idempotent. Callers that split the
+// immutable copy (for example the pipelined download/copy) must call this after
+// the copy completes, because the per-block copy stores the offsets but does
+// not advance this marker on its own.
+func MarkImmutableUtxoOffsetsComplete(
+	db *database.Database,
+	immutableTipSlot uint64,
+) error {
+	return markImmutableUtxoOffsetsComplete(db, immutableTipSlot)
+}
+
 func markImmutableUtxoOffsetsComplete(
 	db *database.Database,
 	immutableTipSlot uint64,
@@ -883,7 +1717,9 @@ func backfillRawBlockCallbacks(
 	return blocksBackfilled, nil
 }
 
-func rawBlockFromImmutableBlock(block *immutable.Block) (chain.RawBlock, error) {
+func rawBlockFromImmutableBlock(
+	block *immutable.Block,
+) (chain.RawBlock, error) {
 	// Extract header CBOR from the block's outer array (first element for all
 	// eras), then decode just the header without decoding transaction bodies.
 	headerCbor, err := extractHeaderCbor(block.Cbor)
@@ -920,7 +1756,7 @@ func storeRawBlockUtxoOffsets(
 	if txn == nil || txn.Blob() == nil {
 		return 0, errors.New("blob transaction not available")
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return 0, errors.New("blob store not available")
 	}
@@ -1177,6 +2013,14 @@ func maybeLogBlockCopyProgress(
 // extractHeaderCbor extracts the header CBOR from a full block's CBOR.
 // All Cardano block eras encode as a CBOR array where the first element
 // is the block header.
+//
+// This uses fxamacker/cbor's package-level UnmarshalFirst directly
+// (bare defaults: 131,072 max array elements/map pairs, 32 max
+// nested levels) rather than gouroboros's raised-limit wrapper,
+// because it only ever extracts a single block header's raw bytes
+// (at most a few KB, with shallow nesting) — not a mainnet-scale
+// map or array, so the fxamacker defaults are already more than
+// sufficient here.
 func extractHeaderCbor(blockCbor []byte) ([]byte, error) {
 	headerLen, err := cborArrayHeaderLen(blockCbor)
 	if err != nil {
@@ -1227,6 +2071,9 @@ func cborArrayHeaderLen(data []byte) (int, error) {
 	case additional == 31:
 		return 1, nil
 	default:
-		return 0, fmt.Errorf("unsupported CBOR array additional info: %d", additional)
+		return 0, fmt.Errorf(
+			"unsupported CBOR array additional info: %d",
+			additional,
+		)
 	}
 }

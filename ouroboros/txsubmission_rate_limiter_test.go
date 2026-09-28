@@ -47,6 +47,8 @@ func testConnIdWithPort(
 }
 
 func TestTokenBucket_BasicAllow(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tb := newTokenBucket(10, 20, now)
 
@@ -70,6 +72,8 @@ func TestTokenBucket_BasicAllow(t *testing.T) {
 }
 
 func TestTokenBucket_Refill(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tb := newTokenBucket(10, 20, now)
 
@@ -96,6 +100,8 @@ func TestTokenBucket_Refill(t *testing.T) {
 }
 
 func TestTokenBucket_RefillCap(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tb := newTokenBucket(10, 20, now)
 
@@ -118,6 +124,8 @@ func TestTokenBucket_RefillCap(t *testing.T) {
 }
 
 func TestTokenBucket_PartialConsumption(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tb := newTokenBucket(10, 20, now)
 
@@ -130,6 +138,8 @@ func TestTokenBucket_PartialConsumption(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_NormalRate(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(30, 60)
 	peer := testConnIdWithPort(4001)
 
@@ -152,6 +162,8 @@ func TestTxSubmissionRateLimiter_NormalRate(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_ExcessiveRate(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(10, 20)
 	// Override time function for deterministic testing
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -179,6 +191,8 @@ func TestTxSubmissionRateLimiter_ExcessiveRate(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_PerPeerIsolation(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(10, 20)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -208,6 +222,8 @@ func TestTxSubmissionRateLimiter_PerPeerIsolation(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_Recovery(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(10, 20)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	mu := sync.Mutex{}
@@ -240,6 +256,8 @@ func TestTxSubmissionRateLimiter_Recovery(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_RemovePeer(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(10, 20)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -264,6 +282,8 @@ func TestTxSubmissionRateLimiter_RemovePeer(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(1000, 2000)
 	peer := testConnIdWithPort(4001)
 
@@ -281,8 +301,10 @@ func TestTxSubmissionRateLimiter_ConcurrentAccess(t *testing.T) {
 }
 
 func TestNewOuroboros_DefaultRateLimitDisabled(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
@@ -295,8 +317,10 @@ func TestNewOuroboros_DefaultRateLimitDisabled(t *testing.T) {
 }
 
 func TestNewOuroboros_CustomRateLimit(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: 50,
@@ -318,8 +342,10 @@ func TestNewOuroboros_CustomRateLimit(t *testing.T) {
 }
 
 func TestNewOuroboros_DisabledRateLimit(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: -1,
@@ -333,8 +359,10 @@ func TestNewOuroboros_DisabledRateLimit(t *testing.T) {
 }
 
 func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: 10,
@@ -368,11 +396,13 @@ func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_CustomRatePlumbing(t *testing.T) {
+	t.Parallel()
+
 	// Verify that a custom MaxTxSubmissionsPerSecond value is
 	// correctly plumbed through to the rate limiter with the
 	// expected rate and burst (2x rate).
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		Logger:                    logger,
 		EventBus:                  event.NewEventBus(nil, logger),
 		MaxTxSubmissionsPerSecond: 10,
@@ -394,6 +424,8 @@ func TestTxSubmissionRateLimiter_CustomRatePlumbing(t *testing.T) {
 }
 
 func TestTokenBucket_ZeroTokenRequest(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tb := newTokenBucket(10, 20, now)
 
@@ -416,6 +448,8 @@ func TestTokenBucket_ZeroTokenRequest(t *testing.T) {
 }
 
 func TestTokenBucket_WaitDuration(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tb := newTokenBucket(10, 20, now)
 
@@ -448,6 +482,8 @@ func TestTokenBucket_WaitDuration(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_WaitDuration(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(10, 20)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -474,6 +510,8 @@ func TestTxSubmissionRateLimiter_WaitDuration(t *testing.T) {
 }
 
 func TestTxSubmissionRateLimiter_SyncMapConcurrency(t *testing.T) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(1000, 2000)
 
 	var wg sync.WaitGroup
@@ -495,6 +533,8 @@ func TestTxSubmissionRateLimiter_SyncMapConcurrency(t *testing.T) {
 }
 
 func TestTxsubmissionBackoffDuration(t *testing.T) {
+	t.Parallel()
+
 	// First hit: base backoff
 	assert.Equal(t, 150*time.Millisecond, txsubmissionBackoffDuration(1))
 	// Second hit: 2x
@@ -512,6 +552,8 @@ func TestTxsubmissionBackoffDuration(t *testing.T) {
 func TestTxSubmissionRateLimiter_MultiplePeersIndependent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	rl := newTxSubmissionRateLimiter(10, 20)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	mu := sync.Mutex{}

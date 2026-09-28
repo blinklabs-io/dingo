@@ -76,10 +76,16 @@ type stmSignerVerificationKey struct {
 func (e *stmClosedRegistrationEntry) UnmarshalJSON(data []byte) error {
 	var tuple []json.RawMessage
 	if err := json.Unmarshal(data, &tuple); err != nil {
-		return fmt.Errorf("unmarshal tuple for closed registration entry: %w", err)
+		return fmt.Errorf(
+			"unmarshal tuple for closed registration entry: %w",
+			err,
+		)
 	}
 	if len(tuple) != 2 {
-		return fmt.Errorf("expected 2-tuple registration entry, got %d fields", len(tuple))
+		return fmt.Errorf(
+			"expected 2-tuple registration entry, got %d fields",
+			len(tuple),
+		)
 	}
 	if err := json.Unmarshal(tuple[0], &e.VerificationKey); err != nil {
 		return fmt.Errorf("decoding registration verification key: %w", err)
@@ -90,13 +96,21 @@ func (e *stmClosedRegistrationEntry) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (s *stmSingleSignatureWithRegisteredParty) UnmarshalJSON(data []byte) error {
+func (s *stmSingleSignatureWithRegisteredParty) UnmarshalJSON(
+	data []byte,
+) error {
 	var tuple []json.RawMessage
 	if err := json.Unmarshal(data, &tuple); err != nil {
-		return fmt.Errorf("unmarshal tuple for signature with registered party: %w", err)
+		return fmt.Errorf(
+			"unmarshal tuple for signature with registered party: %w",
+			err,
+		)
 	}
 	if len(tuple) != 2 {
-		return fmt.Errorf("expected 2-tuple signature/register entry, got %d fields", len(tuple))
+		return fmt.Errorf(
+			"expected 2-tuple signature/register entry, got %d fields",
+			len(tuple),
+		)
 	}
 	if err := json.Unmarshal(tuple[0], &s.Sig); err != nil {
 		return fmt.Errorf("decoding single signature: %w", err)
@@ -147,14 +161,18 @@ func parseSTMAggregateVerificationKey(
 		return nil, errors.New("could not decode aggregate verification key")
 	}
 	var ret stmAggregateVerificationKey
-	if err := json.Unmarshal(raw, &ret); err == nil && len(ret.MTCommitment.Root) > 0 {
+	if err := json.Unmarshal(raw, &ret); err == nil &&
+		len(ret.MTCommitment.Root) > 0 {
 		if ret.MTCommitment.NrLeaves <= 0 {
 			return nil, errors.New("nrLeaves must be positive")
 		}
 		return &ret, nil
 	}
 	if len(raw) < 48 {
-		return nil, fmt.Errorf("invalid aggregate verification key payload length %d", len(raw))
+		return nil, fmt.Errorf(
+			"invalid aggregate verification key payload length %d",
+			len(raw),
+		)
 	}
 	nrLeaves, err := readUint64BE(raw[0:8])
 	if err != nil {
@@ -168,18 +186,25 @@ func parseSTMAggregateVerificationKey(
 		return nil, errors.New("nrLeaves must be positive")
 	}
 	if nrLeaves > uint64(math.MaxInt) {
-		return nil, fmt.Errorf("nrLeaves %d exceeds maximum int value", nrLeaves)
+		return nil, fmt.Errorf(
+			"nrLeaves %d exceeds maximum int value",
+			nrLeaves,
+		)
 	}
 	return &stmAggregateVerificationKey{
 		MTCommitment: stmMerkleTreeBatchCommitment{
-			Root:     append([]byte(nil), raw[8:len(raw)-8]...),
-			NrLeaves: int(nrLeaves), //nolint:gosec // validated against MaxInt above
+			Root: append([]byte(nil), raw[8:len(raw)-8]...),
+			NrLeaves: int(
+				nrLeaves,
+			), //nolint:gosec // validated against MaxInt above
 		},
 		TotalStake: totalStake,
 	}, nil
 }
 
-func parseSTMAggregateSignature(encoded string) (*stmAggregateSignature, error) {
+func parseSTMAggregateSignature(
+	encoded string,
+) (*stmAggregateSignature, error) {
 	raw, ok := decodePrimaryEncodedBytes(encoded)
 	if !ok {
 		return nil, errors.New("could not decode multi-signature")
@@ -203,10 +228,15 @@ func parseSTMSignerVerificationKey(encoded string) ([]byte, error) {
 	if len(raw) == 96 {
 		return raw, nil
 	}
-	return nil, fmt.Errorf("invalid signer verification key payload length %d", len(raw))
+	return nil, fmt.Errorf(
+		"invalid signer verification key payload length %d",
+		len(raw),
+	)
 }
 
-func parseSTMAggregateSignatureBytes(raw []byte) (*stmAggregateSignature, error) {
+func parseSTMAggregateSignatureBytes(
+	raw []byte,
+) (*stmAggregateSignature, error) {
 	if len(raw) < 9 {
 		return nil, fmt.Errorf(
 			"aggregate signature payload too short: need >= 9, got %d",
@@ -214,7 +244,10 @@ func parseSTMAggregateSignatureBytes(raw []byte) (*stmAggregateSignature, error)
 		)
 	}
 	if raw[0] != 0 {
-		return nil, fmt.Errorf("unsupported aggregate signature proof type prefix %d", raw[0])
+		return nil, fmt.Errorf(
+			"unsupported aggregate signature proof type prefix %d",
+			raw[0],
+		)
 	}
 	offset := 1
 	totalSigs, err := readUint64BE(raw[offset : offset+8])
@@ -232,7 +265,8 @@ func parseSTMAggregateSignatureBytes(raw []byte) (*stmAggregateSignature, error)
 	if totalSigs > maxSigs {
 		return nil, fmt.Errorf(
 			"totalSigs %d exceeds maximum possible given payload size (%d bytes remaining)",
-			totalSigs, remaining,
+			totalSigs,
+			remaining,
 		)
 	}
 	ret := &stmAggregateSignature{
@@ -257,7 +291,9 @@ func parseSTMAggregateSignatureBytes(raw []byte) (*stmAggregateSignature, error)
 		}
 		//nolint:gosec // bounded by available.
 		sigRegEnd := offset + int(sizeSigReg)
-		sigReg, err := parseSTMSignatureWithRegisteredPartyBytes(raw[offset:sigRegEnd])
+		sigReg, err := parseSTMSignatureWithRegisteredPartyBytes(
+			raw[offset:sigRegEnd],
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -293,7 +329,9 @@ func parseSTMSignatureWithRegisteredPartyBytes(
 	}
 	//nolint:gosec // bounded by available.
 	regPartyEnd := regPartyStart + int(regPartySize)
-	regParty, err := parseSTMClosedRegistrationEntryBytes(raw[regPartyStart:regPartyEnd])
+	regParty, err := parseSTMClosedRegistrationEntryBytes(
+		raw[regPartyStart:regPartyEnd],
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +368,10 @@ func parseSTMClosedRegistrationEntryBytes(
 	raw []byte,
 ) (*stmClosedRegistrationEntry, error) {
 	if len(raw) < 104 {
-		return nil, fmt.Errorf("invalid closed registration entry length %d", len(raw))
+		return nil, fmt.Errorf(
+			"invalid closed registration entry length %d",
+			len(raw),
+		)
 	}
 	stake, err := readUint64BE(raw[96:104])
 	if err != nil {
@@ -359,7 +400,8 @@ func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
 	if nrIndexes > remaining/8 {
 		return nil, fmt.Errorf(
 			"nrIndexes %d exceeds maximum possible given payload size (%d bytes remaining)",
-			nrIndexes, remaining,
+			nrIndexes,
+			remaining,
 		)
 	}
 	offset := 8
@@ -407,14 +449,16 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 	if lenValues > remaining/32 {
 		return nil, fmt.Errorf(
 			"lenValues %d exceeds maximum possible given payload size (%d bytes remaining)",
-			lenValues, remaining,
+			lenValues,
+			remaining,
 		)
 	}
 	afterValues := remaining - lenValues*32
 	if lenIndices > afterValues/8 {
 		return nil, fmt.Errorf(
 			"lenIndices %d exceeds maximum possible given payload size (%d bytes remaining after values)",
-			lenIndices, afterValues,
+			lenIndices,
+			afterValues,
 		)
 	}
 	offset := 16
@@ -426,7 +470,10 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 		if offset+32 > len(raw) {
 			return nil, errors.New("merkle batch path values overflow")
 		}
-		ret.Values = append(ret.Values, append([]byte(nil), raw[offset:offset+32]...))
+		ret.Values = append(
+			ret.Values,
+			append([]byte(nil), raw[offset:offset+32]...),
+		)
 		offset += 32
 	}
 	for range lenIndices {
@@ -481,11 +528,24 @@ func verifySTMConcatenationProof(
 		}
 		for _, index := range sigReg.Sig.Indexes {
 			if index >= params.M {
-				return fmt.Errorf("lottery index %d exceeds parameter m=%d", index, params.M)
+				return fmt.Errorf(
+					"lottery index %d exceeds parameter m=%d",
+					index,
+					params.M,
+				)
 			}
 			ev := stmDenseMapping(sigReg.Sig.Sigma, msgp, index)
-			if !stmIsLotteryWon(params.PhiF, ev, sigReg.RegParty.Stake, avk.TotalStake) {
-				return fmt.Errorf("lottery lost for signer index %d at lottery index %d", sigReg.Sig.SignerIndex, index)
+			if !stmIsLotteryWon(
+				params.PhiF,
+				ev,
+				sigReg.RegParty.Stake,
+				avk.TotalStake,
+			) {
+				return fmt.Errorf(
+					"lottery lost for signer index %d at lottery index %d",
+					sigReg.Sig.SignerIndex,
+					index,
+				)
 			}
 			uniqueIndices[index] = struct{}{}
 			nrIndices++
@@ -495,10 +555,16 @@ func verifySTMConcatenationProof(
 		leaves = append(leaves, sigReg.RegParty)
 	}
 	if len(uniqueIndices) != nrIndices {
-		return errors.New("aggregate signature contains duplicate lottery indices")
+		return errors.New(
+			"aggregate signature contains duplicate lottery indices",
+		)
 	}
 	if uint64(nrIndices) < params.K {
-		return fmt.Errorf("aggregate signature has %d lottery indices, requires at least %d", nrIndices, params.K)
+		return fmt.Errorf(
+			"aggregate signature has %d lottery indices, requires at least %d",
+			nrIndices,
+			params.K,
+		)
 	}
 	if err := stmVerifyLeavesMembershipFromBatchPath(avk, leaves, &sig.BatchProof); err != nil {
 		return fmt.Errorf("verifying Merkle batch proof: %w", err)
@@ -515,7 +581,11 @@ func stmVerifyBLSSignatureAggregate(
 	sigs []bls12381.G1Affine,
 ) error {
 	if len(vks) != len(sigs) || len(vks) == 0 {
-		return fmt.Errorf("invalid aggregate inputs: %d keys, %d signatures", len(vks), len(sigs))
+		return fmt.Errorf(
+			"invalid aggregate inputs: %d keys, %d signatures",
+			len(vks),
+			len(sigs),
+		)
 	}
 	msgHash, err := bls12381.HashToG1(msg, stmBLSDomainSeparationTag)
 	if err != nil {
@@ -603,7 +673,11 @@ func stmVerifyLeavesMembershipFromBatchPath(
 	proof *stmMerkleBatchPath,
 ) error {
 	if len(leaves) != len(proof.Indices) {
-		return fmt.Errorf("leaf count %d does not match proof index count %d", len(leaves), len(proof.Indices))
+		return fmt.Errorf(
+			"leaf count %d does not match proof index count %d",
+			len(leaves),
+			len(proof.Indices),
+		)
 	}
 	orderedIndices := append([]int(nil), proof.Indices...)
 	for idx, v := range orderedIndices {
@@ -624,7 +698,10 @@ func stmVerifyLeavesMembershipFromBatchPath(
 	}
 	hashedLeaves := make([][]byte, 0, len(leaves))
 	for _, leaf := range leaves {
-		hashedLeaves = append(hashedLeaves, stmBlake2b256(stmMerkleLeafBytes(leaf)))
+		hashedLeaves = append(
+			hashedLeaves,
+			stmBlake2b256(stmMerkleLeafBytes(leaf)),
+		)
 	}
 	values := proof.Values
 	valueOffset := 0
@@ -637,11 +714,18 @@ func stmVerifyLeavesMembershipFromBatchPath(
 			newIndices = append(newIndices, stmParent(orderedIndices[i]))
 			if orderedIndices[i]&1 == 0 {
 				if valueOffset >= len(values) {
-					return errors.New("merkle batch proof ran out of sibling values")
+					return errors.New(
+						"merkle batch proof ran out of sibling values",
+					)
 				}
 				newHashes = append(
 					newHashes,
-					stmBlake2b256(bytes.Join([][]byte{values[valueOffset], hashedLeaves[i]}, nil)),
+					stmBlake2b256(
+						bytes.Join(
+							[][]byte{values[valueOffset], hashedLeaves[i]},
+							nil,
+						),
+					),
 				)
 				valueOffset++
 				continue
@@ -650,31 +734,49 @@ func stmVerifyLeavesMembershipFromBatchPath(
 			if i < len(orderedIndices)-1 && orderedIndices[i+1] == sibling {
 				newHashes = append(
 					newHashes,
-					stmBlake2b256(bytes.Join([][]byte{hashedLeaves[i], hashedLeaves[i+1]}, nil)),
+					stmBlake2b256(
+						bytes.Join(
+							[][]byte{hashedLeaves[i], hashedLeaves[i+1]},
+							nil,
+						),
+					),
 				)
 				i++
 				continue
 			}
 			if sibling < nrNodes {
 				if valueOffset >= len(values) {
-					return errors.New("merkle batch proof ran out of sibling values")
+					return errors.New(
+						"merkle batch proof ran out of sibling values",
+					)
 				}
 				newHashes = append(
 					newHashes,
-					stmBlake2b256(bytes.Join([][]byte{hashedLeaves[i], values[valueOffset]}, nil)),
+					stmBlake2b256(
+						bytes.Join(
+							[][]byte{hashedLeaves[i], values[valueOffset]},
+							nil,
+						),
+					),
 				)
 				valueOffset++
 				continue
 			}
 			newHashes = append(
 				newHashes,
-				stmBlake2b256(bytes.Join([][]byte{hashedLeaves[i], stmBlake2b256([]byte{0})}, nil)),
+				stmBlake2b256(
+					bytes.Join(
+						[][]byte{hashedLeaves[i], stmBlake2b256([]byte{0})},
+						nil,
+					),
+				),
 			)
 		}
 		hashedLeaves = newHashes
 		orderedIndices = newIndices
 	}
-	if len(hashedLeaves) != 1 || !bytes.Equal(hashedLeaves[0], avk.MTCommitment.Root) {
+	if len(hashedLeaves) != 1 ||
+		!bytes.Equal(hashedLeaves[0], avk.MTCommitment.Root) {
 		return errors.New("merkle batch proof root mismatch")
 	}
 	return nil

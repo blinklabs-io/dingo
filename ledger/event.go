@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -24,13 +26,15 @@ import (
 )
 
 const (
-	BlockfetchEventType          event.EventType = "ledger.blockfetch"
-	BlockEventType               event.EventType = "ledger.block"
-	ChainsyncEventType           event.EventType = "ledger.chainsync"
-	ChainsyncAwaitReplyEventType event.EventType = "ledger.chainsync_await_reply"
-	LedgerErrorEventType         event.EventType = "ledger.error"
-	PoolStateRestoredEventType   event.EventType = "ledger.pool_restored"
-	TransactionEventType         event.EventType = "ledger.tx"
+	BlockfetchEventType                 event.EventType = "ledger.blockfetch"
+	BlockEventType                      event.EventType = "ledger.block"
+	ChainsyncEventType                  event.EventType = "ledger.chainsync"
+	ChainsyncAwaitReplyEventType        event.EventType = "ledger.chainsync_await_reply"
+	ConnectionClosedEventType           event.EventType = "ledger.conn_closed"
+	ConnectionRecycleRequestedEventType event.EventType = "ledger.connection_recycle_requested"
+	LedgerErrorEventType                event.EventType = "ledger.error"
+	PoolStateRestoredEventType          event.EventType = "ledger.pool_restored"
+	TransactionEventType                event.EventType = "ledger.tx"
 )
 
 // It represents the direction a block is applied to the ledger.
@@ -56,6 +60,19 @@ type BlockfetchEvent struct {
 	Point        ocommon.Point // Chain point for block
 	Type         uint          // Block type ID
 	BatchDone    bool          // Set to true for a BatchDone event
+	// RequestId identifies the RequestRange call this event belongs to, from
+	// gouroboros' CallbackContext.RequestId (numbered from 1 in send order,
+	// per connection). A BatchDone event releases the ledger's in-flight
+	// entry for this request rather than the connection's oldest one, since
+	// pipelining keeps more than one request outstanding per connection.
+	// Zero means unnumbered and falls back to the oldest entry.
+	RequestId uint64
+	// RangeErr carries a BatchDone event's terminal outcome. gouroboros'
+	// RangeDoneFunc reports every pipelined request's resolution -- success,
+	// NoBlocks, or any transport/protocol failure -- exactly once through this
+	// same callback, so a BatchDone event is no longer necessarily a success.
+	// nil means the range completed successfully.
+	RangeErr error
 }
 
 // ChainsyncEvent represents either a RollForward or RollBackward chainsync event.
@@ -63,11 +80,19 @@ type BlockfetchEvent struct {
 type ChainsyncEvent struct {
 	ConnectionId ouroboros.ConnectionId // Connection ID associated with event
 	BlockHeader  ledger.BlockHeader
-	Point        ocommon.Point  // Chain point for roll forward/backward
-	Tip          ochainsync.Tip // Upstream chain tip
-	BlockNumber  uint64
-	Type         uint // Block or header type ID
-	Rollback     bool // Set to true for a Rollback event
+	// ArrivalTime is recorded immediately when the ChainSync callback receives
+	// a roll-forward header. It lets ledger admission judge the peer's clock at
+	// arrival even if event delivery or header processing is delayed.
+	ArrivalTime time.Time
+	Point       ocommon.Point  // Chain point for roll forward/backward
+	Tip         ochainsync.Tip // Upstream chain tip
+	// SyncTarget is the event-paired, policy-approved target eligible for
+	// publication only after this header is admitted.
+	SyncTarget        ochainsync.Tip
+	SyncTargetTrusted bool
+	BlockNumber       uint64
+	Type              uint // Block or header type ID
+	Rollback          bool // Set to true for a Rollback event
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports
@@ -89,12 +114,29 @@ type PoolStateRestoredEvent struct {
 	Slot uint64 // The slot to which pool state was restored
 }
 
-// TransactionEvent is emitted when a transaction is applied or rolled back.
-// Check the Rollback field to determine direction.
+// TransactionEvent is emitted after a transaction Apply commits durably, or
+// before an applied transaction is rolled back. Check the Rollback field to
+// determine direction.
 type TransactionEvent struct {
 	Transaction ledger.Transaction
 	Point       ocommon.Point
 	BlockNumber uint64
 	TxIndex     uint32
 	Rollback    bool
+}
+
+// ConnectionClosedEvent is emitted by the node layer when a connection closes.
+// Ledger subscribes to this ledger-owned event type instead of connmanager directly,
+// so ledger/ does not need to import connmanager/.
+type ConnectionClosedEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Error        error
+}
+
+// ConnectionRecycleRequestedEvent is emitted by the ledger when header or block
+// crypto verification fails on a peer connection. Node wiring translates this to
+// a connmanager recycle request, keeping ledger/ free of connmanager/ imports.
+type ConnectionRecycleRequestedEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Reason       string
 }

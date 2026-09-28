@@ -18,25 +18,15 @@ import "github.com/blinklabs-io/dingo/database/types"
 
 // NetworkState stores treasury and reserves balances at a given slot.
 type NetworkState struct {
-	ID       uint         `gorm:"primarykey"`
-	Treasury types.Uint64 `gorm:"not null"`
-	Reserves types.Uint64 `gorm:"not null"`
-	Slot     uint64       `gorm:"uniqueIndex;not null"`
-}
-
-// TableName returns the table name for NetworkState.
-func (NetworkState) TableName() string {
-	return "network_state"
+	ID       uint
+	Treasury types.Uint64
+	Reserves types.Uint64
+	Slot     uint64
 }
 
 // SyncState stores ephemeral key-value pairs used during
 // one-time sync/load operations. Cleaned up after completion.
 type SyncState struct {
-	Key   string `gorm:"column:sync_key;primaryKey;size:255"`
-	Value string `gorm:"type:text;not null"`
-}
-
-// TableName returns the table name for SyncState.
-func (SyncState) TableName() string {
-	return "sync_state"
+	Key   string
+	Value string
 }

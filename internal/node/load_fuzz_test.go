@@ -38,7 +38,11 @@ func FuzzCborArrayHeaderLen(f *testing.F) {
 			t.Fatalf("header length = %d, want 1..9", headerLen)
 		}
 		if headerLen > len(data) {
-			t.Fatalf("header length %d exceeds input length %d", headerLen, len(data))
+			t.Fatalf(
+				"header length %d exceeds input length %d",
+				headerLen,
+				len(data),
+			)
 		}
 		if data[0]&gcbor.CborTypeMask != gcbor.CborTypeArray {
 			t.Fatalf("accepted non-array CBOR major type: 0x%x", data[0])
@@ -68,10 +72,16 @@ func FuzzExtractHeaderCbor(f *testing.F) {
 
 		headerLen, err := cborArrayHeaderLen(blockCbor)
 		if err != nil {
-			t.Fatalf("cborArrayHeaderLen rejected block accepted by extractHeaderCbor: %v", err)
+			t.Fatalf(
+				"cborArrayHeaderLen rejected block accepted by extractHeaderCbor: %v",
+				err,
+			)
 		}
 		if !bytes.HasPrefix(blockCbor[headerLen:], header) {
-			t.Fatalf("extracted header %x is not the first element after array header", header)
+			t.Fatalf(
+				"extracted header %x is not the first element after array header",
+				header,
+			)
 		}
 	})
 }
@@ -115,12 +125,20 @@ func FuzzTxBodyMapValueRange(f *testing.F) {
 			t.Skip("tx body CBOR input is too large for fast fuzzing")
 		}
 
-		valueOffset, valueLen, found, err := txBodyMapValueRange(bodyCbor, bodyOffset, key)
+		valueOffset, valueLen, found, err := txBodyMapValueRange(
+			bodyCbor,
+			bodyOffset,
+			key,
+		)
 		if err != nil || !found {
 			return
 		}
 		if valueOffset < bodyOffset {
-			t.Fatalf("value offset %d precedes body offset %d", valueOffset, bodyOffset)
+			t.Fatalf(
+				"value offset %d precedes body offset %d",
+				valueOffset,
+				bodyOffset,
+			)
 		}
 		relativeOffset := uint64(valueOffset - bodyOffset)
 		end := relativeOffset + uint64(valueLen)

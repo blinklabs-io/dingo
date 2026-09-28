@@ -1,0 +1,380 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package event
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+)
+
+// collectOrdered drains n events from ch and returns their int payloads in
+// arrival order.
+func collectOrdered(t *testing.T, ch <-chan Event, n int) []int {
+	t.Helper()
+	got := make([]int, 0, n)
+	deadline := time.After(10 * time.Second)
+	for len(got) < n {
+		select {
+		case evt := <-ch:
+			v, ok := evt.Data.(int)
+			if !ok {
+				t.Fatalf("unexpected payload type %T", evt.Data)
+			}
+			got = append(got, v)
+		case <-deadline:
+			t.Fatalf("timed out after %d of %d events", len(got), n)
+		}
+	}
+	return got
+}
+
+func requireAscending(t *testing.T, got []int) {
+	t.Helper()
+	for i := range got {
+		if got[i] != i {
+			t.Fatalf(
+				"event %d delivered out of order: got %d, want %d (sequence %v)",
+				i,
+				got[i],
+				i,
+				got,
+			)
+		}
+	}
+}
+
+// TestPublishOrderedPreservesPublisherOrder is the core ordering contract:
+// events published to one event type from one goroutine reach a subscriber in
+// publish order. PublishAsync cannot promise this because AsyncWorkerPoolSize
+// workers drain the shared queue concurrently and race each other into
+// Publish; a single 200-event run reordered 3-8 of them. See
+// blinklabs-io/dingo#2287.
+func TestPublishOrderedPreservesPublisherOrder(t *testing.T) {
+	t.Parallel()
+
+	const n = 500
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	subId, ch := eb.SubscribeWithBuffer("ordered.seq", n)
+	if subId == 0 {
+		t.Fatal("subscribe failed")
+	}
+
+	for i := range n {
+		if !eb.PublishOrdered("ordered.seq", NewEvent("ordered.seq", i)) {
+			t.Fatalf("PublishOrdered returned false at %d", i)
+		}
+	}
+	requireAscending(t, collectOrdered(t, ch, n))
+}
+
+// TestPublishOrderedPreservesOrderUnderConcurrentAsyncTraffic keeps the shared
+// async pool busy with an unrelated event type while the ordered lane runs, so
+// a regression that routed ordered events back onto the shared pool is caught
+// rather than passing on an idle bus.
+func TestPublishOrderedPreservesOrderUnderConcurrentAsyncTraffic(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const n = 500
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	subId, ch := eb.SubscribeWithBuffer("ordered.seq", n)
+	if subId == 0 {
+		t.Fatal("subscribe failed")
+	}
+	// Unrelated async traffic occupying the shared worker pool.
+	noiseDone := make(chan struct{})
+	eb.SubscribeFunc("ordered.noise", func(Event) {})
+	go func() {
+		defer close(noiseDone)
+		for i := range n * 4 {
+			eb.PublishAsync("ordered.noise", NewEvent("ordered.noise", i))
+		}
+	}()
+
+	for i := range n {
+		if !eb.PublishOrdered("ordered.seq", NewEvent("ordered.seq", i)) {
+			t.Fatalf("PublishOrdered returned false at %d", i)
+		}
+	}
+	requireAscending(t, collectOrdered(t, ch, n))
+	<-noiseDone
+}
+
+// TestPublishOrderedWaitsForCapacityRatherThanDropping holds the no-drop
+// guarantee documented for the rest of the bus: a full ordered lane
+// backpressures its publisher instead of discarding events.
+func TestPublishOrderedWaitsForCapacityRatherThanDropping(t *testing.T) {
+	t.Parallel()
+
+	// More events than the lane buffer can hold, with a subscriber that
+	// only starts draining once the publisher is demonstrably parked.
+	total := OrderedQueueSize + 64
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	got := make([]int, 0, total)
+	done := make(chan struct{})
+	eb.SubscribeFuncWithBuffer("ordered.full", 1, func(evt Event) {
+		<-release
+		mu.Lock()
+		got = append(got, evt.Data.(int))
+		if len(got) == total {
+			close(done)
+		}
+		mu.Unlock()
+	})
+
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		for i := range total {
+			if !eb.PublishOrdered("ordered.full", NewEvent("ordered.full", i)) {
+				t.Errorf("PublishOrdered returned false at %d", i)
+				return
+			}
+		}
+	}()
+
+	// The publisher must still be parked: nothing is draining yet. Wait for
+	// the lane's queue to actually fill rather than assuming it will within
+	// an arbitrary window -- that is what proves the publisher is blocked on
+	// capacity, not merely slow.
+	lane := eb.orderedLane("ordered.full")
+	testutil.WaitForCondition(t, func() bool {
+		return len(lane.queue) == cap(lane.queue)
+	}, testutil.AsyncWait, "the ordered lane never filled up while nothing drained it")
+	select {
+	case <-published:
+		t.Fatal("publisher completed without backpressure from a full lane")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		t.Fatalf(
+			"only %d of %d events delivered: lane dropped events",
+			n,
+			total,
+		)
+	}
+	<-published
+	mu.Lock()
+	defer mu.Unlock()
+	requireAscending(t, got)
+}
+
+// TestPublishOrderedReturnsFalseWhenStopped mirrors PublishAsync's contract:
+// a stopped or closed bus reports the failed publish rather than accepting an
+// event nothing will deliver.
+func TestPublishOrderedReturnsFalseWhenStopped(t *testing.T) {
+	t.Parallel()
+
+	eb := NewEventBus(nil, nil)
+	eb.Close()
+	if eb.PublishOrdered("ordered.stopped", NewEvent("ordered.stopped", 0)) {
+		t.Fatal("PublishOrdered returned true on a closed bus")
+	}
+}
+
+func TestFlushOrderedContextWaitsForDelivery(t *testing.T) {
+	t.Parallel()
+
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	_, delivered := eb.SubscribeWithBufferPolicy(
+		"ordered.flush",
+		1,
+		SubscriberBackpressureBlock,
+	)
+	if !eb.PublishOrdered(
+		"ordered.flush",
+		NewEvent("ordered.flush", 1),
+	) {
+		t.Fatal("PublishOrdered returned false")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(delivered) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(delivered) != 1 {
+		t.Fatal("first event did not fill subscriber buffer")
+	}
+	if !eb.PublishOrdered(
+		"ordered.flush",
+		NewEvent("ordered.flush", 2),
+	) {
+		t.Fatal("second PublishOrdered returned false")
+	}
+
+	flushed := make(chan bool, 1)
+	go func() {
+		flushed <- eb.FlushOrderedContext(t.Context(), "ordered.flush")
+	}()
+	select {
+	case <-flushed:
+		t.Fatal("flush returned before subscriber delivery")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case evt := <-delivered:
+		if evt.Data != 1 {
+			t.Fatalf("first payload: got %v, want 1", evt.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not receive first ordered event")
+	}
+	select {
+	case ok := <-flushed:
+		if !ok {
+			t.Fatal("flush failed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush did not complete after delivery")
+	}
+	select {
+	case evt := <-delivered:
+		if evt.Data != 2 {
+			t.Fatalf("second payload: got %v, want 2", evt.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not receive second ordered event")
+	}
+}
+
+// TestPublishOrderedPreservesOrderAfterStopRestart covers the reusable-bus
+// path: Stop tears the lanes down, and the next publish must rebuild them
+// bound to the new stop channel rather than to the torn-down one.
+func TestPublishOrderedPreservesOrderAfterStopRestart(t *testing.T) {
+	t.Parallel()
+
+	const n = 200
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	subId, ch := eb.SubscribeWithBuffer("ordered.restart", n)
+	if subId == 0 {
+		t.Fatal("subscribe failed")
+	}
+	for i := range n {
+		if !eb.PublishOrdered(
+			"ordered.restart",
+			NewEvent("ordered.restart", i),
+		) {
+			t.Fatalf("PublishOrdered returned false at %d", i)
+		}
+	}
+	requireAscending(t, collectOrdered(t, ch, n))
+
+	eb.Stop()
+
+	subId, ch = eb.SubscribeWithBuffer("ordered.restart", n)
+	if subId == 0 {
+		t.Fatal("subscribe after restart failed")
+	}
+	for i := range n {
+		if !eb.PublishOrdered(
+			"ordered.restart",
+			NewEvent("ordered.restart", i),
+		) {
+			t.Fatalf("PublishOrdered returned false at %d after restart", i)
+		}
+	}
+	requireAscending(t, collectOrdered(t, ch, n))
+}
+
+// TestPublishOrderedIsolatesEventTypes checks that one lane's slow subscriber
+// cannot stall an unrelated lane. Per-type lanes are what make this true; the
+// shared async pool explicitly does not promise it.
+func TestPublishOrderedIsolatesEventTypes(t *testing.T) {
+	t.Parallel()
+
+	const n = 100
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	block := make(chan struct{})
+	eb.SubscribeFuncWithBuffer("ordered.slow", 1, func(Event) { <-block })
+	t.Cleanup(func() { close(block) })
+
+	fastId, fastCh := eb.SubscribeWithBuffer("ordered.fast", n)
+	if fastId == 0 {
+		t.Fatal("subscribe failed")
+	}
+	// Park the slow lane's worker and fill its buffer.
+	for i := range 4 {
+		eb.PublishOrdered("ordered.slow", NewEvent("ordered.slow", i))
+	}
+	for i := range n {
+		if !eb.PublishOrdered("ordered.fast", NewEvent("ordered.fast", i)) {
+			t.Fatalf("PublishOrdered returned false at %d", i)
+		}
+	}
+	requireAscending(t, collectOrdered(t, fastCh, n))
+}
+
+// TestPublishOrderedContextRejectsCancelledContextWithRoomInLane covers the
+// common case: a cancelled context must be honoured even when the lane has
+// capacity. Checking ctx only in the full-lane wait let a publish on an
+// already-cancelled context be accepted and delivered whenever there happened
+// to be room, which is almost always.
+func TestPublishOrderedContextRejectsCancelledContextWithRoomInLane(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	eb := NewEventBus(nil, nil)
+	t.Cleanup(eb.Close)
+
+	subId, ch := eb.SubscribeWithBuffer("ordered.cancelled", 16)
+	if subId == 0 {
+		t.Fatal("subscribe failed")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The lane is empty, so the enqueue would succeed on capacity alone.
+	if eb.PublishOrderedContext(
+		ctx, "ordered.cancelled", NewEvent("ordered.cancelled", 0),
+	) {
+		t.Fatal("PublishOrderedContext accepted a cancelled publish")
+	}
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("cancelled publish was delivered: %v", evt.Data)
+	default:
+		// PublishOrderedContext already returned false synchronously above,
+		// so nothing further can deliver to ch; no window needs to be waited
+		// out.
+	}
+}

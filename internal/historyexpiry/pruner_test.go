@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,12 +48,12 @@ func (w testLedgerWindow) StabilityWindow() uint64 {
 
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 	return db
 }
@@ -94,6 +95,11 @@ func TestPrunerExpiresBlocksOlderThanStabilityWindow(t *testing.T) {
 
 	txn := db.BlobTxn(false)
 	defer txn.Release()
+	// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+	// store (database/database.go), so the nil-receiver branch of
+	// blobStoreRef.blobStore that nilaway traces is unreachable for any
+	// constructed database.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	_, _, err := db.Blob().GetBlock(txn.Blob(), 9, oldHash)
 	assert.ErrorIs(t, err, types.ErrHistoryExpired)
 	_, _, err = db.Blob().GetBlock(txn.Blob(), 10, boundaryHash)

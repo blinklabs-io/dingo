@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -33,12 +34,18 @@ import (
 // transaction, the epoch and slot at which enactment takes effect,
 // and the protocol-parameter update function for the current era.
 type EnactmentContext struct {
-	DB       *database.Database
-	Txn      *database.Txn
-	Epoch    uint64
-	Slot     uint64
-	PParams  lcommon.ProtocolParameters
-	UpdateFn func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
+	DB    *database.Database
+	Txn   *database.Txn
+	Epoch uint64
+	Slot  uint64
+	// PrevEpochStartSlot is the first slot of the epoch this boundary
+	// closes. cardano-ledger drops the committee state of every cold
+	// credential outside the enacted committee at each epoch boundary
+	// (Conway EPOCH, updateCommitteeState), so a credential newly seated here
+	// keeps only the certificates recorded since the previous boundary.
+	PrevEpochStartSlot uint64
+	PParams            lcommon.ProtocolParameters
+	UpdateFn           func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
 
 	// TreasuryWithdrawalRemaining tracks the ENACT rule's cumulative
 	// withdrawal limit across all treasury-withdrawal actions enacted in
@@ -54,6 +61,17 @@ type EnactmentContext struct {
 type EnactmentResult struct {
 	UpdatedPParams lcommon.ProtocolParameters
 	PParamsChanged bool
+	// PlutusV2CostModelWritten is true when the enacted ParamUpdate itself
+	// explicitly specified a PlutusV2 cost model (map key 1), independent of
+	// what value it wrote. Checking the enacted update's own map -- rather
+	// than comparing the merged result's value before and after -- is the
+	// only correct signal here: HardForkBabbage's synthetic default
+	// (ledger/eras/babbage.go) is the real, canonical mainnet PlutusV2 cost
+	// model, so a real governance enactment writing that exact value is the
+	// common case on any real network, not a rare coincidence a
+	// value-comparison could dismiss as "unchanged, therefore not written."
+	// See blinklabs-io/dingo#3825's PR review.
+	PlutusV2CostModelWritten bool
 }
 
 // EnactProposal applies the side effects of a ratified governance
@@ -88,6 +106,9 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
+		if _, ok := a.ParamUpdate.CostModels[1]; ok {
+			result.PlutusV2CostModelWritten = true
+		}
 
 	case *gdijkstra.DijkstraParameterChangeGovAction:
 		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
@@ -96,6 +117,9 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
+		if _, ok := a.ParamUpdate.CostModels[1]; ok {
+			result.PlutusV2CostModelWritten = true
+		}
 
 	case *lcommon.HardForkInitiationGovAction:
 		updated, err := setProtocolVersion(
@@ -110,7 +134,7 @@ func EnactProposal(
 		result.PParamsChanged = true
 
 	case *lcommon.TreasuryWithdrawalGovAction:
-		if err := applyTreasuryWithdrawal(ctx, a); err != nil {
+		if err := applyTreasuryWithdrawal(ctx, a, proposal); err != nil {
 			return nil, fmt.Errorf("treasury withdrawal: %w", err)
 		}
 
@@ -130,7 +154,7 @@ func EnactProposal(
 		}
 
 	case *lcommon.UpdateCommitteeGovAction:
-		if err := applyUpdateCommittee(ctx, a); err != nil {
+		if err := applyUpdateCommittee(ctx, a, proposal.AddedSlot); err != nil {
 			return nil, fmt.Errorf("update committee: %w", err)
 		}
 
@@ -191,7 +215,7 @@ func decodeGovActionForPParams(
 		lcommon.GovActionTypeParameterChange {
 		if _, ok := pparams.(*gdijkstra.DijkstraProtocolParameters); ok {
 			var a gdijkstra.DijkstraParameterChangeGovAction
-			if _, err := cbor.Decode(data, &a); err != nil {
+			if err := decodeStoredGovAction(data, actionType, &a); err != nil {
 				return nil, err
 			}
 			return &a, nil
@@ -200,16 +224,32 @@ func decodeGovActionForPParams(
 	return decodeGovAction(data, actionType)
 }
 
+// DecodeGovActionForPParams re-hydrates a persisted governance action using
+// the active protocol parameters to select the era-specific parameter-change
+// representation.
+func DecodeGovActionForPParams(
+	data []byte,
+	actionType uint8,
+	pparams lcommon.ProtocolParameters,
+) (lcommon.GovAction, error) {
+	return decodeGovActionForPParams(data, actionType, pparams)
+}
+
 // applyTreasuryWithdrawal debits the treasury by the sum of the
 // per-address amounts, credits registered destination reward accounts,
-// and leaves unclaimed withdrawals in the treasury.
+// and leaves unclaimed withdrawals in the treasury. proposal identifies the
+// enacted withdrawal action; its tx hash and action index are used as the
+// per-event credit discriminator so the credit journals as a distinct,
+// replay-idempotent row.
 func applyTreasuryWithdrawal(
 	ctx *EnactmentContext,
 	a *lcommon.TreasuryWithdrawalGovAction,
+	proposal *models.GovernanceProposal,
 ) error {
 	if ctx == nil || ctx.DB == nil {
 		return errors.New("nil enactment context")
 	}
+	sourceHash := proposalRewardSourceHash(proposal)
 	var metaTxn types.Txn
 	if ctx.Txn != nil {
 		metaTxn = ctx.Txn.Metadata()
@@ -223,12 +263,9 @@ func applyTreasuryWithdrawal(
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	var total uint64
-	for _, amount := range a.Withdrawals {
-		if total > ^uint64(0)-amount {
-			return errors.New("treasury withdrawal amount overflow")
-		}
-		total += amount
+	total, err := treasuryWithdrawalTotal(a)
+	if err != nil {
+		return err
 	}
 	if !ctx.TreasuryWithdrawalRemainingSet {
 		ctx.TreasuryWithdrawalRemaining = treasury
@@ -237,7 +274,8 @@ func applyTreasuryWithdrawal(
 	if total > ctx.TreasuryWithdrawalRemaining {
 		return fmt.Errorf(
 			"treasury withdrawal of %d exceeds tracked treasury withdrawal capacity %d",
-			total, ctx.TreasuryWithdrawalRemaining,
+			total,
+			ctx.TreasuryWithdrawalRemaining,
 		)
 	}
 	ctx.TreasuryWithdrawalRemaining -= total
@@ -251,20 +289,25 @@ func applyTreasuryWithdrawal(
 		}
 		rewardAddrBytes, err := rewardAddr.Bytes()
 		if err != nil {
-			return fmt.Errorf("encode treasury withdrawal reward address: %w", err)
+			return fmt.Errorf(
+				"encode treasury withdrawal reward address: %w",
+				err,
+			)
 		}
-		stakeCredential, err := rewardAccountStakeCredential(
+		credentialTag, stakeCredential, err := rewardAccountStakeCredential(
 			rewardAddrBytes,
 		)
 		if err != nil {
 			return fmt.Errorf("treasury withdrawal reward account: %w", err)
 		}
-		credited, err := creditRegisteredRewardAccount(
+		credited, err := CreditRegisteredRewardAccountAfterSnapshot(
 			ctx.DB,
 			ctx.Txn,
+			credentialTag,
 			stakeCredential,
 			amount,
 			ctx.Slot,
+			sourceHash,
 		)
 		if err != nil {
 			return err
@@ -284,14 +327,111 @@ func applyTreasuryWithdrawal(
 	)
 }
 
-func creditRegisteredRewardAccount(
+// treasuryWithdrawalTotal returns the amount an ENACT transition would remove
+// from its running treasury budget. Dingo stores lovelace in uint64, so an
+// action whose mathematical sum is outside that range is not enactable.
+func treasuryWithdrawalTotal(
+	a *lcommon.TreasuryWithdrawalGovAction,
+) (uint64, error) {
+	if a == nil {
+		return 0, errors.New("nil treasury withdrawal action")
+	}
+	var total uint64
+	for _, amount := range a.Withdrawals {
+		if total > ^uint64(0)-amount {
+			return 0, errors.New("treasury withdrawal amount overflow")
+		}
+		total += amount
+	}
+	return total, nil
+}
+
+// CreditRegisteredRewardAccountAfterSnapshot credits a reward account for an
+// epoch-boundary rule that cardano-ledger runs AFTER the boundary stake snapshot
+// (SNAP): POOLREAP deposit refunds, enacted treasury withdrawals and
+// proposal-deposit refunds. The credit is journaled as post-snapshot so an
+// epoch-boundary stake reconstruction excludes it and still reproduces the
+// authoritative SNAP-point capture.
+//
+// See CreditRegisteredRewardAccountBeforeSnapshot for the pre-SNAP counterpart.
+// There is deliberately no snapshot-agnostic spelling of this helper: which side
+// of SNAP a boundary credit falls on is a consensus decision per boundary rule,
+// and a caller that has not made it cannot pick correctly.
+func CreditRegisteredRewardAccountAfterSnapshot(
 	db *database.Database,
 	txn *database.Txn,
+	credentialTag uint8,
 	stakeCredential []byte,
 	amount uint64,
 	slot uint64,
+	sourceHash []byte,
 ) (bool, error) {
-	err := db.AddAccountReward(stakeCredential, amount, slot, txn)
+	return creditRegisteredRewardAccount(
+		db, txn, credentialTag, stakeCredential, amount, slot, sourceHash, true,
+	)
+}
+
+// CreditRegisteredRewardAccountBeforeSnapshot credits a reward account for an
+// epoch-boundary rule that cardano-ledger runs BEFORE the boundary stake
+// snapshot. Its only caller is the Shelley-era MIR (INSTANT) rule, which
+// Shelley's NEWEPOCH embeds between applyRUpd and EPOCH — so before SNAP. The
+// credit is left unstamped, exactly like the delayed reward update, so an
+// epoch-boundary stake reconstruction retains it.
+func CreditRegisteredRewardAccountBeforeSnapshot(
+	db *database.Database,
+	txn *database.Txn,
+	credentialTag uint8,
+	stakeCredential []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+) (bool, error) {
+	return creditRegisteredRewardAccount(
+		db,
+		txn,
+		credentialTag,
+		stakeCredential,
+		amount,
+		slot,
+		sourceHash,
+		false,
+	)
+}
+
+// creditRegisteredRewardAccount credits a reward account by its stake
+// credential, returning (true, nil) when the account exists and is active. It
+// returns (false, nil) when no active account matches — the caller is expected
+// to route the amount to the treasury instead. Shared by governance deposit
+// refunds, POOLREAP pool-deposit refunds and MIR so all follow identical
+// registered-vs-unclaimed accounting.
+//
+// sourceHash uniquely identifies the credit event (the refunded proposal
+// identity hash, reaped pool key hash, or MIR event discriminator). It
+// distinguishes two distinct refunds to the same account at the same epoch
+// boundary as separate journal rows and makes a crash-replayed boundary
+// idempotent. Pass nil when no per-event discriminator is available.
+func creditRegisteredRewardAccount(
+	db *database.Database,
+	txn *database.Txn,
+	credentialTag uint8,
+	stakeCredential []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+	afterSnapshot bool,
+) (bool, error) {
+	credit := db.AddAccountRewardByCredential
+	if afterSnapshot {
+		credit = db.AddPostSnapshotAccountRewardByCredential
+	}
+	err := credit(
+		credentialTag,
+		stakeCredential,
+		amount,
+		slot,
+		sourceHash,
+		txn,
+	)
 	if err == nil {
 		return true, nil
 	}
@@ -301,7 +441,11 @@ func creditRegisteredRewardAccount(
 	return false, fmt.Errorf("credit reward account: %w", err)
 }
 
-func addUnclaimedToTreasury(
+// AddUnclaimedToTreasury adds an unclaimable amount (e.g. a deposit refund
+// whose reward account is missing or inactive) to the treasury, leaving
+// reserves unchanged and writing the updated NetworkState at the given slot.
+// Shared by governance and POOLREAP for consistent treasury accounting.
+func AddUnclaimedToTreasury(
 	db *database.Database,
 	txn *database.Txn,
 	amount uint64,
@@ -340,17 +484,64 @@ func addUnclaimedToTreasury(
 // applyUpdateCommittee removes the requested cold credentials and
 // adds or updates new members with their expiry epochs from the
 // action's credential-to-epoch map, then records the enacted quorum.
+//
+// A cold credential already an active (non-deleted) committee member
+// immediately before this enactment keeps its existing TermStartSlot: it is
+// continuing, not rejoining, and the hot-key authorization/resignation
+// queries gate on term_start_slot to decide whether a stale, pre-removal
+// certificate should still resolve (blinklabs-io/dingo#4584). Stamping a
+// fresh TermStartSlot on every credential in the action's map -- including a
+// continuing member whose term is simply being renewed -- silently
+// invalidated that member's still-valid hot-key authorization the moment the
+// term renewed, despite no resignation or re-authorization ever occurring.
+// Only a credential genuinely new to the committee, or rejoining after having
+// been removed at some point since its last authorization, gets a fresh
+// TermStartSlot; that is what correctly excludes its stale pre-removal
+// authorization once it rejoins. The fresh start is the later of the
+// proposal's slot and ctx.PrevEpochStartSlot: certificates the credential
+// recorded while pending before the closing epoch were dropped at that
+// epoch's own boundary, when it was not yet a member.
 func applyUpdateCommittee(
 	ctx *EnactmentContext,
 	a *lcommon.UpdateCommitteeGovAction,
+	termStartSlot uint64,
 ) error {
-	removeHashes := make([][]byte, 0, len(a.Credentials))
+	var continuingTermStart map[string]uint64
+	if len(a.CredEpochs) > 0 {
+		existing, err := ctx.DB.GetCommitteeMembers(ctx.Txn)
+		if err != nil {
+			return fmt.Errorf("get existing committee members: %w", err)
+		}
+		continuingTermStart = make(map[string]uint64, len(existing))
+		for _, member := range existing {
+			key := models.CommitteeCredential{
+				CredentialTag: member.ColdCredentialTag,
+				Credential:    member.ColdCredHash,
+			}.Key()
+			continuingTermStart[key] = member.TermStartSlot
+		}
+	}
+	removeCredentials := make(
+		[]models.CommitteeCredential,
+		0,
+		len(a.Credentials),
+	)
 	for _, c := range a.Credentials {
+		credentialTag, err := models.CredentialTagFromUint(c.CredType)
+		if err != nil {
+			return fmt.Errorf("remove member credential: %w", err)
+		}
 		hash := c.Credential
-		removeHashes = append(removeHashes, hash[:])
+		removeCredentials = append(
+			removeCredentials,
+			models.CommitteeCredential{
+				CredentialTag: credentialTag,
+				Credential:    hash[:],
+			},
+		)
 	}
 	if err := ctx.DB.SoftDeleteCommitteeMembers(
-		removeHashes, ctx.Slot, ctx.Txn,
+		removeCredentials, ctx.Slot, ctx.Txn,
 	); err != nil {
 		return fmt.Errorf("remove members: %w", err)
 	}
@@ -368,19 +559,40 @@ func applyUpdateCommittee(
 			continue
 		}
 		hash := cred.Credential
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return fmt.Errorf("add member credential: %w", err)
+		}
+		memberTermStart := max(termStartSlot, ctx.PrevEpochStartSlot)
+		key := models.CommitteeCredential{
+			CredentialTag: credentialTag,
+			Credential:    hash[:],
+		}.Key()
+		if priorTermStart, ok := continuingTermStart[key]; ok {
+			memberTermStart = priorTermStart
+		}
 		members = append(members, &models.CommitteeMember{
-			ColdCredHash: hash[:],
-			ExpiresEpoch: uint64(expiry),
-			AddedSlot:    ctx.Slot,
+			ColdCredentialTag: credentialTag,
+			ColdCredHash:      hash[:],
+			ExpiresEpoch:      uint64(expiry),
+			TermStartSlot:     memberTermStart,
+			TermStartSlotSet:  true,
+			AddedSlot:         ctx.Slot,
 		})
 	}
 	if len(members) == 0 {
 		return nil
 	}
-	// Sort by cold credential hash so the auto-increment ID assigned
+	// Sort by full cold credential identity so the auto-increment ID assigned
 	// by the DB is stable across nodes (Go map iteration is random).
 	sort.Slice(members, func(i, j int) bool {
-		return bytes.Compare(members[i].ColdCredHash, members[j].ColdCredHash) < 0
+		if cmp := bytes.Compare(
+			members[i].ColdCredHash,
+			members[j].ColdCredHash,
+		); cmp != 0 {
+			return cmp < 0
+		}
+		return members[i].ColdCredentialTag < members[j].ColdCredentialTag
 	})
 	return ctx.DB.SetCommitteeMembers(members, ctx.Txn)
 }
@@ -392,75 +604,113 @@ func decodeGovAction(
 	data []byte,
 	actionType uint8,
 ) (lcommon.GovAction, error) {
+	var action lcommon.GovAction
+	switch lcommon.GovActionType(actionType) {
+	case lcommon.GovActionTypeParameterChange:
+		action = &conway.ConwayParameterChangeGovAction{}
+	case lcommon.GovActionTypeHardForkInitiation:
+		action = &lcommon.HardForkInitiationGovAction{}
+	case lcommon.GovActionTypeTreasuryWithdrawal:
+		action = &lcommon.TreasuryWithdrawalGovAction{}
+	case lcommon.GovActionTypeNoConfidence:
+		action = &lcommon.NoConfidenceGovAction{}
+	case lcommon.GovActionTypeUpdateCommittee:
+		action = &lcommon.UpdateCommitteeGovAction{}
+	case lcommon.GovActionTypeNewConstitution:
+		action = &lcommon.NewConstitutionGovAction{}
+	case lcommon.GovActionTypeInfo:
+		action = &lcommon.InfoGovAction{}
+	default:
+		return nil, fmt.Errorf("unknown action type: %d", actionType)
+	}
+	if err := decodeStoredGovAction(data, actionType, action); err != nil {
+		return nil, err
+	}
+	return action, nil
+}
+
+func decodeStoredGovAction(
+	data []byte,
+	actionType uint8,
+	target lcommon.GovAction,
+) error {
 	if len(data) == 0 {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"empty gov action cbor (action type %d)",
 			actionType,
 		)
 	}
-	switch lcommon.GovActionType(actionType) {
-	case lcommon.GovActionTypeParameterChange:
-		var a conway.ConwayParameterChangeGovAction
-		if _, err := cbor.Decode(data, &a); err != nil {
-			return nil, err
-		}
-		return &a, nil
-	case lcommon.GovActionTypeHardForkInitiation:
-		var a lcommon.HardForkInitiationGovAction
-		if _, err := cbor.Decode(data, &a); err != nil {
-			return nil, err
-		}
-		return &a, nil
-	case lcommon.GovActionTypeTreasuryWithdrawal:
-		var a lcommon.TreasuryWithdrawalGovAction
-		if _, err := cbor.Decode(data, &a); err != nil {
-			return nil, err
-		}
-		return &a, nil
-	case lcommon.GovActionTypeNoConfidence:
-		var a lcommon.NoConfidenceGovAction
-		if _, err := cbor.Decode(data, &a); err != nil {
-			return nil, err
-		}
-		return &a, nil
-	case lcommon.GovActionTypeUpdateCommittee:
-		var a lcommon.UpdateCommitteeGovAction
-		if _, err := cbor.Decode(data, &a); err != nil {
-			return nil, err
-		}
-		return &a, nil
-	case lcommon.GovActionTypeNewConstitution:
-		var a lcommon.NewConstitutionGovAction
-		if _, err := cbor.Decode(data, &a); err != nil {
-			return nil, err
-		}
-		return &a, nil
-	case lcommon.GovActionTypeInfo:
-		var a lcommon.InfoGovAction
-		if _, err := cbor.Decode(data, &a); err != nil {
-			return nil, err
-		}
-		return &a, nil
+	consumed, err := cbor.Decode(data, target)
+	if err != nil {
+		return fmt.Errorf("decode gov action type %d: %w", actionType, err)
 	}
-	return nil, fmt.Errorf("unknown action type: %d", actionType)
+	if consumed != len(data) {
+		return fmt.Errorf(
+			"decode gov action type %d: consumed %d of %d bytes",
+			actionType,
+			consumed,
+			len(data),
+		)
+	}
+	embeddedType, err := govActionDiscriminator(target)
+	if err != nil {
+		return err
+	}
+	if embeddedType != uint(actionType) {
+		return fmt.Errorf(
+			"governance action type mismatch: stored %d, embedded %d",
+			actionType,
+			embeddedType,
+		)
+	}
+	return nil
 }
 
-// setProtocolVersion rebuilds the pparams with a new protocol version
-// using the era's update function. We construct a minimal update that
-// only touches the protocol version.
+func govActionDiscriminator(action lcommon.GovAction) (uint, error) {
+	switch a := action.(type) {
+	case *conway.ConwayParameterChangeGovAction:
+		return a.Type, nil
+	case *gdijkstra.DijkstraParameterChangeGovAction:
+		return a.Type, nil
+	case *lcommon.HardForkInitiationGovAction:
+		return a.Type, nil
+	case *lcommon.TreasuryWithdrawalGovAction:
+		return a.Type, nil
+	case *lcommon.NoConfidenceGovAction:
+		return a.Type, nil
+	case *lcommon.UpdateCommitteeGovAction:
+		return a.Type, nil
+	case *lcommon.NewConstitutionGovAction:
+		return a.Type, nil
+	case *lcommon.InfoGovAction:
+		return a.Type, nil
+	default:
+		return 0, fmt.Errorf("unsupported governance action value %T", action)
+	}
+}
+
+// setProtocolVersion deep-clones the pparams before changing only the
+// protocol version, preserving immutable epoch snapshots held by readers.
 func setProtocolVersion(
 	current lcommon.ProtocolParameters,
 	major, minor uint,
 ) (lcommon.ProtocolParameters, error) {
-	switch p := current.(type) {
+	cloned, err := eras.CloneGovernanceProtocolParameters(current)
+	if err != nil {
+		return nil, err
+	}
+	switch p := cloned.(type) {
 	case *conway.ConwayProtocolParameters:
-		updated := *p
-		updated.ProtocolVersion.Major = major
-		updated.ProtocolVersion.Minor = minor
-		return &updated, nil
+		p.ProtocolVersion.Major = major
+		p.ProtocolVersion.Minor = minor
+		return p, nil
+	case *gdijkstra.DijkstraProtocolParameters:
+		p.ProtocolVersion.Major = major
+		p.ProtocolVersion.Minor = minor
+		return p, nil
 	}
 	return nil, fmt.Errorf(
 		"protocol version update unsupported for pparams type %T",
-		current,
+		cloned,
 	)
 }

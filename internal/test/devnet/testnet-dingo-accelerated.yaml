@@ -1,0 +1,68 @@
+# DevNet configurator spec: accelerated all-dingo network (3 pools).
+#
+# Mirrors testnet-dingo.yaml but with compressed consensus timing so one
+# scenario timeline — readiness, propagation, agreement, an epoch
+# transition, a peer interruption, and a relay restart — fits the
+# reference-runner budget in internal/test/devnet/README.md. The canonical
+# testnet-dingo.yaml stays the configuration for soak and canary runs;
+# this file is not a replacement for it.
+#
+# Timing invariants (enforced by DevNetConfig.Validate, covered by
+# internal/test/devnet/config_test.go so a bad edit fails in CI rather
+# than as a DevNet stall):
+#   nonceStabilityWindow     = 4k/f = 4*10/0.4 = 100 < 120 = epochLength
+#   blockfetchStabilityWindow = 3k/f = 3*10/0.4 =  75 < 120 = epochLength
+# The candidate nonce therefore freezes 100 slots before the epoch ends,
+# at slot 20 of each epoch, and still inside the epoch.
+#
+# With slotLength 0.5s an epoch is 60s of wall clock and the network
+# produces a block every ~1.25s (f=0.4), so a full epoch transition is
+# reachable inside a single short scenario.
+#
+# Format: 6 YAML documents (see testnet.yaml for the document map).
+
+--- # Required Testnet Parameters
+poolCount: 3
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+# delegatedSupply must be divisible by poolCount (generator constraint).
+delegatedSupply: 2100000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 10
+
+--- # Shelley Genesis Override
+epochLength: 120
+slotLength: 0.5
+activeSlotsCoeff: 0.4
+securityParam: 10
+maxLovelaceSupply: 6000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

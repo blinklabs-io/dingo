@@ -7,3 +7,16 @@ dingo
 Dockerfile
 README.md
 internal/test/archive-demo/tmp/
+
+# Go test fixtures. Only ever read by *_test.go at test time; no image build
+# runs tests, and no Dockerfile COPYs a testdata path. database/immutable/testdata
+# alone is ~84MB of the ~106MB build context sent for every root-context build
+# (Dockerfile, Dockerfile.txpump, Dockerfile.analysis, devnet/erastest/archive-demo).
+**/testdata/
+
+# Local dev artifacts. Gitignored, so absent in CI, but large in developer
+# trees that build devnet/archive-demo images with the repo root as context.
+.devnet/
+.tools/
+*.prof
+*.test

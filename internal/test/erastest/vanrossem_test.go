@@ -152,7 +152,9 @@ func TestVanRossem(t *testing.T) {
 		}
 		t.Logf(
 			"relay observed %d total headers (dingo-issued=%d, cardano-issued=%d)",
-			len(headers), dingoBlocks, cardanoBlocks,
+			len(headers),
+			dingoBlocks,
+			cardanoBlocks,
 		)
 
 		require.Greaterf(
@@ -225,7 +227,9 @@ func TestVanRossem(t *testing.T) {
 				"immediately after the enactment epoch boundary.",
 		)
 		require.GreaterOrEqualf(
-			t, postBumpCardano, 0,
+			t,
+			postBumpCardano,
+			0,
 			"cardano-issued blocks after PV11 enactment may be zero; cardano-producer contribution is informational",
 		)
 	})

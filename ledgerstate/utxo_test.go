@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,7 +26,10 @@ func TestDecodeTxIn_BinaryKeyUsesBigEndianOutputIndex(t *testing.T) {
 
 // buildShelleyAddr constructs a minimal Shelley address byte slice:
 // header (addrType<<4 | networkId), 28-byte payment hash, 28-byte staking hash (for base addrs).
-func buildShelleyAddr(addrType, networkID byte, paymentHash, stakingHash []byte) []byte {
+func buildShelleyAddr(
+	addrType, networkID byte,
+	paymentHash, stakingHash []byte,
+) []byte {
 	addr := []byte{(addrType << 4) | networkID}
 	addr = append(addr, paymentHash...)
 	if stakingHash != nil {
@@ -40,11 +45,12 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 	stakeHash := bytes.Repeat([]byte{0x22}, 28)
 
 	tests := []struct {
-		name          string
-		addr          []byte
-		wantScript    bool
-		wantPayKey    bool
-		wantStakeKey  bool
+		name         string
+		addr         []byte
+		wantScript   bool
+		wantPayKey   bool
+		wantStakeKey bool
+		wantStakeTag uint8
 	}{
 		{
 			// Type 0: key payment + key staking — NOT script
@@ -53,21 +59,41 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			wantScript:   false,
 			wantPayKey:   true,
 			wantStakeKey: true,
+			wantStakeTag: 0,
 		},
 		{
 			// Type 1: script payment + key staking
 			name:         "type1_script_payment_key_staking",
 			addr:         buildShelleyAddr(1, 1, payHash, stakeHash),
 			wantScript:   true,
-			wantPayKey:   false,
+			wantPayKey:   true,
 			wantStakeKey: true,
+			wantStakeTag: 0,
 		},
 		{
-			// Type 5: script payment + pointer staking (enterprise-like min length)
-			name:        "type5_script_payment_pointer",
-			addr:        buildShelleyAddr(5, 1, payHash, nil),
-			wantScript:  true,
-			wantPayKey:  false,
+			// Type 2: key payment + script staking
+			name:         "type2_key_payment_script_staking",
+			addr:         buildShelleyAddr(2, 1, payHash, stakeHash),
+			wantScript:   false,
+			wantPayKey:   true,
+			wantStakeKey: true,
+			wantStakeTag: 1,
+		},
+		{
+			// Type 3: script payment + script staking
+			name:         "type3_script_payment_script_staking",
+			addr:         buildShelleyAddr(3, 1, payHash, stakeHash),
+			wantScript:   true,
+			wantPayKey:   true,
+			wantStakeKey: true,
+			wantStakeTag: 1,
+		},
+		{
+			// Type 5: script payment + pointer staking
+			name:       "type5_script_payment_pointer",
+			addr:       append(buildShelleyAddr(5, 1, payHash, nil), 0, 0, 0),
+			wantScript: true,
+			wantPayKey: true,
 		},
 		{
 			// Type 6: enterprise key payment — NOT script
@@ -81,7 +107,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:       "type7_enterprise_script",
 			addr:       buildShelleyAddr(7, 1, payHash, nil),
 			wantScript: true,
-			wantPayKey: false,
+			wantPayKey: true,
 		},
 	}
 
@@ -89,20 +115,46 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			result := &ParsedUTxO{}
-			extractAddressKeys(tc.addr, result)
-			require.Equal(t, tc.wantScript, result.PaymentScript, "PaymentScript")
+			require.NoError(t, extractAddressKeys(tc.addr, result))
+			require.Equal(
+				t,
+				tc.wantScript,
+				result.PaymentScript,
+				"PaymentScript",
+			)
 			if tc.wantPayKey {
 				require.Equal(t, payHash, result.PaymentKey, "PaymentKey")
 			} else {
-				require.Empty(t, result.PaymentKey, "PaymentKey should be empty for script payment")
+				require.Empty(t, result.PaymentKey, "PaymentKey should be empty for truncated/unknown address types")
 			}
 			if tc.wantStakeKey {
 				require.Equal(t, stakeHash, result.StakingKey, "StakingKey")
+				require.Equal(
+					t,
+					tc.wantStakeTag,
+					result.CredentialTag,
+					"CredentialTag",
+				)
 			} else {
 				require.Empty(t, result.StakingKey, "StakingKey should be empty for non-staking-key address types")
 			}
 		})
 	}
+}
+
+func TestExtractAddressKeysRejectsMalformedPointer(t *testing.T) {
+	addr := append(
+		[]byte{lcommon.AddressTypeKeyPointer << 4},
+		bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)...,
+	)
+
+	result := &ParsedUTxO{}
+	err := extractAddressKeys(addr, result)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "decoding pointer address")
+	require.Empty(t, result.PaymentKey)
+	require.Empty(t, result.StakingKey)
 }
 
 func TestUTxOToModel_PropagatesPaymentScript(t *testing.T) {
@@ -116,8 +168,57 @@ func TestUTxOToModel_PropagatesPaymentScript(t *testing.T) {
 			OutputIndex:   0,
 			Amount:        1_000_000,
 			PaymentScript: wantScript,
+			CredentialTag: 1,
 		}
 		m := UTxOToModel(u, 100)
 		require.Equal(t, wantScript, m.PaymentScript)
+		require.Equal(t, uint8(1), m.CredentialTag)
 	}
+}
+
+func TestExtractAddressKeys_PreservesPointerPosition(t *testing.T) {
+	t.Parallel()
+
+	addr := buildShelleyAddr(
+		4,
+		1,
+		bytes.Repeat([]byte{0x11}, 28),
+		nil,
+	)
+	// Pointer components are CBOR-style unsigned variable-length integers.
+	addr = append(addr, 100, 2, 3)
+
+	parsed := &ParsedUTxO{}
+	extractAddressKeys(addr, parsed)
+	require.Equal(t, &models.UtxoPointer{
+		Slot: 100, TxIndex: 2, CertIndex: 3,
+	}, parsed.Pointer)
+
+	model := UTxOToModel(parsed, 200)
+	require.Equal(t, parsed.Pointer, model.Pointer)
+}
+
+func TestParseCborTxOut_PreservesPointerPosition(t *testing.T) {
+	t.Parallel()
+
+	addr := buildShelleyAddr(
+		4,
+		1,
+		bytes.Repeat([]byte{0x11}, 28),
+		nil,
+	)
+	addr = append(addr, 100, 2, 3)
+	txOut, err := cbor.Encode([]any{addr, uint64(1_000_000)})
+	require.NoError(t, err)
+
+	parsed, err := parseCborTxOut(
+		bytes.Repeat([]byte{0xab}, 32),
+		0,
+		cbor.RawMessage(txOut),
+		cbor.RawMessage(txOut),
+	)
+	require.NoError(t, err)
+	require.Equal(t, &models.UtxoPointer{
+		Slot: 100, TxIndex: 2, CertIndex: 3,
+	}, parsed.Pointer)
 }

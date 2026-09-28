@@ -28,6 +28,8 @@ import (
 )
 
 func TestBlockIndexerComputeOffsets(t *testing.T) {
+	t.Parallel()
+
 	// Load blocks from immutable test data
 	imm, err := immutable.New("immutable/testdata")
 	require.NoError(t, err, "failed to open immutable database")
@@ -68,12 +70,23 @@ func TestBlockIndexerComputeOffsets(t *testing.T) {
 		// Create indexer and compute offsets
 		indexer := NewBlockIndexer(immBlock.Slot, immBlock.Hash)
 		result, err := indexer.ComputeOffsets(immBlock.Cbor, block)
-		require.NoError(t, err, "failed to compute offsets for block %d (slot %d)",
-			i, immBlock.Slot)
+		require.NoError(
+			t,
+			err,
+			"failed to compute offsets for block %d (slot %d)",
+			i,
+			immBlock.Slot,
+		)
 
 		// Verify we got transaction offsets
-		assert.Equal(t, len(txs), len(result.TxOffsets),
-			"transaction count mismatch for block %d (slot %d)", i, immBlock.Slot)
+		assert.Equal(
+			t,
+			len(txs),
+			len(result.TxOffsets),
+			"transaction count mismatch for block %d (slot %d)",
+			i,
+			immBlock.Slot,
+		)
 
 		// Verify each transaction offset
 		for _, tx := range txs {
@@ -82,13 +95,25 @@ func TestBlockIndexerComputeOffsets(t *testing.T) {
 			copy(txHashArray[:], txHash.Bytes())
 
 			offset, ok := result.TxOffsets[txHashArray]
-			assert.True(t, ok, "missing offset for tx %x in block %d", txHash[:8], i)
+			assert.True(
+				t,
+				ok,
+				"missing offset for tx %x in block %d",
+				txHash[:8],
+				i,
+			)
 
 			if ok {
 				// Verify offset is within block bounds
 				end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
-				assert.LessOrEqual(t, end, uint64(len(immBlock.Cbor)),
-					"tx offset out of bounds for tx %x in block %d", txHash[:8], i)
+				assert.LessOrEqual(
+					t,
+					end,
+					uint64(len(immBlock.Cbor)),
+					"tx offset out of bounds for tx %x in block %d",
+					txHash[:8],
+					i,
+				)
 
 				// Verify block slot and hash match
 				assert.Equal(t, immBlock.Slot, offset.BlockSlot,
@@ -126,9 +151,15 @@ func TestBlockIndexerComputeOffsets(t *testing.T) {
 						extracted := immBlock.Cbor[offset.ByteOffset : offset.ByteOffset+offset.ByteLength]
 						expectedCbor := utxo.Output.Cbor()
 						if len(expectedCbor) > 0 {
-							assert.Equal(t, expectedCbor, extracted,
+							assert.Equal(
+								t,
+								expectedCbor,
+								extracted,
 								"extracted CBOR mismatch for utxo %x:%d in block %d",
-								txHash[:8], utxo.Id.Index(), i)
+								txHash[:8],
+								utxo.Id.Index(),
+								i,
+							)
 						}
 					}
 				}
@@ -141,11 +172,18 @@ func TestBlockIndexerComputeOffsets(t *testing.T) {
 		}
 	}
 
-	assert.Greater(t, blocksWithTx, 0, "no blocks with transactions were tested")
+	assert.Greater(
+		t,
+		blocksWithTx,
+		0,
+		"no blocks with transactions were tested",
+	)
 	t.Logf("Successfully tested %d blocks with transactions", blocksWithTx)
 }
 
 func TestBlockIndexerEmptyBlock(t *testing.T) {
+	t.Parallel()
+
 	// Test with a block that has no transactions
 	indexer := NewBlockIndexer(0, make([]byte, 32))
 
@@ -157,6 +195,8 @@ func TestBlockIndexerEmptyBlock(t *testing.T) {
 }
 
 func TestBlockIndexerNoTxBlockSkipsOffsetExtractor(t *testing.T) {
+	t.Parallel()
+
 	bodyCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x00}, {0x01}})
 	require.NoError(t, err)
 	extraCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x02}})
@@ -202,6 +242,8 @@ func findCborInBytes(data, target []byte) int {
 }
 
 func TestFindCborInBytes(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		data     []byte

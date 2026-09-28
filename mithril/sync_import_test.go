@@ -15,6 +15,8 @@
 package mithril
 
 import (
+	"bytes"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"testing"
@@ -23,22 +25,27 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/node"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
 func newMithrilTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 	return db
 }
 
 func TestEnsureMithrilBackfillCheckpointCreatesMissing(t *testing.T) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 
 	require.NoError(t, ensureMithrilBackfillCheckpoint(db))
@@ -55,6 +62,8 @@ func TestEnsureMithrilBackfillCheckpointCreatesMissing(t *testing.T) {
 }
 
 func TestEnsureMithrilBackfillCheckpointPreservesIncomplete(t *testing.T) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	startedAt := time.Now().Add(-time.Hour)
 	updatedAt := time.Now().Add(-time.Minute)
@@ -85,6 +94,8 @@ func TestEnsureMithrilBackfillCheckpointPreservesIncomplete(t *testing.T) {
 }
 
 func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
+	t.Parallel()
+
 	db := newMithrilTestDB(t)
 	startedAt := time.Now().Add(-time.Hour)
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
@@ -111,4 +122,188 @@ func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
 	require.False(t, cp.Completed)
 	require.Equal(t, startedAt.UnixNano(), cp.StartedAt.UnixNano())
 	require.True(t, cp.UpdatedAt.After(startedAt))
+}
+
+func TestResetMithrilBackfillCheckpointReplaysFromFirstBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      node.BackfillPhase,
+			LastSlot:   1042527,
+			TotalSlots: 2000000,
+			StartedAt:  time.Now().Add(-time.Hour),
+			UpdatedAt:  time.Now().Add(-time.Minute),
+			Completed:  true,
+		},
+		nil,
+	))
+
+	require.NoError(t, resetMithrilBackfillCheckpoint(db))
+	cp, err := db.Metadata().GetBackfillCheckpoint(node.BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	require.Zero(t, cp.LastSlot)
+	require.Zero(t, cp.TotalSlots)
+	require.False(t, cp.Completed)
+}
+
+func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	tipHash := bytes.Repeat([]byte{0x11}, 32)
+	ledgerStateHash := bytes.Repeat([]byte{0x22}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, ledgerStateHash),
+		BlockNumber: 1,
+	}, nil))
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     2,
+		Slot:   42,
+		Hash:   tipHash,
+		Number: 2,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+
+	require.NoError(t, updateMithrilReadyState(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "30", slot)
+	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(ledgerStateHash), hash)
+	storedTip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(30), storedTip.Point.Slot)
+	require.Equal(t, ledgerStateHash, storedTip.Point.Hash)
+}
+
+func TestSetStableMithrilLedgerTipUsesCertifiedBlockNumber(t *testing.T) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	ledgerStateHash := bytes.Repeat([]byte{0x23}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   30,
+		Hash:   ledgerStateHash,
+		Number: 123,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+
+	require.NoError(t, setStableMithrilLedgerTip(
+		db,
+		30,
+		ledgerStateHash,
+	))
+
+	storedTip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(30), storedTip.Point.Slot)
+	require.Equal(t, ledgerStateHash, storedTip.Point.Hash)
+	require.Equal(t, uint64(123), storedTip.BlockNumber)
+}
+
+func TestSetStableMithrilLedgerTipRejectsPointOutsideCertifiedChain(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	certifiedHash := bytes.Repeat([]byte{0x24}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   30,
+		Hash:   certifiedHash,
+		Number: 123,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+
+	err := setStableMithrilLedgerTip(
+		db,
+		30,
+		bytes.Repeat([]byte{0x25}, 32),
+	)
+	require.ErrorContains(t, err, "is not present in certified ImmutableDB")
+}
+
+func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	ledgerStateHash := bytes.Repeat([]byte{0x33}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+
+	require.NoError(t, updateMithrilReadyState(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "30", slot)
+	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(ledgerStateHash), hash)
+}
+
+func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, nil),
+	}, nil))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerHashSyncKey,
+		hex.EncodeToString(bytes.Repeat([]byte{0x44}, 32)),
+		nil,
+	))
+
+	require.NoError(t, updateMithrilReadyState(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		nil,
+		"",
+		true,
+	))
+
+	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "30", slot)
+	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, hash)
 }

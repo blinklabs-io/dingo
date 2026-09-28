@@ -33,6 +33,8 @@ import (
 )
 
 func TestCalculateAcceptBackoff(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 
 	tests := []struct {
@@ -378,8 +380,11 @@ func TestInboundConnectionLimit_RejectsOverLimit(t *testing.T) {
 	cm.connectionsMutex.Lock()
 	for i := range maxInbound {
 		fakeId := ouroboros.ConnectionId{
-			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
-			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40000 + i},
+			LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{
+				IP:   net.ParseIP("10.0.0.1"),
+				Port: 40000 + i,
+			},
 		}
 		cm.connections[fakeId] = &connectionInfo{
 			conn:      nil,
@@ -505,6 +510,8 @@ func TestInboundConnectionLimit_AcceptsWithinLimit(t *testing.T) {
 }
 
 func TestInboundConnectionLimit_DefaultValue(t *testing.T) {
+	t.Parallel()
+
 	// Verify that a zero MaxInboundConns defaults to DefaultMaxInboundConnections
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 	assert.Equal(
@@ -540,8 +547,11 @@ func TestInboundConnectionLimit_OutboundNotCounted(t *testing.T) {
 	cm.connectionsMutex.Lock()
 	for i := range 10 {
 		fakeId := ouroboros.ConnectionId{
-			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
-			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 50000 + i},
+			LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{
+				IP:   net.ParseIP("10.0.0.1"),
+				Port: 50000 + i,
+			},
 		}
 		cm.connections[fakeId] = &connectionInfo{
 			conn:      nil,
@@ -580,6 +590,91 @@ func TestInboundConnectionLimit_OutboundNotCounted(t *testing.T) {
 	defer cancel()
 	err = cm.Stop(ctx)
 	require.NoError(t, err)
+}
+
+func TestAcceptLoopDoesNotBlockOnSilentHandshake(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	mockLn := newToggleMockListener()
+	cfg := ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: 2,
+		Listeners: []ListenerConfig{{
+			Listener: mockLn,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+			},
+		}},
+	}
+
+	cm := NewConnectionManager(cfg)
+	ctx := t.Context()
+	require.NoError(t, cm.Start(ctx))
+	// Consume the signal for the initial Accept call. The next signal must
+	// come after the silent peer has been accepted and setup was dispatched.
+	require.True(t, mockLn.WaitForAcceptEntered(2*time.Second))
+
+	silent, peer := net.Pipe()
+	defer peer.Close()
+	mockLn.ProvideConnection(silent)
+	require.True(
+		t,
+		mockLn.WaitForAcceptEntered(2*time.Second),
+		"silent handshake must not serialize the listener accept loop",
+	)
+
+	// Stop must close pending handshakes instead of waiting for the production
+	// timeout. The accept worker is tracked and must exit cleanly.
+	stopCtx, stopCancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
+	defer stopCancel()
+	require.NoError(t, cm.Stop(stopCtx))
+}
+
+func TestInboundLimitRejectionUntracksPendingConnection(t *testing.T) {
+	mockLn := newToggleMockListener()
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MaxInboundConns: 1,
+		Listeners: []ListenerConfig{{
+			Listener: mockLn,
+		}},
+	})
+	t.Cleanup(func() { goleak.VerifyNone(t) })
+
+	// Occupy the only inbound slot so the accept loop rejects the next bearer
+	// before dispatching its handshake goroutine.
+	require.True(t, cm.tryReserveInboundSlot())
+	t.Cleanup(cm.releaseInboundSlot)
+	require.NoError(t, cm.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	require.True(t, mockLn.WaitForAcceptEntered(2*time.Second))
+
+	rejected, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+	mockLn.ProvideConnection(rejected)
+	require.True(
+		t,
+		mockLn.WaitForAcceptEntered(2*time.Second),
+		"accept loop must continue after the inbound limit rejection",
+	)
+
+	cm.listenersMutex.Lock()
+	pending := len(cm.pendingConns)
+	cm.listenersMutex.Unlock()
+	require.Zero(
+		t,
+		pending,
+		"a connection closed during admission must not remain pending",
+	)
 }
 
 func TestAcceptLoopBackoffOnError(t *testing.T) {
@@ -714,49 +809,9 @@ func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {
 	// the loop continued operating normally after the success.
 }
 
-// concurrentMockListener delivers connections from multiple goroutines
-// simultaneously to exercise the race condition in the inbound limit check.
-type concurrentMockListener struct {
-	mu       sync.Mutex
-	closed   atomic.Bool
-	closeCh  chan struct{}
-	connCh   chan net.Conn
-	accepted atomic.Int32
-}
-
-func newConcurrentMockListener() *concurrentMockListener {
-	return &concurrentMockListener{
-		closeCh: make(chan struct{}),
-		connCh:  make(chan net.Conn, 200),
-	}
-}
-
-func (m *concurrentMockListener) Accept() (net.Conn, error) {
-	if m.closed.Load() {
-		return nil, net.ErrClosed
-	}
-	select {
-	case conn := <-m.connCh:
-		m.accepted.Add(1)
-		return conn, nil
-	case <-m.closeCh:
-		return nil, net.ErrClosed
-	}
-}
-
-func (m *concurrentMockListener) Close() error {
-	if m.closed.Swap(true) {
-		return nil
-	}
-	close(m.closeCh)
-	return nil
-}
-
-func (m *concurrentMockListener) Addr() net.Addr {
-	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}
-}
-
 func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
+	t.Parallel()
+
 	// This test verifies that tryReserveInboundSlot is atomic:
 	// many goroutines racing to reserve slots should never exceed
 	// MaxInboundConns total (existing connections + reservations).
@@ -844,6 +899,8 @@ func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
 }
 
 func TestTryReserveInboundSlot_ConsumeAndRelease(t *testing.T) {
+	t.Parallel()
+
 	// Verify that consumeInboundSlot correctly decrements the reservation
 	// counter, allowing the slot to be tracked by the actual connection
 	// in the connections map instead.

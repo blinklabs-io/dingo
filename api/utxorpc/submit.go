@@ -27,6 +27,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -42,6 +43,21 @@ type submitServiceServer struct {
 	utxorpc *Utxorpc
 }
 
+func waitForTxConfirmedTransaction(
+	eventData any,
+) (gledger.Transaction, bool) {
+	txEvent, ok := eventData.(ledger.TransactionEvent)
+	if !ok || txEvent.Rollback || txEvent.Transaction == nil {
+		return nil, false
+	}
+	return txEvent.Transaction, true
+}
+
+type waitForTxConfirmation struct {
+	ref  []byte
+	hash string
+}
+
 // SubmitTx
 func (s *submitServiceServer) SubmitTx(
 	ctx context.Context,
@@ -53,11 +69,11 @@ func (s *submitServiceServer) SubmitTx(
 	resp := &submit.SubmitTxResponse{}
 
 	txRawBytes := txRaw.GetRaw()
-	txType, err := gledger.DetermineTransactionType(txRawBytes)
+	txType, err := safedecode.TransactionType(txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed decoding tx: %w", err)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+	tx, err := safedecode.Transaction(txType, txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to decode transaction from CBOR: %w",
@@ -77,16 +93,28 @@ func (s *submitServiceServer) SubmitTx(
 	return connect.NewResponse(resp), nil
 }
 
-// WaitForTx subscribes to block events and streams confirmation responses
-// for the requested transaction hashes. It blocks until all requested
-// transactions are confirmed, the server-side timeout expires, or the client
-// disconnects.
+// WaitForTx subscribes to committed transaction events and streams confirmation
+// responses for the requested transaction hashes. It blocks until all
+// requested transactions are confirmed, the server-side timeout expires, or
+// the client disconnects.
 func (s *submitServiceServer) WaitForTx(
 	ctx context.Context,
 	req *connect.Request[submit.WaitForTxRequest],
 	stream *connect.ServerStream[submit.WaitForTxResponse],
 ) error {
 	ref := req.Msg.GetRef() // [][]byte
+	for i, hash := range ref {
+		if len(hash) != len(lcommon.Blake2b256{}) {
+			return connect.NewError(
+				connect.CodeInvalidArgument,
+				fmt.Errorf(
+					"transaction reference at index %d must be 32 bytes, got %d",
+					i,
+					len(hash),
+				),
+			)
+		}
+	}
 
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf(
@@ -94,151 +122,144 @@ func (s *submitServiceServer) WaitForTx(
 			len(ref),
 		),
 	)
+	return s.waitForTx(ctx, ref, stream.Send)
+}
 
+func (s *submitServiceServer) waitForTx(
+	ctx context.Context,
+	ref [][]byte,
+	send func(*submit.WaitForTxResponse) error,
+) error {
 	if len(ref) == 0 {
 		return nil
 	}
 
-	// Build a set of pending transaction hashes for O(1) lookup
-	var mu sync.Mutex
+	// Build a set of pending transaction hashes for O(1) lookup.
+	var pendingMu sync.Mutex
 	pending := make(map[string][]byte, len(ref))
+	uniqueRefs := make([][]byte, 0, len(ref))
 	for _, r := range ref {
-		pending[hex.EncodeToString(r)] = r
+		hash := hex.EncodeToString(r)
+		if _, exists := pending[hash]; exists {
+			continue
+		}
+		pending[hash] = r
+		uniqueRefs = append(uniqueRefs, r)
+	}
+	confirmationTarget := len(pending)
+	confirmations := make(chan waitForTxConfirmation, confirmationTarget)
+	queueConfirmation := func(hash string) {
+		pendingMu.Lock()
+		refBytes, found := pending[hash]
+		if !found {
+			pendingMu.Unlock()
+			return
+		}
+		// Each unique reference is queued at most once. The channel has one
+		// slot per unique reference, so this enqueue cannot block.
+		delete(pending, hash)
+		pendingMu.Unlock()
+		confirmations <- waitForTxConfirmation{
+			ref:  refBytes,
+			hash: hash,
+		}
 	}
 
-	// Channel to signal all transactions have been confirmed
-	doneCh := make(chan struct{}, 1)
-	// Channel to propagate errors from the event handler
-	errCh := make(chan error, 1)
-
-	// Mutex to protect stream.Send which is not goroutine-safe.
-	// The stopped flag prevents sends after the function returns.
-	var streamMu sync.Mutex
-	var stopped bool
-
 	subId := s.utxorpc.config.EventBus.SubscribeFunc(
-		ledger.BlockfetchEventType,
+		ledger.TransactionEventType,
 		func(evt event.Event) {
-			defer func() {
-				if r := recover(); r != nil {
-					s.utxorpc.config.Logger.Error(
-						"panic in WaitForTx event handler",
-						"panic",
-						r,
-					)
-				}
-			}()
-			e, ok := evt.Data.(ledger.BlockfetchEvent)
+			tx, ok := waitForTxConfirmedTransaction(evt.Data)
 			if !ok {
-				s.utxorpc.config.Logger.Warn(
-					"unexpected event data type in WaitForTx",
-				)
 				return
 			}
-			// Skip non-block events (e.g. BatchDone) which have
-			// no block data and cannot confirm transactions
-			if e.Block == nil {
-				return
-			}
-			for _, tx := range e.Block.Transactions() {
-				txHash := tx.Hash().String()
-				mu.Lock()
-				refBytes, found := pending[txHash]
-				if !found {
-					mu.Unlock()
-					continue
-				}
-				// Remove from pending before sending
-				delete(pending, txHash)
-				remaining := len(pending)
-				mu.Unlock()
-
-				// Send confirmation response
-				streamMu.Lock()
-				if stopped {
-					streamMu.Unlock()
-					return
-				}
-				err := stream.Send(
-					&submit.WaitForTxResponse{
-						Ref:   refBytes,
-						Stage: submit.Stage_STAGE_CONFIRMED,
-					},
-				)
-				streamMu.Unlock()
-				if err != nil {
-					select {
-					case errCh <- err:
-					default:
-					}
-					return
-				}
-				s.utxorpc.config.Logger.Debug(
-					"Confirmation response sent",
-					"transaction_hash", txHash,
-				)
-				// Signal done when all txs confirmed
-				if remaining == 0 {
-					select {
-					case doneCh <- struct{}{}:
-					default:
-					}
-					return
-				}
-			}
+			queueConfirmation(tx.Hash().String())
 		},
 	)
-	defer s.utxorpc.config.EventBus.Unsubscribe(
-		ledger.BlockfetchEventType,
-		subId,
+	if subId == 0 {
+		return connect.NewError(
+			connect.CodeUnavailable,
+			errors.New("failed to subscribe to committed transaction events"),
+		)
+	}
+	defer s.utxorpc.config.EventBus.UnsubscribeAndWait(
+		ledger.TransactionEventType, subId,
 	)
-	// Prevent event handler from calling stream.Send
-	// after this function returns and the stream is torn
-	// down. Registered after the Unsubscribe defer so
-	// LIFO ordering sets stopped=true before Unsubscribe.
-	defer func() {
-		streamMu.Lock()
-		stopped = true
-		streamMu.Unlock()
-	}()
+
+	// The subscription must exist before this durable-state lookup. A
+	// transaction committed before subscription is found here, while one that
+	// commits during the lookup is queued by the event callback. Both paths use
+	// queueConfirmation so the same reference is emitted only once. Preserve
+	// first-request order for references that are already committed.
+	if !isNilInterface(s.utxorpc.config.LedgerState) {
+		for _, r := range uniqueRefs {
+			hash := hex.EncodeToString(r)
+			pendingMu.Lock()
+			_, stillPending := pending[hash]
+			pendingMu.Unlock()
+			if !stillPending {
+				continue
+			}
+			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(r)
+			if err != nil {
+				return fmt.Errorf(
+					"lookup committed transaction %x: %w",
+					r,
+					err,
+				)
+			}
+			if txRecord != nil {
+				queueConfirmation(hash)
+			}
+		}
+	}
 
 	serverTimeout := s.utxorpc.config.ServerTimeout
 	timeout := time.NewTimer(serverTimeout)
 	defer timeout.Stop()
 
-	// Block until all transactions are confirmed, an error
-	// occurs, the server-side timeout expires, or the client disconnects
-	select {
-	case <-doneCh:
-		return nil
-	case err := <-errCh:
-		if ctx.Err() != nil {
-			s.utxorpc.config.Logger.Warn(
-				"Client disconnected",
-				"error", ctx.Err(),
+	// The request goroutine is the sole stream sender. EventBus dispatch only
+	// classifies and queues confirmations, so a slow client cannot stall it.
+	confirmed := 0
+	for confirmed < confirmationTarget {
+		select {
+		case confirmation := <-confirmations:
+			err := send(&submit.WaitForTxResponse{
+				Ref:   confirmation.ref,
+				Stage: submit.Stage_STAGE_CONFIRMED,
+			})
+			if err != nil {
+				if ctx.Err() != nil {
+					s.utxorpc.config.Logger.Warn(
+						"Client disconnected",
+						"error", ctx.Err(),
+					)
+					return ctx.Err()
+				}
+				return err
+			}
+			confirmed++
+			s.utxorpc.config.Logger.Debug(
+				"Confirmation response sent",
+				"transaction_hash", confirmation.hash,
+			)
+		case <-ctx.Done():
+			s.utxorpc.config.Logger.Debug(
+				"WaitForTx client disconnected",
 			)
 			return ctx.Err()
+		case <-timeout.C:
+			s.utxorpc.config.Logger.Warn(
+				"WaitForTx timed out",
+				"timeout", serverTimeout,
+				"pending", confirmationTarget-confirmed,
+			)
+			return connect.NewError(
+				connect.CodeDeadlineExceeded,
+				fmt.Errorf("wait for tx timed out after %s", serverTimeout),
+			)
 		}
-		return err
-	case <-ctx.Done():
-		s.utxorpc.config.Logger.Debug(
-			"WaitForTx client disconnected",
-		)
-		return ctx.Err()
-	case <-timeout.C:
-		mu.Lock()
-		remaining := len(pending)
-		mu.Unlock()
-		s.utxorpc.config.Logger.Warn(
-			"WaitForTx timed out",
-			"timeout", serverTimeout,
-			"pending", remaining,
-		)
-		return connect.NewError(
-			connect.CodeDeadlineExceeded,
-			fmt.Errorf("wait for tx timed out after %s", serverTimeout),
-		)
 	}
+	return nil
 }
 
 // EvalTx
@@ -252,14 +273,14 @@ func (s *submitServiceServer) EvalTx(
 
 	txRawBytes := txRaw.GetRaw()
 	// Decode TX
-	txType, err := gledger.DetermineTransactionType(txRawBytes)
+	txType, err := safedecode.TransactionType(txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"could not parse transaction to determine type: %w",
 			err,
 		)
 	}
-	tx, err := gledger.NewTransactionFromCbor(txType, txRawBytes)
+	tx, err := safedecode.Transaction(txType, txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transaction CBOR: %w", err)
 	}
@@ -275,15 +296,26 @@ func (s *submitServiceServer) EvalTx(
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
 	for key, val := range redeemerExUnits {
 		r := &cardano.Redeemer{
-			Purpose: cardano.RedeemerPurpose(key.Tag + 1), // gouroboros tags are 0-based, cardano tags are offset by 1
-			Index:   key.Index,
+			Purpose: cardano.RedeemerPurpose(
+				key.Tag + 1,
+			), // gouroboros tags are 0-based, cardano tags are offset by 1
+			Index: key.Index,
 			ExUnits: &cardano.ExUnits{
 				Steps:  uint64(val.Steps),  // nolint:gosec
 				Memory: uint64(val.Memory), // nolint:gosec
 			},
 		}
 		if pd, ok := redeemerData[key]; ok {
-			r.Payload = plutusDataToCardano(pd)
+			payload, payloadErr := plutusDataToCardano(pd)
+			if payloadErr != nil {
+				s.utxorpc.config.Logger.Warn(
+					"Could not map redeemer Plutus data",
+					"error",
+					payloadErr,
+				)
+			} else {
+				r.Payload = payload
+			}
 		}
 		tmpRedeemers = append(tmpRedeemers, r)
 	}
@@ -401,7 +433,7 @@ func (s *submitServiceServer) WatchMempool(
 				return
 			}
 			txRawBytes := addEvt.Body
-			txType, err := gledger.DetermineTransactionType(
+			txType, err := safedecode.TransactionType(
 				txRawBytes,
 			)
 			if err != nil {
@@ -411,7 +443,7 @@ func (s *submitServiceServer) WatchMempool(
 				)
 				return
 			}
-			tx, err := gledger.NewTransactionFromCbor(
+			tx, err := safedecode.Transaction(
 				txType,
 				txRawBytes,
 			)
@@ -511,7 +543,7 @@ func (u *Utxorpc) matchesTxPattern(
 		parts = append(parts, u.txPatternMatchHasAddress(tx, pattern))
 	}
 	if p := pattern.GetMintsAsset(); p != nil {
-		parts = append(parts, u.txPatternMatchAsset(tx, p))
+		parts = append(parts, txPatternMatchMint(tx, p))
 	}
 	if p := pattern.GetMovesAsset(); p != nil {
 		parts = append(parts, u.txPatternMatchAsset(tx, p))
@@ -632,7 +664,11 @@ func (u *Utxorpc) addressPatternMatchesOutput(
 	if b := ap.GetExactAddress(); b != nil {
 		patAddr, err := lcommon.NewAddressFromBytes(b)
 		if err != nil {
-			u.config.Logger.Error("failed to decode exact address", "error", err)
+			u.config.Logger.Error(
+				"failed to decode exact address",
+				"error",
+				err,
+			)
 			sawUnevaluable = true
 		} else if addr.String() != patAddr.String() {
 			return predNoMatch
@@ -775,6 +811,37 @@ func (u *Utxorpc) txPatternMatchHasAddress(
 	}
 	if sawUnevaluable {
 		return predUnevaluable
+	}
+	return predNoMatch
+}
+
+// txPatternMatchMint matches minting and burning from the signed mint field.
+// An omitted asset name matches any nonzero quantity under the policy.
+func txPatternMatchMint(
+	tx gledger.Transaction,
+	pattern *cardano.AssetPattern,
+) predOutcome {
+	if pattern == nil {
+		return predUnevaluable
+	}
+	mint := tx.AssetMint()
+	if mint == nil {
+		return predNoMatch
+	}
+	for _, policy := range mint.Policies() {
+		if !bytes.Equal(policy.Bytes(), pattern.GetPolicyId()) {
+			continue
+		}
+		for _, name := range mint.Assets(policy) {
+			if len(pattern.GetAssetName()) > 0 &&
+				!bytes.Equal(name, pattern.GetAssetName()) {
+				continue
+			}
+			quantity := mint.Asset(policy, name)
+			if quantity != nil && quantity.Sign() != 0 {
+				return predMatch
+			}
+		}
 	}
 	return predNoMatch
 }

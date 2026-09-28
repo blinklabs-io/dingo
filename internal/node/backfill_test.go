@@ -17,6 +17,8 @@ package node
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -25,6 +27,13 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,18 +42,164 @@ import (
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "", // in-memory
 		Logger:  logger,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		db.Close() //nolint:errcheck
+		dbtest.CloseDatabase(db) //nolint:errcheck
 	})
 	return db
 }
 
+func newFileTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  logger,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		dbtest.CloseDatabase(db) //nolint:errcheck
+	})
+	return db
+}
+
+func addValidBackfillBlocks(t *testing.T, db *database.Database, count int) {
+	t.Helper()
+	addValidBackfillBlocksFrom(t, db, 0, count)
+}
+
+func addValidBackfillBlocksFrom(
+	t *testing.T,
+	db *database.Database,
+	startSlot uint64,
+	count int,
+) {
+	t.Helper()
+	blocks, err := testfixtures.GenerateConwayChainAt(1, startSlot, count)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+}
+
+func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+
+	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        credentialBytes,
+		AddedSlot:         10,
+		LastActivityEpoch: 5,
+		ExpiryEpoch:       25,
+		Active:            true,
+	}))
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.UpdateDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeUpdateDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.DRepInactivityPeriod = 20
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return backfill.processBlockGovernance(
+			tx,
+			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			100,
+			&pparams,
+			txn,
+		)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+
+	credentialBytes := bytes.Repeat([]byte{0xBC}, 28)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        credentialBytes,
+		AddedSlot:         10,
+		LastActivityEpoch: 5,
+		ExpiryEpoch:       25,
+		Active:            true,
+	}))
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.UpdateDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeUpdateDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	conwayPParams := mockledger.NewMockConwayProtocolParams()
+	conwayPParams.DRepInactivityPeriod = 20
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conwayPParams,
+	}
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return backfill.processBlockGovernance(
+			tx,
+			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			100,
+			pparams,
+			txn,
+		)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func closeTestDB(db *database.Database) error {
+	return dbtest.CloseDatabase(db)
+}
+
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -54,6 +209,8 @@ func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
 }
 
 func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -63,6 +220,8 @@ func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
 }
 
 func TestNeedsBackfill_NoCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -73,6 +232,8 @@ func TestNeedsBackfill_NoCheckpoint(t *testing.T) {
 }
 
 func TestNeedsBackfill_NoCheckpointWithBlocks(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -98,6 +259,8 @@ func TestNeedsBackfill_NoCheckpointWithBlocks(t *testing.T) {
 }
 
 func TestNeedsBackfill_IncompleteCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -121,6 +284,8 @@ func TestNeedsBackfill_IncompleteCheckpoint(t *testing.T) {
 }
 
 func TestNeedsBackfill_CompletedCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -144,6 +309,8 @@ func TestNeedsBackfill_CompletedCheckpoint(t *testing.T) {
 }
 
 func TestRun_EmptyBlobStore(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -158,6 +325,8 @@ func TestRun_EmptyBlobStore(t *testing.T) {
 }
 
 func TestRun_AlreadyCompleted(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -180,6 +349,8 @@ func TestRun_AlreadyCompleted(t *testing.T) {
 }
 
 func TestRun_CancelledContext_EmptyBlobStore(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -207,6 +378,8 @@ func TestRun_CancelledContext_EmptyBlobStore(t *testing.T) {
 }
 
 func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	now := time.Now()
@@ -220,16 +393,7 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 2)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bf := NewBackfill(db, nil, logger)
@@ -241,9 +405,53 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	require.Equal(t, uint64(1), got.LastSlot)
 }
 
+func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 2,
+			StartedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			Completed:  false,
+		},
+		nil,
+	))
+	addValidBackfillBlocks(t, db, 2)
+	malformedHash := make([]byte, 32)
+	malformedHash[0] = 3
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 2,
+		Hash: malformedHash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetEndSlot(1)
+
+	// If iteration crosses the configured end slot, parsing the malformed
+	// block at slot 2 fails the run instead of leaving it for ledger replay.
+	require.NoError(t, bf.Run(context.Background()))
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, checkpoint.Completed)
+	require.Equal(t, uint64(1), checkpoint.LastSlot)
+	require.Equal(t, uint64(1), checkpoint.TotalSlots)
+}
+
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
 // published even when the run finishes before the normal 10s progress tick.
 func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	now := time.Now()
@@ -257,16 +465,7 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
-		}, nil))
-	}
+	addValidBackfillBlocks(t, db, 2)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bf := NewBackfill(db, nil, logger)
@@ -282,14 +481,53 @@ func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
 }
 
 // TestRun_IncompleteCheckpointAtZeroVisitsSlotZero proves the iterator
-// actually starts at slot 0 (rather than LastSlot+1 = 1). Asserting only
-// the final cp.LastSlot is too weak: it's left at 1 in both the correct
-// resume-from-zero case and the buggy skip-slot-zero case. We verify
-// directly by feeding intentionally-unparseable CBOR for both blocks and
-// observing the per-block "skipping unparseable block" log line for
-// slot 0 — that log fires from inside the iteration loop and so only
-// emits when the iterator visits that slot.
+// starts at slot 0 rather than LastSlot+1 when a checkpoint records
+// LastSlot 0, which is ambiguous between "slot 0 completed" and "an initial
+// checkpoint was written before any block did".
+//
+// Asserting the final cp.LastSlot is too weak: it lands on 1 whether or not
+// slot 0 was visited. The malformed block at slot 0 is what makes the
+// difference observable, because fail-closed backfill names the slot it
+// stopped on: a run that skips slot 0 processes the valid block at slot 1
+// and returns no error at all.
 func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  now,
+			UpdatedAt:  now,
+			Completed:  false,
+		},
+		nil,
+	))
+
+	hash := make([]byte, 32)
+	hash[0] = 1
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 0,
+		Hash: hash,
+		Cbor: []byte{0x82, 0x01},
+		Type: 1,
+	}, nil))
+	addValidBackfillBlocksFrom(t, db, 1, 1)
+
+	bf := NewBackfill(db, nil, slog.New(
+		slog.NewTextHandler(io.Discard, nil),
+	))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 0")
+}
+
+func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	now := time.Now()
@@ -303,41 +541,92 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 	}
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
-	for _, slot := range []uint64{0, 1} {
-		hash := make([]byte, 32)
-		hash[0] = byte(slot + 1)
+	addValidBackfillBlocks(t, db, 4)
+	hash := make([]byte, 32)
+	hash[0] = 5
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 4,
+		Hash: hash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
+
+	bf := NewBackfill(db, nil, slog.Default())
+	require.NoError(t, bf.SetBatchSize(2))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 4")
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, uint64(3), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
+}
+
+func TestRun_OffsetFailureKeepsLastCommittedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	for _, block := range blocks {
+		blockCbor := block.Cbor()
 		require.NoError(t, db.BlockCreate(models.Block{
-			Slot: slot,
-			Hash: hash,
-			Cbor: []byte{0x82, 0x01},
-			Type: 1,
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   blockCbor,
+			Type:   uint(block.Type()),
 		}, nil))
 	}
 
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	bf := NewBackfill(db, nil, logger)
+	bf := NewBackfill(db, nil, slog.Default())
+	require.NoError(t, bf.SetBatchSize(1))
+	offsetFailure := errors.New("injected offset computation failure")
+	bf.computeOffsets = func(
+		slot uint64,
+		hash, blockCbor []byte,
+		block gledger.Block,
+	) (*database.BlockIngestionResult, error) {
+		if slot == blocks[1].SlotNumber() {
+			return nil, offsetFailure
+		}
+		return database.NewBlockIndexer(slot, hash).ComputeOffsets(
+			blockCbor,
+			block,
+		)
+	}
+	err = bf.Run(context.Background())
+	require.ErrorContains(
+		t,
+		err,
+		fmt.Sprintf(
+			"computing offsets for block at slot %d",
+			blocks[1].SlotNumber(),
+		),
+	)
+	assert.ErrorIs(t, err, offsetFailure)
 
-	require.NoError(t, bf.Run(context.Background()))
-
-	// One unparseable-block warning per visited slot proves the
-	// iterator's slot boundary directly. Both must appear; missing
-	// slot 0 means resume started at 1 and silently skipped the
-	// first block.
-	output := logs.String()
-	assert.Contains(t, output, `"msg":"skipping unparseable block"`)
-	assert.Contains(t, output, `"slot":0`,
-		"iterator must visit slot 0 when resuming from a checkpoint with LastSlot=0")
-	assert.Contains(t, output, `"slot":1`,
-		"iterator must also visit slot 1")
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, blocks[0].SlotNumber(), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
 }
 
 // TestBackfill_AutoDetectsImmutableUtxoOffsetsTip ensures that without an
 // explicit setter call, Run() picks up the sync-state marker and applies it
 // as the skip threshold. This is the path Mithril sync depends on.
 func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -366,6 +655,8 @@ func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
 // that intentionally need offset repair below the immutable-copy tip cannot
 // have the optimisation silently re-enabled behind their back.
 func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -387,7 +678,9 @@ func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 	require.NoError(t, bf.Run(context.Background()))
 
 	assert.Equal(
-		t, uint64(0), bf.immutableUtxoOffsetsTipSlot,
+		t,
+		uint64(0),
+		bf.immutableUtxoOffsetsTipSlot,
 		"explicit SetImmutableUtxoOffsetsTipSlot(0) must beat sync-state auto-detect",
 	)
 }
@@ -398,6 +691,8 @@ func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 // or a stricter repair threshold) without depending on what the
 // immutable-copy phase happened to leave behind.
 func TestBackfill_ExplicitNonZeroOverridesAutoDetect(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -421,6 +716,8 @@ func TestBackfill_ExplicitNonZeroOverridesAutoDetect(t *testing.T) {
 }
 
 func TestRun_CancelledContext_WithBlocks(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
@@ -444,6 +741,10 @@ func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 	// With blocks present, Run enters the iteration loop and
 	// detects the cancelled context, returning an error.
 	err = bf.Run(ctx)
-	require.Error(t, err, "Run should return error on cancelled context with blocks")
+	require.Error(
+		t,
+		err,
+		"Run should return error on cancelled context with blocks",
+	)
 	assert.ErrorIs(t, err, context.Canceled)
 }

@@ -28,7 +28,10 @@ import (
 
 func TestHardForkDijkstraSkipsEmptyGenesis(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadDijkstraGenesisFromReader(strings.NewReader("{}")))
+	require.NoError(
+		t,
+		cfg.LoadDijkstraGenesisFromReader(strings.NewReader("{}")),
+	)
 
 	prev := &conway.ConwayProtocolParameters{
 		MinCommitteeSize:        7,
@@ -39,6 +42,7 @@ func TestHardForkDijkstraSkipsEmptyGenesis(t *testing.T) {
 			Major: 10,
 			Minor: 0,
 		},
+		CostModels: map[uint][]int64{0: {1, 2, 3}},
 	}
 
 	got, err := eras.HardForkDijkstra(cfg, prev)
@@ -54,4 +58,10 @@ func TestHardForkDijkstraSkipsEmptyGenesis(t *testing.T) {
 		uint(dijkstra.MinProtocolVersionDijkstra),
 		dijkstraPParams.ProtocolVersion.Major,
 	)
+	if dijkstraPParams.CostModels == nil || prev.CostModels == nil ||
+		dijkstraPParams.CostModels[0] == nil || prev.CostModels[0] == nil {
+		t.Fatal("expected cost models")
+	}
+	dijkstraPParams.CostModels[0][0] = 9
+	require.Equal(t, []int64{1, 2, 3}, prev.CostModels[0])
 }

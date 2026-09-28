@@ -18,25 +18,33 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 var ErrBlockNotFound = errors.New("block not found")
 
 type Block struct {
-	Hash     []byte `gorm:"index:hash_slot;size:32"`
+	Hash     []byte
 	PrevHash []byte
 	Cbor     []byte
-	ID       uint64 `gorm:"primaryKey"`
-	Slot     uint64 `gorm:"index:hash_slot"`
+	ID       uint64
+	Slot     uint64
 	Number   uint64
 	Type     uint
 }
 
-func (b Block) Decode() (ledger.Block, error) {
-	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
-}
-
-// TableName overrides default table name
-func (Block) TableName() string {
-	return "block"
+// Decode decodes b.Cbor as a block of b.Type. config is forwarded to
+// gouroboros for every type except Conway, which always routes through
+// DecodeConwayBlock (Musashi/Leios's extended header has nothing config
+// would toggle); at most one config is meaningful, matching
+// ledger.NewBlockFromCbor's own variadic convention. Omitting it preserves
+// every existing caller's behavior unchanged.
+func (b Block) Decode(config ...common.VerifyConfig) (ledger.Block, error) {
+	// Conway blocks may carry the Musashi/Leios extended header; route them
+	// through the Leios-aware decoder, which falls back to reconstructing the
+	// block only when gouroboros' strict Conway decode fails.
+	if b.Type == ledger.BlockTypeConway {
+		return DecodeConwayBlock(b.Cbor)
+	}
+	return ledger.NewBlockFromCbor(b.Type, b.Cbor, config...)
 }

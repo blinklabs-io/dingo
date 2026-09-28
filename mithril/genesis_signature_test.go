@@ -25,6 +25,8 @@ import (
 )
 
 func TestVerifyGenesisCertificateSignature(t *testing.T) {
+	t.Parallel()
+
 	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
@@ -45,6 +47,8 @@ func TestVerifyGenesisCertificateSignature(t *testing.T) {
 }
 
 func TestVerifyGenesisCertificateSignatureRejectsBadSignature(t *testing.T) {
+	t.Parallel()
+
 	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
@@ -53,10 +57,12 @@ func TestVerifyGenesisCertificateSignatureRejectsBadSignature(t *testing.T) {
 		hex.EncodeToString(pubKey),
 	)
 	cert := &Certificate{
-		Hash:             "genesis",
-		PreviousHash:     "genesis",
-		SignedMessage:    "mithril-genesis-signed-message",
-		GenesisSignature: hex.EncodeToString(make([]byte, ed25519.SignatureSize)),
+		Hash:          "genesis",
+		PreviousHash:  "genesis",
+		SignedMessage: "mithril-genesis-signed-message",
+		GenesisSignature: hex.EncodeToString(
+			make([]byte, ed25519.SignatureSize),
+		),
 	}
 
 	require.Error(t, VerifyGenesisCertificateSignature(cert, keyText))

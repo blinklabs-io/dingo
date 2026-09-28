@@ -24,6 +24,8 @@ import (
 )
 
 func TestResolveStakeDistributionForCertificateMithril(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -47,7 +49,7 @@ func TestResolveStakeDistributionForCertificateMithril(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeMithrilStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -63,6 +65,8 @@ func TestResolveStakeDistributionForCertificateMithril(t *testing.T) {
 }
 
 func TestResolveStakeDistributionForCertificateCardano(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/cardano-stake-distributions":
@@ -86,7 +90,7 @@ func TestResolveStakeDistributionForCertificateCardano(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -105,7 +109,11 @@ func TestResolveStakeDistributionForCertificateCardano(t *testing.T) {
 // an artifact whose epoch matches the leaf certificate but whose certificate
 // hash differs is NOT returned. Before the fix, the `||` condition on
 // item.Epoch == leaf.Epoch would incorrectly bind an unverified artifact.
-func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(t *testing.T) {
+func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -133,7 +141,7 @@ func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(t *testing.T)
 	// Mithril variant: same epoch, different cert hash -> must fail.
 	_, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeMithrilStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -152,7 +160,7 @@ func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(t *testing.T)
 	// Cardano variant: same epoch, different cert hash -> must fail.
 	_, err = ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -173,6 +181,8 @@ func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(t *testing.T)
 // where the leaf certificate is NOT a stake distribution entity but a
 // supporting certificate in the chain IS.
 func TestResolveStakeDistributionFallbackMithril(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -207,7 +217,7 @@ func TestResolveStakeDistributionFallbackMithril(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoImmutableFilesFull,
 			LeafCertificate: &Certificate{
@@ -227,6 +237,8 @@ func TestResolveStakeDistributionFallbackMithril(t *testing.T) {
 // TestResolveStakeDistributionFallbackCardano exercises the fallback path
 // for Cardano stake distributions.
 func TestResolveStakeDistributionFallbackCardano(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -264,7 +276,7 @@ func TestResolveStakeDistributionFallbackCardano(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoImmutableFilesFull,
 			LeafCertificate: &Certificate{

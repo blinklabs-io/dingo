@@ -33,8 +33,12 @@ import "net"
 // when a connection is closed for stall recovery. Unix-socket NtC
 // connections are unaffected because the type assertion fails for
 // non-TCP connections and the call is a no-op.
+//
+// Accepted connections may already be wrapped for socket deadlines, so unwrap
+// before asserting: matching on the wrapper would silently skip SO_LINGER and
+// reintroduce the TIME_WAIT saturation this guards against.
 func enableTCPLingerZero(conn net.Conn) error {
-	tc, ok := conn.(*net.TCPConn)
+	tc, ok := unwrapConn(conn).(*net.TCPConn)
 	if !ok {
 		return nil
 	}

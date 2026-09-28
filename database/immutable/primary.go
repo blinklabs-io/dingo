@@ -17,16 +17,17 @@ package immutable
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
-	"os"
 )
 
 const (
 	primaryFileExtension = ".primary"
+	primaryIndexVersion  = 1
 )
 
 type primaryIndex struct {
-	file            *os.File
+	file            entryReader
 	slot            int
 	lastOffset      uint32
 	version         uint8
@@ -47,15 +48,18 @@ func (e primaryIndexEntry) Empty() bool {
 	return e.empty
 }
 
-func (p *primaryIndex) Open(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
+// Open takes an already-open index file; see chunk.Open for why.
+func (p *primaryIndex) Open(f entryReader) error {
 	p.file = f
 	// Read version
 	if err := binary.Read(f, binary.BigEndian, &p.version); err != nil {
 		return err
+	}
+	if p.version != primaryIndexVersion {
+		return fmt.Errorf(
+			"unsupported primary index version %d",
+			p.version,
+		)
 	}
 	return nil
 }
@@ -72,6 +76,20 @@ func (p *primaryIndex) Next() (*primaryIndexEntry, error) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if tmpOffset%secondaryIndexEntrySize != 0 {
+		return nil, fmt.Errorf(
+			"secondary index offset %d is not aligned to %d-byte records",
+			tmpOffset,
+			secondaryIndexEntrySize,
+		)
+	}
+	if p.seenFirstOffset && tmpOffset < p.lastOffset {
+		return nil, fmt.Errorf(
+			"non-monotonic secondary index offset: %d follows %d",
+			tmpOffset,
+			p.lastOffset,
+		)
 	}
 	empty := true
 	if tmpOffset > p.lastOffset || !p.seenFirstOffset {

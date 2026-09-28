@@ -15,6 +15,7 @@
 package utxorpc
 
 import (
+	"encoding/hex"
 	"math/big"
 	"testing"
 
@@ -28,7 +29,8 @@ import (
 
 func TestPlutusDataToCardano_IntegerInt64(t *testing.T) {
 	pd := pdata.NewInteger(big.NewInt(-42))
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	intv, ok := proto.GetPlutusData().(*cardano.PlutusData_BigInt)
 	require.True(t, ok)
@@ -40,7 +42,8 @@ func TestPlutusDataToCardano_IntegerInt64(t *testing.T) {
 func TestPlutusDataToCardano_IntegerBigUInt(t *testing.T) {
 	b := new(big.Int).Lsh(big.NewInt(1), 70) // > int64
 	pd := pdata.NewInteger(b)
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	intv, ok := proto.GetPlutusData().(*cardano.PlutusData_BigInt)
 	require.True(t, ok)
@@ -51,7 +54,8 @@ func TestPlutusDataToCardano_IntegerBigUInt(t *testing.T) {
 
 func TestPlutusDataToCardano_ByteString(t *testing.T) {
 	pd := pdata.NewByteString([]byte{0xab, 0xcd})
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	bs, ok := proto.GetPlutusData().(*cardano.PlutusData_BoundedBytes)
 	require.True(t, ok)
@@ -61,7 +65,8 @@ func TestPlutusDataToCardano_ByteString(t *testing.T) {
 func TestPlutusDataToCardano_ConstrAndList(t *testing.T) {
 	inner := pdata.NewList(pdata.NewInteger(big.NewInt(7)))
 	pd := pdata.NewConstr(0, inner)
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	require.NotNil(t, proto)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
 	require.True(t, ok)
@@ -78,19 +83,127 @@ func TestPlutusDataToCardano_Map(t *testing.T) {
 			{pdata.NewInteger(big.NewInt(1)), pdata.NewByteString([]byte{9})},
 		},
 	)
-	proto := plutusDataToCardano(pd)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	mv, ok := proto.GetPlutusData().(*cardano.PlutusData_Map)
 	require.True(t, ok)
 	require.Len(t, mv.Map.Pairs, 1)
 }
 
 func TestPlutusDataToCardano_ConstrLargeTagUsesAnyConstructor(t *testing.T) {
-	pd := pdata.NewConstr(200, pdata.NewInteger(big.NewInt(0)))
-	proto := plutusDataToCardano(pd)
+	pd := pdata.NewConstrFromBigInt(
+		big.NewInt(200),
+		pdata.NewInteger(big.NewInt(0)),
+	)
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
 	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
 	require.True(t, ok)
 	require.Equal(t, uint32(0), cv.Constr.Tag)
 	require.Equal(t, uint64(200), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardanoChecked_ConstrTag127UsesTag(t *testing.T) {
+	pd := pdata.NewConstrFromBigInt(big.NewInt(127))
+	proto, err := plutusDataToCardanoChecked(pd)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(127), cv.Constr.Tag)
+	require.Equal(t, uint64(0), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardanoChecked_ConstrTag128UsesAnyConstructor(
+	t *testing.T,
+) {
+	pd := pdata.NewConstrFromBigInt(big.NewInt(128))
+	proto, err := plutusDataToCardanoChecked(pd)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(0), cv.Constr.Tag)
+	require.Equal(t, uint64(128), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardano_ConstrMaxTagUsesAnyConstructor(t *testing.T) {
+	pd := pdata.NewConstrFromBigInt(new(big.Int).SetUint64(^uint64(0)))
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(0), cv.Constr.Tag)
+	require.Equal(t, ^uint64(0), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardano_ConstrAboveMaxTagRejected(t *testing.T) {
+	tag := new(big.Int).Lsh(big.NewInt(1), 64)
+	pd := pdata.NewConstrFromBigInt(tag)
+	proto, err := plutusDataToCardano(pd)
+	require.Nil(t, proto)
+	require.Error(t, err)
+	_, err = plutusDataToCardanoChecked(pd)
+	require.EqualError(
+		t,
+		err,
+		"constructor tag 18446744073709551616 is outside the Word64 CBOR range",
+	)
+}
+
+func TestPlutusDataToCardano_ConstrNilTagUsesZeroTag(t *testing.T) {
+	pd := &pdata.Constr{}
+	proto, err := plutusDataToCardano(pd)
+	require.NoError(t, err)
+	require.NotNil(t, proto)
+	cv, ok := proto.GetPlutusData().(*cardano.PlutusData_Constr)
+	require.True(t, ok)
+	require.Equal(t, uint32(0), cv.Constr.Tag)
+	require.Equal(t, uint64(0), cv.Constr.AnyConstructor)
+}
+
+func TestPlutusDataToCardano_ConstrNegativeTagRejected(t *testing.T) {
+	pd := pdata.NewConstrFromBigInt(big.NewInt(-1))
+	proto, err := plutusDataToCardano(pd)
+	require.Nil(t, proto)
+	require.Error(t, err)
+	_, err = plutusDataToCardanoChecked(pd)
+	require.EqualError(
+		t,
+		err,
+		"constructor tag -1 is outside the Word64 CBOR range",
+	)
+}
+
+func TestPlutusDataToCardanoChecked_PropagatesNestedTagErrors(t *testing.T) {
+	bad := pdata.NewConstrFromBigInt(new(big.Int).Lsh(big.NewInt(1), 64))
+	nestedBad := pdata.NewConstrFromBigInt(big.NewInt(0), bad)
+	cases := map[string]pdata.PlutusData{
+		"constructor field": nestedBad,
+		"map key": pdata.NewMap([][2]pdata.PlutusData{{
+			nestedBad,
+			pdata.NewInteger(big.NewInt(0)),
+		}}),
+		"map value": pdata.NewMap([][2]pdata.PlutusData{{
+			pdata.NewInteger(big.NewInt(0)),
+			nestedBad,
+		}}),
+		"list item": pdata.NewList(nestedBad),
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			proto, err := plutusDataToCardano(input)
+			require.Nil(t, proto)
+			require.Error(t, err)
+			_, err = plutusDataToCardanoChecked(input)
+			require.EqualError(
+				t,
+				err,
+				"constructor tag 18446744073709551616 is outside the Word64 CBOR range",
+			)
+		})
+	}
 }
 
 func TestPlutusDatumCBORToCardano_Integer(t *testing.T) {
@@ -112,6 +225,26 @@ func TestPlutusDatumCBORToCardano_EmptyRaw(t *testing.T) {
 	require.Nil(t, proto)
 }
 
+func TestPlutusDatumCBORToCardano_NestedInvalidConstructorTag(t *testing.T) {
+	// The decoder rejects invalid constructor alternatives before conversion.
+	raw := []byte{
+		0xd8, 0x79, // constructor 0
+		0x81,       // one field
+		0xd8, 0x66, // constructor 102
+		0x82, // [alternative, fields]
+		0x20, // negative integer -1: invalid alternative
+		0x80, // empty fields
+	}
+
+	proto, err := plutusDatumCBORToCardano(raw)
+	require.Nil(t, proto)
+	require.EqualError(
+		t,
+		err,
+		"decode plutus data: failed to decode CBOR: expected CBOR type 0x00",
+	)
+}
+
 // TestRedeemerPlutusDataByKey_DecodedWitness verifies that redeemer
 // Plutus data from a decoded Conway transaction is keyed identically to
 // ledger evaluation (tag + index).
@@ -124,6 +257,7 @@ func TestRedeemerPlutusDataByKey_DecodedWitness(t *testing.T) {
 			Number:  258,
 			Content: []any{[]any{txHash, uint64(0)}},
 		},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
 		2: uint64(200000),
 	}
 
@@ -174,8 +308,71 @@ func TestRedeemerPlutusDataByKey_DecodedWitness(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, bs.Inner)
 
-	proto := plutusDataToCardano(got)
+	proto, err := plutusDataToCardano(got)
+	require.NoError(t, err)
 	pay, ok := proto.GetPlutusData().(*cardano.PlutusData_BoundedBytes)
 	require.True(t, ok)
 	require.Equal(t, []byte{0x01, 0x02, 0x03}, pay.BoundedBytes)
+}
+
+func TestPlutusDataToCardano_IntegerBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		value     string
+		kind      string
+		magnitude string
+	}{
+		{"negative_int64_min", "-9223372036854775808", "int", ""},
+		{"negative_below_int64", "-9223372036854775809", "negative", "8000000000000000"},
+		{"negative_uint64_edge", "-18446744073709551616", "negative", "ffffffffffffffff"},
+		{"negative_beyond_uint64", "-18446744073709551617", "negative", "010000000000000000"},
+		{"negative_large", "-1180591620717411303424", "negative", "3fffffffffffffffff"},
+		{"zero", "0", "int", ""},
+		{"positive_int64_max", "9223372036854775807", "int", ""},
+		{"positive_above_int64", "9223372036854775808", "positive", "8000000000000000"},
+		{"positive_large", "1180591620717411303424", "positive", "400000000000000000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value, ok := new(big.Int).SetString(tc.value, 10)
+			require.True(t, ok)
+			pd := &pdata.Integer{Inner: value}
+			projected, err := plutusDataToCardano(pd)
+			require.NoError(t, err)
+			require.NotNil(t, projected)
+			integer := projected.GetBigInt()
+			require.NotNil(t, integer)
+			require.Equal(
+				t,
+				tc.value,
+				value.String(),
+				"projection must not mutate its input",
+			)
+			if tc.kind == "int" {
+				native, ok := integer.BigInt.(*cardano.BigInt_Int)
+				require.True(t, ok)
+				require.Equal(t, value.Int64(), native.Int)
+				return
+			}
+			want, err := hex.DecodeString(tc.magnitude)
+			require.NoError(t, err)
+			if tc.kind == "negative" {
+				negative, ok := integer.BigInt.(*cardano.BigInt_BigNInt)
+				require.True(t, ok)
+				require.Equal(
+					t,
+					want,
+					negative.BigNInt,
+					"negative Plutus integers must retain CBOR tag-3 magnitude",
+				)
+			} else {
+				positive, ok := integer.BigInt.(*cardano.BigInt_BigUInt)
+				require.True(t, ok)
+				require.Equal(t, want, positive.BigUInt)
+			}
+		})
+	}
+}
+
+func TestBigIntToCardanoNil(t *testing.T) {
+	require.Nil(t, bigIntToCardano(nil))
 }

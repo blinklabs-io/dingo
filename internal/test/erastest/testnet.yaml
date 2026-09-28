@@ -46,7 +46,10 @@ epochLength: 75
 slotLength: 1
 activeSlotsCoeff: 0.4
 securityParam: 6
-maxLovelaceSupply: 2000000000000
+# The generator creates both a staked and an unstaked genesis address per
+# pool, so delegatedSupply=2T produces 4T of circulating genesis UTxOs.
+# Matches the working DevNet configuration (internal/test/devnet/testnet.yaml).
+maxLovelaceSupply: 6000000000000
 protocolParams:
   decentralisationParam: 0
   protocolVersion:

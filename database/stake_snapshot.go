@@ -21,6 +21,33 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// GetPoolStakeSnapshotsByEpoch returns all pool stake snapshots of
+// snapshotType for the given epoch.
+func (d *Database) GetPoolStakeSnapshotsByEpoch(
+	epoch uint64,
+	snapshotType string,
+	txn *Txn,
+) ([]*models.PoolStakeSnapshot, error) {
+	if !models.ValidPoolStakeSnapshotType(snapshotType) {
+		return nil, fmt.Errorf(
+			"get pool stake snapshots by epoch: invalid snapshot type %q",
+			snapshotType,
+		)
+	}
+	if txn == nil {
+		return d.stakeSnapshotStore().GetPoolStakeSnapshotsByEpoch(
+			epoch,
+			snapshotType,
+			nil,
+		)
+	}
+	return d.stakeSnapshotStore().GetPoolStakeSnapshotsByEpoch(
+		epoch,
+		snapshotType,
+		txn.Metadata(),
+	)
+}
+
 // ResolvePoolRewardAccountAutoVotes classifies each PoolStakeSnapshot
 // with the CIP-1694 reward-account DRep-delegation outcome and writes
 // the result onto snapshot.RewardAccountAutoVote in place. Callers
@@ -30,12 +57,28 @@ import (
 //
 // Resolution proceeds in two batched lookups:
 //  1. Pool rows yield each pool's reward-account stake credential.
-//  2. Account rows yield the DRep delegation type for each credential.
+//  2. Account rows (active and inactive) yield the DRep delegation type
+//     for each credential.
 //
-// Only ACTIVE accounts are considered. A deregistered reward account
-// — even one whose row still carries an AlwaysAbstain or
-// AlwaysNoConfidence delegation flag — yields PoolRewardAccountAutoVoteNone,
-// since CIP-1694 treats unregistered reward accounts as implicit no.
+// RewardAccountAutoVoteResolved is set true only when the outcome is
+// determined from real data, at exactly three terminal conditions:
+//   - The pool row exists and carries no reward account → confirmed None.
+//   - The pool row exists, its reward-account row is present and ACTIVE →
+//     classified by DRep delegation (Abstain / NoConfidence / None).
+//   - The pool row exists, its reward-account row is present but INACTIVE
+//     (deregistered) → confirmed None, since CIP-1694 treats unregistered
+//     reward accounts as implicit no.
+//
+// Resolved is left false (so the tally falls back to implicit no without
+// freezing a value) when:
+//   - The pool row is absent from the DB (cannot determine the reward
+//     account at all), or
+//   - The pool's reward-account credential has no row in the account table
+//     at all. An absent row is ambiguous: it may mean the account was never
+//     registered, OR that account data has not yet been imported (e.g. a
+//     Mithril restore that imported pools from the snapshot fallback before
+//     cert-state accounts were loaded). Persisting Resolved=true here would
+//     conflate "account input unavailable" with "confirmed none".
 func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	snapshots []*models.PoolStakeSnapshot,
 	txn *Txn,
@@ -51,17 +94,16 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	// Group snapshots per pool key so a single pool with multiple
 	// snapshot rows (e.g. mark/set/go imported together) is resolved
 	// once and then fanned out.
-	snapshotsByPool := make(map[string][]*models.PoolStakeSnapshot, len(snapshots))
+	snapshotsByPool := make(
+		map[string][]*models.PoolStakeSnapshot,
+		len(snapshots),
+	)
 	pkhs := make([]lcommon.PoolKeyHash, 0, len(snapshots))
 	for _, s := range snapshots {
 		// Reset to ensure callers can re-run resolution without
 		// stale values leaking through from a previous attempt.
-		// Mark the row as resolved up-front: every snapshot passed
-		// to this resolver runs against snapshot-era state by
-		// contract, so the absence of an Always{Abstain,NoConfidence}
-		// delegation is a real "none" answer, not "unknown".
 		s.RewardAccountAutoVote = models.PoolRewardAccountAutoVoteNone
-		s.RewardAccountAutoVoteResolved = true
+		s.RewardAccountAutoVoteResolved = false
 		key := string(s.PoolKeyHash)
 		if _, seen := snapshotsByPool[key]; !seen {
 			pkhs = append(pkhs, lcommon.PoolKeyHash(s.PoolKeyHash))
@@ -74,46 +116,72 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 		return fmt.Errorf("get pools: %w", err)
 	}
 
-	rewardAcctByPool := make(map[string][]byte, len(pools))
-	rewardAccounts := make([][]byte, 0, len(pools))
+	rewardAcctByPool := make(map[string]models.StakeCredentialRef, len(pools))
+	seenRefs := make(map[string]struct{}, len(pools))
+	rewardAccountRefs := make([]models.StakeCredentialRef, 0, len(pools))
 	for i := range pools {
-		ra := pools[i].RewardAccount
-		if len(ra) == 0 {
-			continue
-		}
 		poolKey := string(pools[i].PoolKeyHash)
 		if _, dup := rewardAcctByPool[poolKey]; dup {
 			continue
 		}
-		rewardAcctByPool[poolKey] = ra
-		rewardAccounts = append(rewardAccounts, ra)
+		ra := pools[i].RewardAccount
+		if len(ra) == 0 {
+			// Pool row exists but carries no reward account: this is a
+			// confirmed None outcome — mark resolved immediately.
+			for _, s := range snapshotsByPool[poolKey] {
+				s.RewardAccountAutoVoteResolved = true
+			}
+			continue
+		}
+		ref := models.StakeCredentialRef{
+			Tag: pools[i].RewardAccountCredentialTag,
+			Key: ra,
+		}
+		rewardAcctByPool[poolKey] = ref
+		mk := ref.MapKey()
+		if _, seen := seenRefs[mk]; !seen {
+			seenRefs[mk] = struct{}{}
+			rewardAccountRefs = append(rewardAccountRefs, ref)
+		}
 	}
-	if len(rewardAccounts) == 0 {
+	if len(rewardAccountRefs) == 0 {
 		return nil
 	}
 
-	// includeInactive=false so a deregistered reward account that
-	// still carries a stale predefined-DRep flag does not auto-vote.
-	accounts, err := d.GetAccounts(rewardAccounts, false, txn)
+	// includeInactive=true so a present-but-deregistered reward account
+	// is distinguishable from an account row that is entirely absent.
+	// Deregistered accounts are a confirmed None; absent rows stay
+	// unresolved (see the doc comment).
+	accounts, err := d.GetAccountsByCredential(
+		rewardAccountRefs,
+		true,
+		txn,
+	)
 	if err != nil {
 		return fmt.Errorf("get reward accounts: %w", err)
 	}
 
-	for poolKey, ra := range rewardAcctByPool {
-		acct, ok := accounts[string(ra)]
+	for poolKey, ref := range rewardAcctByPool {
+		acct, ok := accounts[ref.MapKey()]
 		if !ok {
+			// Account row not in DB: data may not have been imported yet.
+			// Leave Resolved=false rather than persisting a false None.
 			continue
 		}
+		// Account row exists. A deregistered (inactive) account does not
+		// auto-vote per CIP-1694; an active account auto-votes only when
+		// delegated to AlwaysAbstain or AlwaysNoConfidence.
 		var autoVote uint8
-		switch acct.DrepType {
-		case models.DrepTypeAlwaysAbstain:
-			autoVote = models.PoolRewardAccountAutoVoteAbstain
-		case models.DrepTypeAlwaysNoConfidence:
-			autoVote = models.PoolRewardAccountAutoVoteNoConfidence
-		default:
-			continue
+		if acct.Active {
+			switch acct.DrepType {
+			case models.DrepTypeAlwaysAbstain:
+				autoVote = models.PoolRewardAccountAutoVoteAbstain
+			case models.DrepTypeAlwaysNoConfidence:
+				autoVote = models.PoolRewardAccountAutoVoteNoConfidence
+			}
 		}
 		for _, s := range snapshotsByPool[poolKey] {
+			s.RewardAccountAutoVoteResolved = true
 			s.RewardAccountAutoVote = autoVote
 		}
 	}

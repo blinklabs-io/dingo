@@ -1,0 +1,106 @@
+# Dingo Preview sync with live observability and a koios-parity on/off toggle
+#
+# Builds dingo from this checkout's own Dockerfile (no external image), runs
+# a Preview-network sync, and scrapes it with a provisioned Prometheus +
+# Grafana pair so sync progress is visible while it happens.
+#
+# Usage:
+#   cd examples/koios-parity-compose
+#   docker compose up -d
+#
+# Open:
+#   Grafana:    http://127.0.0.1:13930  (admin / admin, change on first login)
+#   Prometheus: http://127.0.0.1:13900
+#
+# Koios-parity toggle (see README.md for details):
+#   KOIOS_PARITY_ENABLED=true docker compose up -d    # on
+#   docker compose up -d                              # off (default)
+#
+# Tear down (and drop synced chain data):
+#   docker compose down -v
+
+name: dingo-koios-parity
+
+services:
+  # --------------------------------------------------------------------------
+  # Dingo Preview node
+  # --------------------------------------------------------------------------
+  dingo:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${DINGO_IMAGE:-dingo-koios-parity-compose-dingo:local}
+    restart: unless-stopped
+    # entrypoint-wrapper.sh is the only thing that changes dingo's own
+    # entrypoint.sh behavior here: it decides whether to append the
+    # --koios-parity-* flags below, based on KOIOS_PARITY_ENABLED, then execs
+    # the image's unmodified /bin/entrypoint.sh.
+    entrypoint: ["/koios-parity/entrypoint-wrapper.sh"]
+    command: ["-n", "preview", "serve"]
+    environment:
+      - CARDANO_NETWORK=preview
+      - CARDANO_DATABASE_PATH=/data/db
+      - DINGO_SOCKET_PATH=/ipc/dingo.socket
+      # Single toggle read by entrypoint-wrapper.sh -- true appends
+      # --koios-parity-enabled --koios-parity-strict=false
+      # --koios-parity-base-url "$KOIOS_PARITY_BASE_URL"; false (default)
+      # appends no --koios-parity-* flags at all.
+      - KOIOS_PARITY_ENABLED=${KOIOS_PARITY_ENABLED:-false}
+      - KOIOS_PARITY_BASE_URL=${KOIOS_PARITY_BASE_URL:-https://preview-koios.tosidrop.me/api/v1}
+      # Uncomment to enable debug logging
+      # - DINGO_DEBUG=1
+    ports:
+      # Ouroboros Node-to-Node (relay port)
+      - "${DINGO_RELAY_PORT:-13701}:3001"
+      # Prometheus metrics (localhost only; Prometheus itself reaches this
+      # over the compose network at dingo:12798, not through this mapping)
+      - "127.0.0.1:${DINGO_METRICS_PORT:-13798}:12798"
+    volumes:
+      - dingo-data:/data/db
+      - dingo-ipc:/ipc
+      - ./entrypoint-wrapper.sh:/koios-parity/entrypoint-wrapper.sh:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12798/metrics"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # Prometheus: scrapes the dingo service's metrics endpoint
+  # --------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    restart: unless-stopped
+    depends_on:
+      - dingo
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-13900}:9090"
+
+  # --------------------------------------------------------------------------
+  # Grafana: pre-provisioned with the Prometheus datasource and a starter
+  # sync-progress dashboard (grafana/provisioning, grafana/dashboards)
+  # --------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.3.1
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-13930}:3000"
+
+volumes:
+  dingo-data:
+  dingo-ipc:
+  prometheus-data:
+  grafana-data:

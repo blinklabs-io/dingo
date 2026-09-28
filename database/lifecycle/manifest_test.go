@@ -1,0 +1,430 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package lifecycle_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"math"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/stretchr/testify/require"
+)
+
+func testManifest() lifecycle.Manifest {
+	return lifecycle.Manifest{
+		CreatedAt:      time.Unix(1700000000, 0).UTC(),
+		Trigger:        lifecycle.TriggerManual,
+		StorageMode:    "core",
+		Network:        "mainnet",
+		TipSlot:        12345,
+		TipHash:        []byte{0xde, 0xad, 0xbe, 0xef},
+		TipBlockNumber: 100,
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DingoVersion:   "test",
+	}
+}
+
+// TestManifestRoundTrip verifies that a written manifest reads back with
+// matching fields, a valid checksum, and the current format version.
+func TestManifestRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
+
+	got, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	require.Equal(t, "mainnet", got.Network)
+	require.Equal(t, uint64(12345), got.TipSlot)
+	require.Equal(t, lifecycle.ManifestFormatVersion, got.FormatVersion)
+	require.NotEmpty(t, got.Checksum)
+}
+
+// TestManifestDetectsTamperedContent verifies that a hand-edited manifest
+// fails checksum validation with the ErrManifestCorrupted sentinel.
+func TestManifestDetectsTamperedContent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
+
+	path := filepath.Join(dir, lifecycle.ManifestFileName)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	tampered := strings.Replace(
+		string(data),
+		`"network": "mainnet"`,
+		`"network": "testnet"`,
+		1,
+	)
+	require.NotEqual(t, string(data), tampered)
+	require.NoError(t, os.WriteFile(path, []byte(tampered), 0o644))
+
+	_, err = lifecycle.ReadManifest(dir)
+	require.Error(t, err)
+	require.True(
+		t,
+		errors.Is(err, lifecycle.ErrManifestCorrupted),
+		"tampered manifest must be distinguishable (via errors.Is) from a "+
+			"manifest that simply isn't there, so callers like bark's "+
+			"resolveSnapshotSource can report corruption instead of "+
+			"'not found'",
+	)
+}
+
+func TestManifestRejectsOversizedInput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, lifecycle.ManifestFileName)
+	require.NoError(t, os.WriteFile(
+		path, bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes+1), 0o600,
+	))
+	_, err := lifecycle.ReadManifest(dir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "size exceeds maximum")
+	require.ErrorContains(t, err, "1048576")
+	require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+}
+
+func TestWriteManifestRejectsOversizedInput(t *testing.T) {
+	dir := t.TempDir()
+	m := testManifest()
+	m.Description = string(bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes))
+	err := lifecycle.WriteManifest(dir, m)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "exceeds maximum")
+	require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+}
+
+func TestManifestConfiguredLimit(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "snapshot")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	m := testManifest()
+	require.NoError(t, lifecycle.WriteManifest(dir, m))
+	data, err := os.ReadFile(filepath.Join(dir, lifecycle.ManifestFileName))
+	require.NoError(t, err)
+	for _, maxBytes := range []int64{int64(len(data)) - 1, int64(len(data)), int64(len(data)) + 1, math.MaxInt64} {
+		opts := []lifecycle.ManifestOption{lifecycle.WithManifestMaxBytes(maxBytes)}
+		_, readErr := lifecycle.ReadManifest(dir, opts...)
+		_, parseErr := lifecycle.ParseManifest(data, opts...)
+		_, peekErr := lifecycle.PeekManifest(context.Background(), nil, dir, opts...)
+		entries, listErr := lifecycle.ListSnapshots(base, opts...)
+		writeErr := lifecycle.WriteManifest(dir, m, opts...)
+		for _, err := range []error{readErr, parseErr, peekErr, listErr, writeErr} {
+			if maxBytes < int64(len(data)) {
+				require.ErrorContains(t, err, "exceeds maximum")
+				require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+			} else {
+				require.NoError(t, err)
+			}
+		}
+		if maxBytes < int64(len(data)) {
+			require.Empty(t, entries)
+		} else {
+			require.Len(t, entries, 1)
+		}
+		current, err := os.ReadFile(filepath.Join(dir, lifecycle.ManifestFileName))
+		require.NoError(t, err)
+		require.Equal(t, data, current, "rejected writes leave the existing manifest intact")
+	}
+	// A label that exceeds the exact input limit must fail without replacing
+	// the valid manifest. Raising that same per-call limit permits the update.
+	err = lifecycle.LabelSnapshot(dir, "longer label", "", lifecycle.WithManifestMaxBytes(int64(len(data))))
+	require.ErrorContains(t, err, "exceeds maximum")
+	require.NoError(t, lifecycle.LabelSnapshot(dir, "longer label", "", lifecycle.WithManifestMaxBytes(int64(len(data)+100))))
+}
+
+func TestManifestNegativeLimit(t *testing.T) {
+	opts := []lifecycle.ManifestOption{lifecycle.WithManifestMaxBytes(-1)}
+	_, err := lifecycle.ReadManifest("missing", opts...)
+	require.ErrorContains(t, err, "must be >= 0")
+	_, err = lifecycle.ParseManifest(nil, opts...)
+	require.ErrorContains(t, err, "must be >= 0")
+	require.ErrorContains(t, lifecycle.WriteManifest("missing", testManifest(), opts...), "must be >= 0")
+	constructed := false
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("test", func(*url.URL) (lifecycle.CloudDestination, error) {
+		constructed = true
+		return &fakeCloudDestination{}, nil
+	})
+	_, ok, err := lifecycle.FetchCloudManifest(context.Background(), registry, "test://bucket/snapshot", opts...)
+	require.ErrorContains(t, err, "must be >= 0")
+	require.False(t, ok)
+	require.False(t, constructed, "invalid limit must fail before provider construction")
+	_, ok, err = lifecycle.FetchCloudManifest(context.Background(), registry, "test://bucket/snapshot", lifecycle.WithManifestMaxBytes(3))
+	require.True(t, ok)
+	require.ErrorContains(t, err, "does not support manifest options")
+}
+
+// TestManifestRejectsNewerFormatVersion verifies that a manifest whose
+// formatVersion exceeds what this build understands is rejected.
+func TestManifestRejectsNewerFormatVersion(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	m := testManifest()
+	require.NoError(t, lifecycle.WriteManifest(dir, m))
+
+	// Directly bump the on-disk format version past what this build
+	// understands, without recomputing the checksum, mirroring an
+	// actually-newer manifest whose extra fields we can't see.
+	path := filepath.Join(dir, lifecycle.ManifestFileName)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	patched := strings.Replace(
+		string(data),
+		`"formatVersion": 1`,
+		`"formatVersion": 999`,
+		1,
+	)
+	require.NotEqual(t, string(data), patched)
+	require.NoError(t, os.WriteFile(path, []byte(patched), 0o644))
+
+	_, err = lifecycle.ReadManifest(dir)
+	require.Error(t, err)
+}
+
+// TestCheckPluginMatch verifies that CheckPluginMatch passes for matching
+// blob/metadata plugins and errors on either mismatching.
+// TestWriteManifestLeavesNoLeftoverTempFile verifies that a successful
+// WriteManifest cleans up after itself: only the final manifest.json
+// remains, no stray same-directory temp file used for the atomic rename.
+func TestWriteManifestLeavesNoLeftoverTempFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, lifecycle.ManifestFileName, entries[0].Name())
+}
+
+// TestWriteManifestFailureLeavesExistingManifestUntouched guards against
+// a real gap: WriteManifest used to write directly to
+// manifest.json (truncating any existing content first), so an
+// interruption partway through could leave a corrupt, partially-written
+// file in its place -- most dangerous for LabelSnapshot, which rewrites
+// the manifest of an already-complete snapshot. This forces the failure
+// mode a truncating write can't ever produce cleanly: something already
+// occupies manifest.json's path in a way the final atomic rename cannot
+// replace (a non-empty directory, which os.Rename refuses to replace
+// with a regular file), after the new manifest's temp file has already
+// been fully written and synced. WriteManifest must fail without
+// touching whatever was already there, and without leaving its own temp
+// file behind.
+func TestWriteManifestFailureLeavesExistingManifestUntouched(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, lifecycle.ManifestFileName)
+	require.NoError(t, os.Mkdir(manifestPath, 0o755))
+	sentinelPath := filepath.Join(manifestPath, "sentinel")
+	require.NoError(t, os.WriteFile(sentinelPath, []byte("original"), 0o644))
+
+	err := lifecycle.WriteManifest(dir, testManifest())
+	require.Error(t, err)
+
+	require.DirExists(t, manifestPath)
+	data, readErr := os.ReadFile(sentinelPath)
+	require.NoError(t, readErr)
+	require.Equal(t, "original", string(data))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(
+		t, entries, 1,
+		"a failed WriteManifest must not leave its temp file behind",
+	)
+}
+
+func TestCheckPluginMatch(t *testing.T) {
+	t.Parallel()
+
+	m := testManifest()
+	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))
+	require.Error(t, m.CheckPluginMatch("gcs", "sqlite"))
+	require.Error(t, m.CheckPluginMatch("badger", "postgres"))
+}
+
+// TestLabelSnapshotSetsNameAndDescription verifies that LabelSnapshot
+// sets Name/Description and rewrites the manifest with all else unchanged.
+func TestLabelSnapshotSetsNameAndDescription(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
+
+	require.NoError(
+		t,
+		lifecycle.LabelSnapshot(dir, "nightly", "pre-hardfork backup"),
+	)
+
+	got, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	require.Equal(t, "nightly", got.Name)
+	require.Equal(t, "pre-hardfork backup", got.Description)
+	// Everything else must survive unchanged, including checksum validity.
+	require.Equal(t, testManifest().TipSlot, got.TipSlot)
+}
+
+// TestLabelSnapshotMissingManifestErrors verifies that labeling a
+// directory with no manifest.json returns an error.
+func TestLabelSnapshotMissingManifestErrors(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	err := lifecycle.LabelSnapshot(dir, "name", "description")
+	require.Error(t, err)
+}
+
+// TestCheckGateMatchAcceptsIdenticalGates verifies that CheckGateMatch
+// passes when a gate the manifest recorded has an identical value in the
+// caller's configured map.
+func TestCheckGateMatchAcceptsIdenticalGates(t *testing.T) {
+	t.Parallel()
+
+	m := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
+	require.NoError(
+		t,
+		m.CheckGateMatch(nodesettings.Values{"network_magic": "1"}),
+	)
+}
+
+// TestCheckGateMatchRejectsDifferingGate verifies that CheckGateMatch
+// errors, naming the gate, when a gate present in both maps disagrees.
+func TestCheckGateMatchRejectsDifferingGate(t *testing.T) {
+	t.Parallel()
+
+	m := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
+	err := m.CheckGateMatch(nodesettings.Values{"network_magic": "2"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "network_magic")
+}
+
+// TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow verifies that a gate
+// recorded in the manifest but absent from the caller's configured map
+// (e.g. a genesis hash gate when the caller has no cardano config loaded)
+// is not an error -- CheckGateMatch only compares gates present in both.
+func TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow(t *testing.T) {
+	t.Parallel()
+
+	m := lifecycle.Manifest{Gates: nodesettings.Values{
+		"network_magic":         "1",
+		"dijkstra_genesis_hash": "dddd",
+	}}
+	require.NoError(
+		t,
+		m.CheckGateMatch(nodesettings.Values{"network_magic": "1"}),
+	)
+}
+
+// TestChecksumCoversGates verifies that Gates is covered by the manifest
+// checksum. Exercised through the Write/Read round trip the existing tests
+// use, rather than reaching for the unexported checksum method: two
+// manifests differing only in Gates must produce different checksums.
+func TestChecksumCoversGates(t *testing.T) {
+	t.Parallel()
+
+	dirA, dirB := t.TempDir(), t.TempDir()
+	a := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
+	b := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "2"}}
+	require.NoError(t, lifecycle.WriteManifest(dirA, a))
+	require.NoError(t, lifecycle.WriteManifest(dirB, b))
+	gotA, err := lifecycle.ReadManifest(dirA)
+	require.NoError(t, err)
+	gotB, err := lifecycle.ReadManifest(dirB)
+	require.NoError(t, err)
+	require.NotEqual(t, gotA.Checksum, gotB.Checksum)
+}
+
+// TestCheckGateMatchIgnoresBlobStoreID verifies that blob_store_id is
+// never compared, even when present in both maps: the restored blob store
+// IS the snapshot's, so its identity always differs from whatever the
+// caller had, and comparing it would fail every restore.
+func TestCheckGateMatchIgnoresBlobStoreID(t *testing.T) {
+	t.Parallel()
+
+	m := lifecycle.Manifest{Gates: nodesettings.Values{
+		"blob_store_id": "aaaa-from-snapshot",
+	}}
+	require.NoError(t, m.CheckGateMatch(nodesettings.Values{
+		"blob_store_id": "bbbb-different",
+	}))
+}
+
+// TestCheckGateMatchToleratesGateMissingFromOlderSnapshot verifies the
+// opposite direction from TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow:
+// an older snapshot predates a gate this dingo now records. The caller
+// supplies it, the manifest does not carry it, and that must NOT be a
+// mismatch -- otherwise every older snapshot becomes unrestorable the
+// moment a new gate is added to the registry.
+func TestCheckGateMatchToleratesGateMissingFromOlderSnapshot(t *testing.T) {
+	t.Parallel()
+
+	m := lifecycle.Manifest{Gates: nodesettings.Values{
+		"network_magic": "1",
+	}}
+	require.NoError(t, m.CheckGateMatch(nodesettings.Values{
+		"network_magic": "1",
+		"start_era":     "dijkstra", // absent from the manifest
+	}))
+}
+
+// TestCheckGateMatchAcceptsPermittedLatchUpgrade is a regression test:
+// CheckGateMatch used to compare LatchBool gates with raw equality, which
+// rejected restoring a snapshot recorded "off" onto a target configured
+// "on" even though nodesettings.Evaluate permits exactly that one-way
+// upgrade at startup (LatchBool moves off-to-on, never back). Restore must
+// agree with startup enforcement instead of being stricter than it.
+func TestCheckGateMatchAcceptsPermittedLatchUpgrade(t *testing.T) {
+	t.Parallel()
+
+	m := lifecycle.Manifest{Gates: nodesettings.Values{
+		"history_expiry_active": "off",
+	}}
+	require.NoError(t, m.CheckGateMatch(nodesettings.Values{
+		"history_expiry_active": "on",
+	}))
+}
+
+// TestCheckGateMatchRejectsForbiddenLatchDowngrade verifies the other
+// direction still fails: a snapshot recorded "on" restored onto a target
+// configured "off" is the direction LatchBool forbids (it cannot be turned
+// off once a database has run with it on), so applying the registry's
+// policy instead of raw equality must not accidentally loosen this side.
+func TestCheckGateMatchRejectsForbiddenLatchDowngrade(t *testing.T) {
+	t.Parallel()
+
+	m := lifecycle.Manifest{Gates: nodesettings.Values{
+		"history_expiry_active": "on",
+	}}
+	err := m.CheckGateMatch(nodesettings.Values{
+		"history_expiry_active": "off",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "history_expiry_active")
+}

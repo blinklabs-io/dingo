@@ -27,12 +27,20 @@ func (p *PeerGovernor) gossipChurn() {
 
 	p.mu.Lock()
 
+	// Churn ranks by score on its own ticker, so age stale scores here too
+	// rather than relying on the last reconcile pass.
+	p.agePeerScoresLocked(time.Now())
+
 	// Collect hot non-root peers (gossip, ledger)
 	hotNonRoot := p.filterPeers(func(peer *Peer) bool {
 		return peer.State == PeerStateHot &&
 			(peer.Source == PeerSourceP2PGossip || peer.Source == PeerSourceP2PLedger)
 	})
 	if len(hotNonRoot) == 0 {
+		// No non-root hot peers means the single-upstream skip below
+		// cannot fire this cycle; clear the edge-trigger so a later
+		// entry into the degraded state logs again.
+		p.lastEligibleUpstreamSkipLogged = false
 		p.mu.Unlock()
 		return
 	}
@@ -64,6 +72,8 @@ func (p *PeerGovernor) gossipChurn() {
 	// Demote the lowest-scoring peers
 	demoted := 0
 	eligibleUpstreams := p.countEligibleUpstreamsLocked()
+	skippedLastEligibleUpstream := false
+	skippedUpstreamAddress := ""
 	for i := 0; i < len(hotNonRoot) && demoted < churnCount; i++ {
 		peer := hotNonRoot[i]
 		targetState, canDemote := p.demotionTarget(peer.Source)
@@ -78,12 +88,13 @@ func (p *PeerGovernor) gossipChurn() {
 			).eligible
 		// Never close the node's last eligible upstream connection.
 		// Demoting it to cold would leave the node with no chainsync
-		// source until the reconcile redial path recovers it.
+		// source until the reconcile redial path recovers it. This
+		// condition persists for as long as the node has a single
+		// eligible upstream, so the operator-facing log is emitted only
+		// on entry (rising edge) after the loop, not on every cycle.
 		if demotionRemovesEligibleUpstream && eligibleUpstreams <= 1 {
-			p.config.Logger.Info(
-				"gossip churn: skipping demotion of last eligible upstream peer",
-				"address", peer.Address,
-			)
+			skippedLastEligibleUpstream = true
+			skippedUpstreamAddress = peer.Address
 			continue
 		}
 		oldSource := peer.Source
@@ -98,12 +109,18 @@ func (p *PeerGovernor) gossipChurn() {
 					peer.Connection.Id,
 				)
 				if conn != nil {
-					conn.Close()
+					closeConnAndLog(
+						p.config.Logger,
+						conn,
+						"gossip churn: error closing connection for demoted peer",
+						"address",
+						peer.Address,
+					)
 				}
 			}
 			peer.Connection = nil
 			p.config.Logger.Debug(
-				"gossip churn: closed connection for demoted peer",
+				"gossip churn: cleared connection for demoted peer",
 				"address", peer.Address,
 			)
 		}
@@ -152,6 +169,23 @@ func (p *PeerGovernor) gossipChurn() {
 		})
 	}
 
+	// Edge-triggered logging for the single-upstream skip: emit the INFO
+	// line only when entering the degraded state, then stay quiet until it
+	// clears. Without this, the message repeats every GossipChurnInterval
+	// for as long as the node has a single eligible upstream.
+	if skippedLastEligibleUpstream {
+		if !p.lastEligibleUpstreamSkipLogged {
+			p.config.Logger.Info(
+				"gossip churn: skipping demotion of last eligible upstream peer",
+				"address",
+				skippedUpstreamAddress,
+			)
+			p.lastEligibleUpstreamSkipLogged = true
+		}
+	} else {
+		p.lastEligibleUpstreamSkipLogged = false
+	}
+
 	// Now promote warm peers to fill slots
 	promotionEvents := p.promoteWarmNonRootPeersLocked(demoted)
 	events = append(events, promotionEvents...)
@@ -168,6 +202,10 @@ func (p *PeerGovernor) publicRootChurn() {
 	var events []pendingEvent
 
 	p.mu.Lock()
+
+	// Churn ranks by score on its own ticker, so age stale scores here too
+	// rather than relying on the last reconcile pass.
+	p.agePeerScoresLocked(time.Now())
 
 	// Collect warm public roots BEFORE demotion (for later promotion)
 	// This prevents promoting peers we just demoted

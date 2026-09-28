@@ -411,6 +411,11 @@ dialog::backdrop {
   padding: 24px;
 }
 
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 a {
   color: var(--blink-amber-light);
 }

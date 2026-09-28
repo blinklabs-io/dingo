@@ -28,7 +28,10 @@ import (
 // singleEraShape returns a shape with only the provided era, useful for
 // unit-testing Summary construction without having to reason about past eras.
 func singleEraShape(entry hardfork.ShapeEntry) hardfork.Shape {
-	return hardfork.Shape{SystemStart: testSysStart, Eras: []hardfork.ShapeEntry{entry}}
+	return hardfork.Shape{
+		SystemStart: testSysStart,
+		Eras:        []hardfork.ShapeEntry{entry},
+	}
 }
 
 func conwayShapeEntry() hardfork.ShapeEntry {
@@ -57,12 +60,22 @@ func TestBuildSummary_SingleEra_TransitionUnknown(t *testing.T) {
 	// SafeZoneSlots = 25_920 → safeEnd = 225_920. Snap to next epoch boundary.
 	// Epoch 500 spans slots [100_000, 532_000). 225_920 is inside epoch 500,
 	// so the end snaps to 532_000 (epoch 501).
-	s, err := hardfork.BuildSummary(shape, nil, current, tipSlot, hardfork.NewTransitionUnknown())
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		tipSlot,
+		hardfork.NewTransitionUnknown(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 
 	cur := s.Eras[0]
-	require.NotNil(t, cur.End, "TransitionUnknown with finite SafeZoneSlots produces bounded end")
+	require.NotNil(
+		t,
+		cur.End,
+		"TransitionUnknown with finite SafeZoneSlots produces bounded end",
+	)
 	assert.Equal(t, uint64(532_000), cur.End.Slot)
 	assert.Equal(t, uint64(501), cur.End.Epoch)
 }
@@ -77,13 +90,24 @@ func TestBuildSummary_SingleEra_TransitionKnown(t *testing.T) {
 		Params: shelleyParams,
 	}
 	tipSlot := uint64(200_000)
-	s, err := hardfork.BuildSummary(shape, nil, current, tipSlot, hardfork.NewTransitionKnown(501))
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		tipSlot,
+		hardfork.NewTransitionKnown(501),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 
 	cur := s.Eras[0]
 	require.NotNil(t, cur.End)
-	assert.Equal(t, uint64(532_000), cur.End.Slot, "TransitionKnown should pin the end at epoch 501's start")
+	assert.Equal(
+		t,
+		uint64(532_000),
+		cur.End.Slot,
+		"TransitionKnown should pin the end at epoch 501's start",
+	)
 	assert.Equal(t, uint64(501), cur.End.Epoch)
 }
 
@@ -97,7 +121,13 @@ func TestBuildSummary_SingleEra_TransitionImpossible(t *testing.T) {
 		Params: shelleyParams,
 	}
 	tipSlot := uint64(200_000)
-	s, err := hardfork.BuildSummary(shape, nil, current, tipSlot, hardfork.NewTransitionImpossible())
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		tipSlot,
+		hardfork.NewTransitionImpossible(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 
@@ -120,7 +150,13 @@ func TestBuildSummary_UnsafeIndefiniteSafeZone(t *testing.T) {
 		End:    nil,
 		Params: entry.Params,
 	}
-	s, err := hardfork.BuildSummary(shape, nil, current, 200_000, hardfork.NewTransitionUnknown())
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		200_000,
+		hardfork.NewTransitionUnknown(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 	assert.Nil(t, s.Eras[0].End, "zero SafeZoneSlots ⇒ unbounded end")
@@ -150,7 +186,13 @@ func TestBuildSummary_WithPastEra(t *testing.T) {
 		Params: shelleyParams,
 	}
 	// tipSlot = 150 (50 Shelley slots past the era start).
-	s, err := hardfork.BuildSummary(shape, past, current, 150, hardfork.NewTransitionUnknown())
+	s, err := hardfork.BuildSummary(
+		shape,
+		past,
+		current,
+		150,
+		hardfork.NewTransitionUnknown(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 2)
 
@@ -159,7 +201,11 @@ func TestBuildSummary_WithPastEra(t *testing.T) {
 	assert.Equal(t, uint64(100), s.Eras[0].End.Slot)
 
 	assert.Equal(t, uint(1), s.Eras[1].EraID)
-	require.NotNil(t, s.Eras[1].End, "TransitionUnknown + finite SafeZoneSlots ⇒ bounded end")
+	require.NotNil(
+		t,
+		s.Eras[1].End,
+		"TransitionUnknown + finite SafeZoneSlots ⇒ bounded end",
+	)
 	// safe end = 150 + 25_920 = 26_070. Shelley epoch 1 = [100, 432_100).
 	// snap to next epoch boundary → 432_100, epoch 2.
 	assert.Equal(t, uint64(432_100), s.Eras[1].End.Slot)
@@ -188,7 +234,13 @@ func TestBuildSummary_RoundTripSlotTime(t *testing.T) {
 		Start:  hardfork.Bound{RelativeTime: 0, Slot: 100_000, Epoch: 500},
 		Params: shelleyParams,
 	}
-	s, err := hardfork.BuildSummary(shape, nil, current, 200_000, hardfork.NewTransitionKnown(501))
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		200_000,
+		hardfork.NewTransitionKnown(501),
+	)
 	require.NoError(t, err)
 
 	when, err := s.SlotToTime(150_000)
@@ -199,4 +251,103 @@ func TestBuildSummary_RoundTripSlotTime(t *testing.T) {
 	back, err := s.TimeToSlot(when)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(150_000), back)
+}
+
+// ------------------------------------------------------------- successor era
+
+// SuccessorEra bounds the era that follows an announced transition boundary by
+// that era's own safe zone, snapped up to an epoch boundary, so the successor
+// always covers the whole first post-boundary epoch and no more than the safe
+// zone allows.
+func TestSuccessorEra_BoundedBySafeZone(t *testing.T) {
+	// Boundary at the start of epoch 1 in a Shelley-shaped era.
+	start := hardfork.Bound{
+		RelativeTime: 432_000 * time.Second,
+		Slot:         432_000,
+		Epoch:        1,
+	}
+	// anchorSlot 0 is behind start, so the safe zone measures from start,
+	// exactly like the pre-anchor-parameter behavior.
+	succ := hardfork.SuccessorEra(start, 6, shelleyParams, 0)
+	assert.Equal(t, uint(6), succ.EraID)
+	assert.Equal(t, start, succ.Start)
+	assert.Equal(t, shelleyParams, succ.Params)
+	// 432000 + 25920 lands inside epoch 1, so the bound snaps up to the start
+	// of epoch 2: the whole first post-boundary epoch is covered.
+	require.NotNil(t, succ.End)
+	assert.Equal(t, uint64(864_000), succ.End.Slot)
+	assert.Equal(t, uint64(2), succ.End.Epoch)
+	assert.Equal(t, 864_000*time.Second, succ.End.RelativeTime)
+}
+
+// A zero SafeZoneSlots is UnsafeIndefiniteSafeZone and leaves the successor
+// open, matching how BuildSummary treats the current era.
+func TestSuccessorEra_ZeroSafeZoneStaysOpen(t *testing.T) {
+	params := shelleyParams
+	params.SafeZoneSlots = 0
+	succ := hardfork.SuccessorEra(
+		hardfork.Bound{Slot: 432_000, Epoch: 1},
+		6,
+		params,
+		0,
+	)
+	assert.Nil(t, succ.End)
+}
+
+// TestSuccessorEra_HorizonRollsForwardWithAnchor is a regression test for a
+// node-side horizon-computation gap: SuccessorEra used to measure its safe
+// zone only from its own start bound (the announced transition boundary),
+// never from how far the live tip/anchor slot has actually progressed past
+// it. Once a caller reconstructs a Summary for a slot beyond
+// start+safeZone-snapped, that fixed horizon can never grow, no matter how
+// far the real chain tip has advanced, so eraForSlot permanently returns
+// ErrPastHorizon for a slot the live chain has already reached.
+//
+// An anchor at or past that frozen bound must extend the horizon the same
+// way BuildSummary's TransitionUnknown branch rolls the current era's horizon
+// forward from tipSlot: measured from max(anchorSlot+1, start.Slot), snapped
+// up to at least the next epoch boundary from there.
+func TestSuccessorEra_HorizonRollsForwardWithAnchor(t *testing.T) {
+	start := hardfork.Bound{
+		RelativeTime: 700 * time.Second,
+		Slot:         700,
+		Epoch:        7,
+	}
+	params := hardfork.EraParams{
+		EpochSize:     100,
+		SlotLength:    time.Second,
+		SafeZoneSlots: 250,
+	}
+
+	// anchorSlot behind start: the tip has not reached the boundary yet, so
+	// this is the ordinary "future era" case and must be unaffected. 700+250
+	// = 950 lands mid-epoch 9, snapping up to epoch 10 at slot 1000.
+	before := hardfork.SuccessorEra(start, 6, params, 600)
+	require.NotNil(t, before.End)
+	assert.Equal(t, uint64(1_000), before.End.Slot)
+
+	// anchorSlot far past the frozen bound (1000): the chain has actually
+	// advanced to slot 50_000, well past where the old (start-only)
+	// computation would ever reach. The horizon must roll forward with the
+	// anchor: 50_000 + 250 = 50_250, snapping up to the next 100-slot epoch
+	// boundary at 50_300.
+	after := hardfork.SuccessorEra(start, 6, params, 50_000)
+	require.NotNil(
+		t,
+		after.End,
+		"a non-zero safe zone must never leave the successor unbounded",
+	)
+	assert.Equal(
+		t,
+		uint64(50_300),
+		after.End.Slot,
+		"the horizon must roll forward with the anchor slot instead of "+
+			"freezing at start+safeZone",
+	)
+	assert.Greater(
+		t,
+		after.End.Slot,
+		uint64(50_000),
+		"the anchor slot itself must resolve within the successor era",
+	)
 }

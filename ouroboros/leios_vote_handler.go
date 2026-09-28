@@ -28,6 +28,8 @@ import (
 type LeiosVoteHandler interface {
 	// HandleVote validates and stores a vote received from a peer.
 	HandleVote(connKey string, vote lcommon.LeiosVote) error
+	HandlePrototypeVote(connKey string, vote lcommon.LeiosPrototypeVote) error
+	ObserveAnnouncement(slot uint64, rbHash, ebHash lcommon.Blake2b256)
 	// NextVotes blocks until count votes not originating from connKey
 	// are available and returns exactly count votes. done aborts the
 	// wait (e.g. protocol shutdown).

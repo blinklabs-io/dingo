@@ -15,6 +15,7 @@
 package txpump
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -22,9 +23,83 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// cborTag258 is the 3-byte CBOR prefix for tag 258 (CBOR set).
+var cborTag258 = []byte{0xd9, 0x01, 0x02}
+
 func requireConwayDecode(t *testing.T, txBytes []byte) {
 	t.Helper()
 	var tx conway.ConwayTransaction
 	_, err := cbor.Decode(txBytes, &tx)
 	require.NoError(t, err)
+	// Inputs must be encoded as a CBOR set (tag 258). Without this, the
+	// Cardano node sees an empty input set and rejects with InputSetEmptyUTxO.
+	require.True(
+		t,
+		bytes.Contains(txBytes, cborTag258),
+		"transaction inputs must be encoded as CBOR tag-258 set (0xd90102 not found)",
+	)
+}
+
+// TestInputsEncodedAsSet is a regression test: inputs must use CBOR tag 258.
+// A plain array causes Cardano node to report InputSetEmptyUTxO on every tx.
+func TestInputsEncodedAsSet(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func() ([]byte, error)
+	}{
+		{
+			name: "payment",
+			build: func() ([]byte, error) {
+				b, _, err := BuildPayment(validParams())
+				return b, err
+			},
+		},
+		{
+			name: "delegation",
+			build: func() ([]byte, error) {
+				return BuildDelegationTx(
+					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 1_000_000}},
+					make([]byte, 28), make([]byte, 28), MinFee, sampleAddr,
+				)
+			},
+		},
+		{
+			name: "drep_registration",
+			build: func() ([]byte, error) {
+				return BuildDRepRegistrationTx(
+					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 600_000_000}},
+					make([]byte, 28), 500_000_000, MinFee, sampleAddr,
+				)
+			},
+		},
+		{
+			name: "vote",
+			build: func() ([]byte, error) {
+				return BuildVoteTx(
+					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 1_000_000}},
+					make([]byte, 28), make([]byte, 32), 0, MinFee, sampleAddr,
+				)
+			},
+		},
+		{
+			name: "plutus_lock",
+			build: func() ([]byte, error) {
+				return BuildPlutusLockTx(
+					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 3_000_000}},
+					make([]byte, 28), minSendAmount, MinFee, sampleAddr,
+				)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			txBytes, err := tc.build()
+			require.NoError(t, err)
+			require.True(
+				t,
+				bytes.Contains(txBytes, cborTag258),
+				"tx type %q: inputs must be CBOR tag-258 set", tc.name,
+			)
+		})
+	}
 }

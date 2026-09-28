@@ -75,7 +75,12 @@ activeSlotsCoeff: 0.4
 `
 	cfg, err := Parse([]byte(yaml))
 	require.NoError(t, err)
-	assert.Equal(t, uint64(100), cfg.SecurityParam, "should fall back to Byron k")
+	assert.Equal(
+		t,
+		uint64(100),
+		cfg.SecurityParam,
+		"should fall back to Byron k",
+	)
 }
 
 func TestParseInsufficientDocs(t *testing.T) {

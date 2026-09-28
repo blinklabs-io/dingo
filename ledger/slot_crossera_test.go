@@ -30,17 +30,43 @@ import (
 // Total Byron time = 2 × 100 × 20s = 4000s.
 func crossEraLedger(t *testing.T) *LedgerState {
 	t.Helper()
-	return &LedgerState{
+	ls := &LedgerState{
 		epochCache: []models.Epoch{
-			{EpochId: 0, StartSlot: 0, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
-			{EpochId: 1, StartSlot: 100, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
-			{EpochId: 2, StartSlot: 200, SlotLength: 1000, LengthInSlots: 432, EraId: 1},
-			{EpochId: 3, StartSlot: 632, SlotLength: 1000, LengthInSlots: 432, EraId: 1},
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    20_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    20_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1000,
+				LengthInSlots: 432,
+				EraId:         1,
+			},
+			{
+				EpochId:       3,
+				StartSlot:     632,
+				SlotLength:    1000,
+				LengthInSlots: 432,
+				EraId:         1,
+			},
 		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
 	}
+	ls.publishSnapshotsLocked()
+	return ls
 }
 
 // TestSlotToTime_CrossEra covers multi-era chains where per-era slot length
@@ -48,6 +74,8 @@ func crossEraLedger(t *testing.T) *LedgerState {
 // being traversed — whether the legacy loop or the new Summary-backed
 // delegation — must return the same absolute times.
 func TestSlotToTime_CrossEra(t *testing.T) {
+	t.Parallel()
+
 	ls := crossEraLedger(t)
 	sysStart := time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC)
 
@@ -75,6 +103,8 @@ func TestSlotToTime_CrossEra(t *testing.T) {
 
 // TestTimeToSlot_CrossEra round-trips cross-era slot→time→slot.
 func TestTimeToSlot_CrossEra(t *testing.T) {
+	t.Parallel()
+
 	ls := crossEraLedger(t)
 	for _, slot := range []uint64{0, 50, 199, 200, 250, 631, 700} {
 		t.Run((time.Duration(slot) * time.Second).String(), func(t *testing.T) {
@@ -89,6 +119,8 @@ func TestTimeToSlot_CrossEra(t *testing.T) {
 
 // TestSlotToEpoch_CrossEra verifies epoch lookup spans both eras correctly.
 func TestSlotToEpoch_CrossEra(t *testing.T) {
+	t.Parallel()
+
 	ls := crossEraLedger(t)
 	tests := []struct {
 		name      string

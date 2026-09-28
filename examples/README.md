@@ -1,0 +1,68 @@
+# Dingo Examples
+
+The examples can share one Preview Dingo node, one Postgres metadata store, and
+one Mithril bootstrap job.
+
+## Docker Compose
+
+Run every example app together:
+
+```sh
+cd examples
+cp .env.example .env
+docker compose up -d
+```
+
+Open:
+
+- Gov Lens: `http://127.0.0.1:8088`
+- Blockfrost Explorer: `http://127.0.0.1:5173`
+- Sundae Preview: `http://127.0.0.1:5174`
+
+The shared stack runs:
+
+- `postgres`: Dingo metadata database with a read-only Gov Lens role
+- `dingo-sync`: one-shot `dingo mithril sync` job
+- `dingo`: Preview node using Postgres metadata, Badger blob storage, and API mode
+- `gov-lens`: Go web app that reads governance rows from Postgres
+- `blockfrost-explorer`: Vite app proxying to Dingo's Blockfrost API
+- `sundae-preview`: Vite app proxying to Dingo's UTxO RPC API
+
+By default Compose builds Dingo from this checkout as
+`dingo-examples-dingo:local`. Set `DINGO_IMAGE=ghcr.io/blinklabs-io/dingo:<tag>`
+if you explicitly want to use a published image.
+
+Building from the checkout is the recommended path when exercising the current
+source tree. Published images are compatible with the full shared stack from
+0.70.0 onward. The explorer's address summary, DRep list, exact-address UTxO
+matching, retiring-pools, and pool-metadata views are available from 0.69.0
+onward.
+
+The shipped database credentials are local-development defaults. Change
+`POSTGRES_PASSWORD` and `DINGO_GOV_LENS_PASSWORD` before exposing the stack
+outside a trusted development machine.
+
+Useful port overrides:
+
+```sh
+GOV_LENS_PORT=18088 \
+BLOCKFROST_EXPLORER_PORT=15173 \
+SUNDAE_PREVIEW_PORT=15174 \
+docker compose up -d
+```
+
+Set `DINGO_BIND_ADDR=127.0.0.1` if Dingo API ports should be local-only.
+
+Reset the shared Dingo/Postgres state:
+
+```sh
+docker compose down -v
+```
+
+## Koios-Parity Compose Stack
+
+[`koios-parity-compose/`](koios-parity-compose/README.md) is a separate,
+standalone stack (its own `docker-compose.yml`, not part of the shared stack
+above): a Preview sync with Prometheus + Grafana observability and an on/off
+toggle for the in-process koios-parity reward validator. See its README for
+usage.

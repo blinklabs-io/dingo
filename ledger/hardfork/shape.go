@@ -80,7 +80,8 @@ func (s Shape) Validate() error {
 		case isLast && e.NextEraTrigger.Kind != TriggerNotDuringThisExecution:
 			return fmt.Errorf(
 				"hardfork: era %q (final): NextEraTrigger must be NotDuringThisExecution, got %s",
-				e.EraName, e.NextEraTrigger,
+				e.EraName,
+				e.NextEraTrigger,
 			)
 		case !isLast && e.NextEraTrigger.Kind == TriggerNotDuringThisExecution:
 			return fmt.Errorf(
@@ -95,10 +96,14 @@ func (s Shape) Validate() error {
 		// Check contiguity without computing prev.MaxMajorVersion+1 directly —
 		// that addition can wrap uint if MaxMajorVersion == math.MaxUint and
 		// silently accept e.MinMajorVersion == 0 as a valid successor.
-		if e.MinMajorVersion == 0 || e.MinMajorVersion-1 != prev.MaxMajorVersion {
+		if e.MinMajorVersion == 0 ||
+			e.MinMajorVersion-1 != prev.MaxMajorVersion {
 			return fmt.Errorf(
 				"hardfork: era %q: MinMajorVersion (%d) must be prev (%q) MaxMajorVersion (%d) + 1",
-				e.EraName, e.MinMajorVersion, prev.EraName, prev.MaxMajorVersion,
+				e.EraName,
+				e.MinMajorVersion,
+				prev.EraName,
+				prev.MaxMajorVersion,
 			)
 		}
 	}
@@ -109,7 +114,8 @@ func (s Shape) Validate() error {
 // majorVersion, or (_, false) if no era covers it.
 func (s Shape) EraForVersion(majorVersion uint) (ShapeEntry, bool) {
 	for _, e := range s.Eras {
-		if majorVersion >= e.MinMajorVersion && majorVersion <= e.MaxMajorVersion {
+		if majorVersion >= e.MinMajorVersion &&
+			majorVersion <= e.MaxMajorVersion {
 			return e, true
 		}
 	}

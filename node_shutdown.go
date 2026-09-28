@@ -18,14 +18,58 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/blinklabs-io/dingo/plugin"
 )
 
+var errShutdownLifecycleGate = errors.New("shutdown lifecycle gate")
+
 func (n *Node) Stop() error {
-	n.shutdownOnce.Do(func() {
-		n.shutdownErr = n.shutdown()
-	})
-	return n.shutdownErr
+	n.shutdownMu.Lock()
+	if n.shutdownDone {
+		err := n.shutdownErr
+		n.shutdownMu.Unlock()
+		return err
+	}
+	if n.shutdownRunning {
+		wait := n.shutdownWait
+		n.shutdownMu.Unlock()
+		<-wait
+		return n.Stop()
+	}
+	n.shutdownRunning = true
+	n.shutdownWait = make(chan struct{})
+	wait := n.shutdownWait
+	n.shutdownMu.Unlock()
+
+	err := n.shutdown()
+
+	n.shutdownMu.Lock()
+	n.shutdownErr = err
+	n.shutdownRunning = false
+	if !errors.Is(err, errShutdownLifecycleGate) {
+		n.shutdownDone = true
+	}
+	close(wait)
+	n.shutdownMu.Unlock()
+	return err
+}
+
+func lockMutexContext(ctx context.Context, mutex *sync.Mutex) error {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if mutex.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (n *Node) closeWithShutdownTimeout(
@@ -74,20 +118,106 @@ func (n *Node) closeWithShutdownTimeout(
 }
 
 func (n *Node) configuredShutdownTimeout() time.Duration {
-	if n.config.shutdownTimeout > 0 {
-		return n.config.shutdownTimeout
+	if d, err := n.config.ShutdownTimeoutDuration(); err == nil {
+		if d > 0 {
+			return d
+		}
+	} else {
+		n.config.logger.Warn("invalid shutdown timeout, using default", "value", n.config.ShutdownTimeout(), "error", err)
 	}
 	return 30 * time.Second
 }
 
+// shutdownPhase1ComponentStops is every phase-1 component whose Stop cancels
+// its own context and then waits for a goroutine to exit with no deadline of
+// its own. #3558 bounded this style of wait for live restore/truncate but not
+// on the normal process-shutdown path (dingo#1649 case R9): a goroutine that
+// never observes n.cancel() could wedge Node.Stop past shutdownTimeout with
+// no error for the caller to act on.
+//
+// The two context-owned waits run first and unconditionally -- both no-op
+// when their worker was never started. The selected-to-none worker must
+// finish before n.chainSelector is stopped below, since it reads the
+// selector's state. Both workers touch node components only while holding
+// liveLifecycleMu (via TryLock), which shutdown already holds by phase 1, so
+// bounding their wait cannot let teardown race a component they are using.
+//
+// The rest is quiesceComponentStops (node_lifecycle.go), reused rather than
+// copied: every component live restore/truncate must stop before closing
+// storage must equally stop before phase 3 closes it here, and a component
+// added to one list cannot then be missed by the other. None of them depends
+// on n.chainSelector or n.peerGov still running, and quiesce already stops
+// them before n.peerGov. n.chainSelector.Stop and n.peerGov.Stop(ctx) stay
+// direct calls after this list (chainSelector.Stop only cancels and does not
+// wait; peerGov.Stop already honors ctx).
+func (n *Node) shutdownPhase1ComponentStops() []namedStop {
+	return append([]namedStop{
+		{
+			name: "chainsync stall recycler",
+			stop: func() error { n.waitChainsyncStallRecycler(); return nil },
+		},
+		{
+			name: "chain-selected-to-none worker",
+			stop: func() error { n.waitChainSelectedNoneWorker(); return nil },
+		},
+	}, n.quiesceComponentStops()...)
+}
+
+// componentStopsForShutdownPhase1 is (*Node).shutdownPhase1ComponentStops,
+// indirected through a variable so a shutdown-level test can inject a stop
+// that blocks until released -- the same seam componentStopsForQuiesce uses,
+// and for the same reason: none of these components can be made to block
+// from outside the package.
+var componentStopsForShutdownPhase1 = (*Node).shutdownPhase1ComponentStops
+
 func (n *Node) shutdown() error {
-	shutdownStart := time.Now()
 	shutdownTimeout := n.configuredShutdownTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	deadline := time.Now().Add(shutdownTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
+	shutdownStart := time.Now()
+
+	// Signal the node before waiting on lifecycle gates. A live restore,
+	// truncate, or snapshot may need the node context to be cancelled before
+	// it can release its gate; waiting first would strand cancellation and
+	// leave the node running when the shutdown deadline expires.
 	if n.cancel != nil {
 		n.cancel()
 	}
+
+	// Run holds this gate until startup has either completed or rolled back.
+	// In particular, a signal can reach Stop while Run is still unwinding a
+	// failed startup; waiting here keeps the phase-ordered shutdown from
+	// concurrently closing a component the startup stack is stopping.
+	if err := lockMutexContext(ctx, &n.startupLifecycleMu); err != nil {
+		return fmt.Errorf(
+			"shutdown startup lifecycle lock: %w: %w",
+			errShutdownLifecycleGate,
+			err,
+		)
+	}
+	defer n.startupLifecycleMu.Unlock()
+	// Restore and Truncate hold these gates while quiescing, closing, and
+	// rebuilding storage-dependent components. Shutdown must take the same
+	// gates, in the same order, before cancelling those components or closing
+	// their storage; otherwise a concurrent live operation can use a resource
+	// while shutdown tears it down.
+	if err := lockMutexContext(ctx, &n.liveLifecycleMu); err != nil {
+		return fmt.Errorf(
+			"shutdown live lifecycle lock: %w: %w",
+			errShutdownLifecycleGate,
+			err,
+		)
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if err := lockMutexContext(ctx, &n.snapshotMu); err != nil {
+		return fmt.Errorf(
+			"shutdown snapshot lock: %w: %w",
+			errShutdownLifecycleGate,
+			err,
+		)
+	}
+	defer n.snapshotMu.Unlock()
 
 	var err error
 
@@ -99,18 +229,27 @@ func (n *Node) shutdown() error {
 	// Phase 1: Stop accepting new work
 	n.config.logger.Info("shutdown phase 1: stopping new work")
 
-	// Stop block forger first to prevent new blocks
-	if n.blockForger != nil {
-		n.blockForger.Stop()
-	}
-
-	// Stop leader election to clean up resources
-	if n.leaderElection != nil {
-		if stopErr := n.leaderElection.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leader election shutdown: %w", stopErr),
-			)
+	// Each of these components waits for a goroutine to exit with no deadline
+	// of its own, so bound each wait here rather than calling Stop directly --
+	// see shutdownPhase1ComponentStops for the set and its ordering, and
+	// stopWithDeadline (node_lifecycle.go) for why an unfinished wait
+	// escalates to errStorageDrainUnconfirmed rather than being reported as
+	// an ordinary stop failure.
+	//
+	// Unlike quiesceForLiveLifecycleOp, each stop gets only what remains of
+	// the one shutdown deadline, not a fresh shutdownTimeout: shutdown's
+	// timeout is a single absolute deadline shared by every phase, and once
+	// it has passed phase 3 cannot confirm the ledger-state close anyway, so
+	// waiting longer here would only delay the return.
+	phase1DrainConfirmed := true
+	for _, cs := range componentStopsForShutdownPhase1(n) {
+		if stopErr := stopWithDeadline(
+			max(time.Until(deadline), 0), cs.name, cs.stop,
+		); stopErr != nil {
+			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
+				phase1DrainConfirmed = false
+			}
+			err = errors.Join(err, stopErr)
 		}
 	}
 
@@ -119,27 +258,26 @@ func (n *Node) shutdown() error {
 	}
 
 	if n.peerGov != nil {
-		n.peerGov.Stop()
-	}
-
-	if n.snapshotMgr != nil {
-		if stopErr := n.snapshotMgr.Stop(); stopErr != nil {
+		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
 			err = errors.Join(
 				err,
-				fmt.Errorf("snapshot manager shutdown: %w", stopErr),
+				fmt.Errorf("peer governor shutdown: %w", stopErr),
 			)
-		}
-	}
-
-	if n.utxorpc != nil {
-		if stopErr := n.utxorpc.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("utxorpc shutdown: %w", stopErr))
 		}
 	}
 
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
+		}
+	}
+
+	if n.midnightServer != nil {
+		if stopErr := n.midnightServer.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("midnight gRPC server shutdown: %w", stopErr),
+			)
 		}
 	}
 
@@ -151,21 +289,16 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.blockfrostAPI != nil {
-		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
-			)
-		}
-	}
-
-	if n.meshAPI != nil {
-		if stopErr := n.meshAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("mesh API shutdown: %w", stopErr),
-			)
+	// API providers are stopped before consumers and stateful dependencies.
+	if n.pluginHost != nil {
+		for _, capability := range []plugin.Capability{
+			plugin.CapabilityAPIUtxorpc,
+			plugin.CapabilityAPIMesh,
+			plugin.CapabilityAPIBlockfrost,
+		} {
+			if stopErr := n.pluginHost.StopCapability(ctx, capability); stopErr != nil {
+				err = errors.Join(err, stopErr)
+			}
 		}
 	}
 
@@ -174,6 +307,35 @@ func (n *Node) shutdown() error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("off-chain metadata fetcher shutdown: %w", stopErr),
+			)
+		}
+	}
+
+	// The token registry sync holds a background goroutine and reads n.db
+	// through its store, so it has to stop here, before phase 3 tears the
+	// store down. Run()'s rollback stack only covers startup failure.
+	if n.tokenRegistrySync != nil {
+		if stopErr := n.tokenRegistrySync.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("token registry sync shutdown: %w", stopErr),
+			)
+		}
+	}
+
+	// Stop the Koios parity observer before phase 3 tears down n.db/
+	// n.pluginHost: the observer's background goroutine reads Dingo's
+	// committed reward state through its RewardParitySource, which is backed
+	// by n.db, so it must fully stop (Observer.Stop blocks until its
+	// goroutine has actually exited, not just been signaled) before that
+	// store is closed. This is the only place the observer is stopped on the
+	// normal/signal-driven shutdown path — startKoiosParityObserver's Run()
+	// registration only covers the startup-failure/panic rollback path.
+	if n.koiosParityObserver != nil {
+		if stopErr := n.koiosParityObserver.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("koios parity observer shutdown: %w", stopErr),
 			)
 		}
 	}
@@ -187,14 +349,33 @@ func (n *Node) shutdown() error {
 	n.config.logger.Info("shutdown phase 2: draining connections")
 	phase2Start := time.Now()
 
-	if n.mempool != nil {
-		if stopErr := n.mempool.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("mempool shutdown: %w", stopErr))
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(ctx, plugin.CapabilityMempool); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 
+	// Close the EventBus while draining connections. Since v0.68, event
+	// delivery applies backpressure instead of dropping events. A chainsync
+	// callback can therefore be blocked waiting for a full ledger subscriber,
+	// while a blockfetch continuation can wait for a BatchDone event that only
+	// connection shutdown releases. Run both operations together so neither
+	// side waits indefinitely for the other.
+	var connManagerDone chan error
 	if n.connManager != nil {
-		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
+		connManagerDone = make(chan error, 1)
+		go func() {
+			connManagerDone <- n.connManager.Stop(ctx)
+		}()
+	}
+
+	if n.eventBus != nil {
+		n.config.logger.Info("closing event bus while draining connections")
+		n.eventBus.Close()
+	}
+
+	if connManagerDone != nil {
+		if stopErr := <-connManagerDone; stopErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("connection manager shutdown: %w", stopErr),
@@ -210,19 +391,42 @@ func (n *Node) shutdown() error {
 	// Phase 3: Flush state and close database
 	n.config.logger.Info("shutdown phase 3: flushing state")
 	phase3Start := time.Now()
+	// Starts from phase1DrainConfirmed: a phase-1 component that never
+	// confirmed stopping may still be using n.db, exactly the same danger an
+	// unconfirmed ledgerState close guards against below, so either failure
+	// must skip the database close and plugin host shutdown that follow.
+	ledgerStateDrainConfirmed := phase1DrainConfirmed
 
 	if n.ledgerState != nil {
-		n.config.logger.Info("closing ledger state")
-		if closeErr := n.closeWithShutdownTimeout(
-			ctx,
-			"ledgerState",
-			shutdownTimeout,
-			n.ledgerState.Close,
-		); closeErr != nil {
+		if !phase1DrainConfirmed {
+			// The block forger, leader election, and both Leios managers call
+			// into n.ledgerState from their own goroutines, so a phase-1 stop
+			// that outlived the deadline may still be using it. Leave it open,
+			// as Restore/Truncate skip closeStorageForLiveLifecycleOp when
+			// quiesce reports errStorageDrainUnconfirmed.
+			n.config.logger.Error(
+				"skipping ledger state close because phase 1 drain was not confirmed",
+			)
 			err = errors.Join(
 				err,
-				fmt.Errorf("ledger state close: %w", closeErr),
+				errors.New(
+					"ledger state close skipped: phase 1 drain unconfirmed",
+				),
 			)
+		} else {
+			n.config.logger.Info("closing ledger state")
+			if closeErr := n.closeWithShutdownTimeout(
+				ctx,
+				"ledgerState",
+				shutdownTimeout,
+				n.ledgerState.Close,
+			); closeErr != nil {
+				ledgerStateDrainConfirmed = false
+				err = errors.Join(
+					err,
+					fmt.Errorf("ledger state close: %w", closeErr),
+				)
+			}
 		}
 	}
 
@@ -234,8 +438,10 @@ func (n *Node) shutdown() error {
 		case <-ctx.Done():
 			n.config.logger.Warn(
 				"timed out waiting for deferred-index maintenance; continuing shutdown",
-				"timeout", shutdownTimeout,
-				"error", ctx.Err(),
+				"timeout",
+				shutdownTimeout,
+				"error",
+				ctx.Err(),
 			)
 			err = errors.Join(
 				err,
@@ -248,16 +454,40 @@ func (n *Node) shutdown() error {
 	}
 
 	if n.db != nil {
-		n.config.logger.Info("closing database")
-		if closeErr := n.closeWithShutdownTimeout(
-			ctx,
-			"database",
-			shutdownTimeout,
-			n.db.Close,
-		); closeErr != nil {
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping database close because ledger state drain was not confirmed",
+			)
 			err = errors.Join(
 				err,
-				fmt.Errorf("database close: %w", closeErr),
+				errors.New(
+					"database close skipped: ledger state drain unconfirmed",
+				),
+			)
+		} else {
+			n.config.logger.Info("closing database")
+			if closeErr := n.closeWithShutdownTimeout(
+				ctx,
+				"database",
+				shutdownTimeout,
+				n.db.Close,
+			); closeErr != nil {
+				err = errors.Join(
+					err,
+					fmt.Errorf("database close: %w", closeErr),
+				)
+			}
+		}
+	}
+	if n.pluginHost != nil {
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping plugin host shutdown because ledger state drain was not confirmed",
+			)
+		} else if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("plugin host shutdown: %w", stopErr),
 			)
 		}
 	}
@@ -277,10 +507,6 @@ func (n *Node) shutdown() error {
 		}
 	}
 	n.shutdownFuncs = nil
-
-	if n.eventBus != nil {
-		n.eventBus.Stop()
-	}
 
 	n.config.logger.Info(
 		"graceful shutdown complete",

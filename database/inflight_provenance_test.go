@@ -17,8 +17,6 @@ package database
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,6 +28,8 @@ import (
 // and marked spent) proves the in-flight lookup carries same-batch provenance
 // without depending on blob/metadata recovery.
 func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
@@ -77,7 +77,11 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 		"same-batch produced output must be created at flush",
 	)
 	require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), utxo.SpentAtTxId)
+	require.Equal(
+		t,
+		candidate.consumerTx.Hash().Bytes(),
+		[]byte(utxo.SpentAtTxId),
+	)
 }
 
 // TestSetTransactionBatched_CrossBatchProducerResolvesFromDB flushes the
@@ -85,6 +89,8 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 // accumulator does not contain the producer. The spend must resolve through
 // the metadata-store fallthrough, exactly as before this optimisation.
 func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
@@ -149,7 +155,11 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, post)
 	require.Equal(t, candidate.consumerPoint.Slot, post.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), post.SpentAtTxId)
+	require.Equal(
+		t,
+		candidate.consumerTx.Hash().Bytes(),
+		[]byte(post.SpentAtTxId),
+	)
 }
 
 // TestSetTransactionBatched_MissingProducerNotFabricated ingests only the
@@ -157,6 +167,8 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 // missing historical producer must not be hidden or fabricated: the in-flight
 // optimisation only short-circuits real same-batch producers.
 func TestSetTransactionBatched_MissingProducerNotFabricated(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
@@ -241,6 +253,8 @@ func ingestSameBatchProducerConsumer(
 func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
@@ -248,16 +262,16 @@ func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	// exists.
 	ingestSameBatchProducerConsumer(t, db, candidate)
 
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-
 	// Mimic a partial prior run: the row stays deleted at the consumer slot
 	// but loses its spender hash.
-	require.NoError(t, store.DB().
-		Model(&models.Utxo{}).
-		Where("tx_id = ? AND output_idx = ?",
-			candidate.input.Id().Bytes(), candidate.input.Index()).
-		Update("spent_at_tx_id", nil).Error)
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err := raw.Exec(`
+UPDATE utxo SET spent_at_tx_id = NULL
+WHERE tx_id = ? AND output_idx = ?`,
+		candidate.input.Id().Bytes(),
+		candidate.input.Index(),
+	)
+	require.NoError(t, err)
 
 	pre, err := db.Metadata().GetUtxoIncludingSpent(
 		candidate.input.Id().Bytes(), candidate.input.Index(), nil,
@@ -281,7 +295,7 @@ func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	require.Equal(
 		t,
 		candidate.consumerTx.Hash().Bytes(),
-		post.SpentAtTxId,
+		[]byte(post.SpentAtTxId),
 		"spender link must be backfilled for a pre-existing same-slot row",
 	)
 }

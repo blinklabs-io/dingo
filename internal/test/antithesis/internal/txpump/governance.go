@@ -40,7 +40,7 @@ type drepRegCert struct {
 // Key 2 = fee
 // Key 4 = certificates
 type txBodyWithDRepCerts struct {
-	Inputs  []txBodyInput  `cbor:"0,keyasint"`
+	Inputs  cbor.Set       `cbor:"0,keyasint"`
 	Outputs []txBodyOutput `cbor:"1,keyasint"`
 	Fee     uint64         `cbor:"2,keyasint"`
 	Certs   []drepRegCert  `cbor:"4,keyasint"`
@@ -123,8 +123,12 @@ func BuildDRepRegistrationTx(
 		Anchor:  nil,
 	}
 
+	inputSet := make(cbor.Set, len(bodyInputs))
+	for i, inp := range bodyInputs {
+		inputSet[i] = inp
+	}
 	body := txBodyWithDRepCerts{
-		Inputs:  bodyInputs,
+		Inputs:  inputSet,
 		Outputs: outputs,
 		Fee:     fee,
 		Certs:   []drepRegCert{cert},
@@ -179,7 +183,7 @@ type votingProcedure struct {
 // procedures as a raw cbor.RawMessage so we can hand-craft the nested map
 // structure required by the Conway CDDL.
 type txBodyWithVotes struct {
-	Inputs  []txBodyInput   `cbor:"0,keyasint"`
+	Inputs  cbor.Set        `cbor:"0,keyasint"`
 	Outputs []txBodyOutput  `cbor:"1,keyasint"`
 	Fee     uint64          `cbor:"2,keyasint"`
 	Votes   cbor.RawMessage `cbor:"19,keyasint"`
@@ -289,8 +293,12 @@ func BuildVoteTx(
 	outerBytes := append([]byte{0xa1}, voterBytes...)
 	outerBytes = append(outerBytes, innerBytes...)
 
+	voteInputSet := make(cbor.Set, len(bodyInputs))
+	for i, inp := range bodyInputs {
+		voteInputSet[i] = inp
+	}
 	body := txBodyWithVotes{
-		Inputs:  bodyInputs,
+		Inputs:  voteInputSet,
 		Outputs: outputs,
 		Fee:     fee,
 		Votes:   cbor.RawMessage(outerBytes),

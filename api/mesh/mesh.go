@@ -22,11 +22,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -42,6 +42,21 @@ const (
 	blockchain        = "cardano"
 	defaultListenAddr = ":8080"
 	maxRequestBody    = 1 << 20 // 1 MB
+
+	// defaultRequestBodyTimeout bounds how long a single request may
+	// take to deliver its body. maxRequestBody caps how many bytes a
+	// client may send, but nothing caps how slowly it may send them, so
+	// without this a client that stops partway through a declared body
+	// holds its handler goroutine for as long as it keeps the
+	// connection open.
+	defaultRequestBodyTimeout = 30 * time.Second
+
+	// listenerReadTimeout bounds the whole request read at the
+	// connection, covering the requests whose body no handler reads --
+	// such as an unknown route -- which the per-request deadline above
+	// never sees.
+	// api/utxorpc's listener carries the same bound.
+	listenerReadTimeout = 60 * time.Second
 
 	// mainnetMagic is the network magic for Cardano
 	// mainnet, used to determine the address network.
@@ -67,6 +82,13 @@ type ServerConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
+	TLS                apiconfig.EffectiveTLS
+	// requestBodyTimeout bounds a single request's body read. It is
+	// unexported deliberately: operators get the constant above, not a
+	// knob whose only supported values are "the default" and "short
+	// enough for a test". NewServer substitutes
+	// defaultRequestBodyTimeout when it is not positive.
+	requestBodyTimeout time.Duration
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -77,8 +99,10 @@ type Server struct {
 	genesisID           *BlockIdentifier
 	genesisStartTimeSec int64
 	addrNetworkID       uint8
-	httpServer          *http.Server
-	mu                  sync.Mutex
+	// listener owns the start/stop protocol, including releasing the
+	// listening socket as part of what Stop waits for -- see
+	// internal/apilistener.
+	listener *apilistener.Listener
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -137,6 +161,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = defaultListenAddr
 	}
+	if cfg.requestBodyTimeout <= 0 {
+		cfg.requestBodyTimeout = defaultRequestBodyTimeout
+	}
 
 	var addrNetID uint8 = lcommon.AddressNetworkTestnet
 	if cfg.NetworkMagic == mainnetMagic {
@@ -160,76 +187,54 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		genesisID:           genesisID,
 		genesisStartTimeSec: cfg.GenesisStartTimeSec,
 		addrNetworkID:       addrNetID,
+		listener:            apilistener.New("Mesh API", logger),
 	}, nil
 }
 
 // Start starts the HTTP server in a background goroutine.
 func (s *Server) Start(ctx context.Context) error {
-	s.mu.Lock()
-	if s.httpServer != nil {
-		s.mu.Unlock()
-		return errors.New("server already started")
-	}
-
-	mux := http.NewServeMux()
-	s.registerRoutes(mux)
-
-	server := &http.Server{
-		Addr: s.config.ListenAddress,
-		Handler: httpcors.Handler(
-			mux,
-			httpcors.Config{
-				AllowedOrigins: s.config.CORSAllowedOrigins,
-			},
-		),
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	s.httpServer = server
-
-	// Launch context monitor before unlocking so there
-	// is no window where Stop() could race with the
-	// goroutine not yet existing.
-	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
-		<-ctx.Done()
-		s.mu.Lock()
-		srv := s.httpServer
-		s.httpServer = nil
-		s.mu.Unlock()
-
-		if srv != nil {
-			s.logger.Debug(
-				"context cancelled, shutting down " +
-					"Mesh API server",
-			)
-			//nolint:contextcheck
-			shutdownCtx, cancel := context.WithTimeout(
-				context.Background(),
-				30*time.Second,
-			)
-			defer cancel()
-			//nolint:contextcheck
-			if err := srv.Shutdown(
-				shutdownCtx,
-			); err != nil {
-				s.logger.Error(
-					"failed to shutdown Mesh API "+
-						"server on context "+
-						"cancellation",
-					"error", err,
-				)
-			}
-		}
-	}()
-
-	s.mu.Unlock()
-
-	if err := s.startServer(server); err != nil {
-		s.mu.Lock()
-		s.httpServer = nil
-		s.mu.Unlock()
+	startDone, err := s.listener.BeginStart()
+	if err != nil {
 		return err
+	}
+	defer s.listener.EndStart(startDone)
+
+	server, bindDone, err := s.listener.Publish(func() *http.Server {
+		mux := http.NewServeMux()
+		s.registerRoutes(mux)
+		return &http.Server{
+			Addr: s.config.ListenAddress,
+			Handler: httpcors.Handler(
+				mux,
+				httpcors.Config{
+					AllowedOrigins: s.config.CORSAllowedOrigins,
+				},
+			),
+			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       listenerReadTimeout,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+	})
+	if err != nil {
+		return err
+	}
+
+	// Watched before the bind so a context cancelled mid-bind still tears the
+	// server down: the detach is what makes an in-flight bind close its own
+	// socket.
+	s.listener.Watch(ctx, server, apilistener.Graceful)
+
+	served, err := s.listener.Bind(server, bindDone, s.config.TLS)
+	if err != nil {
+		s.listener.Unpublish(server)
+		return err
+	}
+	if !served {
+		// A context cancellation detached this server while it was binding, so
+		// Bind closed the socket rather than serving it. Saying the listener
+		// came up would be false.
+		return nil
 	}
 
 	s.logger.Info(
@@ -240,47 +245,10 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts down the HTTP server.
+// Stop gracefully shuts down the HTTP server, and does not return until the
+// listening socket has been released -- see internal/apilistener.
 func (s *Server) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	srv := s.httpServer
-	s.httpServer = nil
-	s.mu.Unlock()
-
-	if srv != nil {
-		s.logger.Debug("shutting down Mesh API server")
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf(
-				"failed to shutdown Mesh API server: %w",
-				err,
-			)
-		}
-	}
-	return nil
-}
-
-// startServer starts the HTTP server with deterministic
-// error detection.
-func (s *Server) startServer(
-	server *http.Server,
-) error {
-	ln, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to listen for Mesh API server: %w",
-			err,
-		)
-	}
-	go func() {
-		if err := server.Serve(ln); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
-			s.logger.Error(
-				"Mesh API server error",
-				"error", err,
-			)
-		}
-	}()
-	return nil
+	return s.listener.Stop(ctx, apilistener.Graceful)
 }
 
 // registerRoutes registers all Mesh API endpoints.
@@ -372,7 +340,7 @@ func (s *Server) decodeAndValidate(
 	r *http.Request,
 	dst networkRequest,
 ) *Error {
-	if err := decodeRequest(w, r, dst); err != nil {
+	if err := s.decodeRequest(w, r, dst); err != nil {
 		return wrapErr(ErrInvalidRequest, err)
 	}
 	id := dst.networkID()
@@ -452,14 +420,59 @@ func writeError(w http.ResponseWriter, meshErr *Error) {
 	writeJSON(w, status, meshErr)
 }
 
-// decodeRequest decodes a JSON request body into dst.
-func decodeRequest(
+// decodeRequest decodes a JSON request body into dst under both
+// request bounds: maxRequestBody caps how many bytes a client may send,
+// and requestBodyTimeout caps how long it may take to send them. A
+// client that stalls partway through a declared body fails the read,
+// and its caller reports the same invalid-request error a malformed
+// body already produces.
+func (s *Server) decodeRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	dst any,
 ) error {
+	rc := http.NewResponseController(w)
+	s.setBodyReadDeadline(
+		rc, time.Now().Add(s.config.requestBodyTimeout),
+	)
+	// Clear it on the way out: the deadline covers the body read only,
+	// and must not outlive it into the response write, the drain
+	// net/http performs to reuse the connection, or the next request
+	// on a kept-alive one.
+	defer s.setBodyReadDeadline(rc, time.Time{})
+
 	body := http.MaxBytesReader(w, r.Body, maxRequestBody)
 	defer body.Close()
 	decoder := json.NewDecoder(body)
-	return decoder.Decode(dst)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	// Decode again to require complete consumption, including any trailing
+	// whitespace, under the same byte and time limits.
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return errors.New("request body must contain only one JSON value")
+	}
+	return nil
+}
+
+// setBodyReadDeadline applies a read deadline to the connection behind
+// a response writer. An httptest recorder, which the handler-level
+// tests use, does not carry one; the served path always does, and the
+// listenerReadTimeout still bounds a request there either way,
+// so a missing deadline is reported rather than raised.
+func (s *Server) setBodyReadDeadline(
+	rc *http.ResponseController,
+	deadline time.Time,
+) {
+	if err := rc.SetReadDeadline(deadline); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		s.logger.Debug(
+			"could not bound request body read",
+			"error", err,
+		)
+	}
 }

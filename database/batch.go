@@ -32,7 +32,7 @@ type BatchAccumulator = types.MetadataBatchAccumulator
 // NewBatchAccumulator creates an accumulator for the configured metadata
 // plugin.
 func (d *Database) NewBatchAccumulator() BatchAccumulator {
-	return d.metadata.NewBatchAccumulator()
+	return d.transactionStore().NewBatchAccumulator()
 }
 
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
@@ -50,7 +50,7 @@ func (d *Database) FlushBatch(
 			return types.ErrNilTxn
 		}
 	}
-	return d.metadata.FlushBatch(acc, metadataTxn)
+	return d.transactionStore().FlushBatch(acc, metadataTxn)
 }
 
 // BatchedTxIngestOpts toggles optional behaviors of SetTransactionBatched.
@@ -79,14 +79,57 @@ type BatchedTxIngestOpts struct {
 	// replay paths where producer rows may be absent.
 	SkipConsumedInputRecovery bool
 
+	// StrictAppliedInputConservation marks the steady-state, at-tip, validated
+	// path. Past the Mithril trust boundary, a missing producer row is recovered
+	// only when the producer block is still on the applied primary chain. This
+	// allows rollback recovery after core-mode cleanup removed a spent row
+	// (issue #3170), while refusing recovery from a retained abandoned-fork block
+	// (issue #3005). The option is retained for callers that identify this path;
+	// the primary-chain check also protects validated catch-up paths. It takes
+	// effect only when StrictUtxoValidation is enabled on the Database.
+	StrictAppliedInputConservation bool
+
 	// Stats receives hot-path timings and row-ish counts for operator
 	// visibility during API-mode Mithril backfill. It is optional and is
 	// intentionally updated only at coarse stage boundaries.
 	Stats *types.BackfillHotPathStats
+
+	// SkipWithdrawalWitnessWrite elides the CIP-0163 account_withdrawal_witness
+	// insert for each reward withdrawal. That table is only ever read by the
+	// delegator-inactivity gate's rollback/renewal paths
+	// (MetadataStore.AccountsWitnessedAfterSlot, AccountLastWitnessSlots); with
+	// the gate off -- the default on every node not running CIP-0163 -- the
+	// insert is pure write amplification on a table nothing reads (issue
+	// #2919). The ledger sets this to !DelegatorInactivityEnabled on the live-
+	// apply path (ledger/delta.go), and internal/node.Backfill derives it the
+	// same way from its own delegatorInactivityEnabled field for the batched
+	// historical-replay path -- see that field's doc comment for why the
+	// gate can genuinely be on there too and why the value must always be set
+	// explicitly rather than assumed. Defaults to false here, preserving the
+	// unconditional write for any caller that does not opt in.
+	SkipWithdrawalWitnessWrite bool
+
+	// HistoricalBackfill records already-ledger-validated historical
+	// withdrawals without replaying account state over the imported snapshot.
+	// Live ledger ingestion leaves this false and enforces balance sufficiency.
+	HistoricalBackfill bool
 }
 
 type batchStatsSetter interface {
 	SetBackfillStats(*types.BackfillHotPathStats)
+}
+
+type transactionStoreHistoricalBackfill interface {
+	SetTransactionBatchedHistorical(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32,
+		map[int]uint64,
+		bool,
+		bool,
+		BatchAccumulator,
+		types.Txn,
+	) error
 }
 
 // inFlightProducerLookup is implemented by accumulators that index the
@@ -150,7 +193,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		}()
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -260,13 +303,28 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if setter, ok := acc.(batchStatsSetter); ok {
 		setter.SetBackfillStats(opts.Stats)
 	}
-	if err := d.metadata.SetTransactionBatched(
-		tx, point, idx, certDeposits, acc, metadataTxn,
-	); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+	var metadataErr error
+	if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
+		metadataErr = store.SetTransactionBatchedHistorical(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite,
+			opts.HistoricalBackfill,
+			acc, metadataTxn,
+		)
+	} else {
+		metadataErr = d.transactionStore().SetTransactionBatched(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
+		)
+	}
+	if err := metadataErr; err != nil {
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (batch idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 
-	if updateEpoch > 0 && tx.IsValid() {
+	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(
 				genesisHash.Bytes(),

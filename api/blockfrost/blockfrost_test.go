@@ -15,8 +15,11 @@
 package blockfrost
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -25,19 +28,19 @@ import (
 	"testing"
 	"time"
 
+	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-//go:fix inline
-func intPtr(v int) *int {
-	return new(v)
-}
-
 func TestRedeemerExecutionFee(t *testing.T) {
+	t.Parallel()
+
 	fee := redeemerExecutionFee(
 		lcommon.ExUnitPrice{
 			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
@@ -47,6 +50,54 @@ func TestRedeemerExecutionFee(t *testing.T) {
 		103956223,
 	)
 	assert.Equal(t, uint64(21647), fee)
+}
+
+func TestMetadataJSONUnavailableSerializesAsNull(t *testing.T) {
+	payload, err := json.Marshal(MetadataTransactionJSONResponse{
+		TxHash:       "deadbeef",
+		JSONMetadata: nil,
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"tx_hash":"deadbeef","json_metadata":null}`, string(payload))
+}
+
+func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
+	t.Parallel()
+	adapter, raw, _ := newDBBackedAdapter(t)
+	validHash := bytes.Repeat([]byte{0x41}, 32)
+	ambiguousHash := bytes.Repeat([]byte{0x42}, 32)
+	validMetadata, err := hex.DecodeString("a11902d1626f6b")
+	require.NoError(t, err)
+	ambiguousMetadata, err := hex.DecodeString("a11902d1a20163696e7461316474657874")
+	require.NoError(t, err)
+	validTx := &models.Transaction{Hash: validHash, Metadata: validMetadata}
+	ambiguousTx := &models.Transaction{Hash: ambiguousHash, Metadata: ambiguousMetadata}
+	insertAdapterTransaction(t, raw, validTx)
+	insertAdapterTransaction(t, raw, ambiguousTx)
+	ambiguousLabelCBOR, err := hex.DecodeString("a20163696e7461316474657874")
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
+		validTx.ID, "721", 1, []byte{0x62, 0x6f, 0x6b}, `"ok"`,
+		ambiguousTx.ID, "721", 2, ambiguousLabelCBOR, nil)
+	require.NoError(t, err)
+	jsonRows, total, err := adapter.MetadataTransactions(721, PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc})
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, jsonRows, 2)
+	require.Equal(t, `"ok"`, string(jsonRows[0].JSONMetadata))
+	require.Nil(t, jsonRows[1].JSONMetadata)
+	cborRows, _, err := adapter.MetadataTransactionsCBOR(721, PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc})
+	require.NoError(t, err)
+	require.Len(t, cborRows, 2)
+	require.Equal(t, "a20163696e7461316474657874", cborRows[1].Metadata)
+	transactionJSON, err := adapter.TransactionMetadata(ambiguousHash)
+	require.NoError(t, err)
+	require.Len(t, transactionJSON, 1)
+	require.Equal(t, "", string(transactionJSON[0].JSONMetadata))
+	transactionCBOR, err := adapter.TransactionMetadataCBOR(ambiguousHash)
+	require.NoError(t, err)
+	require.Len(t, transactionCBOR, 1)
+	require.Equal(t, "a20163696e7461316474657874", transactionCBOR[0].CBORMetadata)
 }
 
 // mockNode implements BlockfrostNode for testing.
@@ -62,14 +113,34 @@ type mockNode struct {
 	networkEras                   []NetworkEraInfo
 	genesis                       GenesisInfo
 	pools                         []PoolExtendedInfo
+	poolsList                     []string
+	poolsListTotal                int
+	poolsListParams               PaginationParams
+	poolsRetiring                 []PoolRetiringInfo
+	poolsRetiringTotal            int
+	poolMetadata                  PoolMetadataInfo
+	poolDetail                    PoolDetailInfo
+	poolDetailErr                 error
 	asset                         AssetInfo
+	assetHolders                  []AssetHolderInfo
+	assetHoldersTotal             int
+	assetAddressesPolicyID        string
+	assetAddressesAssetName       []byte
+	assetAddressesParams          PaginationParams
 	drep                          DRepInfo
+	drepList                      []DRepListItemInfo
+	drepListTotal                 int
+	drepListParams                DRepListParams
+	drepCredential                DRepCredential
+	addressInfo                   AddressInfo
 	addressUTXOs                  []AddressUTXOInfo
 	addressTransactions           []AddressTransactionInfo
 	metadataJSON                  []MetadataTransactionJSONInfo
 	metadataCBOR                  []MetadataTransactionCBORInfo
 	transaction                   TransactionInfo
 	transactionSubmitHash         string
+	transactionEvaluation         TransactionEvaluationResponse
+	transactionEvaluateCbor       []byte
 	transactionCBOR               []byte
 	transactionMetadata           []TransactionMetadataInfo
 	transactionMetadataCBOR       []TransactionMetadataCBORInfo
@@ -91,6 +162,10 @@ type mockNode struct {
 	delegations                   []AccountDelegationHistoryInfo
 	regs                          []AccountRegistrationHistoryInfo
 	rewards                       []AccountRewardHistoryInfo
+	accountUTXOs                  []AccountUTXOInfo
+	accountWithdrawals            []AccountWithdrawalInfo
+	accountTransactions           []AccountTransactionInfo
+	lastAccountTransactionsParams AccountTransactionsParams
 	chainTipErr                   error
 	blockErr                      error
 	blockByIDErr                  error
@@ -102,14 +177,21 @@ type mockNode struct {
 	networkErasErr                error
 	genesisErr                    error
 	poolsErr                      error
+	poolsListErr                  error
+	poolsRetiringErr              error
+	poolMetadataErr               error
 	assetErr                      error
+	assetAddressesErr             error
 	drepErr                       error
+	drepListErr                   error
+	addressInfoErr                error
 	addressUTXOsErr               error
 	addressTransactionsErr        error
 	metadataJSONErr               error
 	metadataCBORErr               error
 	transactionErr                error
 	transactionSubmitErr          error
+	transactionEvaluationErr      error
 	transactionCBORErr            error
 	transactionMetadataErr        error
 	transactionMetadataCBORErr    error
@@ -127,6 +209,9 @@ type mockNode struct {
 	delegationsErr                error
 	regsErr                       error
 	rewardsErr                    error
+	accountUTXOsErr               error
+	accountWithdrawalsErr         error
+	accountTransactionsErr        error
 }
 
 func (m *mockNode) ChainTip() (
@@ -195,6 +280,31 @@ func (m *mockNode) PoolsExtended() (
 	return m.pools, m.poolsErr
 }
 
+func (m *mockNode) PoolsList(
+	params PaginationParams,
+) ([]string, int, error) {
+	m.poolsListParams = params
+	return m.poolsList, m.poolsListTotal, m.poolsListErr
+}
+
+func (m *mockNode) PoolsRetiring(
+	_ PaginationParams,
+) ([]PoolRetiringInfo, int, error) {
+	return m.poolsRetiring, m.poolsRetiringTotal, m.poolsRetiringErr
+}
+
+func (m *mockNode) PoolMetadata(
+	_ string,
+) (PoolMetadataInfo, error) {
+	return m.poolMetadata, m.poolMetadataErr
+}
+
+func (m *mockNode) PoolDetail(
+	_ string,
+) (PoolDetailInfo, error) {
+	return m.poolDetail, m.poolDetailErr
+}
+
 func (m *mockNode) Asset(
 	_ string,
 	_ []byte,
@@ -202,10 +312,35 @@ func (m *mockNode) Asset(
 	return m.asset, m.assetErr
 }
 
+func (m *mockNode) AssetAddresses(
+	policyID string,
+	assetName []byte,
+	params PaginationParams,
+) ([]AssetHolderInfo, int, error) {
+	m.assetAddressesPolicyID = policyID
+	m.assetAddressesAssetName = assetName
+	m.assetAddressesParams = params
+	return m.assetHolders, m.assetHoldersTotal, m.assetAddressesErr
+}
+
 func (m *mockNode) DRep(
-	_ DRepCredential,
+	credential DRepCredential,
 ) (DRepInfo, error) {
+	m.drepCredential = credential
 	return m.drep, m.drepErr
+}
+
+func (m *mockNode) DReps(
+	params DRepListParams,
+) ([]DRepListItemInfo, int, error) {
+	m.drepListParams = params
+	return m.drepList, m.drepListTotal, m.drepListErr
+}
+
+func (m *mockNode) Address(
+	_ string,
+) (AddressInfo, error) {
+	return m.addressInfo, m.addressInfoErr
 }
 
 func (m *mockNode) AddressUTXOs(
@@ -246,6 +381,13 @@ func (m *mockNode) TransactionSubmit(
 	_ []byte,
 ) (string, error) {
 	return m.transactionSubmitHash, m.transactionSubmitErr
+}
+
+func (m *mockNode) TransactionEvaluate(
+	txCbor []byte,
+) (TransactionEvaluationResponse, error) {
+	m.transactionEvaluateCbor = txCbor
+	return m.transactionEvaluation, m.transactionEvaluationErr
 }
 
 func (m *mockNode) TransactionCBOR(
@@ -402,6 +544,61 @@ func (m *mockNode) AccountRewardHistory(
 	return items[start:end], total, m.rewardsErr
 }
 
+// mockPage applies the same in-memory ordering/pagination every
+// mockNode paginated-list method needs: reverse for desc, then slice out
+// the requested page. It only handles the shared count/page/order
+// mechanics; each caller still owns picking its own backing slice and
+// error field, since those differ per endpoint.
+func mockPage[T any](items []T, order string, page, count int) ([]T, int) {
+	items = append([]T(nil), items...)
+	total := len(items)
+	if order == PaginationOrderDesc {
+		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+			items[i], items[j] = items[j], items[i]
+		}
+	}
+	start := (page - 1) * count
+	if start >= total {
+		return []T{}, total
+	}
+	end := min(start+count, total)
+	return items[start:end], total
+}
+
+func (m *mockNode) AccountUTXOs(
+	_ string,
+	params PaginationParams,
+) ([]AccountUTXOInfo, int, error) {
+	rows, total := mockPage(
+		m.accountUTXOs, params.Order, params.Page, params.Count,
+	)
+	return rows, total, m.accountUTXOsErr
+}
+
+func (m *mockNode) AccountWithdrawals(
+	_ string,
+	params PaginationParams,
+) ([]AccountWithdrawalInfo, int, error) {
+	rows, total := mockPage(
+		m.accountWithdrawals, params.Order, params.Page, params.Count,
+	)
+	return rows, total, m.accountWithdrawalsErr
+}
+
+func (m *mockNode) AccountTransactions(
+	_ string,
+	params AccountTransactionsParams,
+) ([]AccountTransactionInfo, int, error) {
+	m.lastAccountTransactionsParams = params
+	rows, total := mockPage(
+		m.accountTransactions,
+		params.Pagination.Order,
+		params.Pagination.Page,
+		params.Pagination.Count,
+	)
+	return rows, total, m.accountTransactionsErr
+}
+
 func newTestBlockfrost(
 	node BlockfrostNode,
 ) *Blockfrost {
@@ -415,6 +612,8 @@ func newTestBlockfrost(
 }
 
 func TestStartStop(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -422,9 +621,7 @@ func TestStartStop(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify server is running
-	b.mu.Lock()
-	assert.NotNil(t, b.httpServer)
-	b.mu.Unlock()
+	assert.NotNil(t, b.listener.Server())
 
 	// Stop the server
 	stopCtx, stopCancel := context.WithTimeout(
@@ -436,12 +633,12 @@ func TestStartStop(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify server is stopped
-	b.mu.Lock()
-	assert.Nil(t, b.httpServer)
-	b.mu.Unlock()
+	assert.Nil(t, b.listener.Server())
 }
 
 func TestStartAlreadyStarted(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -464,6 +661,8 @@ func TestStartAlreadyStarted(t *testing.T) {
 }
 
 func TestHandleRoot(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -491,7 +690,73 @@ func TestHandleRoot(t *testing.T) {
 	assert.Equal(t, "0.1.0", resp.Version)
 }
 
+func TestRouterRootServesRootDocument(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	handler := b.handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp RootResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "https://blockfrost.io/", resp.URL)
+	assert.Equal(t, "0.1.0", resp.Version)
+}
+
+func TestRouterUnimplementedRouteReturns404(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	handler := b.handler()
+
+	// "/api/v0/pools" used to belong here as an unimplemented route. It is
+	// now registered (dingo #3011), so it no longer falls through to the
+	// catch-all. The remaining entries still cover that path.
+	paths := []string{
+		"/api/v0/",
+		"/api/v0/scripts",
+		"/does-not-exist",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+			var resp ErrorResponse
+			err := json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+			assert.Equal(t, "Not Found", resp.Error)
+		})
+	}
+}
+
+func TestRouterImplementedRouteStillWorks(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	handler := b.handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestHandleHealth(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -510,6 +775,11 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleLatestBlock(t *testing.T) {
+	t.Parallel()
+
+	blockVRF := "vrf_vk1abc"
+	opCert := "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+	opCertCounter := "7"
 	mock := &mockNode{
 		block: BlockInfo{
 			Hash:          "abc123",
@@ -523,6 +793,13 @@ func TestHandleLatestBlock(t *testing.T) {
 			SlotLeader:    "pool1xyz",
 			PreviousBlock: "prev123",
 			Confirmations: 10,
+			Output:        "123456789",
+			Fees:          "4321",
+			BlockVRF:      &blockVRF,
+			OPCert:        &opCert,
+			OPCertCounter: &opCertCounter,
+			// Latest block is the tip, so it has no successor.
+			NextBlock: nil,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -551,9 +828,23 @@ func TestHandleLatestBlock(t *testing.T) {
 	assert.Equal(t, "pool1xyz", resp.SlotLeader)
 	assert.Equal(t, "prev123", resp.PreviousBlock)
 	assert.Equal(t, uint64(10), resp.Confirmations)
+	require.NotNil(t, resp.Output)
+	assert.Equal(t, "123456789", *resp.Output)
+	require.NotNil(t, resp.Fees)
+	assert.Equal(t, "4321", *resp.Fees)
+	require.NotNil(t, resp.BlockVRF)
+	assert.Equal(t, "vrf_vk1abc", *resp.BlockVRF)
+	require.NotNil(t, resp.OPCert)
+	assert.Equal(t, opCert, *resp.OPCert)
+	require.NotNil(t, resp.OPCertCounter)
+	assert.Equal(t, "7", *resp.OPCertCounter)
+	assert.Nil(t, resp.NextBlock)
 }
 
 func TestHandleBlockByHashOrNumber(t *testing.T) {
+	t.Parallel()
+
+	nextBlock := "nexthash"
 	mock := &mockNode{
 		blockByID: BlockInfo{
 			Hash:          "abc123",
@@ -567,6 +858,10 @@ func TestHandleBlockByHashOrNumber(t *testing.T) {
 			SlotLeader:    "pool1...",
 			PreviousBlock: "prevhash",
 			Confirmations: 7,
+			Output:        "999",
+			Fees:          "10",
+			// Historical (non-tip) block: it has a known successor.
+			NextBlock: &nextBlock,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -588,9 +883,17 @@ func TestHandleBlockByHashOrNumber(t *testing.T) {
 	assert.Equal(t, "abc123", resp.Hash)
 	assert.Equal(t, uint64(1000), resp.Height)
 	assert.Equal(t, uint64(7), resp.Confirmations)
+	require.NotNil(t, resp.Output)
+	assert.Equal(t, "999", *resp.Output)
+	require.NotNil(t, resp.Fees)
+	assert.Equal(t, "10", *resp.Fees)
+	require.NotNil(t, resp.NextBlock)
+	assert.Equal(t, "nexthash", *resp.NextBlock)
 }
 
 func TestHandleBlockNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{blockByIDErr: ErrBlockNotFound}
 	b := newTestBlockfrost(mock)
 
@@ -607,16 +910,22 @@ func TestHandleBlockNotFound(t *testing.T) {
 }
 
 func TestHandleAsset(t *testing.T) {
+	t.Parallel()
+
+	onchain := any(map[string]any{"name": "Test Token", "decimals": float64(6)})
+	standard := "CIP25v2"
 	mock := &mockNode{
 		asset: AssetInfo{
-			Asset:             "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
-			PolicyID:          "00112233445566778899aabbccddeeff00112233445566778899aabb",
-			AssetName:         "746f6b656e",
-			AssetNameASCII:    "token",
-			Fingerprint:       "asset1test",
-			Quantity:          "42",
-			InitialMintTxHash: "",
-			MintOrBurnCount:   0,
+			Asset:                   "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
+			PolicyID:                "00112233445566778899aabbccddeeff00112233445566778899aabb",
+			AssetName:               "746f6b656e",
+			AssetNameASCII:          "token",
+			Fingerprint:             "asset1test",
+			Quantity:                "42",
+			InitialMintTxHash:       "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+			MintOrBurnCount:         3,
+			OnchainMetadata:         &onchain,
+			OnchainMetadataStandard: &standard,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -646,10 +955,16 @@ func TestHandleAsset(t *testing.T) {
 	assert.Equal(t, mock.asset.Quantity, resp.Quantity)
 	assert.Equal(t, mock.asset.InitialMintTxHash, resp.InitialMintTxHash)
 	assert.Equal(t, mock.asset.MintOrBurnCount, resp.MintOrBurnCount)
-	assert.Nil(t, resp.OnchainMetadata)
+	require.NotNil(t, resp.OnchainMetadata)
+	assert.Equal(t, onchain, *resp.OnchainMetadata)
+	require.NotNil(t, resp.OnchainMetadataStandard)
+	assert.Equal(t, "CIP25v2", *resp.OnchainMetadataStandard)
+	assert.Nil(t, resp.Metadata)
 }
 
 func TestHandleAssetInvalidIdentifier(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -673,6 +988,8 @@ func TestHandleAssetInvalidIdentifier(t *testing.T) {
 }
 
 func TestHandleAssetNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		assetErr: ErrAssetNotFound,
 	}
@@ -700,21 +1017,418 @@ func TestHandleAssetNotFound(t *testing.T) {
 	assert.Equal(t, "The requested asset could not be found.", resp.Message)
 }
 
+func TestHandleAssetAddresses(t *testing.T) {
+	t.Parallel()
+
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e"
+	mock := &mockNode{
+		assetHolders: []AssetHolderInfo{
+			{Address: "addr1holder1", Quantity: "1"},
+			{Address: "addr1holder2", Quantity: "42"},
+		},
+		assetHoldersTotal: 12,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses?count=2&page=3&order=desc",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(
+		t,
+		"00112233445566778899aabbccddeeff00112233445566778899aabb",
+		mock.assetAddressesPolicyID,
+	)
+	assert.Equal(t, []byte("token"), mock.assetAddressesAssetName)
+	assert.Equal(
+		t,
+		PaginationParams{Count: 2, Page: 3, Order: "desc"},
+		mock.assetAddressesParams,
+	)
+	assert.Equal(t, "12", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "6", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []AssetAddressResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 2)
+	assert.Equal(t, "addr1holder1", resp[0].Address)
+	assert.Equal(t, "1", resp[0].Quantity)
+	assert.Equal(t, "addr1holder2", resp[1].Address)
+	assert.Equal(t, "42", resp[1].Quantity)
+}
+
+func TestHandleAssetAddressesInvalidIdentifier(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/not-hex/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", "not-hex")
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.Equal(t, "Invalid asset identifier.", resp.Message)
+}
+
+func TestHandleAssetAddressesNotFound(t *testing.T) {
+	t.Parallel()
+
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
+	mock := &mockNode{
+		assetAddressesErr: ErrAssetNotFound,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
+	assert.Equal(t, "The requested asset could not be found.", resp.Message)
+}
+
+func TestHandleAssetAddressesNoHolders(t *testing.T) {
+	t.Parallel()
+
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
+	assert.Equal(t, "The requested asset could not be found.", resp.Message)
+}
+
+func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
+	t.Parallel()
+
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
+	assetName := []byte("TOKEN")
+	addrBytes := []byte{
+		(lcommon.AddressTypeKeyPointer << 4) |
+			lcommon.AddressNetworkTestnet,
+	}
+	addrBytes = append(addrBytes, paymentHash...)
+	addrBytes = append(addrBytes, 0x01, 0x00, 0x00)
+	addr, err := lcommon.NewAddressFromBytes(addrBytes)
+	require.NoError(t, err)
+
+	output := shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	}
+	outputCbor, err := cbor.Encode(&output)
+	require.NoError(t, err)
+	holders, err := assetHoldersFromUtxos(
+		policyID,
+		assetName,
+		[]models.Utxo{{
+			TxId:      bytes.Repeat([]byte{0x01}, 32),
+			OutputIdx: 0,
+			Cbor:      outputCbor,
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(7),
+			}},
+		}},
+		PaginationParams{Count: 100, Page: 1, Order: "asc"},
+	)
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Equal(t, addr.String(), holders[0].Address)
+	assert.Equal(t, "7", holders[0].Quantity)
+}
+
+func TestHandlePoolsRetiring(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{
+		poolsRetiringTotal: 1,
+		poolsRetiring: []PoolRetiringInfo{
+			{
+				PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+				Epoch:  1400,
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/v0/pools/retiring?count=10", nil,
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolsRetiring(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "1", w.Header().Get("X-Pagination-Count-Total"))
+	var resp []PoolRetiringResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, uint64(1400), resp[0].Epoch)
+}
+
+func TestHandlePoolsRetiringInvalidPagination(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBlockfrost(&mockNode{})
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/v0/pools/retiring?order=a", nil,
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolsRetiring(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(
+		t,
+		"querystring/order must be equal to one of the allowed values",
+		resp.Message,
+	)
+}
+
+func TestHandlePoolMetadata(t *testing.T) {
+	t.Parallel()
+
+	url := "https://example.com/pool.json"
+	hash := "18c2dcb8d69024dbe95beebcef4a49a2bdc3f0b1c60e5e669007e5e39edd4a7f"
+	ticker := "TEST"
+	mock := &mockNode{
+		poolMetadata: PoolMetadataInfo{
+			PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+			Hex:    "6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+			URL:    &url,
+			Hash:   &hash,
+			Ticker: &ticker,
+		},
+	}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec/metadata",
+		nil,
+	)
+	req.SetPathValue(
+		"pool_id",
+		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp PoolMetadataResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, mock.poolMetadata.PoolID, resp.PoolID)
+	require.NotNil(t, resp.URL)
+	assert.Equal(t, url, *resp.URL)
+	require.NotNil(t, resp.Ticker)
+	assert.Nil(t, resp.Name)
+}
+
+func TestHandlePoolMetadataNoAnchor(t *testing.T) {
+	t.Parallel()
+
+	// A pool without registered metadata answers with an empty JSON
+	// object, matching hosted Blockfrost.
+	b := newTestBlockfrost(&mockNode{
+		poolMetadata: PoolMetadataInfo{
+			PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+			Hex:    "6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec/metadata",
+		nil,
+	)
+	req.SetPathValue(
+		"pool_id",
+		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, "{}", w.Body.String())
+}
+
+func TestOffchainFetchErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	url := "https://example.com/meta.json"
+	expected := bytes.Repeat([]byte{0x01}, 32)
+	stale := bytes.Repeat([]byte{0x02}, 32)
+
+	// Latest attempt failed with 404; the stale BodyHash from an
+	// earlier hash-mismatch attempt must not win.
+	err404 := offchainFetchError(
+		"Pool",
+		url,
+		expected,
+		&models.OffchainMetadata{
+			LastError:      "unexpected HTTP status 404",
+			LastHTTPStatus: 404,
+			BodyHash:       stale,
+		},
+	)
+	assert.Equal(t, "HTTP_RESPONSE_ERROR", err404.Code)
+	assert.Contains(t, err404.Message, `404 "Not Found"`)
+
+	mismatch := offchainFetchError(
+		"Pool",
+		url,
+		expected,
+		&models.OffchainMetadata{
+			LastError:      models.OffchainFetchErrHashMismatch,
+			LastHTTPStatus: 200,
+			BodyHash:       stale,
+		},
+	)
+	assert.Equal(t, "HASH_MISMATCH", mismatch.Code)
+	assert.Contains(t, mismatch.Message, hex.EncodeToString(stale))
+
+	size := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
+		LastError:      models.OffchainFetchErrBodyTooLargePrefix + " 1048576 bytes",
+		LastHTTPStatus: 200,
+	})
+	assert.Equal(t, "SIZE_EXCEEDED", size.Code)
+
+	conn := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
+		LastError: "dial tcp: connection refused",
+	})
+	assert.Equal(t, "CONNECTION_ERROR", conn.Code)
+}
+
+func TestHandlePoolMetadataInvalidID(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBlockfrost(&mockNode{poolMetadataErr: ErrInvalidPoolID})
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/v0/pools/pool1stonks/metadata", nil,
+	)
+	req.SetPathValue("pool_id", "pool1stonks")
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Invalid or malformed pool id format.", resp.Message)
+}
+
+func TestHandlePoolMetadataNotFound(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBlockfrost(&mockNode{
+		poolMetadataErr: fmt.Errorf("get pool: %w", models.ErrPoolNotFound),
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d/metadata",
+		nil,
+	)
+	req.SetPathValue(
+		"pool_id",
+		"pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d",
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestParsePoolID(t *testing.T) {
+	t.Parallel()
+
+	hash, err := parsePoolID(
+		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+		hex.EncodeToString(hash),
+	)
+
+	hash2, err := parsePoolID(
+		"6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, hash, hash2)
+
+	_, err = parsePoolID("pool1stonks")
+	require.Error(t, err)
+
+	_, err = parsePoolID(
+		"drep1ygqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7vlc9n",
+	)
+	require.Error(t, err)
+}
+
 func TestHandleDRep(t *testing.T) {
+	t.Parallel()
+
 	const drepHex = "00000000000000000000000000000000000000000000000000000000"
 	const drepID = drepHex
 
+	activeEpoch := uint64(12)
+	lastActive := uint64(14)
 	mock := &mockNode{
 		drep: DRepInfo{
-			DRepID:      drepID,
-			Hex:         drepHex,
-			HasScript:   false,
-			Registered:  true,
-			Epoch:       12,
-			Amount:      "123456",
-			Active:      true,
-			ActiveEpoch: 14,
-			LiveStake:   "123456",
+			DRepID:          drepID,
+			Hex:             drepHex,
+			Amount:          "123456",
+			Active:          true,
+			ActiveEpoch:     &activeEpoch,
+			HasScript:       false,
+			Retired:         false,
+			Expired:         true,
+			LastActiveEpoch: &lastActive,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -736,15 +1450,292 @@ func TestHandleDRep(t *testing.T) {
 	assert.Equal(t, mock.drep.DRepID, resp.DRepID)
 	assert.Equal(t, mock.drep.Hex, resp.Hex)
 	assert.Equal(t, mock.drep.HasScript, resp.HasScript)
-	assert.Equal(t, mock.drep.Registered, resp.Registered)
-	assert.Equal(t, mock.drep.Epoch, resp.Epoch)
 	assert.Equal(t, mock.drep.Amount, resp.Amount)
 	assert.Equal(t, mock.drep.Active, resp.Active)
-	assert.Equal(t, mock.drep.ActiveEpoch, resp.ActiveEpoch)
-	assert.Equal(t, mock.drep.LiveStake, resp.LiveStake)
+	require.NotNil(t, resp.ActiveEpoch)
+	assert.Equal(t, activeEpoch, *resp.ActiveEpoch)
+	assert.False(t, resp.Retired)
+	assert.True(t, resp.Expired)
+	require.NotNil(t, resp.LastActiveEpoch)
+	assert.Equal(t, lastActive, *resp.LastActiveEpoch)
+}
+
+func TestHandleDReps(t *testing.T) {
+	t.Parallel()
+
+	lastActive := uint64(680)
+	mock := &mockNode{
+		drepListTotal: 42,
+		drepList: []DRepListItemInfo{
+			{
+				DRepID:          "drep1y2zpa7e9f23g7snuhfqss73ufeshsqhdt4qqfu74p9y4kfqcpsxym",
+				Hex:             "22841efb254aa28f427cba41087a3c4e617802ed5d4004f3d509495b24",
+				Amount:          "1000000",
+				HasScript:       false,
+				Retired:         false,
+				Expired:         true,
+				LastActiveEpoch: &lastActive,
+				Metadata: &DRepMetadataInfo{
+					URL:          "https://example.com/drep.json",
+					Hash:         "aa",
+					JSONMetadata: json.RawMessage(`{"a":1}`),
+					Bytes:        "\\x7b2261223a317d",
+				},
+			},
+			{
+				DRepID: "drep1yvvxuvh64q9zdqgrjt76d42eclk5wgdxtnsun4808cwg0dquhj65s",
+				Hex:    "23186e32faa80a26810392fda6d559c7ed4721a65ce1c9d4ef3e1c87b4",
+				Amount: "0", HasScript: true, Retired: true,
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/governance/dreps?count=2&order_by=amount&order=desc&retired=false",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	b.handleDReps(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "42", w.Header().Get("X-Pagination-Count-Total"))
+	assert.True(t, mock.drepListParams.OrderByAmount)
+	require.NotNil(t, mock.drepListParams.Retired)
+	assert.False(t, *mock.drepListParams.Retired)
+	assert.Nil(t, mock.drepListParams.Expired)
+	assert.Equal(t, PaginationOrderDesc, mock.drepListParams.Pagination.Order)
+
+	var resp []DRepListItemResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 2)
+	assert.Equal(t, "1000000", resp[0].Amount)
+	require.NotNil(t, resp[0].Metadata)
+	assert.Equal(t, "https://example.com/drep.json", resp[0].Metadata.URL)
+	assert.Nil(t, resp[1].Metadata)
+	assert.True(t, resp[1].Retired)
+}
+
+func TestHandleDRepsInvalidParams(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		query   string
+		message string
+	}{
+		{
+			"order=a",
+			"querystring/order must be equal to one of the allowed values",
+		},
+		{"page=x", "querystring/page must be integer"},
+		{"page=0", "querystring/page must be >= 1"},
+		{"page=99999999999999", "querystring/page must be <= 21474836"},
+		{"count=x", "querystring/count must be integer"},
+		{"count=999999999999999", "querystring/count must be <= 100"},
+		{"count=0", "querystring/count must be >= 1"},
+		{
+			"order_by=bogus",
+			"querystring/order_by must be equal to one of the allowed values",
+		},
+		{"retired=x", "querystring/retired must be boolean"},
+		{"expired=x", "querystring/expired must be boolean"},
+	}
+	b := newTestBlockfrost(&mockNode{})
+	for _, tc := range cases {
+		t.Run(tc.query, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v0/governance/dreps?"+tc.query,
+				nil,
+			)
+			w := httptest.NewRecorder()
+			b.handleDReps(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code, tc.query)
+			var resp ErrorResponse
+			require.NoError(
+				t,
+				json.NewDecoder(w.Body).Decode(&resp),
+				tc.query,
+			)
+			assert.Equal(t, tc.message, resp.Message, tc.query)
+		})
+	}
+}
+
+// TestNodeAdapterDRepsEpochForSlot pins the slot-to-epoch resolution behind a
+// DRep's registration epoch, which is the reported last-active epoch when the
+// DRep has no recorded activity: the epoch is the latest one whose start slot
+// is at or before the registration slot, and a slot equal to a start slot
+// belongs to the epoch it starts.
+func TestNodeAdapterDRepsEpochForSlot(t *testing.T) {
+	t.Parallel()
+
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	for _, epoch := range []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 100},
+		{EpochId: 1, StartSlot: 100, LengthInSlots: 100},
+		{EpochId: 2, StartSlot: 200, LengthInSlots: 100},
+	} {
+		_, err := store.Exec(`
+INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+VALUES (?, ?, ?)`,
+			epoch.EpochId,
+			epoch.StartSlot,
+			epoch.LengthInSlots,
+		)
+		require.NoError(t, err)
+	}
+
+	// LastActivityEpoch 0 makes the reported last-active epoch fall back
+	// to the registration epoch derived from added_slot.
+	for _, drep := range []models.Drep{
+		{Credential: bytes.Repeat([]byte{0x01}, 28), AddedSlot: 150, Active: true},
+		{Credential: bytes.Repeat([]byte{0x02}, 28), AddedSlot: 200, Active: true},
+		{Credential: bytes.Repeat([]byte{0x03}, 28), AddedSlot: 250, Active: true},
+	} {
+		_, err := store.Exec(`
+INSERT INTO drep (
+    credential, credential_tag, added_slot, last_activity_epoch, active
+) VALUES (?, ?, ?, ?, ?)`,
+			drep.Credential,
+			drep.CredentialTag,
+			drep.AddedSlot,
+			drep.LastActivityEpoch,
+			drep.Active,
+		)
+		require.NoError(t, err)
+	}
+
+	items, total, err := adapter.DReps(DRepListParams{
+		Pagination: PaginationParams{
+			Count: 100,
+			Page:  1,
+			Order: PaginationOrderAsc,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, items, 3)
+	// Rows are ordered by first on-chain appearance: slots 150, 200, 250.
+	wantEpochs := []uint64{1, 2, 2}
+	for i, item := range items {
+		require.NotNil(t, item.LastActiveEpoch, i)
+		assert.Equal(t, wantEpochs[i], *item.LastActiveEpoch, i)
+		assert.False(t, item.Retired, i)
+		assert.False(t, item.Expired, i)
+	}
+}
+
+func TestParseDRepIdentifierSpecial(t *testing.T) {
+	t.Parallel()
+
+	cred, err := parseDRepIdentifier("drep_always_abstain")
+	require.NoError(t, err)
+	require.NotNil(t, cred.Predefined)
+	assert.Equal(t, models.DrepTypeAlwaysAbstain, *cred.Predefined)
+
+	cred, err = parseDRepIdentifier("drep_always_no_confidence")
+	require.NoError(t, err)
+	require.NotNil(t, cred.Predefined)
+	assert.Equal(t, models.DrepTypeAlwaysNoConfidence, *cred.Predefined)
+}
+
+// TestHandleDRepCIP129ScriptIdentifier verifies script DRep IDs keep their
+// credential type when the HTTP handler passes them to the node adapter.
+func TestHandleDRepCIP129ScriptIdentifier(t *testing.T) {
+	t.Parallel()
+
+	const drepID = "drep1yvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq770f95"
+	const drepHex = "00000000000000000000000000000000000000000000000000000000"
+
+	mock := &mockNode{
+		drep: DRepInfo{
+			DRepID:    drepID,
+			Hex:       drepHex,
+			HasScript: true,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/governance/dreps/"+drepID,
+		nil,
+	)
+	req.SetPathValue("drep_id", drepID)
+	w := httptest.NewRecorder()
+	b.handleDRep(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, mock.drepCredential.HasScript)
+	assert.True(t, mock.drepCredential.CredentialTagKnown)
+	assert.Equal(
+		t,
+		make([]byte, drepCredentialHashLen),
+		mock.drepCredential.Hash,
+	)
+}
+
+// TestParseDRepIdentifierCIP129CredentialType verifies CIP-129 DRep IDs
+// decode the credential type from the bech32 payload header.
+func TestParseDRepIdentifierCIP129CredentialType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		id            string
+		wantHasScript bool
+	}{
+		{
+			name:          "key",
+			id:            "drep1ygqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7vlc9n",
+			wantHasScript: false,
+		},
+		{
+			name:          "script",
+			id:            "drep1yvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq770f95",
+			wantHasScript: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			credential, err := parseDRepIdentifier(tc.id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.id, credential.ID)
+			assert.Equal(
+				t,
+				make([]byte, drepCredentialHashLen),
+				credential.Hash,
+			)
+			assert.Equal(t, tc.wantHasScript, credential.HasScript)
+			assert.True(t, credential.CredentialTagKnown)
+		})
+	}
+}
+
+// TestParseDRepIdentifierHexIsAmbiguous verifies raw hash identifiers remain
+// untyped so lookup can deliberately fall back across key/script tags.
+func TestParseDRepIdentifierHexIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	const drepHex = "00000000000000000000000000000000000000000000000000000000"
+
+	credential, err := parseDRepIdentifier(drepHex)
+	require.NoError(t, err)
+	assert.Equal(t, drepHex, credential.ID)
+	assert.Equal(t, make([]byte, drepCredentialHashLen), credential.Hash)
+	assert.False(t, credential.HasScript)
+	assert.False(t, credential.CredentialTagKnown)
 }
 
 func TestHandleDRepInvalidIdentifier(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -768,6 +1759,8 @@ func TestHandleDRepInvalidIdentifier(t *testing.T) {
 }
 
 func TestHandleDRepNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		drepErr: ErrDRepNotFound,
 	}
@@ -796,6 +1789,8 @@ func TestHandleDRepNotFound(t *testing.T) {
 }
 
 func TestHandleLatestBlockError(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		blockErr: assert.AnError,
 	}
@@ -827,43 +1822,41 @@ func TestHandleLatestBlockError(t *testing.T) {
 }
 
 func TestHandlePoolsExtended(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		pools: []PoolExtendedInfo{
 			{
 				PoolID:         "pool1zzz",
 				Hex:            "ff",
-				VrfKey:         "vrf2",
 				ActiveStake:    "200",
 				LiveStake:      "300",
+				BlocksMinted:   7,
+				LiveSaturation: 0.8,
 				DeclaredPledge: "400",
 				FixedCost:      "500",
 				MarginCost:     0.2,
-				Relays: []PoolRelayInfo{
-					{
-						IPv4: "192.168.0.1",
-						DNS:  "relay-two.example",
-						Port: new(3002),
-					},
-				},
+				// No registered metadata anchor: pool_list_extended
+				// requires the metadata key to be present as null.
+				Metadata: nil,
 			},
 			{
 				PoolID:         "pool1aaa",
 				Hex:            "01",
-				VrfKey:         "vrf1",
 				ActiveStake:    "20",
 				LiveStake:      "30",
+				BlocksMinted:   69,
+				LiveSaturation: 0.93,
 				DeclaredPledge: "40",
 				FixedCost:      "50",
 				MarginCost:     0.1,
-				Relays: []PoolRelayInfo{
-					{
-						IPv6: "2001:db8::1",
-						DNS:  "relay-one.example",
-						Port: new(3001),
-					},
-					{
-						DNS: "relay-no-port.example",
-					},
+				Metadata: &PoolExtendedMetadataInfo{
+					URL:         new("https://stakenuts.com/mainnet.json"),
+					Hash:        new("47c0c68c"),
+					Ticker:      new("NUTS"),
+					Name:        new("Stake Nuts"),
+					Description: new("The best pool ever"),
+					Homepage:    new("https://stakentus.com/"),
 				},
 			},
 		},
@@ -890,32 +1883,58 @@ func TestHandlePoolsExtended(t *testing.T) {
 		w.Header().Get("X-Pagination-Page-Total"),
 	)
 
+	// Capture the body before decoding: the raw-JSON assertions at the end
+	// of this test need it, and a json.Decoder over w.Body would drain it.
+	body := w.Body.Bytes()
+
 	var resp []PoolExtendedResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
+	err := json.Unmarshal(body, &resp)
 	require.NoError(t, err)
 	require.Len(t, resp, 1)
 	assert.Equal(t, "pool1aaa", resp[0].PoolID)
 	assert.Equal(t, "01", resp[0].Hex)
-	assert.Equal(t, "vrf1", resp[0].VrfKey)
 	assert.Equal(t, "20", resp[0].ActiveStake)
 	assert.Equal(t, "30", resp[0].LiveStake)
+	assert.Equal(t, uint64(69), resp[0].BlocksMinted)
+	assert.InDelta(t, 0.93, resp[0].LiveSaturation, 0.0001)
 	assert.Equal(t, "40", resp[0].DeclaredPledge)
 	assert.Equal(t, "50", resp[0].FixedCost)
 	assert.InDelta(t, 0.1, resp[0].MarginCost, 0.0001)
-	require.Len(t, resp[0].Relays, 2)
-	assert.Nil(t, resp[0].Relays[0].IPv4)
-	require.NotNil(t, resp[0].Relays[0].IPv6)
-	assert.Equal(t, "2001:db8::1", *resp[0].Relays[0].IPv6)
-	require.NotNil(t, resp[0].Relays[0].DNS)
-	assert.Equal(t, "relay-one.example", *resp[0].Relays[0].DNS)
-	require.NotNil(t, resp[0].Relays[0].Port)
-	assert.Equal(t, 3001, *resp[0].Relays[0].Port)
-	require.NotNil(t, resp[0].Relays[1].DNS)
-	assert.Equal(t, "relay-no-port.example", *resp[0].Relays[1].DNS)
-	assert.Nil(t, resp[0].Relays[1].Port)
+	// pool_list_extended requires metadata; a registered anchor with a
+	// successfully fetched document populates all six nullable fields
+	// and carries no error object.
+	require.NotNil(t, resp[0].Metadata)
+	require.NotNil(t, resp[0].Metadata.URL)
+	assert.Equal(
+		t,
+		"https://stakenuts.com/mainnet.json",
+		*resp[0].Metadata.URL,
+	)
+	require.NotNil(t, resp[0].Metadata.Hash)
+	assert.Equal(t, "47c0c68c", *resp[0].Metadata.Hash)
+	require.NotNil(t, resp[0].Metadata.Ticker)
+	assert.Equal(t, "NUTS", *resp[0].Metadata.Ticker)
+	require.NotNil(t, resp[0].Metadata.Name)
+	assert.Equal(t, "Stake Nuts", *resp[0].Metadata.Name)
+	require.NotNil(t, resp[0].Metadata.Description)
+	assert.Equal(t, "The best pool ever", *resp[0].Metadata.Description)
+	require.NotNil(t, resp[0].Metadata.Homepage)
+	assert.Equal(t, "https://stakentus.com/", *resp[0].Metadata.Homepage)
+	assert.Nil(t, resp[0].Metadata.Error)
+
+	// vrf_key and relays are not part of pool_list_extended and must not
+	// be emitted. Assert on the raw JSON, since the typed struct can no
+	// longer express them.
+	var raw []map[string]any
+	require.NoError(t, json.Unmarshal(body, &raw))
+	require.Len(t, raw, 1)
+	assert.NotContains(t, raw[0], "vrf_key")
+	assert.NotContains(t, raw[0], "relays")
 }
 
 func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -942,6 +1961,8 @@ func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
 }
 
 func TestHandlePoolsExtendedError(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		poolsErr: assert.AnError,
 	}
@@ -973,6 +1994,8 @@ func TestHandlePoolsExtendedError(t *testing.T) {
 }
 
 func TestHandleLatestBlockTxs(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		txHashes: []string{"tx1", "tx2", "tx3"},
 	}
@@ -999,6 +2022,8 @@ func TestHandleLatestBlockTxs(t *testing.T) {
 }
 
 func TestHandleLatestBlockTxsEmpty(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		txHashes: nil,
 	}
@@ -1023,17 +2048,21 @@ func TestHandleLatestBlockTxsEmpty(t *testing.T) {
 }
 
 func TestHandleTransaction(t *testing.T) {
+	t.Parallel()
+
 	invalidBefore := "100"
 	invalidHereafter := "200"
 	mock := &mockNode{
 		transaction: TransactionInfo{
-			Hash:             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			Block:            "blockhash1",
-			Slot:             123,
-			BlockHeight:      45,
-			BlockTime:        1700000000,
-			Index:            2,
-			OutputAmount:     []AddressAmountInfo{{Unit: "lovelace", Quantity: "5000"}},
+			Hash:        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Block:       "blockhash1",
+			Slot:        123,
+			BlockHeight: 45,
+			BlockTime:   1700000000,
+			Index:       2,
+			OutputAmount: []AddressAmountInfo{
+				{Unit: "lovelace", Quantity: "5000"},
+			},
 			Fees:             "170000",
 			Deposit:          "0",
 			TreasuryDonation: "12345",
@@ -1084,6 +2113,8 @@ func TestHandleTransaction(t *testing.T) {
 }
 
 func TestHandleTransactionInvalidHash(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -1102,6 +2133,8 @@ func TestHandleTransactionInvalidHash(t *testing.T) {
 }
 
 func TestHandleTransactionNotFound(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionErr: ErrTransactionNotFound,
 	})
@@ -1125,6 +2158,8 @@ func TestHandleTransactionNotFound(t *testing.T) {
 }
 
 func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionSubmitErr: ErrMempoolUnavailable,
 	})
@@ -1147,6 +2182,8 @@ func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
 }
 
 func TestHandleTransactionSubmitMempoolFull(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionSubmitErr: ErrMempoolFull,
 	})
@@ -1169,6 +2206,8 @@ func TestHandleTransactionSubmitMempoolFull(t *testing.T) {
 }
 
 func TestHandleTransactionSubmitErrors(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		contentType string
@@ -1239,6 +2278,8 @@ func TestHandleTransactionSubmitErrors(t *testing.T) {
 }
 
 func TestHandleTransactionCBOR(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionCBOR: []byte{0x84, 0x01, 0x02, 0xf5, 0xf6},
 	})
@@ -1262,6 +2303,8 @@ func TestHandleTransactionCBOR(t *testing.T) {
 }
 
 func TestHandleTransactionSubEndpointNotFound(t *testing.T) {
+	t.Parallel()
+
 	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	tests := []struct {
 		name      string
@@ -1375,12 +2418,18 @@ func TestHandleTransactionSubEndpointNotFound(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 			assert.Equal(t, "Not Found", resp.Error)
-			assert.Equal(t, "The requested transaction could not be found.", resp.Message)
+			assert.Equal(
+				t,
+				"The requested transaction could not be found.",
+				resp.Message,
+			)
 		})
 	}
 }
 
 func TestHandleTransactionMetadata(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionMetadata: []TransactionMetadataInfo{
 			{
@@ -1411,6 +2460,8 @@ func TestHandleTransactionMetadata(t *testing.T) {
 }
 
 func TestHandleTransactionMetadataCBOR(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionMetadataCBOR: []TransactionMetadataCBORInfo{
 			{Label: "721", CBORMetadata: "a1646e616d65636e6674"},
@@ -1440,6 +2491,8 @@ func TestHandleTransactionMetadataCBOR(t *testing.T) {
 }
 
 func TestHandleTransactionUTXOs(t *testing.T) {
+	t.Parallel()
+
 	ref := true
 	b := newTestBlockfrost(&mockNode{
 		transactionUTXOs: TransactionUTXOsInfo{
@@ -1449,15 +2502,19 @@ func TestHandleTransactionUTXOs(t *testing.T) {
 					Address:     "addr_test1input",
 					TxHash:      "prevtx",
 					OutputIndex: 1,
-					Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "10"}},
-					Reference:   &ref,
+					Amount: []AddressAmountInfo{
+						{Unit: "lovelace", Quantity: "10"},
+					},
+					Reference: &ref,
 				},
 			},
 			Outputs: []TransactionOutputInfo{
 				{
 					Address:     "addr_test1output",
 					OutputIndex: 0,
-					Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "5"}},
+					Amount: []AddressAmountInfo{
+						{Unit: "lovelace", Quantity: "5"},
+					},
 				},
 			},
 		},
@@ -1489,6 +2546,8 @@ func TestHandleTransactionUTXOs(t *testing.T) {
 }
 
 func TestHandleTransactionDelegations(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionDelegations: []TransactionDelegationInfo{
 			{
@@ -1525,6 +2584,8 @@ func TestHandleTransactionDelegations(t *testing.T) {
 }
 
 func TestHandleTransactionRedeemers(t *testing.T) {
+	t.Parallel()
+
 	datumHash := "923918e403bf43c34b4ef6b48eb2ee04babed17320d8d1b9ff9ad086e86f44ec"
 	b := newTestBlockfrost(&mockNode{
 		transactionRedeemers: []TransactionRedeemerInfo{
@@ -1561,14 +2622,24 @@ func TestHandleTransactionRedeemers(t *testing.T) {
 	assert.Equal(t, datumHash, *resp[0].DatumHash)
 	assert.Equal(t, 0, resp[0].TxIndex)
 	assert.Equal(t, "spend", resp[0].Purpose)
-	assert.Equal(t, "f00dbeef00112233445566778899aabbccddeeff0011223344556677", resp[0].ScriptHash)
-	assert.Equal(t, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", resp[0].RedeemerDataHash)
+	assert.Equal(
+		t,
+		"f00dbeef00112233445566778899aabbccddeeff0011223344556677",
+		resp[0].ScriptHash,
+	)
+	assert.Equal(
+		t,
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		resp[0].RedeemerDataHash,
+	)
 	assert.Equal(t, "1700", resp[0].UnitMem)
 	assert.Equal(t, "200000", resp[0].UnitSteps)
 	assert.Equal(t, "172345", resp[0].Fee)
 }
 
 func TestHandleTransactionStakeAddresses(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionStakes: []TransactionStakeAddressInfo{
 			{
@@ -1600,6 +2671,8 @@ func TestHandleTransactionStakeAddresses(t *testing.T) {
 }
 
 func TestHandleLatestEpoch(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		epoch: EpochInfo{
 			Epoch:          100,
@@ -1634,6 +2707,8 @@ func TestHandleLatestEpoch(t *testing.T) {
 }
 
 func TestHandleLatestEpochParams(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		params: ProtocolParamsInfo{
 			Epoch:               100,
@@ -1692,6 +2767,8 @@ func TestHandleLatestEpochParams(t *testing.T) {
 }
 
 func TestHandleEpochParams(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		epochParams: ProtocolParamsInfo{
 			Epoch:               42,
@@ -1745,6 +2822,8 @@ func TestHandleEpochParams(t *testing.T) {
 }
 
 func TestHandleEpochParamsInvalidEpoch(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -1768,6 +2847,8 @@ func TestHandleEpochParamsInvalidEpoch(t *testing.T) {
 }
 
 func TestHandleEpochParamsNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		epochParamsErr: ErrEpochNotFound,
 	}
@@ -1792,16 +2873,21 @@ func TestHandleEpochParamsNotFound(t *testing.T) {
 }
 
 func TestHandleAccount(t *testing.T) {
+	t.Parallel()
+
+	drepID := "drep1xyz"
 	mock := &mockNode{
 		account: AccountInfo{
 			StakeAddress:       "stake_test1",
 			Active:             true,
 			ControlledAmount:   "123",
 			RewardsSum:         "10",
-			WithdrawalsSum:     "0",
-			ReservesSum:        "0",
-			TreasurySum:        "0",
+			WithdrawalsSum:     "45",
+			ReservesSum:        "6",
+			TreasurySum:        "7",
 			WithdrawableAmount: "10",
+			DrepID:             &drepID,
+			Registered:         true,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -1824,10 +2910,51 @@ func TestHandleAccount(t *testing.T) {
 	assert.True(t, resp.Active)
 	assert.Equal(t, "123", resp.ControlledAmount)
 	assert.Equal(t, "10", resp.RewardsSum)
+	assert.Equal(t, "45", resp.WithdrawalsSum)
+	assert.Equal(t, "6", resp.ReservesSum)
+	assert.Equal(t, "7", resp.TreasurySum)
 	assert.Equal(t, "10", resp.WithdrawableAmount)
+	require.NotNil(t, resp.DrepID)
+	assert.Equal(t, "drep1xyz", *resp.DrepID)
+	assert.True(t, resp.Registered)
+
+	// The OpenAPI 0.1.88 account_content schema requires these field
+	// names; assert the marshaled key set exposes them.
+	assertJSONKeys(t, resp, []string{
+		"stake_address",
+		"active",
+		"active_epoch",
+		"controlled_amount",
+		"rewards_sum",
+		"withdrawals_sum",
+		"reserves_sum",
+		"treasury_sum",
+		"withdrawable_amount",
+		"pool_id",
+		"drep_id",
+		"registered",
+	})
+}
+
+// assertJSONKeys marshals v and asserts that the resulting JSON object's keys
+// exactly match want. It is used to pin Blockfrost response structs to the
+// field set defined by the Blockfrost OpenAPI schema.
+func assertJSONKeys(t *testing.T, v any, want []string) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	require.NoError(t, err)
+	var obj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &obj))
+	got := make([]string, 0, len(obj))
+	for k := range obj {
+		got = append(got, k)
+	}
+	assert.ElementsMatch(t, want, got)
 }
 
 func TestHandleAccountInvalidStakeAddress(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		accountErr: ErrInvalidStakeAddress,
 	}
@@ -1852,6 +2979,8 @@ func TestHandleAccountInvalidStakeAddress(t *testing.T) {
 }
 
 func TestHandleAccountNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		accountErr: models.ErrAccountNotFound,
 	}
@@ -1870,6 +2999,8 @@ func TestHandleAccountNotFound(t *testing.T) {
 }
 
 func TestHandleAccountAssociatedAddresses(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		addresses: []AccountAssociatedAddressInfo{
 			{Address: "addr_test1"},
@@ -1899,6 +3030,8 @@ func TestHandleAccountAssociatedAddresses(t *testing.T) {
 }
 
 func TestHandleAccountDelegationHistory(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		delegations: []AccountDelegationHistoryInfo{
 			{
@@ -1906,12 +3039,18 @@ func TestHandleAccountDelegationHistory(t *testing.T) {
 				TxHash:      "tx1",
 				Amount:      "0",
 				PoolID:      "pool1",
+				TxSlot:      100,
+				BlockTime:   1000,
+				BlockHeight: 10,
 			},
 			{
 				ActiveEpoch: 2,
 				TxHash:      "tx2",
 				Amount:      "0",
 				PoolID:      "pool2",
+				TxSlot:      200,
+				BlockTime:   2000,
+				BlockHeight: 20,
 			},
 		},
 	}
@@ -1935,13 +3074,43 @@ func TestHandleAccountDelegationHistory(t *testing.T) {
 	assert.Equal(t, int32(2), resp[0].ActiveEpoch)
 	assert.Equal(t, "tx2", resp[0].TxHash)
 	assert.Equal(t, "pool2", resp[0].PoolID)
+	assert.Equal(t, int64(200), resp[0].TxSlot)
+	assert.Equal(t, int64(2000), resp[0].BlockTime)
+	assert.Equal(t, int64(20), resp[0].BlockHeight)
+
+	// OpenAPI 0.1.88 account_delegation_content required field names.
+	assertJSONKeys(t, resp[0], []string{
+		"active_epoch",
+		"tx_hash",
+		"amount",
+		"pool_id",
+		"tx_slot",
+		"block_time",
+		"block_height",
+	})
 }
 
 func TestHandleAccountRegistrationHistory(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		regs: []AccountRegistrationHistoryInfo{
-			{TxHash: "tx1", Action: "registered"},
-			{TxHash: "tx2", Action: "deregistered"},
+			{
+				TxHash:      "tx1",
+				Action:      "registered",
+				Deposit:     "2000000",
+				TxSlot:      100,
+				BlockTime:   1000,
+				BlockHeight: 10,
+			},
+			{
+				TxHash:      "tx2",
+				Action:      "deregistered",
+				Deposit:     "2000000",
+				TxSlot:      200,
+				BlockTime:   2000,
+				BlockHeight: 20,
+			},
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -1963,9 +3132,25 @@ func TestHandleAccountRegistrationHistory(t *testing.T) {
 	require.Len(t, resp, 2)
 	assert.Equal(t, "registered", resp[0].Action)
 	assert.Equal(t, "deregistered", resp[1].Action)
+	assert.Equal(t, "2000000", resp[0].Deposit)
+	assert.Equal(t, int64(100), resp[0].TxSlot)
+	assert.Equal(t, int64(1000), resp[0].BlockTime)
+	assert.Equal(t, int64(10), resp[0].BlockHeight)
+
+	// OpenAPI 0.1.88 account_registration_content required field names.
+	assertJSONKeys(t, resp[0], []string{
+		"tx_hash",
+		"action",
+		"deposit",
+		"tx_slot",
+		"block_time",
+		"block_height",
+	})
 }
 
 func TestHandleAccountRewardHistory(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		rewards: []AccountRewardHistoryInfo{
 			{Epoch: 3, Amount: "12", PoolID: "pool1"},
@@ -1993,6 +3178,8 @@ func TestHandleAccountRewardHistory(t *testing.T) {
 }
 
 func TestHandleNetwork(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		network: NetworkInfo{
 			Supply: NetworkSupplyInfo{
@@ -2037,6 +3224,8 @@ func TestHandleNetwork(t *testing.T) {
 }
 
 func TestHandleNetworkEras(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		networkEras: []NetworkEraInfo{
 			{
@@ -2087,6 +3276,8 @@ func TestHandleNetworkEras(t *testing.T) {
 }
 
 func TestHandleGenesis(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		genesis: GenesisInfo{
 			ActiveSlotsCoefficient: 0.05,
@@ -2122,6 +3313,8 @@ func TestHandleGenesis(t *testing.T) {
 }
 
 func TestStopIdempotent(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -2136,6 +3329,8 @@ func TestStopIdempotent(t *testing.T) {
 }
 
 func TestNilLogger(t *testing.T) {
+	t.Parallel()
+
 	b := New(
 		BlockfrostConfig{ListenAddress: ":0"},
 		&mockNode{},
@@ -2145,6 +3340,8 @@ func TestNilLogger(t *testing.T) {
 }
 
 func TestDefaultListenAddress(t *testing.T) {
+	t.Parallel()
+
 	b := New(
 		BlockfrostConfig{},
 		&mockNode{},
@@ -2153,7 +3350,397 @@ func TestDefaultListenAddress(t *testing.T) {
 	assert.Equal(t, ":3000", b.config.ListenAddress)
 }
 
+func TestParseAddressOrPaymentCred(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input string
+		// wantType is asserted when non-nil.
+		wantType *uint8
+		// wantStakeAddress is asserted when non-empty.
+		wantStakeAddress string
+		wantPaymentCred  bool
+		// wantNilStakeAddress asserts StakeAddress() is nil.
+		wantNilStakeAddress bool
+		wantErr             bool
+	}{
+		{
+			name:                "CIP-5 payment key hash credential",
+			input:               "addr_vkh1x0ph3nhyrvhpttyy3alk78f00q244vfdjwm38h5f3kz47kpgum5",
+			wantPaymentCred:     true,
+			wantType:            new(uint8(lcommon.AddressTypeKeyNone)),
+			wantNilStakeAddress: true,
+		},
+		{
+			name:            "CIP-5 script hash credential",
+			input:           "script1tx3c5y302fupjrm0xs3skumkaw97h2le97rjgrfzw8spydzr5ej",
+			wantPaymentCred: true,
+			wantType:        new(uint8(lcommon.AddressTypeScriptNone)),
+		},
+		{
+			// Full base address still parses through the normal path.
+			name:             "full base address",
+			input:            "addr_test1qprwyxzmswhtjstxvj7epjc28gskffsqcxuurx80qrjdy3uayerntq74us2hsgxymgk3f5nka58z46zcqgctv9c05ctq8g0qn7",
+			wantPaymentCred:  false,
+			wantStakeAddress: "stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
+		},
+		{
+			// Garbage input fails despite decoding as base58 bytes.
+			name:    "garbage input",
+			input:   "addr1stonks",
+			wantErr: true,
+		},
+		{
+			// Stake addresses have no payment part and are rejected.
+			name:    "stake address has no payment part",
+			input:   "stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, isPaymentCred, err := parseAddressOrPaymentCred(
+				tc.input,
+			)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPaymentCred, isPaymentCred)
+			if tc.wantType != nil {
+				assert.Equal(t, *tc.wantType, addr.Type())
+			}
+			if tc.wantNilStakeAddress {
+				assert.Nil(t, addr.StakeAddress())
+			}
+			if tc.wantStakeAddress != "" {
+				require.NotNil(t, addr.StakeAddress())
+				assert.Equal(
+					t,
+					tc.wantStakeAddress,
+					addr.StakeAddress().String(),
+				)
+			}
+		})
+	}
+}
+
+// TestNodeAdapterAddressRejectsInvalidInput covers NodeAdapter.Address's
+// rejection paths: the network guard (queries match on bare credential hashes,
+// so a foreign-network address must not answer with this network's balances)
+// and the parse-failure path, which must keep ErrInvalidAddress for the HTTP
+// 400 mapping while retaining the underlying parse diagnostics.
+func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
+
+	adapter, _, _ := newDBBackedAdapter(t)
+	paymentKey := bytes.Repeat([]byte{0x11}, lcommon.AddressHashSize)
+
+	t.Run("foreign network", func(t *testing.T) {
+		// newDBBackedAdapter supplies no CardanoNodeConfig, so the
+		// adapter's network is testnet; a mainnet-encoded address is
+		// foreign to it.
+		mainnetAddr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkMainnet,
+			paymentKey,
+			nil,
+		)
+		require.NoError(t, err)
+
+		_, err = adapter.Address(mainnetAddr.String())
+		require.ErrorIs(t, err, ErrInvalidAddress)
+		assert.ErrorContains(t, err, "network mismatch")
+	})
+
+	t.Run("parse failure keeps diagnostics", func(t *testing.T) {
+		_, err := adapter.Address("addr1stonks")
+		require.ErrorIs(t, err, ErrInvalidAddress,
+			"the HTTP layer maps this sentinel to 400")
+		// Which diagnostic comes back depends on the first check in the
+		// decoder that rejects the input, and that moves as the decoder
+		// gains validation: gouroboros v0.191.x began rejecting the bad
+		// network ID before the round-trip check could run. What has to
+		// hold is that some diagnostic survives rather than being
+		// flattened into the bare sentinel, so assert that instead of
+		// pinning one decoder's wording.
+		// Asserting the input name or a length difference would prove
+		// nothing: Adapter.Address always wraps as `parse address %q: %w: %w`,
+		// so both hold whether or not the inner error survives. What
+		// distinguishes them is whatever follows that wrapper, so strip the
+		// part the wrapper guarantees and require something left over.
+		prefix := fmt.Sprintf(
+			"parse address %q: %s: ", "addr1stonks", ErrInvalidAddress,
+		)
+		require.True(t, strings.HasPrefix(err.Error(), prefix),
+			"unexpected wrapper shape: %s", err)
+		assert.NotEmpty(
+			t,
+			strings.TrimSpace(strings.TrimPrefix(err.Error(), prefix)),
+			"the underlying parse error is retained, not discarded",
+		)
+	})
+
+	t.Run("this network resolves to not found", func(t *testing.T) {
+		// The same credential encoded for this network passes both
+		// guards and reaches the lookup.
+		testnetAddr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			paymentKey,
+			nil,
+		)
+		require.NoError(t, err)
+		_, err = adapter.Address(testnetAddr.String())
+		require.ErrorIs(t, err, ErrAddressNotFound)
+	})
+}
+
+// TestNodeAdapterAddressPaymentCredTransactionFallback covers the
+// CountTransactionsByPaymentCred fallback: a bare payment credential whose
+// UTxOs are all spent must still resolve with a zero balance, because the
+// synthetic enterprise address alone would not match base-address history.
+func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
+	t.Parallel()
+
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+	credID, err := bech32EncodeData("addr_vkh", paymentKey)
+	require.NoError(t, err)
+
+	// No UTxOs and no transaction history: the credential is unknown.
+	_, err = adapter.Address(credID)
+	require.ErrorIs(t, err, ErrAddressNotFound)
+
+	// Spent history recorded against the payment credential (via a base
+	// address, so the synthetic enterprise form never matches) resolves
+	// with a zero lovelace balance.
+	_, err = store.Exec(`
+INSERT INTO address_transaction (
+    payment_key, staking_key, transaction_id, slot
+) VALUES (?, ?, ?, ?)`,
+		paymentKey,
+		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		1,
+		10,
+	)
+	require.NoError(t, err)
+
+	info, err := adapter.Address(credID)
+	require.NoError(t, err)
+	assert.Equal(t, credID, info.Address)
+	require.Len(t, info.Amount, 1)
+	assert.Equal(t, "lovelace", info.Amount[0].Unit)
+	assert.Equal(t, "0", info.Amount[0].Quantity)
+	assert.Equal(t, "shelley", info.Type)
+	assert.False(t, info.Script)
+	assert.Nil(t, info.StakeAddress)
+}
+
+func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
+	t.Parallel()
+
+	adapter, store, db := newDBBackedAdapter(t)
+	paymentHash := bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize)
+	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyScript,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		stakeScriptHash,
+	)
+	require.NoError(t, err)
+	utxo := models.Utxo{
+		TxId:          fill32(0x31),
+		PaymentKey:    paymentHash,
+		StakingKey:    stakeScriptHash,
+		CredentialTag: 1,
+		AddedSlot:     10,
+		Amount:        types.Uint64(1_000_000),
+	}
+	insertAdapterUtxo(t, store, &utxo)
+	storePointerOutputCbor(t, db, utxo.TxId, 0, addr, 1_000_000)
+
+	info, err := adapter.Address(addr.String())
+	require.NoError(t, err)
+	require.NotNil(t, info.StakeAddress)
+	assert.True(t, strings.HasPrefix(*info.StakeAddress, "stake_test17"))
+
+	stakeAddr, err := lcommon.NewAddress(*info.StakeAddress)
+	require.NoError(t, err)
+	assert.Equal(t, uint(lcommon.AddressNetworkTestnet), stakeAddr.NetworkId())
+	assert.Equal(t, uint8(lcommon.AddressTypeNoneScript), stakeAddr.Type())
+	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
+
+	mainnetCfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"mainnet/config.json",
+	)
+	require.NoError(t, err)
+	mainnetAdapter, mainnetStore, mainnetDB := newDBBackedAdapter(t, mainnetCfg)
+	mainnetAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyScript,
+		lcommon.AddressNetworkMainnet,
+		paymentHash,
+		stakeScriptHash,
+	)
+	require.NoError(t, err)
+	mainnetUtxo := utxo
+	insertAdapterUtxo(t, mainnetStore, &mainnetUtxo)
+	storePointerOutputCbor(t, mainnetDB, mainnetUtxo.TxId, 0, mainnetAddr, 1_000_000)
+
+	mainnetInfo, err := mainnetAdapter.Address(mainnetAddr.String())
+	require.NoError(t, err)
+	require.NotNil(t, mainnetInfo.StakeAddress)
+	assert.True(t, strings.HasPrefix(*mainnetInfo.StakeAddress, "stake17"))
+	mainnetStakeAddr, err := lcommon.NewAddress(*mainnetInfo.StakeAddress)
+	require.NoError(t, err)
+	mainnetStakeBytes, err := mainnetStakeAddr.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, uint8(0xf1), mainnetStakeBytes[0])
+
+	keyStakeHash := bytes.Repeat([]byte{0x03}, lcommon.AddressHashSize)
+	keyAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		keyStakeHash,
+	)
+	require.NoError(t, err)
+	keyUtxo := models.Utxo{
+		TxId:          fill32(0x32),
+		PaymentKey:    paymentHash,
+		StakingKey:    keyStakeHash,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		Amount:        types.Uint64(1_000_000),
+	}
+	insertAdapterUtxo(t, store, &keyUtxo)
+	storePointerOutputCbor(t, db, keyUtxo.TxId, 0, keyAddr, 1_000_000)
+
+	keyInfo, err := adapter.Address(keyAddr.String())
+	require.NoError(t, err)
+	require.NotNil(t, keyInfo.StakeAddress)
+	assert.True(t, strings.HasPrefix(*keyInfo.StakeAddress, "stake_test1u"))
+	keyStakeAddr, err := lcommon.NewAddress(*keyInfo.StakeAddress)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(lcommon.AddressTypeNoneKey), keyStakeAddr.Type())
+	assert.Equal(t, keyStakeHash, keyStakeAddr.StakeKeyHash().Bytes())
+}
+
+func TestKeyScriptStakeAddressDerivation(t *testing.T) {
+	// Keep direct coverage of the script-credential branch used when the
+	// adapter derives a stake address from a base address.
+	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
+
+	encoded, err := stakeAddressFromCredential(
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeScriptHash,
+			Credential: lcommon.CredentialHash(stakeScriptHash),
+		},
+		lcommon.AddressNetworkTestnet,
+	)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(encoded, "stake_test17"))
+
+	stakeAddr, err := lcommon.NewAddress(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
+}
+
+func TestHandleAddress(t *testing.T) {
+	t.Parallel()
+
+	stakeAddress := "stake_test1upwlsqc..."
+	mock := &mockNode{
+		addressInfo: AddressInfo{
+			Address: "addr_test1vr8nl4...",
+			Amount: []AddressAmountInfo{
+				{Unit: "lovelace", Quantity: "3000"},
+				{Unit: "policyasset", Quantity: "7"},
+			},
+			StakeAddress: &stakeAddress,
+			Type:         "shelley",
+			Script:       false,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4...",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4...")
+	w := httptest.NewRecorder()
+	b.handleAddress(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp AddressResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "addr_test1vr8nl4...", resp.Address)
+	require.Len(t, resp.Amount, 2)
+	assert.Equal(t, "lovelace", resp.Amount[0].Unit)
+	assert.Equal(t, "3000", resp.Amount[0].Quantity)
+	assert.Equal(t, "policyasset", resp.Amount[1].Unit)
+	assert.Equal(t, "7", resp.Amount[1].Quantity)
+	require.NotNil(t, resp.StakeAddress)
+	assert.Equal(t, stakeAddress, *resp.StakeAddress)
+	assert.Equal(t, "shelley", resp.Type)
+	assert.False(t, resp.Script)
+}
+
+func TestHandleAddressNotFound(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBlockfrost(&mockNode{
+		addressInfoErr: ErrAddressNotFound,
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4...",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4...")
+	w := httptest.NewRecorder()
+	b.handleAddress(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"The requested component has not been found.",
+		resp.Message,
+	)
+}
+
+func TestHandleAddressInvalidAddress(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBlockfrost(&mockNode{
+		addressInfoErr: ErrInvalidAddress,
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/not_an_address",
+		nil,
+	)
+	req.SetPathValue("address", "not_an_address")
+	w := httptest.NewRecorder()
+	b.handleAddress(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
 func TestHandleAddressUTXOs(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		addressUTXOsTotal: 2,
 		addressUTXOs: []AddressUTXOInfo{
@@ -2197,6 +3784,8 @@ func TestHandleAddressUTXOs(t *testing.T) {
 }
 
 func TestHandleAddressUTXOsInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -2215,6 +3804,8 @@ func TestHandleAddressUTXOsInvalidPagination(t *testing.T) {
 }
 
 func TestHandleAddressUTXOsInvalidAddress(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		addressUTXOsErr: ErrInvalidAddress,
 	})
@@ -2231,6 +3822,8 @@ func TestHandleAddressUTXOsInvalidAddress(t *testing.T) {
 }
 
 func TestHandleAddressTransactions(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		addressTxsTotal: 3,
 		addressTransactions: []AddressTransactionInfo{
@@ -2268,6 +3861,8 @@ func TestHandleAddressTransactions(t *testing.T) {
 }
 
 func TestHandleMetadataTransactions(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		metadataJSONTotal: 2,
 		metadataJSON: []MetadataTransactionJSONInfo{
@@ -2300,7 +3895,26 @@ func TestHandleMetadataTransactions(t *testing.T) {
 	assert.JSONEq(t, `{"name":"nft-one"}`, string(resp[0].JSONMetadata))
 }
 
+func TestHandleMetadataTransactionsKeepsUnavailableJSONAsNull(t *testing.T) {
+	t.Parallel()
+	mock := &mockNode{metadataJSONTotal: 1, metadataJSON: []MetadataTransactionJSONInfo{{
+		TxHash: "txhash-ambiguous", JSONMetadata: nil,
+	}}}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(http.MethodGet, "/api/v0/metadata/txs/labels/721", nil)
+	req.SetPathValue("label", "721")
+	w := httptest.NewRecorder()
+	b.handleMetadataTransactions(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp []MetadataTransactionJSONResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "null", string(resp[0].JSONMetadata))
+}
+
 func TestHandleMetadataTransactionsCBOR(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		metadataCBORTotal: 1,
 		metadataCBOR: []MetadataTransactionCBORInfo{
@@ -2336,6 +3950,8 @@ func TestHandleMetadataTransactionsCBOR(t *testing.T) {
 }
 
 func TestHandleMetadataTransactionsInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -2354,6 +3970,8 @@ func TestHandleMetadataTransactionsInvalidPagination(t *testing.T) {
 }
 
 func TestHandleMetadataTransactionsInvalidLabel(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,

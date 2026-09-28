@@ -15,7 +15,6 @@
 package badger
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -23,9 +22,11 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -36,15 +37,115 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// badgerEntryOverhead is what badger charges a staged entry on top of its key
+// and value bytes: the 2 meta bytes Entry.estimateSizeAndSetThreshold adds
+// and the 10 bytes Txn.checkSize adds for the key's version suffix.
+const badgerEntryOverhead = 12
+
+// badgerValuePointerSize is what badger charges instead of the value bytes
+// once a value reaches the value threshold and is stored in the value log.
+const badgerValuePointerSize = 12
+
+// badgerTxnBaseEntries and badgerTxnBaseBytes are what badger charges a
+// transaction the moment it is created: DB.newTransaction starts count at 1
+// and size at len("!badger!txn")+10, holding room for the end-of-entries
+// marker it appends at commit. A budget computed from zero would be one
+// entry too generous.
+const (
+	badgerTxnBaseEntries = 1
+	badgerTxnBaseBytes   = len("!badger!txn") + 10
+)
+
 // badgerTxn wraps a badger transaction and implements types.Txn
 type badgerTxn struct {
 	store    *BlobStoreBadger
 	tx       *badger.Txn
 	finished bool
+	// stagedEntries and stagedBytes mirror the count and size badger's own
+	// Txn.checkSize accumulates for this transaction. badger keeps those
+	// counters unexported and offers no accessor, so charging every
+	// mutation the same amount as it is issued is the only way
+	// RemainingTxnEntries can report what is left. They are atomic because
+	// a transaction handed out as a types.Txn may be read from a goroutine
+	// other than the one that staged the writes.
+	stagedEntries atomic.Int64
+	stagedBytes   atomic.Int64
 }
 
 func newBadgerTxn(store *BlobStoreBadger, tx *badger.Txn) *badgerTxn {
-	return &badgerTxn{store: store, tx: tx}
+	txn := &badgerTxn{store: store, tx: tx}
+	txn.stagedEntries.Store(badgerTxnBaseEntries)
+	txn.stagedBytes.Store(int64(badgerTxnBaseBytes))
+	return txn
+}
+
+// set stages a write and charges it against the transaction's budget.
+// Everything in this package that mutates through a badgerTxn goes through
+// set or delete, so the counters stay in step with badger's own.
+func (t *badgerTxn) set(key, val []byte) error {
+	if err := t.tx.Set(key, val); err != nil {
+		return err
+	}
+	t.charge(len(key), len(val))
+	return nil
+}
+
+// delete stages a deletion and charges it against the transaction's budget.
+// A deletion is a staged entry like any other -- it carries no value, but it
+// occupies a slot in the entry count and its key counts toward the byte
+// budget.
+func (t *badgerTxn) delete(key []byte) error {
+	if err := t.tx.Delete(key); err != nil {
+		return err
+	}
+	t.charge(len(key), 0)
+	return nil
+}
+
+func (t *badgerTxn) charge(keyLen, valLen int) {
+	t.stagedEntries.Add(1)
+	t.stagedBytes.Add(
+		badgerEntrySize(keyLen, valLen, t.store.valueThreshold),
+	)
+}
+
+// badgerEntrySize is what Txn.checkSize charges for one entry: the estimate
+// from Entry.estimateSizeAndSetThreshold plus checkSize's own per-entry
+// version allowance. A value at or above the value threshold lives in the
+// value log, so badger charges a pointer for it rather than its bytes.
+func badgerEntrySize(keyLen, valLen int, valueThreshold int64) int64 {
+	if int64(valLen) < valueThreshold {
+		return int64(keyLen) + int64(valLen) + badgerEntryOverhead
+	}
+	return int64(keyLen) + badgerValuePointerSize + badgerEntryOverhead
+}
+
+// RemainingTxnEntries implements blob.TxnBudget. See that interface for why
+// a caller staging a bulk delete has to ask.
+func (d *BlobStoreBadger) RemainingTxnEntries(
+	txn types.Txn,
+	entryBytes int,
+) (int, bool) {
+	badgerTxn, err := d.validateTxn(txn)
+	if err != nil {
+		return 0, false
+	}
+	db := d.DB()
+	if db == nil {
+		return 0, false
+	}
+	// checkSize rejects the entry that would *reach* either limit, so the
+	// last entry this transaction can still accept is one below each.
+	byCount := db.MaxBatchCount() - 1 - badgerTxn.stagedEntries.Load()
+	// An entry never costs less than its overhead, so a zero or negative
+	// entryBytes cannot make the byte budget look unlimited.
+	perEntry := max(int64(entryBytes), 0) + badgerEntryOverhead
+	byBytes := (db.MaxBatchSize() - 1 - badgerTxn.stagedBytes.Load()) /
+		perEntry
+	remaining := max(min(byCount, byBytes), 0)
+	// Clamped so the conversion cannot wrap on a 32-bit platform.
+	remaining = min(remaining, math.MaxInt)
+	return int(remaining), true
 }
 
 // validateTxn validates a types.Txn for this BlobStore and returns the
@@ -154,10 +255,6 @@ type badgerItem struct {
 	item *badger.Item
 }
 
-var blockMetadataBinaryMagic = [4]byte{'D', 'B', 'M', '1'}
-
-const blockMetadataPrevHashMaxLen = 32
-
 func buildBlockBlobKey(dst []byte, slot uint64, hash []byte) {
 	copy(dst, types.BlockBlobKeyPrefix)
 	binary.BigEndian.PutUint64(
@@ -180,54 +277,21 @@ func buildBlockBlobMetadataKey(dst []byte, baseKey []byte) {
 	copy(dst[len(baseKey):], types.BlockBlobMetadataKeySuffix)
 }
 
+// marshalBlockMetadataInto and unmarshalBlockMetadata delegate to
+// database/types. The encoding is not private to this plugin: the value
+// sits at a shared BlockBlobMetadataKey that generic database code reads
+// directly, and which of the two encodings is there depends on the
+// writing node's configuration, so the codec has to be shared with every
+// reader.
 func marshalBlockMetadataInto(
 	dst []byte,
 	metadata types.BlockMetadata,
 ) error {
-	prevHashLen := len(metadata.PrevHash)
-	if prevHashLen > blockMetadataPrevHashMaxLen {
-		return fmt.Errorf(
-			"invalid block metadata prev hash length: %d",
-			prevHashLen,
-		)
-	}
-	copy(dst[:4], blockMetadataBinaryMagic[:])
-	binary.BigEndian.PutUint64(dst[4:12], metadata.ID)
-	binary.BigEndian.PutUint64(dst[12:20], uint64(metadata.Type))
-	binary.BigEndian.PutUint64(dst[20:28], metadata.Height)
-	binary.BigEndian.PutUint32(
-		dst[28:32],
-		uint32(prevHashLen),
-	)
-	copy(dst[32:], metadata.PrevHash)
-	return nil
+	return types.MarshalBlockMetadataInto(dst, metadata)
 }
 
 func unmarshalBlockMetadata(data []byte) (types.BlockMetadata, error) {
-	if len(data) >= 32 && bytes.Equal(data[:4], blockMetadataBinaryMagic[:]) {
-		prevHashLen := binary.BigEndian.Uint32(data[28:32])
-		expectedLen := 32 + int(prevHashLen)
-		if len(data) != expectedLen {
-			return types.BlockMetadata{}, fmt.Errorf(
-				"invalid block metadata length: got %d, want %d",
-				len(data),
-				expectedLen,
-			)
-		}
-		prevHash := make([]byte, prevHashLen)
-		copy(prevHash, data[32:])
-		return types.BlockMetadata{
-			ID:       binary.BigEndian.Uint64(data[4:12]),
-			Type:     uint(binary.BigEndian.Uint64(data[12:20])),
-			Height:   binary.BigEndian.Uint64(data[20:28]),
-			PrevHash: prevHash,
-		}, nil
-	}
-	var metadata types.BlockMetadata
-	if _, err := cbor.Decode(data, &metadata); err != nil {
-		return types.BlockMetadata{}, err
-	}
-	return metadata, nil
+	return types.UnmarshalBlockMetadata(data)
 }
 
 func (i *badgerItem) Key() []byte {
@@ -262,8 +326,13 @@ type BlobStoreBadger struct {
 	logger               *slog.Logger
 	gcTicker             *time.Ticker
 	gcStopCh             chan struct{}
+	runValueLogGC        func(float64) error
 	dataDir              string
 	gcWg                 sync.WaitGroup
+	gcMetrics            *badgerGCMetrics
+	closeOnce            sync.Once
+	closeDone            chan struct{}
+	closeErr             error
 	blockCacheSize       uint64
 	indexCacheSize       uint64
 	valueLogFileSize     int64
@@ -290,6 +359,7 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 		valueLogFileSize:   int64(DefaultValueLogFileSize),
 		memTableSize:       int64(DefaultMemTableSize),
 		valueThreshold:     int64(DefaultValueThreshold),
+		closeDone:          make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(db)
@@ -382,41 +452,95 @@ func (d *BlobStoreBadger) init() error {
 		// We do this so we don't have to add guards around every log operation
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	// Configure metrics — fall back to the default registry so that
-	// plugins created via NewFromCmdlineOptions (which does not
-	// receive a prometheus.Registerer) still export metrics.
-	if d.promRegistry == nil {
-		d.promRegistry = prometheus.DefaultRegisterer
+	// Metrics are an explicitly injected shared dependency. Transient
+	// database compositions (for example startup preflight checks) omit the
+	// registry so opening and closing them cannot leave collectors behind in
+	// the process-global registry.
+	if d.promRegistry != nil {
+		d.registerBlobMetrics()
 	}
-	d.registerBlobMetrics()
+	if d.runValueLogGC == nil {
+		d.runValueLogGC = d.DB().RunValueLogGC
+	}
 	// Configure GC
 	if d.gcEnabled {
 		d.gcTicker = time.NewTicker(5 * time.Minute)
 		d.gcStopCh = make(chan struct{})
 		d.gcWg.Add(1)
-		go d.blobGc(d.gcTicker, d.gcStopCh)
+		go d.blobGc(d.gcTicker.C, d.gcStopCh)
 	}
 	return nil
 }
 
-func (d *BlobStoreBadger) blobGc(t *time.Ticker, stop <-chan struct{}) {
+func (d *BlobStoreBadger) blobGc(
+	ticks <-chan time.Time,
+	stop <-chan struct{},
+) {
 	defer d.gcWg.Done()
 	for {
 		select {
-		case <-t.C:
-		again:
-			err := d.DB().RunValueLogGC(0.5)
-			if err != nil {
-				// Log any actual errors
-				if !errors.Is(err, badger.ErrNoRewrite) {
-					d.logger.Warn(
-						fmt.Sprintf("blob DB: GC failure: %s", err),
-						"component", "database",
+		case <-ticks:
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for {
+				var beforeLSM, beforeVlog int64
+				if d.gcMetrics != nil {
+					d.gcMetrics.attempts.Inc()
+					beforeLSM, beforeVlog = d.DB().Size()
+				}
+				gcStarted := time.Now()
+				err := d.runValueLogGC(0.5)
+				if d.gcMetrics != nil {
+					d.gcMetrics.duration.Observe(
+						time.Since(gcStarted).Seconds(),
 					)
 				}
-			} else {
-				// Run it again if it just ran successfully
-				goto again
+				if err != nil {
+					if d.gcMetrics != nil {
+						if errors.Is(err, badger.ErrNoRewrite) {
+							d.gcMetrics.noRewrite.Inc()
+						} else {
+							d.gcMetrics.errors.Inc()
+						}
+						d.gcMetrics.consecutive.Set(0)
+					}
+					// Log any actual errors
+					if !errors.Is(err, badger.ErrNoRewrite) {
+						d.logger.Warn(
+							fmt.Sprintf("blob DB: GC failure: %s", err),
+							"component", "database",
+						)
+					}
+					break
+				}
+				if d.gcMetrics != nil {
+					d.gcMetrics.successes.Inc()
+					afterLSM, afterVlog := d.DB().Size()
+					d.gcMetrics.lsmBytes.Set(float64(afterLSM))
+					d.gcMetrics.vlogBytes.Set(float64(afterVlog))
+					beforeSize := beforeLSM + beforeVlog
+					afterSize := afterLSM + afterVlog
+					if beforeSize > afterSize {
+						d.gcMetrics.reclaimedBytes.Set(
+							float64(beforeSize - afterSize),
+						)
+					} else {
+						d.gcMetrics.reclaimedBytes.Set(0)
+					}
+					d.gcMetrics.consecutive.Inc()
+					d.gcMetrics.lastSuccess.SetToCurrentTime()
+				}
+				// A successful rewrite normally starts another pass. Check the
+				// stop signal first so shutdown bounds the cycle to the rewrite
+				// that was already in flight.
+				select {
+				case <-stop:
+					return
+				default:
+				}
 			}
 		case <-stop:
 			return
@@ -443,22 +567,68 @@ func (d *BlobStoreBadger) Stop() error {
 
 // Close gets the database handle from our BlobStore and closes it
 func (d *BlobStoreBadger) Close() error {
-	// Stop GC ticker if it exists
-	if d.gcTicker != nil {
-		d.gcTicker.Stop()
+	return d.CloseContext(context.Background())
+}
+
+// CloseContext stops background GC and closes the database. Badger does not
+// expose cancellation for an in-flight value-log rewrite, so a deadline may
+// return before cleanup finishes. The rewrite is allowed to drain and the
+// database is then closed by the same one-time cleanup in the background.
+func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
+	d.closeOnce.Do(func() {
+		if d.closeDone == nil {
+			d.closeDone = make(chan struct{})
+		}
+		if d.gcTicker != nil {
+			d.gcTicker.Stop()
+		}
 		if d.gcStopCh != nil {
 			close(d.gcStopCh)
-			d.gcStopCh = nil
 		}
-		// Wait for GC goroutine to finish
-		d.gcWg.Wait()
-		d.gcTicker = nil
+		go func() {
+			d.gcWg.Wait()
+			if d.gcMetrics != nil && d.gcMetrics.cleanup != nil {
+				d.gcMetrics.cleanup()
+			}
+			if db := d.DB(); db != nil {
+				d.closeErr = db.Close()
+				if d.closeErr == nil && d.dataDir != "" {
+					lockDir := filepath.Join(d.dataDir, "blob")
+					if !waitForDirLockRelease(
+						lockDir, dirLockReleaseTimeout,
+					) {
+						d.logger.Warn(
+							"badger directory lock still held after close",
+							"component", "database",
+							"dir", lockDir,
+							"waited", dirLockReleaseTimeout,
+						)
+					}
+				}
+			}
+			close(d.closeDone)
+		}()
+	})
+
+	select {
+	case <-d.closeDone:
+		return d.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	db := d.DB()
-	if db == nil {
-		return nil
-	}
-	return db.Close()
+}
+
+// Closed returns a channel that is closed once CloseContext's background
+// cleanup has actually finished -- GC has drained, the underlying
+// badger.DB.Close() call has returned, and waitForDirLockRelease has seen the
+// on-disk directory lock free or given up after dirLockReleaseTimeout, logging
+// a warning. CloseContext itself may return earlier,
+// when its context's deadline expires before that cleanup completes (see its
+// doc comment); a caller that needs to know the close is actually done, for
+// example before reopening the same data directory, must wait on this channel
+// rather than on CloseContext returning.
+func (d *BlobStoreBadger) Closed() <-chan struct{} {
+	return d.closeDone
 }
 
 // DB returns the database handle
@@ -477,9 +647,46 @@ func (d *BlobStoreBadger) DiskSize() (int64, error) {
 	return lsm + vlog, nil
 }
 
-// NewTransaction creates a new badger transaction
+// Sync flushes committed writes to disk. Badger is opened with its default
+// SyncWrites=false, so a committed transaction lives in the active memtable's
+// WAL and the value log without an fsync; with a 128MiB default memtable and
+// only a few MiB of blocks per hour at chain tip, an unclean shutdown can
+// discard hours of committed blocks. badger.DB.Sync syncs both the memtable WAL
+// and the value log, which is what makes those commits recoverable on reopen.
+// It is a no-op for in-memory and read-only stores.
+func (d *BlobStoreBadger) Sync() error {
+	db := d.DB()
+	if db == nil {
+		return nil
+	}
+	if err := db.Sync(); err != nil {
+		return fmt.Errorf("badger sync: %w", err)
+	}
+	return nil
+}
+
+// NewTransaction creates a new badger transaction. A store that is closed or
+// not yet open yields a transaction reporting types.ErrBlobStoreUnavailable
+// from every operation, rather than one built from a closed *badger.DB.
+//
+// Building one from a closed DB can hang forever. badger.DB.NewTransaction
+// takes a read timestamp through oracle.readTs, which waits on the commit
+// watermark with context.Background(). Close stops that watermark's process
+// goroutine, and a Done mark still queued when the close signal arrives can
+// be dropped, because y/watermark.go selects between the mark channel and the
+// close signal and Go picks randomly when both are ready. doneUntil then
+// stays behind nextTxnTs-1 permanently and the wait has no context to cancel
+// it. See #3609.
+//
+// IsClosed narrows this window rather than eliminating it. A store closed
+// concurrently with this call already breaks the database.New contract, which
+// requires the stores to outlive Database.Close.
 func (d *BlobStoreBadger) NewTransaction(update bool) types.Txn {
-	return newBadgerTxn(d, d.DB().NewTransaction(update))
+	db := d.DB()
+	if db == nil || db.IsClosed() {
+		return newBadgerTxn(d, nil)
+	}
+	return newBadgerTxn(d, db.NewTransaction(update))
 }
 
 // Get retrieves a value from badger within a transaction
@@ -507,7 +714,7 @@ func (d *BlobStoreBadger) Set(txn types.Txn, key, val []byte) error {
 	if err != nil {
 		return err
 	}
-	return badgerTxn.tx.Set(key, val)
+	return badgerTxn.set(key, val)
 }
 
 // Delete removes a key from badger within a transaction
@@ -516,7 +723,7 @@ func (d *BlobStoreBadger) Delete(txn types.Txn, key []byte) error {
 	if err != nil {
 		return err
 	}
-	return badgerTxn.tx.Delete(key)
+	return badgerTxn.delete(key)
 }
 
 // NewIterator creates an iterator for badger within a transaction.
@@ -560,7 +767,11 @@ func (d *BlobStoreBadger) NewIterator(
 			)
 			if errors.Is(err, badger.ErrDBClosed) {
 				iter = &errorIterator{
-					err: fmt.Errorf("%w: %w", types.ErrBlobStoreUnavailable, err),
+					err: fmt.Errorf(
+						"%w: %w",
+						types.ErrBlobStoreUnavailable,
+						err,
+					),
 				}
 				return
 			}
@@ -597,12 +808,12 @@ func (d *BlobStoreBadger) SetBlock(
 	hashIndexKeyLen := len(types.BlockHashIndexKeyPrefix) + len(hash)
 	packedLen := keyLen + indexKeyLen + metadataKeyLen + hashIndexKeyLen
 	if d.compactBlockMetadata {
-		packedLen += 32 + len(prevHash)
+		packedLen += types.BlockMetadataBinarySize(prevHash)
 	}
 	packed := make([]byte, packedLen)
 	key := packed[:keyLen]
 	buildBlockBlobKey(key, slot, hash)
-	if err := badgerTxn.tx.Set(key, cborData); err != nil {
+	if err := badgerTxn.set(key, cborData); err != nil {
 		return err
 	}
 	// Block index to point key
@@ -610,7 +821,7 @@ func (d *BlobStoreBadger) SetBlock(
 	indexKeyEnd := indexKeyStart + indexKeyLen
 	indexKey := packed[indexKeyStart:indexKeyEnd]
 	buildBlockBlobIndexKey(indexKey, id)
-	if err := badgerTxn.tx.Set(indexKey, key); err != nil {
+	if err := badgerTxn.set(indexKey, key); err != nil {
 		return err
 	}
 	// Hash-to-block-key index for O(1) BlockByHash lookups
@@ -619,7 +830,7 @@ func (d *BlobStoreBadger) SetBlock(
 	hashIndexKey := packed[hashIndexStart:hashIndexEnd]
 	copy(hashIndexKey, types.BlockHashIndexKeyPrefix)
 	copy(hashIndexKey[len(types.BlockHashIndexKeyPrefix):], hash)
-	if err := badgerTxn.tx.Set(hashIndexKey, key); err != nil {
+	if err := badgerTxn.set(hashIndexKey, key); err != nil {
 		return err
 	}
 	// Block metadata by point
@@ -639,7 +850,7 @@ func (d *BlobStoreBadger) SetBlock(
 			return err
 		}
 	}
-	if err := badgerTxn.tx.Set(metadataKey, tmpMetadataBytes); err != nil {
+	if err := badgerTxn.set(metadataKey, tmpMetadataBytes); err != nil {
 		return err
 	}
 	return nil
@@ -710,20 +921,20 @@ func (d *BlobStoreBadger) DeleteBlock(
 		return err
 	}
 	key := types.BlockBlobKey(slot, hash)
-	if err := badgerTxn.tx.Delete(key); err != nil {
+	if err := badgerTxn.delete(key); err != nil {
 		return err
 	}
 	indexKey := types.BlockBlobIndexKey(id)
-	if err := badgerTxn.tx.Delete(indexKey); err != nil {
+	if err := badgerTxn.delete(indexKey); err != nil {
 		return err
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
-	if err := badgerTxn.tx.Delete(metadataKey); err != nil {
+	if err := badgerTxn.delete(metadataKey); err != nil {
 		return err
 	}
 	// Clean up hash-to-block-key index
 	hashIndexKey := types.BlockHashIndexKey(hash)
-	if err := badgerTxn.tx.Delete(hashIndexKey); err != nil {
+	if err := badgerTxn.delete(hashIndexKey); err != nil {
 		return err
 	}
 	return nil
@@ -738,9 +949,9 @@ func (d *BlobStoreBadger) DeleteBlock(
 //   - bi<id>: required by BlockByIndex (the chain iterator translates
 //     id→key here; no equivalent index exists in metadata).
 //
-//   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
-//     but on a deep chain that scan is O(N) per call — keeping the index
-//     preserves the fast path.
+//   - bh<hash>: BlockByHash resolves only through this index and treats
+//     a missing entry as a hard miss (ErrBlockNotFound), so the entry
+//     must survive tombstoning to keep the block reachable by hash.
 //
 //   - bp_metadata: kept so bark can populate models.Block.ID (and the
 //     other small metadata fields) when surfacing a CBOR fetched from
@@ -756,7 +967,7 @@ func (d *BlobStoreBadger) TombstoneBlock(
 		return err
 	}
 	key := types.BlockBlobKey(slot, hash)
-	return badgerTxn.tx.Set(key, types.BlockTombstone())
+	return badgerTxn.set(key, types.BlockTombstone())
 }
 
 // SetUtxo stores a UTxO's CBOR data
@@ -771,7 +982,7 @@ func (d *BlobStoreBadger) SetUtxo(
 		return err
 	}
 	key := types.UtxoBlobKey(txId, outputIdx)
-	return badgerTxn.tx.Set(key, cborData)
+	return badgerTxn.set(key, cborData)
 }
 
 // GetUtxo retrieves a UTxO's CBOR data
@@ -806,7 +1017,7 @@ func (d *BlobStoreBadger) DeleteUtxo(
 		return err
 	}
 	key := types.UtxoBlobKey(txId, outputIdx)
-	return badgerTxn.tx.Delete(key)
+	return badgerTxn.delete(key)
 }
 
 // SetTx stores a transaction's offset data
@@ -820,7 +1031,7 @@ func (d *BlobStoreBadger) SetTx(
 		return fmt.Errorf("SetTx: validate txn: %w", err)
 	}
 	key := types.TxBlobKey(txHash)
-	if err := badgerTxn.tx.Set(key, offsetData); err != nil {
+	if err := badgerTxn.set(key, offsetData); err != nil {
 		return fmt.Errorf("SetTx: set key %x: %w", key, err)
 	}
 	return nil
@@ -860,7 +1071,7 @@ func (d *BlobStoreBadger) DeleteTx(
 		return fmt.Errorf("DeleteTx: validate txn: %w", err)
 	}
 	key := types.TxBlobKey(txHash)
-	if err := badgerTxn.tx.Delete(key); err != nil {
+	if err := badgerTxn.delete(key); err != nil {
 		return fmt.Errorf("DeleteTx: delete key %x: %w", key, err)
 	}
 	return nil

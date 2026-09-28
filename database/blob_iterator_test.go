@@ -38,7 +38,7 @@ func newTestDBWithMode(t *testing.T, mode string) *Database {
 		DataDir:     "", // In-memory
 		StorageMode: mode,
 	}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err, "failed to create test database")
 	t.Cleanup(func() {
 		require.NoError(t, db.Close(), "failed to close test database")
@@ -75,6 +75,8 @@ func insertTestBlock(
 }
 
 func TestBlobBlockIterator_EmptyDatabase(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	iter := db.BlocksFromSlot(0)
@@ -108,6 +110,8 @@ func collectIterSlots(
 }
 
 func TestBlobBlockIterator_SlotRanges(t *testing.T) {
+	t.Parallel()
+
 	seedSlots := []uint64{10, 20, 30, 40, 50}
 
 	tests := []struct {
@@ -158,12 +162,9 @@ func TestBlobBlockIterator_SlotRanges(t *testing.T) {
 	}
 }
 
-// ptr returns a pointer to the given value.
-//
-//go:fix inline
-func ptr[T any](v T) *T { return new(v) }
-
 func TestBlobBlockIterator_Progress(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert blocks
@@ -188,11 +189,18 @@ func TestBlobBlockIterator_Progress(t *testing.T) {
 	assert.Equal(t, uint64(100), result.Slot)
 
 	current, end = iter.Progress()
-	assert.Equal(t, uint64(100), current, "current should track last yielded slot")
+	assert.Equal(
+		t,
+		uint64(100),
+		current,
+		"current should track last yielded slot",
+	)
 	assert.Equal(t, uint64(500), end, "end should remain unchanged")
 }
 
 func TestBlobBlockIterator_ProgressNoEndSlot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	iter := db.BlocksFromSlot(0)
@@ -203,6 +211,8 @@ func TestBlobBlockIterator_ProgressNoEndSlot(t *testing.T) {
 }
 
 func TestBlobBlockIterator_CloseMultipleTimes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	iter := db.BlocksFromSlot(0)
@@ -219,6 +229,8 @@ func TestBlobBlockIterator_CloseMultipleTimes(t *testing.T) {
 }
 
 func TestBlobBlockIterator_CloseWhileIterating(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert blocks
@@ -244,6 +256,8 @@ func TestBlobBlockIterator_CloseWhileIterating(t *testing.T) {
 }
 
 func TestBlobBlockIterator_CborContent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	expectedCbor := []byte{0x83, 0x01, 0x02, 0x03}
@@ -262,6 +276,8 @@ func TestBlobBlockIterator_CborContent(t *testing.T) {
 }
 
 func TestBlobBlockIterator_EmptyRange(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert blocks outside the requested range
@@ -278,6 +294,8 @@ func TestBlobBlockIterator_EmptyRange(t *testing.T) {
 }
 
 func TestBlobBlockIterator_SingleBlock(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	hash := randomHash(t)
@@ -301,6 +319,8 @@ func TestBlobBlockIterator_SingleBlock(t *testing.T) {
 }
 
 func TestBlobBlockIterator_MultiBatchResume(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert more blocks than blobIteratorBatchSize (1000) to
@@ -339,6 +359,8 @@ func TestBlobBlockIterator_MultiBatchResume(t *testing.T) {
 }
 
 func TestBlobBlockIterator_MaxEndSlot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	hash := randomHash(t)

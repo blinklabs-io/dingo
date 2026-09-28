@@ -332,7 +332,9 @@ func (m *mithrilSyncMetrics) recordDownloadProgress(
 	m.downloadBytesPerSecond.Set(p.BytesPerSecond)
 }
 
-func (m *mithrilSyncMetrics) recordSnapshot(snapshot *mithril.SnapshotListItem) {
+func (m *mithrilSyncMetrics) recordSnapshot(
+	snapshot *mithril.SnapshotListItem,
+) {
 	if m == nil || snapshot == nil {
 		return
 	}
@@ -420,21 +422,34 @@ func (m *mithrilSyncMetrics) recordBackfillProgress(
 	m.backfillStageDuration.WithLabelValues("checkpoint_write").
 		Set(stats.CheckpointWrites.Seconds())
 
-	m.backfillIntervalCounts.WithLabelValues("blocks").Set(float64(stats.Blocks))
+	m.backfillIntervalCounts.WithLabelValues("blocks").
+		Set(float64(stats.Blocks))
 	m.backfillIntervalCounts.WithLabelValues("txs").Set(float64(stats.Txs))
 	m.backfillIntervalCounts.WithLabelValues("utxos").Set(float64(stats.Utxos))
-	m.backfillIntervalCounts.WithLabelValues("input_refs").Set(float64(stats.InputRefs))
-	m.backfillIntervalCounts.WithLabelValues("address_txs").Set(float64(stats.AddressTxs))
-	m.backfillIntervalCounts.WithLabelValues("witnesses").Set(float64(stats.Witnesses))
-	m.backfillIntervalCounts.WithLabelValues("witness_scripts").Set(float64(stats.WitnessScripts))
-	m.backfillIntervalCounts.WithLabelValues("scripts").Set(float64(stats.Scripts))
-	m.backfillIntervalCounts.WithLabelValues("plutus_data").Set(float64(stats.PlutusData))
-	m.backfillIntervalCounts.WithLabelValues("redeemers").Set(float64(stats.Redeemers))
-	m.backfillIntervalCounts.WithLabelValues("utxo_spends").Set(float64(stats.UtxoSpends))
-	m.backfillIntervalCounts.WithLabelValues("collateral_returns").Set(float64(stats.CollateralRets))
-	m.backfillIntervalCounts.WithLabelValues("certificates").Set(float64(stats.Certificates))
-	m.backfillIntervalCounts.WithLabelValues("metadata_labels").Set(float64(stats.MetadataLabels))
-	m.backfillIntervalCounts.WithLabelValues("pparam_updates").Set(float64(stats.PParamUpdates))
+	m.backfillIntervalCounts.WithLabelValues("input_refs").
+		Set(float64(stats.InputRefs))
+	m.backfillIntervalCounts.WithLabelValues("address_txs").
+		Set(float64(stats.AddressTxs))
+	m.backfillIntervalCounts.WithLabelValues("witnesses").
+		Set(float64(stats.Witnesses))
+	m.backfillIntervalCounts.WithLabelValues("witness_scripts").
+		Set(float64(stats.WitnessScripts))
+	m.backfillIntervalCounts.WithLabelValues("scripts").
+		Set(float64(stats.Scripts))
+	m.backfillIntervalCounts.WithLabelValues("plutus_data").
+		Set(float64(stats.PlutusData))
+	m.backfillIntervalCounts.WithLabelValues("redeemers").
+		Set(float64(stats.Redeemers))
+	m.backfillIntervalCounts.WithLabelValues("utxo_spends").
+		Set(float64(stats.UtxoSpends))
+	m.backfillIntervalCounts.WithLabelValues("collateral_returns").
+		Set(float64(stats.CollateralRets))
+	m.backfillIntervalCounts.WithLabelValues("certificates").
+		Set(float64(stats.Certificates))
+	m.backfillIntervalCounts.WithLabelValues("metadata_labels").
+		Set(float64(stats.MetadataLabels))
+	m.backfillIntervalCounts.WithLabelValues("pparam_updates").
+		Set(float64(stats.PParamUpdates))
 	m.backfillIntervalCounts.WithLabelValues("blob_tx_offset_writes").
 		Set(float64(stats.BlobTxOffsetWrites))
 	m.backfillIntervalCounts.WithLabelValues("blob_utxo_offset_writes").
@@ -444,7 +459,9 @@ func (m *mithrilSyncMetrics) recordBackfillProgress(
 }
 
 // recordIndexRebuildDuration records the elapsed time for deferred-index rebuild.
-func (m *mithrilSyncMetrics) recordIndexRebuildDuration(duration time.Duration) {
+func (m *mithrilSyncMetrics) recordIndexRebuildDuration(
+	duration time.Duration,
+) {
 	if m == nil {
 		return
 	}

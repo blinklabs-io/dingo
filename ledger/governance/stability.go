@@ -40,6 +40,7 @@ type StabilityCheckInputs struct {
 	DB                      *database.Database
 	Txn                     *database.Txn
 	CurrentEpoch            uint64
+	DelegatorInactivityOn   bool
 	PParams                 lcommon.ProtocolParameters
 	ConwayGenesis           *conway.ConwayGenesis
 	OnProposalDecodeFailure func(proposal *models.GovernanceProposal, err error)
@@ -49,6 +50,7 @@ func NewStabilityCheckInputs(
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
+	delegatorInactivityOn bool,
 	pparams lcommon.ProtocolParameters,
 	conwayGenesis *conway.ConwayGenesis,
 	onProposalDecodeFailure func(proposal *models.GovernanceProposal, err error),
@@ -57,6 +59,7 @@ func NewStabilityCheckInputs(
 		DB:                      db,
 		Txn:                     txn,
 		CurrentEpoch:            currentEpoch,
+		DelegatorInactivityOn:   delegatorInactivityOn,
 		PParams:                 pparams,
 		ConwayGenesis:           conwayGenesis,
 		OnProposalDecodeFailure: onProposalDecodeFailure,
@@ -87,6 +90,15 @@ type RatifiableHardForkInitiation struct {
 // on the voting deadline (currentSlot >= epochEnd - 2*stabilityWindow);
 // before that point, the answer can flip when new votes arrive.
 //
+// It is a prediction, not a preview of the boundary's own arithmetic. The
+// SPO denominator it tallies against is mark[CurrentEpoch], while the
+// boundary into CurrentEpoch+1 will tally mark[CurrentEpoch+1], a snapshot
+// SNAP does not capture until that boundary runs -- see
+// predictedBoundaryStakeEpochFor for why the two cannot be the same read and
+// what a stake shift between them costs. Every other input here is likewise
+// the current epoch's (active DReps, committee state, roots), where the
+// boundary uses the new epoch's.
+//
 // Returns nil with no error when no HardForkInitiation is currently
 // ratifiable, or when the chain is pre-Conway.
 func EvaluateRatifiableHardForkInitiation(
@@ -95,8 +107,11 @@ func EvaluateRatifiableHardForkInitiation(
 	if in.DB == nil {
 		return nil, errors.New("nil database")
 	}
-	conwayPParams, ok := in.PParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	if err != nil {
+		return nil, err
+	}
+	if conwayPParams == nil {
 		// Pre-Conway: no governance state machine exists, so no
 		// HardForkInitiation can be in flight.
 		return nil, nil
@@ -125,10 +140,12 @@ func EvaluateRatifiableHardForkInitiation(
 	// boundary path performs; doing them again here is the cost of not
 	// sharing with ProcessEpoch.
 	tallyCtx := &TallyContext{
-		DB:           in.DB,
-		Txn:          in.Txn,
-		StakeEpoch:   stakeEpochFor(in.CurrentEpoch),
-		CurrentEpoch: in.CurrentEpoch,
+		DB:                    in.DB,
+		Txn:                   in.Txn,
+		StakeEpoch:            predictedBoundaryStakeEpochFor(in.CurrentEpoch),
+		CurrentEpoch:          in.CurrentEpoch,
+		MajorVersion:          conwayPParams.ProtocolVersion.Major,
+		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
 	activeDRepCount, err := countActiveDReps(in.DB, in.Txn, in.CurrentEpoch)
@@ -173,27 +190,8 @@ func EvaluateRatifiableHardForkInitiation(
 		if !validateParentChain(proposal, hardForkRoot) {
 			continue
 		}
-		tally, err := TallyProposal(tallyCtx, proposal)
-		if err != nil {
-			return nil, fmt.Errorf("tally proposal: %w", err)
-		}
-		decision := ShouldRatify(RatifyInputs{
-			Tally:                 tally,
-			PParams:               conwayPParams,
-			ParamUpdate:           nil, // not used for HardForkInitiation
-			ActiveDRepCount:       activeDRepCount,
-			ActiveCCCount:         committeeState.ActiveMemberCount,
-			CCQuorum:              ccQuorum,
-			MajorVersion:          conwayPParams.ProtocolVersion.Major,
-			CommitteeNoConfidence: committeeNoConfidence,
-		})
-		if !decision.Ratified {
-			continue
-		}
-		// Decode to extract the target protocol version; an active
-		// HardForkInitiation that fails to decode here is a
-		// data-integrity bug, but the conservative behaviour is to
-		// skip it rather than abort the whole check.
+		// Decode before ratification so the same decoded-action-aware input
+		// shape is used by this mid-epoch check and the boundary RATIFY loop.
 		action, err := decodeGovAction(
 			proposal.GovActionCbor, proposal.ActionType,
 		)
@@ -201,6 +199,28 @@ func EvaluateRatifiableHardForkInitiation(
 			if in.OnProposalDecodeFailure != nil {
 				in.OnProposalDecodeFailure(proposal, err)
 			}
+			continue
+		}
+		tally, err := TallyProposal(tallyCtx, proposal)
+		if err != nil {
+			return nil, fmt.Errorf("tally proposal: %w", err)
+		}
+		decision := ShouldRatify(RatifyInputs{
+			Tally:           tally,
+			PParams:         conwayPParams,
+			GovAction:       action,
+			CurrentEpoch:    in.CurrentEpoch,
+			ActiveDRepCount: activeDRepCount,
+			ActiveCCCount:   committeeState.ActiveMemberCount,
+			CommitteeAbsent: committeeAbsent(
+				committeeRoot, in.ConwayGenesis,
+				committeeState.CommitteePresent,
+			),
+			CCQuorum:              ccQuorum,
+			MajorVersion:          conwayPParams.ProtocolVersion.Major,
+			CommitteeNoConfidence: committeeNoConfidence,
+		})
+		if !decision.Ratified {
 			continue
 		}
 		hf, ok := action.(*lcommon.HardForkInitiationGovAction)

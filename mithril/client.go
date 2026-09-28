@@ -27,6 +27,7 @@ import (
 	"hash"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -562,24 +563,42 @@ type NetworkConfig struct {
 	AncillaryVerificationKeyURL string
 }
 
+// ErrNoSnapshotsAvailable indicates that the aggregator responded
+// successfully but currently has no snapshots to serve.
+var ErrNoSnapshotsAvailable = errors.New(
+	"no snapshots available from aggregator",
+)
+
 // Default network configuration for each supported Cardano network. The
 // verification key URLs follow the official Mithril network configurations.
 var defaultNetworkConfigs = map[string]NetworkConfig{
 	"mainnet": {
 		AggregatorURL:               "https://aggregator.release-mainnet.api.mithril.network/aggregator",
-		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/mainnet/genesis.vkey",
-		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/mainnet/genesis-ancillary.vkey",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-mainnet/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-mainnet/ancillary.vkey",
 	},
 	"preprod": {
 		AggregatorURL:               "https://aggregator.release-preprod.api.mithril.network/aggregator",
-		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preprod/genesis.vkey",
-		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preprod/genesis-ancillary.vkey",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-preprod/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-preprod/ancillary.vkey",
 	},
 	"preview": {
 		AggregatorURL:               "https://aggregator.pre-release-preview.api.mithril.network/aggregator",
-		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preview/genesis.vkey",
-		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/data/network-config/preview/genesis-ancillary.vkey",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/pre-release-preview/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/pre-release-preview/ancillary.vkey",
 	},
+}
+
+// AcceptedNetworks returns the recognized Mithril network identifiers.
+// It is the single source for network-name validation: path-safety checks
+// on aggregator-supplied snapshot metadata verify parity against it.
+func AcceptedNetworks() []string {
+	networks := make([]string, 0, len(defaultNetworkConfigs))
+	for network := range defaultNetworkConfigs {
+		networks = append(networks, network)
+	}
+	slices.Sort(networks)
+	return networks
 }
 
 // NetworkConfigForNetwork returns the default Mithril network configuration
@@ -627,17 +646,29 @@ func AncillaryVerificationKeyURLForNetwork(network string) (string, error) {
 
 // Client is an HTTP client for the Mithril aggregator REST API.
 type Client struct {
-	aggregatorURL string
-	httpClient    *http.Client
+	aggregatorURL     string
+	httpClient        *http.Client
+	allowInsecureHTTP bool
 }
 
 // ClientOption is a functional option for configuring a Client.
 type ClientOption func(*Client)
 
-// WithHTTPClient sets a custom *http.Client for the Mithril client.
-// Note: the default client enforces HTTPS-only redirects via
-// httpsOnlyRedirect. A custom client bypasses this protection,
-// so callers should configure their own redirect policy if needed.
+// WithAllowInsecureHTTP permits the client to send requests to a plain-HTTP
+// aggregator or local/private address. By default, NewClient's aggregatorURL
+// and every request it issues must use HTTPS and resolve to public addresses;
+// this is an explicit escape hatch for local development and tests (e.g.
+// against an httptest server) and should not be set in production.
+func WithAllowInsecureHTTP() ClientOption {
+	return func(c *Client) {
+		c.allowInsecureHTTP = true
+	}
+}
+
+// WithHTTPClient sets a custom *http.Client for the Mithril client. Unless
+// WithAllowInsecureHTTP is also set, its redirect policy is wrapped and its
+// *http.Transport is cloned with proxy, custom-dialer, and private-address
+// bypasses removed. Other RoundTripper implementations are rejected at use.
 func WithHTTPClient(hc *http.Client) ClientOption {
 	return func(c *Client) {
 		if hc != nil {
@@ -655,31 +686,87 @@ func NewClient(
 ) *Client {
 	c := &Client{
 		aggregatorURL: strings.TrimRight(aggregatorURL, "/"),
-		httpClient: &http.Client{
-			Timeout:       30 * time.Second,
-			CheckRedirect: httpsOnlyRedirect,
-		},
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
+	if c.httpClient == nil {
+		c.httpClient = newMithrilHTTPClient(
+			30*time.Second,
+			c.allowInsecureHTTP,
+		)
+	}
 	return c
 }
 
-// httpsOnlyRedirect rejects redirects to non-HTTPS URLs to prevent
-// downgrade attacks and SSRF.
-func httpsOnlyRedirect(
-	req *http.Request,
-	via []*http.Request,
-) error {
-	if len(via) >= 10 {
-		return errors.New("too many redirects")
+// newMithrilClient constructs a Client, applying WithAllowInsecureHTTP
+// when allowInsecureHTTP is set. It centralizes the option plumbing
+// shared by every BootstrapConfig/SyncConfig call site so callers don't
+// each re-derive a ClientOption slice from a bool.
+func newMithrilClient(aggregatorURL string, allowInsecureHTTP bool) *Client {
+	if allowInsecureHTTP {
+		return NewClient(aggregatorURL, WithAllowInsecureHTTP())
 	}
-	if req.URL.Scheme != "https" {
+	return NewClient(aggregatorURL)
+}
+
+// requireSecureURL rejects a non-HTTPS rawURL. allowInsecureHTTP widens
+// that to also accept http, and only http — a malformed URL or any
+// other scheme is always rejected, escape hatch or not. It guards the
+// initial request, which a redirect policy never sees. label identifies
+// the URL's role (e.g. "mithril aggregator URL") in the returned error.
+func requireSecureURL(
+	rawURL string,
+	label string,
+	allowInsecureHTTP bool,
+) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
 		return fmt.Errorf(
-			"redirect to non-HTTPS URL blocked: %s",
-			req.URL,
+			"parsing %s %q: malformed URL",
+			label,
+			redactLocationURI(rawURL),
 		)
+	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf(
+			"parsing %s %q: URL must include a host",
+			label,
+			redactLocationURI(rawURL),
+		)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf(
+			"parsing %s %q: URL must not include userinfo",
+			label,
+			redactLocationURI(rawURL),
+		)
+	}
+	switch parsed.Scheme {
+	case "https":
+	case "http":
+		if !allowInsecureHTTP {
+			return fmt.Errorf(
+				"%s %q must use https; set an explicit allow-insecure-http "+
+					"option for local development or tests",
+				label,
+				redactLocationURI(rawURL),
+			)
+		}
+	default:
+		return fmt.Errorf(
+			"%s %q must use https; set an explicit allow-insecure-http "+
+				"option for local development or tests",
+			label,
+			redactLocationURI(rawURL),
+		)
+	}
+	if !allowInsecureHTTP && isBlockedMithrilHost(parsed.Hostname()) {
+		return fmt.Errorf("%s host %q is not allowed", label, parsed.Hostname())
+	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil &&
+		!allowInsecureHTTP && isBlockedMithrilIP(ip) {
+		return fmt.Errorf("%s IP %s is not allowed", label, ip)
 	}
 	return nil
 }
@@ -884,7 +971,7 @@ func (c *Client) GetLatestSnapshot(
 		return nil, err
 	}
 	if len(snapshots) == 0 {
-		return nil, errors.New("no snapshots available from aggregator")
+		return nil, ErrNoSnapshotsAvailable
 	}
 	slices.SortFunc(snapshots, func(a, b SnapshotListItem) int {
 		if a.Beacon.Epoch != b.Beacon.Epoch {
@@ -904,6 +991,9 @@ func (c *Client) doGet(
 	ctx context.Context,
 	reqURL string,
 ) (io.ReadCloser, error) {
+	if err := requireSecureURL(reqURL, "mithril aggregator URL", c.allowInsecureHTTP); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -915,11 +1005,22 @@ func (c *Client) doGet(
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do( //nolint:gosec // URL is built from trusted aggregatorURL base; HTTPS-only redirect policy prevents downgrade
+	httpClient, err := secureMithrilHTTPClient(
+		c.httpClient,
+		c.allowInsecureHTTP,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// Initial, redirect, and dial-time destinations are restricted above.
+	resp, err := httpClient.Do( //nolint:gosec
 		req,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("executing request: %w", err)
+		return nil, fmt.Errorf(
+			"executing request: %w",
+			redactLocationError(err, reqURL),
+		)
 	}
 	if resp == nil || resp.Body == nil {
 		return nil, errors.New("nil response from server")
@@ -930,11 +1031,11 @@ func (c *Client) doGet(
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
-		return nil, fmt.Errorf(
+		return nil, redactLocationError(fmt.Errorf(
 			"unexpected status %d: %s",
 			resp.StatusCode,
 			string(bodyBytes),
-		)
+		), reqURL)
 	}
 
 	return &limitedReadCloser{

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"testing"
@@ -26,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -35,12 +38,11 @@ import (
 // mode. An empty mode defaults to core (per Database.New).
 func newTestDBForCleanup(t *testing.T, mode string) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir:     "",
 		StorageMode: mode,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
@@ -74,12 +76,13 @@ func seedSpentUtxoForCleanup(
 // calculateStabilityWindowForEra returns the default
 // (blockfetchBatchSlotThresholdDefault = 50000); the tip slot is then
 // chosen well past that window so consumed-UTxO cleanup is eligible to
-// run in core mode.
+// run in core mode. The upstream tip is initialized to the local tip so the
+// test represents a node that is near the network tip.
 func newLedgerStateForCleanup(
 	db *database.Database,
 	tipSlot uint64,
 ) *LedgerState {
-	return &LedgerState{
+	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ConwayEraDesc,
 		currentTip: ochainsync.Tip{
@@ -89,6 +92,8 @@ func newLedgerStateForCleanup(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.syncUpstreamTipSlot.Store(tipSlot)
+	return ls
 }
 
 // TestCleanupConsumedUtxos_CoreModePrunes asserts the pre-existing
@@ -97,6 +102,8 @@ func newLedgerStateForCleanup(
 // retention test below could pass by accident if the cleanup loop were
 // silently dead for both modes.
 func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	txId := bytes.Repeat([]byte{0xA1}, 32)
 	const (
@@ -122,12 +129,218 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 	)
 }
 
+// TestCleanupConsumedUtxos_PersistsPruneFloor covers the durable marker
+// checkUtxoRetentionWindow relies on (ledger/queries.go): every run that
+// actually prunes must durably record the floor it used, so a later pin
+// check can reject against it even if the tip subsequently moves in a way
+// that would otherwise make a freshly-computed floor look more lenient
+// (blinklabs-io/dingo#382 review -- see persistConsumedUtxoPruneFloor's doc
+// comment for the rollback and era-transition cases this closes).
+func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	const tipSlot = 100_000 // > 50_000 default stability window
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+
+	before, err := ls.readConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	assert.Zero(t, before, "no floor before cleanup has ever run")
+
+	ls.cleanupConsumedUtxos()
+
+	after, err := ls.readConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	assert.Equal(
+		t, uint64(50_000), after,
+		"must persist tipSlot minus the default stability window",
+	)
+}
+
+func TestCleanupConsumedUtxos_DoesNotWaitForChainsyncMutex(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	ls := newLedgerStateForCleanup(db, 100_000)
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		ls.cleanupConsumedUtxos()
+		close(done)
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"consumed UTxO cleanup must not acquire chainsyncMutex",
+	)
+}
+
+// TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails covers the
+// ordering invariant persistConsumedUtxoPruneFloor's doc comment depends on:
+// a failure to durably record the floor must abort this run before any row
+// is actually hard-deleted, not just be logged and ignored. Otherwise real
+// rows could be pruned with no durable record that floor was ever used,
+// letting a later pinned query at or above that floor see no persisted
+// floor to reject against and silently answer "absent" for a ref that was
+// actually there (blinklabs-io/dingo#382 review, Cubic). Drops the
+// sync_state table (via a raw connection to the same file) so SetSyncState
+// fails while the utxo table -- and so UtxosDeleteConsumed -- stays fully
+// functional, isolating the failure to exactly the call this test cares
+// about.
+func TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		StorageMode: types.StorageModeCore,
+	})
+	require.NoError(t, err)
+
+	txId := bytes.Repeat([]byte{0xD2}, 32)
+	const (
+		addedSlot   uint64 = 1_000
+		deletedSlot uint64 = 5_000
+		tipSlot     uint64 = 100_000 // > 50_000 default stability window
+	)
+	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec("DROP TABLE sync_state")
+	require.NoError(t, err)
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls.cleanupConsumedUtxos()
+
+	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	assert.NotNil(
+		t, post,
+		"cleanup must not delete rows when persisting the prune floor "+
+			"fails, since that would prune without any durable record "+
+			"that pruning happened",
+	)
+}
+
+func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	mdTxn := db.MetadataTxn(true)
+	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
+		for idx := 0; idx <= cleanupConsumedUtxoBatchSize; idx++ {
+			txID := bytes.Repeat([]byte{0}, 32)
+			binary.BigEndian.PutUint32(txID[:4], uint32(idx+1))
+			if err := db.CreateUtxo(txn, &models.Utxo{
+				TxId:        txID,
+				OutputIdx:   0,
+				AddedSlot:   1_000,
+				DeletedSlot: 5_000,
+				Amount:      types.Uint64(1),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	ls := newLedgerStateForCleanup(db, 100_000)
+	ls.cleanupConsumedUtxos()
+
+	remaining, err := db.Metadata().GetUtxosDeletedBeforeSlot(
+		50_000,
+		cleanupConsumedUtxoBatchSize+1,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Len(t, remaining, 1, "one eligible row must remain for a later run")
+
+	ls.cleanupConsumedUtxos()
+	remaining, err = db.Metadata().GetUtxosDeletedBeforeSlot(
+		50_000,
+		cleanupConsumedUtxoBatchSize+1,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "the next run must resume the bounded cleanup")
+}
+
+func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	txId := bytes.Repeat([]byte{0xA3}, 32)
+	const (
+		addedSlot   uint64 = 1_000
+		deletedSlot uint64 = 5_000
+		tipSlot     uint64 = 100_000
+		upstreamTip uint64 = 200_000
+	)
+	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+	ls.syncUpstreamTipSlot.Store(upstreamTip)
+	ls.cleanupConsumedUtxos()
+
+	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, post, "cleanup must defer while the ledger is catching up")
+}
+
+// TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip covers the
+// distinction the catch-up deferral has to make: an upstream tip of 0 means
+// unknown, not "infinitely far behind". A node that has never connected to a
+// peer -- or that lost its last active connection, which zeroes the value in
+// chainsync.go -- would otherwise defer cleanup for as long as it stays
+// peerless, growing the utxo table without bound in core mode, and silently:
+// no error, no crash. Cleanup ran off the local tip alone before the deferral
+// existed, so that is the behavior an unknown upstream tip falls back to.
+func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeCore)
+	txId := bytes.Repeat([]byte{0xB4}, 32)
+	const (
+		addedSlot   uint64 = 1_000
+		deletedSlot uint64 = 5_000
+		// Far past the 50_000 default stability window, so the only
+		// reason to retain the row would be the deferral itself.
+		tipSlot uint64 = 10_000_000
+	)
+	seedSpentUtxoForCleanup(t, db, txId, 0, addedSlot, deletedSlot)
+
+	pre, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pre, "seed must succeed before cleanup")
+
+	ls := newLedgerStateForCleanup(db, tipSlot)
+	// No peer has ever reported a tip.
+	ls.syncUpstreamTipSlot.Store(0)
+	ls.cleanupConsumedUtxos()
+
+	post, err := db.Metadata().GetUtxoIncludingSpent(txId, 0, nil)
+	require.NoError(t, err)
+	assert.Nil(
+		t, post,
+		"an unknown upstream tip must not defer cleanup: the local tip "+
+			"is already far past the stability window",
+	)
+}
+
 // TestCleanupConsumedUtxos_APIModeRetains is the regression fix for
 // issue #2350: in API storage mode the periodic cleanup must leave
 // spent UTxO metadata rows in place so historical transaction queries
 // can resolve input / collateral / reference-input associations via
 // spent_at_tx_id, collateral_by_tx_id, and referenced_by_tx_id.
 func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeAPI)
 	txId := bytes.Repeat([]byte{0xA2}, 32)
 	const (

@@ -57,9 +57,21 @@ func TestArchiveProxy(t *testing.T) {
 	// We wait for tip >= 400 to give History Expiry some cycles past the window.
 	const stabilityWindow = uint64(300) // 3 * k(40) / f(0.4)
 	const targetTip = uint64(400)
-	_, err := archivedemo.WaitForSlot(archive, archivedemo.DefaultNetworkMagic, targetTip, 10*time.Minute, t.Logf)
+	_, err := archivedemo.WaitForSlot(
+		archive,
+		archivedemo.DefaultNetworkMagic,
+		targetTip,
+		10*time.Minute,
+		t.Logf,
+	)
 	require.NoError(t, err)
-	_, err = archivedemo.WaitForSlot(pruning, archivedemo.DefaultNetworkMagic, targetTip, 10*time.Minute, t.Logf)
+	_, err = archivedemo.WaitForSlot(
+		pruning,
+		archivedemo.DefaultNetworkMagic,
+		targetTip,
+		10*time.Minute,
+		t.Logf,
+	)
 	require.NoError(t, err)
 
 	// Step 1b: poll until History Expiry has had time to act on candidateSlot.
@@ -78,7 +90,11 @@ func TestArchiveProxy(t *testing.T) {
 	// Step 2: resolve (slot, hash) of the first block at or after candidateSlot
 	// using dingo-archive, which has the full chain.
 	point, err := archivedemo.FindBlockAtOrAfterSlot(
-		archive, archivedemo.DefaultNetworkMagic, candidateSlot, 60*time.Second, t.Logf,
+		archive,
+		archivedemo.DefaultNetworkMagic,
+		candidateSlot,
+		60*time.Second,
+		t.Logf,
 	)
 	require.NoError(t, err)
 	t.Logf("target block: slot=%d hash=%x", point.Slot, point.Hash)
@@ -88,7 +104,11 @@ func TestArchiveProxy(t *testing.T) {
 	cbor, err := archivedemo.FetchBlock(
 		pruning, archivedemo.DefaultNetworkMagic, point, 60*time.Second,
 	)
-	require.NoError(t, err, "BlockFetch on history-expiry node should transparently proxy via bark")
+	require.NoError(
+		t,
+		err,
+		"BlockFetch on history-expiry node should transparently proxy via bark",
+	)
 	require.NotEmpty(t, cbor, "block CBOR should be non-empty")
 
 	// Step 4 (assertion 3): object present in Minio bucket.
@@ -107,11 +127,18 @@ func TestArchiveProxy(t *testing.T) {
 	stopPruning(t)
 
 	inspectBin := os.Getenv("ARCHIVEDEMO_INSPECT_BIN")
-	require.NotEmpty(t, inspectBin, "ARCHIVEDEMO_INSPECT_BIN must be set by run-tests.sh")
+	require.NotEmpty(
+		t,
+		inspectBin,
+		"ARCHIVEDEMO_INSPECT_BIN must be set by run-tests.sh",
+	)
 	pruningDir := os.Getenv("ARCHIVEDEMO_PRUNING_DATA_DIR")
 	require.NotEmpty(t, pruningDir, "ARCHIVEDEMO_PRUNING_DATA_DIR must be set")
 
-	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	inspectCtx, inspectCancel := context.WithTimeout(
+		context.Background(),
+		60*time.Second,
+	)
 	defer inspectCancel()
 	cmd := exec.CommandContext(inspectCtx, inspectBin,
 		"-dir", pruningDir,
@@ -129,8 +156,17 @@ func TestArchiveProxy(t *testing.T) {
 
 	// Exit 0 = present, 1 = absent. We require absent.
 	var exitErr *exec.ExitError
-	require.Error(t, runErr, "block should be ABSENT from local Badger; inspect-blob exited 0 (present)")
-	require.True(t, errors.As(runErr, &exitErr), "expected ExitError, got %T", runErr)
+	require.Error(
+		t,
+		runErr,
+		"block should be ABSENT from local Badger; inspect-blob exited 0 (present)",
+	)
+	require.True(
+		t,
+		errors.As(runErr, &exitErr),
+		"expected ExitError, got %T",
+		runErr,
+	)
 	require.Equal(t, 1, exitErr.ExitCode(),
 		"inspect-blob should return 1 (absent), got %d", exitErr.ExitCode())
 }
@@ -157,7 +193,10 @@ func newMinioClient(t *testing.T) *s3.Client {
 
 func stopPruning(t *testing.T) {
 	t.Helper()
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	stopCtx, stopCancel := context.WithTimeout(
+		context.Background(),
+		60*time.Second,
+	)
 	defer stopCancel()
 	cmd := exec.CommandContext(stopCtx, "docker", "compose",
 		"-f", composeFile(t),
@@ -173,7 +212,10 @@ func stopPruning(t *testing.T) {
 	// bind-mounted data dir aren't readable to the host user that will
 	// run inspect-blob or stat Badger's lock file. Spin a one-shot
 	// busybox container as root to open the perms back up.
-	chmodCtx, chmodCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	chmodCtx, chmodCancel := context.WithTimeout(
+		context.Background(),
+		60*time.Second,
+	)
 	defer chmodCancel()
 	chmod := exec.CommandContext(chmodCtx, "docker", "run", "--rm",
 		"-v", pruningDir+":/data",
@@ -196,10 +238,17 @@ func composeFile(t *testing.T) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").
+		Output()
 	require.NoError(t, err, "git rev-parse")
 	root := strings.TrimSpace(string(out))
-	return filepath.Join(root, "internal", "test", "archive-demo", "docker-compose.yml")
+	return filepath.Join(
+		root,
+		"internal",
+		"test",
+		"archive-demo",
+		"docker-compose.yml",
+	)
 }
 
 // blobKeyForBlock returns the S3 object key the AWS blob plugin uses for

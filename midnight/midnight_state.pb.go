@@ -12,11 +12,12 @@
 package midnight
 
 import (
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -28,9 +29,9 @@ const (
 
 type AssetCreatesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StartBlock    uint32                 `protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3" json:"start_block,omitempty"`
-	StartTxIndex  uint32                 `protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
-	UtxoCapacity  uint32                 `protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3" json:"utxo_capacity,omitempty"`
+	StartBlock    uint32                 `                   protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3"      json:"start_block,omitempty"`
+	StartTxIndex  uint32                 `                   protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
+	UtxoCapacity  uint32                 `                   protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3"  json:"utxo_capacity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -88,14 +89,14 @@ func (x *AssetCreatesRequest) GetUtxoCapacity() uint32 {
 
 type AssetCreate struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
-	Address                  []byte                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
-	Quantity                 uint64                 `protobuf:"varint,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
-	TxHash                   []byte                 `protobuf:"bytes,3,opt,name=tx_hash,json=txHash,proto3" json:"tx_hash,omitempty"`
-	OutputIndex              uint32                 `protobuf:"varint,4,opt,name=output_index,json=outputIndex,proto3" json:"output_index,omitempty"`
-	BlockNumber              uint64                 `protobuf:"varint,5,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	BlockHash                []byte                 `protobuf:"bytes,6,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	TxIndex                  uint32                 `protobuf:"varint,7,opt,name=tx_index,json=txIndex,proto3" json:"tx_index,omitempty"`
-	BlockTimestampUnixMillis int64                  `protobuf:"varint,8,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
+	Address                  []byte                 `                   protobuf:"bytes,1,opt,name=address,proto3"                                                    json:"address,omitempty"`
+	Quantity                 uint64                 `                   protobuf:"varint,2,opt,name=quantity,proto3"                                                  json:"quantity,omitempty"`
+	TxHash                   []byte                 `                   protobuf:"bytes,3,opt,name=tx_hash,json=txHash,proto3"                                        json:"tx_hash,omitempty"`
+	OutputIndex              uint32                 `                   protobuf:"varint,4,opt,name=output_index,json=outputIndex,proto3"                             json:"output_index,omitempty"`
+	BlockNumber              uint64                 `                   protobuf:"varint,5,opt,name=block_number,json=blockNumber,proto3"                             json:"block_number,omitempty"`
+	BlockHash                []byte                 `                   protobuf:"bytes,6,opt,name=block_hash,json=blockHash,proto3"                                  json:"block_hash,omitempty"`
+	TxIndex                  uint32                 `                   protobuf:"varint,7,opt,name=tx_index,json=txIndex,proto3"                                     json:"tx_index,omitempty"`
+	BlockTimestampUnixMillis int64                  `                   protobuf:"varint,8,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -188,7 +189,7 @@ func (x *AssetCreate) GetBlockTimestampUnixMillis() int64 {
 
 type AssetCreatesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Creates       []*AssetCreate         `protobuf:"bytes,1,rep,name=creates,proto3" json:"creates,omitempty"`
+	Creates       []*AssetCreate         `                   protobuf:"bytes,1,rep,name=creates,proto3" json:"creates,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -232,9 +233,9 @@ func (x *AssetCreatesResponse) GetCreates() []*AssetCreate {
 
 type AssetSpendsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StartBlock    uint32                 `protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3" json:"start_block,omitempty"`
-	StartTxIndex  uint32                 `protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
-	UtxoCapacity  uint32                 `protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3" json:"utxo_capacity,omitempty"`
+	StartBlock    uint32                 `                   protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3"      json:"start_block,omitempty"`
+	StartTxIndex  uint32                 `                   protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
+	UtxoCapacity  uint32                 `                   protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3"  json:"utxo_capacity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -292,15 +293,15 @@ func (x *AssetSpendsRequest) GetUtxoCapacity() uint32 {
 
 type AssetSpend struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
-	Address                  []byte                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
-	Quantity                 uint64                 `protobuf:"varint,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
-	SpendingTxHash           []byte                 `protobuf:"bytes,3,opt,name=spending_tx_hash,json=spendingTxHash,proto3" json:"spending_tx_hash,omitempty"`
-	BlockNumber              uint64                 `protobuf:"varint,4,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	BlockHash                []byte                 `protobuf:"bytes,5,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	TxIndex                  uint32                 `protobuf:"varint,6,opt,name=tx_index,json=txIndex,proto3" json:"tx_index,omitempty"`
-	UtxoTxHash               []byte                 `protobuf:"bytes,7,opt,name=utxo_tx_hash,json=utxoTxHash,proto3" json:"utxo_tx_hash,omitempty"`
-	UtxoIndex                uint32                 `protobuf:"varint,8,opt,name=utxo_index,json=utxoIndex,proto3" json:"utxo_index,omitempty"`
-	BlockTimestampUnixMillis int64                  `protobuf:"varint,9,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
+	Address                  []byte                 `                   protobuf:"bytes,1,opt,name=address,proto3"                                                    json:"address,omitempty"`
+	Quantity                 uint64                 `                   protobuf:"varint,2,opt,name=quantity,proto3"                                                  json:"quantity,omitempty"`
+	SpendingTxHash           []byte                 `                   protobuf:"bytes,3,opt,name=spending_tx_hash,json=spendingTxHash,proto3"                       json:"spending_tx_hash,omitempty"`
+	BlockNumber              uint64                 `                   protobuf:"varint,4,opt,name=block_number,json=blockNumber,proto3"                             json:"block_number,omitempty"`
+	BlockHash                []byte                 `                   protobuf:"bytes,5,opt,name=block_hash,json=blockHash,proto3"                                  json:"block_hash,omitempty"`
+	TxIndex                  uint32                 `                   protobuf:"varint,6,opt,name=tx_index,json=txIndex,proto3"                                     json:"tx_index,omitempty"`
+	UtxoTxHash               []byte                 `                   protobuf:"bytes,7,opt,name=utxo_tx_hash,json=utxoTxHash,proto3"                               json:"utxo_tx_hash,omitempty"`
+	UtxoIndex                uint32                 `                   protobuf:"varint,8,opt,name=utxo_index,json=utxoIndex,proto3"                                 json:"utxo_index,omitempty"`
+	BlockTimestampUnixMillis int64                  `                   protobuf:"varint,9,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -400,7 +401,7 @@ func (x *AssetSpend) GetBlockTimestampUnixMillis() int64 {
 
 type AssetSpendsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Spends        []*AssetSpend          `protobuf:"bytes,1,rep,name=spends,proto3" json:"spends,omitempty"`
+	Spends        []*AssetSpend          `                   protobuf:"bytes,1,rep,name=spends,proto3" json:"spends,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -444,9 +445,9 @@ func (x *AssetSpendsResponse) GetSpends() []*AssetSpend {
 
 type RegistrationsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StartBlock    uint32                 `protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3" json:"start_block,omitempty"`
-	StartTxIndex  uint32                 `protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
-	UtxoCapacity  uint32                 `protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3" json:"utxo_capacity,omitempty"`
+	StartBlock    uint32                 `                   protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3"      json:"start_block,omitempty"`
+	StartTxIndex  uint32                 `                   protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
+	UtxoCapacity  uint32                 `                   protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3"  json:"utxo_capacity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -504,13 +505,13 @@ func (x *RegistrationsRequest) GetUtxoCapacity() uint32 {
 
 type Registration struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
-	FullDatum                []byte                 `protobuf:"bytes,1,opt,name=full_datum,json=fullDatum,proto3" json:"full_datum,omitempty"`
-	TxHash                   []byte                 `protobuf:"bytes,2,opt,name=tx_hash,json=txHash,proto3" json:"tx_hash,omitempty"`
-	OutputIndex              uint32                 `protobuf:"varint,3,opt,name=output_index,json=outputIndex,proto3" json:"output_index,omitempty"`
-	BlockNumber              uint64                 `protobuf:"varint,4,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	BlockHash                []byte                 `protobuf:"bytes,5,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	TxIndex                  uint32                 `protobuf:"varint,6,opt,name=tx_index,json=txIndex,proto3" json:"tx_index,omitempty"`
-	BlockTimestampUnixMillis int64                  `protobuf:"varint,7,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
+	FullDatum                []byte                 `                   protobuf:"bytes,1,opt,name=full_datum,json=fullDatum,proto3"                                  json:"full_datum,omitempty"`
+	TxHash                   []byte                 `                   protobuf:"bytes,2,opt,name=tx_hash,json=txHash,proto3"                                        json:"tx_hash,omitempty"`
+	OutputIndex              uint32                 `                   protobuf:"varint,3,opt,name=output_index,json=outputIndex,proto3"                             json:"output_index,omitempty"`
+	BlockNumber              uint64                 `                   protobuf:"varint,4,opt,name=block_number,json=blockNumber,proto3"                             json:"block_number,omitempty"`
+	BlockHash                []byte                 `                   protobuf:"bytes,5,opt,name=block_hash,json=blockHash,proto3"                                  json:"block_hash,omitempty"`
+	TxIndex                  uint32                 `                   protobuf:"varint,6,opt,name=tx_index,json=txIndex,proto3"                                     json:"tx_index,omitempty"`
+	BlockTimestampUnixMillis int64                  `                   protobuf:"varint,7,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -596,7 +597,7 @@ func (x *Registration) GetBlockTimestampUnixMillis() int64 {
 
 type RegistrationsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Registrations []*Registration        `protobuf:"bytes,1,rep,name=registrations,proto3" json:"registrations,omitempty"`
+	Registrations []*Registration        `                   protobuf:"bytes,1,rep,name=registrations,proto3" json:"registrations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -640,9 +641,9 @@ func (x *RegistrationsResponse) GetRegistrations() []*Registration {
 
 type DeregistrationsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StartBlock    uint32                 `protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3" json:"start_block,omitempty"`
-	StartTxIndex  uint32                 `protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
-	UtxoCapacity  uint32                 `protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3" json:"utxo_capacity,omitempty"`
+	StartBlock    uint32                 `                   protobuf:"varint,1,opt,name=start_block,json=startBlock,proto3"      json:"start_block,omitempty"`
+	StartTxIndex  uint32                 `                   protobuf:"varint,2,opt,name=start_tx_index,json=startTxIndex,proto3" json:"start_tx_index,omitempty"`
+	UtxoCapacity  uint32                 `                   protobuf:"varint,3,opt,name=utxo_capacity,json=utxoCapacity,proto3"  json:"utxo_capacity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -700,14 +701,14 @@ func (x *DeregistrationsRequest) GetUtxoCapacity() uint32 {
 
 type Deregistration struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
-	FullDatum                []byte                 `protobuf:"bytes,1,opt,name=full_datum,json=fullDatum,proto3" json:"full_datum,omitempty"`
-	TxHash                   []byte                 `protobuf:"bytes,2,opt,name=tx_hash,json=txHash,proto3" json:"tx_hash,omitempty"`
-	BlockNumber              uint64                 `protobuf:"varint,3,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	BlockHash                []byte                 `protobuf:"bytes,4,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	TxIndex                  uint32                 `protobuf:"varint,5,opt,name=tx_index,json=txIndex,proto3" json:"tx_index,omitempty"`
-	UtxoTxHash               []byte                 `protobuf:"bytes,6,opt,name=utxo_tx_hash,json=utxoTxHash,proto3" json:"utxo_tx_hash,omitempty"`
-	UtxoIndex                uint32                 `protobuf:"varint,7,opt,name=utxo_index,json=utxoIndex,proto3" json:"utxo_index,omitempty"`
-	BlockTimestampUnixMillis int64                  `protobuf:"varint,8,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
+	FullDatum                []byte                 `                   protobuf:"bytes,1,opt,name=full_datum,json=fullDatum,proto3"                                  json:"full_datum,omitempty"`
+	TxHash                   []byte                 `                   protobuf:"bytes,2,opt,name=tx_hash,json=txHash,proto3"                                        json:"tx_hash,omitempty"`
+	BlockNumber              uint64                 `                   protobuf:"varint,3,opt,name=block_number,json=blockNumber,proto3"                             json:"block_number,omitempty"`
+	BlockHash                []byte                 `                   protobuf:"bytes,4,opt,name=block_hash,json=blockHash,proto3"                                  json:"block_hash,omitempty"`
+	TxIndex                  uint32                 `                   protobuf:"varint,5,opt,name=tx_index,json=txIndex,proto3"                                     json:"tx_index,omitempty"`
+	UtxoTxHash               []byte                 `                   protobuf:"bytes,6,opt,name=utxo_tx_hash,json=utxoTxHash,proto3"                               json:"utxo_tx_hash,omitempty"`
+	UtxoIndex                uint32                 `                   protobuf:"varint,7,opt,name=utxo_index,json=utxoIndex,proto3"                                 json:"utxo_index,omitempty"`
+	BlockTimestampUnixMillis int64                  `                   protobuf:"varint,8,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -800,7 +801,7 @@ func (x *Deregistration) GetBlockTimestampUnixMillis() int64 {
 
 type DeregistrationsResponse struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	Deregistrations []*Deregistration      `protobuf:"bytes,1,rep,name=deregistrations,proto3" json:"deregistrations,omitempty"`
+	Deregistrations []*Deregistration      `                   protobuf:"bytes,1,rep,name=deregistrations,proto3" json:"deregistrations,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -844,7 +845,7 @@ func (x *DeregistrationsResponse) GetDeregistrations() []*Deregistration {
 
 type TechnicalCommitteeDatumRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	BlockNumber   uint64                 `protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
+	BlockNumber   uint64                 `                   protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -888,8 +889,8 @@ func (x *TechnicalCommitteeDatumRequest) GetBlockNumber() uint64 {
 
 type TechnicalCommitteeDatumResponse struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
-	SourceBlockNumber uint64                 `protobuf:"varint,1,opt,name=source_block_number,json=sourceBlockNumber,proto3" json:"source_block_number,omitempty"`
-	Datum             []byte                 `protobuf:"bytes,2,opt,name=datum,proto3" json:"datum,omitempty"`
+	SourceBlockNumber uint64                 `                   protobuf:"varint,1,opt,name=source_block_number,json=sourceBlockNumber,proto3" json:"source_block_number,omitempty"`
+	Datum             []byte                 `                   protobuf:"bytes,2,opt,name=datum,proto3"                                       json:"datum,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -940,7 +941,7 @@ func (x *TechnicalCommitteeDatumResponse) GetDatum() []byte {
 
 type CouncilDatumRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	BlockNumber   uint64                 `protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
+	BlockNumber   uint64                 `                   protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -984,8 +985,8 @@ func (x *CouncilDatumRequest) GetBlockNumber() uint64 {
 
 type CouncilDatumResponse struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
-	SourceBlockNumber uint64                 `protobuf:"varint,1,opt,name=source_block_number,json=sourceBlockNumber,proto3" json:"source_block_number,omitempty"`
-	Datum             []byte                 `protobuf:"bytes,2,opt,name=datum,proto3" json:"datum,omitempty"`
+	SourceBlockNumber uint64                 `                   protobuf:"varint,1,opt,name=source_block_number,json=sourceBlockNumber,proto3" json:"source_block_number,omitempty"`
+	Datum             []byte                 `                   protobuf:"bytes,2,opt,name=datum,proto3"                                       json:"datum,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -1036,7 +1037,7 @@ func (x *CouncilDatumResponse) GetDatum() []byte {
 
 type AriadneParametersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Epoch         uint64                 `protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Epoch         uint64                 `                   protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1080,8 +1081,8 @@ func (x *AriadneParametersRequest) GetEpoch() uint64 {
 
 type AriadneParametersResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	SourceEpoch   uint64                 `protobuf:"varint,1,opt,name=source_epoch,json=sourceEpoch,proto3" json:"source_epoch,omitempty"`
-	Datum         []byte                 `protobuf:"bytes,2,opt,name=datum,proto3" json:"datum,omitempty"`
+	SourceEpoch   uint64                 `                   protobuf:"varint,1,opt,name=source_epoch,json=sourceEpoch,proto3" json:"source_epoch,omitempty"`
+	Datum         []byte                 `                   protobuf:"bytes,2,opt,name=datum,proto3"                          json:"datum,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1132,7 +1133,7 @@ func (x *AriadneParametersResponse) GetDatum() []byte {
 
 type EpochNonceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Epoch         uint64                 `protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Epoch         uint64                 `                   protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1176,7 +1177,7 @@ func (x *EpochNonceRequest) GetEpoch() uint64 {
 
 type EpochNonceResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Nonce         []byte                 `protobuf:"bytes,1,opt,name=nonce,proto3,oneof" json:"nonce,omitempty"`
+	Nonce         []byte                 `                   protobuf:"bytes,1,opt,name=nonce,proto3,oneof" json:"nonce,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1220,7 +1221,7 @@ func (x *EpochNonceResponse) GetNonce() []byte {
 
 type EpochCandidatesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Epoch         uint64                 `protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Epoch         uint64                 `                   protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1264,8 +1265,8 @@ func (x *EpochCandidatesRequest) GetEpoch() uint64 {
 
 type UtxoId struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	TxHash        []byte                 `protobuf:"bytes,1,opt,name=tx_hash,json=txHash,proto3" json:"tx_hash,omitempty"`
-	Index         uint32                 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	TxHash        []byte                 `                   protobuf:"bytes,1,opt,name=tx_hash,json=txHash,proto3" json:"tx_hash,omitempty"`
+	Index         uint32                 `                   protobuf:"varint,2,opt,name=index,proto3"              json:"index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1316,14 +1317,14 @@ func (x *UtxoId) GetIndex() uint32 {
 
 type EpochCandidate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	FullDatum     []byte                 `protobuf:"bytes,1,opt,name=full_datum,json=fullDatum,proto3" json:"full_datum,omitempty"`
-	UtxoTxHash    []byte                 `protobuf:"bytes,2,opt,name=utxo_tx_hash,json=utxoTxHash,proto3" json:"utxo_tx_hash,omitempty"`
-	UtxoIndex     uint32                 `protobuf:"varint,3,opt,name=utxo_index,json=utxoIndex,proto3" json:"utxo_index,omitempty"`
-	TxInputs      []*UtxoId              `protobuf:"bytes,4,rep,name=tx_inputs,json=txInputs,proto3" json:"tx_inputs,omitempty"`
-	EpochNumber   uint64                 `protobuf:"varint,5,opt,name=epoch_number,json=epochNumber,proto3" json:"epoch_number,omitempty"`
-	BlockNumber   uint64                 `protobuf:"varint,6,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	SlotNumber    uint64                 `protobuf:"varint,7,opt,name=slot_number,json=slotNumber,proto3" json:"slot_number,omitempty"`
-	TxIndex       uint32                 `protobuf:"varint,8,opt,name=tx_index,json=txIndex,proto3" json:"tx_index,omitempty"`
+	FullDatum     []byte                 `                   protobuf:"bytes,1,opt,name=full_datum,json=fullDatum,proto3"      json:"full_datum,omitempty"`
+	UtxoTxHash    []byte                 `                   protobuf:"bytes,2,opt,name=utxo_tx_hash,json=utxoTxHash,proto3"   json:"utxo_tx_hash,omitempty"`
+	UtxoIndex     uint32                 `                   protobuf:"varint,3,opt,name=utxo_index,json=utxoIndex,proto3"     json:"utxo_index,omitempty"`
+	TxInputs      []*UtxoId              `                   protobuf:"bytes,4,rep,name=tx_inputs,json=txInputs,proto3"        json:"tx_inputs,omitempty"`
+	EpochNumber   uint64                 `                   protobuf:"varint,5,opt,name=epoch_number,json=epochNumber,proto3" json:"epoch_number,omitempty"`
+	BlockNumber   uint64                 `                   protobuf:"varint,6,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
+	SlotNumber    uint64                 `                   protobuf:"varint,7,opt,name=slot_number,json=slotNumber,proto3"   json:"slot_number,omitempty"`
+	TxIndex       uint32                 `                   protobuf:"varint,8,opt,name=tx_index,json=txIndex,proto3"         json:"tx_index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1416,8 +1417,8 @@ func (x *EpochCandidate) GetTxIndex() uint32 {
 
 type StakePoolEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	PoolHash      []byte                 `protobuf:"bytes,1,opt,name=pool_hash,json=poolHash,proto3" json:"pool_hash,omitempty"`
-	Stake         uint64                 `protobuf:"varint,2,opt,name=stake,proto3" json:"stake,omitempty"`
+	PoolHash      []byte                 `                   protobuf:"bytes,1,opt,name=pool_hash,json=poolHash,proto3" json:"pool_hash,omitempty"`
+	Stake         uint64                 `                   protobuf:"varint,2,opt,name=stake,proto3"                  json:"stake,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1468,8 +1469,8 @@ func (x *StakePoolEntry) GetStake() uint64 {
 
 type EpochCandidatesResponse struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
-	Candidates        []*EpochCandidate      `protobuf:"bytes,1,rep,name=candidates,proto3" json:"candidates,omitempty"`
-	StakeDistribution []*StakePoolEntry      `protobuf:"bytes,2,rep,name=stake_distribution,json=stakeDistribution,proto3" json:"stake_distribution,omitempty"`
+	Candidates        []*EpochCandidate      `                   protobuf:"bytes,1,rep,name=candidates,proto3"                                json:"candidates,omitempty"`
+	StakeDistribution []*StakePoolEntry      `                   protobuf:"bytes,2,rep,name=stake_distribution,json=stakeDistribution,proto3" json:"stake_distribution,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -1520,9 +1521,9 @@ func (x *EpochCandidatesResponse) GetStakeDistribution() []*StakePoolEntry {
 
 type UtxoEventsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	TxCapacity    uint32                 `protobuf:"varint,1,opt,name=tx_capacity,json=txCapacity,proto3" json:"tx_capacity,omitempty"`
-	EndBlockHash  []byte                 `protobuf:"bytes,2,opt,name=end_block_hash,json=endBlockHash,proto3" json:"end_block_hash,omitempty"`
-	StartPosition *CardanoPosition       `protobuf:"bytes,3,opt,name=start_position,json=startPosition,proto3" json:"start_position,omitempty"`
+	TxCapacity    uint32                 `                   protobuf:"varint,1,opt,name=tx_capacity,json=txCapacity,proto3"      json:"tx_capacity,omitempty"`
+	EndBlockHash  []byte                 `                   protobuf:"bytes,2,opt,name=end_block_hash,json=endBlockHash,proto3"  json:"end_block_hash,omitempty"`
+	StartPosition *CardanoPosition       `                   protobuf:"bytes,3,opt,name=start_position,json=startPosition,proto3" json:"start_position,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1586,7 +1587,7 @@ type UtxoEvent struct {
 	//	*UtxoEvent_AssetSpend
 	//	*UtxoEvent_Registration
 	//	*UtxoEvent_Deregistration
-	Kind          isUtxoEvent_Kind `protobuf_oneof:"kind"`
+	Kind          isUtxoEvent_Kind `                   protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1694,10 +1695,10 @@ func (*UtxoEvent_Deregistration) isUtxoEvent_Kind() {}
 
 type CardanoPosition struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
-	BlockHash                []byte                 `protobuf:"bytes,1,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	BlockNumber              uint32                 `protobuf:"varint,2,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	TxIndex                  uint32                 `protobuf:"varint,3,opt,name=tx_index,json=txIndex,proto3" json:"tx_index,omitempty"`
-	BlockTimestampUnixMillis int64                  `protobuf:"varint,4,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
+	BlockHash                []byte                 `                   protobuf:"bytes,1,opt,name=block_hash,json=blockHash,proto3"                                  json:"block_hash,omitempty"`
+	BlockNumber              uint32                 `                   protobuf:"varint,2,opt,name=block_number,json=blockNumber,proto3"                             json:"block_number,omitempty"`
+	TxIndex                  uint32                 `                   protobuf:"varint,3,opt,name=tx_index,json=txIndex,proto3"                                     json:"tx_index,omitempty"`
+	BlockTimestampUnixMillis int64                  `                   protobuf:"varint,4,opt,name=block_timestamp_unix_millis,json=blockTimestampUnixMillis,proto3" json:"block_timestamp_unix_millis,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -1762,8 +1763,8 @@ func (x *CardanoPosition) GetBlockTimestampUnixMillis() int64 {
 
 type UtxoEventsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Events        []*UtxoEvent           `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
-	NextPosition  *CardanoPosition       `protobuf:"bytes,2,opt,name=next_position,json=nextPosition,proto3" json:"next_position,omitempty"`
+	Events        []*UtxoEvent           `                   protobuf:"bytes,1,rep,name=events,proto3"                          json:"events,omitempty"`
+	NextPosition  *CardanoPosition       `                   protobuf:"bytes,2,opt,name=next_position,json=nextPosition,proto3" json:"next_position,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1814,7 +1815,7 @@ func (x *UtxoEventsResponse) GetNextPosition() *CardanoPosition {
 
 type BlockByHashRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	BlockHash     []byte                 `protobuf:"bytes,1,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
+	BlockHash     []byte                 `                   protobuf:"bytes,1,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1858,11 +1859,11 @@ func (x *BlockByHashRequest) GetBlockHash() []byte {
 
 type BlockByHashResponse struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
-	BlockNumber        uint32                 `protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	TxCount            uint32                 `protobuf:"varint,2,opt,name=tx_count,json=txCount,proto3" json:"tx_count,omitempty"`
-	BlockTimestampUnix int64                  `protobuf:"varint,3,opt,name=block_timestamp_unix,json=blockTimestampUnix,proto3" json:"block_timestamp_unix,omitempty"`
-	EpochNumber        uint32                 `protobuf:"varint,4,opt,name=epoch_number,json=epochNumber,proto3" json:"epoch_number,omitempty"`
-	SlotNumber         uint64                 `protobuf:"varint,5,opt,name=slot_number,json=slotNumber,proto3" json:"slot_number,omitempty"`
+	BlockNumber        uint32                 `                   protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3"                json:"block_number,omitempty"`
+	TxCount            uint32                 `                   protobuf:"varint,2,opt,name=tx_count,json=txCount,proto3"                        json:"tx_count,omitempty"`
+	BlockTimestampUnix int64                  `                   protobuf:"varint,3,opt,name=block_timestamp_unix,json=blockTimestampUnix,proto3" json:"block_timestamp_unix,omitempty"`
+	EpochNumber        uint32                 `                   protobuf:"varint,4,opt,name=epoch_number,json=epochNumber,proto3"                json:"epoch_number,omitempty"`
+	SlotNumber         uint64                 `                   protobuf:"varint,5,opt,name=slot_number,json=slotNumber,proto3"                  json:"slot_number,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -1934,11 +1935,11 @@ func (x *BlockByHashResponse) GetSlotNumber() uint64 {
 
 type Block struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
-	BlockNumber        uint32                 `protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3" json:"block_number,omitempty"`
-	BlockHash          []byte                 `protobuf:"bytes,2,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	EpochNumber        uint32                 `protobuf:"varint,3,opt,name=epoch_number,json=epochNumber,proto3" json:"epoch_number,omitempty"`
-	SlotNumber         uint64                 `protobuf:"varint,4,opt,name=slot_number,json=slotNumber,proto3" json:"slot_number,omitempty"`
-	BlockTimestampUnix uint64                 `protobuf:"varint,5,opt,name=block_timestamp_unix,json=blockTimestampUnix,proto3" json:"block_timestamp_unix,omitempty"`
+	BlockNumber        uint32                 `                   protobuf:"varint,1,opt,name=block_number,json=blockNumber,proto3"                json:"block_number,omitempty"`
+	BlockHash          []byte                 `                   protobuf:"bytes,2,opt,name=block_hash,json=blockHash,proto3"                     json:"block_hash,omitempty"`
+	EpochNumber        uint32                 `                   protobuf:"varint,3,opt,name=epoch_number,json=epochNumber,proto3"                json:"epoch_number,omitempty"`
+	SlotNumber         uint64                 `                   protobuf:"varint,4,opt,name=slot_number,json=slotNumber,proto3"                  json:"slot_number,omitempty"`
+	BlockTimestampUnix uint64                 `                   protobuf:"varint,5,opt,name=block_timestamp_unix,json=blockTimestampUnix,proto3" json:"block_timestamp_unix,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -2010,8 +2011,8 @@ func (x *Block) GetBlockTimestampUnix() uint64 {
 
 type LatestStableBlockRequest struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
-	StabilityOffset         uint32                 `protobuf:"varint,1,opt,name=stability_offset,json=stabilityOffset,proto3" json:"stability_offset,omitempty"`
-	AsOfTimestampUnixMillis uint64                 `protobuf:"varint,2,opt,name=as_of_timestamp_unix_millis,json=asOfTimestampUnixMillis,proto3" json:"as_of_timestamp_unix_millis,omitempty"`
+	StabilityOffset         uint32                 `                   protobuf:"varint,1,opt,name=stability_offset,json=stabilityOffset,proto3"                    json:"stability_offset,omitempty"`
+	AsOfTimestampUnixMillis uint64                 `                   protobuf:"varint,2,opt,name=as_of_timestamp_unix_millis,json=asOfTimestampUnixMillis,proto3" json:"as_of_timestamp_unix_millis,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -2062,7 +2063,7 @@ func (x *LatestStableBlockRequest) GetAsOfTimestampUnixMillis() uint64 {
 
 type LatestStableBlockResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Block         *Block                 `protobuf:"bytes,1,opt,name=block,proto3,oneof" json:"block,omitempty"`
+	Block         *Block                 `                   protobuf:"bytes,1,opt,name=block,proto3,oneof" json:"block,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2142,7 +2143,7 @@ func (*LatestBlockRequest) Descriptor() ([]byte, []int) {
 
 type LatestBlockResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Block         *Block                 `protobuf:"bytes,1,opt,name=block,proto3" json:"block,omitempty"`
+	Block         *Block                 `                   protobuf:"bytes,1,opt,name=block,proto3" json:"block,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2186,9 +2187,9 @@ func (x *LatestBlockResponse) GetBlock() *Block {
 
 type StableBlockRequest struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
-	BlockHash               []byte                 `protobuf:"bytes,1,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	StabilityOffset         uint32                 `protobuf:"varint,2,opt,name=stability_offset,json=stabilityOffset,proto3" json:"stability_offset,omitempty"`
-	AsOfTimestampUnixMillis uint64                 `protobuf:"varint,3,opt,name=as_of_timestamp_unix_millis,json=asOfTimestampUnixMillis,proto3" json:"as_of_timestamp_unix_millis,omitempty"`
+	BlockHash               []byte                 `                   protobuf:"bytes,1,opt,name=block_hash,json=blockHash,proto3"                                 json:"block_hash,omitempty"`
+	StabilityOffset         uint32                 `                   protobuf:"varint,2,opt,name=stability_offset,json=stabilityOffset,proto3"                    json:"stability_offset,omitempty"`
+	AsOfTimestampUnixMillis uint64                 `                   protobuf:"varint,3,opt,name=as_of_timestamp_unix_millis,json=asOfTimestampUnixMillis,proto3" json:"as_of_timestamp_unix_millis,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -2246,7 +2247,7 @@ func (x *StableBlockRequest) GetAsOfTimestampUnixMillis() uint64 {
 
 type StableBlockResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Block         *Block                 `protobuf:"bytes,1,opt,name=block,proto3,oneof" json:"block,omitempty"`
+	Block         *Block                 `                   protobuf:"bytes,1,opt,name=block,proto3,oneof" json:"block,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2494,51 +2495,125 @@ var (
 
 func file_midnight_proto_midnight_state_proto_rawDescGZIP() []byte {
 	file_midnight_proto_midnight_state_proto_rawDescOnce.Do(func() {
-		file_midnight_proto_midnight_state_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_midnight_proto_midnight_state_proto_rawDesc), len(file_midnight_proto_midnight_state_proto_rawDesc)))
+		file_midnight_proto_midnight_state_proto_rawDescData = protoimpl.X.CompressGZIP(
+			unsafe.Slice(
+				unsafe.StringData(
+					file_midnight_proto_midnight_state_proto_rawDesc,
+				),
+				len(file_midnight_proto_midnight_state_proto_rawDesc),
+			),
+		)
 	})
 	return file_midnight_proto_midnight_state_proto_rawDescData
 }
 
-var file_midnight_proto_midnight_state_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_midnight_proto_midnight_state_proto_msgTypes = make(
+	[]protoimpl.MessageInfo,
+	38,
+)
 var file_midnight_proto_midnight_state_proto_goTypes = []any{
-	(*AssetCreatesRequest)(nil),             // 0: midnight_state.AssetCreatesRequest
-	(*AssetCreate)(nil),                     // 1: midnight_state.AssetCreate
-	(*AssetCreatesResponse)(nil),            // 2: midnight_state.AssetCreatesResponse
-	(*AssetSpendsRequest)(nil),              // 3: midnight_state.AssetSpendsRequest
-	(*AssetSpend)(nil),                      // 4: midnight_state.AssetSpend
-	(*AssetSpendsResponse)(nil),             // 5: midnight_state.AssetSpendsResponse
-	(*RegistrationsRequest)(nil),            // 6: midnight_state.RegistrationsRequest
-	(*Registration)(nil),                    // 7: midnight_state.Registration
-	(*RegistrationsResponse)(nil),           // 8: midnight_state.RegistrationsResponse
-	(*DeregistrationsRequest)(nil),          // 9: midnight_state.DeregistrationsRequest
-	(*Deregistration)(nil),                  // 10: midnight_state.Deregistration
-	(*DeregistrationsResponse)(nil),         // 11: midnight_state.DeregistrationsResponse
-	(*TechnicalCommitteeDatumRequest)(nil),  // 12: midnight_state.TechnicalCommitteeDatumRequest
-	(*TechnicalCommitteeDatumResponse)(nil), // 13: midnight_state.TechnicalCommitteeDatumResponse
-	(*CouncilDatumRequest)(nil),             // 14: midnight_state.CouncilDatumRequest
-	(*CouncilDatumResponse)(nil),            // 15: midnight_state.CouncilDatumResponse
-	(*AriadneParametersRequest)(nil),        // 16: midnight_state.AriadneParametersRequest
-	(*AriadneParametersResponse)(nil),       // 17: midnight_state.AriadneParametersResponse
-	(*EpochNonceRequest)(nil),               // 18: midnight_state.EpochNonceRequest
-	(*EpochNonceResponse)(nil),              // 19: midnight_state.EpochNonceResponse
-	(*EpochCandidatesRequest)(nil),          // 20: midnight_state.EpochCandidatesRequest
-	(*UtxoId)(nil),                          // 21: midnight_state.UtxoId
-	(*EpochCandidate)(nil),                  // 22: midnight_state.EpochCandidate
-	(*StakePoolEntry)(nil),                  // 23: midnight_state.StakePoolEntry
-	(*EpochCandidatesResponse)(nil),         // 24: midnight_state.EpochCandidatesResponse
-	(*UtxoEventsRequest)(nil),               // 25: midnight_state.UtxoEventsRequest
-	(*UtxoEvent)(nil),                       // 26: midnight_state.UtxoEvent
-	(*CardanoPosition)(nil),                 // 27: midnight_state.CardanoPosition
-	(*UtxoEventsResponse)(nil),              // 28: midnight_state.UtxoEventsResponse
-	(*BlockByHashRequest)(nil),              // 29: midnight_state.BlockByHashRequest
-	(*BlockByHashResponse)(nil),             // 30: midnight_state.BlockByHashResponse
-	(*Block)(nil),                           // 31: midnight_state.Block
-	(*LatestStableBlockRequest)(nil),        // 32: midnight_state.LatestStableBlockRequest
-	(*LatestStableBlockResponse)(nil),       // 33: midnight_state.LatestStableBlockResponse
-	(*LatestBlockRequest)(nil),              // 34: midnight_state.LatestBlockRequest
-	(*LatestBlockResponse)(nil),             // 35: midnight_state.LatestBlockResponse
-	(*StableBlockRequest)(nil),              // 36: midnight_state.StableBlockRequest
-	(*StableBlockResponse)(nil),             // 37: midnight_state.StableBlockResponse
+	(*AssetCreatesRequest)(
+		nil,
+	), // 0: midnight_state.AssetCreatesRequest
+	(*AssetCreate)(nil), // 1: midnight_state.AssetCreate
+	(*AssetCreatesResponse)(
+		nil,
+	), // 2: midnight_state.AssetCreatesResponse
+	(*AssetSpendsRequest)(
+		nil,
+	), // 3: midnight_state.AssetSpendsRequest
+	(*AssetSpend)(nil), // 4: midnight_state.AssetSpend
+	(*AssetSpendsResponse)(
+		nil,
+	), // 5: midnight_state.AssetSpendsResponse
+	(*RegistrationsRequest)(
+		nil,
+	), // 6: midnight_state.RegistrationsRequest
+	(*Registration)(nil), // 7: midnight_state.Registration
+	(*RegistrationsResponse)(
+		nil,
+	), // 8: midnight_state.RegistrationsResponse
+	(*DeregistrationsRequest)(
+		nil,
+	), // 9: midnight_state.DeregistrationsRequest
+	(*Deregistration)(
+		nil,
+	), // 10: midnight_state.Deregistration
+	(*DeregistrationsResponse)(
+		nil,
+	), // 11: midnight_state.DeregistrationsResponse
+	(*TechnicalCommitteeDatumRequest)(
+		nil,
+	), // 12: midnight_state.TechnicalCommitteeDatumRequest
+	(*TechnicalCommitteeDatumResponse)(
+		nil,
+	), // 13: midnight_state.TechnicalCommitteeDatumResponse
+	(*CouncilDatumRequest)(
+		nil,
+	), // 14: midnight_state.CouncilDatumRequest
+	(*CouncilDatumResponse)(
+		nil,
+	), // 15: midnight_state.CouncilDatumResponse
+	(*AriadneParametersRequest)(
+		nil,
+	), // 16: midnight_state.AriadneParametersRequest
+	(*AriadneParametersResponse)(
+		nil,
+	), // 17: midnight_state.AriadneParametersResponse
+	(*EpochNonceRequest)(
+		nil,
+	), // 18: midnight_state.EpochNonceRequest
+	(*EpochNonceResponse)(
+		nil,
+	), // 19: midnight_state.EpochNonceResponse
+	(*EpochCandidatesRequest)(
+		nil,
+	), // 20: midnight_state.EpochCandidatesRequest
+	(*UtxoId)(nil), // 21: midnight_state.UtxoId
+	(*EpochCandidate)(
+		nil,
+	), // 22: midnight_state.EpochCandidate
+	(*StakePoolEntry)(
+		nil,
+	), // 23: midnight_state.StakePoolEntry
+	(*EpochCandidatesResponse)(
+		nil,
+	), // 24: midnight_state.EpochCandidatesResponse
+	(*UtxoEventsRequest)(
+		nil,
+	), // 25: midnight_state.UtxoEventsRequest
+	(*UtxoEvent)(nil), // 26: midnight_state.UtxoEvent
+	(*CardanoPosition)(
+		nil,
+	), // 27: midnight_state.CardanoPosition
+	(*UtxoEventsResponse)(
+		nil,
+	), // 28: midnight_state.UtxoEventsResponse
+	(*BlockByHashRequest)(
+		nil,
+	), // 29: midnight_state.BlockByHashRequest
+	(*BlockByHashResponse)(
+		nil,
+	), // 30: midnight_state.BlockByHashResponse
+	(*Block)(nil), // 31: midnight_state.Block
+	(*LatestStableBlockRequest)(
+		nil,
+	), // 32: midnight_state.LatestStableBlockRequest
+	(*LatestStableBlockResponse)(
+		nil,
+	), // 33: midnight_state.LatestStableBlockResponse
+	(*LatestBlockRequest)(
+		nil,
+	), // 34: midnight_state.LatestBlockRequest
+	(*LatestBlockResponse)(
+		nil,
+	), // 35: midnight_state.LatestBlockResponse
+	(*StableBlockRequest)(
+		nil,
+	), // 36: midnight_state.StableBlockRequest
+	(*StableBlockResponse)(
+		nil,
+	), // 37: midnight_state.StableBlockResponse
 }
 var file_midnight_proto_midnight_state_proto_depIdxs = []int32{
 	1,  // 0: midnight_state.AssetCreatesResponse.creates:type_name -> midnight_state.AssetCreate
@@ -2611,7 +2686,12 @@ func file_midnight_proto_midnight_state_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_midnight_proto_midnight_state_proto_rawDesc), len(file_midnight_proto_midnight_state_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(
+				unsafe.StringData(
+					file_midnight_proto_midnight_state_proto_rawDesc,
+				),
+				len(file_midnight_proto_midnight_state_proto_rawDesc),
+			),
 			NumEnums:      0,
 			NumMessages:   38,
 			NumExtensions: 0,

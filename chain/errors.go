@@ -17,6 +17,8 @@ package chain
 import (
 	"errors"
 	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // DefaultMaxQueuedHeaders is the minimum header queue capacity (floor).
@@ -25,7 +27,14 @@ import (
 const DefaultMaxQueuedHeaders = 10_000
 
 var (
-	ErrIntersectNotFound            = errors.New("chain intersect not found")
+	ErrIntersectNotFound = errors.New("chain intersect not found")
+	// ErrBlockAddNotAdmitted is returned by AddBlockWithPointDeferredIf when
+	// the caller's admit predicate, evaluated under the chain mutex, declines
+	// the block. It means the add was abandoned before any chain state was
+	// read or written, not that the block was invalid.
+	ErrBlockAddNotAdmitted = errors.New(
+		"block add was not admitted by the caller's predicate",
+	)
 	ErrRollbackBeyondEphemeralChain = errors.New(
 		"cannot rollback ephemeral chain beyond memory buffer",
 	)
@@ -42,6 +51,19 @@ var (
 	)
 	ErrRollbackExceedsSecurityParam = errors.New(
 		"rollback depth exceeds security parameter K",
+	)
+	// ErrRollbackPointNotOnChain is returned when a rollback target resolves
+	// to a block that this chain no longer holds at that block index.
+	// Rolled-back blocks stay resolvable through the manager's retained block
+	// cache with their original index, so a point another fork has since
+	// overwritten still looks valid; rolling back to it truncates to a stale
+	// index and moves the tip to a block the chain does not have, splicing a
+	// continuation onto a parent that is absent from the chain (issue #3005).
+	// It wraps models.ErrBlockNotFound so existing callers keep treating an
+	// unusable rollback target as "point not found" and re-intersect.
+	ErrRollbackPointNotOnChain = fmt.Errorf(
+		"%w: rollback point is not on this chain",
+		models.ErrBlockNotFound,
 	)
 	ErrIteratorChainTip = errors.New(
 		"chain iterator is at chain tip",
@@ -90,6 +112,46 @@ func (e BlockNotFitChainTipError) Error() string {
 		e.blockHash,
 		e.blockPrevHash,
 		e.tipHash,
+	)
+}
+
+// BlockNumberNotContiguousError is returned when a block/header's self-reported
+// block number does not follow its parent's. The block number is a redundant
+// header field that chain selection uses to pick the longer chain, so it must
+// be bound to the actual chain length: a header that chains onto the tip
+// (matching prev hash) but claims a non-contiguous block number is rejected so
+// a forged (e.g. inflated) number cannot win chain selection.
+type BlockNumberNotContiguousError struct {
+	blockHash    string
+	blockNumber  uint64
+	parentNumber uint64
+}
+
+func NewBlockNumberNotContiguousError(
+	blockHash string,
+	blockNumber uint64,
+	parentNumber uint64,
+) BlockNumberNotContiguousError {
+	return BlockNumberNotContiguousError{
+		blockHash:    blockHash,
+		blockNumber:  blockNumber,
+		parentNumber: parentNumber,
+	}
+}
+
+func (e BlockNumberNotContiguousError) BlockHash() string { return e.blockHash }
+
+func (e BlockNumberNotContiguousError) BlockNumber() uint64 { return e.blockNumber }
+func (e BlockNumberNotContiguousError) ParentNumber() uint64 {
+	return e.parentNumber
+}
+
+func (e BlockNumberNotContiguousError) Error() string {
+	return fmt.Sprintf(
+		"block %s claims block number %d that is not contiguous with parent %d",
+		e.blockHash,
+		e.blockNumber,
+		e.parentNumber,
 	)
 }
 

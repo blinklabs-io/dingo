@@ -34,14 +34,11 @@ func (ls *LedgerState) SystemStart() (time.Time, error) {
 
 // It returns all epochs stored in the database.
 func (ls *LedgerState) GetEpochs() ([]models.Epoch, error) {
-	ls.RLock()
-	defer ls.RUnlock()
-	if len(ls.epochCache) == 0 {
+	cache := ls.loadConsensusSnapshot().epochCache
+	if len(cache) == 0 {
 		return nil, nil
 	}
-	epochs := make([]models.Epoch, len(ls.epochCache))
-	copy(epochs, ls.epochCache)
-	return epochs, nil
+	return cloneEpochs(cache), nil
 }
 
 // It returns protocol parameters for the specific epoch.
@@ -52,5 +49,5 @@ func (ls *LedgerState) GetPParamsForEpoch(
 	if era.DecodePParamsFunc == nil {
 		return nil, nil
 	}
-	return ls.db.GetPParams(epoch, era.Id, era.DecodePParamsFunc, nil)
+	return ls.loadPersistedProtocolParameters(epoch, era, nil)
 }

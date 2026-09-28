@@ -83,7 +83,7 @@ func datumHash(datum []byte) []byte {
 // Key 1 = outputs  (array of map-encoded outputs)
 // Key 2 = fee
 type txBodyWithScriptOutput struct {
-	Inputs  []txBodyInput     `cbor:"0,keyasint"`
+	Inputs  cbor.Set          `cbor:"0,keyasint"`
 	Outputs []cbor.RawMessage `cbor:"1,keyasint"`
 	Fee     uint64            `cbor:"2,keyasint"`
 }
@@ -215,8 +215,12 @@ func BuildPlutusLockTx(
 		outputs = append(outputs, cbor.RawMessage(changeOutBytes))
 	}
 
+	lockInputSet := make(cbor.Set, len(bodyInputs))
+	for i, inp := range bodyInputs {
+		lockInputSet[i] = inp
+	}
 	body := txBodyWithScriptOutput{
-		Inputs:  bodyInputs,
+		Inputs:  lockInputSet,
 		Outputs: outputs,
 		Fee:     fee,
 	}
@@ -243,7 +247,7 @@ func BuildPlutusLockTx(
 // Key 1 = outputs
 // Key 2 = fee
 type txBodyUnlock struct {
-	Inputs  []txBodyInput  `cbor:"0,keyasint"`
+	Inputs  cbor.Set       `cbor:"0,keyasint"`
 	Outputs []txBodyOutput `cbor:"1,keyasint"`
 	Fee     uint64         `cbor:"2,keyasint"`
 }
@@ -335,8 +339,12 @@ func BuildPlutusUnlockTx(
 		)
 	}
 
+	unlockInputSet := make(cbor.Set, len(bodyInputs))
+	for i, inp := range bodyInputs {
+		unlockInputSet[i] = inp
+	}
 	body := txBodyUnlock{
-		Inputs:  bodyInputs,
+		Inputs:  unlockInputSet,
 		Outputs: outputs,
 		Fee:     fee,
 	}

@@ -27,6 +27,8 @@ import (
 func (p *PeerGovernor) reconcile(ctx context.Context) {
 	p.mu.Lock()
 	now := time.Now()
+	// Age stale scores before any ranking decision reads them.
+	p.agePeerScoresLocked(now)
 	debugEnabled := p.config.Logger.Enabled(
 		ctx,
 		slog.LevelDebug,
@@ -39,6 +41,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Cleanup expired deny list entries
 	p.cleanupDenyList()
+	p.cleanupNetworkMismatchDenyList()
+
+	// Reconcile ledger-derived address bookkeeping against currently
+	// retained peers so addresses from peers that left the peer list (deny,
+	// capacity, inactivity, reconnect-failure eviction) do not linger in
+	// memory forever.
+	p.pruneLedgerKnownAddrsLocked()
 
 	// Check if we should exit bootstrap mode
 	if shouldExit, reason := p.shouldExitBootstrap(); shouldExit {
@@ -103,7 +112,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 							peer.Connection.Id,
 						)
 						if conn != nil {
-							conn.Close()
+							closeConnAndLog(
+								p.config.Logger,
+								conn,
+								"error closing connection for bootstrap peer after exit",
+								"address",
+								peer.Address,
+							)
 						}
 					}
 					peer.Connection = nil
@@ -155,6 +170,31 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					PeerStateChangeEvent{Address: peer.Address, Reason: "excessive failures"},
 				})
 				// Remove from slice (safe while iterating backwards)
+				p.peers = slices.Delete(p.peers, i, i+1)
+			} else if p.isStaleTestOnlyPeerLocked(peer, now) {
+				// TestPeer creates this entry solely to cache a suitability
+				// result; it never dials through the normal reconnect path,
+				// so ReconnectCount never rises and the branch above never
+				// fires. Without this, an untested address that nothing else
+				// ever discovers again stays PeerSourceUnknown/cold forever,
+				// occupies a peer-cap slot, and blocks AddPeer from ever
+				// admitting that address under its real source (AddPeer
+				// treats any existing entry as a dedupe match regardless of
+				// source). Once its cooldown lapses, the cached result is no
+				// longer even consulted by TestPeer, so nothing depends on
+				// keeping it.
+				knownRemoved++
+				p.config.Logger.Debug(
+					"removing stale test-only peer entry",
+					"address", peer.Address,
+				)
+				events = append(events, pendingEvent{
+					PeerRemovedEventType,
+					PeerStateChangeEvent{
+						Address: peer.Address,
+						Reason:  "test entry expired",
+					},
+				})
 				p.peers = slices.Delete(p.peers, i, i+1)
 			}
 		}
@@ -230,7 +270,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					}
 					return 1
 				}
-				if len(selectedGroups) < p.bootstrapPromotionMinDiversityGroups() {
+				if len(
+					selectedGroups,
+				) < p.bootstrapPromotionMinDiversityGroups() {
 					_, aSeen := selectedGroups[a.diversityGroup]
 					_, bSeen := selectedGroups[b.diversityGroup]
 					aNew := a.diversityGroup != "" && !aSeen
@@ -358,12 +400,18 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				}
 				logArgs = append(
 					logArgs,
-					"tenure", tenure,
-					"min_tenure", p.config.InboundMinTenure,
-					"score_threshold", p.config.InboundHotScoreThreshold,
-					"full_duplex", peer.hasClientConnection() || peer.InboundDuplex,
-					"topology_slot", peer.InboundTopologyMatch,
-					"satisfies_topology_slot", satisfiesTopologySlot,
+					"tenure",
+					tenure,
+					"min_tenure",
+					p.config.InboundMinTenure,
+					"score_threshold",
+					p.config.InboundHotScoreThreshold,
+					"full_duplex",
+					peer.hasClientConnection() || peer.InboundDuplex,
+					"topology_slot",
+					peer.InboundTopologyMatch,
+					"satisfies_topology_slot",
+					satisfiesTopologySlot,
 				)
 			}
 			p.config.Logger.Info(logMsg, logArgs...)
@@ -384,7 +432,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Prune idle/unhelpful inbound warm peers and apply cooldown for
 	// flapping identities before generic state-limit pruning.
-	events = append(events, p.pruneInboundWarmPeersLocked(now, &knownRemoved)...)
+	events = append(
+		events,
+		p.pruneInboundWarmPeersLocked(now, &knownRemoved)...)
 
 	// Log valency status for topology groups
 	if debugEnabled {
@@ -487,7 +537,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Discover peers from ledger (stake pool relays) before peer sharing,
 	// which can block on unresponsive peers.
-	p.discoverLedgerPeers()
+	p.discoverLedgerPeersContext(ctx)
 
 	for i := range eligiblePeersCopy {
 		addrs := p.config.PeerRequestFunc(&eligiblePeersCopy[i])
@@ -614,7 +664,13 @@ func (p *PeerGovernor) enforceStateLimit(
 		if peer.Connection != nil && p.config.ConnManager != nil {
 			conn := p.config.ConnManager.GetConnectionById(peer.Connection.Id)
 			if conn != nil {
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing connection for peer removed due to limit exceeded",
+					"address",
+					peer.Address,
+				)
 			}
 		}
 		events = append(events, pendingEvent{
@@ -632,7 +688,8 @@ func (p *PeerGovernor) enforceStateLimit(
 			p.inboundPruned++
 			if p.metrics != nil {
 				p.metrics.inboundPruned.Inc()
-				p.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded").Inc()
+				p.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded").
+					Inc()
 			}
 		}
 	}
@@ -670,10 +727,14 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 ) []pendingEvent {
 	var events []pendingEvent
 	for i, peer := range slices.Backward(p.peers) {
-		if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+		if peer == nil || peer.Source != PeerSourceInboundConn ||
+			peer.State != PeerStateWarm {
 			continue
 		}
-		shouldPrune, reason, reasonLabel, cooldownDuration, applyCooldown := p.inboundPruneDecisionLocked(peer, now)
+		shouldPrune, reason, reasonLabel, cooldownDuration, applyCooldown := p.inboundPruneDecisionLocked(
+			peer,
+			now,
+		)
 		if !shouldPrune {
 			continue
 		}
@@ -745,13 +806,18 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 ) {
 	reason = "inbound idle or unhelpful past prune threshold"
 	reasonLabel = "idle_unhelpful"
-	if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+	if peer == nil || peer.Source != PeerSourceInboundConn ||
+		peer.State != PeerStateWarm {
 		return false, "", "", 0, false
 	}
 	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
 		cooldownDuration = max(
 			// Keep cooldown at least as long as the normal deny duration.
-			p.config.InboundCooldown*time.Duration(multiplier), p.config.DenyDuration)
+			p.config.InboundCooldown*time.Duration(
+				multiplier,
+			),
+			p.config.DenyDuration,
+		)
 		reason = "inbound flapping cooldown"
 		reasonLabel = "flapping_cooldown"
 		applyCooldown = true
@@ -780,4 +846,50 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 		return false, reason, reasonLabel, cooldownDuration, applyCooldown
 	}
 	return true, reason, reasonLabel, cooldownDuration, applyCooldown
+}
+
+// isStaleTestOnlyPeerLocked reports whether peer is a TestPeer-only probe
+// entry (PeerSourceUnknown, never actually connected) whose cached result has
+// outlived the cooldown that makes it useful. Past that point a fresh
+// TestPeer call would retest rather than trust the cache, so nothing reads
+// this entry any longer. Must be called with p.mu held.
+func (p *PeerGovernor) isStaleTestOnlyPeerLocked(
+	peer *Peer,
+	now time.Time,
+) bool {
+	if peer == nil ||
+		peer.Source != PeerSourceUnknown ||
+		peer.EverConnected ||
+		peer.LastTestTime.IsZero() {
+		return false
+	}
+	return now.Sub(peer.LastTestTime) >= p.config.TestCooldown
+}
+
+// pruneLedgerKnownAddrsLocked removes ledgerKnownAddrs entries that no longer
+// correspond to a retained peer. An address is recorded here only while a
+// live peer holds it (either as a newly admitted PeerSourceP2PLedger peer, or
+// as an existing peer from another source that a ledger candidate matched),
+// so once no peer in p.peers carries the address any longer, the entry only
+// serves to grow this map forever across ledger-discovery rounds as relays
+// rotate in and out of the on-chain registration set. Must be called with
+// p.mu held.
+func (p *PeerGovernor) pruneLedgerKnownAddrsLocked() {
+	if len(p.ledgerKnownAddrs) == 0 {
+		return
+	}
+	live := make(map[string]struct{}, len(p.peers))
+	for _, peer := range p.peers {
+		if peer == nil {
+			continue
+		}
+		// ledgerKnownAddrs is keyed on normalizeAddress(peer.Address) (see
+		// addLedgerPeerContext), not peer.NormalizedAddress.
+		live[p.normalizeAddress(peer.Address)] = struct{}{}
+	}
+	for addr := range p.ledgerKnownAddrs {
+		if _, ok := live[addr]; !ok {
+			delete(p.ledgerKnownAddrs, addr)
+		}
+	}
 }

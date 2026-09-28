@@ -115,6 +115,8 @@ func seedUtxoMetadata(
 }
 
 func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const slot uint64 = 100
@@ -190,6 +192,8 @@ func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 }
 
 func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const slot uint64 = 100
@@ -230,6 +234,8 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 // "history expired" signal — not the silent chain-tip closure that
 // BlockFetch produced before the fix.
 func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const slot uint64 = 100
@@ -281,6 +287,8 @@ func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 // to raw CBOR up front so resolution does not require a wrapping
 // archive proxy to fetch the source block.
 func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBWithMode(t, types.StorageModeAPI)
 
 	const slot uint64 = 100
@@ -328,6 +336,8 @@ func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
 // spent blob entry must remain as the original offset reference (and is
 // then deleted by the next cleanup pass).
 func TestPruneBlock_CoreModeLeavesSpentUtxos(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBWithMode(t, types.StorageModeCore)
 
 	const slot uint64 = 100
@@ -357,6 +367,8 @@ func TestPruneBlock_CoreModeLeavesSpentUtxos(t *testing.T) {
 }
 
 func TestPruneBlock_SkipsAlreadyMaterializedUtxo(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const slot uint64 = 100

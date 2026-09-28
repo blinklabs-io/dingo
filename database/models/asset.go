@@ -15,34 +15,108 @@
 package models
 
 import (
-	"encoding/hex"
+	"errors"
+	"fmt"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 type Asset struct {
-	Name        []byte       `gorm:"uniqueIndex:idx_asset_unique;size:32"`
-	NameHex     []byte       `gorm:"index;size:64"`
-	PolicyId    []byte       `gorm:"index:idx_asset_policy_id;uniqueIndex:idx_asset_unique;size:28"`
-	Fingerprint []byte       `gorm:"index;size:48"`
-	ID          uint         `gorm:"primaryKey"`
-	UtxoID      uint         `gorm:"index;uniqueIndex:idx_asset_unique"`
-	Amount      types.Uint64 `gorm:"index"`
+	Name        []byte
+	PolicyId    []byte
+	Fingerprint []byte
+	ID          uint
+	UtxoID      uint
+	Amount      types.Uint64
 }
 
-func (Asset) TableName() string {
-	return "asset"
+// AssetMintBurn records a single asset mint or burn event: one row per
+// (transaction, asset) pair for every transaction that mints or burns the
+// asset. Quantity is a signed decimal string (positive for a mint, negative
+// for a burn). Only populated in API storage mode.
+//
+// Unlike Asset (which tracks live UTxO holdings), this table preserves the
+// full mint/burn history so the Blockfrost API can derive an asset's
+// initial_mint_tx_hash (earliest event) and mint_or_burn_count (row count).
+type AssetMintBurn struct {
+	ID          uint
+	TxHash      []byte
+	PolicyId    []byte
+	Name        []byte
+	Fingerprint []byte
+	Slot        uint64
+	Quantity    string
+	TxIndex     uint32
+}
+
+// ConvertMintToAssetMintBurnModels converts a transaction's mint field into a
+// slice of AssetMintBurn models, one per (policy, asset name) pair with a
+// non-zero net quantity. Returns nil when there is nothing minted or burned.
+func ConvertMintToAssetMintBurnModels(
+	mint *lcommon.MultiAsset[lcommon.MultiAssetTypeMint],
+	txHash []byte,
+	slot uint64,
+	txIndex uint32,
+) []AssetMintBurn {
+	if mint == nil {
+		return nil
+	}
+	var rows []AssetMintBurn
+	for _, policyId := range mint.Policies() {
+		policyIdBytes := policyId.Bytes()
+		for _, assetNameBytes := range mint.Assets(policyId) {
+			amount := mint.Asset(policyId, assetNameBytes)
+			if amount == nil || amount.Sign() == 0 {
+				continue
+			}
+			fingerprint := lcommon.NewAssetFingerprint(
+				policyIdBytes,
+				assetNameBytes,
+			)
+			rows = append(rows, AssetMintBurn{
+				TxHash:      append([]byte(nil), txHash...),
+				PolicyId:    policyIdBytes,
+				Name:        append([]byte(nil), assetNameBytes...),
+				Fingerprint: []byte(fingerprint.String()),
+				Slot:        slot,
+				Quantity:    amount.String(),
+				TxIndex:     txIndex,
+			})
+		}
+	}
+	return rows
+}
+
+// CheckedUint64FromBigInt converts amount to a uint64, rejecting negative
+// values and values that exceed math.MaxUint64. big.Int.Uint64 silently
+// keeps only the low 64 bits on overflow, which would otherwise let an
+// indexed asset amount wrap into an unrelated, much smaller value. Exported
+// so other packages indexing arbitrary-precision on-chain quantities (e.g.
+// midnight/indexer's cNIGHT amounts) share this one check rather than each
+// reimplementing it.
+func CheckedUint64FromBigInt(amount *big.Int) (uint64, error) {
+	if amount == nil {
+		return 0, errors.New("asset amount is nil")
+	}
+	if !amount.IsUint64() {
+		return 0, fmt.Errorf(
+			"asset amount %s does not fit in uint64",
+			amount.String(),
+		)
+	}
+	return amount.Uint64(), nil
 }
 
 // ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
-// Each asset is populated with its name, hex-encoded name, policy ID, fingerprint, and amount.
+// Each asset is populated with its name, policy ID, fingerprint, and amount.
 // Returns an empty slice if multiAsset is nil or contains no assets.
 func ConvertMultiAssetToModels(
 	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],
-) []Asset {
+) ([]Asset, error) {
 	if multiAsset == nil {
-		return []Asset{}
+		return []Asset{}, nil
 	}
 	numAssets := 0
 	// Get all policy IDs
@@ -57,7 +131,17 @@ func ConvertMultiAssetToModels(
 		// Get asset names for this policy
 		assetNames := multiAsset.Assets(policyId)
 		for _, assetNameBytes := range assetNames {
-			amount := multiAsset.Asset(policyId, assetNameBytes)
+			amount, err := CheckedUint64FromBigInt(
+				multiAsset.Asset(policyId, assetNameBytes),
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"asset %x.%x: %w",
+					policyIdBytes,
+					assetNameBytes,
+					err,
+				)
+			}
 
 			// Calculate fingerprint
 			fingerprint := lcommon.NewAssetFingerprint(
@@ -67,14 +151,13 @@ func ConvertMultiAssetToModels(
 
 			asset := Asset{
 				Name:        assetNameBytes,
-				NameHex:     []byte(hex.EncodeToString(assetNameBytes)),
 				PolicyId:    policyIdBytes,
 				Fingerprint: []byte(fingerprint.String()),
-				Amount:      types.Uint64(amount.Uint64()),
+				Amount:      types.Uint64(amount),
 			}
 			assets = append(assets, asset)
 		}
 	}
 
-	return assets
+	return assets, nil
 }

@@ -22,6 +22,7 @@ import (
 	"hash/crc32"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ErrLedgerDirNotFound is returned when the ledger directory cannot
@@ -43,7 +45,27 @@ var ErrLedgerDirNotFound = errors.New("ledger directory not found")
 //   - UTxO-HD: ledger/<slot>/state
 //
 // Returns the path to the state file.
+//
+// For trees the caller controls. It resolves pathnames and follows symlinks, so
+// what it returns describes the tree only for as long as nobody else can write
+// to it — and the name is resolved again by whoever opens it. Use
+// OpenSnapshotAtOrBefore for a tree that was vetted, or that lives anywhere a
+// concurrent writer might reach; it discovers through a directory handle and
+// hands back the files already open. Mithril bootstrap uses that one.
 func FindLedgerStateFile(extractedDir string) (string, error) {
+	return FindLedgerStateFileAtOrBefore(extractedDir, ^uint64(0))
+}
+
+// FindLedgerStateFileAtOrBefore searches the extracted snapshot directory for
+// the newest ledger state whose filename slot is at or before maxSlot. Mithril
+// ancillary archives can contain a newer ledger state from the node's volatile
+// database in addition to states anchored by certified ImmutableDB content.
+// Callers that use a ledger state as a trust anchor must cap selection at the
+// certified immutable tip.
+func FindLedgerStateFileAtOrBefore(
+	extractedDir string,
+	maxSlot uint64,
+) (string, error) {
 	ledgerDir, err := findLedgerDir(extractedDir)
 	if err != nil {
 		return "", err
@@ -63,6 +85,14 @@ func FindLedgerStateFile(extractedDir string) (string, error) {
 
 	for _, e := range entries {
 		name := e.Name()
+		slot, parseErr := strconv.ParseUint(
+			stripLedgerSuffix(name),
+			10,
+			64,
+		)
+		if parseErr != nil || slot > maxSlot {
+			continue
+		}
 		if e.IsDir() {
 			// UTxO-HD format: directory named by slot number
 			statePath := filepath.Join(
@@ -95,7 +125,8 @@ func FindLedgerStateFile(extractedDir string) (string, error) {
 	}
 
 	return "", fmt.Errorf(
-		"no ledger state files found in %s",
+		"no ledger state files at or before slot %d found in %s",
+		maxSlot,
 		ledgerDir,
 	)
 }
@@ -145,6 +176,17 @@ func FindUTxOTableFile(extractedDir string) string {
 	path, _ := findUTxOTableInSlot(
 		filepath.Join(ledgerDir, dirs[0]),
 	)
+	return path
+}
+
+// FindUTxOTableFileForState returns the UTxO-HD table that belongs to the
+// selected ledger state. Legacy ledger-state files embed their UTxO table and
+// return an empty path.
+func FindUTxOTableFileForState(statePath string) string {
+	if filepath.Base(statePath) != "state" {
+		return ""
+	}
+	path, _ := findUTxOTableInSlot(filepath.Dir(statePath))
 	return path
 }
 
@@ -360,15 +402,18 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	// HeaderState = [WithOrigin AnnTip, ChainDepState telescope]
 	nonces, nonceErr := parsePraosNonces(outer[1])
 	if nonceErr != nil {
-		slog.Debug(
-			"nonce extraction failed (non-fatal)",
-			"error", nonceErr,
-		)
+		if result.EraIndex >= EraShelley {
+			return nil, fmt.Errorf(
+				"extracting Praos HeaderState: %w", nonceErr,
+			)
+		}
+		slog.Debug("nonce extraction skipped for pre-Praos state")
 	} else if nonces != nil {
 		result.EpochNonce = nonces.EpochNonce
 		result.EvolvingNonce = nonces.EvolvingNonce
 		result.CandidateNonce = nonces.CandidateNonce
 		result.LastEpochBlockNonce = nonces.LastEpochBlockNonce
+		result.OpCertCounters = nonces.OpCertCounters
 	}
 
 	return result, nil
@@ -495,6 +540,22 @@ func parseCurrentEra(
 		return nil, fmt.Errorf("decoding epoch: %w", err)
 	}
 
+	// nesBprev and nesBcur. Both are mandatory strict fields of
+	// NewEpochState, so the length check above already guarantees they are
+	// present, and a map that will not decode means this is not a
+	// NewEpochState rather than a snapshot that omits them.
+	blocksPrev, err := parseBlocksMade(nes[1])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding blocks made in previous epoch: %w",
+			err,
+		)
+	}
+	blocksCur, err := parseBlocksMade(nes[2])
+	if err != nil {
+		return nil, fmt.Errorf("decoding blocks made in current epoch: %w", err)
+	}
+
 	// EpochState = [AccountState, LedgerState, SnapShots, NonMyopic]
 	es, err := decodeRawArray(nes[3])
 	if err != nil {
@@ -558,23 +619,48 @@ func parseCurrentEra(
 		)
 	}
 
+	// UTxOState[2] (utxosFees) is ssFee plus the fees this epoch has
+	// collected up to and including the snapshot's anchor block, not a
+	// partial "so far" total in isolation -- cardano-ledger's NEWEPOCH rule
+	// subtracts ssFee out of it and SNAP resets ssFee from it every epoch, so
+	// it only ever grows across a single epoch's ssFee baseline. It is one
+	// of the three addends of the reward pot (see ledger/rewards: the pot is
+	// incentives + fees), so a reward round computed without it understates
+	// every pool's reward. Decoding it is what lets a Mithril bootstrap seed
+	// a complete RewardAdaPots row rather than a partial one, and lets
+	// seedImportedRewardBasis recover the epoch's pre-anchor fee pot as
+	// utxosFees minus ssFee. Older eras may carry a shorter array, so its
+	// absence is tolerated and left at zero.
+	var fees uint64
+	if len(utxoState) > 2 {
+		if _, err := cbor.Decode(utxoState[2], &fees); err != nil {
+			return nil, fmt.Errorf("decoding UTxOState fees: %w", err)
+		}
+	}
+
 	result := &RawLedgerState{
 		EraIndex:      eraIndex,
 		Epoch:         epoch,
 		Tip:           tip,
 		Treasury:      treasury,
 		Reserves:      reserves,
+		Fees:          fees,
 		EraBoundSlot:  eraBoundSlot,
 		EraBoundEpoch: eraBoundEpoch,
 		UTxOData:      utxoState[0], // The UTxO map
 		CertStateData: ls[0],        // [VState, PState, DState]
 		SnapShotsData: es[2],        // mark/set/go
+		BlocksPrev:    blocksPrev,
+		BlocksCur:     blocksCur,
+	}
+	if len(nes) > 5 {
+		result.PoolDistrData = nes[5]
 	}
 
 	// GovState (index 3 in UTxOState)
 	if len(utxoState) > 3 {
 		result.GovStateData = utxoState[3]
-		pparamsData, pparamsErr := extractPParamsData(
+		pparamsData, prevPParamsData, pparamsErr := extractPParamsData(
 			eraIndex,
 			utxoState[3],
 		)
@@ -585,6 +671,7 @@ func parseCurrentEra(
 			)
 		}
 		result.PParamsData = pparamsData
+		result.PrevPParamsData = prevPParamsData
 	}
 
 	return result, nil
@@ -713,6 +800,9 @@ func parseBound(data []byte) (uint64, uint64, error) {
 // praosNonces holds the nonces extracted from the PraosState in the
 // HeaderState's ChainDepState telescope.
 type praosNonces struct {
+	// OpCertCounters is the certified per-pool operational-certificate counter
+	// state. Keys are 28-byte pool cold-key hashes encoded as strings.
+	OpCertCounters map[string]uint64
 	// EvolvingNonce is the rolling nonce (eta_v) updated with each
 	// block's VRF output. This is needed as the starting nonce for
 	// block processing after a mithril snapshot restore.
@@ -723,8 +813,8 @@ type praosNonces struct {
 	// CandidateNonce is the current Praos candidate nonce (eta_c)
 	// at the imported tip.
 	CandidateNonce []byte
-	// LastEpochBlockNonce is the lagged lab nonce used in epoch
-	// nonce calculation.
+	// LastEpochBlockNonce is the Praos last applied block hash used
+	// in epoch nonce calculation.
 	LastEpochBlockNonce []byte
 }
 
@@ -868,7 +958,12 @@ func extractPraosNonces(praosState [][]byte) (*praosNonces, error) {
 		)
 	}
 
-	result := &praosNonces{}
+	opCertCounters, err := decodeOpCertCounters(praosState[1])
+	if err != nil {
+		return nil, fmt.Errorf("decoding opcert counters: %w", err)
+	}
+
+	result := &praosNonces{OpCertCounters: opCertCounters}
 
 	evolvingNonce, err := decodeNonce(praosState[2])
 	if err != nil {
@@ -928,6 +1023,39 @@ func extractPraosNonces(praosState [][]byte) (*praosNonces, error) {
 	}
 	result.LastEpochBlockNonce = lastEpochBlockNonce
 
+	return result, nil
+}
+
+// decodeOpCertCounters decodes the Praos ocertCounters map. Every key is a
+// BlockIssuer key hash and must therefore be a 28-byte byte string. Rejecting
+// malformed and duplicate entries keeps the certified HeaderState an
+// unambiguous baseline for subsequent block validation.
+func decodeOpCertCounters(data []byte) (map[string]uint64, error) {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]uint64, len(entries))
+	for i, entry := range entries {
+		var poolKeyHash []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
+			return nil, fmt.Errorf("decoding key %d: %w", i, err)
+		}
+		if len(poolKeyHash) != 28 {
+			return nil, fmt.Errorf(
+				"key %d has length %d, expected 28", i, len(poolKeyHash),
+			)
+		}
+		var counter uint64
+		if _, err := cbor.Decode(entry.ValueRaw, &counter); err != nil {
+			return nil, fmt.Errorf("decoding value %d: %w", i, err)
+		}
+		key := string(poolKeyHash)
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("duplicate pool key at entry %d", i)
+		}
+		result[key] = counter
+	}
 	return result, nil
 }
 
@@ -1061,11 +1189,12 @@ func parseSnapShot(
 
 	var warnings []error
 	var stake map[string]uint64
+	var stakeTags map[string]uint8
 	var delegations map[string][]byte
 	var poolParams map[string]*ParsedPool
 
 	if len(snap) == 2 {
-		stake, delegations, err = parseStakeWithPoolMap(snap[0])
+		stake, stakeTags, delegations, err = parseStakeWithPoolMap(snap[0])
 		if err != nil {
 			if stake == nil || delegations == nil {
 				return nil, fmt.Errorf(
@@ -1089,7 +1218,7 @@ func parseSnapShot(
 		// Parse Stake: map[Credential]Coin
 		// Warnings from these parsers indicate skipped entries,
 		// not fatal errors, so we collect them.
-		stake, err = parseStakeMap(snap[0])
+		stake, stakeTags, err = parseStakeMap(snap[0])
 		if err != nil {
 			if stake == nil {
 				return nil, fmt.Errorf(
@@ -1124,25 +1253,220 @@ func parseSnapShot(
 
 	return &ParsedSnapShot{
 		Stake:       stake,
+		StakeTags:   stakeTags,
 		Delegations: delegations,
 		PoolParams:  poolParams,
 	}, errors.Join(warnings...)
 }
 
+// ParseActivePoolDistribution decodes NewEpochState.pool-distr:
+// map[PoolKeyHash][UnitInterval, active stake, VrfKeyHash, LeiosKey]. Older
+// states omit active stake and/or LeiosKey. The UnitInterval is the exact
+// active stake fraction (sigma) used by Praos leader eligibility.
+func ParseActivePoolDistribution(
+	data cbor.RawMessage,
+) ([]ParsedActivePoolStake, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	mapData, totalActiveStake, hasTotal, err := activePoolDistributionMapData(
+		data,
+	)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := decodeMapEntries(mapData)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding active pool distribution: %w", err,
+		)
+	}
+	result := make([]ParsedActivePoolStake, 0, len(entries))
+	for idx, entry := range entries {
+		var poolKeyHash []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: decoding pool key hash: %w",
+				idx,
+				err,
+			)
+		}
+		if len(poolKeyHash) != 28 {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: pool key hash has %d bytes, expected 28",
+				idx,
+				len(poolKeyHash),
+			)
+		}
+
+		fields, err := decodeRawArray(entry.ValueRaw)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: decoding value: %w",
+				idx,
+				err,
+			)
+		}
+		if len(fields) < 2 || len(fields) > 4 {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: value has %d fields, expected 2, 3, or 4",
+				idx,
+				len(fields),
+			)
+		}
+
+		stakeNumerator, stakeDenominator, ok := parseRational(fields[0])
+		if !ok {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: stake fraction is not a non-negative uint64 ratio",
+				idx,
+			)
+		}
+
+		vrfFieldIdx := 1
+		if len(fields) >= 3 {
+			vrfFieldIdx = 2
+			var activeStake uint64
+			if _, err := cbor.Decode(fields[1], &activeStake); err != nil {
+				return nil, fmt.Errorf(
+					"active pool distribution entry %d: decoding active stake: %w",
+					idx,
+					err,
+				)
+			}
+			if hasTotal {
+				actual := new(big.Rat).SetFrac(
+					new(big.Int).SetUint64(stakeNumerator),
+					new(big.Int).SetUint64(stakeDenominator),
+				)
+				expected := new(big.Rat).SetFrac(
+					new(big.Int).SetUint64(activeStake),
+					new(big.Int).SetUint64(totalActiveStake),
+				)
+				if actual.Cmp(expected) != 0 {
+					return nil, fmt.Errorf(
+						"active pool distribution entry %d: stake fraction does not match active stake",
+						idx,
+					)
+				}
+				stakeNumerator = activeStake
+				stakeDenominator = totalActiveStake
+			}
+		}
+
+		var vrfKeyHash []byte
+		if _, err := cbor.Decode(fields[vrfFieldIdx], &vrfKeyHash); err != nil {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: decoding VRF key hash: %w",
+				idx,
+				err,
+			)
+		}
+		if len(vrfKeyHash) != 32 {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: VRF key hash has %d bytes, expected 32",
+				idx,
+				len(vrfKeyHash),
+			)
+		}
+
+		var leiosKey *lcommon.LeiosKey
+		var keyRegistrationEpoch *uint64
+		if len(fields) == 4 {
+			leiosKey, keyRegistrationEpoch, err = decodeOptionalLeiosKey(fields[3])
+			if err != nil {
+				return nil, fmt.Errorf(
+					"active pool distribution entry %d: %w",
+					idx,
+					err,
+				)
+			}
+		}
+		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		if leiosKey != nil {
+			leiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
+			leiosKeyPossessionProof = append(
+				[]byte(nil), leiosKey.PossessionProof...,
+			)
+		}
+
+		result = append(result, ParsedActivePoolStake{
+			PoolKeyHash:               slices.Clone(poolKeyHash),
+			StakeNumerator:            stakeNumerator,
+			StakeDenominator:          stakeDenominator,
+			VrfKeyHash:                slices.Clone(vrfKeyHash),
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: keyRegistrationEpoch,
+		})
+	}
+	return result, nil
+}
+
+func activePoolDistributionMapData(
+	data cbor.RawMessage,
+) ([]byte, uint64, bool, error) {
+	if len(data) == 0 {
+		return nil, 0, false, errors.New("active pool distribution is empty")
+	}
+	switch data[0] >> 5 {
+	case 5:
+		return data, 0, false, nil
+	case 4:
+		fields, err := decodeRawArray(data)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf(
+				"decoding active pool distribution container: %w",
+				err,
+			)
+		}
+		if len(fields) != 2 {
+			return nil, 0, false, fmt.Errorf(
+				"active pool distribution container has %d fields, expected 2",
+				len(fields),
+			)
+		}
+		var totalActiveStake uint64
+		if _, err := cbor.Decode(fields[1], &totalActiveStake); err != nil {
+			return nil, 0, false, fmt.Errorf(
+				"decoding active pool distribution total stake: %w",
+				err,
+			)
+		}
+		if totalActiveStake == 0 {
+			return nil, 0, false, errors.New(
+				"active pool distribution total stake is zero",
+			)
+		}
+		return fields[0], totalActiveStake, true, nil
+	default:
+		return nil, 0, false, fmt.Errorf(
+			"decoding active pool distribution: expected map or container array, got major type %d",
+			data[0]>>5,
+		)
+	}
+}
+
 // parseStakeMap decodes a credential -> coin map. Handles both
 // definite and indefinite-length maps. Returns a warning if any
 // entries were skipped due to decode errors.
+// parseStakeMap decodes a credential->coin map. The returned tag map carries
+// each credential's type alongside, because the result is keyed by hash alone
+// and a script credential can share a hash with a key credential; attributing
+// a script delegator's stake to a key credential would misdirect both its
+// reward and its contribution to leadership stake.
 func parseStakeMap(
 	data cbor.RawMessage,
-) (map[string]uint64, error) {
+) (map[string]uint64, map[string]uint8, error) {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding stake map: %w", err,
 		)
 	}
 
 	result := make(map[string]uint64, len(entries))
+	tags := make(map[string]uint8, len(entries))
 	var skipped int
 	for _, entry := range entries {
 		cred, err := parseCredential(entry.KeyRaw)
@@ -1163,7 +1487,14 @@ func parseStakeMap(
 			skipped++
 			continue
 		}
-		result[hex.EncodeToString(cred.Hash)] = amount
+		key := hex.EncodeToString(cred.Hash)
+		result[key] = amount
+		// The credential type is discarded by the map key, which is the
+		// hash alone. Reward and leadership stake are attributed per
+		// credential, and a script credential and a key credential can share
+		// a hash, so the type has to travel alongside or a script
+		// delegator's stake is credited to a key credential.
+		tags[key] = uint8(cred.Type) // #nosec G115 -- 0 or 1
 	}
 
 	var warning error
@@ -1173,22 +1504,30 @@ func parseStakeMap(
 			skipped, len(entries),
 		)
 	}
-	return result, warning
+	return result, tags, warning
 }
 
 // parseStakeWithPoolMap decodes the UTxO-HD compact snapshot map:
 // map[Credential][Coin, PoolKeyHash].
+// parseStakeWithPoolMap decodes the compact UTxO-HD shape. It returns the
+// credential types alongside for the same reason parseStakeMap does: the maps
+// are keyed by credential hash alone, and a script credential can share a hash
+// with a key credential, so attributing a script delegator's stake to a key
+// credential would misdirect both its reward and its share of leadership
+// stake. This is the shape current snapshots use, so it is the path that
+// decides whether that attribution is right in practice.
 func parseStakeWithPoolMap(
 	data cbor.RawMessage,
-) (map[string]uint64, map[string][]byte, error) {
+) (map[string]uint64, map[string]uint8, map[string][]byte, error) {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, nil, nil, fmt.Errorf(
 			"decoding stake-with-pool map: %w", err,
 		)
 	}
 
 	stake := make(map[string]uint64, len(entries))
+	tags := make(map[string]uint8, len(entries))
 	delegations := make(map[string][]byte, len(entries))
 	var skipped int
 	for _, entry := range entries {
@@ -1220,6 +1559,7 @@ func parseStakeWithPoolMap(
 
 		credKey := hex.EncodeToString(cred.Hash)
 		stake[credKey] = amount
+		tags[credKey] = uint8(cred.Type) // #nosec G115 -- 0 or 1
 		delegations[credKey] = poolHash
 	}
 
@@ -1230,12 +1570,62 @@ func parseStakeWithPoolMap(
 			skipped, len(entries),
 		)
 	}
-	return stake, delegations, warning
+	return stake, tags, delegations, warning
 }
 
 // parseDelegationMap decodes a credential -> pool key hash map.
 // Handles both definite and indefinite-length maps. Returns a
 // warning if any entries were skipped due to decode errors.
+// parseBlocksMade decodes a NewEpochState BlocksMade field: a CBOR map from a
+// 28-byte pool cold-key hash to the number of blocks that pool minted in the
+// epoch the field describes.
+//
+// Unlike the stake and delegation maps, a malformed entry is an error rather
+// than a skipped one. Those maps drop an entry the node then simply does not
+// pay; dropping a block count instead lowers one pool's beta and the epoch
+// total that every other pool's beta divides by, so a silently partial map
+// yields a complete-looking reward distribution at the wrong amounts for every
+// pool at once. An absent map is not representable in the reference either:
+// nesBprev and nesBcur are strict, non-optional fields.
+func parseBlocksMade(data cbor.RawMessage) (map[string]uint64, error) {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]uint64, len(entries))
+	for i, entry := range entries {
+		var poolKeyHash []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
+			return nil, fmt.Errorf(
+				"entry %d: decoding pool key hash: %w",
+				i,
+				err,
+			)
+		}
+		if len(poolKeyHash) != credentialHashSize {
+			return nil, fmt.Errorf(
+				"entry %d: pool key hash is %d bytes, expected %d",
+				i, len(poolKeyHash), credentialHashSize,
+			)
+		}
+		var blocks uint64
+		if _, err := cbor.Decode(entry.ValueRaw, &blocks); err != nil {
+			return nil, fmt.Errorf(
+				"entry %d: decoding block count for pool %x: %w",
+				i, poolKeyHash, err,
+			)
+		}
+		key := string(poolKeyHash)
+		if _, dup := result[key]; dup {
+			return nil, fmt.Errorf(
+				"entry %d: duplicate pool key hash %x", i, poolKeyHash,
+			)
+		}
+		result[key] = blocks
+	}
+	return result, nil
+}
+
 func parseDelegationMap(
 	data cbor.RawMessage,
 ) (map[string][]byte, error) {
@@ -1331,7 +1721,9 @@ func parsePoolParamsMap(
 
 // AggregatePoolStake aggregates per-credential stake into per-pool
 // totals, producing PoolStakeSnapshot models suitable for database
-// storage.
+// storage. Every pool with at least one delegated credential gets a row,
+// even when every one of its delegators is at zero stake -- see the loop
+// below and blinklabs-io/dingo#4152.
 func AggregatePoolStake(
 	snap *ParsedSnapShot,
 	epoch uint64,
@@ -1357,27 +1749,41 @@ func AggregatePoolStake(
 			poolMap[poolHex] = agg
 		}
 
-		// Add this credential's stake to the pool total.
-		// Only count delegators that have non-zero stake so the
-		// count is consistent with totalStake.
-		if stake, ok := snap.Stake[credHex]; ok && stake > 0 {
+		// Every credential delegated to this pool counts as a delegator,
+		// matching the live snapshot-rotation path
+		// (calculateLiveStakeDistributionInTxn in ledger/snapshot/calculator.go),
+		// which increments DelegatorCount for every reward_live_stake row it
+		// reads regardless of that row's stake amount. A credential can be
+		// genuinely delegated with zero lovelace behind it at snapshot time
+		// (its UTxOs spent, no reward balance) -- that is still a real
+		// delegator, not a decode gap, and a real cardano-node's own
+		// GetStakeDistribution reply reports the pool anyway (confirmed live
+		// against a real Preview cardano-node during blinklabs-io/dingo#4152:
+		// it answers with an explicit zero StakeFraction rather than omitting
+		// the pool). Gating the count on stake > 0, as this used to, made a
+		// pool whose only delegator(s) happened to be at zero stake
+		// contribute nothing here at all.
+		agg.delegatorCount++
+		if stake, ok := snap.Stake[credHex]; ok {
 			agg.totalStake += stake
-			agg.delegatorCount++
 		}
 	}
 
-	// Convert to models, skipping pools with zero stake
-	// (delegators without a stake entry should not produce
-	// misleading snapshot records).
+	// Convert to models. Every pool with at least one delegator gets a row,
+	// including one whose aggregated stake is zero -- dropping those rows (as
+	// this used to) is what made a registered, actively-delegated pool vanish
+	// from GetStakeDistribution/GetPoolDistr2 entirely after a Mithril
+	// bootstrap, rather than reporting it with a zero stake the way a real
+	// cardano-node does (blinklabs-io/dingo#4152). The row survives only
+	// until the live snapshot-rotation path (which never applied this skip)
+	// recomputes the epoch a few epochs later; until then the pool is simply
+	// missing.
 	snapshots := make(
 		[]*models.PoolStakeSnapshot,
 		0,
 		len(poolMap),
 	)
 	for poolHex, agg := range poolMap {
-		if agg.totalStake == 0 {
-			continue
-		}
 		poolKeyHash, err := hex.DecodeString(poolHex)
 		if err != nil {
 			// poolHex was self-encoded via hex.EncodeToString,
@@ -1385,13 +1791,31 @@ func AggregatePoolStake(
 			continue
 		}
 
+		pool := snap.PoolParams[poolHex]
+		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		var leiosKeyRegistrationEpoch *uint64
+		if pool != nil {
+			leiosKeyPublic = append([]byte(nil), pool.LeiosKeyPublic...)
+			leiosKeyPossessionProof = append(
+				[]byte(nil), pool.LeiosKeyPossessionProof...,
+			)
+			if pool.LeiosKeyRegistrationEpoch != nil {
+				epoch := *pool.LeiosKeyRegistrationEpoch
+				leiosKeyRegistrationEpoch = &epoch
+			}
+		}
+
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:          epoch,
-			SnapshotType:   snapshotType,
-			PoolKeyHash:    poolKeyHash,
-			TotalStake:     types.Uint64(agg.totalStake),
-			DelegatorCount: agg.delegatorCount,
-			CapturedSlot:   capturedSlot,
+			Epoch:                     epoch,
+			SnapshotType:              snapshotType,
+			PoolKeyHash:               poolKeyHash,
+			TotalStake:                types.Uint64(agg.totalStake),
+			DelegatorCount:            agg.delegatorCount,
+			CapturedSlot:              capturedSlot,
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: leiosKeyRegistrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
 

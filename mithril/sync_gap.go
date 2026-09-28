@@ -62,17 +62,51 @@ func fetchGapBlocks(
 		)
 	}
 
-	var lastErr error
-	for i, peer := range netInfo.BootstrapPeers {
-		peerAddr := net.JoinHostPort(
+	peerAddrs := make([]string, 0, len(netInfo.BootstrapPeers))
+	for _, peer := range netInfo.BootstrapPeers {
+		peerAddrs = append(peerAddrs, net.JoinHostPort(
 			peer.Address,
 			strconv.FormatUint(uint64(peer.Port), 10),
-		)
+		))
+	}
+	return fetchGapBlocksFromPeers(
+		ctx,
+		logger,
+		netInfo.NetworkMagic,
+		peerAddrs,
+		start,
+		end,
+		fetchGapBlocksFromPeer,
+	)
+}
 
-		blocks, err := fetchGapBlocksFromPeer(
-			ctx, logger, netInfo.NetworkMagic,
+type gapBlockPeerFetcher func(
+	context.Context,
+	*slog.Logger,
+	uint32,
+	string,
+	ocommon.Point,
+	ocommon.Point,
+) ([]models.Block, error)
+
+func fetchGapBlocksFromPeers(
+	ctx context.Context,
+	logger *slog.Logger,
+	networkMagic uint32,
+	peerAddrs []string,
+	start ocommon.Point,
+	end ocommon.Point,
+	fetchFromPeer gapBlockPeerFetcher,
+) ([]models.Block, error) {
+	var lastErr error
+	for i, peerAddr := range peerAddrs {
+		blocks, err := fetchFromPeer(
+			ctx, logger, networkMagic,
 			peerAddr, start, end,
 		)
+		if err == nil {
+			err = validateCompleteGapBlocks(blocks, start, end)
+		}
 		if err == nil {
 			return blocks, nil
 		}
@@ -88,14 +122,14 @@ func fetchGapBlocks(
 			"component", "mithril",
 			"peer", peerAddr,
 			"peer_index", i,
-			"total_peers", len(netInfo.BootstrapPeers),
+			"total_peers", len(peerAddrs),
 			"error", err,
 		)
 	}
 
 	return nil, fmt.Errorf(
 		"all %d bootstrap peers failed: %w",
-		len(netInfo.BootstrapPeers),
+		len(peerAddrs),
 		lastErr,
 	)
 }
@@ -394,6 +428,13 @@ func validateStoredGapContinuity(
 			immutableTip.Slot,
 		)
 	}
+	if blocks[0].Slot <= immutableTip.Slot {
+		return fmt.Errorf(
+			"gap first block slot %d does not follow start slot %d",
+			blocks[0].Slot,
+			immutableTip.Slot,
+		)
+	}
 	if !bytes.Equal(blocks[0].PrevHash, immutableTip.Hash) {
 		return fmt.Errorf(
 			"stored gap first block at slot %d prev hash %x does not match immutable tip slot %d hash %x",
@@ -404,6 +445,13 @@ func validateStoredGapContinuity(
 		)
 	}
 	for i := 1; i < len(blocks); i++ {
+		if blocks[i].Slot <= blocks[i-1].Slot {
+			return fmt.Errorf(
+				"gap block slot %d does not follow previous block slot %d",
+				blocks[i].Slot,
+				blocks[i-1].Slot,
+			)
+		}
 		if bytes.Equal(blocks[i].PrevHash, blocks[i-1].Hash) {
 			continue
 		}
@@ -418,76 +466,35 @@ func validateStoredGapContinuity(
 	return nil
 }
 
-func validateStoredGapBlocks(
+func validateCompleteGapBlocks(
 	blocks []models.Block,
-	immutableTip models.Block,
-	ledgerStateHash []byte,
+	start ocommon.Point,
+	end ocommon.Point,
 ) error {
+	if len(blocks) == 0 {
+		return fmt.Errorf(
+			"gap is empty after start slot %d",
+			start.Slot,
+		)
+	}
+	immutableTip := models.Block{Slot: start.Slot, Hash: start.Hash}
 	if err := validateStoredGapContinuity(blocks, immutableTip); err != nil {
 		return err
 	}
-	if len(blocks) == 0 {
+	last := blocks[len(blocks)-1]
+	if last.Slot != end.Slot {
 		return fmt.Errorf(
-			"stored volatile gap is empty after immutable tip slot %d",
-			immutableTip.Slot,
+			"gap terminal block slot %d does not match requested end slot %d",
+			last.Slot,
+			end.Slot,
 		)
 	}
-	last := blocks[len(blocks)-1]
-	if !bytes.Equal(last.Hash, ledgerStateHash) {
+	if !bytes.Equal(last.Hash, end.Hash) {
 		return fmt.Errorf(
-			"stored gap terminal block at slot %d hash %x does not match ledger state hash %x",
+			"gap terminal block at slot %d hash %x does not match requested end hash %x",
 			last.Slot,
 			last.Hash,
-			ledgerStateHash,
-		)
-	}
-	return nil
-}
-
-func processPostLedgerStateBlocks(
-	ctx context.Context,
-	db *database.Database,
-	logger *slog.Logger,
-	ledgerStateSlot uint64,
-	ledgerStateHash []byte,
-) error {
-	recentBlocks, err := database.BlocksRecent(db, 1)
-	if err != nil {
-		return fmt.Errorf("reading chain tip for post-ledger processing: %w", err)
-	}
-	if len(recentBlocks) == 0 || recentBlocks[0].Slot <= ledgerStateSlot {
-		return nil
-	}
-	logger.Info(
-		"processing post-ledger-state blocks from blob store",
-		"component", "mithril",
-		"ledger_state_slot", ledgerStateSlot,
-		"stored_tip_slot", recentBlocks[0].Slot,
-	)
-	postLedgerBlocks, err := loadGapBlocksFromBlob(
-		db,
-		ledgerStateSlot+1,
-		recentBlocks[0].Slot,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"loading post-ledger-state blocks from blob store: %w",
-			err,
-		)
-	}
-	if err := validateStoredGapContinuity(
-		postLedgerBlocks,
-		models.Block{Slot: ledgerStateSlot, Hash: ledgerStateHash},
-	); err != nil {
-		return fmt.Errorf(
-			"validating post-ledger-state block continuity: %w",
-			err,
-		)
-	}
-	if err := processGapBlocks(ctx, db, logger, postLedgerBlocks); err != nil {
-		return fmt.Errorf(
-			"processing post-ledger-state block transactions: %w",
-			err,
+			end.Hash,
 		)
 	}
 	return nil
@@ -511,7 +518,11 @@ func processGapBlocks(
 	if err != nil {
 		return fmt.Errorf("loading epochs for gap blocks: %w", err)
 	}
-	conwayPParamsCache := make(map[uint64]*conway.ConwayProtocolParameters)
+	// Protocol parameters per epoch, loaded once per gap and reused across
+	// its blocks. They serve two consumers: Conway governance processing
+	// needs the Conway-typed record, and certificate deposits are derived
+	// from them for every era that has a CertDepositFunc.
+	pparamsCache := make(map[uint64]lcommon.ProtocolParameters)
 	for _, block := range blocks {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
@@ -555,14 +566,17 @@ func processGapBlocks(
 				err,
 			)
 		}
-		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
-		if epoch.EraId == conway.EraIdConway {
-			cached, ok := conwayPParamsCache[epoch.EpochId]
-			if !ok {
+		blockPParams, cached := pparamsCache[epoch.EpochId]
+		if !cached {
+			// Byron has no protocol-parameter record and no decode
+			// function; leaving blockPParams nil is correct there, and
+			// it also carries no deposit-bearing certificates.
+			if era := eras.GetEraById(epoch.EraId); era != nil &&
+				era.DecodePParamsFunc != nil {
 				pparams, err := db.GetPParams(
 					epoch.EpochId,
-					eras.ConwayEraDesc.Id,
-					eras.ConwayEraDesc.DecodePParamsFunc,
+					era.Id,
+					era.DecodePParamsFunc,
 					nil,
 				)
 				if err != nil {
@@ -573,27 +587,32 @@ func processGapBlocks(
 						err,
 					)
 				}
-				if pparams != nil {
-					cached, ok = pparams.(*conway.ConwayProtocolParameters)
-					if !ok {
-						return fmt.Errorf(
-							"unexpected protocol params %T for gap block at slot %d (epoch %d)",
-							pparams,
-							block.Slot,
-							epoch.EpochId,
-						)
-					}
-				}
-				conwayPParamsCache[epoch.EpochId] = cached
+				blockPParams = pparams
 			}
-			blockConwayPParams = cached
+			pparamsCache[epoch.EpochId] = blockPParams
+		}
+		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
+		if epoch.EraId == conway.EraIdConway && blockPParams != nil {
+			conwayPParams, ok := blockPParams.(*conway.ConwayProtocolParameters)
+			if !ok {
+				return fmt.Errorf(
+					"unexpected protocol params %T for gap block at slot %d (epoch %d)",
+					blockPParams,
+					block.Slot,
+					epoch.EpochId,
+				)
+			}
+			blockConwayPParams = conwayPParams
 		}
 		if err := processGapBlockTransactions(
 			db,
+			logger,
 			point,
 			txs,
 			offsets,
 			epoch.EpochId,
+			epoch.EraId,
+			blockPParams,
 			blockConwayPParams,
 		); err != nil {
 			return fmt.Errorf(
@@ -613,10 +632,13 @@ func processGapBlocks(
 
 func processGapBlockTransactions(
 	db *database.Database,
+	logger *slog.Logger,
 	point ocommon.Point,
 	txs []lcommon.Transaction,
 	offsets *database.BlockIngestionResult,
 	epochId uint64,
+	eraId uint,
+	pparams lcommon.ProtocolParameters,
 	conwayPParams *conway.ConwayProtocolParameters,
 ) error {
 	txn := db.Transaction(true)
@@ -629,6 +651,7 @@ func processGapBlockTransactions(
 			tx,
 			point,
 			uint32(i), // #nosec G115 -- tx index within a block
+			gapCertDeposits(logger, tx, point, eraId, pparams),
 			offsets,
 			txn,
 		); err != nil {
@@ -678,6 +701,63 @@ func processGapBlockTransactions(
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
+}
+
+// gapCertDeposits calculates the deposit each of a gap block transaction's
+// certificates paid, keyed by the certificate's index within the transaction.
+//
+// A gap block is replayed from raw CBOR with no ledger delta, so nothing
+// upstream has calculated these. They are still derivable: processGapBlocks
+// resolves the block's epoch and era and loads that epoch's protocol
+// parameters, which is everything eras.CertDepositFunc needs.
+//
+// Deriving them matters because the deposit is recorded on the certificate row
+// and read back much later: GetPoolsRetiringAtEpoch takes a retiring pool's
+// latest pool_registration row, and applyPoolRetirements credits that amount as
+// the refund. A pool that re-registered inside a Mithril gap has its gap row as
+// the latest one, so without this the refund is whatever an absent deposit
+// reads back as -- zero -- rather than the deposit actually paid.
+//
+// A certificate whose deposit cannot be derived is left out of the map rather
+// than defaulted to zero, and SetGapBlockTransaction records NULL for it. Byron
+// (no CertDepositFunc) and an epoch with no stored protocol parameters return
+// an empty map for the same reason.
+func gapCertDeposits(
+	logger *slog.Logger,
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	eraId uint,
+	pparams lcommon.ProtocolParameters,
+) map[int]uint64 {
+	certs := tx.Certificates()
+	if len(certs) == 0 || pparams == nil {
+		return nil
+	}
+	era := eras.GetEraById(eraId)
+	if era == nil || era.CertDepositFunc == nil {
+		return nil
+	}
+	deposits := make(map[int]uint64, len(certs))
+	for i, cert := range certs {
+		deposit, err := era.CertDepositFunc(cert, pparams)
+		if err != nil {
+			// Mirrors the backfill path: a certificate the era cannot
+			// price is skipped rather than failing the gap, which would
+			// stall a sync over a block the network accepted.
+			if !errors.Is(err, eras.ErrIncompatibleProtocolParams) {
+				logger.Debug(
+					"gap certificate deposit calculation failed",
+					"component", "mithril",
+					"slot", point.Slot,
+					"cert_index", i,
+					"error", err,
+				)
+			}
+			continue
+		}
+		deposits[i] = deposit
+	}
+	return deposits
 }
 
 // gapBlockEpoch resolves the epoch containing slot from a slice of

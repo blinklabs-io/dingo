@@ -17,20 +17,23 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
-	"net"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -47,6 +50,21 @@ const (
 	// headroom so legitimate sync is never rejected.
 	chainsyncMaxFindIntersectPoints = 1000
 
+	// chainsyncFindIntersectBudgetRate bounds the sustained rate (points per
+	// second) of database lookup work a single ChainSync peer connection may
+	// trigger via repeated FindIntersect requests. Cost is charged per point
+	// actually looked up, after deduplication, so this bounds cumulative
+	// work across many requests, not just the size of one request. Honest
+	// clients issue FindIntersect rarely — on connect, and on resync after a
+	// rollback we cannot follow — so this is far above legitimate use.
+	chainsyncFindIntersectBudgetRate = 200
+
+	// chainsyncFindIntersectBudgetBurst allows a peer to spend its entire
+	// FindIntersect work budget on one immediate request up to
+	// chainsyncMaxFindIntersectPoints, matching the point-count cap above so
+	// a single in-bounds request is never rejected by the budget alone.
+	chainsyncFindIntersectBudgetBurst = float64(chainsyncMaxFindIntersectPoints)
+
 	// chainsyncRestartTimeout bounds how long the restart of a
 	// chainsync client can take before we give up and close the
 	// connection. Increase this for slow or congested networks.
@@ -58,6 +76,184 @@ const (
 	chainsyncDivergentPeerCooldown = 2 * time.Minute
 )
 
+var chainsyncRestartAfter = time.After
+
+type chainsyncHeaderAdmissionFunc func(
+	context.Context,
+	ledger.ChainsyncEvent,
+) (bool, error)
+
+type chainsyncScheduleAtFunc func(time.Time, func()) func()
+
+type scheduledChainsyncResync struct {
+	onset  time.Time
+	cancel func()
+	fired  bool
+}
+
+type chainsyncClientDoneContext struct {
+	done <-chan struct{}
+}
+
+func (c chainsyncClientDoneContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c chainsyncClientDoneContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c chainsyncClientDoneContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c chainsyncClientDoneContext) Value(any) any {
+	return nil
+}
+
+func chainsyncAdmissionContext(
+	ctx ochainsync.CallbackContext,
+) context.Context {
+	if ctx.Client == nil || ctx.Client.ProtocolInstance() == nil {
+		return context.Background()
+	}
+	return chainsyncClientDoneContext{done: ctx.Client.DoneChan()}
+}
+
+func defaultChainsyncScheduleAt(onset time.Time, fn func()) func() {
+	timer := time.AfterFunc(time.Until(onset), fn)
+	return func() {
+		timer.Stop()
+	}
+}
+
+// scheduleFutureHeaderResync keeps at most one recovery timer per connection.
+// The earliest resolvable onset wins: every later dropped header is already
+// covered by re-intersecting from the last ledger-accepted point at that time.
+func (o *Ouroboros) scheduleFutureHeaderResync(
+	connId ouroboros.ConnectionId,
+	onset time.Time,
+) {
+	if o.chainsyncScheduleAt == nil || o.eventBus == nil || onset.IsZero() {
+		return
+	}
+	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
+		return
+	}
+	o.futureHeaderResyncMu.Lock()
+	if o.futureHeaderResyncClosed {
+		o.futureHeaderResyncMu.Unlock()
+		return
+	}
+	if current := o.futureHeaderResyncs[connId]; current != nil {
+		if current.fired {
+			o.futureHeaderResyncMu.Unlock()
+			return
+		}
+		if !onset.Before(current.onset) {
+			o.futureHeaderResyncMu.Unlock()
+			return
+		}
+		current.cancel()
+	}
+	scheduled := &scheduledChainsyncResync{onset: onset}
+	// A timer whose onset is already due may invoke its callback before the
+	// scheduler returns. Arm publication only after the marker and cancel
+	// function are installed, or that callback can observe no current timer and
+	// strand the connection in the withheld state without a recovery event.
+	armed := make(chan struct{})
+	scheduled.cancel = o.chainsyncScheduleAt(onset, func() {
+		go func() {
+			<-armed
+			o.futureHeaderResyncMu.Lock()
+			if o.futureHeaderResyncs[connId] != scheduled || scheduled.fired {
+				o.futureHeaderResyncMu.Unlock()
+				return
+			}
+			// Retain the marker until the resync handler stops the old
+			// protocol. Headers received between timer onset and Stop must
+			// stay withheld or they can advance the remote cursor across the
+			// gap being recovered.
+			scheduled.fired = true
+			o.futureHeaderResyncMu.Unlock()
+
+			ctx := o.futureHeaderResyncCtx
+			if ctx == nil {
+				return
+			}
+			o.eventBus.PublishOrderedContext(
+				ctx,
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: connId,
+						Reason:       event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+					},
+				),
+			)
+		}()
+	})
+	o.futureHeaderResyncs[connId] = scheduled
+	// Connection removal publishes its close event only after removing the
+	// connection from connManager. Re-check that authoritative state while the
+	// timer marker is installed and still protected: the close handler may have
+	// run between the optimistic lookup above and this insertion, when there was
+	// not yet a marker for it to cancel.
+	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
+		scheduled.cancel()
+		delete(o.futureHeaderResyncs, connId)
+		close(armed)
+		o.futureHeaderResyncMu.Unlock()
+		return
+	}
+	close(armed)
+	o.futureHeaderResyncMu.Unlock()
+}
+
+func (o *Ouroboros) futureHeaderResyncPending(
+	connId ouroboros.ConnectionId,
+) bool {
+	o.futureHeaderResyncMu.Lock()
+	defer o.futureHeaderResyncMu.Unlock()
+	return o.futureHeaderResyncs[connId] != nil
+}
+
+func (o *Ouroboros) completeFutureHeaderResync(
+	connId ouroboros.ConnectionId,
+) {
+	o.cancelFutureHeaderResync(connId)
+}
+
+func (o *Ouroboros) cancelFutureHeaderResync(
+	connId ouroboros.ConnectionId,
+) {
+	o.futureHeaderResyncMu.Lock()
+	if scheduled := o.futureHeaderResyncs[connId]; scheduled != nil {
+		scheduled.cancel()
+		delete(o.futureHeaderResyncs, connId)
+	}
+	o.futureHeaderResyncMu.Unlock()
+}
+
+func (o *Ouroboros) stopFutureHeaderResyncs() {
+	if o.futureHeaderResyncCancel != nil {
+		o.futureHeaderResyncCancel()
+	}
+	o.futureHeaderResyncMu.Lock()
+	o.futureHeaderResyncClosed = true
+	for connId, scheduled := range o.futureHeaderResyncs {
+		scheduled.cancel()
+		delete(o.futureHeaderResyncs, connId)
+	}
+	o.futureHeaderResyncMu.Unlock()
+}
+
 func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 	if timeout < ochainsync.MustReplyTimeoutMax {
 		return ochainsync.MustReplyTimeoutMax
@@ -65,10 +261,41 @@ func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
-func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
+func (o *Ouroboros) chainsyncConnectionConfigOption(
+	includeClient bool,
+) ouroboros.ConnectionOptionFunc {
+	return func(c *ouroboros.Connection) {
+		limiter := newChainsyncFindIntersectRateLimiter(
+			chainsyncFindIntersectBudgetRate,
+			chainsyncFindIntersectBudgetBurst,
+		)
+		opts := o.chainsyncServerConnOpts(limiter)
+		if includeClient {
+			opts = slices.Concat(o.chainsyncClientConnOpts(), opts)
+		}
+		ouroboros.WithChainSyncConfig(
+			ochainsync.NewConfig(opts...),
+		)(c)
+	}
+}
+
+func (o *Ouroboros) chainsyncServerConnOpts(
+	limiter *chainsyncFindIntersectRateLimiter,
+) []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
-			o.instrumentChainsyncFindIntersect(o.chainsyncServerFindIntersect),
+			o.instrumentChainsyncFindIntersect(
+				func(
+					ctx ochainsync.CallbackContext,
+					points []ocommon.Point,
+				) (ocommon.Point, ochainsync.Tip, error) {
+					return o.chainsyncServerFindIntersect(
+						limiter,
+						ctx,
+						points,
+					)
+				},
+			),
 		),
 		ochainsync.WithRequestNextFunc(
 			o.instrumentChainsyncRequestNext(o.chainsyncServerRequestNext),
@@ -88,8 +315,10 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithRollForwardFunc(
-			o.instrumentChainsyncRollForward(o.chainsyncClientRollForward),
+		ochainsync.WithRollForwardRawFunc(
+			o.instrumentChainsyncRollForwardRaw(
+				o.chainsyncClientRollForwardRaw,
+			),
 		),
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
@@ -132,19 +361,117 @@ func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
 }
 
-// sameNetAddr compares addresses by string form, treating nil as equal
-// only to nil. ConnectionId.String() panics when either net.Addr field
-// is nil, so the addresses are compared individually instead.
-func sameNetAddr(a, b net.Addr) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+// originOnlyIntersectWarnInterval throttles the "intersect points collapsed to
+// origin" warning. The condition that produces it (an in-flight ledger
+// rollback) is re-evaluated on every reconnect, and peer governance reconnects
+// every second or so, so an unthrottled warning would emit hundreds of lines
+// for a single incident.
+const originOnlyIntersectWarnInterval = 30 * time.Second
+
+// intersectPointsHaveRealPoint reports whether points contains a point other
+// than origin.
+//
+// It is the sole definition of the condition the rollback anchor exists to
+// rescue, shared by finalizeChainsyncIntersectPoints and by the gate on the
+// anchor lookup in buildDefaultChainsyncIntersectPoints. Those two must agree:
+// if the gate were ever narrower than the rescue, the lookup would be skipped
+// for a list the rescue would have acted on, and the node would send the
+// origin-only request this whole path exists to prevent.
+func intersectPointsHaveRealPoint(points []ocommon.Point) bool {
+	for _, point := range points {
+		if !isOriginPoint(point) {
+			return true
+		}
 	}
-	return a.String() == b.String()
+	return false
 }
 
-func sameConnectionId(a, b ouroboros.ConnectionId) bool {
-	return sameNetAddr(a.LocalAddr, b.LocalAddr) &&
-		sameNetAddr(a.RemoteAddr, b.RemoteAddr)
+// finalizeChainsyncIntersectPoints appends origin as the last-resort intersect
+// point and refuses to offer origin *alone* while the local chain holds a
+// non-origin tip.
+//
+// Origin is always appended so FindIntersect still succeeds against a peer that
+// follows a divergent fork (e.g. a multi-producer DevNet) -- without it such
+// peers have no common point at all. But an origin-ONLY list is a different
+// request: it asks the peer to replay the chain from genesis. A synced node
+// cannot accept that reply. Genesis-era headers fail leader-eligibility
+// verification (the genesis-era producer has no entry in the epoch-0 stake
+// snapshot), which publishes ConnectionRecycleRequestedEvent and tears the
+// connection down milliseconds after it opened, so the node makes no chainsync
+// progress with any peer for as long as the condition lasts.
+//
+// The condition does occur on a healthy node: while a rollback's metadata
+// truncation is in flight the ledger tip names a block the chain rewind has
+// already deleted, and the ledger can return no points. In that case the
+// ledger can still name a point it has applied, so seed the list with it and
+// let origin stay the fallback it was meant to be.
+//
+// rollbackAnchor MUST come from LedgerState.RollbackWindowIntersectAnchor,
+// never from the primary chain tip directly. An empty point list can also mean
+// the primary chain is ahead of the ledger on a fork that does not descend
+// from the applied ledger tip; seeding from that raw chain tip would advertise
+// unapplied fork state and break the primary-chain ancestor invariant (#2309).
+// The ledger returns hasRollbackAnchor=false for that case, so it stays
+// origin-only exactly as before.
+//
+// Returns the finalized points and whether an origin-only list had to be
+// rescued, which the caller logs (throttled).
+func finalizeChainsyncIntersectPoints(
+	intersectPoints []ocommon.Point,
+	rollbackAnchor ocommon.Point,
+	hasRollbackAnchor bool,
+) ([]ocommon.Point, bool) {
+	rescued := false
+	if !intersectPointsHaveRealPoint(intersectPoints) &&
+		hasRollbackAnchor && !isOriginPoint(rollbackAnchor) {
+		intersectPoints = normalizeIntersectPoints(
+			append(
+				[]ocommon.Point{rollbackAnchor},
+				intersectPoints...,
+			),
+		)
+		rescued = true
+	}
+	// Always include origin as the last intersect point. This
+	// ensures FindIntersect succeeds even when the peer follows
+	// a different fork (e.g. multi-producer DevNet). Without
+	// origin, peers on divergent chains have no common point.
+	if len(intersectPoints) == 0 ||
+		!isOriginPoint(intersectPoints[len(intersectPoints)-1]) {
+		intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
+	}
+	return intersectPoints, rescued
+}
+
+// warnOriginOnlyIntersectRescued reports, at most once per
+// originOnlyIntersectWarnInterval, that we were about to ask a peer to replay
+// from genesis on a node that is not at genesis.
+func (o *Ouroboros) warnOriginOnlyIntersectRescued(
+	connId ouroboros.ConnectionId,
+	rollbackAnchor ocommon.Point,
+) {
+	now := time.Now()
+	last := o.lastOriginOnlyIntersectWarn.Load()
+	if last != 0 &&
+		now.Sub(time.Unix(0, last)) < originOnlyIntersectWarnInterval {
+		return
+	}
+	if !o.lastOriginOnlyIntersectWarn.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	o.config.Logger.Warn(
+		"chainsync intersect points collapsed to origin on a non-origin chain, using rollback anchor instead",
+		"component",
+		"ouroboros",
+		"connection_id",
+		connId.String(),
+		"anchor_slot",
+		rollbackAnchor.Slot,
+		"anchor_hash",
+		hex.EncodeToString(rollbackAnchor.Hash),
+		"reason",
+		"ledger returned no intersect points (rollback truncation in flight)",
+	)
 }
 
 func chainsyncResyncRequiresFreshConnection(reason string) bool {
@@ -153,9 +480,14 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 		event.ChainsyncResyncReasonPostPlateauRealign,
 		event.ChainsyncResyncReasonRollbackNotFound,
 		event.ChainsyncResyncReasonPersistentFork,
+		event.ChainsyncResyncReasonLiveTxValidationRecovery,
+		event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
+		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
+		event.ChainsyncResyncReasonChainSwitchCursorAhead,
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
 		event.ChainsyncResyncReasonRollbackLoop:
 		return true
@@ -164,6 +496,20 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 	}
 }
 
+// chainsyncResyncDeniesPeer lists the re-sync reasons that also put the peer
+// in peer governance's deny list for chainsyncDivergentPeerCooldown.
+//
+// A peer that is merely behind on our own chain is deliberately absent: the
+// ledger now classifies it before any of these reasons is published (see
+// LedgerState.chainsyncPeerBehindOnOurChain) and publishes no re-sync at all,
+// so the connection is kept and the peer resumes on its own once it catches
+// up. Denying such a peer is what turns a lagging upstream into an outage on a
+// node whose valency is one. Do not add a behind-peer reason here.
+//
+// ChainsyncResyncReasonPeerTipBehindMithril stays, even though that peer is
+// also just behind: unlike the case above we still close its connection,
+// because we cannot follow it below the trust anchor, and without the cooldown
+// it is redialed and rejected again within a second, forever.
 func chainsyncResyncDeniesPeer(reason string) bool {
 	switch reason {
 	case event.ChainsyncResyncReasonRollbackExceedsK,
@@ -180,13 +526,13 @@ func (o *Ouroboros) denyDivergentChainsyncPeer(
 	connId ouroboros.ConnectionId,
 	reason string,
 ) {
-	if o.PeerGov == nil ||
+	if o.peerGov == nil ||
 		connId.RemoteAddr == nil ||
 		!chainsyncResyncDeniesPeer(reason) {
 		return
 	}
 	address := connId.RemoteAddr.String()
-	o.PeerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
+	o.peerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
 	o.config.Logger.Warn(
 		"temporarily denying chainsync peer whose chain we cannot follow",
 		"connection_id", connId.String(),
@@ -199,12 +545,15 @@ func (o *Ouroboros) denyDivergentChainsyncPeer(
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 	connId ouroboros.ConnectionId,
 ) ([]ocommon.Point, error) {
-	if o.LedgerState == nil {
+	if o.ledgerState == nil {
 		return nil, errors.New("ledger state not available")
 	}
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
-		return nil, fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+		return nil, fmt.Errorf(
+			"failed to lookup connection ID: %s",
+			connId.String(),
+		)
 	}
 	if conn.ChainSync() == nil || conn.ChainSync().Client == nil {
 		return nil, fmt.Errorf(
@@ -212,7 +561,7 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 			connId.String(),
 		)
 	}
-	intersectPoints, err := o.LedgerState.IntersectPoints(
+	intersectPoints, err := o.ledgerState.IntersectPoints(
 		chainsyncIntersectPointCount,
 	)
 	if err != nil {
@@ -242,13 +591,39 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		}
 	}
 	intersectPoints = normalizeIntersectPoints(intersectPoints)
-	// Always include origin as the last intersect point. This
-	// ensures FindIntersect succeeds even when the peer follows
-	// a different fork (e.g. multi-producer DevNet). Without
-	// origin, peers on divergent chains have no common point.
-	if len(intersectPoints) == 0 ||
-		!isOriginPoint(intersectPoints[len(intersectPoints)-1]) {
-		intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
+	// The anchor is consulted only to rescue a list with no real point, so
+	// look it up only in that case. Unconditionally is both wasted work on
+	// every chainsync client start and a way to lose a healthy peer: the
+	// common path is served from the in-memory chain without touching the
+	// database, while the anchor lookup always reads it, so a transient
+	// storage fault there would fail a start that had good points to offer
+	// and close the connection under it.
+	var (
+		rollbackAnchor    ocommon.Point
+		hasRollbackAnchor bool
+	)
+	if !intersectPointsHaveRealPoint(intersectPoints) {
+		rollbackAnchor, hasRollbackAnchor, err = o.ledgerState.RollbackWindowIntersectAnchor()
+		if err != nil {
+			// Surfaced like any other intersect-point failure above: a
+			// storage fault must fail the chainsync start so the caller
+			// retries, not be downgraded into "no anchor" and sent to the
+			// peer as origin-only. Reached only when the list is already
+			// origin-only, which is exactly when the answer decides what
+			// goes on the wire.
+			return nil, fmt.Errorf(
+				"LedgerState.RollbackWindowIntersectAnchor failed: %w",
+				err,
+			)
+		}
+	}
+	intersectPoints, rescued := finalizeChainsyncIntersectPoints(
+		intersectPoints,
+		rollbackAnchor,
+		hasRollbackAnchor,
+	)
+	if rescued {
+		o.warnOriginOnlyIntersectRescued(connId, rollbackAnchor)
 	}
 	return intersectPoints, nil
 }
@@ -257,7 +632,7 @@ func (o *Ouroboros) syncChainsyncClient(
 	connId ouroboros.ConnectionId,
 	intersectPoints []ocommon.Point,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
@@ -271,8 +646,8 @@ func (o *Ouroboros) syncChainsyncClient(
 	if len(intersectPoints) == 0 {
 		intersectPoints = []ocommon.Point{ocommon.NewPointOrigin()}
 	}
-	if o.PeerGov != nil {
-		o.PeerGov.SetPeerHotByConnId(connId)
+	if o.peerGov != nil {
+		o.peerGov.SetPeerHotByConnId(connId)
 	}
 	return conn.ChainSync().Client.Sync(intersectPoints)
 }
@@ -287,7 +662,9 @@ func (o *Ouroboros) syncChainsyncClient(
 // (FindIntersect + RequestNext). The server will send RollBackward if
 // the intersection point is behind the client's current position, which
 // triggers the normal rollback handler.
-func (o *Ouroboros) RestartChainsyncClient(connId ouroboros.ConnectionId) error {
+func (o *Ouroboros) RestartChainsyncClient(
+	connId ouroboros.ConnectionId,
+) error {
 	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
 	if err != nil {
 		return fmt.Errorf(
@@ -304,7 +681,7 @@ func (o *Ouroboros) RestartChainsyncClientWithPoints(
 	connId ouroboros.ConnectionId,
 	intersectPoints []ocommon.Point,
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connId.String())
 	}
@@ -327,11 +704,12 @@ func (o *Ouroboros) RestartChainsyncClientWithPoints(
 	return nil
 }
 
-func (o *Ouroboros) resyncChainsyncClientWithPoints(
+func (o *Ouroboros) resyncChainsyncClientWithPointsAfterStop(
 	connId ouroboros.ConnectionId,
 	intersectPoints []ocommon.Point,
+	afterStop func(),
 ) error {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("connection not found: %s", connId.String())
 	}
@@ -342,12 +720,19 @@ func (o *Ouroboros) resyncChainsyncClientWithPoints(
 			connId.String(),
 		)
 	}
+	if o.chainsyncState != nil {
+		// The peer is not responsible for the restart round trip.
+		o.chainsyncState.PatiencePause(connId)
+	}
 	if err := cs.Client.Stop(); err != nil {
 		return fmt.Errorf(
 			"stop chainsync client for conn %s: %w",
 			connId.String(),
 			err,
 		)
+	}
+	if afterStop != nil {
+		afterStop()
 	}
 	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
 }
@@ -367,6 +752,7 @@ func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
 }
 
 func (o *Ouroboros) chainsyncServerFindIntersect(
+	limiter *chainsyncFindIntersectRateLimiter,
 	ctx ochainsync.CallbackContext,
 	points []ocommon.Point,
 ) (ocommon.Point, ochainsync.Tip, error) {
@@ -377,7 +763,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		"connection_id", ctx.ConnectionId.String(),
 		"num_points", len(points),
 	)
-	tip := o.LedgerState.Tip()
+	tip := o.ledgerState.Tip()
 	o.config.Logger.Debug(
 		"chainsync server: got tip",
 		"component", "ouroboros",
@@ -399,7 +785,27 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		)
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
-	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
+	// Deduplicate before charging the work budget or performing any lookup.
+	// GetIntersectPoint's running-best-match scan only skips a point once a
+	// higher-or-equal-slot match has already been found, so a peer resending
+	// the same point many times (or an equal-slot point with a different
+	// hash) would otherwise force one redundant database lookup per repeat.
+	// The intersection result is independent of point order (the highest
+	// matching slot always wins), so deduplicating here changes no outcome.
+	points = normalizeIntersectPoints(points)
+	if !limiter.Allow(len(points)) {
+		o.config.Logger.Warn(
+			"chainsync server: rejecting FindIntersect over per-connection work budget",
+			"component",
+			"ouroboros",
+			"connection_id",
+			ctx.ConnectionId.String(),
+			"num_points",
+			len(points),
+		)
+		return retPoint, tip, ochainsync.ErrIntersectNotFound
+	}
+	intersectPoint, err := o.ledgerState.GetIntersectPoint(points)
 	if err != nil {
 		o.config.Logger.Error(
 			"chainsync server: GetIntersectPoint error",
@@ -417,9 +823,10 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		return retPoint, tip, ochainsync.ErrIntersectNotFound
 	}
 	// Add our client to the chainsync state
-	_, err = o.ChainsyncState.AddClient(
+	_, err = o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		*intersectPoint,
+		ctx.Server,
 	)
 	if err != nil {
 		return retPoint, tip, fmt.Errorf(
@@ -437,7 +844,7 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 // ledger processes them, so the tip can be stale. A tip slot behind the
 // block slot is a protocol violation that causes peers to disconnect.
 func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
-	tip := o.LedgerState.Tip()
+	tip := o.ledgerState.Tip()
 	if !next.Rollback && next.Point.Slot > tip.Point.Slot {
 		tip = ochainsync.Tip{
 			Point:       next.Point,
@@ -451,10 +858,11 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 ) error {
 	// Create/retrieve chainsync state for connection
-	tip := o.LedgerState.Tip()
-	clientState, err := o.ChainsyncState.AddClient(
+	tip := o.ledgerState.Tip()
+	clientState, err := o.chainsyncState.AddClient(
 		ctx.ConnectionId,
 		tip.Point,
+		ctx.Server,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -463,6 +871,13 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			err,
 		)
 	}
+	// LookupClient snapshots this same field under clientState's own lock,
+	// scoped to this one connection rather than the whole chainsync State,
+	// so a slow RollBackward send here cannot stall AddClient/LookupClient/
+	// RemoveClient for other connections. Held through the send and state
+	// transition so observers cannot read the pending flag after
+	// RollBackward is visible but before it is cleared.
+	clientState.LockRollbackState()
 	if clientState.NeedsInitialRollback {
 		o.config.Logger.Debug(
 			"chainsync server: initial rollback",
@@ -474,11 +889,14 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			tip,
 		)
 		if err != nil {
+			clientState.UnlockRollbackState()
 			return err
 		}
 		clientState.NeedsInitialRollback = false
+		clientState.UnlockRollbackState()
 		return nil
 	}
+	clientState.UnlockRollbackState()
 	// Check for available block
 	next, err := clientState.ChainIter.Next(false)
 	if err != nil {
@@ -494,9 +912,16 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				tip,
 			)
 		} else {
+			blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
+			if blockErr != nil {
+				// Do not RollForward an incomplete CertRB; return the error so
+				// the connection is torn down and the client retries from its
+				// last point once the endorser closure is available.
+				return blockErr
+			}
 			err = ctx.Server.RollForward(
 				next.Block.Type,
-				o.chainsyncServerBlockCbor(ctx, next.Block),
+				blockCbor,
 				tip,
 			)
 		}
@@ -512,79 +937,199 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		return err
 	}
 	// Wait for next block and send
-	conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+	conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 	if conn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
+	go o.chainsyncServerAwaitNext(ctx, conn, clientState)
+	return nil
+}
+
+// chainsyncServerConnection is the connection surface the post-AwaitReply
+// ChainSync server waiter needs: the error channel it watches while the peer is
+// parked in MustReply, and the Close that is the only thing that releases it.
+//
+// It is an interface for the same reason blockfetchConnection is: conn's error
+// channel is a single buffered channel shared with blockfetch, tx-submission
+// and the connection manager's teardown watcher, and delivery goes to whichever
+// consumer the runtime picks, so a test cannot address this waiter on the real
+// one. Taking the two methods the waiter actually uses keeps that seam in the
+// signature instead of in a production field only tests write.
+//
+// *ouroboros.Connection satisfies it, and the RequestNext callback above passes
+// exactly that.
+type chainsyncServerConnection interface {
+	ErrorChan() chan error
+	Close() error
+}
+
+// chainsyncServerAwaitNext is the post-AwaitReply waiter. It runs as its own
+// goroutine once the server has parked the peer in MustReply, and either serves
+// the block the iterator eventually yields or drops the transport.
+func (o *Ouroboros) chainsyncServerAwaitNext(
+	ctx ochainsync.CallbackContext,
+	conn chainsyncServerConnection,
+	clientState *chainsync.ChainsyncClientState,
+) {
+	// Wait for next block in a separate goroutine so we can
+	// also monitor the connection for errors. This avoids
+	// leaking the monitor goroutine when Next returns first.
+	done := make(chan struct{})
+	var next *chain.ChainIteratorResult
+	var nextErr error
 	go func() {
-		// Wait for next block in a separate goroutine so we can
-		// also monitor the connection for errors. This avoids
-		// leaking the monitor goroutine when Next returns first.
-		done := make(chan struct{})
-		var next *chain.ChainIteratorResult
-		var nextErr error
-		go func() {
-			defer close(done)
-			next, nextErr = clientState.ChainIter.Next(true)
-		}()
-		select {
-		case <-done:
-			// Iterator returned
-		case <-conn.ErrorChan():
-			clientState.ChainIter.Cancel()
-			return
-		}
-		if nextErr != nil {
-			// Don't log context.Canceled errors as they're
-			// expected during connection closure.
-			if !errors.Is(nextErr, context.Canceled) {
-				o.config.Logger.Debug(
-					"failed to get next block from chain iterator",
-					"error", nextErr,
-				)
-			}
-			return
-		}
-		if next == nil {
+		defer close(done)
+		next, nextErr = clientState.ChainIter.Next(true)
+	}()
+	select {
+	case <-done:
+		// Iterator returned
+	case connErr := <-conn.ErrorChan():
+		// Abandoning the wait here leaves the peer parked in MustReply
+		// with the server holding agency, so the transport has to be
+		// dropped: an error-channel send alone does not unpark it. See
+		// closeChainsyncServerConn.
+		//
+		// conn.ErrorChan() is one buffered channel shared with blockfetch,
+		// tx-submission and the connection manager's own teardown watcher,
+		// so the error taken here may belong to another mini-protocol --
+		// in which case the manager never sees it and would not tear the
+		// connection down at all. Closing is correct either way: it is
+		// what the manager would have done with that error, and it wakes
+		// the manager's watcher through the closed error channel.
+		//
+		// A closed channel delivers a nil error and is the ordinary way in:
+		// gouroboros' Connection.shutdown closes the channel it owns, so
+		// every consumer wakes at once. orErrConnectionClosed keeps the
+		// logged reason meaningful in that case.
+		clientState.ChainIter.Cancel()
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			fmt.Errorf(
+				"connection error while peer awaited a reply: %w",
+				orErrConnectionClosed(connErr),
+			),
+		)
+		return
+	}
+	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+}
+
+// errChainsyncAwaitConnectionClosed stands in for the nil value a closed
+// conn.ErrorChan() yields, so the reason logged for the teardown is never an
+// empty error.
+var errChainsyncAwaitConnectionClosed = errors.New("connection closed")
+
+// orErrConnectionClosed substitutes a non-nil error for the nil a closed
+// error channel delivers.
+func orErrConnectionClosed(err error) error {
+	if err == nil {
+		return errChainsyncAwaitConnectionClosed
+	}
+	return err
+}
+
+// chainsyncServerServeAwaited delivers the chain iterator result that resolved
+// a post-AwaitReply wait, or drops the transport when there is nothing to
+// deliver.
+//
+// Once MsgAwaitReply is on the wire the server holds agency in MustReply. A
+// peer parked there cannot make progress and cannot detect abandonment except
+// through gouroboros' randomized MustReply timer (135-269s), after which it
+// tears the connection down, reconnects, re-intersects, receives one
+// MsgRollBackward and parks again -- a stable loop that keeps a node pinned
+// behind a healthy upstream with no ERROR logged on either side. So every path
+// out of here either sends a reply or closes the connection; returning
+// silently is not a third option.
+func (o *Ouroboros) chainsyncServerServeAwaited(
+	ctx ochainsync.CallbackContext,
+	conn chainsyncServerConnection,
+	next *chain.ChainIteratorResult,
+	nextErr error,
+) {
+	if nextErr != nil {
+		if errors.Is(nextErr, context.Canceled) {
+			// The only cancellations of a server client's iterator come from
+			// chainsync.State.RemoveClient (driven by connection-closed
+			// handling) and from the error-channel exit above, both of which
+			// have already dropped the transport. There is no parked peer left
+			// to unpark, so this stays a quiet, expected unwind.
 			o.config.Logger.Debug(
-				"chainsync server: goroutine got nil block",
+				"chainsync server: await unwound by connection teardown",
 				"connection_id", ctx.ConnectionId.String(),
 			)
 			return
 		}
-		tip := o.refreshTip(next)
-		if next.Rollback {
-			if err := ctx.Server.RollBackward(
-				next.Point,
-				tip,
-			); err != nil {
-				o.reportChainsyncServerAsyncError(
-					conn,
-					ctx.ConnectionId.String(),
-					"RollBackward",
-					err,
-				)
-			}
-		} else {
-			if err := ctx.Server.RollForward(
-				next.Block.Type,
-				o.chainsyncServerBlockCbor(ctx, next.Block),
-				tip,
-			); err != nil {
-				o.reportChainsyncServerAsyncError(
-					conn,
-					ctx.ConnectionId.String(),
-					"RollForward",
-					err,
-				)
-			}
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			fmt.Errorf(
+				"chain iterator failed while peer awaited a reply: %w",
+				nextErr,
+			),
+		)
+		return
+	}
+	if next == nil {
+		// Defensive: ChainIterator.Next maps an empty non-error result to
+		// ErrIteratorChainTip, so this is not reachable through the real
+		// iterator. Should it ever become reachable, dropping the transport is
+		// still the only way to release the parked peer.
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			errors.New(
+				"chain iterator returned no block while peer awaited a reply",
+			),
+		)
+		return
+	}
+	tip := o.refreshTip(next)
+	if next.Rollback {
+		if err := ctx.Server.RollBackward(
+			next.Point,
+			tip,
+		); err != nil {
+			o.reportChainsyncServerAsyncError(
+				conn,
+				ctx.ConnectionId.String(),
+				"RollBackward",
+				err,
+			)
 		}
-	}()
-	return nil
+		return
+	}
+	blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
+	if blockErr != nil {
+		// Do not RollForward an incomplete CertRB. This runs after the
+		// callback returned AwaitReply, so actively close the transport
+		// (an error-channel send alone does not) to unpark the client
+		// from AwaitReply so it reconnects and retries the point once
+		// the endorser closure is available.
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			blockErr,
+		)
+		return
+	}
+	if err := ctx.Server.RollForward(
+		next.Block.Type,
+		blockCbor,
+		tip,
+	); err != nil {
+		o.reportChainsyncServerAsyncError(
+			conn,
+			ctx.ConnectionId.String(),
+			"RollForward",
+			err,
+		)
+	}
 }
 
 func (o *Ouroboros) reportChainsyncServerAsyncError(
-	conn *ouroboros.Connection,
+	conn chainsyncServerConnection,
 	connectionID string,
 	operation string,
 	err error,
@@ -598,26 +1143,43 @@ func (o *Ouroboros) reportChainsyncServerAsyncError(
 		"operation", operation,
 		"error", err,
 	)
-	if !sendChainsyncConnError(conn.ErrorChan(), err) {
+	if closeErr := conn.Close(); closeErr != nil {
 		o.config.Logger.Debug(
-			"chainsync server: failed to forward async send error to connection error channel",
-			"connection_id", connectionID,
-			"operation", operation,
+			"chainsync server: failed to close connection after async send error",
+			"connection_id",
+			connectionID,
+			"operation",
+			operation,
+			"error",
+			closeErr,
 		)
 	}
 }
 
-func sendChainsyncConnError(errCh chan error, err error) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	select {
-	case errCh <- err:
-		return true
-	default:
-		return false
+// closeChainsyncServerConn tears down the connection after the async serving
+// goroutine declines to serve a block (e.g. a certifying ranking block whose
+// endorser closure did not resolve). This runs after the RequestNext callback
+// has already returned AwaitReply, so gouroboros cannot propagate the error
+// through the callback-owned teardown path the synchronous path relies on. A
+// direct Close tears down the bearer so the client reconnects and retries the
+// point. It also closes the gouroboros-owned error channel, which wakes the
+// connmanager watcher without racing a Dingo send against channel closure.
+func (o *Ouroboros) closeChainsyncServerConn(
+	conn chainsyncServerConnection,
+	connectionID string,
+	err error,
+) {
+	o.config.Logger.Warn(
+		"chainsync server: closing connection to force client retry",
+		"connection_id", connectionID,
+		"error", err,
+	)
+	if closeErr := conn.Close(); closeErr != nil {
+		o.config.Logger.Debug(
+			"chainsync server: connection close failed",
+			"connection_id", connectionID,
+			"error", closeErr,
+		)
 	}
 }
 
@@ -632,10 +1194,51 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	) {
 		return nil
 	}
+	if o.chainsyncState != nil && !o.chainsyncState.UpdateClientRollback(
+		ctx.ConnectionId, point, tip,
+	) {
+		return nil
+	}
+	// Observe the rollback for chain selection FIRST — it trims the peer's
+	// observed frontier (ApplyRollback), which can change its corroboration
+	// status, so the apply gate below must reflect it. If the hook handles it
+	// synchronously (Genesis corroboration active), skip the async publish to
+	// avoid a double update; otherwise publish for the async subscriber. This
+	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
+	rollbackEvent := chainselection.PeerRollbackEvent{
+		ConnectionId: ctx.ConnectionId,
+		Point:        point,
+		Tip:          tip,
+	}
+	observedSync := false
+	if o.config.ChainsyncObservePeerRollback != nil {
+		observedSync = o.config.ChainsyncObservePeerRollback(rollbackEvent)
+	}
+	if !observedSync {
+		o.eventBus.Publish(
+			chainselection.PeerRollbackEventType,
+			event.NewEvent(
+				chainselection.PeerRollbackEventType,
+				rollbackEvent,
+			),
+		)
+	}
+	// Apply gate: withhold an uncorroborated peer's rollback from the ledger,
+	// mirroring the roll-forward apply gate. The observation above ran first, so
+	// this reflects the post-rollback corroboration state.
+	if !o.shouldApplyChainsyncToLedger(ctx.ConnectionId) {
+		o.config.Logger.Debug(
+			"chainsync: rollback withheld (not apply eligible)",
+			"component", "ouroboros",
+			"slot", point.Slot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		return nil
+	}
 	// Generate event. This stream is ordering-critical: dropping a
 	// rollback/header event can strand the ledger pipeline, so use blocking
 	// delivery to apply backpressure instead of lossy buffer overflow.
-	if err := o.EventBus.PublishBlocking(
+	if err := o.eventBus.PublishBlocking(
 		ledger.ChainsyncEventType,
 		event.NewEvent(
 			ledger.ChainsyncEventType,
@@ -649,36 +1252,47 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	); err != nil {
 		return err
 	}
-	o.EventBus.Publish(
-		chainselection.PeerRollbackEventType,
-		event.NewEvent(
-			chainselection.PeerRollbackEventType,
-			chainselection.PeerRollbackEvent{
-				ConnectionId: ctx.ConnectionId,
-				Point:        point,
-				Tip:          tip,
-			},
-		),
-	)
 	return nil
 }
 
-func (o *Ouroboros) chainsyncClientRollForward(
+func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
 	blockData any,
 	tip ochainsync.Tip,
+	arrivalTime time.Time,
 ) error {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
 		point := ocommon.NewPoint(blockSlot, blockHash)
+		// Genesis Limit on Patience: the peer is charged up to the header's
+		// network arrival, not for this node's decoding, admission waits,
+		// verification, or ledger backpressure below. A header that clears
+		// verification resumes the leak when the callback returns.
+		patienceGrant := false
+		if o.chainsyncState != nil {
+			o.chainsyncState.PatienceMessageArrived(
+				ctx.ConnectionId,
+				arrivalTime,
+			)
+			defer func() {
+				if patienceGrant {
+					o.chainsyncState.PatienceHeaderAccepted(
+						ctx.ConnectionId,
+						v.BlockNumber(),
+						point.Slot == tip.Point.Slot &&
+							bytes.Equal(point.Hash, tip.Point.Hash),
+					)
+				}
+			}()
+		}
 		// Extract VRF output from block header once for chain
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
-		vrfOutput := chainselection.GetVRFOutput(v)
-		praosView, _ := chainselection.GetPraosTiebreakerView(v)
+		vrfOutput := praos.GetVRFOutput(v)
+		praosView, _ := praos.GetPraosTiebreakerView(v)
 		// Ingress eligibility is the sole gate for feeding the ledger
 		// and chain selection. reconcileChainsyncIngressAdmission
 		// defers to ChainsyncIngressEligible (peergov), which already
@@ -698,56 +1312,187 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			"connection_id", ctx.ConnectionId.String(),
 			"ingress_eligible", ingressEligible,
 		)
-		// Update tracked client state and deduplicate headers.
-		// If this header has already been reported by another
-		// eligible client, skip publishing it into the ledger.
-		isNew := true
-		if o.ChainsyncState != nil {
-			if ingressEligible {
-				isNew = o.ChainsyncState.UpdateClientTip(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			} else {
-				o.ChainsyncState.UpdateClientTipWithoutDedup(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			}
+		chainsyncEvent := ledger.ChainsyncEvent{
+			ConnectionId: ctx.ConnectionId,
+			ArrivalTime:  arrivalTime,
+			Point:        point,
+			Type:         blockType,
+			BlockHeader:  v,
+			Tip:          tip,
 		}
-		// Publish peer tip update for chain selection only for
-		// ingress-eligible peers. Random inbound peers reporting
-		// ephemeral tips would cause spurious chain switches; peergov
-		// filters them via chainSelectionEligible so they fail the
-		// reconcile above and get skipped here.
-		if ingressEligible {
-			observedTip := ochainsync.Tip{
-				Point:       point,
-				BlockNumber: v.BlockNumber(),
-			}
-			o.EventBus.Publish(
-				chainselection.PeerTipUpdateEventType,
-				event.NewEvent(
-					chainselection.PeerTipUpdateEventType,
-					chainselection.PeerTipUpdateEvent{
-						ConnectionId: ctx.ConnectionId,
-						Tip:          tip,
-						ObservedTip:  observedTip,
-						VRFOutput:    vrfOutput,
-						PraosView:    praosView,
-					},
-				),
+		// Enforce the future-header boundary on this peer's protocol callback,
+		// before any observed-tip, cursor, dedup, or ledger mutation. A
+		// permitted wait therefore blocks only this peer and never the shared
+		// ledger ChainSync dispatch mutex/goroutine.
+		if ingressEligible && o.chainsyncHeaderAdmission != nil {
+			accepted, err := o.chainsyncHeaderAdmission(
+				chainsyncAdmissionContext(ctx),
+				chainsyncEvent,
 			)
+			if err != nil {
+				o.config.Logger.Warn(
+					"chainsync: future-header admission failed closed",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", err,
+				)
+				return err
+			}
+			if !accepted {
+				// Returning nil deliberately drops this header without turning
+				// ambiguous local/remote clock skew into a connection penalty.
+				// Re-intersect at the earliest dropped header's onset so the
+				// protocol cursor cannot permanently strand the accepted chain.
+				if o.chainsyncHeaderSlotTime != nil {
+					onset, onsetErr := o.chainsyncHeaderSlotTime(blockSlot)
+					if onsetErr == nil {
+						o.scheduleFutureHeaderResync(ctx.ConnectionId, onset)
+					} else {
+						o.config.Logger.Error(
+							"chainsync: failed to schedule future-header recovery",
+							"component", "ouroboros",
+							"slot", blockSlot,
+							"connection_id", ctx.ConnectionId.String(),
+							"error", onsetErr,
+						)
+					}
+				}
+				return nil
+			}
+			if o.futureHeaderResyncPending(ctx.ConnectionId) {
+				o.config.Logger.Debug(
+					"chainsync: header withheld pending future-header re-intersection",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+				)
+				return nil
+			}
 		}
-		if ingressEligible && o.ChainsyncState != nil {
-			o.ChainsyncState.RecordObservedHeader(
+		// Verify header crypto (VRF/KES and, once local state has caught up,
+		// leader eligibility) before this header is allowed to influence
+		// Genesis chain-selection density or corroboration. Without this
+		// gate, an untrusted peer-reported header could steer fork selection
+		// using data that has not passed the same checks as the applied
+		// chain (dingo #3517). This runs for every ingress-eligible peer, not
+		// only the one currently apply-eligible: a competing candidate's
+		// headers never reach the ledger's own chainsync header-queue
+		// verification, since that only runs for headers actually applied.
+		//
+		// Verification is skipped only for a slot an imported Mithril
+		// snapshot already covers (issue #3528); a coarse bulk
+		// historical/catch-up loading toggle no longer exempts it, so a
+		// Mithril-restored bootstrap is unaffected but ordinary fast sync is
+		// not. A deferred result (local state has not caught up to this
+		// header's slot yet) also leaves the header eligible -- that is the
+		// normal shape of a peer legitimately racing ahead of local ledger
+		// application, not a peer fault. Only a definite crypto/eligibility
+		// failure excludes the header from observation and recycles the
+		// connection.
+		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
+			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
+			if verifyErr := o.chainSelectionVerifyHeaderCrypto(v); verifyErr != nil {
+				if ledger.IsHeaderVerificationDeferred(verifyErr) {
+					o.config.Logger.Debug(
+						"chainsync: header verification deferred for chain selection",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"connection_id", ctx.ConnectionId.String(),
+						"error", verifyErr,
+					)
+				} else {
+					o.config.Logger.Warn(
+						"chainsync: excluding header from chain selection after verification failure",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"connection_id", ctx.ConnectionId.String(),
+						"error", verifyErr,
+					)
+					o.eventBus.Publish(
+						ledger.ConnectionRecycleRequestedEventType,
+						event.NewEvent(
+							ledger.ConnectionRecycleRequestedEventType,
+							ledger.ConnectionRecycleRequestedEvent{
+								ConnectionId: ctx.ConnectionId,
+								Reason:       "header_verification_failure",
+							},
+						),
+					)
+					ingressEligible = false
+				}
+			}
+		}
+		patienceGrant = ingressEligible
+		// Observe the tip for chain selection FIRST, so the apply-eligibility
+		// decision below reflects this header. Only ingress-eligible peers are
+		// observed; random inbound peers reporting ephemeral tips are filtered
+		// by peergov and skipped here.
+		observedTip := ochainsync.Tip{
+			Point:       point,
+			BlockNumber: v.BlockNumber(),
+		}
+		if ingressEligible {
+			// Update the tracked tip before synchronous chain selection. Genesis
+			// corroboration can select this peer from the callback, and the
+			// resulting switch must see a delivered tip.
+			if o.chainsyncState != nil {
+				o.chainsyncState.UpdateClientTipWithoutDedup(
+					ctx.ConnectionId,
+					point,
+					tip,
+				)
+			}
+			peerTipUpdate := chainselection.PeerTipUpdateEvent{
+				ConnectionId: ctx.ConnectionId,
+				Tip:          tip,
+				ObservedTip:  observedTip,
+				VRFOutput:    vrfOutput,
+				PraosView:    praosView,
+			}
+			// If the hook handles it synchronously (Genesis corroboration
+			// active, so the apply gate below must reflect this header), skip
+			// the async publish to avoid a double update; otherwise publish for
+			// the async chain-selection and peergov subscribers.
+			observedSync := false
+			if o.config.ChainsyncObservePeerTip != nil {
+				observedSync = o.config.ChainsyncObservePeerTip(peerTipUpdate)
+			}
+			if !observedSync {
+				o.eventBus.Publish(
+					chainselection.PeerTipUpdateEventType,
+					event.NewEvent(
+						chainselection.PeerTipUpdateEventType,
+						peerTipUpdate,
+					),
+				)
+			}
+		}
+		// Apply-eligibility, evaluated after observation so it reflects this
+		// header. A peer can be ingress-eligible yet not apply-eligible (an
+		// uncorroborated Genesis fast source): its tips are observed but its
+		// blocks are withheld from the ledger.
+		applyEligible := ingressEligible &&
+			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
+		// Update tracked client cursor/tip and deduplicate headers. Record the
+		// cross-peer dedup entry ONLY for headers we will actually apply, so a
+		// header withheld from an uncorroborated peer is not permanently
+		// deduplicated — a later corroborated, apply-eligible peer can still
+		// publish the point into the ledger.
+		isNew := true
+		if o.chainsyncState != nil {
+			if applyEligible {
+				isNew = o.chainsyncState.RecordHeader(ctx.ConnectionId, point)
+			}
+		}
+		if ingressEligible && o.chainsyncState != nil {
+			o.chainsyncState.RecordObservedHeader(
 				chainsync.ObservedHeader{
 					ConnectionId: ctx.ConnectionId,
 					Point:        point,
 					Type:         blockType,
 					BlockHeader:  v,
+					ArrivalTime:  arrivalTime,
 					Tip:          tip,
 				},
 			)
@@ -762,52 +1507,85 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
-		if !isNew {
-			shouldReplayDuplicate := false
-			if o.ChainsyncState != nil {
-				activeConnId := o.ChainsyncState.GetClientConnId()
-				if activeConnId != nil &&
-					sameConnectionId(*activeConnId, ctx.ConnectionId) &&
-					o.ChainsyncState.HeaderPreviouslySeenFromOtherConn(
-						ctx.ConnectionId,
-						point,
-					) {
-					shouldReplayDuplicate = true
-				}
+		// Header-sync strategy gate: cross-peer deduplication (isNew) has run
+		// above; the configured strategy now decides whether this eligible
+		// peer is permitted to drive ledger ingress. Primary lets any eligible
+		// peer publish new headers and the active peer replay duplicates first
+		// seen elsewhere (prior behavior); parallel lets every eligible peer
+		// publish new headers but never replays duplicates; round-robin admits
+		// only the current rotation driver.
+		if o.chainsyncState != nil &&
+			!o.chainsyncState.ShouldPublishHeader(
+				ctx.ConnectionId,
+				point,
+				isNew,
+			) {
+			dropReason := "duplicate"
+			if isNew {
+				dropReason = "not ingress driver"
 			}
-			if !shouldReplayDuplicate {
-				o.config.Logger.Debug(
-					"chainsync: header dropped (duplicate)",
-					"component", "ouroboros",
-					"slot", blockSlot,
-					"connection_id", ctx.ConnectionId.String(),
-				)
-				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
-				return nil
+			o.config.Logger.Debug(
+				"chainsync: header dropped",
+				"component", "ouroboros",
+				"reason", dropReason,
+				"strategy", o.chainsyncState.HeaderSyncStrategy().String(),
+				"slot", blockSlot,
+				"connection_id", ctx.ConnectionId.String(),
+			)
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
+		}
+		// Apply gate: a peer's tips have already been observed for chain
+		// selection above, but its headers are applied to the ledger only when
+		// apply-eligible (computed above, after observation). This withholds
+		// blocks from an uncorroborated Genesis fast source (it is observed but
+		// cannot steer the ledger) while letting corroboration still form from
+		// the observed tips. The header was recorded WITHOUT dedup above, so a
+		// later corroborated peer can still publish this point.
+		if !applyEligible {
+			o.config.Logger.Debug(
+				"chainsync: header withheld (not apply eligible)",
+				"component", "ouroboros",
+				"slot", blockSlot,
+				"connection_id", ctx.ConnectionId.String(),
+			)
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
+		}
+		// The only target ledger may later publish is paired with this exact
+		// delivered header and its apply-eligibility decision. Do not make
+		// ledger recover it from mutable selector state.
+		chainsyncEvent.SyncTarget = observedTip
+		if o.config.ChainsyncSyncTarget != nil {
+			if target, ok := o.config.ChainsyncSyncTarget(
+				chainselection.PeerTipUpdateEvent{
+					ConnectionId: ctx.ConnectionId,
+					Tip:          tip,
+					ObservedTip:  observedTip,
+					VRFOutput:    vrfOutput,
+					PraosView:    praosView,
+				},
+			); ok {
+				chainsyncEvent.SyncTarget = target
 			}
 		}
-		if err := o.EventBus.PublishBlocking(
+		chainsyncEvent.SyncTargetTrusted = true
+		if err := o.eventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
 				ledger.ChainsyncEventType,
-				ledger.ChainsyncEvent{
-					ConnectionId: ctx.ConnectionId,
-					Point:        point,
-					Type:         blockType,
-					BlockHeader:  v,
-					Tip:          tip,
-				},
+				chainsyncEvent,
 			),
 		); err != nil {
 			return err
 		}
 		if point.Slot == tip.Point.Slot &&
 			bytes.Equal(point.Hash, tip.Point.Hash) {
-			if o.ChainsyncState != nil {
-				o.ChainsyncState.MarkClientSynced(ctx.ConnectionId)
+			if o.chainsyncState != nil {
+				o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
 			}
-			if ingressEligible && o.EventBus != nil {
-				o.EventBus.Publish(
+			if ingressEligible && o.eventBus != nil {
+				o.eventBus.Publish(
 					ledger.ChainsyncAwaitReplyEventType,
 					event.NewEvent(
 						ledger.ChainsyncAwaitReplyEventType,
@@ -840,11 +1618,26 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	if o.config.ChainsyncIngressEligible != nil {
 		return o.config.ChainsyncIngressEligible(connId)
 	}
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return false
 	}
-	outbound, exists := o.ChainsyncState.ClientStartedAsOutbound(connId)
+	outbound, exists := o.chainsyncState.ClientStartedAsOutbound(connId)
 	return exists && outbound
+}
+
+// shouldApplyChainsyncToLedger reports whether an ingress-eligible peer's
+// headers/rollbacks may be APPLIED to the ledger. It is the second, stricter
+// gate (see ChainsyncApplyEligible): it runs after the peer's tips have already
+// been observed for chain selection, so an uncorroborated Genesis fast source is
+// observed but its blocks are withheld. When no policy is wired, every ingress-
+// eligible peer is apply-eligible.
+func (o *Ouroboros) shouldApplyChainsyncToLedger(
+	connId ouroboros.ConnectionId,
+) bool {
+	if o.config.ChainsyncApplyEligible == nil {
+		return true
+	}
+	return o.config.ChainsyncApplyEligible(connId)
 }
 
 // isInboundChainsyncClient returns true if the chainsync client for
@@ -857,10 +1650,10 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 func (o *Ouroboros) isInboundChainsyncClient(
 	connId ouroboros.ConnectionId,
 ) bool {
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return false
 	}
-	outbound, exists := o.ChainsyncState.ClientStartedAsOutbound(connId)
+	outbound, exists := o.chainsyncState.ClientStartedAsOutbound(connId)
 	if !exists {
 		// Unknown client — treat as inbound (conservative: don't
 		// feed untracked connections into the ledger).
@@ -871,8 +1664,8 @@ func (o *Ouroboros) isInboundChainsyncClient(
 
 func (o *Ouroboros) maxTrackedChainsyncClients() int {
 	maxClients := defaultMaxChainsyncClients
-	if o.ChainsyncState != nil && o.ChainsyncState.MaxClients() > 0 {
-		maxClients = o.ChainsyncState.MaxClients()
+	if o.chainsyncState != nil && o.chainsyncState.MaxClients() > 0 {
+		maxClients = o.chainsyncState.MaxClients()
 	}
 	return maxClients
 }
@@ -882,23 +1675,23 @@ func (o *Ouroboros) registerTrackedChainsyncClient(
 	ingressEligible bool,
 	startedAsOutbound bool,
 ) bool {
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return false
 	}
 	if ingressEligible {
-		if o.ChainsyncState.TryAddClientConnIdWithDirection(
+		if o.chainsyncState.TryAddClientConnIdWithDirection(
 			connId,
 			o.maxTrackedChainsyncClients(),
 			startedAsOutbound,
 		) {
 			return true
 		}
-		if o.ChainsyncState.HasClientConnId(connId) {
-			o.ChainsyncState.SetClientStartedAsOutbound(
+		if o.chainsyncState.HasClientConnId(connId) {
+			o.chainsyncState.SetClientStartedAsOutbound(
 				connId,
 				startedAsOutbound,
 			)
-			observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+			observabilityOnly, exists := o.chainsyncState.ClientObservabilityOnly(
 				connId,
 			)
 			if !exists {
@@ -911,7 +1704,7 @@ func (o *Ouroboros) registerTrackedChainsyncClient(
 		}
 		return false
 	}
-	if o.ChainsyncState.TryAddObservedClientConnIdWithDirection(
+	if o.chainsyncState.TryAddObservedClientConnIdWithDirection(
 		connId,
 		startedAsOutbound,
 	) {
@@ -924,10 +1717,10 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 	connId ouroboros.ConnectionId,
 	desiredEligible bool,
 ) bool {
-	if o.ChainsyncState == nil {
+	if o.chainsyncState == nil {
 		return desiredEligible
 	}
-	observabilityOnly, exists := o.ChainsyncState.ClientObservabilityOnly(
+	observabilityOnly, exists := o.chainsyncState.ClientObservabilityOnly(
 		connId,
 	)
 	if !exists {
@@ -937,16 +1730,16 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 		if !observabilityOnly {
 			return true
 		}
-		if !o.ChainsyncState.SetClientObservabilityOnly(connId, false) {
+		if !o.chainsyncState.SetClientObservabilityOnly(connId, false) {
 			return false
 		}
-		observabilityOnly, exists = o.ChainsyncState.ClientObservabilityOnly(
+		observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(
 			connId,
 		)
 		return exists && !observabilityOnly
 	}
 	if !observabilityOnly {
-		_ = o.ChainsyncState.SetClientObservabilityOnly(connId, true)
+		_ = o.chainsyncState.SetClientObservabilityOnly(connId, true)
 	}
 	return false
 }
@@ -957,7 +1750,7 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	connId ouroboros.ConnectionId,
 	peerTip ochainsync.Tip,
 ) {
-	if o.PeerGov == nil || o.LedgerState == nil {
+	if o.peerGov == nil || o.ledgerState == nil {
 		return
 	}
 
@@ -996,7 +1789,7 @@ func (o *Ouroboros) updateChainsyncMetrics(
 
 	// Calculate tip delta (our tip slot - peer's tip slot)
 	// Positive means peer is behind us, negative means peer is ahead
-	ourTip := o.LedgerState.Tip()
+	ourTip := o.ledgerState.Tip()
 	// Use signed subtraction to handle the delta correctly
 	// Slots are uint64, but the difference fits in int64 for reasonable cases
 	// Cap at math.MaxInt64 to avoid overflow
@@ -1018,7 +1811,7 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	}
 
 	// Update peer scoring
-	o.PeerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
+	o.peerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
 }
 
 func (o *Ouroboros) restartChainsyncClientAsync(
@@ -1027,7 +1820,7 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 	reason string,
 	restartFn func() error,
 ) {
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return
 	}
@@ -1072,7 +1865,7 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 			)
 			closeConn()
 			<-done
-		case <-time.After(chainsyncRestartTimeout):
+		case <-chainsyncRestartAfter(chainsyncRestartTimeout):
 			o.config.Logger.Warn(
 				"chainsync restart timed out, closing connection",
 				"connection_id", connId.String(),
@@ -1092,10 +1885,10 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 // rewind tracked client cursors and attempt ledger-side recovery
 // before recycling affected connections as a fallback.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
-	if o.EventBus == nil {
+	if o.eventBus == nil {
 		return
 	}
-	o.EventBus.SubscribeFunc(
+	o.subscribeTracked(
 		event.ChainsyncResyncEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(event.ChainsyncResyncEvent)
@@ -1110,25 +1903,25 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			var connIds []ouroboros.ConnectionId
 			if e.ConnectionId != (ouroboros.ConnectionId{}) {
 				connIds = append(connIds, e.ConnectionId)
-			} else if o.ChainsyncState != nil {
-				connIds = o.ChainsyncState.RewindTrackedClientsTo(e.Point)
+			} else if o.chainsyncState != nil {
+				connIds = o.chainsyncState.RewindTrackedClientsTo(e.Point)
 				if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback &&
 					len(connIds) == 0 {
-					connIds = o.ChainsyncState.GetClientConnIds()
+					connIds = o.chainsyncState.GetClientConnIds()
 				}
 			}
-			if o.ChainsyncState != nil {
+			if o.chainsyncState != nil {
 				if e.Point.Slot > 0 || len(e.Point.Hash) > 0 {
-					o.ChainsyncState.ClearSeenHeadersFrom(e.Point.Slot)
+					o.chainsyncState.ClearSeenHeadersFrom(e.Point.Slot)
 				} else {
-					o.ChainsyncState.ClearSeenHeaders()
+					o.chainsyncState.ClearSeenHeaders()
 				}
 			}
 			if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback {
-				if o.LedgerState == nil {
+				if o.ledgerState == nil {
 					return
 				}
-				recovery := o.LedgerState.RecoverAfterLocalRollback(
+				recovery := o.ledgerState.RecoverAfterLocalRollback(
 					connIds,
 					e.Point,
 				)
@@ -1138,9 +1931,12 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				if recovery.SkipConnectionClose {
 					o.config.Logger.Info(
 						"skipping connection closure: chain already past rollback point",
-						"component", "ouroboros",
-						"rollback_slot", e.Point.Slot,
-						"chain_tip_slot", recovery.PrimaryChainTipSlot,
+						"component",
+						"ouroboros",
+						"rollback_slot",
+						e.Point.Slot,
+						"chain_tip_slot",
+						recovery.PrimaryChainTipSlot,
 					)
 					return
 				}
@@ -1157,25 +1953,30 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				// state, so there are no in-flight lookups to break.
 				o.config.Logger.Info(
 					"local rollback had no recoverable peer history, closing connections for fresh chainsync",
-					"component", "ouroboros",
-					"rollback_slot", e.Point.Slot,
-					"connection_count", len(connIds),
+					"component",
+					"ouroboros",
+					"rollback_slot",
+					e.Point.Slot,
+					"connection_count",
+					len(connIds),
 				)
 				for _, connId := range connIds {
-					if o.ChainsyncState != nil {
-						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					if o.chainsyncState != nil {
+						o.chainsyncState.ClearObservedHeaderHistory(connId)
 					}
-					if o.ConnManager == nil {
+					if o.connManager == nil {
 						continue
 					}
-					conn := o.ConnManager.GetConnectionById(connId)
+					conn := o.connManager.GetConnectionById(connId)
 					if conn == nil {
 						continue
 					}
 					o.config.Logger.Info(
 						"closing connection for fresh chainsync after local rollback",
-						"component", "ouroboros",
-						"connection_id", connId.String(),
+						"component",
+						"ouroboros",
+						"connection_id",
+						connId.String(),
 					)
 					conn.Close()
 				}
@@ -1194,13 +1995,13 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if chainsyncResyncRequiresFreshConnection(e.Reason) {
 				for _, connId := range connIds {
 					o.denyDivergentChainsyncPeer(connId, e.Reason)
-					if o.ChainsyncState != nil {
-						o.ChainsyncState.ClearObservedHeaderHistory(connId)
+					if o.chainsyncState != nil {
+						o.chainsyncState.ClearObservedHeaderHistory(connId)
 					}
-					if o.ConnManager == nil {
+					if o.connManager == nil {
 						continue
 					}
-					conn := o.ConnManager.GetConnectionById(connId)
+					conn := o.connManager.GetConnectionById(connId)
 					if conn == nil {
 						continue
 					}
@@ -1214,10 +2015,10 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			}
 			for _, connId := range connIds {
-				if o.ChainsyncState != nil {
-					o.ChainsyncState.ClearObservedHeaderHistory(connId)
+				if o.chainsyncState != nil {
+					o.chainsyncState.ClearObservedHeaderHistory(connId)
 				}
-				if o.ConnManager == nil {
+				if o.connManager == nil {
 					continue
 				}
 				o.restartChainsyncClientAsync(
@@ -1234,9 +2035,16 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 								err,
 							)
 						}
-						return o.resyncChainsyncClientWithPoints(
+						var afterStop func()
+						if e.Reason == event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery {
+							afterStop = func() {
+								o.completeFutureHeaderResync(connId)
+							}
+						}
+						return o.resyncChainsyncClientWithPointsAfterStop(
 							connId,
 							intersectPoints,
+							afterStop,
 						)
 					},
 				)
@@ -1290,13 +2098,110 @@ func (o *Ouroboros) instrumentChainsyncRollBackward(
 	}
 }
 
-func (o *Ouroboros) instrumentChainsyncRollForward(
-	fn func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error,
-) func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error {
+// decodeChainsyncHeader decodes a chain-sync block header, choosing the decoder
+// by block type. On the Musashi prototype network, blocks tagged Conway (block
+// type 7) carry the Leios header extension (leios_certified/leios_announcement)
+// in place — a structurally extended Babbage header that gouroboros' strict
+// Conway header decoder rejects. Decode those via the Dijkstra header path,
+// which handles the trailing extension, so the strict Conway decoder that every
+// real Conway network relies on is left untouched. All other networks and block
+// types decode exactly as before.
+func (o *Ouroboros) decodeChainsyncHeader(
+	blockType uint,
+	raw []byte,
+) (header gledger.BlockHeader, err error) {
+	defer func() {
+		if err == nil && header != nil {
+			header.Hash()
+		}
+	}()
+	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
+		blockType == gledger.BlockTypeConway {
+		return gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+	}
+	header, err = gledger.NewBlockHeaderFromCbor(blockType, raw)
+	if err == nil || blockType != gledger.BlockTypeByronEbb {
+		return header, err
+	}
+	// Some dingo peers have sent a complete Byron EBB in the NtN header
+	// payload. A complete EBB is an array of its header, body, and extra data,
+	// so the header decoder rejects it at ConsensusData. Decode that one legacy
+	// representation as a block and return its header; the regular path above
+	// remains the only path for all other block types and correctly encoded EBB
+	// headers.
+	block, blockErr := gledger.NewBlockFromCbor(blockType, raw)
+	if blockErr != nil {
+		return nil, err
+	}
+	return block.Header(), nil
+}
+
+// chainsyncClientRollForwardRaw decodes the raw header itself (via
+// decodeChainsyncHeader, through the shared decode cache) and forwards the
+// decoded header to the shared RollForward handler. dingo takes the raw
+// callback so it can apply the Musashi-scoped Conway-with-Leios-header
+// decode; using the decoded callback would let gouroboros' strict decode fail
+// before dingo can intervene.
+//
+// Every chainsync-connected peer delivers a header for each new point at
+// roughly the same time, so -- like blockfetchClientBlockRaw -- the decode is
+// keyed by content hash and shared across connections instead of repeated
+// once per connection. See #489.
+func (o *Ouroboros) chainsyncClientRollForwardRaw(
+	ctx ochainsync.CallbackContext,
+	blockType uint,
+	blockData []byte,
+	tip ochainsync.Tip,
+) error {
+	// Record arrival at the raw network callback boundary. Header decoding can
+	// block behind another peer's in-flight decode of the same bytes, so a
+	// timestamp taken by the decoded handler would already include local work.
+	arrivalNow := o.chainsyncArrivalNow
+	if arrivalNow == nil {
+		arrivalNow = time.Now
+	}
+	arrivalTime := arrivalNow()
+	key := hashDecodeInput(blockType, blockData)
+	header, err := decodeWithPanicSafeMetrics(
+		o.headerDecodeCache,
+		key,
+		func() (gledger.BlockHeader, error) {
+			return o.decodeChainsyncHeader(blockType, blockData)
+		},
+		o.recordHeaderDecodeCacheOutcome,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"decode chain-sync header (block type %d): %w",
+			blockType,
+			err,
+		)
+	}
+	if header == nil {
+		// decodeCache's contract is (nil value, non-nil err) on failure, but
+		// that is a convention on decodeFn, not something the generic cache
+		// itself enforces -- guard explicitly rather than trust it silently.
+		return fmt.Errorf(
+			"decode chain-sync header (block type %d): decoded nil header with no error",
+			blockType,
+		)
+	}
+	return o.chainsyncClientRollForwardAt(
+		ctx,
+		blockType,
+		header,
+		tip,
+		arrivalTime,
+	)
+}
+
+func (o *Ouroboros) instrumentChainsyncRollForwardRaw(
+	fn func(ochainsync.CallbackContext, uint, []byte, ochainsync.Tip) error,
+) func(ochainsync.CallbackContext, uint, []byte, ochainsync.Tip) error {
 	return func(
 		ctx ochainsync.CallbackContext,
 		blockType uint,
-		blockData any,
+		blockData []byte,
 		tip ochainsync.Tip,
 	) error {
 		start := time.Now()

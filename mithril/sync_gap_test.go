@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"math/big"
@@ -24,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -188,7 +190,9 @@ func testGapHash28(seed string) []byte {
 	return hash
 }
 
-func TestValidateStoredGapBlocks(t *testing.T) {
+func TestValidateCompleteGapBlocks(t *testing.T) {
+	t.Parallel()
+
 	immutableTip := models.Block{
 		Slot: 10,
 		Hash: testGapHash32("immutable-tip"),
@@ -203,13 +207,21 @@ func TestValidateStoredGapBlocks(t *testing.T) {
 		Hash:     testGapHash32("second-gap"),
 		PrevHash: first.Hash,
 	}
+	start := ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash)
+	end := ocommon.NewPoint(second.Slot, second.Hash)
+
+	require.ErrorContains(
+		t,
+		validateCompleteGapBlocks(nil, start, end),
+		"gap is empty",
+	)
 
 	require.NoError(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{first, second},
-			immutableTip,
-			second.Hash,
+			start,
+			end,
 		),
 	)
 
@@ -217,35 +229,122 @@ func TestValidateStoredGapBlocks(t *testing.T) {
 	brokenFirst.PrevHash = testGapHash32("wrong-prev")
 	require.ErrorContains(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{brokenFirst, second},
-			immutableTip,
-			second.Hash,
+			start,
+			end,
 		),
 		"does not match immutable tip",
 	)
+
+	for _, slot := range []uint64{start.Slot, start.Slot - 1} {
+		nonIncreasingFirst := first
+		nonIncreasingFirst.Slot = slot
+		require.ErrorContains(
+			t,
+			validateCompleteGapBlocks(
+				[]models.Block{nonIncreasingFirst, second},
+				start,
+				end,
+			),
+			"does not follow start slot",
+		)
+	}
 
 	brokenSecond := second
 	brokenSecond.PrevHash = testGapHash32("wrong-link")
 	require.ErrorContains(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{first, brokenSecond},
-			immutableTip,
-			second.Hash,
+			start,
+			end,
 		),
 		"does not match previous block",
 	)
 
+	for _, slot := range []uint64{first.Slot, first.Slot - 1} {
+		nonIncreasingSecond := second
+		nonIncreasingSecond.Slot = slot
+		require.ErrorContains(
+			t,
+			validateCompleteGapBlocks(
+				[]models.Block{first, nonIncreasingSecond},
+				start,
+				end,
+			),
+			"does not follow previous block slot",
+		)
+	}
+
 	require.ErrorContains(
 		t,
-		validateStoredGapBlocks(
+		validateCompleteGapBlocks(
 			[]models.Block{first, second},
-			immutableTip,
-			testGapHash32("ledger-hash"),
+			start,
+			ocommon.NewPoint(second.Slot, testGapHash32("ledger-hash")),
 		),
-		"does not match ledger state hash",
+		"does not match requested end hash",
 	)
+
+	require.ErrorContains(
+		t,
+		validateCompleteGapBlocks(
+			[]models.Block{first},
+			start,
+			end,
+		),
+		"does not match requested end slot",
+	)
+}
+
+func TestFetchGapBlocksFromPeersFallsThroughOnMismatchedRange(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	start := ocommon.NewPoint(10, testGapHash32("start"))
+	end := ocommon.NewPoint(12, testGapHash32("end"))
+	middleHash := testGapHash32("middle")
+	valid := []models.Block{
+		{
+			Slot:     11,
+			Hash:     middleHash,
+			PrevHash: start.Hash,
+		},
+		{
+			Slot:     end.Slot,
+			Hash:     end.Hash,
+			PrevHash: middleHash,
+		},
+	}
+	short := []models.Block{valid[0]}
+	var called []string
+
+	got, err := fetchGapBlocksFromPeers(
+		t.Context(),
+		logger,
+		1,
+		[]string{"first", "second"},
+		start,
+		end,
+		func(
+			_ context.Context,
+			_ *slog.Logger,
+			_ uint32,
+			peerAddr string,
+			_ ocommon.Point,
+			_ ocommon.Point,
+		) ([]models.Block, error) {
+			called = append(called, peerAddr)
+			if peerAddr == "first" {
+				return short, nil
+			}
+			return valid, nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"first", "second"}, called)
+	assert.Equal(t, valid, got)
 }
 
 func testGapConwayProtocolParameters() *conway.ConwayProtocolParameters {
@@ -258,16 +357,16 @@ func testGapConwayProtocolParameters() *conway.ConwayProtocolParameters {
 func TestProcessGapBlockTransactionsProcessesGovernance(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	rewardAddress, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xE1}, testGapHash28("proposal-reward")...),
@@ -366,13 +465,17 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 
+	conwayPParams := testGapConwayProtocolParameters()
 	err = processGapBlockTransactions(
 		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
 		[]lcommon.Transaction{proposalTx, voteTx},
 		offsets,
 		100,
-		testGapConwayProtocolParameters(),
+		conway.EraIdConway,
+		conwayPParams,
+		conwayPParams,
 	)
 	require.NoError(t, err)
 
@@ -401,16 +504,16 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 }
 
 func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -496,23 +599,38 @@ func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 }
 
 func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Three synthetic blocks at well-separated slots so the deletion
 	// boundary is unambiguous. CBOR/type don't need to parse — the
 	// blob store treats them as opaque bytes.
 	blocks := []models.Block{
-		{Slot: 100, Hash: testGapHash32("blk-100"), Cbor: []byte{0x82, 0x01}, Type: 1},
-		{Slot: 200, Hash: testGapHash32("blk-200"), Cbor: []byte{0x82, 0x02}, Type: 1},
-		{Slot: 300, Hash: testGapHash32("blk-300"), Cbor: []byte{0x82, 0x03}, Type: 1},
+		{
+			Slot: 100,
+			Hash: testGapHash32("blk-100"),
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		},
+		{
+			Slot: 200,
+			Hash: testGapHash32("blk-200"),
+			Cbor: []byte{0x82, 0x02},
+			Type: 1,
+		},
+		{
+			Slot: 300,
+			Hash: testGapHash32("blk-300"),
+			Cbor: []byte{0x82, 0x03},
+			Type: 1,
+		},
 	}
 	for _, b := range blocks {
 		require.NoError(t, db.BlockCreate(b, nil))
@@ -534,20 +652,35 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 }
 
 func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	blocks := []models.Block{
-		{Slot: 100, Hash: testGapHash32("blk-100"), Cbor: []byte{0x82, 0x01}, Type: 1},
-		{Slot: 200, Hash: testGapHash32("blk-200"), Cbor: []byte{0x82, 0x02}, Type: 1},
-		{Slot: 300, Hash: testGapHash32("blk-300"), Cbor: []byte{0x82, 0x03}, Type: 1},
+		{
+			Slot: 100,
+			Hash: testGapHash32("blk-100"),
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		},
+		{
+			Slot: 200,
+			Hash: testGapHash32("blk-200"),
+			Cbor: []byte{0x82, 0x02},
+			Type: 1,
+		},
+		{
+			Slot: 300,
+			Hash: testGapHash32("blk-300"),
+			Cbor: []byte{0x82, 0x03},
+			Type: 1,
+		},
 	}
 	for _, b := range blocks {
 		require.NoError(t, db.BlockCreate(b, nil))
@@ -568,16 +701,16 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 }
 
 func TestLoadGapBlocksFromBlob(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	immutableDir := filepath.Join(
 		"..",

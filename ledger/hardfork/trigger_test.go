@@ -22,23 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
-func TestTriggerHardFork_Constructors(t *testing.T) {
-	v := hardfork.NewTriggerAtVersion(7)
-	assert.Equal(t, hardfork.TriggerAtVersion, v.Kind)
-	assert.Equal(t, uint(7), v.Version)
-	assert.Equal(t, uint64(0), v.Epoch)
-
-	e := hardfork.NewTriggerAtEpoch(500)
-	assert.Equal(t, hardfork.TriggerAtEpoch, e.Kind)
-	assert.Equal(t, uint64(500), e.Epoch)
-	assert.Equal(t, uint(0), e.Version)
-
-	n := hardfork.NewTriggerNotDuringThisExecution()
-	assert.Equal(t, hardfork.TriggerNotDuringThisExecution, n.Kind)
-	assert.Equal(t, uint(0), n.Version)
-	assert.Equal(t, uint64(0), n.Epoch)
-}
-
 func TestTriggerHardFork_String(t *testing.T) {
 	cases := []struct {
 		in   hardfork.TriggerHardFork

@@ -1,0 +1,2619 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//nolint:gosec // SQL INTEGER mappings preserve the existing unsigned domain API.
+package sqlstore
+
+import (
+	"context"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"math"
+	"strings"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+)
+
+const sqliteUtxoColumns = "transaction_id, collateral_return_for_tx_id, " +
+	"tx_id, payment_key, staking_key, credential_tag, datum_hash, " +
+	"spent_at_tx_id, referenced_by_tx_id, collateral_by_tx_id, id, " +
+	"added_slot, deleted_slot, amount, output_idx, payment_script"
+
+const qualifiedSQLiteUtxoColumns = "utxo.transaction_id, " +
+	"utxo.collateral_return_for_tx_id, utxo.tx_id, utxo.payment_key, " +
+	"utxo.staking_key, utxo.credential_tag, utxo.datum_hash, " +
+	"utxo.spent_at_tx_id, utxo.referenced_by_tx_id, " +
+	"utxo.collateral_by_tx_id, utxo.id, utxo.added_slot, " +
+	"utxo.deleted_slot, utxo.amount, utxo.output_idx, " +
+	"utxo.payment_script"
+
+const (
+	getLiveUtxoByRefQuery = "SELECT " + sqliteUtxoColumns +
+		" FROM utxo WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0"
+	getUtxoIncludingSpentByRefQuery = "SELECT " + sqliteUtxoColumns +
+		" FROM utxo WHERE tx_id = ? AND output_idx = ?"
+)
+
+func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
+	if utxo == nil {
+		return errors.New("create UTxO: UTxO is nil")
+	}
+	err := s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			q := s.operationalQueries(db)
+			params, err := createUtxoParams(utxo)
+			if err != nil {
+				return err
+			}
+			id, err := q.CreateUtxo(ctx, params)
+			if err != nil {
+				return err
+			}
+			utxo.ID = uint(id)
+			// A pointer address carries its stake reference as a
+			// position rather than a credential, so it lives in
+			// utxo_pointer rather than in a utxo column. Writing the
+			// utxo row alone would silently drop it -- the same
+			// omission insertUtxoModel avoids on the block-apply path.
+			if err := persistUtxoPointer(
+				ctx, db, id, utxo.Pointer,
+			); err != nil {
+				return err
+			}
+			for i := range utxo.Assets {
+				asset := &utxo.Assets[i]
+				asset.UtxoID = utxo.ID
+				assetID, err := q.CreateAsset(
+					ctx,
+					sqlitequery.CreateAssetParams{
+						Name:        asset.Name,
+						PolicyID:    asset.PolicyId,
+						Fingerprint: asset.Fingerprint,
+						UtxoID: sql.NullInt64{
+							Int64: id,
+							Valid: true,
+						},
+						Amount: sql.NullString{
+							String: decimalUint64(asset.Amount),
+							Valid:  true,
+						},
+					},
+				)
+				if err != nil {
+					return err
+				}
+				asset.ID = uint(assetID)
+			}
+			return s.refreshRewardLiveStakeAggregate(
+				ctx,
+				db,
+				models.NewStakeCredentialRef(
+					utxo.CredentialTag,
+					utxo.StakingKey,
+				),
+				utxo.AddedSlot,
+			)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create UTxO: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteUtxo(
+	utxoID models.UtxoId,
+	txn types.Txn,
+) error {
+	return s.DeleteUtxos([]models.UtxoId{utxoID}, txn)
+}
+
+func (s *Store) DeleteUtxos(
+	utxoIDs []models.UtxoId,
+	txn types.Txn,
+) error {
+	if len(utxoIDs) == 0 {
+		return nil
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			slot, err := currentTipSlot(ctx, db)
+			if err != nil {
+				return err
+			}
+			refs, err := queryUtxoStakeRefs(ctx, db, utxoIDs, true)
+			if err != nil {
+				return err
+			}
+			chunkSize := s.dialect.ParameterLimit() / 2
+			for start := 0; start < len(utxoIDs); start += chunkSize {
+				end := min(start+chunkSize, len(utxoIDs))
+				predicate, args := utxoIDPredicate(utxoIDs[start:end])
+				if _, err := db.ExecContext(
+					ctx,
+					s.dialect.Rebind("DELETE FROM utxo WHERE "+predicate),
+					args...,
+				); err != nil {
+					return err
+				}
+			}
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
+		},
+	)
+}
+
+// utxoStakeRefsAddedAfterSlotQuery and utxoStakeRefsDeletedAfterSlotQuery
+// collect the stake credentials whose live stake a rollback sweep has to
+// recompute. They are deliberately free of SQL DISTINCT so the planner keeps
+// using the index that answers the slot predicate; see
+// queryStakeRefsDeduped. TestRollbackStakeRefQueriesUseSlotIndexes pins the
+// resulting SQLite query plans.
+const (
+	utxoStakeRefsAddedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE added_slot > ?"
+	utxoStakeRefsDeletedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE deleted_slot > ?"
+)
+
+func (s *Store) DeleteUtxosAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			// No SQL DISTINCT here: it makes SQLite prefer
+			// idx_utxo_staking_deleted_amount (which already yields
+			// (credential_tag, staking_key) order, so the temp B-tree can
+			// be skipped) over the purpose-built idx_utxo_added_slot. That
+			// index has no added_slot column, so the scan is not covering
+			// and every entry costs a row lookup just to test the
+			// predicate -- a full pass over the utxo table on every
+			// rollback. Dedupe in Go instead, which also keeps the plan
+			// stable across the MySQL and Postgres dialects.
+			refs, err := queryStakeRefsDeduped(
+				ctx,
+				db,
+				utxoStakeRefsAddedAfterSlotQuery,
+				slotValue,
+			)
+			if err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(
+				ctx,
+				"DELETE FROM utxo WHERE added_slot > ?",
+				slotValue,
+			); err != nil {
+				return err
+			}
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
+		},
+	)
+}
+
+func (s *Store) SetUtxoDeletedAtSlot(
+	input ledger.TransactionInput,
+	slot uint64,
+	spenderTxHash []byte,
+	txn types.Txn,
+) error {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	txID := input.Id().Bytes()
+	outputIndex := input.Index()
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			result, err := db.ExecContext(ctx, `
+UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = ?
+  AND spent_at_tx_id IS NULL
+  AND (deleted_slot = 0 OR deleted_slot = ?)`,
+				slotValue,
+				spenderTxHash,
+				txID,
+				outputIndex,
+				slotValue,
+			)
+			if err != nil {
+				return err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected != 1 {
+				var count int
+				if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+					txID,
+					outputIndex,
+				).Scan(&count); err != nil {
+					return err
+				}
+				if count == 0 {
+					return fmt.Errorf(
+						"%w: %x:%d",
+						types.ErrUtxoNotFound,
+						txID,
+						outputIndex,
+					)
+				}
+				return fmt.Errorf(
+					"%w: %x:%d",
+					types.ErrUtxoConflict,
+					txID,
+					outputIndex,
+				)
+			}
+			refs, err := queryUtxoStakeRefs(
+				ctx,
+				db,
+				[]models.UtxoId{{Hash: txID, Idx: outputIndex}},
+				false,
+			)
+			if err != nil {
+				return err
+			}
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
+		},
+	)
+}
+
+func (s *Store) SetUtxosNotDeletedAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			// See DeleteUtxosAfterSlot: SQL DISTINCT costs a full index
+			// scan here too, in place of a range search on
+			// idx_utxo_deleted_staking_amount.
+			refs, err := queryStakeRefsDeduped(
+				ctx,
+				db,
+				utxoStakeRefsDeletedAfterSlotQuery,
+				slotValue,
+			)
+			if err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `
+UPDATE utxo
+SET deleted_slot = 0, spent_at_tx_id = NULL
+WHERE deleted_slot > ?`,
+				slotValue,
+			); err != nil {
+				return err
+			}
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
+		},
+	)
+}
+
+func (s *Store) MarkUtxosDeletedAtSlot(
+	txn types.Txn,
+	refs []types.UtxoKey,
+	atSlot uint64,
+) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	slot, err := checkedInt64(atSlot)
+	if err != nil {
+		return err
+	}
+	ids := make([]models.UtxoId, len(refs))
+	for i := range refs {
+		ids[i] = models.UtxoId{
+			Hash: refs[i].TxId,
+			Idx:  refs[i].OutputIdx,
+		}
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			rowIDs, stakeRefs, err := queryUtxoDeletionRows(
+				ctx,
+				db,
+				ids,
+				s.dialect.Name() != "sqlite",
+			)
+			if err != nil {
+				return err
+			}
+			chunkSize := s.dialect.ParameterLimit() - 1
+			for start := 0; start < len(rowIDs); start += chunkSize {
+				end := min(start+chunkSize, len(rowIDs))
+				query, args := markUtxosDeletedQuery(
+					rowIDs[start:end],
+					slot,
+					s.dialect.Name() != "sqlite",
+				)
+				if _, err := db.ExecContext(
+					ctx,
+					s.dialect.Rebind(query),
+					args...,
+				); err != nil {
+					return err
+				}
+			}
+			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, atSlot)
+		},
+	)
+}
+
+func (s *Store) AddUtxos(
+	utxos []models.UtxoSlot,
+	txn types.Txn,
+) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+	items := make([]models.Utxo, len(utxos))
+	for i := range utxos {
+		item, err := models.UtxoLedgerToModel(utxos[i].Utxo, utxos[i].Slot)
+		if err != nil {
+			return fmt.Errorf(
+				"convert utxo %d: %w",
+				utxos[i].Utxo.Id.Index(),
+				err,
+			)
+		}
+		items[i] = item
+	}
+	return s.importUtxos(items, txn, false, true)
+}
+
+func (s *Store) ImportUtxos(
+	utxos []models.Utxo,
+	txn types.Txn,
+) error {
+	return s.importUtxos(utxos, txn, true, true)
+}
+
+// ImportUtxosDeferredRewardLiveStakeRefresh bulk-loads snapshot UTxOs without
+// rebuilding the per-credential aggregate after every batch. The snapshot
+// importer performs one complete rebuild after all ledger state is present.
+func (s *Store) ImportUtxosDeferredRewardLiveStakeRefresh(
+	utxos []models.Utxo,
+	txn types.Txn,
+) error {
+	return s.importUtxos(utxos, txn, true, false)
+}
+
+func (s *Store) GetUtxoBalanceByAddress(
+	address lcommon.Address,
+	mode models.UtxoAddressMatchMode,
+	txn types.Txn,
+) (models.AddressBalance, error) {
+	var ret models.AddressBalance
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return ret, fmt.Errorf(
+			"resolve DB for utxo balance by address: %w",
+			err,
+		)
+	}
+	var predicates []string
+	var args []any
+	if err := models.AppendUtxoAddressOrBranchMode(
+		&predicates,
+		&args,
+		address,
+		mode,
+	); err != nil {
+		return ret, fmt.Errorf("utxo balance by address: %w", err)
+	}
+	if len(predicates) == 0 {
+		return ret, nil
+	}
+	addressPredicate := "(" + strings.Join(predicates, " OR ") + ")"
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT amount
+FROM utxo
+WHERE deleted_slot = 0 AND `+addressPredicate), args...)
+	if err != nil {
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		ret.UtxoCount++
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return ret, fmt.Errorf("scan utxo balance by address: %w", err)
+		}
+		if raw.Valid && raw.String != "" {
+			amount, err := parseUint64("utxo amount", raw.String)
+			if err != nil {
+				rows.Close()
+				return ret, err
+			}
+			if ^uint64(0)-ret.Lovelace < amount {
+				rows.Close()
+				return ret, errors.New("utxo balance overflow")
+			}
+			ret.Lovelace += amount
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
+	if ret.UtxoCount == 0 {
+		return ret, nil
+	}
+	rows, err = db.QueryContext(
+		ctx,
+		s.dialect.Rebind(`
+SELECT asset.policy_id, asset.name, asset.amount
+FROM utxo
+JOIN asset ON asset.utxo_id = utxo.id
+WHERE utxo.deleted_slot = 0 AND `+addressPredicate+`
+ORDER BY asset.policy_id, asset.name`),
+		args...,
+	)
+	if err != nil {
+		return ret, fmt.Errorf(
+			"sum utxo asset balances by address: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	type assetKey struct{ policy, name string }
+	assetIndexes := make(map[assetKey]int)
+	for rows.Next() {
+		var asset models.AssetBalance
+		var raw sql.NullString
+		if err := rows.Scan(
+			&asset.PolicyId,
+			&asset.Name,
+			&raw,
+		); err != nil {
+			return ret, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("asset amount", raw.String)
+		if err != nil {
+			return ret, err
+		}
+		key := assetKey{
+			policy: string(asset.PolicyId),
+			name:   string(asset.Name),
+		}
+		idx, ok := assetIndexes[key]
+		if !ok {
+			asset.Amount = amount
+			assetIndexes[key] = len(ret.Assets)
+			ret.Assets = append(ret.Assets, asset)
+			continue
+		}
+		if ^uint64(0)-ret.Assets[idx].Amount < amount {
+			return ret, errors.New("asset balance overflow")
+		}
+		ret.Assets[idx].Amount += amount
+	}
+	return ret, rows.Err()
+}
+
+func (s *Store) importUtxos(
+	utxos []models.Utxo,
+	txn types.Txn,
+	hydrateProvenance bool,
+	refreshRewardLiveStake bool,
+) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			q := s.operationalQueries(db)
+			refs := make(map[string]models.StakeCredentialRef)
+			slots := make(map[string]uint64)
+			for i := range utxos {
+				item := utxos[i]
+				params, err := createUtxoParams(&item)
+				if err != nil {
+					return err
+				}
+				var id int64
+				err = s.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
+					params.TransactionID,
+					params.CollateralReturnForTxID,
+					params.TxID,
+					params.PaymentKey,
+					params.StakingKey,
+					params.CredentialTag,
+					params.DatumHash,
+					nullBytes(params.SpentAtTxID),
+					nullBytes(params.ReferencedByTxID),
+					nullBytes(params.CollateralByTxID),
+					params.AddedSlot,
+					params.DeletedSlot,
+					params.Amount,
+					params.OutputIdx,
+					params.PaymentScript,
+				).Scan(&id)
+				if errors.Is(err, sql.ErrNoRows) {
+					id, err = q.GetUtxoIDByRef(
+						ctx,
+						sqlitequery.GetUtxoIDByRefParams{
+							TxID: item.TxId,
+							OutputIdx: validInt64(
+								int64(item.OutputIdx),
+							),
+						},
+					)
+					if err != nil {
+						return fmt.Errorf(
+							"fetch imported UTxO ID: %w",
+							err,
+						)
+					}
+					if hydrateProvenance {
+						if err := hydrateImportedUtxo(
+							ctx,
+							db,
+							&item,
+						); err != nil {
+							return err
+						}
+					}
+				} else if err != nil {
+					return fmt.Errorf("import UTxO: %w", err)
+				}
+				// See CreateUtxo: the pointer position is a separate
+				// row, and persistUtxoPointer converges, so an output
+				// already imported keeps the same position.
+				if err := persistUtxoPointer(
+					ctx, db, id, item.Pointer,
+				); err != nil {
+					return err
+				}
+				for j := range item.Assets {
+					asset := item.Assets[j]
+					if _, err := s.execCached(ctx, db, importAssetQuery,
+						asset.Name,
+						asset.PolicyId,
+						asset.Fingerprint,
+						validInt64(id),
+						validString(decimalUint64(asset.Amount)),
+					); err != nil {
+						return fmt.Errorf(
+							"import UTxO asset: %w",
+							err,
+						)
+					}
+				}
+				ref := models.NewStakeCredentialRef(
+					item.CredentialTag,
+					item.StakingKey,
+				)
+				if len(ref.Key) > 0 {
+					refs[ref.MapKey()] = ref
+					if item.AddedSlot > slots[ref.MapKey()] {
+						slots[ref.MapKey()] = item.AddedSlot
+					}
+				}
+			}
+			if refreshRewardLiveStake {
+				for key, ref := range refs {
+					if err := s.refreshRewardLiveStakeAggregate(
+						ctx,
+						db,
+						ref,
+						slots[key],
+					); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+	)
+}
+
+func hydrateImportedUtxo(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+) error {
+	addedSlot, err := checkedInt64(utxo.AddedSlot)
+	if err != nil {
+		return err
+	}
+	if utxo.TransactionID != nil {
+		if _, err := db.ExecContext(ctx, `
+UPDATE utxo
+SET transaction_id = ?, added_slot = ?
+WHERE tx_id = ? AND output_idx = ? AND transaction_id IS NULL`,
+			*utxo.TransactionID,
+			addedSlot,
+			utxo.TxId,
+			utxo.OutputIdx,
+		); err != nil {
+			return fmt.Errorf("hydrate UTxO transaction provenance: %w", err)
+		}
+	}
+	if utxo.CollateralReturnForTxID != nil {
+		if _, err := db.ExecContext(ctx, `
+UPDATE utxo
+SET collateral_return_for_tx_id = ?, added_slot = ?
+WHERE tx_id = ? AND output_idx = ?
+  AND collateral_return_for_tx_id IS NULL`,
+			*utxo.CollateralReturnForTxID,
+			addedSlot,
+			utxo.TxId,
+			utxo.OutputIdx,
+		); err != nil {
+			return fmt.Errorf(
+				"hydrate UTxO collateral-return provenance: %w",
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func (s *Store) refreshRewardLiveStakeRefs(
+	ctx context.Context,
+	db queryer,
+	refs []models.StakeCredentialRef,
+	slot uint64,
+) error {
+	for i := range refs {
+		if err := s.refreshRewardLiveStakeAggregate(ctx, db, refs[i], slot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stakeCredentialDelta pairs a stake credential with the signed lovelace
+// change one write's UTxO mutations made to its live-UTxO total. See
+// refreshRewardLiveStakeAggregateDelta.
+type stakeCredentialDelta struct {
+	ref   models.StakeCredentialRef
+	delta int64
+}
+
+// refsToStakeCredentialDeltas widens a plain ref slice -- a certificate-only
+// touch, which never changes the utxo table -- into zero-delta entries so it
+// can be merged with a slice that does carry a real UTxO delta.
+func refsToStakeCredentialDeltas(
+	refs []models.StakeCredentialRef,
+) []stakeCredentialDelta {
+	if len(refs) == 0 {
+		return nil
+	}
+	ret := make([]stakeCredentialDelta, len(refs))
+	for i, ref := range refs {
+		ret[i] = stakeCredentialDelta{ref: ref}
+	}
+	return ret
+}
+
+// mergeStakeCredentialDeltas merges delta slices into one entry per
+// credential, summing every occurrence's delta -- unlike
+// mergeStakeCredentialRefs, which keeps only a ref's first occurrence, this
+// has to add every occurrence's contribution or a credential appearing in
+// both a consumed input and a produced output within the same transaction
+// (an ordinary change pattern) would silently drop one side of its net
+// effect. Order follows first occurrence, matching mergeStakeCredentialRefs.
+func mergeStakeCredentialDeltas(
+	deltaSlices ...[]stakeCredentialDelta,
+) []stakeCredentialDelta {
+	total := 0
+	for _, deltas := range deltaSlices {
+		total += len(deltas)
+	}
+	if total == 0 {
+		return nil
+	}
+	sums := make(map[string]int64, total)
+	refs := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, deltas := range deltaSlices {
+		for _, d := range deltas {
+			key := d.ref.MapKey()
+			if _, ok := refs[key]; !ok {
+				order = append(order, key)
+				refs[key] = d.ref
+			}
+			sums[key] += d.delta
+		}
+	}
+	ret := make([]stakeCredentialDelta, len(order))
+	for i, key := range order {
+		ret[i] = stakeCredentialDelta{ref: refs[key], delta: sums[key]}
+	}
+	return ret
+}
+
+// refreshRewardLiveStakeDeltas is refreshRewardLiveStakeRefs's incremental
+// counterpart, applying each entry's exact signed UTxO delta instead of
+// re-deriving it with a full scan. See refreshRewardLiveStakeAggregateDelta
+// for which callers this is safe for.
+func (s *Store) refreshRewardLiveStakeDeltas(
+	ctx context.Context,
+	db queryer,
+	deltas []stakeCredentialDelta,
+	slot uint64,
+) error {
+	for i := range deltas {
+		if err := s.refreshRewardLiveStakeAggregateDelta(
+			ctx, db, deltas[i].ref, slot, deltas[i].delta,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// producedStakeCredentialDelta builds the delta a produced UTxO output
+// contributes to its stake credential's running live-UTxO total.
+//
+// inserted reports whether this write actually created the output's row.
+// insertUtxoModel's conflict-tolerant form is an ON CONFLICT (tx_id,
+// output_idx) DO NOTHING insert, so an output whose row already exists -- a
+// snapshot import creates outputs before their producing transaction is
+// replayed, and a gap-closure or Leios re-apply can revisit a transaction
+// already stored -- leaves the utxo table unchanged. A delta must state the
+// change this write made to that table, not the change it intended, so a
+// conflicting output contributes 0: its amount is already inside the running
+// total that the row it collided with was counted into. Counting it again
+// would inflate the credential's live stake permanently, since the
+// incremental path has no scan to correct it (dingo #4421).
+//
+// amount is already bounded within int64 by CheckedUint64FromBigInt
+// (UtxoLedgerToModel's caller), well inside a real lovelace value's range
+// (ada's total supply is far below both int64's and uint64's ceiling), but
+// this checks explicitly rather than trusting that indirectly like
+// sumCredentialUtxoStakeQuery's doc comment argues for the SQL-side sum.
+func producedStakeCredentialDelta(
+	tag uint8,
+	key []byte,
+	amount types.Uint64,
+	inserted bool,
+) (stakeCredentialDelta, error) {
+	if uint64(amount) > math.MaxInt64 {
+		return stakeCredentialDelta{}, fmt.Errorf(
+			"produced UTxO amount overflow: %d",
+			uint64(amount),
+		)
+	}
+	ret := stakeCredentialDelta{ref: models.NewStakeCredentialRef(tag, key)}
+	if inserted {
+		ret.delta = int64(amount)
+	}
+	return ret, nil
+}
+
+// utxoStakeConsumedDeltaQuery is queryUtxoStakeConsumedDeltas' batched
+// lookup, built the same way utxoStakeRefsByTxIDQuery is: driven by distinct
+// tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
+// planner stays on the unique tx_id_output_idx index instead of falling back
+// to a full idx_utxo_staking_deleted_amount scan once the batch has more than
+// a handful of terms (dingo #4067).
+func utxoStakeConsumedDeltaQuery(n int) string {
+	return "SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
+		"FROM utxo WHERE tx_id IN (" +
+		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
+}
+
+// queryUtxoStakeConsumedDeltas is queryUtxoStakeRefs's counterpart for the
+// setTransactionWithAccumulator fast path: alongside each spent input's
+// credential it also reads the row's amount, so the caller can pass
+// refreshRewardLiveStakeAggregateDelta the exact negative delta a spend
+// contributes instead of falling back to sumCredentialUtxoStake's full scan.
+//
+// ids must name only the inputs this write actually transitioned from live to
+// deleted -- the ones whose UPDATE reported a row affected -- and not every
+// input the transaction lists. An input the write skipped because the row was
+// already spent (by an earlier certified endorser block on the Leios closure
+// path, or by an earlier application of this same transaction) changed
+// nothing in the utxo table, so subtracting its amount would drive the
+// credential's running total permanently below its real live stake, or fail
+// the write outright on applyUtxoStakeDelta's underflow guard. Those inputs
+// belong in the caller's zero-delta touch set instead (dingo #4421).
+//
+// deleted_slot is not filtered on: ids names exactly the inputs this
+// transaction just spent, by (tx_id, output_idx), so the deleted_slot value
+// (already set to this transaction's slot by the caller) does not change
+// which row answers the lookup.
+func queryUtxoStakeConsumedDeltas(
+	ctx context.Context,
+	db queryer,
+	ids []models.UtxoId,
+) ([]stakeCredentialDelta, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(ids)
+	sums := make(map[string]int64, len(ids))
+	refs := make(map[string]models.StakeCredentialRef, len(ids))
+	order := make([]string, 0, len(ids))
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		query := utxoStakeConsumedDeltaQuery(len(batch))
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var txID []byte
+				var outputIdx sql.NullInt64
+				var tag int64
+				var key []byte
+				var raw sql.NullString
+				if err := rows.Scan(
+					&txID, &outputIdx, &tag, &key, &raw,
+				); err != nil {
+					return err
+				}
+				if len(key) == 0 || !outputIdx.Valid {
+					continue
+				}
+				outs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
+					continue
+				}
+				if !raw.Valid || raw.String == "" {
+					continue
+				}
+				amount, err := parseUint64("consumed UTxO amount", raw.String)
+				if err != nil {
+					return err
+				}
+				if amount > math.MaxInt64 {
+					return fmt.Errorf(
+						"consumed UTxO amount overflow: %d",
+						amount,
+					)
+				}
+				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				mapKey := ref.MapKey()
+				if _, ok := refs[mapKey]; !ok {
+					order = append(order, mapKey)
+					refs[mapKey] = ref
+				}
+				sums[mapKey] -= int64(amount)
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+	}
+	ret := make([]stakeCredentialDelta, len(order))
+	for i, key := range order {
+		ret[i] = stakeCredentialDelta{ref: refs[key], delta: sums[key]}
+	}
+	return ret, nil
+}
+
+func currentTipSlot(ctx context.Context, db queryer) (uint64, error) {
+	var slot sql.NullInt64
+	err := db.QueryRowContext(
+		ctx,
+		"SELECT slot FROM tip WHERE id = 1",
+	).Scan(&slot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return uint64(slot.Int64), nil
+}
+
+// distinctUtxoTxIDs returns the distinct tx_id hashes among ids, in
+// first-seen order, alongside a lookup from tx_id (as a string map key) to
+// the set of output indexes requested for that transaction.
+func distinctUtxoTxIDs(
+	ids []models.UtxoId,
+) ([][]byte, map[string]map[uint32]struct{}) {
+	wanted := make(map[string]map[uint32]struct{}, len(ids))
+	order := make([][]byte, 0, len(ids))
+	for _, id := range ids {
+		key := string(id.Hash)
+		outs, ok := wanted[key]
+		if !ok {
+			outs = make(map[uint32]struct{}, 1)
+			wanted[key] = outs
+			order = append(order, id.Hash)
+		}
+		outs[id.Idx] = struct{}{}
+	}
+	return order, wanted
+}
+
+// utxoStakeRefsByTxIDQuery builds the tx_id-driven lookup queryUtxoStakeRefs
+// runs per batch of n distinct transaction hashes. It deliberately carries no
+// "deleted_slot = 0" predicate -- see queryUtxoStakeRefs -- so deleted_slot
+// is filtered in Go instead.
+//
+// Filtering by tx_id alone -- rather than an OR of per-(tx_id, output_idx)
+// equalities, see utxoIDPredicate -- keeps SQLite's planner on the leading
+// column of the unique tx_id_output_idx index no matter how many terms are
+// in the batch. The OR-of-pairs form defeats that index past a handful of
+// terms and falls back to a full scan of idx_utxo_deleted_staking_amount
+// once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
+// measured on an 11M-row live UTxO table in issue #4067, which starves block
+// application for minutes at a time. The caller filters the extra rows this
+// query can return (other outputs of the same transaction, and, for liveOnly,
+// already-deleted ones) down to the exact requested (tx_id, output_idx)
+// pairs in Go.
+func utxoStakeRefsByTxIDQuery(n int) string {
+	return "SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
+		"staking_key FROM utxo WHERE tx_id IN (" +
+		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
+}
+
+func queryUtxoStakeRefs(
+	ctx context.Context,
+	db queryer,
+	ids []models.UtxoId,
+	liveOnly bool,
+) ([]models.StakeCredentialRef, error) {
+	ret := []models.StakeCredentialRef{}
+	if len(ids) == 0 {
+		return ret, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(ids)
+	seen := make(map[string]struct{})
+	// One bind variable per distinct tx_id; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration, with headroom to
+	// spare versus the old form's two binds per reference.
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		query := utxoStakeRefsByTxIDQuery(len(batch))
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var txID []byte
+				var outputIdx sql.NullInt64
+				var deletedSlot sql.NullInt64
+				var tag int64
+				var key []byte
+				if err := rows.Scan(
+					&txID,
+					&outputIdx,
+					&deletedSlot,
+					&tag,
+					&key,
+				); err != nil {
+					return err
+				}
+				if len(key) == 0 || !outputIdx.Valid {
+					continue
+				}
+				if liveOnly && deletedSlot.Int64 != 0 {
+					continue
+				}
+				outs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
+					continue
+				}
+				ref := models.NewStakeCredentialRef(uint8(tag), key)
+				if _, ok := seen[ref.MapKey()]; ok {
+					continue
+				}
+				seen[ref.MapKey()] = struct{}{}
+				ret = append(ret, ref)
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+	}
+	return ret, nil
+}
+
+func queryStakeRefs(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) ([]models.StakeCredentialRef, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []models.StakeCredentialRef{}
+	for rows.Next() {
+		var tag int64
+		var key []byte
+		if err := rows.Scan(&tag, &key); err != nil {
+			return nil, err
+		}
+		if len(key) == 0 {
+			continue
+		}
+		ret = append(ret, models.NewStakeCredentialRef(uint8(tag), key))
+	}
+	return ret, rows.Err()
+}
+
+// queryStakeRefsDeduped runs query and returns its stake credential
+// references with duplicates removed, preserving the order of first
+// occurrence. It exists so range-scan queries over utxo can be written
+// without a SQL DISTINCT: DISTINCT over (credential_tag, staking_key)
+// pushes SQLite onto an index that supplies that ordering rather than onto
+// the index that satisfies the WHERE clause, turning a bounded range search
+// into a full table pass. queryStakeRefs already materialises every row, so
+// deduping in Go costs one map insert per row.
+//
+// Neither the result nor the seen set is presized from len(rows): the callers
+// are rollback sweeps, where a window of thousands of rows routinely collapses
+// to a handful of credentials, so sizing for the input would reserve orders of
+// magnitude more than the output needs.
+func queryStakeRefsDeduped(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) ([]models.StakeCredentialRef, error) {
+	rows, err := queryStakeRefs(ctx, db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	ret := []models.StakeCredentialRef{}
+	seen := make(map[string]struct{})
+	for _, ref := range rows {
+		// MapKey allocates, so compute it once per row.
+		key := ref.MapKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, ref)
+	}
+	return ret, nil
+}
+
+// mergeStakeCredentialRefs merges any number of stake-credential reference
+// slices into one, with duplicates removed by MapKey and each credential's
+// first occurrence kept. setTransaction uses it to fold the credentials
+// touched by a transaction's certificates, consumed inputs, and produced
+// outputs into a single refreshRewardLiveStakeRefs pass: the same credential
+// legitimately appears in more than one of these (a wallet's own change
+// output alongside a certificate it just submitted, or several outputs to one
+// address), and each occurrence would otherwise trigger its own full
+// sumCredentialUtxoStake recompute for what is, after all of the
+// transaction's mutations are applied, the same final total.
+func mergeStakeCredentialRefs(
+	refSlices ...[]models.StakeCredentialRef,
+) []models.StakeCredentialRef {
+	total := 0
+	for _, refs := range refSlices {
+		total += len(refs)
+	}
+	if total == 0 {
+		return nil
+	}
+	seen := make(map[string]models.StakeCredentialRef, total)
+	order := make([]string, 0, total)
+	for _, refs := range refSlices {
+		for _, ref := range refs {
+			key := ref.MapKey()
+			if _, ok := seen[key]; !ok {
+				order = append(order, key)
+			}
+			seen[key] = ref
+		}
+	}
+	ret := make([]models.StakeCredentialRef, len(order))
+	for i, key := range order {
+		ret[i] = seen[key]
+	}
+	return ret
+}
+
+func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
+	parts := make([]string, len(ids))
+	args := make([]any, 0, len(ids)*2)
+	for i := range ids {
+		parts[i] = "(tx_id = ? AND output_idx = ?)"
+		args = append(args, ids[i].Hash, ids[i].Idx)
+	}
+	return strings.Join(parts, " OR "), args
+}
+
+// utxoDeletionRowsByTxIDQuery returns the single index-friendly lookup used
+// by MarkUtxosDeletedAtSlot. Querying distinct tx_id values avoids the
+// OR-of-pairs predicate that makes SQLite prefer a deleted_slot index over
+// tx_id_output_idx for larger batches. The result carries both primary keys
+// for the update and stake references for the reward-cache refresh.
+//
+// deleted_slot is projected so liveness can be filtered in Go without making
+// SQLite drive the lookup from a deleted_slot index when sqlite_stat1 is
+// absent. Other dialects retain a liveness predicate on the primary-key
+// update to protect against another transaction changing a selected row.
+func utxoDeletionRowsByTxIDQuery(
+	txIDs [][]byte,
+	lockRows bool,
+) (string, []any) {
+	args := make([]any, len(txIDs))
+	for i, txID := range txIDs {
+		args[i] = txID
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(txIDs)), ",")
+	query := "SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
+		"staking_key FROM utxo " +
+		"WHERE tx_id IN (" + placeholders + ")"
+	if lockRows {
+		query += " ORDER BY id FOR UPDATE"
+	}
+	return query, args
+}
+
+// markUtxosDeletedQuery builds the primary-key update for the live row IDs
+// established by queryUtxoDeletionRows.
+//
+// SQLite updates carry no "deleted_slot = 0" predicate. With one, SQLite
+// plans the statement as SEARCH utxo USING INDEX
+// idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards
+// whenever sqlite_stat1 is absent -- every live row visited and "id IN (...)"
+// evaluated per row, which is the whole-table pass issue #4067 reports, moved
+// from the lookup to the update. Populated statistics change the plan, but a
+// long-running node's utxo statistics are stale or absent, so the plan has to
+// hold without them. Liveness is filtered in queryUtxoDeletionRows instead,
+// inside the same write transaction as this update. This method is also used
+// by import reconciliation, outside the ledger apply loop, so that loop is
+// not a correctness guarantee: SQLite rejects a stale read snapshot that
+// tries to upgrade after another writer commits, while other dialects retain
+// the liveness predicate to protect against that concurrent change.
+func markUtxosDeletedQuery(
+	rowIDs []int64,
+	slot int64,
+	guardLiveRows bool,
+) (string, []any) {
+	args := make([]any, len(rowIDs)+1)
+	args[0] = slot
+	for i, rowID := range rowIDs {
+		args[i+1] = rowID
+	}
+	placeholders := strings.TrimSuffix(
+		strings.Repeat("?,", len(rowIDs)),
+		",",
+	)
+	where := "id IN ("
+	if guardLiveRows {
+		where = "deleted_slot = 0 AND " + where
+	}
+	return "UPDATE utxo SET deleted_slot = ? WHERE " + where +
+		placeholders + ")", args
+}
+
+// queryUtxoDeletionRows resolves live primary keys and the stake references
+// affected by deleting exactly the requested UTxO references. It reads every
+// output for each requested transaction ID once, then applies output-index
+// and liveness matching in Go so SQLite can use tx_id_output_idx without a
+// deleted_slot predicate.
+func queryUtxoDeletionRows(
+	ctx context.Context,
+	db queryer,
+	ids []models.UtxoId,
+	lockRows bool,
+) ([]int64, []models.StakeCredentialRef, error) {
+	ids = dedupeUtxoIDs(ids)
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(ids)
+	rowIDs := make([]int64, 0, len(ids))
+	seenRows := make(map[int64]struct{}, len(ids))
+	stakeRefs := make([]models.StakeCredentialRef, 0, len(ids))
+	seenStakeRefs := make(map[string]struct{})
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		query, args := utxoDeletionRowsByTxIDQuery(
+			txIDs[start:end],
+			lockRows,
+		)
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, nil, err
+		}
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var rowID int64
+				var txID []byte
+				var outputIdx sql.NullInt64
+				var deletedSlot sql.NullInt64
+				var credentialTag int64
+				var stakingKey []byte
+				if err := rows.Scan(
+					&rowID,
+					&txID,
+					&outputIdx,
+					&deletedSlot,
+					&credentialTag,
+					&stakingKey,
+				); err != nil {
+					return err
+				}
+				if !outputIdx.Valid || outputIdx.Int64 < 0 ||
+					outputIdx.Int64 > math.MaxUint32 {
+					continue
+				}
+				// Matches the "deleted_slot = 0" predicate this lookup
+				// replaces: a NULL or already-set deleted_slot is not live.
+				if !deletedSlot.Valid || deletedSlot.Int64 != 0 {
+					continue
+				}
+				outputs, ok := wanted[string(txID)]
+				if !ok {
+					continue
+				}
+				if _, ok := outputs[uint32(outputIdx.Int64)]; ok {
+					if len(stakingKey) > 0 {
+						ref := models.NewStakeCredentialRef(
+							uint8(credentialTag),
+							stakingKey,
+						)
+						if _, ok := seenStakeRefs[ref.MapKey()]; !ok {
+							seenStakeRefs[ref.MapKey()] = struct{}{}
+							stakeRefs = append(stakeRefs, ref)
+						}
+					}
+					if deletedSlot.Valid && deletedSlot.Int64 == 0 {
+						if _, ok := seenRows[rowID]; !ok {
+							seenRows[rowID] = struct{}{}
+							rowIDs = append(rowIDs, rowID)
+						}
+					}
+				}
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			return nil, nil, scanErr
+		}
+	}
+	return rowIDs, stakeRefs, nil
+}
+
+func (s *Store) GetUtxo(
+	txID []byte,
+	index uint32,
+	txn types.Txn,
+) (*models.Utxo, error) {
+	return s.getUtxo(txID, index, txn, false)
+}
+
+func (s *Store) GetUtxoIncludingSpent(
+	txID []byte,
+	index uint32,
+	txn types.Txn,
+) (*models.Utxo, error) {
+	return s.getUtxo(txID, index, txn, true)
+}
+
+func (s *Store) getUtxo(
+	txID []byte,
+	index uint32,
+	txn types.Txn,
+	includeSpent bool,
+) (*models.Utxo, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := getLiveUtxoByRefQuery
+	if includeSpent {
+		query = getUtxoIncludingSpentByRefQuery
+	}
+	queryerCanUseWriteCache := true
+	if s.readDB != s.writeDB {
+		if txn == nil {
+			queryerCanUseWriteCache = false
+		} else if sqlTxn, ok := txn.(*sqlTxn); ok && sqlTxn.readOnly {
+			queryerCanUseWriteCache = false
+		}
+	}
+	args := []any{txID, sql.NullInt64{Int64: int64(index), Valid: true}}
+	var sqlRow *sql.Row
+	if queryerCanUseWriteCache {
+		sqlRow = s.queryRowCached(ctx, db, query, args...)
+	} else {
+		// Start prepares hot statements against writeDB before writes begin.
+		// A file-backed SQLite store has a distinct read-only pool, whose
+		// statements cannot use that write-pool cache; keep those reads on the
+		// instrumented, dialect-aware queryer instead.
+		sqlRow = db.QueryRowContext(ctx, query, args...)
+	}
+	row, err := scanUtxoRow(sqlRow)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get UTxO %x#%d: %w", txID, index, err)
+	}
+	ret, err := utxoFromSQLite(row)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.loadUtxoAssets(ctx, db, []*models.Utxo{ret}); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func scanUtxoRow(row *sql.Row) (sqlitequery.Utxo, error) {
+	var ret sqlitequery.Utxo
+	err := row.Scan(
+		&ret.TransactionID,
+		&ret.CollateralReturnForTxID,
+		&ret.TxID,
+		&ret.PaymentKey,
+		&ret.StakingKey,
+		&ret.CredentialTag,
+		&ret.DatumHash,
+		&ret.SpentAtTxID,
+		&ret.ReferencedByTxID,
+		&ret.CollateralByTxID,
+		&ret.ID,
+		&ret.AddedSlot,
+		&ret.DeletedSlot,
+		&ret.Amount,
+		&ret.OutputIdx,
+		&ret.PaymentScript,
+	)
+	return ret, err
+}
+
+// utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in
+// refs -- the same tx_id-driven, index-friendly shape queryUtxoStakeRefs
+// uses (see its doc comment and issue #4067) -- and returns them alongside
+// the (tx_id, output_idx) index refs asked for, so the caller can filter the
+// extra rows (other outputs of the same transaction) down to exactly the
+// requested references in Go.
+func (s *Store) utxoRefsByTxID(
+	txn types.Txn,
+	refs []models.UtxoId,
+) ([]models.Utxo, map[string]map[uint32]struct{}, error) {
+	refs = dedupeUtxoIDs(refs)
+	if len(refs) == 0 {
+		return []models.Utxo{}, nil, nil
+	}
+	txIDs, wanted := distinctUtxoTxIDs(refs)
+	ret := []models.Utxo{}
+	// One bind variable per distinct tx_id; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration, with headroom to
+	// spare versus the old OR-predicate form's two binds per reference.
+	for start := 0; start < len(txIDs); start += 400 {
+		end := min(start+400, len(txIDs))
+		batch := txIDs[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for i, txID := range batch {
+			args[i] = txID
+		}
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"tx_id IN ("+placeholders+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		ret = append(ret, utxos...)
+	}
+	return ret, wanted, nil
+}
+
+// GetUtxosByRefs retrieves multiple live UTxOs by their (tx_id, output_idx)
+// references in a single batch. Refs with no matching live UTxO are simply
+// absent from the result. A ref repeated in the input yields at most one
+// row, keeping one-row-per-requested-ref semantics for callers.
+func (s *Store) GetUtxosByRefs(
+	refs []models.UtxoId,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
+		}
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.DeletedSlot != 0 {
+			continue
+		}
+		ret = append(ret, u)
+	}
+	return ret, nil
+}
+
+// GetUtxosByRefsAsOf retrieves the UTxOs matching refs as they stood at
+// atSlot: created at-or-before atSlot and either still live (deleted_slot =
+// 0) or spent strictly after it (deleted_slot > atSlot). See the UtxoStore
+// interface doc comment for the retention caveat callers must enforce
+// themselves -- a row spent long enough ago can already be hard-deleted by
+// the periodic stability-window cleanup regardless of atSlot.
+func (s *Store) GetUtxosByRefsAsOf(
+	refs []models.UtxoId,
+	atSlot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	// Slots are stored as signed SQLite INTEGERs. atSlot is compared in Go
+	// below rather than bound to SQL, so reject an out-of-domain value here
+	// instead of silently matching every live row against it.
+	if _, err := checkedInt64(atSlot); err != nil {
+		return nil, err
+	}
+	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, 0, len(utxos))
+	for _, u := range utxos {
+		outs, ok := wanted[string(u.TxId)]
+		if !ok {
+			continue
+		}
+		if _, ok := outs[u.OutputIdx]; !ok {
+			continue
+		}
+		if u.AddedSlot > atSlot {
+			continue
+		}
+		if u.DeletedSlot != 0 && u.DeletedSlot <= atSlot {
+			continue
+		}
+		ret = append(ret, u)
+	}
+	return ret, nil
+}
+
+// dedupeUtxoIDs returns ids with duplicate (Hash, Idx) pairs removed,
+// preserving the order of first occurrence.
+func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {
+	seen := make(map[string]struct{}, len(ids))
+	ret := make([]models.UtxoId, 0, len(ids))
+	for _, id := range ids {
+		key := fmt.Sprintf("%s:%d", id.Hash, id.Idx)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, id)
+	}
+	return ret
+}
+
+// GetUtxosAddedAfterSlot returns every UTxO added after slot, newest first.
+//
+// The rollback sweep calls this (through UtxosDeleteRolledback) immediately
+// before DeleteUtxosAfterSlot, to hand the blob store the objects it has to
+// drop. The statement used to end in "ORDER BY id DESC". id is the rowid, so
+// SQLite satisfied that by walking the table backwards -- a full SCAN, with
+// readahead defeated by the descending direction -- rather than
+// range-searching idx_utxo_added_slot, and the sweep read the entire utxo
+// table to return the handful of rows a rollback actually touches.
+//
+// Ordering by added_slot first fixes it without giving up a deterministic
+// order: idx_utxo_added_slot is (added_slot, rowid) and id is the rowid, so
+// "ORDER BY added_slot DESC, id DESC" is exactly that index's reverse order.
+// SQLite walks the matching range backwards and needs no sorter, at every
+// table size and whether or not ANALYZE has run.
+// TestGetUtxosAddedAfterSlotUsesSlotIndex pins the plan.
+func (s *Store) GetUtxosAddedAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	q := s.operationalQueries(db)
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.GetUtxosAddedAfterSlot(
+		ctx,
+		sql.NullInt64{Int64: sqlSlot, Valid: true},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return utxosFromSQLite(rows)
+}
+
+func (s *Store) GetLiveUtxosBySlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.UtxoId, error) {
+	return s.getUtxoRefsBySlot(slot, txn, true)
+}
+
+func (s *Store) GetUtxosBySlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.UtxoId, error) {
+	return s.getUtxoRefsBySlot(slot, txn, false)
+}
+
+func (s *Store) getUtxoRefsBySlot(
+	slot uint64,
+	txn types.Txn,
+	liveOnly bool,
+) ([]models.UtxoId, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	q := s.operationalQueries(db)
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	arg := sql.NullInt64{Int64: sqlSlot, Valid: true}
+	var rows []sqlitequery.GetLiveUtxoRefsBySlotRow
+	if liveOnly {
+		rows, err = q.GetLiveUtxoRefsBySlot(ctx, arg)
+	} else {
+		var all []sqlitequery.GetUtxoRefsBySlotRow
+		all, err = q.GetUtxoRefsBySlot(ctx, arg)
+		rows = make([]sqlitequery.GetLiveUtxoRefsBySlotRow, len(all))
+		for i := range all {
+			rows[i] = sqlitequery.GetLiveUtxoRefsBySlotRow(all[i])
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]models.UtxoId, 0, len(rows))
+	for _, row := range rows {
+		ret = append(ret, models.UtxoId{
+			Hash: row.TxID,
+			Idx:  uint32(row.OutputIdx.Int64),
+		})
+	}
+	return ret, nil
+}
+
+func (s *Store) GetUtxosDeletedBeforeSlot(
+	slot uint64,
+	limit int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	q := s.operationalQueries(db)
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	sqlLimit := int64(-1)
+	if limit > 0 {
+		sqlLimit = int64(limit)
+	}
+	rows, err := q.GetUtxosDeletedBeforeSlot(
+		ctx,
+		sqlitequery.GetUtxosDeletedBeforeSlotParams{
+			DeletedSlot: sql.NullInt64{Int64: sqlSlot, Valid: true},
+			Limit:       sqlLimit,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return utxosFromSQLite(rows)
+}
+
+// GetUtxosByAddress runs one OR-joined query per chunk of patterns -- a
+// single statement covering every pattern can exceed the dialect's
+// bound-parameter limit (e.g. SQLite's 999) or its OR-expression tree depth
+// limit once enough addresses are requested. Chunking is bounded by both
+// accumulated bind-argument count and branch count: a pattern whose
+// exact-address hash decodes as the zero hash for both payment and staking
+// (e.g. a Byron address with an all-zero payment hash) falls back to a
+// zero-argument branch in AppendUtxoAddressPatternOrBranch, so
+// argument-count alone would never chunk a run of such patterns before the
+// expression tree overflowed. Candidates are deduplicated by (tx id, output
+// index) across chunks -- a coarse, non-selective branch (e.g. the
+// zero-argument fallback above) can return the same candidate rows from
+// every chunk it appears in -- before assets are loaded once on the final
+// deduplicated set, so asset-loading cost is bounded by the result size
+// rather than chunk count times candidate-set size.
+//
+// maxResults must be positive: it is an explicit, caller-supplied bound on
+// the number of candidate rows this call may materialize, since a broad
+// pattern set (or an address with an unusually large UTxO set) would
+// otherwise force an unbounded result. Exceeding it returns
+// models.ErrTooManyUtxoResults rather than silently truncating the answer.
+func (s *Store) GetUtxosByAddress(
+	patterns []models.UtxoAddressPattern,
+	maxResults int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	if maxResults <= 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddress: maxResults must be positive, got %d",
+			maxResults,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	paramLimit := s.dialect.ParameterLimit()
+	// chunkQueryLimit is a fixed per-chunk SQL LIMIT, one more than
+	// maxResults, computed once rather than shrunk by the deduplicated
+	// count already collected (len(ret)). A shrinking limit is unsound
+	// across overlapping chunks: chunk A's coarse branch and chunk B's
+	// exact-address branch can both match the same physical row, so a
+	// chunk full of already-seen duplicates would leave no budget left
+	// to see a chunk's own, still-unseen matches, silently returning an
+	// incomplete answer instead of detecting the overflow. A fixed
+	// maxResults+1 per chunk avoids that: by construction, at most
+	// maxResults of a chunk's returned rows can already be in ret
+	// (ret's own length is checked against maxResults after every
+	// insertion below), so whenever a chunk's true match count exceeds
+	// maxResults+1, at least one of its returned rows is guaranteed to
+	// be new, which is what actually proves the overflow. 0 means
+	// unbounded, guarding maxResults+1 against overflow when the caller
+	// passes math.MaxInt (a query-level LIMIT would be moot at that
+	// bound regardless).
+	chunkQueryLimit := 0
+	if maxResults < math.MaxInt {
+		chunkQueryLimit = maxResults + 1
+	}
+	// queryUtxos appends one extra bind parameter for the LIMIT clause
+	// whenever chunkQueryLimit > 0. That parameter must be reserved here
+	// too, or a chunk that fills exactly to paramLimit on WHERE-clause
+	// args alone produces a statement with paramLimit+1 total parameters,
+	// which the dialect may reject.
+	limitParamReserve := 0
+	if chunkQueryLimit > 0 {
+		limitParamReserve = 1
+	}
+	type utxoKey struct {
+		txId string
+		idx  uint32
+	}
+	seen := make(map[utxoKey]struct{})
+	var ret []models.Utxo
+	var branches []string
+	var args []any
+	runQuery := func() error {
+		if len(branches) == 0 {
+			return nil
+		}
+		utxos, err := s.queryUtxos(
+			txn,
+			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
+			args,
+			"",
+			chunkQueryLimit,
+		)
+		if err != nil {
+			return err
+		}
+		for i := range utxos {
+			key := utxoKey{string(utxos[i].TxId), utxos[i].OutputIdx}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			ret = append(ret, utxos[i])
+			if len(ret) > maxResults {
+				return fmt.Errorf(
+					"GetUtxosByAddress: %w (maxResults=%d)",
+					models.ErrTooManyUtxoResults,
+					maxResults,
+				)
+			}
+		}
+		branches = nil
+		args = nil
+		return nil
+	}
+	for _, pattern := range patterns {
+		var branchOrs []string
+		var branchArgs []any
+		if err := models.AppendUtxoAddressPatternOrBranch(
+			&branchOrs,
+			&branchArgs,
+			pattern,
+		); err != nil {
+			return nil, err
+		}
+		if len(branches) > 0 &&
+			(len(args)+len(branchArgs)+limitParamReserve > paramLimit ||
+				len(branches)+len(branchOrs) >= max(1, paramLimit/2)) {
+			if err := runQuery(); err != nil {
+				return nil, err
+			}
+		}
+		branches = append(branches, branchOrs...)
+		args = append(args, branchArgs...)
+	}
+	if err := runQuery(); err != nil {
+		return nil, err
+	}
+	pointers := make([]*models.Utxo, len(ret))
+	for i := range ret {
+		pointers[i] = &ret[i]
+	}
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+// utxoOrderingPredicate builds the WHERE predicate shared by
+// GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
+// returned predicate excludes any keyset (query.After) bound, which only
+// GetUtxosByAddressWithOrdering applies.
+func utxoOrderingPredicate(
+	query *models.UtxoWithOrderingQuery,
+) (string, []any, error) {
+	predicate := "utxo.deleted_slot = 0"
+	args := []any{}
+	switch {
+	case query.MatchAllAddresses:
+	case len(query.AddressPatterns) == 0:
+		predicate += " AND 1 = 0"
+	default:
+		branches := []string{}
+		for _, pattern := range query.AddressPatterns {
+			if err := models.AppendUtxoAddressPatternOrBranch(
+				&branches,
+				&args,
+				pattern,
+			); err != nil {
+				return "", nil, err
+			}
+		}
+		if len(branches) == 0 {
+			predicate += " AND 1 = 0"
+		} else {
+			predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+		}
+	}
+	if query.FilterByAsset {
+		if len(query.AssetPolicyID) == 0 {
+			return "", nil, models.ErrEmptyAssetPolicyID
+		}
+		predicate += `
+ AND EXISTS (
+     SELECT 1 FROM asset
+     WHERE asset.utxo_id = utxo.id AND asset.policy_id = ?`
+		args = append(args, query.AssetPolicyID)
+		if query.AssetName != nil {
+			predicate += " AND asset.name = ?"
+			args = append(args, query.AssetName)
+		}
+		predicate += ")"
+	}
+	return predicate, args, nil
+}
+
+func (s *Store) GetUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) ([]models.UtxoWithOrdering, error) {
+	if query == nil {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if query.After != nil && query.Descending {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrDescendingKeysetUnsupported,
+		)
+	}
+	if query.After != nil && query.Offset > 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetKeysetUnsupported,
+		)
+	}
+	if query.Offset > 0 &&
+		models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetRequiresCoarseMatch,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
+	}
+	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
+	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
+	if query.After != nil {
+		predicate += `
+ AND (
+     ` + slotExpr + ` > ?
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` > ?)
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
+         AND utxo.output_idx > ?)
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
+         AND utxo.output_idx = ? AND utxo.tx_id > ?)
+ )`
+		args = append(
+			args,
+			query.After.Slot,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.TxId,
+		)
+	}
+	orderDir := "ASC"
+	if query.Descending {
+		orderDir = "DESC"
+	}
+	statement := `
+SELECT ` + qualifiedSQLiteUtxoColumns + `,
+       ` + slotExpr + `, ` + blockIndexExpr + `
+FROM utxo
+LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
+WHERE ` + predicate + `
+ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
+         utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir
+	statement, args = addLimitOffset(statement, args, query.Limit, query.Offset)
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(statement),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []models.UtxoWithOrdering{}
+	pointers := []*models.Utxo{}
+	for rows.Next() {
+		item, err := scanUtxoWithOrdering(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if query.SkipAssets {
+		return ret, nil
+	}
+	for i := range ret {
+		pointers = append(pointers, &ret[i].Utxo)
+	}
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+// CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
+// query's coarse SQL predicate (address patterns and asset filter), without
+// materializing rows. It rejects a query whose address patterns require
+// CBOR-based exact-address filtering (see RequiresExactAddressFilter):
+// the coarse predicate alone over-matches address forms that share a
+// payment/delegation credential (for example pointer addresses), so a count
+// against it would not equal the exact-match total.
+func (s *Store) CountUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) (int, error) {
+	if query == nil {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrExactAddressRequiresCbor,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
+	}
+	var count int
+	err = db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(
+			"SELECT COUNT(*) FROM utxo WHERE "+predicate,
+		),
+		args...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count utxos by address: %w", err)
+	}
+	return count, nil
+}
+
+func (s *Store) GetUtxosByAddressAtSlot(
+	pattern models.UtxoAddressPattern,
+	slot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	var predicates []string
+	var args []any
+	if err := models.AppendUtxoAddressPatternOrBranch(
+		&predicates,
+		&args,
+		pattern,
+	); err != nil {
+		return nil, err
+	}
+	if len(predicates) == 0 {
+		return nil, models.ErrEmptyUtxoAddressPattern
+	}
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	args = append(
+		[]any{sqlSlot, sqlSlot},
+		args...,
+	)
+	return s.queryUtxosWithAssets(
+		txn,
+		"utxo.added_slot <= ? AND "+
+			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?) AND "+
+			predicates[0],
+		args,
+		"",
+	)
+}
+
+func (s *Store) GetControlledAmountByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (uint64, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	return sumUint64Rows(ctx, db, s.dialect.Rebind(`
+SELECT amount FROM utxo
+WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`), credentialTag, stakingKey)
+}
+
+func (s *Store) GetUtxoPaymentScriptByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	paymentKeys [][]byte,
+	txn types.Txn,
+) (map[string]bool, error) {
+	ret := make(map[string]bool, len(paymentKeys))
+	if len(stakingKey) == 0 || len(paymentKeys) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve read DB for payment script by stake credential: %w",
+			err,
+		)
+	}
+	paymentKeys = dedupeByteSlices(paymentKeys)
+	chunkSize := max(1, s.dialect.ParameterLimit()-2)
+	for start := 0; start < len(paymentKeys); start += chunkSize {
+		end := min(start+chunkSize, len(paymentKeys))
+		chunk := paymentKeys[start:end]
+		err := func() error {
+			args := make([]any, 0, len(chunk)+2)
+			args = append(args, credentialTag, stakingKey)
+			for _, key := range chunk {
+				args = append(args, key)
+			}
+			rows, err := db.QueryContext(
+				ctx,
+				s.dialect.Rebind(`
+SELECT DISTINCT payment_key, payment_script
+FROM utxo
+WHERE credential_tag = ? AND staking_key = ?
+  AND payment_key IN (`+bindPlaceholders(len(chunk))+`)`),
+				args...,
+			)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var key []byte
+				var script sql.NullBool
+				if err := rows.Scan(&key, &script); err != nil {
+					return err
+				}
+				ret[hex.EncodeToString(key)] = script.Bool
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get payment script by stake credential: %w",
+				err,
+			)
+		}
+	}
+	return ret, nil
+}
+
+func (s *Store) GetScriptLockedSupply(txn types.Txn) (uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	return sumUint64Rows(ctx, db, s.dialect.Rebind(`
+SELECT amount FROM utxo
+WHERE payment_script = TRUE AND deleted_slot = 0`))
+}
+
+func (s *Store) GetUtxosByAssets(
+	policyID []byte,
+	assetName []byte,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	q := s.operationalQueries(db)
+	var rows []sqlitequery.Utxo
+	if assetName == nil {
+		rows, err = q.GetLiveUtxosByAssetPolicy(
+			ctx,
+			policyID,
+		)
+	} else {
+		rows, err = q.GetLiveUtxosByAsset(
+			ctx,
+			sqlitequery.GetLiveUtxosByAssetParams{
+				PolicyID: policyID,
+				Name:     assetName,
+			},
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	ret, err := utxosFromSQLite(rows)
+	if err != nil {
+		return nil, err
+	}
+	pointers := make([]*models.Utxo, len(ret))
+	for i := range ret {
+		pointers[i] = &ret[i]
+	}
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func (s *Store) IterateLiveUtxos(
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate live UTxOs: callback is nil")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		"SELECT "+sqliteUtxoColumns+" FROM utxo WHERE deleted_slot = 0",
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return err
+		}
+		model, err := utxoFromSQLite(row)
+		if err != nil {
+			return err
+		}
+		if err := fn(model); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// IterateUtxosAsOf invokes fn once for each UTxO row live as of atSlot --
+// added at or before atSlot, and either never spent or spent strictly
+// after atSlot -- matching UtxosByRefsAsOf's identical predicate for a
+// bounded ref list, here applied to the whole table. See the
+// MetadataStore interface doc comment for why this has no indexed
+// shortcut, unlike IterateLiveUtxos' deleted_slot = 0 filter.
+func (s *Store) IterateUtxosAsOf(
+	atSlot uint64,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate UTxOs as of slot: callback is nil")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return err
+	}
+	query := s.dialect.Rebind(
+		"SELECT " + sqliteUtxoColumns + ` FROM utxo
+WHERE added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`,
+	)
+	rows, err := db.QueryContext(ctx, query, sqlSlot, sqlSlot)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return err
+		}
+		model, err := utxoFromSQLite(row)
+		if err != nil {
+			return err
+		}
+		if err := fn(model); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// queryUtxos runs predicate/args against the utxo table and returns the
+// matching rows without loading assets -- callers that need to deduplicate
+// candidates across multiple queries (e.g. chunked GetUtxosByAddress) should
+// use this and load assets once on the final deduplicated set, rather than
+// paying the asset-load cost once per query. limit <= 0 means unbounded; a
+// positive limit appends a SQL LIMIT clause so a broad predicate cannot
+// force an unbounded result set to be materialized.
+func (s *Store) queryUtxos(
+	txn types.Txn,
+	predicate string,
+	args []any,
+	order string,
+	limit int,
+) ([]models.Utxo, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := "SELECT " + sqliteUtxoColumns + " FROM utxo WHERE " + predicate
+	if order != "" {
+		query += " ORDER BY " + order
+	}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(query),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := make([]models.Utxo, 0)
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return nil, err
+		}
+		model, err := utxoFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *model)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func (s *Store) queryUtxosWithAssets(
+	txn types.Txn,
+	predicate string,
+	args []any,
+	order string,
+) ([]models.Utxo, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	ret, err := s.queryUtxos(txn, predicate, args, order, 0)
+	if err != nil {
+		return nil, err
+	}
+	pointers := make([]*models.Utxo, len(ret))
+	for i := range ret {
+		pointers[i] = &ret[i]
+	}
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func (s *Store) loadUtxoAssets(
+	ctx context.Context,
+	db queryer,
+	utxos []*models.Utxo,
+) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+	return s.loadUtxoAssetsPointers(ctx, db, utxos)
+}
+
+func (s *Store) loadUtxoAssetsBatch(
+	ctx context.Context,
+	db queryer,
+	groups ...map[string][]models.Utxo,
+) error {
+	pointers := make([]*models.Utxo, 0)
+	for _, group := range groups {
+		for _, items := range group {
+			for i := range items {
+				pointers = append(pointers, &items[i])
+			}
+		}
+	}
+	return s.loadUtxoAssetsPointers(ctx, db, pointers)
+}
+
+func (s *Store) loadUtxoAssetsPointers(
+	ctx context.Context,
+	db queryer,
+	utxos []*models.Utxo,
+) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+	for _, utxo := range utxos {
+		utxo.Assets = make([]models.Asset, 0)
+	}
+	// The same UTxO can be present in multiple association groups (for
+	// example, when hydrating transactions by block/hash/address).  Keep the
+	// fan-out map keyed by ID, but deduplicate IDs before chunking the query;
+	// otherwise a repeated ID straddling two parameter chunks causes its asset
+	// rows to be loaded twice and appended twice to every instance.
+	ids := make([]uint, 0, len(utxos))
+	byID := make(map[uint][]*models.Utxo, len(utxos))
+	for _, utxo := range utxos {
+		if _, exists := byID[utxo.ID]; !exists {
+			ids = append(ids, utxo.ID)
+		}
+		byID[utxo.ID] = append(byID[utxo.ID], utxo)
+	}
+	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(ids))
+		args := make([]any, end-start)
+		for i, id := range ids[start:end] {
+			args[i] = id
+		}
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+			"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
+				end-start,
+			)+") ORDER BY id",
+		), args...)
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var name, policyID, fingerprint []byte
+				var id int64
+				var utxoID sql.NullInt64
+				var amount sql.NullString
+				if err := rows.Scan(&name, &policyID, &fingerprint, &id, &utxoID, &amount); err != nil {
+					return err
+				}
+				if !utxoID.Valid {
+					continue
+				}
+				value := uint64(0)
+				if amount.Valid {
+					value, err = parseUint64("asset amount", amount.String)
+					if err != nil {
+						return err
+					}
+				}
+				asset := models.Asset{
+					Name:        name,
+					PolicyId:    policyID,
+					Fingerprint: fingerprint,
+					ID:          uint(id),
+					UtxoID:      uint(utxoID.Int64),
+					Amount:      types.Uint64(value),
+				}
+				for _, utxo := range byID[asset.UtxoID] {
+					utxo.Assets = append(utxo.Assets, asset)
+				}
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func utxosFromSQLite(rows []sqlitequery.Utxo) ([]models.Utxo, error) {
+	ret := make([]models.Utxo, 0, len(rows))
+	for _, row := range rows {
+		utxo, err := utxoFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *utxo)
+	}
+	return ret, nil
+}
+
+func utxoFromSQLite(row sqlitequery.Utxo) (*models.Utxo, error) {
+	amount := uint64(0)
+	var err error
+	if row.Amount.Valid {
+		amount, err = parseUint64("UTxO amount", row.Amount.String)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &models.Utxo{
+		TransactionID:           uintPointer(row.TransactionID),
+		CollateralReturnForTxID: uintPointer(row.CollateralReturnForTxID),
+		TxId:                    row.TxID,
+		PaymentKey:              row.PaymentKey,
+		StakingKey:              row.StakingKey,
+		CredentialTag:           uint8(row.CredentialTag),
+		DatumHash:               row.DatumHash,
+		SpentAtTxId:             types.NullableHash(row.SpentAtTxID),
+		ReferencedByTxId:        types.NullableHash(row.ReferencedByTxID),
+		CollateralByTxId:        types.NullableHash(row.CollateralByTxID),
+		ID:                      uint(row.ID),
+		AddedSlot:               uint64(row.AddedSlot.Int64),
+		DeletedSlot:             uint64(row.DeletedSlot.Int64),
+		Amount:                  types.Uint64(amount),
+		OutputIdx:               uint32(row.OutputIdx.Int64),
+		PaymentScript:           row.PaymentScript.Bool,
+	}, nil
+}
+
+func scanSQLiteUtxo(rows *sql.Rows) (sqlitequery.Utxo, error) {
+	var row sqlitequery.Utxo
+	err := rows.Scan(
+		&row.TransactionID,
+		&row.CollateralReturnForTxID,
+		&row.TxID,
+		&row.PaymentKey,
+		&row.StakingKey,
+		&row.CredentialTag,
+		&row.DatumHash,
+		&row.SpentAtTxID,
+		&row.ReferencedByTxID,
+		&row.CollateralByTxID,
+		&row.ID,
+		&row.AddedSlot,
+		&row.DeletedSlot,
+		&row.Amount,
+		&row.OutputIdx,
+		&row.PaymentScript,
+	)
+	return row, err
+}
+
+func scanUtxoWithOrdering(
+	rows *sql.Rows,
+) (models.UtxoWithOrdering, error) {
+	var raw sqlitequery.Utxo
+	var slot sql.NullInt64
+	var blockIndex sql.NullInt64
+	err := rows.Scan(
+		&raw.TransactionID,
+		&raw.CollateralReturnForTxID,
+		&raw.TxID,
+		&raw.PaymentKey,
+		&raw.StakingKey,
+		&raw.CredentialTag,
+		&raw.DatumHash,
+		&raw.SpentAtTxID,
+		&raw.ReferencedByTxID,
+		&raw.CollateralByTxID,
+		&raw.ID,
+		&raw.AddedSlot,
+		&raw.DeletedSlot,
+		&raw.Amount,
+		&raw.OutputIdx,
+		&raw.PaymentScript,
+		&slot,
+		&blockIndex,
+	)
+	if err != nil {
+		return models.UtxoWithOrdering{}, err
+	}
+	utxo, err := utxoFromSQLite(raw)
+	if err != nil {
+		return models.UtxoWithOrdering{}, err
+	}
+	return models.UtxoWithOrdering{
+		Utxo:         *utxo,
+		TxSlot:       uint64(slot.Int64),
+		TxBlockIndex: uint32(blockIndex.Int64),
+	}, nil
+}
+
+func uintPointer(value sql.NullInt64) *uint {
+	if !value.Valid {
+		return nil
+	}
+	ret := uint(value.Int64)
+	return &ret
+}
+
+func createUtxoParams(
+	utxo *models.Utxo,
+) (sqlitequery.CreateUtxoParams, error) {
+	addedSlot, err := checkedInt64(utxo.AddedSlot)
+	if err != nil {
+		return sqlitequery.CreateUtxoParams{}, err
+	}
+	deletedSlot, err := checkedInt64(utxo.DeletedSlot)
+	if err != nil {
+		return sqlitequery.CreateUtxoParams{}, err
+	}
+	return sqlitequery.CreateUtxoParams{
+		TransactionID:           nullableUint(utxo.TransactionID),
+		CollateralReturnForTxID: nullableUint(utxo.CollateralReturnForTxID),
+		TxID:                    utxo.TxId,
+		PaymentKey:              utxo.PaymentKey,
+		StakingKey:              utxo.StakingKey,
+		CredentialTag:           int64(utxo.CredentialTag),
+		DatumHash:               utxo.DatumHash,
+		SpentAtTxID:             utxo.SpentAtTxId,
+		ReferencedByTxID:        utxo.ReferencedByTxId,
+		CollateralByTxID:        utxo.CollateralByTxId,
+		AddedSlot: sql.NullInt64{
+			Int64: addedSlot,
+			Valid: true,
+		},
+		DeletedSlot: sql.NullInt64{
+			Int64: deletedSlot,
+			Valid: true,
+		},
+		Amount: sql.NullString{
+			String: decimalUint64(utxo.Amount),
+			Valid:  true,
+		},
+		OutputIdx: sql.NullInt64{
+			Int64: int64(utxo.OutputIdx),
+			Valid: true,
+		},
+		PaymentScript: sql.NullBool{
+			Bool:  utxo.PaymentScript,
+			Valid: true,
+		},
+	}, nil
+}
+
+func nullableUint(value *uint) sql.NullInt64 {
+	if value == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(*value), Valid: true}
+}

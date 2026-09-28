@@ -27,6 +27,8 @@ import (
 )
 
 func TestNewTieredCborCache(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  1000,
 		HotTxEntries:    500,
@@ -44,6 +46,8 @@ func TestNewTieredCborCache(t *testing.T) {
 }
 
 func TestTieredCborCacheHotHitUtxo(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -76,6 +80,8 @@ func TestTieredCborCacheHotHitUtxo(t *testing.T) {
 }
 
 func TestTieredCborCacheHotHitTx(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -106,6 +112,8 @@ func TestTieredCborCacheHotHitTx(t *testing.T) {
 }
 
 func TestTieredCborCacheHotMissUtxo(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -134,6 +142,8 @@ func TestTieredCborCacheHotMissUtxo(t *testing.T) {
 }
 
 func TestTieredCborCacheHotMissTx(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -161,12 +171,13 @@ func TestTieredCborCacheHotMissTx(t *testing.T) {
 }
 
 func TestResolveTxCborUsesCallerTxn(t *testing.T) {
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, db.Close())
@@ -210,6 +221,8 @@ func TestResolveTxCborUsesCallerTxn(t *testing.T) {
 }
 
 func TestTieredCborCacheMetrics(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -267,6 +280,8 @@ func TestTieredCborCacheMetrics(t *testing.T) {
 }
 
 func TestTieredCborCacheBatchHotHits(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -296,7 +311,11 @@ func TestTieredCborCacheBatchHotHits(t *testing.T) {
 	assert.Equal(t, cbor1, result[ref1])
 	assert.Equal(t, cbor2, result[ref2])
 	_, hasRef3 := result[ref3]
-	assert.False(t, hasRef3, "ref3 should not be in result (not in cache, no db)")
+	assert.False(
+		t,
+		hasRef3,
+		"ref3 should not be in result (not in cache, no db)",
+	)
 
 	// Verify hot hit metrics
 	metrics := cache.Metrics()
@@ -305,6 +324,8 @@ func TestTieredCborCacheBatchHotHits(t *testing.T) {
 }
 
 func TestTieredCborCacheBatchEmpty(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -323,6 +344,8 @@ func TestTieredCborCacheBatchEmpty(t *testing.T) {
 }
 
 func TestTieredCborCacheTxBatchHotHits(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -352,7 +375,11 @@ func TestTieredCborCacheTxBatchHotHits(t *testing.T) {
 	assert.Equal(t, cbor1, result[hash1])
 	assert.Equal(t, cbor2, result[hash2])
 	_, hasHash3 := result[hash3]
-	assert.False(t, hasHash3, "hash3 should not be in result (not in cache, no db)")
+	assert.False(
+		t,
+		hasHash3,
+		"hash3 should not be in result (not in cache, no db)",
+	)
 
 	// Verify hot hit metrics
 	metrics := cache.Metrics()
@@ -361,6 +388,8 @@ func TestTieredCborCacheTxBatchHotHits(t *testing.T) {
 }
 
 func TestTieredCborCacheTxBatchEmpty(t *testing.T) {
+	t.Parallel()
+
 	config := CborCacheConfig{
 		HotUtxoEntries:  100,
 		HotTxEntries:    100,
@@ -379,6 +408,8 @@ func TestTieredCborCacheTxBatchEmpty(t *testing.T) {
 }
 
 func TestUtxoRefEquality(t *testing.T) {
+	t.Parallel()
+
 	// Test that UtxoRef works correctly as map keys
 	ref1 := UtxoRef{TxId: [32]byte{1, 2, 3}, OutputIdx: 5}
 	ref2 := UtxoRef{TxId: [32]byte{1, 2, 3}, OutputIdx: 5}
@@ -401,6 +432,8 @@ func TestUtxoRefEquality(t *testing.T) {
 }
 
 func TestMakeUtxoKey(t *testing.T) {
+	t.Parallel()
+
 	var txId [32]byte
 	for i := range txId {
 		txId[i] = byte(i)
@@ -423,6 +456,8 @@ func TestMakeUtxoKey(t *testing.T) {
 }
 
 func TestCborCacheConfigDefaults(t *testing.T) {
+	t.Parallel()
+
 	// Test with zero config
 	config := CborCacheConfig{}
 
@@ -436,6 +471,8 @@ func TestCborCacheConfigDefaults(t *testing.T) {
 }
 
 func TestCacheMetricsPrometheus(t *testing.T) {
+	t.Parallel()
+
 	// Create a fresh registry to avoid conflicts
 	registry := prometheus.NewRegistry()
 
@@ -485,13 +522,31 @@ func TestCacheMetricsPrometheus(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_utxo_hot_hits_total"])
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_utxo_hot_misses_total"])
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_tx_hot_hits_total"])
-	assert.Equal(t, float64(1), metricNames["dingo_cbor_cache_tx_hot_misses_total"])
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_utxo_hot_hits_total"],
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_utxo_hot_misses_total"],
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_tx_hot_hits_total"],
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		metricNames["dingo_cbor_cache_tx_hot_misses_total"],
+	)
 }
 
 func TestCacheMetricsRegisterNil(t *testing.T) {
+	t.Parallel()
+
 	// Register with nil registry should not panic
 	metrics := &CacheMetrics{}
 	metrics.Register(nil)

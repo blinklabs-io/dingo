@@ -68,6 +68,8 @@ func shelleyGenesisCfgForNonceWindow(t *testing.T) *cardano.CardanoNodeConfig {
 // The Babbage row asserting 60 is the regression guard for the
 // Babbage→Conway VRF wedge.
 func TestNonceStabilityWindow_EraDispatch(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name         string
 		eraId        uint

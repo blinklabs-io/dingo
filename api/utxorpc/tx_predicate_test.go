@@ -59,7 +59,11 @@ func evalSubmit(
 	p *submit.TxPredicate,
 	leaf txPatternLeaf,
 ) bool {
-	return evalTxPredicateOutcome(tx, txPredicateFromSubmit(p), leaf) == predMatch
+	return evalTxPredicateOutcome(
+		tx,
+		txPredicateFromSubmit(p),
+		leaf,
+	) == predMatch
 }
 
 func TestEvalTxPredicate_Match(t *testing.T) {
@@ -80,7 +84,9 @@ func TestEvalTxPredicate_Not(t *testing.T) {
 		pred := &submit.TxPredicate{Not: []*submit.TxPredicate{matchSubmit(pA)}}
 		require.False(t, evalSubmit(nil, pred, leaf))
 
-		pred2 := &submit.TxPredicate{Not: []*submit.TxPredicate{matchSubmit(pB)}}
+		pred2 := &submit.TxPredicate{
+			Not: []*submit.TxPredicate{matchSubmit(pB)},
+		}
 		require.True(t, evalSubmit(nil, pred2, leaf))
 	})
 

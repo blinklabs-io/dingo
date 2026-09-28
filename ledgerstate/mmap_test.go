@@ -23,6 +23,8 @@ import (
 )
 
 func TestMmapReadOnlyRejectsEmptyFile(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "empty")
 	if err := os.WriteFile(path, nil, 0o640); err != nil {
 		t.Fatalf("writing empty file: %v", err)
@@ -41,6 +43,8 @@ func TestMmapReadOnlyRejectsEmptyFile(t *testing.T) {
 }
 
 func TestMmapReadOnlyReturnsFileData(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "data")
 	want := []byte("dingo mmap test")
 	if err := os.WriteFile(path, want, 0o640); err != nil {

@@ -16,7 +16,10 @@ func BenchmarkUpdateConnectionMetrics(b *testing.B) {
 				PromRegistry: prometheus.NewRegistry(),
 			})
 			for i := range connections {
-				addr := net.JoinHostPort("198.51.100."+strconv.Itoa(i%250+1), strconv.Itoa(3000+i))
+				addr := net.JoinHostPort(
+					"198.51.100."+strconv.Itoa(i%250+1),
+					strconv.Itoa(3000+i),
+				)
 				cm.connections[connectionIDForBench(i)] = &connectionInfo{
 					peerAddr:  addr,
 					isInbound: i%2 == 0,
@@ -42,7 +45,10 @@ func BenchmarkTryReserveInboundSlotParallel(b *testing.B) {
 				MaxInboundConns: connections * 2,
 			})
 			for i := range connections {
-				addr := net.JoinHostPort("198.51.100."+strconv.Itoa(i%250+1), strconv.Itoa(3000+i))
+				addr := net.JoinHostPort(
+					"198.51.100."+strconv.Itoa(i%250+1),
+					strconv.Itoa(3000+i),
+				)
 				cm.connections[connectionIDForBench(i)] = &connectionInfo{
 					peerAddr:  addr,
 					isInbound: true,

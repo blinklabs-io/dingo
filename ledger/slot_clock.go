@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
 // SlotTick represents a notification that a slot boundary has been reached
@@ -93,16 +95,27 @@ type SlotClock struct {
 	subscribers []chan SlotTick
 	mu          sync.RWMutex
 	cancel      context.CancelFunc
-	ctx         context.Context
+	done        chan struct{}
+	generation  uint64
 	running     bool
-	wg          sync.WaitGroup
+	stopped     bool
 
 	// Track last emitted epoch to avoid duplicates and detect discrepancies
 	lastEmittedEpoch uint64
 	epochEmitMu      sync.Mutex
 
+	// behindHorizon tracks whether the previous tick was skipped because the
+	// applied ledger's era history did not reach the current slot, so the
+	// transition into and out of that state is reported once instead of once
+	// per slot. Only touched by the single run goroutine.
+	behindHorizon bool
+
 	// For testing: allow injection of custom time source
-	nowFunc func() time.Time
+	nowFunc  func() time.Time
+	waitFunc func(context.Context, time.Duration) error
+	// beforeRunDone is a test hook that runs after a worker releases its
+	// lifecycle state but before it reports completion. It is nil in production.
+	beforeRunDone func()
 }
 
 // NewSlotClock creates a new SlotClock with the given provider and configuration
@@ -121,6 +134,21 @@ func NewSlotClock(
 		config:      config,
 		subscribers: make([]chan SlotTick, 0),
 		nowFunc:     time.Now,
+		waitFunc:    waitForDuration,
+	}
+}
+
+func waitForDuration(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -128,17 +156,23 @@ func NewSlotClock(
 // The clock will emit SlotTick notifications at each slot boundary.
 // Returns immediately; the tick loop runs in a goroutine.
 func (sc *SlotClock) Start(ctx context.Context) {
+	clockCtx, cancel := context.WithCancel(ctx)
 	sc.mu.Lock()
 	if sc.running {
+		cancel()
 		sc.mu.Unlock()
 		return
 	}
 	sc.running = true
-	sc.ctx, sc.cancel = context.WithCancel(ctx)
+	sc.stopped = false
+	sc.cancel = cancel
+	sc.generation++
+	generation := sc.generation
+	done := make(chan struct{})
+	sc.done = done
 	sc.mu.Unlock()
 
-	sc.wg.Add(1)
-	go sc.run()
+	go sc.run(clockCtx, generation, done)
 }
 
 // Stop halts the slot clock and waits for the tick loop to exit.
@@ -146,22 +180,17 @@ func (sc *SlotClock) Start(ctx context.Context) {
 // on receiving from them to exit cleanly.
 func (sc *SlotClock) Stop() {
 	sc.mu.Lock()
-	if !sc.running {
-		sc.mu.Unlock()
-		return
-	}
-	sc.running = false
-	if sc.cancel != nil {
+	sc.stopped = true
+	if sc.running && sc.cancel != nil {
 		sc.cancel()
 	}
-	// Close all subscriber channels to unblock any goroutines waiting on them
-	for _, ch := range sc.subscribers {
-		close(ch)
-	}
-	sc.subscribers = nil
+	sc.closeSubscribersLocked()
+	done := sc.done
 	sc.mu.Unlock()
 
-	sc.wg.Wait()
+	if done != nil {
+		<-done
+	}
 }
 
 // Subscribe returns a channel that will receive SlotTick notifications.
@@ -170,9 +199,21 @@ func (sc *SlotClock) Stop() {
 func (sc *SlotClock) Subscribe() <-chan SlotTick {
 	ch := make(chan SlotTick, 1)
 	sc.mu.Lock()
+	if sc.stopped {
+		close(ch)
+		sc.mu.Unlock()
+		return ch
+	}
 	sc.subscribers = append(sc.subscribers, ch)
 	sc.mu.Unlock()
 	return ch
+}
+
+func (sc *SlotClock) closeSubscribersLocked() {
+	for _, ch := range sc.subscribers {
+		close(ch)
+	}
+	sc.subscribers = nil
 }
 
 // Unsubscribe removes a subscriber channel from the notification list.
@@ -222,6 +263,17 @@ func (sc *SlotClock) GetEpochForSlot(slot uint64) (EpochInfo, error) {
 // This works regardless of sync state and can be called during catch up or load.
 func (sc *SlotClock) SlotToTime(slot uint64) (time.Time, error) {
 	return sc.provider.SlotToTime(slot)
+}
+
+// waitUntil blocks until target according to the same clock CurrentSlot uses,
+// or until ctx is cancelled. The injected wait function keeps boundary tests
+// deterministic without sleeping.
+func (sc *SlotClock) waitUntil(ctx context.Context, target time.Time) error {
+	delay := target.Sub(sc.nowFunc())
+	if delay <= 0 {
+		return nil
+	}
+	return sc.waitFunc(ctx, delay)
 }
 
 // NextSlotTime returns the time when the next slot will start
@@ -306,15 +358,33 @@ func (sc *SlotClock) SetLastEmittedEpoch(epoch uint64) {
 // =============================================================================
 
 // run is the main tick loop
-func (sc *SlotClock) run() {
-	defer sc.wg.Done()
+func (sc *SlotClock) run(
+	ctx context.Context,
+	generation uint64,
+	done chan struct{},
+) {
+	defer func() {
+		sc.mu.Lock()
+		if sc.generation == generation {
+			sc.running = false
+			sc.stopped = true
+			sc.cancel = nil
+			sc.closeSubscribersLocked()
+		}
+		beforeRunDone := sc.beforeRunDone
+		sc.mu.Unlock()
+		if beforeRunDone != nil {
+			beforeRunDone()
+		}
+		close(done)
+	}()
 
 	logger := sc.config.Logger.With("component", "slot_clock")
 
 	for {
 		// Check context first
 		select {
-		case <-sc.ctx.Done():
+		case <-ctx.Done():
 			return
 		default:
 		}
@@ -332,7 +402,7 @@ func (sc *SlotClock) run() {
 						"error", slotErr,
 					)
 					select {
-					case <-sc.ctx.Done():
+					case <-ctx.Done():
 						return
 					case <-time.After(time.Second):
 						continue
@@ -348,7 +418,7 @@ func (sc *SlotClock) run() {
 					"wait", waitDur.Round(time.Second),
 				)
 				select {
-				case <-sc.ctx.Done():
+				case <-ctx.Done():
 					return
 				case <-time.After(waitDur):
 					continue
@@ -357,7 +427,7 @@ func (sc *SlotClock) run() {
 			logger.Error("failed to get current slot", "error", err)
 			// Sleep briefly and retry
 			select {
-			case <-sc.ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(100 * time.Millisecond):
 				continue
@@ -376,7 +446,7 @@ func (sc *SlotClock) run() {
 				nextSlot,
 			)
 			select {
-			case <-sc.ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(100 * time.Millisecond):
 				continue
@@ -387,7 +457,7 @@ func (sc *SlotClock) run() {
 		sleepDuration := nextSlotTime.Sub(now)
 		if sleepDuration > 0 {
 			select {
-			case <-sc.ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(sleepDuration):
 			}
@@ -417,6 +487,34 @@ func (sc *SlotClock) run() {
 		// Emit tick for the slot we're at (might have skipped some if drift is large)
 		tick, err := sc.buildSlotTick(actualSlot, actualNow)
 		if err != nil {
+			// A past-horizon slot is the expected state while the applied
+			// ledger is behind the wall clock (from-genesis sync, bulk load,
+			// restart after downtime): the era history simply does not reach
+			// the current slot yet, so its epoch is unknowable and there is
+			// nothing meaningful to emit. Deliberately not extrapolated -- the
+			// tick's Epoch and IsEpochStart drive subscriber epoch-boundary
+			// work, and a fabricated epoch would be worse than no tick.
+			//
+			// Report the transition once at info rather than an error per slot,
+			// which on a live network meant one error per second for the whole
+			// catch-up.
+			if errors.Is(err, hardfork.ErrPastHorizon) {
+				if !sc.behindHorizon {
+					sc.behindHorizon = true
+					logger.Info(
+						"applied ledger is behind the wall clock; "+
+							"slot ticks are paused until era history reaches "+
+							"the current slot",
+						"slot", actualSlot,
+					)
+				}
+				logger.Debug(
+					"skipping slot tick past era horizon",
+					"slot", actualSlot,
+					"error", err,
+				)
+				continue
+			}
 			logger.Error(
 				"failed to build slot tick",
 				"error",
@@ -425,6 +523,13 @@ func (sc *SlotClock) run() {
 				actualSlot,
 			)
 			continue
+		}
+		if sc.behindHorizon {
+			sc.behindHorizon = false
+			logger.Info(
+				"era history now covers the current slot; resuming slot ticks",
+				"slot", actualSlot,
+			)
 		}
 
 		sc.emitTick(tick)
@@ -475,32 +580,43 @@ func (sc *SlotClock) emitTick(tick SlotTick) {
 }
 
 // =============================================================================
-// LedgerState adapter
+// SlotTimeConverter adapter
 // =============================================================================
 
-// ledgerStateSlotProvider adapts LedgerState to the SlotTimeProvider interface.
-type ledgerStateSlotProvider struct {
-	ls *LedgerState
+// slotTimeConverterProvider adapts a SlotTimeConverter to the
+// SlotTimeProvider interface: only SlotToEpoch's return type differs
+// (models.Epoch vs. the tick-facing EpochInfo), so this is otherwise a thin
+// pass-through.
+type slotTimeConverterProvider struct {
+	conv *SlotTimeConverter
 }
 
-// newLedgerStateSlotProvider creates a new adapter wrapping the given LedgerState
-func newLedgerStateSlotProvider(ls *LedgerState) *ledgerStateSlotProvider {
-	return &ledgerStateSlotProvider{ls: ls}
+// newSlotTimeConverterProvider creates a new adapter wrapping the given
+// SlotTimeConverter.
+func newSlotTimeConverterProvider(
+	conv *SlotTimeConverter,
+) *slotTimeConverterProvider {
+	return &slotTimeConverterProvider{conv: conv}
 }
 
-// SlotToTime delegates to LedgerState.SlotToTime
-func (p *ledgerStateSlotProvider) SlotToTime(slot uint64) (time.Time, error) {
-	return p.ls.SlotToTime(slot)
+// SlotToTime delegates to SlotTimeConverter.SlotToTime
+func (p *slotTimeConverterProvider) SlotToTime(
+	slot uint64,
+) (time.Time, error) {
+	return p.conv.SlotToTime(slot)
 }
 
-// TimeToSlot delegates to LedgerState.TimeToSlot
-func (p *ledgerStateSlotProvider) TimeToSlot(t time.Time) (uint64, error) {
-	return p.ls.TimeToSlot(t)
+// TimeToSlot delegates to SlotTimeConverter.TimeToSlot
+func (p *slotTimeConverterProvider) TimeToSlot(t time.Time) (uint64, error) {
+	return p.conv.TimeToSlot(t)
 }
 
-// SlotToEpoch delegates to LedgerState.SlotToEpoch and converts the result
-func (p *ledgerStateSlotProvider) SlotToEpoch(slot uint64) (EpochInfo, error) {
-	epoch, err := p.ls.SlotToEpoch(slot)
+// SlotToEpoch delegates to SlotTimeConverter.SlotToEpoch and converts the
+// result
+func (p *slotTimeConverterProvider) SlotToEpoch(
+	slot uint64,
+) (EpochInfo, error) {
+	epoch, err := p.conv.SlotToEpoch(slot)
 	if err != nil {
 		return EpochInfo{}, err
 	}

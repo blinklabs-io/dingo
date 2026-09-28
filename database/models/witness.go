@@ -29,11 +29,7 @@ type KeyWitness struct {
 	PublicKey     []byte
 	ChainCode     []byte
 	Attributes    []byte
-	ID            uint  `gorm:"primaryKey"`
-	TransactionID uint  `gorm:"index"`
-	Type          uint8 `gorm:"index"`
-}
-
-func (KeyWitness) TableName() string {
-	return "key_witness"
+	ID            uint
+	TransactionID uint
+	Type          uint8
 }

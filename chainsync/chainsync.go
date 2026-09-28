@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"sync"
 	"time"
@@ -56,6 +57,10 @@ const defaultSeenHeadersRetention = 2500 * 20
 // the retained cache at roughly retentionWindow + seenHeadersPruneInterval
 // slots of observed headers.
 const seenHeadersPruneInterval = 1000
+
+// maxSeenHeadersPerSlot bounds deduplication records and fork notifications
+// within a retained slot. It is a cache limit, not a consensus validity rule.
+const maxSeenHeadersPerSlot = 32
 
 // ClientStatus represents the sync status of a chainsync client.
 type ClientStatus int
@@ -97,6 +102,34 @@ type ChainsyncClientState struct {
 	ChainIter            *chain.ChainIterator
 	Cursor               ocommon.Point
 	NeedsInitialRollback bool
+	// mu guards NeedsInitialRollback so chainsyncServerRequestNext's
+	// read-send-clear sequence and LookupClient's snapshot read never
+	// observe a torn value. It is scoped to this one client rather than
+	// State's map-wide lock so a slow send to one peer cannot stall
+	// AddClient/LookupClient/RemoveClient for every other connection.
+	mu sync.Mutex
+}
+
+// LockRollbackState and UnlockRollbackState serialize access to
+// NeedsInitialRollback for this client. Callers outside this package (the
+// chainsync server's request-next handler) use these instead of reaching
+// into an unexported field.
+func (cs *ChainsyncClientState) LockRollbackState() {
+	cs.mu.Lock()
+}
+
+func (cs *ChainsyncClientState) UnlockRollbackState() {
+	cs.mu.Unlock()
+}
+
+// ChainsyncClientStateSnapshot is an immutable, point-in-time copy of a
+// registered server-side chainsync client's mutable state. It intentionally
+// omits ChainIter: callers only need Cursor and NeedsInitialRollback, and
+// exposing the shared iterator would let a caller cancel or advance the
+// live client's iterator through what looks like a read-only value.
+type ChainsyncClientStateSnapshot struct {
+	Cursor               ocommon.Point
+	NeedsInitialRollback bool
 }
 
 // TrackedClient holds per-connection state for a tracked
@@ -126,20 +159,40 @@ type TrackedClient struct {
 	// response. Zero means no samples recorded yet.
 	BlockfetchLatencyEWMA time.Duration
 	blockfetchSampleCount uint64
+	// Patience is the client's Genesis Limit on Patience bucket.
+	Patience PatienceState
 }
 
 // Config holds configuration for the chainsync State.
 type Config struct {
 	MaxClients   int
 	StallTimeout time.Duration
+	// HeaderSyncStrategy selects how headers from multiple eligible peers
+	// drive ledger ingress. The zero value is HeaderSyncStrategyPrimary,
+	// which preserves single-active behavior.
+	HeaderSyncStrategy HeaderSyncStrategy
 	// SeenHeadersRetention overrides the retention window, in slots, for
 	// the header deduplication cache. When zero, the retention window is
 	// derived from the ledger's current stability window (falling back to
 	// defaultSeenHeadersRetention when no ledger state is available).
 	SeenHeadersRetention uint64
+	// ObservedHeaderLimitFunc returns the per-connection ancestry limit used
+	// by fork resolution. A non-positive result uses the bounded default.
+	// Genesis composition raises this to the active density window so a fully
+	// fetched candidate remains reconstructable from its intersection.
+	ObservedHeaderLimitFunc func() int
 	// PromRegistry, when non-nil, is used to register chainsync metrics
 	// such as the current header deduplication cache size.
 	PromRegistry prometheus.Registerer
+	// Patience configures the Genesis Limit on Patience.
+	Patience PatienceConfig
+	// PatienceActiveFunc reports whether Genesis selection is syncing, the
+	// only state in which the Limit on Patience applies. When nil the Limit
+	// on Patience never applies.
+	PatienceActiveFunc func() bool
+	// Now is the clock for activity, stall, and patience tracking. When nil
+	// it is time.Now.
+	Now func() time.Time
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -147,6 +200,7 @@ func DefaultConfig() Config {
 	return Config{
 		MaxClients:   DefaultMaxClients,
 		StallTimeout: DefaultStallTimeout,
+		Patience:     DefaultPatienceConfig(),
 	}
 }
 
@@ -154,7 +208,10 @@ func DefaultConfig() Config {
 // layer: local chain iteration for N2C server clients and the stability-window
 // value used to bound the seen-header deduplication cache.
 type ChainProvider interface {
-	GetChainFromPoint(point ocommon.Point, inclusive bool) (*chain.ChainIterator, error)
+	GetChainFromPoint(
+		point ocommon.Point,
+		inclusive bool,
+	) (*chain.ChainIterator, error)
 	StabilityWindow() uint64
 }
 
@@ -164,6 +221,7 @@ type ChainProvider interface {
 type ObservedHeader struct {
 	ConnectionId ouroboros.ConnectionId
 	BlockHeader  gledger.BlockHeader
+	ArrivalTime  time.Time
 	Point        ocommon.Point
 	Tip          ochainsync.Tip
 	BlockNumber  uint64
@@ -180,12 +238,16 @@ type State struct {
 	config        Config
 
 	// Server-side clients (node-to-client connections)
-	clients map[ouroboros.ConnectionId]*ChainsyncClientState
+	clients      map[ouroboros.ConnectionId]*ChainsyncClientState
+	clientOwners map[ouroboros.ConnectionId]*ochainsync.Server
 
 	// Tracked outbound clients (node-to-node connections)
 	trackedClients     map[ouroboros.ConnectionId]*TrackedClient
 	activeClientConnId *ouroboros.ConnectionId
 	clientConnIdMutex  sync.RWMutex
+	// roundRobinIndex is the rotation cursor for the round-robin header-sync
+	// strategy. Guarded by clientConnIdMutex.
+	roundRobinIndex uint64
 
 	// Header deduplication: maps slot -> list of distinct
 	// block hashes seen at that slot
@@ -202,6 +264,15 @@ type State struct {
 	// seenHeadersGauge tracks the current number of slots retained in the
 	// deduplication cache. Never nil; unregistered when PromRegistry is nil.
 	seenHeadersGauge prometheus.Gauge
+	// blockfetchLatencyGauge exposes the per-connection blockfetch latency
+	// EWMA (seconds), labelled by remote peer address and full connection
+	// ID. Never nil; unregistered when PromRegistry is nil. Series are
+	// deleted on disconnect in RemoveClientConnId so cardinality stays
+	// bounded by live connections.
+	blockfetchLatencyGauge *prometheus.GaugeVec
+	// patienceExhaustedCounter counts clients that exhausted their Genesis
+	// Limit on Patience. Never nil; unregistered when PromRegistry is nil.
+	patienceExhaustedCounter prometheus.Counter
 
 	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
 	observedHeadersMutex sync.RWMutex
@@ -250,11 +321,16 @@ func NewStateWithConfig(
 	if cfg.StallTimeout <= 0 {
 		cfg.StallTimeout = DefaultStallTimeout
 	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	cfg.Patience = cfg.Patience.withDefaults()
 	s := &State{
 		eventBus:       eventBus,
 		chainProvider:  chainProvider,
 		config:         cfg,
 		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
+		clientOwners:   make(map[ouroboros.ConnectionId]*ochainsync.Server),
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
 		seenHeaders:    make(map[uint64][]headerRecord),
 		observedHeaders: make(
@@ -269,18 +345,43 @@ func NewStateWithConfig(
 			Help: "current number of slots retained in the chainsync header deduplication cache",
 		},
 	)
+	s.blockfetchLatencyGauge = promauto.With(cfg.PromRegistry).NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "dingo_chainsync_blockfetch_latency_seconds",
+			Help: "exponential moving average (alpha=0.2) of blockfetch RequestRange-to-first-block latency in seconds, by peer connection",
+		},
+		[]string{"peer", "connection_id"},
+	)
+	s.patienceExhaustedCounter = promauto.With(cfg.PromRegistry).NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_patience_exhausted_total",
+			Help: "chainsync clients disconnected for exhausting the Genesis Limit on Patience",
+		},
+	)
 	return s
+}
+
+func (s *State) now() time.Time {
+	return s.config.Now()
 }
 
 // AddClient registers a server-side (N2C) chainsync client.
 func (s *State) AddClient(
 	connId connection.ConnectionId,
 	intersectPoint ocommon.Point,
+	owners ...*ochainsync.Server,
 ) (*ChainsyncClientState, error) {
 	s.Lock()
 	defer s.Unlock()
+	var owner *ochainsync.Server
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	// Return existing client state if already registered
 	if existing, ok := s.clients[connId]; ok {
+		if owner != nil {
+			s.clientOwners[connId] = owner
+		}
 		return existing, nil
 	}
 	// Create initial chainsync state for connection
@@ -301,7 +402,41 @@ func (s *State) AddClient(
 		ChainIter:            chainIter,
 		NeedsInitialRollback: true,
 	}
+	if owner != nil {
+		s.clientOwners[connId] = owner
+	}
 	return s.clients[connId], nil
+}
+
+// LookupClient returns a snapshot of the registered server-side (N2C)
+// chainsync client state for a connection, or false if no client is
+// registered for it.
+//
+// Unlike AddClient, this is a pure read: it never registers a client as a
+// side effect of being asked about one. Callers that need to assert whether
+// a connection was registered (rather than ensure it is) must use this, so
+// the question cannot create its own answer.
+func (s *State) LookupClient(
+	connId connection.ConnectionId,
+) (*ChainsyncClientStateSnapshot, bool) {
+	s.Lock()
+	clientState, ok := s.clients[connId]
+	s.Unlock()
+	if !ok || clientState == nil {
+		return nil, false
+	}
+	// clientState's mutable fields are guarded by its own lock, not
+	// State's, so this only serializes against chainsyncServerRequestNext
+	// for this one connection instead of blocking every other connection's
+	// AddClient/LookupClient/RemoveClient.
+	clientState.LockRollbackState()
+	defer clientState.UnlockRollbackState()
+	cursor := clientState.Cursor
+	cursor.Hash = cloneBytes(clientState.Cursor.Hash)
+	return &ChainsyncClientStateSnapshot{
+		Cursor:               cursor,
+		NeedsInitialRollback: clientState.NeedsInitialRollback,
+	}, true
 }
 
 // RemoveClient unregisters a server-side (N2C) chainsync
@@ -316,6 +451,28 @@ func (s *State) RemoveClient(connId connection.ConnectionId) {
 	}
 	// Remove client state entry
 	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
+}
+
+// RemoveClientOwner removes a client only when the close belongs to its
+// currently registered server instance. An entry created without an owner is
+// still removable, closing the AddClient-to-owner registration race for legacy
+// and test callers.
+func (s *State) RemoveClientOwner(
+	connId connection.ConnectionId,
+	owner *ochainsync.Server,
+) {
+	s.Lock()
+	defer s.Unlock()
+	if current, ok := s.clientOwners[connId]; ok && current != owner {
+		return
+	}
+	if clientState := s.clients[connId]; clientState != nil &&
+		clientState.ChainIter != nil {
+		clientState.ChainIter.Cancel()
+	}
+	delete(s.clients, connId)
+	delete(s.clientOwners, connId)
 }
 
 // GetClientConnId returns the active chainsync client
@@ -329,19 +486,69 @@ func (s *State) GetClientConnId() *ouroboros.ConnectionId {
 
 // SetClientConnId sets the active chainsync client connection
 // ID. This is used when chain selection determines a new best
-// peer.
+// peer. A stale selection for an unavailable client is ignored.
 func (s *State) SetClientConnId(connId ouroboros.ConnectionId) {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	s.activeClientConnId = &connId
 }
 
-// RemoveClientConnId removes a connection from tracking. If
-// this was the active client, promotes the client with the
-// highest tip slot as the new primary.
+// TrySetClientConnId sets the active chainsync client after a chain-selection
+// decision and reports whether the client was still tracked and eligible.
+func (s *State) TrySetClientConnId(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists || tc == nil || tc.ObservabilityOnly || tc.HeadersRecv == 0 {
+		return false
+	}
+	s.activeClientConnId = &connId
+	return true
+}
+
+// ClearClientConnId clears connId as the active chainsync client. The
+// compare-and-clear behavior prevents a stale selected-to-none event from
+// clearing a newer chain-selection decision.
+func (s *State) ClearClientConnId(connId ouroboros.ConnectionId) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	if s.activeClientConnId != nil && *s.activeClientConnId == connId {
+		s.activeClientConnId = nil
+	}
+}
+
+// RemoveClientConnId removes a connection from tracking. If this was the
+// active client, the active selection is cleared. Selecting a replacement is
+// deliberately left to ChainSelector, which has the authoritative tracked-tip,
+// liveness, eligibility, and corroboration state.
 func (s *State) RemoveClientConnId(
 	connId ouroboros.ConnectionId,
 ) {
+	removedEvent := s.removeClientConnId(connId)
+	if removedEvent == nil {
+		return
+	}
+	// Removal can run inside an EventBus callback. PublishAsync waits for queue
+	// capacity, so waiting here can occupy that callback while all async workers
+	// are parked trying to deliver into its full subscriber channel. Keep the
+	// state mutation independent from bus backpressure; shutdown releases a
+	// deferred publish through the bus stop channel.
+	s.publishAsyncDetached(
+		ClientRemovedEventType,
+		event.NewEvent(ClientRemovedEventType, *removedEvent),
+	)
+}
+
+func (s *State) publishAsyncDetached(eventType event.EventType, evt event.Event) {
+	if s.eventBus == nil {
+		return
+	}
+	go s.eventBus.PublishAsync(eventType, evt)
+}
+
+func (s *State) removeClientConnId(
+	connId ouroboros.ConnectionId,
+) *ClientRemovedEvent {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	tc, exists := s.trackedClients[connId]
@@ -349,25 +556,21 @@ func (s *State) RemoveClientConnId(
 		*s.activeClientConnId == connId
 	wasEligible := exists && tc != nil && !tc.ObservabilityOnly
 	delete(s.trackedClients, connId)
+	peer, connectionID := blockfetchLatencyMetricLabels(connId)
+	s.blockfetchLatencyGauge.DeleteLabelValues(peer, connectionID)
 	s.clearObservedHeaderHistory(connId)
 	if wasPrimary {
 		s.activeClientConnId = nil
-		s.promoteBestClientLocked()
 	}
-	// Emit client removed event
+	var removedEvent *ClientRemovedEvent
 	if wasEligible && s.eventBus != nil {
-		s.eventBus.PublishAsync(
-			ClientRemovedEventType,
-			event.NewEvent(
-				ClientRemovedEventType,
-				ClientRemovedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-					WasPrimary:   wasPrimary,
-				},
-			),
-		)
+		removedEvent = &ClientRemovedEvent{
+			ConnId:       connId,
+			TotalClients: s.eligibleClientCountLocked(),
+			WasPrimary:   wasPrimary,
+		}
 	}
+	return removedEvent
 }
 
 func pointAheadOf(a, b ocommon.Point) bool {
@@ -387,88 +590,40 @@ func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
 	s.RemoveClientConnId(e.ConnId)
 }
 
-// promoteBestClientLocked selects the tracked client with the
-// highest tip slot as the new active client. Healthy (syncing
-// or synced) clients are preferred. If no healthy client exists,
-// the stalled client with the most recent activity is promoted
-// as a fallback — receiving a header will transition it back to
-// syncing, breaking the deadlock where nil active selection
-// prevents any client from making progress.
-// Caller must hold clientConnIdMutex.
-func (s *State) promoteBestClientLocked() {
-	var bestId *ouroboros.ConnectionId
-	var bestSlot uint64
-	var bestStalledId *ouroboros.ConnectionId
-	var bestStalledActivity time.Time
-	for id, tc := range s.trackedClients {
-		if tc.ObservabilityOnly || tc.Status == ClientStatusFailed {
-			continue
-		}
-		if tc.Status == ClientStatusStalled {
-			if bestStalledId == nil || tc.LastActivity.After(bestStalledActivity) {
-				idCopy := id
-				bestStalledId = &idCopy
-				bestStalledActivity = tc.LastActivity
-			}
-			continue
-		}
-		if bestId == nil || tc.Tip.Point.Slot > bestSlot {
-			idCopy := id
-			bestId = &idCopy
-			bestSlot = tc.Tip.Point.Slot
-		}
-	}
-	if bestId != nil {
-		s.activeClientConnId = bestId
-	} else if bestStalledId != nil {
-		// All clients stalled — promote the most recently active
-		// one to prevent permanent nil-selection deadlock.
-		s.activeClientConnId = bestStalledId
-	} else {
-		s.activeClientConnId = nil
-	}
-}
-
-// addTrackedClientLocked registers a new tracked client. It
-// initialises the TrackedClient, sets it as active if none
-// exists, and emits a ClientAddedEvent.
+// addTrackedClientLocked registers a new tracked client and returns its
+// notification. Registration alone does not make the client active: it has
+// not delivered a tip for ChainSelector to validate yet.
 // Caller must hold clientConnIdMutex.
 func (s *State) addTrackedClientLocked(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
 	startedAsOutbound bool,
-) {
+) *ClientAddedEvent {
 	s.trackedClients[connId] = &TrackedClient{
 		ConnId:            connId,
 		Status:            ClientStatusSyncing,
 		ObservabilityOnly: observabilityOnly,
 		StartedAsOutbound: startedAsOutbound,
-		LastActivity:      time.Now(),
+		LastActivity:      s.now(),
+		Patience: newPatienceState(
+			s.config.Patience.Capacity,
+			s.now(),
+		),
 	}
-	// Set as active if there's no active client
-	if !observabilityOnly && s.activeClientConnId == nil {
-		s.activeClientConnId = &connId
-	}
-	// Emit client added event
 	if !observabilityOnly && s.eventBus != nil {
-		s.eventBus.PublishAsync(
-			ClientAddedEventType,
-			event.NewEvent(
-				ClientAddedEventType,
-				ClientAddedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-				},
-			),
-		)
+		return &ClientAddedEvent{
+			ConnId:       connId,
+			TotalClients: s.eligibleClientCountLocked(),
+		}
 	}
+	return nil
 }
 
 // AddClientConnId adds a connection ID to the set of tracked
 // chainsync clients, enforcing the configured MaxClients limit.
 // Returns true if the client was added, false if rejected
-// (already tracked or at capacity). If no active client exists,
-// this connection is automatically set as the active client.
+// (already tracked or at capacity). ChainSelector sets the active client after
+// observing and validating a tip from the connection.
 // The client is recorded as outbound (StartedAsOutbound=true).
 func (s *State) AddClientConnId(
 	connId ouroboros.ConnectionId,
@@ -496,13 +651,26 @@ func (s *State) TryAddObservedClientConnIdWithDirection(
 	connId ouroboros.ConnectionId,
 	startedAsOutbound bool,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	if _, exists := s.trackedClients[connId]; exists {
-		return false
+	added, ok := func() (*ClientAddedEvent, bool) {
+		s.clientConnIdMutex.Lock()
+		defer s.clientConnIdMutex.Unlock()
+		if _, exists := s.trackedClients[connId]; exists {
+			return nil, false
+		}
+		return s.addTrackedClientLocked(connId, true, startedAsOutbound), true
+	}()
+	s.publishClientAdded(added)
+	return ok
+}
+
+func (s *State) publishClientAdded(added *ClientAddedEvent) {
+	if added == nil {
+		return
 	}
-	s.addTrackedClientLocked(connId, true, startedAsOutbound)
-	return true
+	s.publishAsyncDetached(
+		ClientAddedEventType,
+		event.NewEvent(ClientAddedEventType, *added),
+	)
 }
 
 // HasClientConnId returns true if the connection ID is being
@@ -548,18 +716,25 @@ func (s *State) TryAddClientConnId(
 	connId ouroboros.ConnectionId,
 	maxClients int,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	// Check if already tracked
-	if _, exists := s.trackedClients[connId]; exists {
-		return false
-	}
-	// Check client limit
-	if s.eligibleClientCountLocked() >= maxClients {
-		return false
-	}
-	s.addTrackedClientLocked(connId, false, false)
-	return true
+	return s.tryAddClientConnIdWithDirection(connId, maxClients, false)
+}
+
+func (s *State) tryAddClientConnIdWithDirection(
+	connId ouroboros.ConnectionId,
+	maxClients int,
+	startedAsOutbound bool,
+) bool {
+	added, ok := func() (*ClientAddedEvent, bool) {
+		s.clientConnIdMutex.Lock()
+		defer s.clientConnIdMutex.Unlock()
+		if _, exists := s.trackedClients[connId]; exists ||
+			s.eligibleClientCountLocked() >= maxClients {
+			return nil, false
+		}
+		return s.addTrackedClientLocked(connId, false, startedAsOutbound), true
+	}()
+	s.publishClientAdded(added)
+	return ok
 }
 
 // TryAddClientConnIdWithDirection is like TryAddClientConnId but
@@ -572,18 +747,7 @@ func (s *State) TryAddClientConnIdWithDirection(
 	maxClients int,
 	startedAsOutbound bool,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	// Check if already tracked
-	if _, exists := s.trackedClients[connId]; exists {
-		return false
-	}
-	// Check client limit
-	if s.eligibleClientCountLocked() >= maxClients {
-		return false
-	}
-	s.addTrackedClientLocked(connId, false, startedAsOutbound)
-	return true
+	return s.tryAddClientConnIdWithDirection(connId, maxClients, startedAsOutbound)
 }
 
 // ClientObservabilityOnly reports whether a tracked client is currently
@@ -641,67 +805,56 @@ func (s *State) SetClientObservabilityOnly(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
+	var notifyType event.EventType
+	var notify *event.Event
+	ok := func() bool {
+		s.clientConnIdMutex.Lock()
+		defer s.clientConnIdMutex.Unlock()
 
-	tc, exists := s.trackedClients[connId]
-	if !exists {
-		return false
-	}
-	if tc.ObservabilityOnly == observabilityOnly {
+		tc, exists := s.trackedClients[connId]
+		if !exists {
+			return false
+		}
+		if tc.ObservabilityOnly == observabilityOnly {
+			return true
+		}
+		if !observabilityOnly &&
+			s.config.MaxClients > 0 &&
+			s.eligibleClientCountLocked() >= s.config.MaxClients {
+			return false
+		}
+
+		wasPrimary := s.activeClientConnId != nil &&
+			*s.activeClientConnId == connId
+		wasEligible := !tc.ObservabilityOnly
+		tc.ObservabilityOnly = observabilityOnly
+		if wasPrimary && observabilityOnly {
+			s.activeClientConnId = nil
+		}
+
+		if s.eventBus != nil && wasEligible && observabilityOnly {
+			notifyType = ClientRemovedEventType
+			evt := event.NewEvent(ClientRemovedEventType, ClientRemovedEvent{
+				ConnId:       connId,
+				TotalClients: s.eligibleClientCountLocked(),
+				WasPrimary:   wasPrimary,
+			})
+			notify = &evt
+		}
+		if s.eventBus != nil && !wasEligible && !observabilityOnly {
+			notifyType = ClientAddedEventType
+			evt := event.NewEvent(ClientAddedEventType, ClientAddedEvent{
+				ConnId:       connId,
+				TotalClients: s.eligibleClientCountLocked(),
+			})
+			notify = &evt
+		}
 		return true
+	}()
+	if notify != nil {
+		s.publishAsyncDetached(notifyType, *notify)
 	}
-	if !observabilityOnly &&
-		s.config.MaxClients > 0 &&
-		s.eligibleClientCountLocked() >= s.config.MaxClients {
-		return false
-	}
-
-	wasPrimary := s.activeClientConnId != nil &&
-		*s.activeClientConnId == connId
-	wasEligible := !tc.ObservabilityOnly
-	tc.ObservabilityOnly = observabilityOnly
-	needPromote := false
-	if wasPrimary && observabilityOnly {
-		s.activeClientConnId = nil
-		needPromote = true
-	}
-	if !observabilityOnly && s.activeClientConnId == nil {
-		needPromote = true
-	}
-	if needPromote {
-		s.promoteBestClientLocked()
-	}
-
-	if s.eventBus == nil {
-		return true
-	}
-	if wasEligible && observabilityOnly {
-		s.eventBus.PublishAsync(
-			ClientRemovedEventType,
-			event.NewEvent(
-				ClientRemovedEventType,
-				ClientRemovedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-					WasPrimary:   wasPrimary,
-				},
-			),
-		)
-	}
-	if !wasEligible && !observabilityOnly {
-		s.eventBus.PublishAsync(
-			ClientAddedEventType,
-			event.NewEvent(
-				ClientAddedEventType,
-				ClientAddedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-				},
-			),
-		)
-	}
-	return true
+	return ok
 }
 
 // UpdateClientTip updates the cursor, tip, and activity
@@ -713,20 +866,76 @@ func (s *State) UpdateClientTip(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) bool {
-	return s.updateClientTip(connId, point, tip, true)
+	if !s.updateTrackedClientTip(connId, point, tip) {
+		return true
+	}
+	return s.RecordHeaderForDedup(connId, point)
 }
 
 // UpdateClientTipWithoutDedup updates the cursor, tip, and
-// activity tracking for a tracked client without recording the
-// header in the shared dedup cache. This is used for peers that
-// should not drive ledger ingress, so they do not suppress
-// later delivery of the same header from an eligible peer.
+// activity tracking for a tracked client without recording the header in the
+// shared dedup cache. The Ouroboros ingress path uses this before synchronous
+// chain selection so a switch event can verify that the client has delivered a
+// tip. It records the header for deduplication separately, and only when the
+// post-selection apply gate admits it. It reports whether the client was still
+// tracked and updated.
 func (s *State) UpdateClientTipWithoutDedup(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-) {
-	s.updateClientTip(connId, point, tip, false)
+) bool {
+	return s.updateTrackedClientTip(connId, point, tip)
+}
+
+// UpdateClientRollback updates an existing client's cursor, advertised tip,
+// activity, and syncing status atomically. Rollbacks do not count as delivered
+// headers or enter the header deduplication cache.
+func (s *State) UpdateClientRollback(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) bool {
+	active := s.patienceActive()
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	point.Hash = cloneBytes(point.Hash)
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Cursor = point
+	tc.Tip = tip
+	tc.LastActivity = s.now()
+	tc.Status = ClientStatusSyncing
+	s.resumePatienceAfterRollbackLocked(tc, point, tip, active)
+	return true
+}
+
+// RecordHeaderForDedup records a tracked header in the shared cross-peer
+// deduplication and fork-detection cache. Callers that update the tracked tip
+// before a synchronous selection decision use this after the apply gate, so a
+// withheld Genesis header cannot suppress a later eligible delivery.
+func (s *State) RecordHeaderForDedup(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	isNew := s.processHeader(connId, point)
+	// Prune stale observations on the normal progress path so the dedup cache
+	// stays bounded over long-running nodes.
+	s.maybePruneSeenHeaders()
+	return isNew
+}
+
+// RecordHeader records a header in the cross-peer deduplication cache after
+// the caller has completed any synchronous eligibility checks.
+func (s *State) RecordHeader(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	isNew := s.processHeader(connId, point)
+	s.maybePruneSeenHeaders()
+	return isNew
 }
 
 // RewindTrackedClientsTo rewinds tracked client cursors that sit ahead of the
@@ -748,7 +957,7 @@ func (s *State) RewindTrackedClientsTo(
 			Hash: cloneBytes(point.Hash),
 		}
 		tc.Status = ClientStatusSyncing
-		tc.LastActivity = time.Now()
+		tc.LastActivity = s.now()
 		ret = append(ret, connId)
 	}
 	return ret
@@ -764,6 +973,18 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 	}
 	prevHash := h.BlockHeader.PrevHash().Bytes()
 	if len(prevHash) == 0 {
+		return
+	}
+
+	// A raw header callback can still be in flight when the connection is
+	// removed. RemoveClientConnId deletes the tracked client and clears this
+	// history under clientConnIdMutex, so the tracked check is held across
+	// the observed-header write in the same order: a late callback for a
+	// connection that is gone would otherwise recreate an entry that nothing
+	// removes again, leaking one per disconnect.
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	if _, tracked := s.trackedClients[h.ConnectionId]; !tracked {
 		return
 	}
 
@@ -791,12 +1012,21 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 		header:   h,
 		prevHash: append([]byte(nil), prevHash...),
 	}
-	if len(chainHistory.order) <= maxObservedHeadersPerConn {
-		return
+	limit := s.observedHeaderLimit()
+	for len(chainHistory.order) > limit {
+		evictKey := chainHistory.order[0]
+		chainHistory.order = chainHistory.order[1:]
+		delete(chainHistory.byHash, evictKey)
 	}
-	evictKey := chainHistory.order[0]
-	chainHistory.order = chainHistory.order[1:]
-	delete(chainHistory.byHash, evictKey)
+}
+
+func (s *State) observedHeaderLimit() int {
+	if s.config.ObservedHeaderLimitFunc != nil {
+		if limit := s.config.ObservedHeaderLimitFunc(); limit > 0 {
+			return limit
+		}
+	}
+	return maxObservedHeadersPerConn
 }
 
 // LookupObservedHeader returns a previously observed header for the given
@@ -835,53 +1065,45 @@ func (s *State) ClearObservedHeaderHistory(
 	s.clearObservedHeaderHistory(connId)
 }
 
-func (s *State) updateClientTip(
+func (s *State) updateTrackedClientTip(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-	dedup bool,
 ) bool {
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
 	if !exists {
 		s.clientConnIdMutex.Unlock()
-		return true
+		return false
 	}
 	tc.Cursor = point
 	tc.Tip = tip
-	tc.LastActivity = time.Now()
+	tc.LastActivity = s.now()
 	tc.HeadersRecv++
 	if tc.Status == ClientStatusStalled {
 		tc.Status = ClientStatusSyncing
 	}
 	s.clientConnIdMutex.Unlock()
-
-	if !dedup {
-		return true
-	}
-	// Header deduplication and fork detection
-	isNew := s.processHeader(connId, point)
-	// Prune stale observations on the normal progress path so the dedup
-	// cache stays bounded over long-running nodes.
-	s.maybePruneSeenHeaders()
-	return isNew
+	return true
 }
 
 // processHeader checks whether the header at the given point
 // has already been seen. If another client reported a different
 // hash at the same slot, a fork detection event is emitted.
-// Returns true if this is a new (non-duplicate) header.
+// Returns true if the header is absent from the bounded deduplication cache.
+// Saturated slots retain the first alternatives and the latest header, and
+// suppress further fork notifications until the slot is pruned or cleared.
 func (s *State) processHeader(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 ) bool {
 	s.seenHeadersMutex.Lock()
-	defer s.seenHeadersMutex.Unlock()
 	records := s.seenHeaders[point.Slot]
 	// Check if any existing record matches this hash
 	for _, rec := range records {
 		if bytes.Equal(rec.hash, point.Hash) {
 			// Duplicate header, same hash
+			s.seenHeadersMutex.Unlock()
 			return false
 		}
 	}
@@ -892,6 +1114,14 @@ func (s *State) processHeader(
 		hash:   hashClone,
 		connId: connId,
 	}
+	if len(records) >= maxSeenHeadersPerSlot {
+		// Keep the first observations stable, but deduplicate consecutive
+		// deliveries of an overflow header too. An unseen header must remain
+		// eligible for ledger validation: cache saturation is not invalidity.
+		records[len(records)-1] = newRec
+		s.seenHeadersMutex.Unlock()
+		return true
+	}
 	s.seenHeaders[point.Slot] = append(records, newRec)
 	if point.Slot > s.seenHeadersMaxSlot {
 		s.seenHeadersMaxSlot = point.Slot
@@ -901,27 +1131,24 @@ func (s *State) processHeader(
 	// emit a fork detection event against the first record.
 	// Clone the Point.Hash to avoid aliasing the caller's
 	// buffer in the event payload.
-	if len(records) > 0 {
-		if s.eventBus != nil {
-			clonedPoint := ocommon.NewPoint(
-				point.Slot,
-				cloneBytes(point.Hash),
-			)
-			s.eventBus.PublishAsync(
-				ForkDetectedEventType,
-				event.NewEvent(
-					ForkDetectedEventType,
-					ForkDetectedEvent{
-						Slot:    point.Slot,
-						HashA:   records[0].hash,
-						HashB:   hashClone,
-						ConnIdA: records[0].connId,
-						ConnIdB: connId,
-						Point:   clonedPoint,
-					},
-				),
-			)
+	var forkEvent *ForkDetectedEvent
+	if len(records) > 0 && s.eventBus != nil {
+		clonedPoint := ocommon.NewPoint(point.Slot, cloneBytes(point.Hash))
+		forkEvent = &ForkDetectedEvent{
+			Slot:    point.Slot,
+			HashA:   records[0].hash,
+			HashB:   hashClone,
+			ConnIdA: records[0].connId,
+			ConnIdB: connId,
+			Point:   clonedPoint,
 		}
+	}
+	s.seenHeadersMutex.Unlock()
+	if forkEvent != nil {
+		s.publishAsyncDetached(
+			ForkDetectedEventType,
+			event.NewEvent(ForkDetectedEventType, *forkEvent),
+		)
 	}
 	return true
 }
@@ -949,11 +1176,18 @@ func trackedConnIdsEqual(
 	a,
 	b ouroboros.ConnectionId,
 ) bool {
-	if a.LocalAddr == nil && a.RemoteAddr == nil {
-		return b.LocalAddr == nil && b.RemoteAddr == nil
-	}
-	if b.LocalAddr == nil && b.RemoteAddr == nil {
-		return false
+	// Compare each address individually rather than via ConnectionId.String():
+	// that method dereferences LocalAddr/RemoteAddr unconditionally and panics
+	// when either is nil (e.g. a partial-nil tracked connection id).
+	return sameTrackedNetAddr(a.LocalAddr, b.LocalAddr) &&
+		sameTrackedNetAddr(a.RemoteAddr, b.RemoteAddr)
+}
+
+// sameTrackedNetAddr compares two addresses by string form, treating nil as
+// equal only to nil.
+func sameTrackedNetAddr(a, b net.Addr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
 	return a.String() == b.String()
 }
@@ -968,7 +1202,7 @@ func (s *State) MarkClientSynced(
 	var changed bool
 	if exists && tc.Status != ClientStatusSynced {
 		tc.Status = ClientStatusSynced
-		tc.LastActivity = time.Now()
+		tc.LastActivity = s.now()
 		changed = true
 	}
 	var slot uint64
@@ -977,7 +1211,7 @@ func (s *State) MarkClientSynced(
 	}
 	s.clientConnIdMutex.Unlock()
 	if changed && s.eventBus != nil {
-		s.eventBus.PublishAsync(
+		s.publishAsyncDetached(
 			ClientSyncedEventType,
 			event.NewEvent(
 				ClientSyncedEventType,
@@ -990,17 +1224,16 @@ func (s *State) MarkClientSynced(
 	}
 }
 
-// CheckStalledClients scans all tracked clients and marks any
-// that have exceeded the stall timeout. If the primary client
-// is stalled, a failover to the next best client is triggered.
-// Returns the list of connection IDs that were newly marked as
-// stalled.
+// CheckStalledClients scans all tracked clients and marks any that have
+// exceeded the stall timeout. It does not change the active connection;
+// ChainSelector owns selection, and the recycler closes stalled connections so
+// selection can move using the same liveness and eligibility contract.
+// Returns the list of connection IDs that were newly marked as stalled.
 func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-
-	now := time.Now()
+	now := s.now()
 	var stalled []ouroboros.ConnectionId
+	var notifications []ClientStalledEvent
 	for id, tc := range s.trackedClients {
 		if tc.ObservabilityOnly ||
 			tc.Status == ClientStatusStalled ||
@@ -1011,26 +1244,19 @@ func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 			tc.Status = ClientStatusStalled
 			stalled = append(stalled, id)
 			if s.eventBus != nil {
-				s.eventBus.PublishAsync(
-					ClientStalledEventType,
-					event.NewEvent(
-						ClientStalledEventType,
-						ClientStalledEvent{
-							ConnId: id,
-							Slot:   tc.Tip.Point.Slot,
-						},
-					),
-				)
+				notifications = append(notifications, ClientStalledEvent{
+					ConnId: id,
+					Slot:   tc.Tip.Point.Slot,
+				})
 			}
 		}
 	}
-
-	// Check if the primary client was stalled
-	if len(stalled) > 0 &&
-		s.activeClientConnId != nil &&
-		slices.Contains(stalled, *s.activeClientConnId) {
-		s.activeClientConnId = nil
-		s.promoteBestClientLocked()
+	s.clientConnIdMutex.Unlock()
+	for _, notification := range notifications {
+		s.publishAsyncDetached(
+			ClientStalledEventType,
+			event.NewEvent(ClientStalledEventType, notification),
+		)
 	}
 
 	return stalled
@@ -1267,12 +1493,33 @@ func (s *State) RecordBlockfetchLatency(
 	tc.blockfetchSampleCount++
 	if tc.blockfetchSampleCount == 1 {
 		tc.BlockfetchLatencyEWMA = latency
-		return
+	} else {
+		tc.BlockfetchLatencyEWMA = time.Duration(
+			float64(latency)*blockfetchLatencyAlpha +
+				float64(tc.BlockfetchLatencyEWMA)*(1-blockfetchLatencyAlpha),
+		)
 	}
-	tc.BlockfetchLatencyEWMA = time.Duration(
-		float64(latency)*blockfetchLatencyAlpha +
-			float64(tc.BlockfetchLatencyEWMA)*(1-blockfetchLatencyAlpha),
-	)
+	peer, connectionID := blockfetchLatencyMetricLabels(connId)
+	s.blockfetchLatencyGauge.WithLabelValues(peer, connectionID).
+		Set(tc.BlockfetchLatencyEWMA.Seconds())
+}
+
+func blockfetchLatencyMetricLabels(
+	connId ouroboros.ConnectionId,
+) (string, string) {
+	return netAddrLabel(connId.RemoteAddr),
+		fmt.Sprintf(
+			"%s<->%s",
+			netAddrLabel(connId.LocalAddr),
+			netAddrLabel(connId.RemoteAddr),
+		)
+}
+
+func netAddrLabel(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
 }
 
 // BlockfetchLatency returns the blockfetch EWMA for the given

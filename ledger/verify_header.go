@@ -19,14 +19,41 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
+	"strconv"
+	"strings"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
+)
+
+type genesisDelegation struct {
+	genesisHash  []byte
+	delegateHash []byte
+	vrfHash      []byte
+}
+
+type genesisOverlaySlotStatus uint8
+
+const (
+	genesisOverlayNone genesisOverlaySlotStatus = iota
+	genesisOverlayNonActive
+	genesisOverlayActive
 )
 
 // headerOnlyBlock adapts a block header to the Block interface so we can
@@ -35,32 +62,176 @@ type headerOnlyBlock struct {
 	header ledger.BlockHeader
 }
 
+var (
+	errHeaderVerificationDeferred = errors.New(
+		"header verification deferred",
+	)
+	errEpochCacheForecastBoundary = errors.New(
+		"epoch cache forecast crosses era boundary",
+	)
+	// errLeaderStakeSnapshotUnavailable marks a leader-stake snapshot that
+	// dingo cannot answer from: the epoch's mark/active distribution is
+	// missing, empty, or has no usable denominator. This is NEVER an
+	// authoritative statement that the producer pool is ineligible -- the
+	// reference node's nesPd is always populated, so an empty or absent
+	// snapshot is a dingo-side data gap (pruned below the retention window,
+	// unwritten during catch-up, or an incomplete import), not
+	// cardano-ledger's VRFKeyUnknown. Header verification classifies it as
+	// deferrable so the missing state is resolved rather than misreported as
+	// pool absence (issue #3727). A pool absent from a *populated* snapshot is
+	// a separate, authoritative rejection that never carries this sentinel.
+	errLeaderStakeSnapshotUnavailable = errors.New(
+		"leader stake snapshot unavailable",
+	)
+	errVrfKeyRegistrationHistoryUnavailable = errors.New(
+		"VRF key registration history unavailable",
+	)
+	// errEpochNonceUnavailable marks an epoch-cache entry that covers the
+	// requested slot but has no published Praos nonce. Byron epochs always
+	// have this shape; a post-Byron entry can also have it transiently while
+	// nonce state catches up. It is distinct from a slot that is outside the
+	// published cache entirely.
+	errEpochNonceUnavailable = errors.New(
+		"epoch has no nonce for slot",
+	)
+	// errBlockPipelineEta0Unavailable marks an epoch-cache entry with no
+	// Praos nonce. This is expected for Byron and can be transient for later
+	// eras; slots outside the published cache use
+	// errHeaderVerificationDeferred instead.
+	errBlockPipelineEta0Unavailable = errors.New(
+		"block-processing pipeline: epoch nonce unavailable",
+	)
+)
+
+// IsHeaderVerificationDeferred reports whether header-only verification could
+// not proceed because required ledger state, epoch data, or stake snapshot
+// data is not available yet. errEpochNonceUnavailable is included: a cached
+// epoch entry with no published nonce yet (Byron always, or a post-Byron
+// epoch transiently) is the same "not ready, not proof of invalidity"
+// condition as a slot outside the published cache entirely -- treating it as
+// a hard failure would let a chain-selection or Leios-announcement caller
+// wrongly reject and recycle an honest peer over a transient local gap
+// instead of retrying once the nonce is published (matches how
+// errBlockPipelineEta0Unavailable, which wraps the same sentinel, is already
+// treated as non-fatal on the block-pipeline path).
+func IsHeaderVerificationDeferred(err error) bool {
+	return errors.Is(err, errHeaderVerificationDeferred) ||
+		errors.Is(err, errEpochNonceUnavailable)
+}
+
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
 func (b headerOnlyBlock) Type() int                  { return 0 }
 func (b headerOnlyBlock) Transactions() []lcommon.Transaction {
 	return nil
 }
 func (b headerOnlyBlock) Utxorpc() (*utxorpc.Block, error) { return nil, nil }
-func (b headerOnlyBlock) Hash() lcommon.Blake2b256         { return b.header.Hash() }
-func (b headerOnlyBlock) PrevHash() lcommon.Blake2b256     { return b.header.PrevHash() }
-func (b headerOnlyBlock) BlockNumber() uint64              { return b.header.BlockNumber() }
-func (b headerOnlyBlock) SlotNumber() uint64               { return b.header.SlotNumber() }
-func (b headerOnlyBlock) IssuerVkey() lcommon.IssuerVkey   { return b.header.IssuerVkey() }
-func (b headerOnlyBlock) BlockBodySize() uint64            { return b.header.BlockBodySize() }
-func (b headerOnlyBlock) Era() lcommon.Era                 { return b.header.Era() }
-func (b headerOnlyBlock) Cbor() []byte                     { return b.header.Cbor() }
+
+func (b headerOnlyBlock) Hash() lcommon.Blake2b256 { return b.header.Hash() }
+
+func (b headerOnlyBlock) PrevHash() lcommon.Blake2b256 { return b.header.PrevHash() }
+
+func (b headerOnlyBlock) BlockNumber() uint64 { return b.header.BlockNumber() }
+
+func (b headerOnlyBlock) SlotNumber() uint64 { return b.header.SlotNumber() }
+
+func (b headerOnlyBlock) IssuerVkey() lcommon.IssuerVkey { return b.header.IssuerVkey() }
+
+func (b headerOnlyBlock) BlockBodySize() uint64 { return b.header.BlockBodySize() }
+
+func (b headerOnlyBlock) Era() lcommon.Era { return b.header.Era() }
+
+func (b headerOnlyBlock) Cbor() []byte { return b.header.Cbor() }
 func (b headerOnlyBlock) BlockBodyHash() lcommon.Blake2b256 {
 	return b.header.BlockBodyHash()
 }
 
-func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) error {
-	return ls.verifyBlockHeaderCrypto(headerOnlyBlock{header: header})
+func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(
+	header ledger.BlockHeader,
+) error {
+	_, err := ls.verifyBlockHeaderStatelessCrypto(
+		headerOnlyBlock{header: header},
+		false,
+	)
+	return err
+}
+
+// ValidateBlockHeaderCrypto validates a header using the current ledger
+// state.  It is used by protocol handlers that receive a header without its
+// block body (for example LeiosNotify announcements) and must not let an
+// unauthenticated header influence shared state.
+func (ls *LedgerState) ValidateBlockHeaderCrypto(
+	header ledger.BlockHeader,
+) error {
+	if header == nil {
+		return errors.New("nil block header")
+	}
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+		headerOnlyBlock{header: header},
+		false,
+		false,
+	)
+}
+
+// ShouldVerifyChainSelectionHeaderCrypto reports whether a header at the
+// given slot is eligible to have its cryptography verified right now via
+// ValidateChainSelectionHeaderCrypto. Verification is skipped only for
+// slots already covered by an imported Mithril snapshot, since those slots
+// were authenticated by the certificate chain during import and the
+// restored database does not retain every historical epoch nonce. It is not
+// exempted merely because bulk historical/catch-up loading has not yet
+// enabled live validation (issue #3528). A caller that skips verification
+// because this returns false must still treat the header as eligible, not
+// reject it -- the same trust boundary the ledger's own pipeline already
+// extends to this data.
+//
+// Unlike shouldEnforceBlockPipelineCrypto (the ledger's own chainsync
+// header-queue gate), this does NOT also skip when the epoch nonce isn't
+// cached yet: that gate can rely on a later retry once the nonce becomes
+// available, but chain selection has no such retry -- a header this
+// returns false for is never re-verified. ValidateChainSelectionHeaderCrypto
+// already handles a not-yet-available epoch by returning a deferred error
+// (see IsHeaderVerificationDeferred) rather than failing, so it's always
+// safe to attempt verification here and let the verifier decide.
+func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
+	slot uint64,
+) bool {
+	return !ls.slotCoveredByMithril(slot)
+}
+
+// ValidateChainSelectionHeaderCrypto verifies a header's VRF/KES cryptography
+// and, where the local ledger's stake/pool state has already caught up to
+// the header's epoch, its leader eligibility. It lets chain selection require
+// that a peer-reported header has passed the same checks as the applied
+// chain before the header is allowed to influence Genesis density or
+// corroboration (dingo #3517), independent of whether that header will ever
+// be applied to the ledger.
+//
+// It never advances the shared epoch cache (matching ValidateBlockHeaderCrypto's
+// no-mutation contract for header-only validation), but unlike
+// ValidateBlockHeaderCrypto it tolerates ledger state that has not yet caught
+// up to the header's slot: that is the normal condition for a peer
+// legitimately racing ahead of local ledger application during fast sync or
+// Genesis bootstrap. Use IsHeaderVerificationDeferred to distinguish that
+// case (the header must still be treated as eligible) from a header this
+// node can already prove is invalid.
+func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
+	header ledger.BlockHeader,
+) error {
+	if header == nil {
+		return errors.New("nil block header")
+	}
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+		headerOnlyBlock{header: header},
+		false,
+		true,
+	)
 }
 
 // verifyBlockHeader performs cryptographic verification of a block header.
 // This includes VRF proof verification and KES signature verification.
-// Byron-era blocks are skipped because they use a different consensus
-// mechanism (PBFT) and do not have VRF/KES fields.
+// Byron-era blocks are skipped here because this helper has only Praos
+// parameters. LedgerState.verifyBlockHeaderStatelessCrypto validates their
+// PBFT signatures and issuer state through the configured Byron genesis.
 //
 // Parameters:
 //   - block: the block whose header to verify
@@ -68,7 +239,7 @@ func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) er
 //   - slotsPerKesPeriod: number of slots per KES period from Shelley genesis
 //
 // Returns an error if verification fails, nil if the block passes
-// verification or is a Byron-era block.
+// verification or is a Byron-era block (validated by the LedgerState wrapper).
 func verifyBlockHeaderHex(
 	block ledger.Block,
 	epochNonceHex string,
@@ -103,8 +274,25 @@ func verifyBlockHeaderHex(
 		SkipStakePoolValidation:   true,
 	}
 
+	header, err := normalizeHeaderVrfFieldsFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification failed at slot %d: "+
+				"normalize VRF fields from header body CBOR: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if err := verifyTPraosNonceVrfHex(header, epochNonceHex); err != nil {
+		return fmt.Errorf(
+			"block header verification failed at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+
 	isValid, _, _, _, err := ledger.VerifyBlock(
-		block,
+		headerOnlyBlock{header: header},
 		epochNonceHex,
 		slotsPerKesPeriod,
 		config,
@@ -145,12 +333,211 @@ func verifyBlockHeaderHex(
 func (ls *LedgerState) verifyBlockHeaderCrypto(
 	block ledger.Block,
 ) error {
-	// Skip Byron-era blocks early to avoid parameter lookups
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, false)
+}
+
+func (ls *LedgerState) verifyBlockHeaderCryptoBeforeApply(
+	block ledger.Block,
+) error {
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, true)
+}
+
+func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+	allowStateDefer bool,
+) error {
+	epoch, epochCache, err := ls.verifyBlockHeaderStatelessCryptoWithCache(
+		block,
+		allowEpochCacheAdvance,
+	)
+	if err != nil {
+		return err
+	}
+	return ls.verifyBlockHeaderStateWithCache(
+		block, epoch.EpochId, epochCache, allowStateDefer,
+	)
+}
+
+func (ls *LedgerState) verifyBlockHeaderStateWithEpochAdvance(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+	allowStateDefer bool,
+) error {
 	if block.Era().Id == byron.EraIdByron {
 		return nil
 	}
+	epoch, epochCache, err := ls.headerVerificationEpochWithCache(
+		block.SlotNumber(),
+		allowEpochCacheAdvance,
+	)
+	if err != nil {
+		return err
+	}
+	return ls.verifyBlockHeaderStateWithCache(
+		block, epoch.EpochId, epochCache, allowStateDefer,
+	)
+}
+
+func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, error) {
+	epoch, _, err := ls.verifyBlockHeaderStatelessCryptoWithCache(
+		block, allowEpochCacheAdvance,
+	)
+	return epoch, err
+}
+
+func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, []models.Epoch, error) {
+	// Byron uses PBFT rather than Praos. Validate its exact signature,
+	// configured genesis issuer, protocol magic, and current-slot bound before
+	// avoiding the Praos epoch/nonce lookups below. Ordered active-delegation
+	// and issuer-window checks run during ledger application because parallel
+	// pre-validation cannot see earlier blocks in the same batch.
+	if block.Era().Id == byron.EraIdByron {
+		err := ls.validateByronPBFTHeaderCrypto(block)
+		return models.Epoch{}, nil, err
+	}
 
 	blockSlot := block.SlotNumber()
+	epoch, epochCache, err := ls.headerVerificationEpochWithCache(
+		blockSlot,
+		allowEpochCacheAdvance,
+	)
+	if err != nil {
+		return models.Epoch{}, nil, err
+	}
+
+	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
+	if slotsPerKesPeriod == 0 {
+		return models.Epoch{}, nil, fmt.Errorf(
+			"shelley genesis not available for block header verification at slot %d",
+			blockSlot,
+		)
+	}
+
+	if err := verifyBlockHeaderHex(
+		block,
+		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
+		slotsPerKesPeriod,
+	); err != nil {
+		return models.Epoch{}, nil, err
+	}
+
+	// Validate the operational certificate's cold-key signature and KES
+	// period expiry. This is the stateless half of inbound opcert validation;
+	// the counter-monotonicity check lives in the block-apply transaction.
+	if err := verifyOpCertHeaderCrypto(
+		block.Header(),
+		blockSlot,
+		slotsPerKesPeriod,
+		ls.maxKESEvolutions(),
+	); err != nil {
+		return models.Epoch{}, nil, fmt.Errorf(
+			"block header verification failed at slot %d: %w",
+			blockSlot,
+			err,
+		)
+	}
+
+	return epoch, epochCache, nil
+}
+
+// validateHeaderEraOrder rejects a non-nil header whose era precedes the era
+// of the header or block it extends (chain.ErrEraRegression). The parent is
+// resolved only when it is the primary chain's header tip or block tip, which
+// covers every header this node would admit; a header extending anything else
+// is checked against its concrete parent at chain admission and by the inbound
+// block envelope.
+func (ls *LedgerState) validateHeaderEraOrder(header ledger.BlockHeader) error {
+	parentEra, found, err := ls.chain.ParentEra(header.PrevHash().Bytes())
+	if err != nil {
+		// Failing to load a local block says nothing about the peer's header.
+		return fmt.Errorf(
+			"%w: resolve parent era: %w",
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
+	if !found {
+		return nil
+	}
+	if err := chain.CheckEraOrder(header.Era().Id, parentEra); err != nil {
+		return fmt.Errorf(
+			"block header at slot %d: %w",
+			header.SlotNumber(),
+			err,
+		)
+	}
+	return nil
+}
+
+func (ls *LedgerState) headerVerificationEpoch(
+	blockSlot uint64,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, error) {
+	// The epoch cache can be forecast forward for near-future headers, but it
+	// must never be advanced past the HFC safe zone or a known era boundary.
+	// Resolve known epochs without requiring forecast configuration. Only
+	// future slots need the immutable summary before cache mutation, and
+	// checking it first surfaces ErrPastHorizon before ensureEpochForSlot
+	// mutates any forecasted nonce state.
+	_, cachedEpochErr := ls.epochForSlot(blockSlot)
+	if snapshot := ls.loadConsensusSnapshot(); cachedEpochErr != nil &&
+		snapshot != nil && len(snapshot.epochCache) > 0 {
+		summary, err := ls.HardForkSummary()
+		if err != nil {
+			// A summary that cannot be BUILT says nothing about the header:
+			// the era shape, the genesis it is derived from, or the epoch
+			// cache is unavailable, all of which are local faults. Byron
+			// genesis alone is enough to reach here, because
+			// eras.BuildShapeForEras builds Byron era params for every
+			// config while ByronGenesisFile is optional. Since
+			// ouroboros/chainsync.go routes every non-deferred header error
+			// to ConnectionRecycleRequestedEvent, returning this unwrapped
+			// recycles the honest peer that served the header and stalls
+			// catch-up at each epoch boundary. Classify it as deferred so
+			// the block stays queued for in-order re-verification instead.
+			return models.Epoch{}, fmt.Errorf(
+				"%w: block header verification deferred: "+
+					"build forecast for slot %d: %w",
+				errHeaderVerificationDeferred,
+				blockSlot,
+				err,
+			)
+		}
+		if _, err := summary.SlotToEpoch(blockSlot); err != nil {
+			if errors.Is(err, hardfork.ErrPastHorizon) {
+				// A header past the forecast horizon cannot be verified yet:
+				// the applied ledger has not advanced far enough to know its
+				// epoch and nonce. This is a deferred condition, not a peer
+				// fault. Classify it as deferred so the block stays queued for
+				// in-order re-verification once the applied tip advances into
+				// range (preserving the no-apply-past-horizon guard), instead
+				// of being treated as a crypto failure that recycles the honest
+				// peer. Recycling on past-horizon starves the peer pool the
+				// block and Leios endorser-block fetch depend on and deadlocks
+				// catch-up at epoch boundaries; the chainsync recycle paths skip
+				// deferred errors.
+				return models.Epoch{}, fmt.Errorf(
+					"%w: block header verification deferred past era horizon "+
+						"at slot %d: %w",
+					errHeaderVerificationDeferred,
+					blockSlot,
+					err,
+				)
+			}
+			return models.Epoch{}, fmt.Errorf(
+				"block header verification rejected: forecast slot %d: %w",
+				blockSlot,
+				err,
+			)
+		}
+	}
 
 	// Look up the epoch for this block's slot from the epoch cache.
 	// This is an epoch-aware lookup that searches through all known
@@ -158,13 +545,30 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 	// at epoch boundaries are verified against the correct nonce.
 	epoch, err := ls.epochForSlot(blockSlot)
 	if err != nil {
+		if !allowEpochCacheAdvance {
+			return models.Epoch{}, fmt.Errorf(
+				"%w: no cached epoch data for slot %d: %w",
+				errHeaderVerificationDeferred,
+				blockSlot,
+				err,
+			)
+		}
 		// Epoch cache doesn't cover this slot yet. Blockfetch can
 		// deliver blocks past the epoch boundary before the ledger
 		// processing goroutine runs the full epoch rollover. Eagerly
 		// compute the next epoch(s) so verification can proceed.
 		epoch, err = ls.ensureEpochForSlot(blockSlot)
 		if err != nil {
-			return fmt.Errorf(
+			if errors.Is(err, errEpochCacheForecastBoundary) {
+				return models.Epoch{}, fmt.Errorf(
+					"%w: block header verification deferred at hard-fork "+
+						"boundary for slot %d: %w",
+					errHeaderVerificationDeferred,
+					blockSlot,
+					err,
+				)
+			}
+			return models.Epoch{}, fmt.Errorf(
 				"block header verification rejected: no epoch data for slot %d: %w",
 				blockSlot,
 				err,
@@ -176,63 +580,1739 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 	// A missing nonce means the epoch rollover has not completed
 	// or the epoch is too far in the future.
 	if len(epoch.Nonce) == 0 {
-		return fmt.Errorf(
-			"block header verification rejected: "+
+		return models.Epoch{}, fmt.Errorf(
+			"%w: block header verification rejected: "+
 				"epoch %d has no nonce for slot %d "+
 				"(epoch rollover may not have been processed yet)",
+			errEpochNonceUnavailable,
 			epoch.EpochId,
 			blockSlot,
 		)
 	}
+	return epoch, nil
+}
 
-	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
-	if slotsPerKesPeriod == 0 {
-		return fmt.Errorf(
-			"shelley genesis not available for block header verification at slot %d",
-			blockSlot,
+// headerVerificationEpochWithCache pairs the epoch result with the immutable
+// cache that produced it. Retry if an epoch rollover publishes a new cache
+// during the lookup.
+func (ls *LedgerState) headerVerificationEpochWithCache(
+	blockSlot uint64,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, []models.Epoch, error) {
+	for range 3 {
+		before := ls.loadConsensusSnapshot()
+		epoch, err := ls.headerVerificationEpoch(
+			blockSlot, allowEpochCacheAdvance,
 		)
+		if err != nil {
+			return models.Epoch{}, nil, err
+		}
+		after := ls.loadConsensusSnapshot()
+		if before == after {
+			return epoch, after.epochCache, nil
+		}
 	}
-
-	return verifyBlockHeaderHex(
-		block,
-		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
-		slotsPerKesPeriod,
+	return models.Epoch{}, nil, errors.New(
+		"block header verification deferred: epoch cache changed during lookup",
 	)
 }
 
+//nolint:unused // retained as a test helper
+func (ls *LedgerState) verifyBlockHeaderState(
+	block ledger.Block,
+	epochId uint64,
+	allowStateDefer bool,
+) error {
+	return ls.verifyBlockHeaderStateWithCache(
+		block, epochId, ls.epochCacheSnapshot(), allowStateDefer,
+	)
+}
+
+func (ls *LedgerState) verifyBlockHeaderStateWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
+	allowStateDefer bool,
+) error {
+	if handled, err := ls.verifyGenesisDelegateHeader(
+		block,
+		allowStateDefer,
+	); handled || err != nil {
+		return err
+	}
+
+	// Bind the header's VRF key to the pool's on-chain registered VRF key.
+	// The crypto path above verifies the VRF proof only against the key carried
+	// in the header (SkipStakePoolValidation skips gouroboros' registered-key
+	// check), so without this an attacker can grind VRF keys to win slots.
+	if err := ls.verifyRegisteredVrfKeyWithCache(block, epochId, epochCache); err != nil {
+		if allowStateDefer &&
+			(errors.Is(err, models.ErrPoolNotFound) ||
+				errors.Is(err, errVrfKeyRegistrationHistoryUnavailable)) &&
+			ls.ledgerTipBehindSlot(block.SlotNumber()) {
+			return fmt.Errorf(
+				"%w: registered VRF key state for slot %d is ahead of the ledger apply cursor: %w",
+				errHeaderVerificationDeferred,
+				block.SlotNumber(),
+				err,
+			)
+		}
+		return err
+	}
+
+	if err := ls.verifyBlockLeaderEligibilityWithCache(
+		block, epochId, epochCache,
+	); err != nil {
+		// Scope the deferral to the RECOVERABLE case only (issue #3727,
+		// finding 4 -- consensus-sensitive). A leader-stake snapshot reported
+		// unavailable (errLeaderStakeSnapshotUnavailable) means the epoch's
+		// distribution is missing/empty, which is only *recoverable* while the
+		// apply cursor is still behind this slot: the mark snapshot for the
+		// slot has not been computed yet and will exist once apply catches up,
+		// so defer. Once the cursor has caught up, a still-empty distribution
+		// is a genuine, permanent gap for that epoch -- a producer whose
+		// eligibility can never be established -- and MUST stay a hard
+		// rejection, exactly as before this change: deferring it forever would
+		// either adopt a block whose leader eligibility is never checked or
+		// loop. The #3727 retention pin is what makes the recoverable case
+		// actually resolve: it retains the mark snapshot a queued/deferred
+		// header needs so that, by the time the cursor reaches the slot, the
+		// snapshot is present and this path is not taken. Deferred headers on
+		// abandoned forks are released by the retention guard's eviction of
+		// entries the cursor has passed (see PrunePoolSnapshotsWithRetentionFloor),
+		// not by deferring their headers forever. A pool absent from a
+		// *populated* snapshot never carries this sentinel and hard-rejects.
+		if allowStateDefer &&
+			errors.Is(err, errLeaderStakeSnapshotUnavailable) &&
+			ls.ledgerTipBehindSlot(block.SlotNumber()) {
+			return fmt.Errorf(
+				"%w: leader stake snapshot state for slot %d is ahead of the ledger apply cursor: %w",
+				errHeaderVerificationDeferred,
+				block.SlotNumber(),
+				err,
+			)
+		}
+		return err
+	}
+	return nil
+}
+
+func (ls *LedgerState) verifyGenesisDelegateHeader(
+	block ledger.Block,
+	allowStateDefer bool,
+) (bool, error) {
+	if block.Era().Id == byron.EraIdByron {
+		return false, nil
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return false, nil
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil || len(shelleyGenesis.GenDelegs) == 0 {
+		return false, nil
+	}
+	// The overlay decision uses protocol parameters for the block's epoch.
+	// Blockfetch can verify a header ahead of ledger apply, while the
+	// in-memory parameters still describe the previous epoch. Defer any
+	// state-dependent overlay decision until the rollover has installed the
+	// target epoch's parameters. This must precede
+	// genesisOverlayDelegationForBlock because stale parameters can otherwise
+	// classify a future slot as having no overlay.
+	if allowStateDefer && ls.ledgerTipBehindSlot(block.SlotNumber()) {
+		return true, fmt.Errorf(
+			"%w: genesis overlay state for slot %d is not yet authoritative",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+		)
+	}
+	genesisDeleg, status, err := ls.genesisOverlayDelegationForBlock(
+		block,
+		shelleyGenesis,
+	)
+	if err != nil {
+		return true, err
+	}
+	if status == genesisOverlayNone {
+		return false, nil
+	}
+	if status == genesisOverlayNonActive {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"slot is reserved for the genesis overlay schedule but not active",
+			block.SlotNumber(),
+		)
+	}
+
+	issuerHash := block.IssuerVkey().Hash()
+	if !bytes.Equal(issuerHash.Bytes(), genesisDeleg.delegateHash) {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"genesis overlay slot assigned to delegate %x, got issuer %x",
+			block.SlotNumber(),
+			genesisDeleg.delegateHash,
+			issuerHash.Bytes(),
+		)
+	}
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(block.Header())
+	if err != nil {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract genesis delegate VRF key: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfKey) == 0 {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"genesis delegate VRF key unavailable",
+			block.SlotNumber(),
+		)
+	}
+	headerVrfKeyHash := lcommon.Blake2b256Hash(vrfKey)
+	if !bytes.Equal(headerVrfKeyHash.Bytes(), genesisDeleg.vrfHash) {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"genesis delegate %s VRF key does not match genesis VRF key "+
+				"(header %x, genesis %x)",
+			block.SlotNumber(),
+			hex.EncodeToString(issuerHash.Bytes()),
+			headerVrfKeyHash.Bytes(),
+			genesisDeleg.vrfHash,
+		)
+	}
+	return true, nil
+}
+
+// genesisOverlayDelegationForBlock resolves the overlay parameters using the
+// era that encoded the block. At a hard-fork boundary, the boundary block can
+// be encoded in the predecessor era while its header announces the successor.
+// In that case the epoch cache already describes the successor era, but the
+// block's leader was selected under the predecessor-era parameters.
+func (ls *LedgerState) genesisOverlayDelegationForBlock(
+	block ledger.Block,
+	shelleyGenesis *shelley.ShelleyGenesis,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	if pparams == nil {
+		// Unresolvable overlay parameters are a local state gap, not a peer
+		// fault: the snapshot's current pparams, the persisted pparams row
+		// for the block's epoch, and the era forecast behind
+		// ProtocolParamsForSlot can each be unavailable while the applied
+		// ledger catches up. ouroboros/chainsync.go routes every
+		// non-deferred header error to ConnectionRecycleRequestedEvent, so
+		// rejecting here drops the honest peer that served the header.
+		// Classify it as deferred, the same way this file already classifies
+		// an unbuildable forecast and an unresolvable consensus mode, so the
+		// header is re-verified in order once the parameters resolve.
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"%w: block header verification deferred at slot %d: "+
+				"protocol parameters unavailable for genesis overlay",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+		)
+	}
+	return ls.genesisOverlayDelegationForSlotWithParams(
+		block.SlotNumber(),
+		shelleyGenesis,
+		pparams,
+	)
+}
+
+func (ls *LedgerState) genesisOverlayDelegationForSlotWithParams(
+	slot uint64,
+	shelleyGenesis *shelley.ShelleyGenesis,
+	pparams lcommon.ProtocolParameters,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	genesisDelegs, err := parseShelleyGenesisDelegations(shelleyGenesis)
+	if err != nil {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if len(genesisDelegs) == 0 {
+		return genesisDelegation{}, genesisOverlayNone, nil
+	}
+
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"resolve epoch for genesis overlay schedule: %w",
+			slot,
+			err,
+		)
+	}
+	if epoch.LengthInSlots == 0 || slot < epoch.StartSlot {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"invalid epoch data for genesis overlay schedule",
+			slot,
+		)
+	}
+
+	decentralization := decentralizationParamRat(pparams)
+	overlayIndex, status := classifyGenesisOverlaySlot(
+		slot-epoch.StartSlot,
+		decentralization,
+		shelleyGenesis.ActiveSlotsCoeff.Rat,
+		uint64(len(genesisDelegs)),
+	)
+	if status != genesisOverlayActive {
+		return genesisDelegation{}, status, nil
+	}
+
+	genesisDeleg := genesisDelegs[overlayIndex]
+	activeDeleg, err := ls.activeGenesisDelegationForSlot(genesisDeleg, slot)
+	if err != nil {
+		return genesisDelegation{}, genesisOverlayNone, err
+	}
+	return activeDeleg, genesisOverlayActive, nil
+}
+
+func parseShelleyGenesisDelegations(
+	shelleyGenesis *shelley.ShelleyGenesis,
+) ([]genesisDelegation, error) {
+	if shelleyGenesis == nil || len(shelleyGenesis.GenDelegs) == 0 {
+		return nil, nil
+	}
+	ret := make([]genesisDelegation, 0, len(shelleyGenesis.GenDelegs))
+	for genesisHashHex, genDeleg := range shelleyGenesis.GenDelegs {
+		genesisHash, err := hex.DecodeString(genesisHashHex)
+		if err != nil || len(genesisHash) != lcommon.Blake2b224Size {
+			return nil, fmt.Errorf(
+				"invalid genesis key hash %q",
+				genesisHashHex,
+			)
+		}
+		delegateHashHex := genDeleg["delegate"]
+		delegateHash, err := hex.DecodeString(delegateHashHex)
+		if err != nil || len(delegateHash) != lcommon.Blake2b224Size {
+			return nil, fmt.Errorf(
+				"invalid genesis delegate hash %q",
+				delegateHashHex,
+			)
+		}
+		vrfHashHex := genDeleg["vrf"]
+		vrfHash, err := hex.DecodeString(vrfHashHex)
+		if err != nil || len(vrfHash) != lcommon.Blake2b256Size {
+			return nil, fmt.Errorf(
+				"invalid genesis delegate VRF key hash %q",
+				vrfHashHex,
+			)
+		}
+		ret = append(ret, genesisDelegation{
+			genesisHash:  genesisHash,
+			delegateHash: delegateHash,
+			vrfHash:      vrfHash,
+		})
+	}
+	slices.SortFunc(ret, func(a, b genesisDelegation) int {
+		return bytes.Compare(a.genesisHash, b.genesisHash)
+	})
+	return ret, nil
+}
+
+func (ls *LedgerState) activeGenesisDelegationForSlot(
+	initial genesisDelegation,
+	slot uint64,
+) (genesisDelegation, error) {
+	return ls.activeGenesisDelegationForSlotWithTxn(initial, slot, nil)
+}
+
+func (ls *LedgerState) activeGenesisDelegationForSlotWithTxn(
+	initial genesisDelegation,
+	slot uint64,
+	txn types.Txn,
+) (genesisDelegation, error) {
+	if ls.db == nil {
+		return genesisDelegation{}, errors.New(
+			"genesis delegation state has no metadata database",
+		)
+	}
+	row, err := ls.db.Metadata().GetGenesisDelegationForSlot(
+		initial.genesisHash,
+		slot,
+		txn,
+	)
+	if err != nil {
+		return genesisDelegation{}, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"lookup active genesis delegation: %w",
+			slot,
+			err,
+		)
+	}
+	if row == nil {
+		return initial, nil
+	}
+	if len(row.GenesisDelegateHash) != lcommon.Blake2b224Size ||
+		len(row.VrfKeyHash) != lcommon.Blake2b256Size {
+		return genesisDelegation{}, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"invalid active genesis delegation for genesis key %x",
+			slot,
+			initial.genesisHash,
+		)
+	}
+	return genesisDelegation{
+		genesisHash:  append([]byte(nil), initial.genesisHash...),
+		delegateHash: append([]byte(nil), row.GenesisDelegateHash...),
+		vrfHash:      append([]byte(nil), row.VrfKeyHash...),
+	}, nil
+}
+
+// GenesisDelegateKeyHashes returns the active Shelley genesis delegate keys
+// used by the classic PPUP and MIR rules at slot.
+func (ls *LedgerState) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return ls.genesisDelegateKeyHashes(slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateKeyHashes(
+	slot uint64,
+	txn types.Txn,
+) ([]lcommon.Blake2b224, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, errors.New("unable to get cardano node config")
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	delegates := make(map[lcommon.Blake2b224]struct{}, len(genesis))
+	for _, initial := range genesis {
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		delegates[delegate] = struct{}{}
+	}
+	ret := make([]lcommon.Blake2b224, 0, len(delegates))
+	for delegate := range delegates {
+		ret = append(ret, delegate)
+	}
+	slices.SortFunc(ret, func(a, b lcommon.Blake2b224) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return ret, nil
+}
+
+// GenesisDelegateForGenesisKey resolves the active delegate for a Shelley
+// genesis key at slot.
+func (ls *LedgerState) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return ls.genesisDelegateForGenesisKey(genesisKeyHash, slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+	txn types.Txn,
+) (lcommon.Blake2b224, bool, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return lcommon.Blake2b224{}, false, errors.New(
+			"unable to get cardano node config",
+		)
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return lcommon.Blake2b224{}, false, err
+	}
+	for _, initial := range genesis {
+		if !bytes.Equal(initial.genesisHash, genesisKeyHash[:]) {
+			continue
+		}
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return lcommon.Blake2b224{}, false, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		return delegate, true, nil
+	}
+	return lcommon.Blake2b224{}, false, nil
+}
+
+// GenesisUpdateQuorum returns the quorum configured by Shelley genesis.
+func (ls *LedgerState) GenesisUpdateQuorum() (uint, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("unable to get cardano node config")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return 0, errors.New("unable to get shelley genesis")
+	}
+	return uint(genesis.UpdateQuorum), nil
+}
+
+// ProtocolParameterUpdateWindow returns the current epoch and the first slot
+// where proposals target the following epoch.
+func (ls *LedgerState) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, 0, errors.New("unable to get cardano node config")
+	}
+	// Every Shelley-family era takes its stability window from Shelley
+	// genesis, so the transaction's era does not change the boundary.
+	stabilityWindow, err := eras.StabilityWindowForEra(
+		ls.config.CardanoNodeConfig,
+		eras.ShelleyEraDesc.Id,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("classic PPUP stability window: %w", err)
+	}
+	epochLength := uint64(epoch.LengthInSlots)
+	if epoch.StartSlot > ^uint64(0)-epochLength {
+		return 0, 0, errors.New("epoch end slot overflows")
+	}
+	// The reference point of no return is the next epoch's first slot less
+	// twice the stability window, where the window is ceiling(3k/f)
+	// (Cardano.Ledger.Slot.getTheSlotOfNoReturn). Doubling the rounded window
+	// is not floor(6k/f): the two differ whenever 3k/f is not an integer.
+	// When the voting window covers the whole epoch every slot targets the
+	// next epoch, which the epoch's first slot expresses.
+	if stabilityWindow > (^uint64(0))/2 || 2*stabilityWindow >= epochLength {
+		return epoch.EpochId, epoch.StartSlot, nil
+	}
+	return epoch.EpochId, epoch.StartSlot + epochLength - 2*stabilityWindow, nil
+}
+
+func classifyGenesisOverlaySlot(
+	relativeSlot uint64,
+	decentralization *big.Rat,
+	activeSlotsCoeff *big.Rat,
+	genesisKeyCount uint64,
+) (uint64, genesisOverlaySlotStatus) {
+	if decentralization == nil ||
+		decentralization.Sign() <= 0 ||
+		decentralization.Cmp(big.NewRat(1, 1)) > 0 ||
+		activeSlotsCoeff == nil ||
+		activeSlotsCoeff.Sign() <= 0 ||
+		activeSlotsCoeff.Cmp(big.NewRat(1, 1)) > 0 ||
+		genesisKeyCount == 0 {
+		return 0, genesisOverlayNone
+	}
+	position := ceilUint64Rat(relativeSlot, decentralization)
+	nextPosition := ceilUint64Rat(relativeSlot+1, decentralization)
+	if position >= nextPosition {
+		return 0, genesisOverlayNone
+	}
+	activeSlotCoeffInv := activeSlotCoeffInverse(activeSlotsCoeff)
+	if activeSlotCoeffInv == 0 || position%activeSlotCoeffInv != 0 {
+		return 0, genesisOverlayNonActive
+	}
+	return (position / activeSlotCoeffInv) % genesisKeyCount,
+		genesisOverlayActive
+}
+
+func ceilUint64Rat(v uint64, rat *big.Rat) uint64 {
+	numerator := new(big.Int).Mul(
+		new(big.Int).SetUint64(v),
+		rat.Num(),
+	)
+	denom := rat.Denom()
+	numerator.Add(numerator, new(big.Int).Sub(denom, big.NewInt(1)))
+	numerator.Quo(numerator, denom)
+	return numerator.Uint64()
+}
+
+func activeSlotCoeffInverse(activeSlotsCoeff *big.Rat) uint64 {
+	inv := new(big.Int).Quo(
+		activeSlotsCoeff.Denom(),
+		activeSlotsCoeff.Num(),
+	)
+	return inv.Uint64()
+}
+
+// genesisOverlayProtocolParamsForBlock resolves protocol parameters for the
+// block body era rather than only the epoch's current era. A hard-fork
+// boundary block may be encoded in the predecessor era while its header
+// announces the successor; using the successor-era parameters would disable
+// a still-active genesis overlay and incorrectly send the genesis delegate
+// through the registered-pool lookup.
+func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
+	block ledger.Block,
+) lcommon.ProtocolParameters {
+	slot := block.SlotNumber()
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return ls.ProtocolParamsForSlot(slot)
+	}
+
+	paramsEpoch := epoch.EpochId
+	paramsEraID := epoch.EraId
+	blockEraID := uint(block.Era().Id)
+	if blockEraID < epoch.EraId {
+		paramsEraID = blockEraID
+	}
+
+	snapshot := ls.loadConsensusSnapshot()
+	if paramsEpoch == snapshot.currentEpoch.EpochId &&
+		paramsEraID == snapshot.currentEpoch.EraId {
+		return snapshot.currentPParams
+	}
+	if ls.db != nil {
+		era, ok := ls.eraById(paramsEraID)
+		if ok && era != nil && era.DecodePParamsFunc != nil {
+			if pparams, pparamsErr := ls.loadPersistedProtocolParameters(
+				paramsEpoch,
+				*era,
+				nil,
+			); pparamsErr == nil && pparams != nil {
+				return pparams
+			}
+		}
+	}
+	return ls.ProtocolParamsForSlot(slot)
+}
+
+func decentralizationParamRat(
+	pparams lcommon.ProtocolParameters,
+) *big.Rat {
+	switch pp := pparams.(type) {
+	case *shelley.ShelleyProtocolParameters:
+		if pp.Decentralization == nil {
+			return nil
+		}
+		return pp.Decentralization.Rat
+	case *mary.MaryProtocolParameters:
+		if pp.Decentralization == nil {
+			return nil
+		}
+		return pp.Decentralization.Rat
+	case *alonzo.AlonzoProtocolParameters:
+		if pp.Decentralization == nil {
+			return nil
+		}
+		return pp.Decentralization.Rat
+	default:
+		return nil
+	}
+}
+
+func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
+	return ls.loadTipSnapshot().currentTip.Point.Slot < slot
+}
+
+// verifyBlockLeaderEligibility checks that the block's producer pool was
+// eligible to produce a block at this slot under the Praos stake-derived
+// leadership threshold. This enforces the Cardano Blueprint chain validity
+// requirement that header validation confirms slot-leader eligibility.
+//
+// The eligibility condition is:
+//
+//	vrfLeaderOutput < threshold(sigma, f)
+//
+// where sigma = poolStake / totalStake and f is the active slot coefficient
+// from Shelley genesis.
+//
+// Stake selection follows the ledger's active pool distribution. For the
+// epoch imported from a Mithril snapshot, NewEpochState.pool-distr is used
+// directly. Otherwise, the active distribution is the mark snapshot from
+// epoch-2, clamped to genesis for early epochs.
+//
+// TPraos (Shelley/Allegra/Mary/Alonzo) and CPraos (Babbage/Conway) differ in
+// how the VRF leader value is derived from the output bytes; ConsensusModeForEpoch
+// selects the correct path for the block's era.
+//
+// The production caller first runs verifyGenesisDelegateHeader, which handles
+// or rejects exact genesis-overlay slots. Reaching this function from that path
+// means the block is in a Praos slot and must receive the pool threshold check,
+// even when the decentralization parameter enables overlay slots elsewhere in
+// the same epoch.
+//
+// Byron blocks are skipped (PBFT). A state that leaves the threshold
+// unevaluable -- a zero total active stake, a missing or non-positive active
+// slot coefficient, or a post-Mithril mark row reconstructed after its target
+// boundary -- is rejected rather than skipped; only the explicitly selected
+// prototype profile logs it and trusts the block. The snapshot cases carry
+// errLeaderStakeSnapshotUnavailable, so header verification running ahead of
+// the ledger apply cursor defers instead of rejecting.
+//
+// epochCacheSnapshot returns the published epoch cache, or nil when no
+// snapshot has been published. The test-helper wrappers that pin a cache for
+// their WithCache counterparts read it before the callee's own early returns
+// (a Byron block, for instance, is skipped without touching ledger state), and
+// a zero-value LedgerState has no published snapshot.
+//
+//nolint:unused // reached only from the test-helper wrappers that pin a cache
+func (ls *LedgerState) epochCacheSnapshot() []models.Epoch {
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot.epochCache
+}
+
+//nolint:unused // retained as a test helper
+func (ls *LedgerState) verifyBlockLeaderEligibility(
+	block ledger.Block,
+	epochId uint64,
+) error {
+	return ls.verifyBlockLeaderEligibilityWithCache(
+		block, epochId, ls.epochCacheSnapshot(),
+	)
+}
+
+func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
+) error {
+	if block.Era().Id == byron.EraIdByron {
+		return nil
+	}
+
+	// Derive pool key hash from the block's issuer verification key.
+	issuerVkey := block.IssuerVkey()
+	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+
+	poolStake, totalStake, snapshotEpoch, snapshotType, skipEligibility, err := ls.leaderEligibilityStakeWithCache(
+		block,
+		epochId,
+		poolKeyHash,
+		epochCache,
+	)
+	if err != nil {
+		return err
+	}
+	if skipEligibility {
+		return nil
+	}
+	if totalStake == 0 {
+		// leaderEligibilityStake already rejected an absent or zero pool
+		// row, so reaching here means the producer holds stake while the
+		// network-wide denominator reads zero: a dingo-side storage or
+		// computation gap rather than an empty network, and a threshold
+		// with no denominator to divide by. Accepting the block would
+		// admit a producer nothing verified, so only the explicitly
+		// selected prototype profile may bypass it.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility unevaluable: total active stake is zero; trusting block (prototype profile)",
+				"slot",
+				block.SlotNumber(),
+				"epoch",
+				epochId,
+				"snapshot_epoch",
+				snapshotEpoch,
+				"snapshot_type",
+				snapshotType,
+				"component",
+				"ledger",
+			)
+			return nil
+		}
+		// Classified as an unavailable snapshot so header verification
+		// running ahead of the ledger apply cursor defers instead of
+		// rejecting (verifyBlockHeaderState); once the cursor has caught
+		// up the same state is a hard rejection.
+		return fmt.Errorf(
+			"%w: block header verification rejected at slot %d: "+
+				"total active stake for epoch %d snapshot %s is zero "+
+				"while producer pool %x holds stake",
+			errLeaderStakeSnapshotUnavailable,
+			block.SlotNumber(),
+			snapshotEpoch,
+			snapshotType,
+			poolKeyHash[:],
+		)
+	}
+
+	// Use the genesis Rat directly to avoid a float64 precision roundtrip.
+	// A zero or negative coefficient computes a zero threshold, under which
+	// no VRF output is ever eligible.
+	activeSlotCoeffRat := ls.activeSlotCoeffRat()
+	if activeSlotCoeffRat == nil || activeSlotCoeffRat.Sign() <= 0 {
+		// The coefficient is a threshold input, so without it eligibility
+		// cannot be evaluated at all. Unlike a missing snapshot this is a
+		// genesis/configuration fault that the apply cursor never
+		// resolves, so it is rejected outright rather than deferred.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility unevaluable: active slot coefficient unavailable or non-positive; trusting block (prototype profile)",
+				"slot",
+				block.SlotNumber(),
+				"component",
+				"ledger",
+			)
+			return nil
+		}
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"active slot coefficient unavailable or non-positive; "+
+				"leader eligibility cannot be evaluated",
+			block.SlotNumber(),
+		)
+	}
+
+	// Consensus mode determines the VRF leader-value derivation path.
+	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	if modeErr != nil {
+		// The mode selects both the leader-value derivation and the
+		// threshold, so without it eligibility cannot be evaluated. The era
+		// shape it is resolved from comes from the local node configuration,
+		// so an unresolvable mode is not the peer's fault: defer instead of
+		// recycling the connection that served the header.
+		return fmt.Errorf(
+			"%w: block header verification deferred at slot %d: %w",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+			modeErr,
+		)
+	}
+
+	// Extract the VRF output from the header body CBOR.
+	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract VRF result: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfResult.Output) == 0 {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"VRF output unavailable for eligibility check",
+			block.SlotNumber(),
+		)
+	}
+
+	// Compute the Praos leadership threshold and compare.
+	threshold, err := leaderthreshold.Threshold(
+		poolStake,
+		totalStake,
+		activeSlotCoeffRat,
+		mode,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"compute leadership threshold: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	belowThreshold, err := consensus.IsVRFOutputBelowThresholdWithMode(
+		vrfResult.Output,
+		threshold,
+		mode,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"compare VRF output against threshold: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	// Record how close the decision was, for every decision rather than only
+	// the failures. See leaderThresholdMargin for why the distribution is the
+	// thing worth having.
+	margin := leaderThresholdMargin(
+		leaderValueForMode(vrfResult.Output, mode),
+		threshold,
+	)
+	ls.metrics.observeLeaderThresholdMargin(margin)
+	if !belowThreshold {
+		// The leadership stake includes reward-account balances:
+		// refreshRewardLiveStakeAggregate stores total_stake =
+		// utxo_stake + reward_stake (reward_stake from account.reward) and
+		// GetLiveStakeInputsForPools selects total_stake; the historical
+		// reconstruction adds the same term in getStakeByPoolsAtSlot. An
+		// earlier comment here claimed the stake was delegated UTxO only.
+		// That was stale, and #3165 was diagnosed from it rather than from
+		// the code.
+		//
+		// On the concentrated prototype topology this check still rejected
+		// the dominant pool's eligible blocks and wedged the chain, so it is
+		// downgraded to a warning there; all cryptographic header checks
+		// above still passed. See
+		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility below stake-derived threshold; trusting block (prototype trust bypass)",
+				"slot",
+				block.SlotNumber(),
+				"pool",
+				hex.EncodeToString(poolKeyHash[:]),
+				"pool_stake",
+				poolStake,
+				"total_stake",
+				totalStake,
+				"epoch",
+				epochId,
+				"snapshot_epoch",
+				snapshotEpoch,
+				"snapshot_type",
+				snapshotType,
+				"component",
+				"ledger",
+			)
+			return nil
+		}
+		// Counted here rather than at the top of the branch: the bypass
+		// above trusts the block, so counting before it would report
+		// rejections that never happened.
+		ls.metrics.incLeaderThresholdRejections()
+		// margin is carried in the message because it is the number that
+		// says whether this was a genuinely ineligible producer or a stake
+		// discrepancy: a rejection sitting a fraction of a percent under
+		// zero means the local stake distribution, not the block, is what
+		// disagreed with the network.
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x VRF leader value exceeds stake-derived threshold "+
+				"(pool stake: %d, total stake: %d, epoch: %d, snapshot_epoch: %d, snapshot_type: %s, threshold_margin: %.9f)",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			poolStake,
+			totalStake,
+			epochId,
+			snapshotEpoch,
+			snapshotType,
+			margin,
+		)
+	}
+
+	return nil
+}
+
+func (ls *LedgerState) leaderEligibilityStakeWithCache(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+) (uint64, uint64, uint64, string, bool, error) {
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionWithCache(
+		block,
+		epochId,
+		epochCache,
+	)
+	if err != nil {
+		return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false, err
+	}
+	if useImportedActive {
+		snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+			epochId,
+			models.PoolStakeSnapshotTypeActive,
+			poolKeyHash[:],
+			nil,
+		)
+		if err != nil {
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false,
+				fmt.Errorf(
+					"block header verification rejected at slot %d: "+
+						"lookup active pool distribution: %w",
+					block.SlotNumber(),
+					err,
+				)
+		}
+		if snapshot == nil ||
+			snapshot.TotalStake == 0 ||
+			snapshot.StakeDenominator == 0 {
+			// Mirror the mark path below and separate a storage gap from
+			// genuine ineligibility. A zero denominator leaves the
+			// threshold with no divisor, and an imported distribution
+			// holding no pools at all cannot be the certified nesPd
+			// (which is always populated); both mean dingo cannot yet
+			// answer, so they are classified as unavailable and header
+			// verification ahead of the apply cursor defers. A pool
+			// simply absent from a populated distribution is an
+			// authoritative answer -- cardano-ledger's VRFKeyUnknown --
+			// and stays a rejection.
+			unavailable := snapshot != nil && snapshot.StakeDenominator == 0
+			if !unavailable {
+				if total, terr := ls.db.Metadata().GetTotalActiveStake(
+					epochId,
+					models.PoolStakeSnapshotTypeActive,
+					nil,
+				); terr == nil && total == 0 {
+					unavailable = true
+				}
+			}
+			if unavailable {
+				return 0, 0, epochId,
+					models.PoolStakeSnapshotTypeActive, false,
+					fmt.Errorf(
+						"%w: block header verification rejected at slot %d: "+
+							"producer pool %x missing from active pool distribution "+
+							"for epoch %d (imported distribution is incomplete)",
+						errLeaderStakeSnapshotUnavailable,
+						block.SlotNumber(),
+						poolKeyHash[:],
+						epochId,
+					)
+			}
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false,
+				fmt.Errorf(
+					"block header verification rejected at slot %d: "+
+						"producer pool %x missing from active pool distribution for epoch %d",
+					block.SlotNumber(),
+					poolKeyHash[:],
+					epochId,
+				)
+		}
+		return uint64(snapshot.TotalStake),
+			uint64(snapshot.StakeDenominator),
+			epochId,
+			models.PoolStakeSnapshotTypeActive,
+			false,
+			nil
+	}
+
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
+	snapshotType := models.PoolStakeSnapshotTypeMark
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		snapshotType,
+		poolKeyHash[:],
+		nil,
+	)
+	if err != nil {
+		return 0, 0, snapshotEpoch, snapshotType, false,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"lookup pool stake: %w",
+				block.SlotNumber(),
+				err,
+			)
+	}
+	if snapshot == nil || snapshot.TotalStake == 0 {
+		// Mirror cardano-ledger: a pool absent from the leader stake
+		// distribution is a hard rejection (the reference node's
+		// VRFKeyUnknown). The reference distribution (nesPd) is always
+		// populated, so an empty epoch snapshot here signals a dingo-side
+		// storage or computation gap (corrupt DB, incomplete Mithril import,
+		// pruned history) rather than genuine pool ineligibility. Surface that
+		// distinction to operators without changing the reject decision.
+		diag := "pool is absent from the epoch distribution"
+		if total, terr := ls.db.Metadata().GetTotalActiveStake(
+			snapshotEpoch,
+			snapshotType,
+			nil,
+		); terr == nil && total == 0 {
+			diag = "epoch mark snapshot is empty (no pools) - likely a " +
+				"storage or computation gap, not pool ineligibility"
+			return 0, 0, snapshotEpoch, snapshotType, false,
+				fmt.Errorf(
+					"%w: "+
+						"block header verification rejected at slot %d: "+
+						"producer pool %x has no stake in epoch %d snapshot (%s)",
+					errLeaderStakeSnapshotUnavailable,
+					block.SlotNumber(),
+					poolKeyHash[:],
+					snapshotEpoch,
+					diag,
+				)
+		}
+		return 0, 0, snapshotEpoch, snapshotType, false,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"producer pool %x has no stake in epoch %d snapshot (%s)",
+				block.SlotNumber(),
+				poolKeyHash[:],
+				snapshotEpoch,
+				diag,
+			)
+	}
+	if ls.shouldSkipPostMithrilMarkEligibilityWithCache(
+		snapshot, snapshotEpoch, epochCache,
+	) {
+		// The reconstructed row makes a hard threshold *comparison* unsafe,
+		// but that means eligibility is unevaluable, not automatically
+		// satisfied. Mirror the zero-active-stake and missing-coefficient
+		// guards above: only the explicitly selected prototype profile may
+		// trust the block anyway; a standard profile must reject (wrapped so
+		// header verification running ahead of the ledger apply cursor
+		// defers instead).
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary (prototype profile)",
+					"slot",
+					block.SlotNumber(),
+					"epoch",
+					epochId,
+					"snapshot_epoch",
+					snapshotEpoch,
+					"snapshot_type",
+					snapshotType,
+					"captured_slot",
+					snapshot.CapturedSlot,
+					"component",
+					"ledger",
+				)
+			}
+			return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
+				true, nil
+		}
+		return 0, 0, snapshotEpoch, snapshotType, false,
+			fmt.Errorf(
+				"%w: block header verification rejected at slot %d: "+
+					"post-Mithril mark snapshot for epoch %d was "+
+					"reconstructed after the target boundary "+
+					"(captured slot %d); leader eligibility for "+
+					"producer pool %x cannot be evaluated",
+				errLeaderStakeSnapshotUnavailable,
+				block.SlotNumber(),
+				snapshotEpoch,
+				snapshot.CapturedSlot,
+				poolKeyHash[:],
+			)
+	}
+	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
+		snapshotEpoch,
+		snapshotType,
+		nil,
+	)
+	if err != nil {
+		return 0, 0, snapshotEpoch, snapshotType, false,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"lookup total active stake: %w",
+				block.SlotNumber(),
+				err,
+			)
+	}
+	return uint64(snapshot.TotalStake), totalStake, snapshotEpoch, snapshotType,
+		false, nil
+}
+
+// shouldSkipPostMithrilMarkEligibility reports whether a mark row was
+// reconstructed from live state after its target boundary and therefore cannot
+// safely drive hard leader-threshold rejection. New imports retain the
+// certified NewEpochState.SnapShots boundary slot. Older imports used the
+// Mithril anchor itself as CapturedSlot, so that exact legacy provenance is
+// accepted too; startup-synthesized historical rows use another post-boundary
+// slot and remain conservative.
+//
+//nolint:unused // retained as a test helper
+func (ls *LedgerState) shouldSkipPostMithrilMarkEligibility(
+	snapshot *models.PoolStakeSnapshot,
+	snapshotEpoch uint64,
+) bool {
+	return ls.shouldSkipPostMithrilMarkEligibilityWithCache(
+		snapshot, snapshotEpoch, ls.epochCacheSnapshot(),
+	)
+}
+
+// shouldSkipPostMithrilMarkEligibilityWithCache decides the bypass against a
+// caller-supplied epoch cache.
+//
+// This is the most consequential of the decisions header verification makes
+// from the epoch cache: it admits a block whose stake eligibility nothing
+// checked. Deciding it from a different cache generation than the VRF key and
+// the snapshot selection is the same hazard, so it takes the pinned cache too.
+func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
+	snapshot *models.PoolStakeSnapshot,
+	snapshotEpoch uint64,
+	epochCache []models.Epoch,
+) bool {
+	if snapshot == nil ||
+		snapshot.SnapshotType != models.PoolStakeSnapshotTypeMark ||
+		snapshot.CapturedSlot == 0 {
+		return false
+	}
+
+	ls.RLock()
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.RUnlock()
+
+	if mithrilLedgerSlot == 0 {
+		return false
+	}
+	if snapshot.CapturedSlot == mithrilLedgerSlot {
+		return false
+	}
+	for _, ep := range epochCache {
+		if ep.EpochId != snapshotEpoch || ep.LengthInSlots == 0 {
+			continue
+		}
+		return snapshot.CapturedSlot >= ep.StartSlot
+	}
+	return false
+}
+
+// shouldUseImportedActivePoolDistributionWithCache resolves the Mithril trust
+// boundary against a caller-supplied epoch cache.
+//
+// This selection decides *which* snapshot elects the block, and both halves of
+// header verification consume it: the VRF-key cutoff and the leader stake. A
+// second, unpinned read of the live cache here would let those two halves
+// disagree about the electing snapshot across an epoch rollover or a rollback,
+// which is the divergence threading epochId through this path exists to
+// prevent.
+func (ls *LedgerState) shouldUseImportedActivePoolDistributionWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
+) (bool, error) {
+	if ls.mithrilLedgerSlot == 0 || block.SlotNumber() <= ls.mithrilLedgerSlot {
+		return false, nil
+	}
+	mithrilEpoch, err := epochForSlotInCache(epochCache, ls.mithrilLedgerSlot)
+	if err != nil {
+		return false, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"resolve Mithril trust boundary epoch: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	return epochId == mithrilEpoch.EpochId, nil
+}
+
+// electingVrfKeyHash returns the VRF key hash the producing pool had registered
+// when the snapshot that elected it was captured, which is not necessarily the
+// key it has registered now.
+//
+// A pool may rotate its VRF key, and doing so does not retroactively change the
+// key it was elected under: the leader schedule for an epoch is built from a
+// stake snapshot captured at an earlier boundary, and the producer signs with
+// the key registered at that capture. Comparing against the live registration
+// rejects every block the pool makes for the rest of the epoch it rotated in,
+// and the reject/rewind/refetch cycle does not converge (issue #3842).
+//
+// cardano-ledger avoids the question by carrying the key in the pool
+// distribution itself (IndividualPoolStake.individualPoolStakeVrf), captured
+// with the stake. pool_stake_snapshot has no such column -- it already freezes
+// the optional Leios voting key at this same boundary and for this same reason
+// -- so the key is resolved from registration history as of the snapshot's
+// parameter cutoff instead (see electingPoolParamsCutoffSlot), which is
+// equivalent for a chain whose certificate history is intact.
+//
+// Falling back to the live registration is safe only when no snapshot is
+// available. A present snapshot with no historical registration means the
+// database cannot answer the consensus-critical question; using the live key
+// would reintroduce the rotation wedge this lookup avoids.
+//
+//nolint:unused // retained as a test helper
+func (ls *LedgerState) electingVrfKeyHash(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+) (lcommon.Blake2b256, bool, error) {
+	return ls.electingVrfKeyHashWithCache(
+		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
+	)
+}
+
+func (ls *LedgerState) electingVrfKeyHashWithCache(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+) (lcommon.Blake2b256, bool, error) {
+	cutoffSlot, capturedSlot, ok, err := ls.electingPoolParamsCutoffSlotWithCache(
+		block,
+		epochId,
+		poolKeyHash,
+		epochCache,
+	)
+	if err != nil {
+		return lcommon.Blake2b256{}, false, err
+	}
+	if ok {
+		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+			poolKeyHash[:],
+			cutoffSlot,
+			nil,
+		)
+		if err != nil {
+			return lcommon.Blake2b256{}, false, err
+		}
+		if found && len(vrfKeyHash) == len(lcommon.Blake2b256{}) {
+			var hash lcommon.Blake2b256
+			copy(hash[:], vrfKeyHash)
+			return hash, true, nil
+		}
+		// No registration in force at the cutoff. That is not a gap in
+		// history: cardano-ledger's POOL rule inserts a pool's FIRST
+		// registration into psStakePools immediately and defers only a
+		// re-registration through psFutureStakePoolParams, so a pool that
+		// first registered inside the captured epoch is already in the
+		// snapshot with that registration's key. Resolve the earliest
+		// registration at or before the capture, which is what psStakePools
+		// holds for it. Earliest rather than latest: if the pool also
+		// re-registered in that same epoch, the re-registration was deferred
+		// and is not the key the snapshot carries.
+		vrfKeyHash, found, err = ls.db.Metadata().
+			GetPoolEarliestVrfKeyHashAtSlot(
+				poolKeyHash[:],
+				capturedSlot,
+				nil,
+			)
+		if err != nil {
+			return lcommon.Blake2b256{}, false, err
+		}
+		if found && len(vrfKeyHash) == len(lcommon.Blake2b256{}) {
+			var hash lcommon.Blake2b256
+			copy(hash[:], vrfKeyHash)
+			return hash, true, nil
+		}
+		// Both lookups missed. That is ordinarily the unanswerable gap the
+		// error below reports, but it is also exactly what a Mithril
+		// bootstrap produces for the epoch boundary the node crosses right
+		// after import: the snapshot import writes only the pool's live
+		// registration, stamped at the import slot, and never replays the
+		// certificate history that produced it. So a pool that has in fact
+		// been continuously registered the whole time has no row at or
+		// before a cutoff/capture slot that predates the import (issue
+		// #4047).
+		//
+		// mithrilLedgerSlot pins that import slot for the life of the
+		// process (set once at startup, like the other reads of this field
+		// in this file), so a capture at or below it is diagnostic: the
+		// snapshot that elected this pool was captured no later than the
+		// bootstrap boundary, which only a bootstrap-created gap explains.
+		// Falling back to the live registration here is the same trust
+		// electingVrfKeyHashWithCache already extends when ok is false --
+		// no snapshot at all -- applied to the narrower case of a snapshot
+		// whose registration history the import could not carry. It is not
+		// the general "no history found" fallback #3842 removed: outside
+		// this bootstrap-anchor window, a genuine gap still hard-rejects
+		// rather than resolving the pool's current (possibly rotated) key.
+		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
+			pool, poolErr := ls.db.GetPool(poolKeyHash, true, nil)
+			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
+				return lcommon.Blake2b256{}, false, poolErr
+			}
+			if hash, ok := registeredPoolVrfKeyHash(pool); ok {
+				return hash, true, nil
+			}
+		}
+		return lcommon.Blake2b256{}, false, fmt.Errorf(
+			"%w at cutoff slot %d or capture slot %d for pool %x",
+			errVrfKeyRegistrationHistoryUnavailable,
+			cutoffSlot,
+			capturedSlot,
+			poolKeyHash[:],
+		)
+	}
+	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
+	if err != nil {
+		return lcommon.Blake2b256{}, false, err
+	}
+	hash, ok := registeredPoolVrfKeyHash(pool)
+	return hash, ok, nil
+}
+
+// electingPoolParamsCutoffSlot reports the slot up to which pool registrations
+// were in force in the snapshot that elected this block's producer.
+//
+// Which slot that is depends on the era in force during the epoch the snapshot
+// was captured in, because the two rules involved run in the opposite order on
+// either side of the Dijkstra hard fork. The merge of psFutureStakePoolParams
+// into psStakePools -- where a re-registration submitted during the epoch
+// waits -- lives in cardano-ledger's POOLREAP rule; SNAP is what freezes the
+// snapshot. The EPOCH rule sequences them:
+//
+//   - Conway and earlier run SNAP first, then POOLREAP
+//     (Conway.Rules.Epoch: `trans @(EraRule "SNAP")` precedes
+//     `trans @(EraRule "POOLREAP")`). The snapshot taken at the boundary out
+//     of epoch N is captured before that epoch's re-registrations merge, so it
+//     still carries the parameters in force through the end of N-1. The cutoff
+//     is the last slot of the epoch preceding the capture.
+//
+//   - Dijkstra runs POOLREAP first, then SNAP
+//     (Dijkstra.Rules.Epoch: POOLREAP is the first transition in
+//     epochTransition, SNAP the last). The re-registrations submitted during
+//     epoch N are merged before the snapshot is frozen, so the snapshot
+//     carries them. The cutoff is the capture slot itself.
+//
+// Both halves are load-bearing and each was learned from a node wedging on a
+// canonical block.
+//
+// On Preview (Conway) a pool rotated its VRF key at slot 3279920 (epoch 37)
+// and the chain kept electing it on the old key through epoch 39. Binding the
+// key to the capture slot (3283199, after the rotation) resolves the new key
+// and wedges epoch 39, one epoch later than the wedge that binding to the live
+// registration produces (issue #3842).
+//
+// On a Dijkstra network a pool rotated its VRF key at slot 639855 (epoch 29,
+// epochs of 21600 slots from 604800). The mark snapshot electing epoch 31 was
+// captured at 647999, and the chain elected the pool on the rotated key from
+// epoch 31. Lagging the cutoff to 626399 resolves the pre-rotation key and
+// wedges on the first block the pool produces after the rotation is in force
+// (issue #4326).
+//
+// For the lagged case the cutoff is the last slot of the epoch preceding the
+// one the snapshot was captured in, which is exactly the capture slot of the
+// previous snapshot. Deriving it from the epoch boundary rather than reading
+// that snapshot row keeps it defined for a pool that is absent from the
+// earlier snapshot.
+//
+//nolint:unused // retained as a test helper
+func (ls *LedgerState) electingPoolParamsCutoffSlot(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+) (cutoffSlot uint64, capturedSlot uint64, ok bool, err error) {
+	return ls.electingPoolParamsCutoffSlotWithCache(
+		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
+	)
+}
+
+func (ls *LedgerState) electingPoolParamsCutoffSlotWithCache(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+) (cutoffSlot uint64, capturedSlot uint64, ok bool, err error) {
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
+	snapshotType := models.PoolStakeSnapshotTypeMark
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionWithCache(
+		block,
+		epochId,
+		epochCache,
+	)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if useImportedActive {
+		snapshotEpoch = epochId
+		snapshotType = models.PoolStakeSnapshotTypeActive
+	}
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		snapshotType,
+		poolKeyHash[:],
+		nil,
+	)
+	if err != nil || snapshot == nil || snapshot.CapturedSlot == 0 {
+		return 0, 0, false, err
+	}
+	capturedEpoch, err := epochForSlotInCache(epochCache, snapshot.CapturedSlot)
+	if err != nil {
+		// The capture predates the epoch cache, so the parameter cutoff
+		// cannot be placed. Report unavailable rather than guessing; the
+		// caller falls back to the live registration only when no snapshot
+		// exists.
+		return 0, 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
+	}
+	if poolParamsMergedBeforeSnapshot(capturedEpoch.EraId) {
+		// POOLREAP ran before SNAP, so the capture already carries every
+		// registration accepted through the end of the captured epoch.
+		// Returning the capture slot for both values also makes the
+		// GetPoolEarliestVrfKeyHashAtSlot fallback in
+		// electingVrfKeyHashWithCache a no-op here, which is correct: that
+		// fallback exists for the deferral this era does not have, and it
+		// searches the same range the primary lookup just searched.
+		return snapshot.CapturedSlot, snapshot.CapturedSlot, true, nil
+	}
+	if capturedEpoch.StartSlot == 0 {
+		// Captured in the first epoch: there is no preceding epoch to take
+		// parameters from, so registration history cannot answer.
+		return 0, 0, false, nil
+	}
+	return capturedEpoch.StartSlot - 1, snapshot.CapturedSlot, true, nil
+}
+
+// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule in force
+// during the epoch a stake snapshot was captured in merges
+// psFutureStakePoolParams into psStakePools before SNAP freezes the snapshot.
+//
+// The era to ask about is the captured epoch's own, not the validated block's:
+// the EPOCH transition out of epoch N runs under the protocol version in force
+// during N, and HARDFORK is a sub-rule of that same transition. A block two
+// epochs after a hard fork into Dijkstra can therefore be elected by a
+// snapshot that Conway's ordering froze.
+func poolParamsMergedBeforeSnapshot(eraId uint) bool {
+	return eraId >= dijkstra.EraIdDijkstra
+}
+
+// verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in
+// the header body) is not the VRF key the producing pool registered on-chain.
+// The block's VRF proof is validated only against this embedded key, and the
+// leader-eligibility threshold uses its output, so binding it to the pool's
+// registered VRF key is what prevents an attacker from grinding VRF keys to
+// win slots. Mirrors gouroboros VerifyBlock's stake-pool VRF-key check, which
+// dingo's crypto path skips via SkipStakePoolValidation.
+//
+//nolint:unused // retained as a test helper
+func (ls *LedgerState) verifyRegisteredVrfKey(
+	block ledger.Block,
+	epochId uint64,
+) error {
+	return ls.verifyRegisteredVrfKeyWithCache(
+		block, epochId, ls.epochCacheSnapshot(),
+	)
+}
+
+func (ls *LedgerState) verifyRegisteredVrfKeyWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
+) error {
+	// Byron (PBFT) blocks have no pool-registered VRF key.
+	if block.Era().Id == byron.EraIdByron {
+		return nil
+	}
+	issuerVkey := block.IssuerVkey()
+	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract VRF key: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfKey) == 0 {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"VRF key unavailable for registration check",
+			block.SlotNumber(),
+		)
+	}
+	registeredVrfKeyHash, ok, err := ls.electingVrfKeyHashWithCache(
+		block,
+		epochId,
+		poolKeyHash,
+		epochCache,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x registration lookup failed: %w",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			err,
+		)
+	}
+	if !ok {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x registered VRF key hash unavailable",
+			block.SlotNumber(),
+			poolKeyHash[:],
+		)
+	}
+	headerVrfKeyHash := lcommon.Blake2b256Hash(vrfKey)
+	if !bytes.Equal(registeredVrfKeyHash.Bytes(), headerVrfKeyHash.Bytes()) {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x VRF key does not match registered VRF key "+
+				"(header %x, registered %x)",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			headerVrfKeyHash.Bytes(),
+			registeredVrfKeyHash.Bytes(),
+		)
+	}
+	return nil
+}
+
+func registeredPoolVrfKeyHash(
+	pool *models.Pool,
+) (lcommon.Blake2b256, bool) {
+	var vrfHash lcommon.Blake2b256
+	if pool == nil {
+		return vrfHash, false
+	}
+	if len(pool.Registration) == 0 {
+		return vrfHash, false
+	}
+	if len(pool.Registration[0].VrfKeyHash) == len(vrfHash) {
+		copy(vrfHash[:], pool.Registration[0].VrfKeyHash)
+		return vrfHash, true
+	}
+	if len(pool.VrfKeyHash) != len(vrfHash) {
+		return vrfHash, false
+	}
+	copy(vrfHash[:], pool.VrfKeyHash)
+	return vrfHash, true
+}
+
+// registeredPoolVrfKeyHashAsOfSlot is registeredPoolVrfKeyHash's
+// point-in-time counterpart: it resolves the VRF key hash a pool was held
+// to as of a specific historical slot rather than its current one.
+//
+// pool.Registration is loaded (loadPoolsAssociations) ordered added_slot
+// DESC, so the first entry at or before slot is the registration that was
+// in force at that point -- the same "later re-registration wins" rule
+// registeredPoolVrfKeyHash applies for "now", just bounded to a slot in the
+// past. A pool that re-registers with a new VRF key after slot must not
+// have that later key attributed to it here (blinklabs-io/dingo#4237): a
+// pinned GetStakeDistribution reply pairs each pool's historical stake with
+// the key that was actually in force at that slot, not whatever is
+// registered today.
+//
+// Unlike registeredPoolVrfKeyHash, this does not fall back to pool.VrfKeyHash
+// on a miss: that field is the pool's current, always-latest VRF key, and
+// falling back to it here would silently reintroduce the same bug for any
+// pool with no registration on record at or before slot.
+func registeredPoolVrfKeyHashAsOfSlot(
+	pool *models.Pool,
+	slot uint64,
+) (lcommon.Blake2b256, bool) {
+	var vrfHash lcommon.Blake2b256
+	if pool == nil {
+		return vrfHash, false
+	}
+	for _, reg := range pool.Registration {
+		if reg.AddedSlot > slot {
+			continue
+		}
+		if len(reg.VrfKeyHash) != len(vrfHash) {
+			return vrfHash, false
+		}
+		copy(vrfHash[:], reg.VrfKeyHash)
+		return vrfHash, true
+	}
+	return vrfHash, false
+}
+
+// maxKESEvolutions returns the maximum number of KES evolutions allowed before
+// an operational certificate expires, from Shelley genesis. Returns 0 when the
+// genesis is unavailable or carries a non-positive value; the caller,
+// verifyOpCertHeaderCrypto, treats that 0 as a configuration error and fails
+// closed rather than falling back to a lighter guard (issue #3528).
+func (ls *LedgerState) maxKESEvolutions() uint64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil || shelleyGenesis.MaxKESEvolutions <= 0 {
+		return 0
+	}
+	return uint64(shelleyGenesis.MaxKESEvolutions) // #nosec G115 -- guarded > 0
+}
+
+// epochNonceHexCacheEntry keeps the nonce that produced its hexadecimal form.
+// The nonce is copied at insertion because callers can reuse their backing
+// storage after verification returns.
+type epochNonceHexCacheEntry struct {
+	nonce []byte
+	hex   string
+}
+
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
-	nonceHex := hex.EncodeToString(nonce)
 	ls.RLock()
 	cachedNonce, ok := ls.epochNonceHexCache[epochId]
 	ls.RUnlock()
-	if ok && cachedNonce == nonceHex {
-		return cachedNonce
+	if ok && bytes.Equal(cachedNonce.nonce, nonce) {
+		return cachedNonce.hex
 	}
 	ls.Lock()
 	defer ls.Unlock()
-	if ls.epochNonceHexCache == nil {
-		ls.epochNonceHexCache = make(map[uint64]string)
+	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok &&
+		bytes.Equal(cachedNonce.nonce, nonce) {
+		return cachedNonce.hex
 	}
-	ls.epochNonceHexCache[epochId] = nonceHex
+	nonceHex := hex.EncodeToString(nonce)
+	if ls.epochNonceHexCache == nil {
+		ls.epochNonceHexCache = make(map[uint64]epochNonceHexCacheEntry)
+	}
+	ls.epochNonceHexCache[epochId] = epochNonceHexCacheEntry{
+		nonce: slices.Clone(nonce),
+		hex:   nonceHex,
+	}
 	return nonceHex
 }
 
-// epochForSlot searches the epoch cache for the epoch containing the
-// given slot. It takes a snapshot of the epoch cache under RLock to
-// avoid racing with concurrent epoch rollover updates.
+// blockPipelineEta0Provider implements gouroboros' pipeline.Eta0Provider for
+// the block-processing pipeline's validate stage (issue #1894 phase 3). It
+// reads only the already-published epoch cache. Unlike the admission path it
+// must neither forecast nor rebuild the hard-fork summary: validate workers
+// run concurrently over blocks already committed to ls.chain, and a missing
+// cached nonce means this later validation is deferred under the same gate as
+// the serial path. Avoiding headerVerificationEpoch here also keeps the hot
+// path O(logical cache scan) instead of rebuilding the full era summary for
+// every block.
+//
+// Byron-era slots have no Praos epoch nonce. Callers skip VRF/KES validation
+// for decoded Byron blocks, exactly as the serial path's verifyBlockHeaderHex
+// does. A missing nonce for any decoded post-Byron block is handled by the
+// same validation-state gate as admission rather than treated as a
+// cryptographic rejection.
+//
+// An epoch without a nonce is wrapped in errBlockPipelineEta0Unavailable.
+// A slot outside the published cache is wrapped in
+// errHeaderVerificationDeferred, so the error drain and enforcement path can
+// distinguish missing state from a cryptographic rejection.
+func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return "", fmt.Errorf(
+			"%w: block-processing pipeline nonce lookup for slot %d: %w",
+			errHeaderVerificationDeferred,
+			slot,
+			err,
+		)
+	}
+	if len(epoch.Nonce) == 0 {
+		return "", fmt.Errorf(
+			"%w: %w: epoch %d has no nonce for slot %d",
+			errBlockPipelineEta0Unavailable,
+			errEpochNonceUnavailable,
+			epoch.EpochId,
+			slot,
+		)
+	}
+	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
+}
+
+// epochForSlot searches the currently published epoch-cache snapshot for the
+// epoch containing the given slot.
 //
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
-	ls.RLock()
-	defer ls.RUnlock()
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return models.Epoch{}, errors.New(
+			"epoch cache snapshot not yet published",
+		)
+	}
+	return epochForSlotInCache(snapshot.epochCache, slot)
+}
 
-	if len(ls.epochCache) == 0 {
+// epochForSlotInCache resolves a slot to its epoch against a caller-supplied
+// epoch-cache snapshot. Callers that resolve several slots and must see one
+// coherent view (e.g. computing a single retention floor) capture the cache
+// once and pass it here, so a concurrent epoch-cache publication or rollback
+// cannot interleave a different generation between lookups.
+func epochForSlotInCache(
+	cache []models.Epoch,
+	slot uint64,
+) (models.Epoch, error) {
+	if len(cache) == 0 {
 		return models.Epoch{}, errors.New("epoch cache is empty")
 	}
 
 	// Search newest-to-oldest so that if cache entries overlap
 	// (e.g., after rollback/rebuild), we use the most recent epoch data.
-	for _, ep := range slices.Backward(ls.epochCache) {
+	for _, ep := range slices.Backward(cache) {
 		if ep.LengthInSlots == 0 {
 			continue
 		}
@@ -246,7 +2326,7 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	// meaningful error message.
 	var lastValidEnd uint64
 	var hasValidEpoch bool
-	for _, v := range slices.Backward(ls.epochCache) {
+	for _, v := range slices.Backward(cache) {
 		if v.LengthInSlots > 0 {
 			lastValidEnd = v.StartSlot +
 				uint64(v.LengthInSlots)
@@ -258,15 +2338,185 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 		return models.Epoch{}, fmt.Errorf(
 			"slot %d not covered by any known epoch (cache has %d epochs, all with zero length)",
 			slot,
-			len(ls.epochCache),
+			len(cache),
 		)
 	}
 	return models.Epoch{}, fmt.Errorf(
 		"slot %d not covered by any known epoch (cache has %d epochs, last ends at slot %d)",
 		slot,
-		len(ls.epochCache),
+		len(cache),
 		lastValidEnd,
 	)
+}
+
+// OldestRequiredSnapshotEpoch returns the oldest pool-stake snapshot epoch that
+// a currently queued/deferred header still needs for leader-eligibility
+// validation, so snapshot pruning can retain it instead of removing it out from
+// under the deferred header (issue #3727). It locks the deferred-header set and
+// delegates to oldestRequiredSnapshotEpochLocked. Prefer
+// PrunePoolSnapshotsWithRetentionFloor for the prune path, which holds the lock
+// across both the floor read and the prune so admission cannot interleave; this
+// public method exists for observation and tests.
+func (ls *LedgerState) OldestRequiredSnapshotEpoch() (uint64, bool) {
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
+	return ls.oldestRequiredSnapshotEpochLocked()
+}
+
+// oldestRequiredSnapshotEpochLocked computes the retention floor with
+// ls.deferredHeaderValidationMu already held. A header deferred at slot S
+// validates its producer's leader eligibility against the mark snapshot for
+// StakeSnapshotEpoch(epochOf(S)); the floor is the minimum of that quantity
+// over every outstanding deferred header.
+//
+// Return contract:
+//   - (_, false): no header is deferred, so the default retention window
+//     applies and nothing extra is pinned.
+//   - (0, true): at least one deferred slot cannot yet be mapped to an epoch
+//     (its epoch cache entry has not been published, or its key is malformed).
+//     We cannot name the snapshot epoch such a header will need, and once the
+//     cache catches up leaderEligibilityStake WILL need it, so we retain ALL
+//     pool snapshots (floor 0 prunes nothing) until every deferred slot is
+//     mappable. Skipping the slot instead would let cleanup prune the snapshot
+//     the header needs and drive it into a defer loop.
+//   - (min, true): every deferred slot mapped; pin at the minimum required
+//     snapshot epoch.
+func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
+	if len(ls.deferredHeaderValidation) == 0 {
+		return 0, false
+	}
+	// Capture one epoch-cache generation and resolve every deferred slot
+	// against it. loadConsensusSnapshot returns whatever is published at each
+	// call, so calling epochForSlot per key could mix generations across a
+	// concurrent epoch-cache publication/rollback and compute the floor from an
+	// incoherent mapping. One snapshot for the whole loop keeps the decision
+	// coherent (issue #3727, finding: mixed cache generations in floor read).
+	cache := ls.loadConsensusSnapshot().epochCache
+	var floor uint64
+	have := false
+	for key := range ls.deferredHeaderValidation {
+		slot, err := slotFromHeaderValidationKey(key)
+		if err != nil {
+			// A key we cannot parse is a deferred header whose need we cannot
+			// bound. Retain everything until it is gone rather than risk
+			// pruning a snapshot it turns out to require.
+			return 0, true
+		}
+		epoch, err := epochForSlotInCache(cache, slot)
+		if err != nil {
+			// The slot is not yet covered by the published epoch cache, so we
+			// cannot name the snapshot epoch it needs. Retain ALL pool
+			// snapshots until it becomes mappable (see the return contract):
+			// pruning now would delete the snapshot leaderEligibilityStake
+			// will read once the cache advances, looping the header on defer.
+			return 0, true
+		}
+		snapshotEpoch := praos.StakeSnapshotEpoch(epoch.EpochId)
+		if !have || snapshotEpoch < floor {
+			floor = snapshotEpoch
+			have = true
+		}
+	}
+	return floor, have
+}
+
+// PrunePoolSnapshotsWithRetentionFloor is the snapshot manager's retention
+// guard (wired via Manager.SetPoolSnapshotRetentionGuard). Under the
+// deferred-header lock it evicts abandoned headers and computes the retention
+// floor as ONE atomic decision, RELEASES the lock, and only then runs the
+// caller's pool-snapshot prune. The prune must NOT run under the lock: it opens
+// the single sqlite write connection (SetMaxOpenConns(1)) via Transaction(true),
+// and block apply holds that connection before taking this same mutex through
+// consumeDeferredHeaderValidation. Holding the mutex across prune therefore
+// inverts the lock order (mutex→write-conn here vs. write-conn→mutex on apply)
+// and deadlocks the node on the single write connection (issue #3717). Under
+// the lock it, in order:
+//
+//  1. Evicts abandoned deferred headers that are beyond the rollback horizon
+//     (tip minus the stability window). A canonical deferred header is consumed
+//     when the cursor applies it, so one still present that deep is on a fork
+//     chain selection can no longer re-adopt and would otherwise pin its
+//     snapshot forever (finding 5). The horizon — rather than the bare tip — is
+//     what makes eviction safe: eviction also drops the durable marker, and a
+//     point evicted while still re-adoptable would apply with required == false
+//     and skip its stateful header check. Eviction lets the floor rise; the
+//     evicted markers' persisted rows are deleted after the lock is released
+//     (best effort — they cannot affect a resolved header).
+//  2. Computes the retention floor over the surviving deferred headers and
+//     lowers defaultBefore (cleanup's currentEpoch-3 pool boundary) to it when
+//     a header needs an older snapshot (or to 0 = retain everything while any
+//     deferred slot is unmappable).
+//  3. Clamps the boundary UP to minBefore, a hard backstop
+//     (currentEpoch - poolSnapshotRetentionMaxDepth) that bounds how many
+//     historical epochs the pin can ever hold, so a stuck header cannot pin
+//     pool snapshots without limit (finding 5).
+//
+// The eviction+floor read is atomic (one lock hold), so `before` reflects a
+// coherent view of the deferred set; a header admitted after the lock is
+// released — during or after prune — cannot corrupt this invocation's boundary.
+// A header admitted in that window that needs a below-floor snapshot is a
+// deeply lagged header (its need is < defaultBefore = currentEpoch-3); this
+// invocation may prune a snapshot it wants, but the retention floor is a
+// lower-watermark that is RE-COMPUTED every cleanup pass, so the next pass pins
+// at the lower floor and the header resolves then. This narrow re-admit window
+// is accepted in exchange for never inverting the lock order (issue #3717); it
+// replaces the prior design that held the lock across prune and deadlocked.
+//
+// prune must perform and COMMIT the pool-snapshot delete before returning; it
+// must not touch ledger locks or the deferred set.
+func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
+	defaultBefore uint64,
+	minBefore uint64,
+	prune func(before uint64) error,
+) error {
+	// Read BEFORE taking deferredHeaderValidationMu: both of these take
+	// ls.RWMutex (calculateStabilityWindow reads ls.currentEra under RLock),
+	// and block apply holds the ls lock before taking
+	// deferredHeaderValidationMu via consumeDeferredHeaderValidation. Taking
+	// the ls lock under this mutex would invert that order.
+	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	rollbackHorizon := ls.calculateStabilityWindow()
+	var evicted []string
+	var before uint64
+	func() {
+		ls.deferredHeaderValidationMu.Lock()
+		defer ls.deferredHeaderValidationMu.Unlock()
+		evicted = ls.evictStaleDeferredHeadersLocked(tipSlot, rollbackHorizon)
+		before = defaultBefore
+		if floor, ok := ls.oldestRequiredSnapshotEpochLocked(); ok &&
+			floor < before {
+			before = floor
+		}
+		if before < minBefore {
+			before = minBefore
+		}
+	}()
+	// Prune runs with the mutex RELEASED: it opens the single sqlite write
+	// connection, which block apply holds before taking this mutex, so running
+	// it under the lock deadlocks (issue #3717). See the doc comment.
+	err := prune(before)
+	// Delete the evicted headers' persisted markers; deletePersistedDeferredMarkers
+	// takes the deferred-header mutex only to test membership per key (releasing
+	// it before each DB delete, for the same lock-order reason) so it can skip
+	// any point re-deferred (and re-persisted) since eviction, keeping the
+	// sync_state table free of dead markers without dropping a marker that now
+	// backs a live pin. A restore failure for a point re-admitted during its
+	// delete is a lost DURABLE pin: it is joined onto the prune result so the
+	// retention guard's caller (cleanupOldSnapshots) surfaces the failed cleanup
+	// rather than continuing with a marker a restart would miss (issue #3717
+	// review).
+	cleanupErr := ls.deletePersistedDeferredMarkers(evicted)
+	return errors.Join(err, cleanupErr)
+}
+
+// slotFromHeaderValidationKey extracts the slot from a deferred-header map key,
+// which headerValidationPointKey formats as "<slot>:<hex-hash>".
+func slotFromHeaderValidationKey(key string) (uint64, error) {
+	before, _, ok := strings.Cut(key, ":")
+	if !ok {
+		return 0, fmt.Errorf("malformed header validation key %q", key)
+	}
+	return strconv.ParseUint(before, 10, 64)
 }
 
 // ensureEpochForSlot advances the epoch cache until it covers the target
@@ -298,22 +2548,33 @@ func (ls *LedgerState) ensureEpochForSlot(
 	)
 }
 
-// advanceEpochCache computes the next epoch's parameters and nonce from
-// chain data and appends it to the in-memory epoch cache. This is a
+// advanceEpochCache computes the next same-era epoch's parameters and nonce
+// from chain data and appends it to the in-memory epoch cache. This is a
 // lightweight alternative to the full processEpochRollover — it only
 // populates the nonce and epoch boundaries needed for header verification,
-// without running pparam updates, snapshot rotation, or DB writes.
-// The full rollover will run later in ledgerProcessBlocks and replace
-// the cache with the authoritative DB-backed version.
+// without running pparam updates, snapshot rotation, or DB writes. It refuses
+// to cross a confirmed or configured hard-fork boundary because only the full
+// rollover owns the successor era's parameters and snapshot rotation. The full
+// rollover will run later in ledgerProcessBlocks and replace the cache with the
+// authoritative DB-backed version.
 func (ls *LedgerState) advanceEpochCache() error {
-	// Read last epoch under read lock
-	ls.RLock()
-	if len(ls.epochCache) == 0 {
-		ls.RUnlock()
+	// Read last epoch from the lock-free consensus snapshot
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return errors.New("epoch cache snapshot not yet published")
+	}
+	cache := snapshot.epochCache
+	if len(cache) == 0 {
 		return errors.New("epoch cache is empty")
 	}
-	lastEpoch := ls.epochCache[len(ls.epochCache)-1]
-	ls.RUnlock()
+	lastEpoch := cache[len(cache)-1]
+	if err := ls.validateEpochCacheForecast(
+		lastEpoch,
+		snapshot.currentEra.Id,
+		snapshot.transitionInfo,
+	); err != nil {
+		return err
+	}
 
 	if lastEpoch.LengthInSlots == 0 {
 		return errors.New("last epoch has zero length")
@@ -322,7 +2583,10 @@ func (ls *LedgerState) advanceEpochCache() error {
 	newStartSlot := lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots)
 
 	// Compute epoch nonce (requires DB access, done outside lock)
-	nonce, evolvingNonce, candidateNonce, labNonce, err := ls.computeEpochNonceForSlot(newStartSlot, lastEpoch)
+	nonce, evolvingNonce, candidateNonce, labNonce, err := ls.computeEpochNonceForSlot(
+		newStartSlot,
+		lastEpoch,
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"compute epoch nonce for epoch %d: %w",
@@ -366,7 +2630,22 @@ func (ls *LedgerState) advanceEpochCache() error {
 		ls.Unlock()
 		return nil
 	}
-	ls.epochCache = append(ls.epochCache, newEpoch)
+	// TransitionInfo can become known without changing the cache tail while
+	// nonce computation is in flight. Recheck under the writer lock so that
+	// publication cannot race a newly-confirmed boundary and append a row with
+	// the source era's parameters on the other side.
+	if err := ls.validateEpochCacheForecast(
+		lastCached,
+		ls.currentEra.Id,
+		ls.transitionInfo,
+	); err != nil {
+		ls.Unlock()
+		return err
+	}
+	newCache := make([]models.Epoch, len(ls.epochCache), len(ls.epochCache)+1)
+	copy(newCache, ls.epochCache)
+	ls.epochCache = append(newCache, newEpoch)
+	ls.publishSnapshotsLocked()
 	ls.Unlock()
 
 	ls.config.Logger.Debug(
@@ -382,8 +2661,46 @@ func (ls *LedgerState) advanceEpochCache() error {
 	return nil
 }
 
+// validateEpochCacheForecast rejects an eager cache advance that would cross
+// an era boundary. A configured TriggerAtEpoch is authoritative for the cache
+// tail's era. Otherwise TransitionKnown applies only when the tail still
+// belongs to the current era whose transition state was published.
+func (ls *LedgerState) validateEpochCacheForecast(
+	lastEpoch models.Epoch,
+	currentEraID uint,
+	transition hardfork.TransitionInfo,
+) error {
+	nextEpochID := lastEpoch.EpochId + 1
+	shape := ls.eraShape()
+	if entry, ok := shape.EraForID(lastEpoch.EraId); ok &&
+		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+		if nextEpochID >= entry.NextEraTrigger.Epoch {
+			return fmt.Errorf(
+				"%w: cannot forecast epoch %d from era %d across configured hard-fork boundary at epoch %d",
+				errEpochCacheForecastBoundary,
+				nextEpochID,
+				lastEpoch.EraId,
+				entry.NextEraTrigger.Epoch,
+			)
+		}
+		return nil
+	}
+	if lastEpoch.EraId != currentEraID ||
+		transition.State != hardfork.TransitionKnown ||
+		nextEpochID < transition.KnownEpoch {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: cannot forecast epoch %d from era %d across confirmed hard-fork boundary at epoch %d",
+		errEpochCacheForecastBoundary,
+		nextEpochID,
+		lastEpoch.EraId,
+		transition.KnownEpoch,
+	)
+}
+
 // computeEpochNonceForSlot computes the epoch nonce, evolving nonce,
-// and labNonce for a new epoch starting at epochStartSlot. This
+// and lastEpochBlockNonce for a new epoch starting at epochStartSlot. This
 // mirrors calculateEpochNonce but uses non-transactional DB lookups
 // since we're not inside the ledger processing pipeline.
 //
@@ -408,8 +2725,14 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		)
 	}
 
-	// For the initial epoch (no nonce yet), return genesis hash
-	// for both epoch nonce and initial evolving nonce.
+	// For the initial epoch (no nonce yet), the epoch/evolving/candidate nonces
+	// are all the genesis nonce, and the carried lastEpochBlockNonce is Neutral
+	// (nil): cardano-ledger initializes praosStateLastEpochBlockNonce to
+	// NeutralNonce at genesis, so the first from-genesis boundary uses the
+	// identity (eta = candidate ⭒ NeutralNonce = candidate). Do NOT seed this
+	// with the genesis nonce (#2734). Mirrors calculateEpochNonce; the Mithril
+	// bootstrap path imports a non-nil lastEpochBlockNonce and never takes this
+	// branch.
 	if len(prevEpoch.Nonce) == 0 {
 		return genesisHash, genesisHash, genesisHash, nil, nil
 	}
@@ -434,13 +2757,9 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	// When resuming from a snapshot, prevEpoch can carry nonce state
 	// already advanced to the imported tip slot. Continue from the next
 	// slot in that case instead of replaying from epoch start.
-	ls.RLock()
-	currentTipSlot := ls.currentTip.Point.Slot
-	currentTipBlockNonce := append(
-		[]byte(nil),
-		ls.currentTipBlockNonce...,
-	)
-	ls.RUnlock()
+	tipState := ls.loadTipSnapshot()
+	currentTipSlot := tipState.currentTip.Point.Slot
+	currentTipBlockNonce := tipState.currentTipBlockNonce
 	if currentTipSlot >= prevEpoch.StartSlot &&
 		currentTipSlot < prevEpochEndSlot &&
 		len(prevEpoch.CandidateNonce) == 32 &&
@@ -504,25 +2823,43 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		)
 	}
 
-	// Compute the labNonce to SAVE for the next epoch's formula.
-	var labNonceToSave []byte
-	boundaryBlock, err := database.BlockBeforeSlot(
-		ls.db,
+	// The epoch nonce mixes the frozen candidate with the CARRIED
+	// last-block-of-previous-epoch nonce (cardano-ledger
+	// praosStateLastEpochBlockNonce), i.e. prevEpoch.LastEpochBlockNonce — NOT
+	// the last block of the epoch being closed. This must match the rollover
+	// path (calculateEpochNonce); see #2734.
+	//   epochNonce(N+1) = candidateNonce(N) ⭒ prevEpoch(N).LastEpochBlockNonce
+	labForEta := cloneNonce(prevEpoch.LastEpochBlockNonce)
+
+	// The carried lab for the NEXT boundary is stored on the new epoch record:
+	// prevHashToNonce(lastBlock.prevHash) = the PARENT hash of the last block of
+	// the epoch being closed (a one-block Praos lag), NOT the last block's own
+	// hash. See epochLabNonce and #2734 (eta_1349 wedge).
+	labNonceToSave, err := ls.epochLabNonce(
+		nil,
+		prevEpoch.StartSlot,
 		prevEpochEndSlot,
+		prevEpoch.LastEpochBlockNonce,
 	)
 	if err != nil {
-		if !errors.Is(err, models.ErrBlockNotFound) {
-			return nil, nil, nil, nil, fmt.Errorf(
-				"lookup boundary block: %w", err,
-			)
-		}
-	} else if len(boundaryBlock.PrevHash) > 0 {
-		labNonceToSave = boundaryBlock.PrevHash
+		return nil, nil, nil, nil, err
 	}
 
-	// Use the LAGGED lastEpochBlockNonce in the formula.
-	lastEpochBlockNonce := prevEpoch.LastEpochBlockNonce
-	if len(lastEpochBlockNonce) == 0 {
+	// The extraEntropy protocol parameter is the third term of the TICKN
+	// assembly. This path runs before the rollover enacts the new epoch's
+	// parameters, so the value is forecast the way cardano-ledger's TICKF
+	// supplies it to TICKN. Mainnet set a non-neutral value for exactly one
+	// epoch (259); everywhere else this resolves to NeutralNonce and leaves
+	// the result unchanged.
+	extraEntropy, err := ls.forecastExtraEntropyForEpoch(
+		prevEpoch.EpochId+1,
+		prevEpoch.EraId,
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	if len(labForEta) == 0 && len(extraEntropy) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		ls.config.Logger.Debug(
@@ -539,10 +2876,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	result, err := lcommon.CalculateEpochNonce(
+	result, err := assembleEpochNonce(
 		candidateNonce,
-		lastEpochBlockNonce,
-		nil,
+		labForEta,
+		extraEntropy,
 	)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf(
@@ -554,13 +2891,16 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		"computed epoch nonce for cache advance",
 		"new_epoch_start_slot", epochStartSlot,
 		"prev_epoch_id", prevEpoch.EpochId,
-		"last_epoch_block_nonce",
-		hex.EncodeToString(lastEpochBlockNonce),
+		"lab_for_eta",
+		hex.EncodeToString(labForEta),
+		"lab_nonce_to_save",
+		hex.EncodeToString(labNonceToSave),
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
 		"evolving_nonce", hex.EncodeToString(evolvingNonce),
-		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"epoch_nonce", hex.EncodeToString(result),
+		"extra_entropy", hex.EncodeToString(extraEntropy),
 		"component", "ledger",
 	)
 
-	return result.Bytes(), evolvingNonce, candidateNonce, labNonceToSave, nil
+	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
 }

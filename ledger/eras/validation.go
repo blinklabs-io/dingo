@@ -19,12 +19,15 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"reflect"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 // ErrExUnitsOverflow is returned when ExUnits
@@ -37,29 +40,90 @@ type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
 }
 
+// MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
+// CIP-23 minimum pool margin to era validation, mirroring phase2ValidationSkipper.
+// Exported so implementers (e.g. *ledger.LedgerView) can assert conformance at
+// compile time; a signature drift here would otherwise silently disable the
+// CIP-23 pool-margin-floor certificate rule at runtime.
+type MinPoolMarginProvider interface {
+	MinPoolMargin() *big.Rat
+}
+
+// CommitteeCredentialState is the optional ledger-state capability used by
+// Dingo's Conway and Dijkstra validation compositions to preserve key/script
+// credential tags. The legacy hash-only LedgerState committee methods cannot
+// distinguish credentials that share a hash.
+//
+// The method set is identical to gouroboros
+// ledger/common.CommitteeCredentialState, so the compile-time assertions
+// against this interface (ledger.LedgerView, conformance DingoStateProvider)
+// also prove those types satisfy the upstream capability. Keep the two in
+// sync: the upstream Conway rules type-assert for it and fail closed when the
+// assertion misses, so a signature drift here would silently disable committee
+// validation rather than fail to build. Once the gouroboros pin exports it,
+// alias this to the upstream type instead of redeclaring it.
+type CommitteeCredentialState interface {
+	CommitteeStateAvailable() (bool, error)
+	CommitteeCredentialMember(
+		lcommon.Credential,
+	) (*lcommon.CommitteeMember, error)
+	CommitteeHotCredentialMember(
+		lcommon.Credential,
+	) (*lcommon.CommitteeMember, error)
+}
+
+// minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
+// state enforces, or nil when the state does not provide one (feature disabled).
+func minPoolMarginFromLedgerState(ls lcommon.LedgerState) *big.Rat {
+	provider, ok := ls.(MinPoolMarginProvider)
+	if !ok {
+		return nil
+	}
+	return provider.MinPoolMargin()
+}
+
+// checkPoolMarginFloor enforces the CIP-23 rule that each pool registration
+// certificate's margin (variable fee) is at least minMargin. It is a no-op when
+// minMargin is nil (feature disabled). A nil certificate margin is treated as 0.
+// Non-pool-registration certificates are ignored.
+func checkPoolMarginFloor(
+	certs []lcommon.Certificate,
+	minMargin *big.Rat,
+) error {
+	if minMargin == nil {
+		return nil
+	}
+	for _, cert := range certs {
+		reg, ok := cert.(*lcommon.PoolRegistrationCertificate)
+		if !ok {
+			continue
+		}
+		if reg == nil {
+			continue
+		}
+		margin := reg.Margin.Rat
+		if margin == nil {
+			margin = new(big.Rat)
+		}
+		if margin.Cmp(minMargin) < 0 {
+			return fmt.Errorf(
+				"pool %x margin %s below minimum pool margin %s",
+				reg.Operator.Bytes(),
+				margin.RatString(),
+				minMargin.RatString(),
+			)
+		}
+	}
+	return nil
+}
+
 type indexedUtxoValidationRule struct {
 	index          int
 	validationFunc lcommon.UtxoValidationRuleFunc
 }
 
-type utxoValidationRuleSkip struct {
-	index          int
-	validationFunc lcommon.UtxoValidationRuleFunc
-	name           string
-}
-
 const (
 	noUtxoValidationRuleIndex = -1
-
-	// Positions in gouroboros v0.180.1 UtxoValidationRules. Function
-	// values are not directly comparable in Go, so setup guards compare
-	// function pointers before filtering by index.
-	alonzoUtxoValidatePlutusScriptsRuleIndex   = 26
-	babbageUtxoValidatePlutusScriptsRuleIndex  = 30
-	conwayUtxoValidateFeeTooSmallRuleIndex     = 19
-	conwayUtxoValidateExUnitsTooBigRuleIndex   = 34
-	conwayUtxoValidatePlutusScriptsRuleIndex   = 38
-	dijkstraUtxoValidatePlutusScriptsRuleIndex = 38
 
 	conwayRefScriptCostStride = 25_600
 )
@@ -71,43 +135,442 @@ func shouldSkipPhase2Validation(
 	return ok && skipper.SkipPhase2Validation()
 }
 
-func buildIndexedUtxoValidationRules(
-	rules []lcommon.UtxoValidationRuleFunc,
-	skipIndex int,
-	skipValidationFunc lcommon.UtxoValidationRuleFunc,
-	skipRuleName string,
-) []indexedUtxoValidationRule {
-	if skipIndex != noUtxoValidationRuleIndex {
-		return buildIndexedUtxoValidationRulesWithSkips(
-			rules,
-			[]utxoValidationRuleSkip{
-				{
-					index:          skipIndex,
-					validationFunc: skipValidationFunc,
-					name:           skipRuleName,
-				},
-			},
+func protocolMajorVersion(pp lcommon.ProtocolParameters) uint {
+	versioned, ok := pp.(interface{ ProtocolMajorVersion() uint })
+	if !ok {
+		return 0
+	}
+	return versioned.ProtocolMajorVersion()
+}
+
+// CommitteeMemberAlreadyResignedError indicates a committee cold-key
+// resignation certificate for a member already resigned, in ledger state or
+// by an earlier certificate of the same transaction.
+//
+// Reference: ConwayCommitteeHasPreviouslyResigned in GOVCERT,
+// eras/conway/impl/src/Cardano/Ledger/Conway/Rules/GovCert.hs.
+type CommitteeMemberAlreadyResignedError struct {
+	ColdCredential lcommon.Credential
+}
+
+func (e CommitteeMemberAlreadyResignedError) Error() string {
+	return fmt.Sprintf(
+		"committee member already resigned: %x",
+		e.ColdCredential.Credential[:],
+	)
+}
+
+// committeeCredentialKey is a comparable identity for a committee cold
+// credential. Credential embeds cbor.DecodeStoreCbor, which is not itself
+// comparable, so a full tagged identity must be projected out to use as a map
+// key; a hash-only key would conflate a key-hash and script-hash credential
+// that happen to share hash bytes.
+type committeeCredentialKey struct {
+	credType   uint
+	credential lcommon.CredentialHash
+}
+
+func committeeCredentialKeyFor(
+	credential lcommon.Credential,
+) committeeCredentialKey {
+	return committeeCredentialKey{
+		credType:   credential.CredType,
+		credential: credential.Credential,
+	}
+}
+
+// validateCommitteeCertificates preserves the full cold credential identity
+// when the ledger state exposes Dingo's tag-aware capability. Other state
+// implementations retain the upstream hash-only behavior.
+//
+// Committee certificates are processed sequentially within the transaction:
+// a resignation certificate is tracked in resignedInTx so a later certificate
+// for the same credential sees it, rather than every certificate querying
+// only the pre-transaction snapshot.
+func validateCommitteeCertificates(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	// Committee certificates belong to the CERTS state transition. A
+	// phase-2-invalid transaction only applies its collateral effects, so it
+	// must not inspect or reject against committee state.
+	if !tx.IsValid() {
+		return nil
+	}
+	if _, ok := tx.(*gdijkstra.DijkstraTransaction); ok {
+		if err := gdijkstra.UtxoValidateCommitteeCertificates(
+			tx, slot, ls, pp,
+		); err != nil {
+			return err
+		}
+	}
+	state, ok := ls.(CommitteeCredentialState)
+	if !ok {
+		return conway.UtxoValidateCommitteeCertificates(tx, slot, ls, pp)
+	}
+	// Availability is resolved on the first lookup rather than up front, so a
+	// transaction carrying no committee certificate never pays for the query.
+	// The second result reports whether the answer is authoritative; a nil
+	// member is only non-membership when it is.
+	var availabilityKnown, available bool
+	committeeMember := func(
+		coldCredential lcommon.Credential,
+	) (*lcommon.CommitteeMember, bool, error) {
+		if !availabilityKnown {
+			resolved, err := state.CommitteeStateAvailable()
+			if err != nil {
+				return nil, false, err
+			}
+			available, availabilityKnown = resolved, true
+		}
+		if !available {
+			return nil, false, nil
+		}
+		member, err := state.CommitteeCredentialMember(coldCredential)
+		return member, true, err
+	}
+	resignedInTx := make(map[committeeCredentialKey]bool)
+	for _, cert := range tx.Certificates() {
+		var (
+			credential lcommon.Credential
+			operation  string
+			authorize  bool
+		)
+		switch c := cert.(type) {
+		case *lcommon.AuthCommitteeHotCertificate:
+			credential = c.ColdCredential
+			operation = "authorize hot key"
+			authorize = true
+		case *lcommon.ResignCommitteeColdCertificate:
+			credential = c.ColdCredential
+			operation = "resign"
+		default:
+			continue
+		}
+		key := committeeCredentialKeyFor(credential)
+		member, authoritative, err := committeeMember(credential)
+		if err != nil {
+			// A failed lookup is never authorization: fail closed.
+			return conway.CommitteeMemberLookupError{
+				Credential: credential.Credential,
+				Err:        err,
+			}
+		}
+		if member == nil {
+			if !authoritative {
+				// Dingo holds no committee state for this snapshot, so
+				// non-membership cannot be established beyond what this
+				// transaction's own certificates have already done. An
+				// earlier certificate's resignation must still be honored,
+				// or a resign-then-resign or resign-then-authorize sequence
+				// within one transaction would pass uninspected whenever
+				// committee state happens to be unavailable. See
+				// LedgerView.CommitteeStateAvailable.
+				if resignedInTx[key] {
+					if authorize {
+						return conway.ResignedCommitteeMemberHotKeyError{
+							ColdKey: credential.Credential,
+						}
+					}
+					return CommitteeMemberAlreadyResignedError{
+						ColdCredential: credential,
+					}
+				}
+				if !authorize {
+					resignedInTx[key] = true
+				}
+				continue
+			}
+			return conway.NotCommitteeMemberError{
+				Credential: credential.Credential,
+				Operation:  operation,
+			}
+		}
+		resigned := member.Resigned || resignedInTx[key]
+		if resigned {
+			if authorize {
+				return conway.ResignedCommitteeMemberHotKeyError{
+					ColdKey: credential.Credential,
+				}
+			}
+			return CommitteeMemberAlreadyResignedError{
+				ColdCredential: credential,
+			}
+		}
+		if !authorize {
+			resignedInTx[key] = true
+		}
+	}
+	return nil
+}
+
+// validateUnknownVoters rejects a vote cast by a voter that does not exist
+// (Conway GOV, VotersDoNotExist). cardano-ledger resolves every voter against
+// the certificate state after the transaction's own certificates (Conway
+// LEDGER passes certStateAfterCERTS to GOV), so a DRep, stake pool or
+// committee hot credential registered or authorized earlier in the same
+// transaction is known, and a DRep deregistered or a hot credential replaced
+// or resigned there is not. Dijkstra sub-transactions are resolved in order
+// before the top-level transaction, each seeing the certificates of the
+// levels before it. Credentials keep their key/script tags throughout, and a
+// committee hot credential is known while any cold credential authorizes it:
+// the mapping from hot to cold credential is not unique
+// (authorizedHotCommitteeCredentials).
+func validateUnknownVoters(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
+		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
+			return err
+		}
+	}
+	// Votes belong to the GOV state transition, which a phase-2-invalid
+	// transaction does not apply.
+	if !tx.IsValid() {
+		return nil
+	}
+	state, ok := ls.(CommitteeCredentialState)
+	if !ok {
+		if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
+			return nil
+		}
+		return conway.UtxoValidateUnknownVoters(tx, slot, ls, pp)
+	}
+	overlay := newVoterOverlay(ls, state)
+	for _, level := range governanceLevels(tx) {
+		overlay.applyCertificates(level.certificates)
+		if err := overlay.validateVoters(level.votes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ParameterChangeProtocolVersionError indicates that a ParameterChange
+// governance action set protocol-version key 14, which the reference
+// excludes from PParamsUpdate entirely.
+type ParameterChangeProtocolVersionError struct {
+	ProposalIndex int
+}
+
+func (e ParameterChangeProtocolVersionError) Error() string {
+	return fmt.Sprintf(
+		"proposal %d: ParameterChange must not set protocol-version (key 14); only HardForkInitiation can change protocol version",
+		e.ProposalIndex,
+	)
+}
+
+// parameterChangeSetsProtocolVersionKey reports whether a ParameterChange's
+// raw CBOR param-update map contains key 14 (protocolVersion) at all,
+// independent of what it decoded to. A present-but-null value decodes a
+// pointer field to the same nil the field takes when the key is absent
+// entirely, so the decoded pointer alone cannot distinguish "not requested"
+// from "requested null" -- the same distinction
+// conwayCurrentTreasuryValuePresent draws for transaction-body key 21. The
+// reference rejects a ParameterChange carrying key 14 whatever value it
+// holds, so presence, not a specific decoded value, is what must be
+// rejected.
+func parameterChangeSetsProtocolVersionKey(paramUpdateCbor []byte) bool {
+	if len(paramUpdateCbor) == 0 {
+		// No raw CBOR to inspect (e.g. an update built in Go without going
+		// through decode). The caller's decoded-pointer check already
+		// covers this case.
+		return false
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(paramUpdateCbor, &fields); err != nil {
+		// The type already decoded successfully from this CBOR, so a
+		// failure here means the raw bytes and typed value disagree. Fail
+		// closed rather than silently admit the proposal.
+		return true
+	}
+	_, ok := fields[14]
+	return ok
+}
+
+// validateParameterChangeExcludesProtocolVersion rejects a Conway or
+// Dijkstra ParameterChange governance action that carries protocol-version
+// key 14 (dingo#4439). The reference excludes protocol version from
+// PParamsUpdate: a protocol change must go through HardForkInitiation
+// instead, which carries separate SPO/DRep threshold semantics and, at PV9,
+// bootstrap restrictions that a same-purpose ParameterChange would
+// otherwise bypass. Rejecting here, before ProcessProposals, keeps a
+// malformed proposal from ever being persisted or reaching enactment.
+func validateParameterChangeExcludesProtocolVersion(
+	tx lcommon.Transaction,
+	_ uint64,
+	_ lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	for i, proposal := range tx.ProposalProcedures() {
+		var setsProtocolVersion bool
+		switch action := proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
+		case *gdijkstra.DijkstraParameterChangeGovAction:
+			setsProtocolVersion = action != nil &&
+				(action.ParamUpdate.ProtocolVersion != nil ||
+					parameterChangeSetsProtocolVersionKey(
+						action.ParamUpdate.Cbor(),
+					))
+		}
+		if setsProtocolVersion {
+			return ParameterChangeProtocolVersionError{ProposalIndex: i}
+		}
+	}
+	return nil
+}
+
+// isConwayBootstrapPhase reports whether pp is Conway protocol parameters
+// with major version PV9: the initial Conway "bootstrap phase", before the
+// Plomin hard fork lifts its restrictions at PV10. Mirrors gouroboros's
+// unexported conway.isInConwayBootstrapPhase, which this package cannot call
+// directly.
+func isConwayBootstrapPhase(pp lcommon.ProtocolParameters) bool {
+	conwayPp, ok := pp.(*conway.ConwayProtocolParameters)
+	if !ok {
+		return false
+	}
+	major := conwayPp.ProtocolVersion.Major
+	return major >= lcommon.ProtocolVersionConway &&
+		major < lcommon.ProtocolVersionPlomin
+}
+
+// validateDelegationConwayBootstrapAware wraps the upstream Conway
+// delegation-certificate rule (conway.UtxoValidateDelegation) to relax the
+// vote-delegation DRep-registration check during the Conway bootstrap phase
+// (PV9), matching cardano-ledger's checkDRepRegistered in
+// Cardano.Ledger.Conway.Rules.Deleg:
+//
+//	checkDRepRegistered = \case
+//	  DRepAlwaysAbstain -> pure ()
+//	  DRepAlwaysNoConfidence -> pure ()
+//	  DRepCredential targetDRep -> do
+//	    unless (hardforkConwayBootstrapPhase (pp ^. ppProtocolVersionL)) $
+//	      targetDRep `Map.member` dReps ?! injectFailure
+//	        (DelegateeDRepNotRegisteredDELEG targetDRep)
+//
+// Only the DRep-registered branch is bootstrap-relaxed upstream: stake
+// credential registration, pool registration, and every other delegation
+// check in conway.UtxoValidateDelegation stay fully enforced, since this
+// wrapper defers to the upstream function unchanged and only swallows the
+// one error it can produce for a target DRep that has not registered yet.
+//
+// Without this, a genuinely valid PV9 vote-delegation certificate (or the
+// combined stake-vote-delegation/registration certificate variants, which
+// share the same DRep-registration check and error type) targeting a DRep
+// that only registers later is rejected forever, wedging block application.
+// Live incident: dingo rejected a Preview block at slot 55847379 (epoch
+// 646, ~2024-08-01) delegating to DRep credential
+// 0e4bdd698b4cc2f2e518b4b1fa5190d0bc566ac42f93c26986ecaa79, which Koios
+// shows registering only around 2025-02-20 (block_time 1740052671) — seven
+// months after the delegation. cardano-ledger's PV10 (Plomin) HARDFORK rule
+// (updateDRepDelegations, ported in dingo as
+// LedgerState.ClearDanglingDRepDelegations) exists specifically to clean up
+// this kind of dangling pre-PV10 delegation, which only makes sense if the
+// delegation was accepted onto the chain in the first place.
+func validateDelegationConwayBootstrapAware(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	err := conway.UtxoValidateDelegation(tx, slot, ls, pp)
+	if err == nil {
+		return nil
+	}
+	var drepErr conway.DelegateVoteToUnregisteredDRepError
+	if errors.As(err, &drepErr) && isConwayBootstrapPhase(pp) {
+		return nil
+	}
+	return err
+}
+
+// validatePlutusOutcome requires the locally evaluated phase-2 result to
+// match the transaction's declared validity flag. A failed script is the
+// expected outcome for an invalid transaction; every other validation error
+// remains a hard failure because it does not establish that script execution
+// itself failed.
+func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
+	if tx.IsValid() {
+		return phase2Err
+	}
+	if phase2Err == nil {
+		return errors.New(
+			"transaction declared invalid but Plutus scripts succeeded",
 		)
 	}
-	return buildIndexedUtxoValidationRulesWithSkips(rules, nil)
+	if _, ok := errors.AsType[conway.PlutusScriptFailedError](phase2Err); ok {
+		return nil
+	}
+	return phase2Err
+}
+
+// txHasRedeemers reports whether the transaction carries at least one redeemer.
+//
+// Redeemers are what drive Plutus phase-2 evaluation: every Plutus script a
+// transaction runs needs one, so a transaction without any runs no Plutus
+// script. Native scripts are phase-1 and never reach evaluation.
+//
+// Callers use this to avoid building a Plutus script context (TxInfo) for a
+// transaction that has no script to evaluate. That is not merely wasted work:
+// the context embeds the transaction's validity interval translated to
+// wall-clock time, so building it converts the transaction's TTL through the
+// bounded HFC forecast horizon and fails with hardfork.ErrPastHorizon whenever
+// the TTL lies past that horizon — rejecting canonical, script-free
+// transactions. cardano-ledger only translates the validity interval while
+// assembling the context for the Plutus scripts a transaction actually needs
+// (Alonzo collectPlutusScriptsWithContext), and ValidateTxConway already
+// follows that shape here via txInfoCache.
+func txHasRedeemers(tx lcommon.Transaction) bool {
+	witnesses := tx.Witnesses()
+	if witnesses == nil {
+		return false
+	}
+	redeemers := witnesses.Redeemers()
+	if redeemers == nil {
+		return false
+	}
+	for range redeemers.Iter() {
+		return true
+	}
+	return false
+}
+
+func buildIndexedUtxoValidationRules(
+	descriptors []lcommon.UtxoValidationRuleDescriptor,
+	rules []lcommon.UtxoValidationRuleFunc,
+	skipRuleId lcommon.UtxoValidationRuleId,
+) []indexedUtxoValidationRule {
+	return buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
+		rules,
+		[]lcommon.UtxoValidationRuleId{skipRuleId},
+	)
 }
 
 func buildIndexedUtxoValidationRulesWithSkips(
+	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
-	skips []utxoValidationRuleSkip,
+	skipRuleIds []lcommon.UtxoValidationRuleId,
 ) []indexedUtxoValidationRule {
-	skipIndexes := map[int]struct{}{}
-	for _, skip := range skips {
-		if skip.index == noUtxoValidationRuleIndex {
-			continue
-		}
-		validateUtxoValidationSkipIndex(
+	skipIndexes := make(map[int]struct{}, len(skipRuleIds))
+	for _, skipRuleId := range skipRuleIds {
+		resolvedIndex := resolveUtxoValidationSkipIndex(
+			descriptors,
 			rules,
-			skip.index,
-			skip.validationFunc,
-			skip.name,
+			skipRuleId,
 		)
-		skipIndexes[skip.index] = struct{}{}
+		skipIndexes[resolvedIndex] = struct{}{}
 	}
 	ret := make([]indexedUtxoValidationRule, 0, len(rules))
 	for idx, validationFunc := range rules {
@@ -122,47 +585,66 @@ func buildIndexedUtxoValidationRulesWithSkips(
 	return ret
 }
 
-func validateUtxoValidationSkipIndex(
+// resolveUtxoValidationSkipIndex returns the position of the upstream rule
+// carrying the stable semantic identifier skipRuleId.
+//
+// Resolution is by rule Id and must never fall back to validation function
+// identity or runtime function name. gouroboros builds several era rule lists
+// with common.ComposeUtxoValidationRules, which replaces every phase-2-gated
+// entry with an anonymous wrapper closure, and it moves shared rules between
+// era packages across releases. Both erase function identity while leaving the
+// Id intact, so a function-keyed resolver panics at package initialization on
+// an ordinary upstream refactor.
+//
+// It panics when the Id is empty, absent, or duplicated, and when the upstream
+// descriptor list and rule list have diverged in length, so an upstream change
+// fails loudly instead of silently leaving an upstream rule in place or
+// removing the wrong one.
+func resolveUtxoValidationSkipIndex(
+	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
-	skipIndex int,
-	skipValidationFunc lcommon.UtxoValidationRuleFunc,
-	skipRuleName string,
-) {
-	if skipRuleName == "" {
-		skipRuleName = "UTxO validation skip rule"
+	skipRuleId lcommon.UtxoValidationRuleId,
+) int {
+	if skipRuleId == "" {
+		panic("UTxO validation skip rule Id is empty")
 	}
-	if skipIndex < 0 {
+	if len(descriptors) != len(rules) {
 		panic(fmt.Sprintf(
-			"%s has invalid negative hardcoded rule index %d",
-			skipRuleName,
-			skipIndex,
-		))
-	}
-	if skipIndex >= len(rules) {
-		panic(fmt.Sprintf(
-			"%s hardcoded rule index %d is outside upstream rules length %d",
-			skipRuleName,
-			skipIndex,
+			"UTxO validation rule %q: upstream descriptor count %d does not match rule count %d",
+			skipRuleId,
+			len(descriptors),
 			len(rules),
 		))
 	}
-	if skipValidationFunc == nil {
-		panic(skipRuleName + " expected validation function is nil")
+	found := noUtxoValidationRuleIndex
+	for index, descriptor := range descriptors {
+		if descriptor.Id != skipRuleId {
+			continue
+		}
+		if found != noUtxoValidationRuleIndex {
+			panic(fmt.Sprintf(
+				"UTxO validation rule %q resolves to multiple upstream rule indexes %d and %d",
+				skipRuleId,
+				found,
+				index,
+			))
+		}
+		found = index
 	}
-	if utxoValidationRulePtr(rules[skipIndex]) != utxoValidationRulePtr(skipValidationFunc) {
+	if found == noUtxoValidationRuleIndex {
 		panic(fmt.Sprintf(
-			"%s hardcoded rule index %d no longer resolves to the expected function",
-			skipRuleName,
-			skipIndex,
+			"UTxO validation rule %q is absent from the upstream validation rule descriptors",
+			skipRuleId,
 		))
 	}
-}
-
-func utxoValidationRulePtr(fn lcommon.UtxoValidationRuleFunc) uintptr {
-	if fn == nil {
-		return 0
+	if rules[found] == nil {
+		panic(fmt.Sprintf(
+			"UTxO validation rule %q resolves to a nil upstream rule at index %d",
+			skipRuleId,
+			found,
+		))
 	}
-	return reflect.ValueOf(fn).Pointer()
+	return found
 }
 
 // SafeAddExUnits adds two ExUnits values with
@@ -224,13 +706,110 @@ const txTypeAlonzo = 4
 // on-wire 4-element format is exactly the 1-byte IsValid
 // field. Pre-Alonzo transactions (Byron through Mary) do
 // not contain an IsValid byte, so their full CBOR length
-// is the fee-relevant size.
+// is the fee-relevant size — except when the transaction
+// was rebuilt from block components, which
+// preAlonzoRebuiltWireSize handles.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
+	if size, ok := preAlonzoRebuiltWireSize(tx); ok {
+		return size
+	}
 	fullSize := uint64(len(tx.Cbor()))
 	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
 		return fullSize - 1
 	}
 	return fullSize
+}
+
+// preAlonzoRebuiltWireSize returns the wire size of a Shelley or Allegra
+// transaction that was rebuilt from separately decoded components rather than
+// decoded from a complete transaction encoding.
+//
+// ShelleyBlock.Transactions and AllegraBlock.Transactions construct each
+// transaction from the block's parallel body, witness-set, and auxiliary-data
+// arrays, so the resulting value carries no stored transaction CBOR. The
+// current upstream body and witness encoders preserve their component wire
+// bytes; this helper explicitly reconstructs the fee-relevant transaction
+// size from those bytes and the three-element transaction envelope.
+//
+// The size is rebuilt from the preserved component bytes: a 1-byte
+// definite-length 3-element array header, the body and witness-set bytes as
+// they appeared on the wire, and either the auxiliary data bytes or a 1-byte
+// CBOR null. A non-empty body or witness-set Cbor() is only ever set by that
+// component's UnmarshalCBOR, so these bytes are the ones that were decoded.
+//
+// Transactions that do carry stored transaction CBOR are left to the caller's
+// len(tx.Cbor()), so no size that a node observed on the wire is recomputed
+// here. MaryTransactionBody likewise implements MarshalCBOR and returns its
+// preserved bytes, so Mary does not need this helper.
+func preAlonzoRebuiltWireSize(tx lcommon.Transaction) (uint64, bool) {
+	var storedCbor, bodyCbor, witnessCbor []byte
+	var auxData lcommon.AuxiliaryData
+	var metadata lcommon.TransactionMetadatum
+	switch tmpTx := tx.(type) {
+	case *shelley.ShelleyTransaction:
+		storedCbor = tmpTx.DecodeStoreCbor.Cbor()
+		bodyCbor = tmpTx.Body.Cbor()
+		witnessCbor = tmpTx.WitnessSet.Cbor()
+		auxData = tmpTx.AuxiliaryData()
+		metadata = tmpTx.Metadata()
+	case *allegra.AllegraTransaction:
+		storedCbor = tmpTx.DecodeStoreCbor.Cbor()
+		bodyCbor = tmpTx.Body.Cbor()
+		witnessCbor = tmpTx.WitnessSet.Cbor()
+		auxData = tmpTx.AuxiliaryData()
+		metadata = tmpTx.Metadata()
+	default:
+		return 0, false
+	}
+	if len(storedCbor) > 0 {
+		// Decoded from a complete transaction encoding, so those are the
+		// bytes the node received.
+		return 0, false
+	}
+	if len(bodyCbor) == 0 || len(witnessCbor) == 0 {
+		return 0, false
+	}
+	// The third wire element is the auxiliary data, or CBOR null when the
+	// transaction has none. Bail out rather than guess when auxiliary data is
+	// present but its original bytes are not, so the caller falls back to
+	// len(tx.Cbor()).
+	auxSize := 1 // CBOR null auxiliary data
+	switch {
+	case auxData != nil && len(auxData.Cbor()) > 0:
+		auxSize = len(auxData.Cbor())
+	case auxData != nil || metadata != nil:
+		return 0, false
+	}
+	// 1 byte for the definite-length 3-element array header.
+	return uint64(1 + len(bodyCbor) + len(witnessCbor) + auxSize), true
+}
+
+// validatePreAlonzoTx runs a pre-Alonzo era's UTxO validation rules and then
+// applies Dingo's size and fee checks in place of the upstream fee and
+// max-size rules that buildIndexedUtxoValidationRulesWithSkips removed.
+//
+// Both replacements derive their size from TxSizeForFee. Keeping both checks
+// on TxSizeForFee makes the local validation path explicit and consistent with
+// the fee calculation, matching cardano-ledger, where validateMaxTxSizeUTxO
+// and the minimum-fee calculation both read sizeTxF.
+func validatePreAlonzoTx(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+	rules []indexedUtxoValidationRule,
+	maxTxSize uint,
+	minFeeA uint,
+	minFeeB uint,
+) error {
+	errs := make([]error, 0, len(rules)+3)
+	for _, rule := range rules {
+		errs = append(errs, rule.validationFunc(tx, slot, ls, pp))
+	}
+	errs = append(errs, validateShelleyDelegCerts(tx, slot, ls, pp))
+	errs = append(errs, ValidateTxSize(tx, maxTxSize))
+	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
+	return errors.Join(errs...)
 }
 
 // ValidateTxSize checks that the transaction size does
@@ -570,28 +1149,41 @@ func referencedScriptUtxos(
 	return utxos, nil
 }
 
-// DeclaredExUnits returns the total execution units
-// declared across all redeemers in a transaction's
-// witness set. These are the budgets the transaction
-// builder committed to (not the evaluated actuals).
-// Returns an error if the summation would overflow
-// int64.
+// DeclaredExUnits returns the total execution units declared across all
+// redeemers in a transaction, including Dijkstra subtransaction witness sets.
+// These are the budgets the transaction builder committed to (not the
+// evaluated actuals). Returns an error for negative values or if the summation
+// would overflow int64.
 func DeclaredExUnits(
 	tx lcommon.Transaction,
 ) (lcommon.ExUnits, error) {
 	var total lcommon.ExUnits
-	wits := tx.Witnesses()
-	if wits == nil {
-		return total, nil
+	addWitnessSet := func(wits lcommon.TransactionWitnessSet) error {
+		if wits == nil {
+			return nil
+		}
+		redeemers := wits.Redeemers()
+		if redeemers == nil {
+			return nil
+		}
+		for _, val := range redeemers.Iter() {
+			var err error
+			total, err = SafeAddExUnits(total, val.ExUnits)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	redeemers := wits.Redeemers()
-	if redeemers == nil {
-		return total, nil
+
+	if err := addWitnessSet(tx.Witnesses()); err != nil {
+		return lcommon.ExUnits{}, fmt.Errorf(
+			"summing redeemer execution units: %w",
+			err,
+		)
 	}
-	for _, val := range redeemers.Iter() {
-		var err error
-		total, err = SafeAddExUnits(total, val.ExUnits)
-		if err != nil {
+	for _, wits := range lcommon.SubTransactionWitnessSetsFromTransaction(tx) {
+		if err := addWitnessSet(wits); err != nil {
 			return lcommon.ExUnits{}, fmt.Errorf(
 				"summing redeemer execution units: %w",
 				err,

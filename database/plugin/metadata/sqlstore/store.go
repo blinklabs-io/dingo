@@ -1,0 +1,1128 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package sqlstore
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"regexp"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// Config contains backend-neutral dependencies for a Store.
+type Config struct {
+	WriteDB *sql.DB
+	ReadDB  *sql.DB
+	Dialect Dialect
+	Logger  *slog.Logger
+	// StorageMode controls retention of API-only transaction detail. Empty
+	// selects the consensus-focused core mode.
+	StorageMode string
+	// CommitteeAuthRetentionSlots overrides how far back superseded
+	// auth_committee_hot rows are retained for rollback, in slots. Zero
+	// selects DefaultCommitteeAuthRetentionSlots; see committee_prune.go for
+	// the retention rule and why the window has to cover the rollback bound.
+	CommitteeAuthRetentionSlots uint64
+
+	Migrations      []migrations.Migration
+	MigrationLocker migrations.Locker
+	DiskSize        func() (int64, error)
+	// Maintenance is optional backend maintenance started only after the
+	// migration readiness gate succeeds. It runs alongside the periodic
+	// committee authorization sweep.
+	Maintenance         func(context.Context) error
+	MaintenanceInterval time.Duration
+	// Vacuum runs optional database vacuum work on a dedicated ticker. It is
+	// separate from Maintenance because vacuum may take much longer and has a
+	// different safe cadence.
+	Vacuum         func(context.Context) error
+	VacuumInterval time.Duration
+	// Checkpoint is an optional provider-owned hook run on its own ticker,
+	// independent of Maintenance/MaintenanceInterval: SQLite uses it to
+	// attempt a periodic WAL TRUNCATE checkpoint (see sqlite.checkpointWAL)
+	// so the on-disk WAL file can be shrunk back down on a schedule, rather
+	// than relying solely on the commit-triggered wal_autocheckpoint passive
+	// checkpoint, which never truncates. This is best-effort: an active read
+	// snapshot can leave a given attempt busy, deferring the reduction to a
+	// later tick instead of guaranteeing an unconditional size ceiling. Left
+	// unset (or CheckpointInterval <= 0), this ticker never starts -- the
+	// same convention Maintenance/MaintenanceInterval already use.
+	Checkpoint         func(context.Context) error
+	CheckpointInterval time.Duration
+	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.
+	// SQLite supplies them for its file-backed store; other dialects may leave
+	// them unset until a native snapshot mechanism is available.
+	BackupTo    func(context.Context, string) error
+	RestoreFrom func(context.Context, string) error
+	// Prepare is an optional provider-owned hook run once at the start of
+	// Start, before anything touches the pools. It is where a provider does
+	// setup that has to happen on a connection of its own and must not
+	// happen at construction time: SQLite uses it to put a new database into
+	// WAL mode, which materialises the file, and constructing a store is not
+	// allowed to do that -- RestoreFrom runs against a constructed but
+	// unstarted store and requires the destination not to exist.
+	Prepare func(context.Context) error
+	// Reset is an optional provider-owned hook clearing all data this store
+	// owns, using the still-open pool (it must run before the store is
+	// closed). See metadata.Resettable's doc comment for why this exists:
+	// a live client/server backend's restore orchestration needs a way to
+	// undo a brief resolve-and-start's real migrations against the actual
+	// remote database, which a directory wipe (sqlite/badger's mechanism)
+	// cannot touch. Left unset, Reset is a harmless no-op.
+	Reset func(context.Context) error
+	// ValidateBackup is an optional provider-owned hook checking a backup
+	// file's structural integrity without touching any database -- see
+	// metadata.BackupValidator's doc comment for why this exists
+	// specifically for Resettable providers: their restore orchestration
+	// resets a live remote target before RestoreFrom ever parses the
+	// backup, so an invalid backup needs to be caught before that reset,
+	// not after it. Left unset, ValidateBackup is a harmless no-op.
+	ValidateBackup func(context.Context, string) error
+	// PromRegistry is optional. When set, Store registers
+	// dingo_database_sql_operations_total, a counter of every statement
+	// issued through Store's shared query chokepoint (instrumentedQueryer),
+	// labeled by its best-effort operation classification, and
+	// dingo_database_sql_query_duration_seconds, a histogram of each such
+	// statement's wall-clock duration labeled by that same op
+	// classification plus, when known, the sqlc-generated query name (see
+	// classifySQLStatement in metrics.go). Store also registers six
+	// dingo_database_sql_pool_* connection-pool metrics per pool, labeled
+	// pool="write"|"read" and sampled live from WritePoolStats/
+	// ReadPoolStats on every scrape (see newSQLPoolMetrics in metrics.go)
+	// -- most notably pool_wait_count_total and
+	// pool_wait_duration_seconds_total, which for pool="write" are the
+	// direct signal for contention on the single writer connection every
+	// current provider caps that pool to. Left nil, instrumentation is a
+	// no-op -- the same convention database/plugin/blob/badger uses for its
+	// own promRegistry.
+	PromRegistry prometheus.Registerer
+}
+
+// Store owns the shared database/sql pools. Provider packages own DSN and
+// driver selection; metadata behavior belongs here.
+type Store struct {
+	writeDB     *sql.DB
+	readDB      *sql.DB
+	dialect     Dialect
+	logger      *slog.Logger
+	storageMode string
+
+	// committeeAuthRetentionSlots is the configured rollback window for
+	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
+	// which applies the default, rather than directly.
+	committeeAuthRetentionSlots uint64
+
+	// rewardLiveStakeBatchSize overrides rewardLiveStakeRebuildBatch when
+	// non-zero. Only tests set it, to drive the rebuild across many batch
+	// boundaries without a production-sized fixture.
+	rewardLiveStakeBatchSize int
+
+	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
+	// the live rollback-safe immutable slot (tip depth securityParam blocks
+	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
+	// package -- sqlstore cannot import chain (chain already imports
+	// database) to compute it directly. committeeAuthImmutableSlotEverSet
+	// distinguishes "no live syncer has ever been wired for this Store"
+	// (committeeAuthHorizon falls back to the slot-window assumption, the
+	// pre-live-sync behavior every existing caller and test still gets)
+	// from "a live syncer is wired but has no current value" (bootstrap
+	// before the first successful resolution, or invalidated by a rollback
+	// in DeleteCertificatesAfterSlot -- pruning suspends rather than fall
+	// back to an assumption a sparse or recently-reorganized chain can
+	// violate). Read through committeeAuthHorizon(). Plain atomics, not a
+	// mutex: the setter runs from an independent periodic sync goroutine
+	// while readers run inline in the certificate write path and the
+	// maintenance sweep, and none of them may block on each other.
+	committeeAuthImmutableSlot        atomic.Uint64
+	committeeAuthImmutableSlotKnown   atomic.Bool
+	committeeAuthImmutableSlotEverSet atomic.Bool
+
+	migrations        []migrations.Migration
+	migrationLocker   migrations.Locker
+	diskSize          func() (int64, error)
+	maintenance       func(context.Context) error
+	maintenanceEvery  time.Duration
+	vacuum            func(context.Context) error
+	vacuumEvery       time.Duration
+	backupTo          func(context.Context, string) error
+	restoreFrom       func(context.Context, string) error
+	prepare           func(context.Context) error
+	reset             func(context.Context) error
+	validateBackup    func(context.Context, string) error
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	maintenanceState  atomic.Uint32
+	vacuumCancel      context.CancelFunc
+	vacuumDone        chan struct{}
+	vacuumState       atomic.Uint32
+
+	// checkpoint/checkpointEvery back an independent ticker from
+	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
+	// why WAL checkpointing needs a much shorter cadence than VACUUM.
+	checkpoint       func(context.Context) error
+	checkpointEvery  time.Duration
+	checkpointCancel context.CancelFunc
+	checkpointDone   chan struct{}
+	checkpointState  atomic.Uint32
+	ready            atomic.Bool
+	closed           atomic.Bool
+	startMu          sync.Mutex
+	bulkMu           sync.RWMutex
+	bulkConnMu       sync.Mutex
+	bulkConn         *sql.Conn
+
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
+
+	// stmtMu and stmts back the prepared-statement cache; see
+	// prepared_stmt.go for the mechanism and correctness argument.
+	stmtMu sync.Mutex
+	stmts  map[string]*sql.Stmt
+
+	// sumCredentialUtxoStakeCalls counts invocations of
+	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
+	// scan that refreshRewardLiveStakeAggregate runs on every touch (see
+	// live_stake.go). It exists purely for test observability -- proving
+	// that a transaction touching one stake credential through a
+	// certificate, a consumed input, and a produced output triggers that
+	// scan at most once, not once per occurrence. No production code path
+	// reads it.
+	sumCredentialUtxoStakeCalls atomic.Int64
+
+	// sqlOperations and sqlQueryDuration are nil when Config.PromRegistry
+	// was nil; see instrumentedQueryer and metrics.go.
+	sqlOperations    *prometheus.CounterVec
+	sqlQueryDuration *prometheus.HistogramVec
+
+	// txStmtMu and txStmts back the per-transaction Tx-scoped statement
+	// cache; see prepared_stmt.go's txScopedStmt/evictTxStmts for the
+	// mechanism and correctness argument.
+	txStmtMu sync.Mutex
+	txStmts  map[*sql.Tx]map[*sql.Stmt]*sql.Stmt
+}
+
+// New constructs a shared store around already-opened connection pools.
+func New(config Config) (*Store, error) {
+	if config.WriteDB == nil {
+		return nil, errors.New("sqlstore: write database is required")
+	}
+	if config.Dialect == nil {
+		return nil, errors.New("sqlstore: dialect is required")
+	}
+	if config.ReadDB == nil {
+		config.ReadDB = config.WriteDB
+	}
+	if config.Logger == nil {
+		config.Logger = slog.Default()
+	}
+	if config.StorageMode == "" {
+		config.StorageMode = types.StorageModeCore
+	}
+	if config.MaintenanceInterval <= 0 {
+		config.MaintenanceInterval = committeeAuthMaintenanceInterval
+	}
+	if config.CommitteeAuthRetentionSlots != 0 &&
+		config.CommitteeAuthRetentionSlots < DefaultCommitteeAuthRetentionSlots {
+		return nil, fmt.Errorf(
+			"sqlstore: committee auth retention slots %d is below the safe rollback window %d",
+			config.CommitteeAuthRetentionSlots,
+			DefaultCommitteeAuthRetentionSlots,
+		)
+	}
+	switch config.StorageMode {
+	case types.StorageModeCore, types.StorageModeAPI:
+	default:
+		return nil, fmt.Errorf(
+			"sqlstore: invalid storage mode %q",
+			config.StorageMode,
+		)
+	}
+	if len(config.Migrations) > 0 && config.MigrationLocker == nil {
+		return nil, errors.New(
+			"sqlstore: migration locker is required when migrations are configured",
+		)
+	}
+	store := &Store{
+		writeDB:                     config.WriteDB,
+		readDB:                      config.ReadDB,
+		dialect:                     config.Dialect,
+		logger:                      config.Logger,
+		storageMode:                 config.StorageMode,
+		committeeAuthRetentionSlots: config.CommitteeAuthRetentionSlots,
+		migrations:                  config.Migrations,
+		migrationLocker:             config.MigrationLocker,
+		diskSize:                    config.DiskSize,
+		maintenance:                 config.Maintenance,
+		maintenanceEvery:            config.MaintenanceInterval,
+		vacuum:                      config.Vacuum,
+		vacuumEvery:                 config.VacuumInterval,
+		checkpoint:                  config.Checkpoint,
+		checkpointEvery:             config.CheckpointInterval,
+		backupTo:                    config.BackupTo,
+		restoreFrom:                 config.RestoreFrom,
+		prepare:                     config.Prepare,
+		reset:                       config.Reset,
+		validateBackup:              config.ValidateBackup,
+		closeDone:                   make(chan struct{}),
+		sqlOperations: newSQLOperationsCounter(
+			config.PromRegistry,
+		),
+		sqlQueryDuration: newSQLQueryDurationHistogram(
+			config.PromRegistry,
+		),
+	}
+	// Registered against store.WritePoolStats/ReadPoolStats (not
+	// config.WriteDB.Stats/config.ReadDB.Stats directly) so every backend
+	// (SQLite, Postgres, MySQL) gets write/read pool contention metrics for
+	// free through the same two accessor methods callers already use, with
+	// no provider-specific wiring required. See newSQLPoolMetrics' doc
+	// comment for the metric shapes and why the write pool is the one that
+	// matters.
+	newSQLPoolMetrics(config.PromRegistry, "write", store.WritePoolStats)
+	newSQLPoolMetrics(config.PromRegistry, "read", store.ReadPoolStats)
+	return store, nil
+}
+
+func (s *Store) BackupTo(ctx context.Context, dstPath string) error {
+	if s.backupTo == nil {
+		return errors.New("metadata backup is not supported by this provider")
+	}
+	if s.closed.Load() {
+		return errors.New("metadata backup: store is closed")
+	}
+	if !s.ready.Load() {
+		return errors.New("metadata backup: store is not ready")
+	}
+	return s.backupTo(ctx, dstPath)
+}
+
+func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
+	if s.restoreFrom == nil {
+		return errors.New("metadata restore is not supported by this provider")
+	}
+	err := s.restoreFrom(ctx, srcPath)
+	// Like Reset, a restore replaces the on-disk/remote schema and data out
+	// from under any statement prepared before it ran; invalidate the cache
+	// regardless of outcome so a later call always re-prepares against
+	// whatever RestoreFrom actually left behind.
+	s.closePreparedStatements()
+	return err
+}
+
+// Reset clears all data this store owns, for providers that supply the
+// hook (see metadata.Resettable). A no-op for providers that don't --
+// unlike BackupTo/RestoreFrom, silently doing nothing here is correct,
+// not a lost user request: sqlite (the only file-based provider built on
+// this shared Store) has nothing for this to do, since restoreMetadataStore's
+// directory wipe already fully undoes its brief resolve-and-start. Every
+// backend built on this shared Store -- sqlite included -- therefore
+// satisfies metadata.Resettable's interface, but only postgres/mysql wire
+// a non-nil Config.Reset into it; sqlite's Reset is a documented no-op, not
+// evidence that it "needs more than a directory wipe" the way
+// metadata.Resettable's own doc comment describes for the backends that do.
+func (s *Store) Reset(ctx context.Context) error {
+	if s.reset == nil {
+		return nil
+	}
+	// Serialized with Start/CloseContext via the same startMu they already
+	// hold: without it, a concurrent CloseContext could close the pool
+	// while s.reset(ctx) is mid-flight (or land in the TOCTOU window right
+	// after the closed check below), leaving a live database partially
+	// reset with its connection pool pulled out from under it.
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("metadata reset: store is closed")
+	}
+	err := s.reset(ctx)
+	// A wired Reset (postgres/mysql) drops and recreates schema objects
+	// (resetDatabase's DROP TABLE ... CASCADE), so any statement cached
+	// before this point may now reference a table that no longer exists in
+	// the form it was prepared against -- invalidate unconditionally,
+	// whether reset succeeded or failed partway, rather than assume a
+	// partial failure left every cached statement's table intact.
+	s.closePreparedStatements()
+	return err
+}
+
+// HasDestructiveReset reports whether Reset actually mutates a live target
+// (postgres/mysql, which wire a real Config.Reset callback) rather than
+// being a harmless no-op (sqlite, which never sets one). Every backend's
+// concrete *Store satisfies metadata.Resettable's Reset(ctx) error method
+// regardless, so a plain type assertion against that interface alone
+// cannot distinguish "genuinely destructive" from "no-op" -- callers that
+// need to know whether Reset already happening (or having failed partway)
+// means there is no safe pre-restore state left to resume on (see
+// node_lifecycle.go's Restore) must check this instead.
+func (s *Store) HasDestructiveReset() bool {
+	return s.reset != nil
+}
+
+// ValidateBackup checks a backup file's structural integrity, for
+// providers that supply the hook (see metadata.BackupValidator). A no-op
+// for providers that don't -- every backend built on this shared Store
+// therefore satisfies metadata.BackupValidator's interface, but only
+// providers whose restore orchestration needs it wire a non-nil
+// Config.ValidateBackup in.
+func (s *Store) ValidateBackup(ctx context.Context, srcPath string) error {
+	if s.validateBackup == nil {
+		return nil
+	}
+	return s.validateBackup(ctx, srcPath)
+}
+
+// DiskSize returns backend storage usage when the provider supplies it.
+func (s *Store) DiskSize() (int64, error) {
+	if s.diskSize == nil {
+		return 0, nil
+	}
+	return s.diskSize()
+}
+
+// Start verifies connectivity and completes every offline migration before
+// making the store available to normal readers or writers.
+func (s *Store) Start(ctx context.Context) error {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("sqlstore: store is closed")
+	}
+	if s.ready.Load() {
+		return nil
+	}
+	if s.prepare != nil {
+		if err := s.prepare(ctx); err != nil {
+			return fmt.Errorf("sqlstore: prepare database: %w", err)
+		}
+	}
+	if err := s.writeDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("sqlstore: ping write database: %w", err)
+	}
+	if len(s.migrations) > 0 {
+		runner := migrations.Runner{
+			DB:       s.writeDB,
+			Dialect:  s.dialect.Name(),
+			Registry: s.migrations,
+			Locker:   s.migrationLocker,
+			Logger:   s.logger,
+			Rebind:   s.dialect.Rebind,
+		}
+		if err := runner.Run(ctx); err != nil {
+			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
+		}
+	}
+	if s.readDB != s.writeDB {
+		if err := s.readDB.PingContext(ctx); err != nil {
+			return fmt.Errorf("sqlstore: ping read database: %w", err)
+		}
+	}
+	// Must run before ready flips true: this is the only point in the
+	// Store's lifecycle guaranteed to have no write transaction open yet,
+	// which prepareHotStatements' own doc comment explains is required to
+	// prepare against writeDB without risking a self-deadlock under
+	// SetMaxOpenConns(1). Best-effort: see prepareHotStatements for why a
+	// failure here does not abort Start.
+	s.prepareHotStatements(ctx)
+	s.ready.Store(true)
+	// The maintenance, vacuum, and checkpoint tickers own their own
+	// lifetimes and must not inherit the startup context, which callers
+	// commonly cancel as soon as Start returns.
+	s.startMaintenance()      //nolint:contextcheck
+	s.startVacuumTicker()     //nolint:contextcheck
+	s.startCheckpointTicker() //nolint:contextcheck
+	return nil
+}
+
+// Ready reports whether startup migrations completed successfully.
+func (s *Store) Ready() bool {
+	return s.ready.Load()
+}
+
+// WritePoolStats exposes database/sql pool telemetry without exposing the
+// underlying database handle.
+func (s *Store) WritePoolStats() sql.DBStats {
+	return s.writeDB.Stats()
+}
+
+// ReadPoolStats exposes read-pool telemetry. SQLite file stores use this to
+// report their independently-sized WAL reader pool.
+func (s *Store) ReadPoolStats() sql.DBStats {
+	return s.readDB.Stats()
+}
+
+// Transaction begins a write transaction bound to ctx: every statement a
+// caller issues against the returned Txn (via a domain method's txn
+// parameter) runs with this ctx, and per database/sql's own BeginTx
+// contract, canceling it rolls the transaction back rather than leaving it
+// to time out on its own. Begin failures are retained on the returned
+// transaction because the historical MetadataStore contract cannot return
+// an error from this method. A nil ctx is treated as context.Background(),
+// matching prior behavior for any caller that does not supply one.
+func (s *Store) Transaction(ctx context.Context) types.Txn {
+	return s.transaction(ctx, false)
+}
+
+// ReadTransaction begins a repeatable, read-only transaction on the read
+// pool, bound to ctx the same way Transaction is.
+func (s *Store) ReadTransaction(ctx context.Context) types.Txn {
+	return s.transaction(ctx, true)
+}
+
+// transaction begins a transaction bound to ctx. The context.Background()
+// fallback below is for a caller passing a literal nil, not a dropped
+// caller ctx -- there is nothing above to derive from in that case.
+func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !s.ready.Load() {
+		return &sqlTxn{
+			owner:    s,
+			ctx:      ctx,
+			readOnly: readOnly,
+			beginErr: errors.New("sqlstore: store is not ready"),
+		}
+	}
+	var (
+		tx      *sql.Tx
+		release func()
+		err     error
+	)
+	if readOnly {
+		tx, err = s.readDB.BeginTx(ctx, s.dialect.BeginOptions(true))
+	} else {
+		tx, release, err = s.beginWriteTx(ctx)
+	}
+	return &sqlTxn{
+		owner:    s,
+		tx:       tx,
+		ctx:      ctx,
+		readOnly: readOnly,
+		release:  release,
+		beginErr: err,
+	}
+}
+
+// Close closes each owned pool exactly once.
+func (s *Store) Close() error {
+	return s.CloseContext(context.Background())
+}
+
+// CloseContext cancels maintenance, vacuum, and checkpoint tickers and closes
+// each owned pool after their callbacks drain. The lifecycle context bounds
+// how long this call waits. A timed-out call leaves shutdown running so a
+// later call can still wait for completion.
+func (s *Store) CloseContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("sqlstore: close context is nil")
+	}
+	s.startMu.Lock()
+	if s.closeDone == nil {
+		s.closeDone = make(chan struct{})
+	}
+	s.closeOnce.Do(func() {
+		s.closeMaintenanceAdmission()
+		s.closeVacuumAdmission()
+		s.closeCheckpointAdmission()
+		s.closed.Store(true)
+		s.ready.Store(false)
+		// Invalidate the prepared-statement cache before the pools it was
+		// prepared against go away. closed is already true above, so any
+		// cachedStmt call racing with this either observes it before
+		// preparing (returns the "store is closed" error) or finishes its
+		// Prepare and then sees closed==true when it goes to install the
+		// result, closing its own statement instead of caching it -- see
+		// prepared_stmt.go.
+		s.closePreparedStatements()
+		if s.bulkConn != nil {
+			// Restore session variables before releasing the dedicated
+			// connection; this is especially important for pooled PostgreSQL
+			// sessions where session_replication_role is connection-scoped.
+			_ = s.restoreNormalPragmas(ctx)
+		}
+		// Cancel every ticker up front, before waiting on any. Cancelling
+		// stops each ticker's select loop from admitting a new tick, but it
+		// does not interrupt a tick already in flight when its callback is
+		// inside a database driver call. A caller's context bounds the wait;
+		// all callbacks receive cancellation before shutdown waits on any one
+		// of them.
+		if s.maintenanceCancel != nil {
+			s.maintenanceCancel()
+		}
+		if s.vacuumCancel != nil {
+			s.vacuumCancel()
+		}
+		if s.checkpointCancel != nil {
+			s.checkpointCancel()
+		}
+		go func() {
+			if s.maintenanceDone != nil {
+				<-s.maintenanceDone
+			}
+			if s.vacuumDone != nil {
+				<-s.vacuumDone
+			}
+			if s.checkpointDone != nil {
+				<-s.checkpointDone
+			}
+			s.closeErr = s.closePools()
+			close(s.closeDone)
+		}()
+	})
+	done := s.closeDone
+	s.startMu.Unlock()
+	select {
+	case <-done:
+		return s.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Store) closePools() error {
+	if s.readDB == s.writeDB {
+		return s.writeDB.Close()
+	}
+	return errors.Join(s.readDB.Close(), s.writeDB.Close())
+}
+
+func (s *Store) startMaintenance() {
+	if s.maintenanceEvery <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.maintenanceCancel = cancel
+	s.maintenanceDone = make(chan struct{})
+	go func() {
+		defer close(s.maintenanceDone)
+		ticker := time.NewTicker(s.maintenanceEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Admission is an atomic state transition. Close moves the
+				// state to closed before cancelling the callback context, so a
+				// racing tick cannot start maintenance against closing pools.
+				if !s.maintenanceState.CompareAndSwap(0, 1) {
+					return
+				}
+				if ctx.Err() != nil || s.closed.Load() {
+					s.maintenanceState.CompareAndSwap(1, 0)
+					return
+				}
+				started := time.Now()
+				err := s.runMaintenance(ctx)
+				s.maintenanceState.CompareAndSwap(1, 0)
+				if err != nil {
+					if ctx.Err() == nil {
+						s.logger.Error(
+							"metadata database maintenance failed",
+							"dialect", s.dialect.Name(),
+							"duration", time.Since(started),
+							"error", err,
+						)
+					} else {
+						return
+					}
+					continue
+				}
+				s.logger.Debug(
+					"metadata database maintenance complete",
+					"dialect", s.dialect.Name(),
+					"duration", time.Since(started),
+				)
+			}
+		}
+	}()
+}
+
+func (s *Store) runMaintenance(ctx context.Context) error {
+	var errs []error
+	if s.maintenance != nil {
+		if err := s.maintenance(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := s.pruneCommitteeHotAuthorizationsMaintenance(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Store) closeMaintenanceAdmission() {
+	for {
+		state := s.maintenanceState.Load()
+		if state == 2 || s.maintenanceState.CompareAndSwap(state, 2) {
+			return
+		}
+	}
+}
+
+func (s *Store) startVacuumTicker() {
+	if s.vacuum == nil || s.vacuumEvery <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.vacuumCancel = cancel
+	s.vacuumDone = make(chan struct{})
+	go func() {
+		defer close(s.vacuumDone)
+		ticker := time.NewTicker(s.vacuumEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !s.vacuumState.CompareAndSwap(0, 1) {
+					return
+				}
+				if ctx.Err() != nil || s.closed.Load() {
+					s.vacuumState.CompareAndSwap(1, 0)
+					return
+				}
+				started := time.Now()
+				err := s.vacuum(ctx)
+				s.vacuumState.CompareAndSwap(1, 0)
+				if err != nil {
+					if ctx.Err() == nil {
+						s.logger.Error(
+							"metadata database vacuum failed",
+							"dialect", s.dialect.Name(),
+							"duration", time.Since(started),
+							"error", err,
+						)
+					} else {
+						return
+					}
+					continue
+				}
+				s.logger.Debug(
+					"metadata database vacuum complete",
+					"dialect", s.dialect.Name(),
+					"duration", time.Since(started),
+				)
+			}
+		}
+	}()
+}
+
+func (s *Store) closeVacuumAdmission() {
+	for {
+		state := s.vacuumState.Load()
+		if state == 2 || s.vacuumState.CompareAndSwap(state, 2) {
+			return
+		}
+	}
+}
+
+// startCheckpointTicker runs s.checkpoint on its own ticker, independent of
+// maintenance and vacuum cadences. WAL checkpointing needs to run every 1-5
+// minutes to bound WAL growth, not once a day. Mirrors
+// startMaintenance's admission/cancellation shape (checkpointState,
+// checkpointCancel, checkpointDone) exactly, as a distinct instance rather
+// than a shared one, so a slow VACUUM can never delay or skip a checkpoint
+// tick and vice versa.
+func (s *Store) startCheckpointTicker() {
+	if s.checkpoint == nil || s.checkpointEvery <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.checkpointCancel = cancel
+	s.checkpointDone = make(chan struct{})
+	go func() {
+		defer close(s.checkpointDone)
+		ticker := time.NewTicker(s.checkpointEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Admission is an atomic state transition, identical in
+				// shape to closeMaintenanceAdmission: Close moves the state
+				// to closed before cancelling the callback context, so a
+				// racing tick cannot start a checkpoint against closing
+				// pools.
+				if !s.checkpointState.CompareAndSwap(0, 1) {
+					return
+				}
+				if ctx.Err() != nil || s.closed.Load() {
+					s.checkpointState.CompareAndSwap(1, 0)
+					return
+				}
+				started := time.Now()
+				err := s.checkpoint(ctx)
+				s.checkpointState.CompareAndSwap(1, 0)
+				if err != nil {
+					if ctx.Err() == nil {
+						s.logger.Error(
+							"metadata database WAL checkpoint failed",
+							"dialect", s.dialect.Name(),
+							"duration", time.Since(started),
+							"error", err,
+						)
+					} else {
+						return
+					}
+					continue
+				}
+				s.logger.Debug(
+					"metadata database WAL checkpoint complete",
+					"dialect", s.dialect.Name(),
+					"duration", time.Since(started),
+				)
+			}
+		}
+	}()
+}
+
+func (s *Store) closeCheckpointAdmission() {
+	for {
+		state := s.checkpointState.Load()
+		if state == 2 || s.checkpointState.CompareAndSwap(state, 2) {
+			return
+		}
+	}
+}
+
+// dbFromTxn resolves txn to a queryer plus the context.Context statements
+// against it should use. txn == nil is the autocommit convenience: no
+// caller-managed ctx exists for that path, so it returns
+// context.Background() -- accepted for a one-off statement against the
+// shared pool, bounded server-side by the statement/lock timeout config
+// instead of by caller cancellation. A real *sqlTxn instead carries the
+// ctx its owning Transaction/ReadTransaction call was given, so every
+// statement issued against it -- through whichever domain method's txn
+// parameter it arrived through -- is bound to that same caller-supplied
+// ctx without that method needing a ctx parameter of its own.
+func (s *Store) dbFromTxn(
+	txn types.Txn,
+) (queryer, context.Context, error) {
+	if txn == nil {
+		if err := s.ensureReady(); err != nil {
+			return nil, nil, err
+		}
+		return s.instrumentedQueryer(
+			s.writeDB,
+		), context.Background(), nil
+	}
+	sqlTransaction, ok := txn.(*sqlTxn)
+	if !ok || sqlTransaction.owner != s {
+		return nil, nil, errors.New(
+			"sqlstore: transaction belongs to another store",
+		)
+	}
+	sqlTransaction.mu.Lock()
+	defer sqlTransaction.mu.Unlock()
+	if sqlTransaction.beginErr != nil {
+		return nil, nil, sqlTransaction.beginErr
+	}
+	if sqlTransaction.finished || sqlTransaction.tx == nil {
+		return nil, nil, types.ErrNilTxn
+	}
+	return s.instrumentedQueryer(
+		sqlTransaction.tx,
+	), sqlTransaction.ctx, nil
+}
+
+func (s *Store) readDBFromTxn(
+	txn types.Txn,
+) (queryer, context.Context, error) {
+	if txn == nil {
+		if err := s.ensureReady(); err != nil {
+			return nil, nil, err
+		}
+		return s.instrumentedQueryer(
+			s.readDB,
+		), context.Background(), nil
+	}
+	return s.dbFromTxn(txn)
+}
+
+// withWriteTransaction runs fn against either the caller-supplied txn (its
+// own ctx passed through, per dbFromTxn) or, when txn is nil, a fresh
+// implicit write transaction this call begins and commits/rolls back
+// itself -- that implicit case has no caller-managed ctx to inherit
+// either, so it uses context.Background(), the same accepted autocommit-
+// path gap dbFromTxn documents.
+func (s *Store) withWriteTransaction(
+	txn types.Txn,
+	fn func(queryer, context.Context) error,
+) error {
+	return s.withWriteTransactionContext(context.Background(), txn, fn)
+}
+
+// withWriteTransactionContext is withWriteTransaction with an explicit ctx
+// for the implicit-transaction case, so a caller that owns a cancellable
+// context (a restore, say) can interrupt a long DDL statement instead of
+// waiting it out. A caller-supplied txn still carries its own ctx, per
+// dbFromTxn, and ctx is ignored in that case.
+func (s *Store) withWriteTransactionContext(
+	ctx context.Context,
+	txn types.Txn,
+	fn func(queryer, context.Context) error,
+) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
+	if txn != nil {
+		db, txnCtx, err := s.dbFromTxn(txn)
+		if err != nil {
+			return err
+		}
+		return fn(db, txnCtx)
+	}
+	sqlTransaction, release, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return err
+	}
+	sqlTxnState := &sqlTxn{
+		owner:   s,
+		tx:      sqlTransaction,
+		ctx:     ctx,
+		release: release,
+	}
+	fnErr := fn(s.instrumentedQueryer(sqlTransaction), ctx)
+	if fnErr != nil {
+		return errors.Join(fnErr, sqlTxnState.Rollback())
+	}
+	return sqlTxnState.Commit()
+}
+
+func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
+	s.bulkMu.RLock()
+	conn := s.bulkConn
+	if conn != nil {
+		s.bulkConnMu.Lock()
+		tx, err := conn.BeginTx(ctx, s.dialect.BeginOptions(false))
+		if err != nil {
+			s.bulkConnMu.Unlock()
+			s.bulkMu.RUnlock()
+			return nil, nil, err
+		}
+		return tx, func() {
+			s.bulkConnMu.Unlock()
+			s.bulkMu.RUnlock()
+		}, nil
+	}
+	tx, err := s.writeDB.BeginTx(ctx, s.dialect.BeginOptions(false))
+	s.bulkMu.RUnlock()
+	return tx, nil, err
+}
+
+type queryer interface {
+	Execer
+	PrepareContext(context.Context, string) (*sql.Stmt, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// instrumentedQueryer applies dialect translation (newDialectQueryer) and,
+// when Config.PromRegistry was set, statement-count and duration
+// instrumentation (countingQueryer) around db. Every call site that used to
+// call newDialectQueryer directly calls this instead, so
+// dingo_database_sql_operations_total's totals and
+// dingo_database_sql_query_duration_seconds's observations both reflect
+// Store's entire SQL surface -- domain queries, committee pruning,
+// deferred-index maintenance, and the hot-statement cache -- from one
+// place, rather than requiring every call site to remember to instrument
+// itself.
+func (s *Store) instrumentedQueryer(db queryer) queryer {
+	dq := newDialectQueryer(db, s.dialect.Name())
+	if s.sqlOperations == nil && s.sqlQueryDuration == nil {
+		return dq
+	}
+	return countingQueryer{
+		queryer:  dq,
+		counter:  s.sqlOperations,
+		duration: s.sqlQueryDuration,
+	}
+}
+
+type sqlTxn struct {
+	owner    *Store
+	tx       *sql.Tx
+	readOnly bool
+	// ctx is the context.Context this transaction was begun with (via
+	// Transaction/ReadTransaction). dbFromTxn hands it back alongside the
+	// queryer so every statement issued against this txn -- through
+	// whichever domain method's txn parameter -- is bound to it.
+	ctx      context.Context
+	release  func()
+	beginErr error
+
+	mu       sync.Mutex
+	finished bool
+}
+
+func (t *sqlTxn) Commit() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	defer t.releaseConnection()
+	if t.tx == nil {
+		return nil
+	}
+	return t.tx.Commit()
+}
+
+func (t *sqlTxn) Rollback() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	defer t.releaseConnection()
+	if t.tx == nil {
+		return nil
+	}
+	return t.tx.Rollback()
+}
+
+func (t *sqlTxn) releaseConnection() {
+	// Evict this transaction's derived Tx-scoped statement cache before
+	// releasing the connection: t.tx is committed or rolled back by the
+	// caller (Commit/Rollback, above) by the time releaseConnection runs,
+	// which is also when database/sql closes every *sql.Stmt it derived
+	// from t.tx (see prepared_stmt.go's txScopedStmt), so there is nothing
+	// left in owner.txStmts[t.tx] worth keeping. This bounds owner.txStmts
+	// to the store's concurrently open transactions rather than every
+	// transaction ever opened.
+	if t.owner != nil {
+		t.owner.evictTxStmts(t.tx)
+	}
+	if t.release != nil {
+		t.release()
+		t.release = nil
+	}
+}
+
+func (t *sqlTxn) SavePoint(name string) error {
+	return t.execSavepoint("SAVEPOINT", name)
+}
+
+func (t *sqlTxn) RollbackTo(name string) error {
+	return t.execSavepoint("ROLLBACK TO SAVEPOINT", name)
+}
+
+func (t *sqlTxn) execSavepoint(operation, name string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.tx == nil {
+		return types.ErrNilTxn
+	}
+	if !savepointNamePattern.MatchString(name) {
+		return fmt.Errorf("sqlstore: invalid savepoint name %q", name)
+	}
+	// operation is selected by private callers and name is both allow-listed
+	// above and quoted by the dialect.
+	statement := operation + " " + //nolint:gosec
+		t.owner.dialect.QuoteIdentifier(name)
+	if _, err := t.tx.ExecContext(context.Background(), statement); err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return nil
+}
+
+// SetBulkLoadPragmas enables backend-specific session tuning.
+func (s *Store) SetBulkLoadPragmas() error {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("sqlstore: store is closed")
+	}
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if s.bulkConn != nil {
+		return nil
+	}
+	if s.dialect.Name() == "sqlite" {
+		return s.dialect.SetBulkMode(context.Background(), s.writeDB)
+	}
+	conn, err := s.writeDB.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	if err := s.dialect.SetBulkMode(context.Background(), conn); err != nil {
+		// A backend may apply some session settings before a later setup
+		// statement fails. Restore before releasing the connection so a
+		// pooled session cannot leak partial bulk-load state.
+		restoreErr := s.dialect.RestoreNormalMode(context.Background(), conn)
+		closeErr := conn.Close()
+		return errors.Join(err, restoreErr, closeErr)
+	}
+	s.bulkConn = conn
+	return nil
+}
+
+// RestoreNormalPragmas restores safe backend defaults.
+func (s *Store) RestoreNormalPragmas() error {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	return s.restoreNormalPragmas(context.Background())
+}
+
+func (s *Store) restoreNormalPragmas(ctx context.Context) error {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if s.bulkConn == nil {
+		return s.dialect.RestoreNormalMode(ctx, s.writeDB)
+	}
+	conn := s.bulkConn
+	restoreErr := s.dialect.RestoreNormalMode(ctx, conn)
+	closeErr := conn.Close()
+	s.bulkConn = nil
+	return errors.Join(restoreErr, closeErr)
+}
+
+// UpdatePlannerStats refreshes backend planner statistics.
+func (s *Store) UpdatePlannerStats() error {
+	s.bulkMu.RLock()
+	defer s.bulkMu.RUnlock()
+	if s.bulkConn == nil {
+		return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+	}
+	s.bulkConnMu.Lock()
+	defer s.bulkConnMu.Unlock()
+	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
+}
