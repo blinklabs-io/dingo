@@ -36,9 +36,9 @@ const (
 //  2. At equal block number, a Byron epoch-boundary block beats a Byron
 //     regular block sharing its predecessor's block number: canonical Byron
 //     PBFT counts the boundary block as an additional block despite the
-//     shared number. This rule only fires when at least one side is a Byron
-//     header (view.Byron != ByronBlockKindNone); Shelley-family tips are
-//     unaffected and fall through to the rules below exactly as before.
+//     shared number. This rule fires only when both sides are Byron headers
+//     of different kinds; a Byron/Shelley pair, like a Shelley-family pair,
+//     falls through to the rules below exactly as before.
 //  3. Otherwise, for a Praos-era view, prefer a candidate with the same
 //     issuer and slot only when it has a higher opcert issue number.
 //  4. Otherwise compare the tip VRF only when the era's VRF tiebreaker flavor
