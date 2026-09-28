@@ -3038,15 +3038,29 @@ ORDER BY credential_tag ASC, staking_key ASC, pool_key_hash ASC,
          reward_type ASC
 `
 
-func (q *Queries) GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]RewardAccountOutput, error) {
+type GetRewardAccountOutputsRow struct {
+	StakingKey    []byte
+	PoolKeyHash   []byte
+	RewardType    string
+	ID            int64
+	Epoch         int64
+	CredentialTag int64
+	Amount        string
+	Spendable     bool
+	Guarded       bool
+	CapturedSlot  int64
+	BoundarySlot  int64
+}
+
+func (q *Queries) GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]GetRewardAccountOutputsRow, error) {
 	rows, err := q.db.QueryContext(ctx, getRewardAccountOutputs, epoch)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []RewardAccountOutput{}
+	items := []GetRewardAccountOutputsRow{}
 	for rows.Next() {
-		var i RewardAccountOutput
+		var i GetRewardAccountOutputsRow
 		if err := rows.Scan(
 			&i.StakingKey,
 			&i.PoolKeyHash,

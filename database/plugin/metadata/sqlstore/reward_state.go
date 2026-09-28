@@ -1997,7 +1997,7 @@ func rewardAccountOutputParams(
 }
 
 func rewardAccountOutputFromSQLite(
-	row sqlitequery.RewardAccountOutput,
+	row sqlitequery.GetRewardAccountOutputsRow,
 ) (*models.RewardAccountOutput, error) {
 	amount, err := parseUint64("reward account amount", row.Amount)
 	if err != nil {

@@ -153,7 +153,7 @@ type Querier interface {
 	GetPParams(ctx context.Context, arg GetPParamsParams) ([]Pparam, error)
 	GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnapshotParams) (PoolStakeSnapshot, error)
 	GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolStakeSnapshotsByEpochParams) ([]PoolStakeSnapshot, error)
-	GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]RewardAccountOutput, error)
+	GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]GetRewardAccountOutputsRow, error)
 	GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaPot, error)
 	GetRewardPoolInputs(ctx context.Context, epoch int64) ([]RewardPoolInput, error)
 	GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]RewardPoolOutput, error)
