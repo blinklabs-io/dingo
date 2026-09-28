@@ -96,6 +96,10 @@ var (
 	errVoteVerificationPeerTrackingBudget = errors.New(
 		"vote verification peer tracking capacity exhausted",
 	)
+	errVoteVerificationPeerBudget = errors.New(
+		"peer vote verification budget exhausted",
+	)
+	errVoteEquivocation = errors.New("vote equivocation")
 )
 
 // Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
@@ -1705,22 +1709,22 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 	if record, ok := m.voteRecords[id]; ok &&
 		now.Sub(record.insertedAt) < m.voteTTL {
 		m.mu.Unlock()
-		if record.ebHash != vote.EndorserBlockHash && m.metrics != nil {
-			m.metrics.votesEquivocationTotal.Inc()
-		}
 		if record.ebHash != vote.EndorserBlockHash {
-			return false, errors.New("vote equivocation for an existing voter and slot")
+			return false, fmt.Errorf(
+				"%w for an existing voter and slot",
+				errVoteEquivocation,
+			)
 		}
 		return false, nil
 	}
 	m.pruneExpiredLocked(now)
 	if inFlightHash, ok := m.voteVerificationsInFlight[id]; ok {
 		m.mu.Unlock()
-		if inFlightHash != vote.EndorserBlockHash && m.metrics != nil {
-			m.metrics.votesEquivocationTotal.Inc()
-		}
 		if inFlightHash != vote.EndorserBlockHash {
-			return false, errors.New("vote equivocation during verification")
+			return false, fmt.Errorf(
+				"%w during verification",
+				errVoteEquivocation,
+			)
 		}
 		return false, nil
 	}
@@ -1731,7 +1735,7 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 		return false, errVoteVerificationProcessBudget
 	case ratewindow.PeerBudgetExceeded:
 		m.mu.Unlock()
-		return false, errors.New("peer vote verification budget exhausted")
+		return false, errVoteVerificationPeerBudget
 	case ratewindow.PeerTrackingCapacityExceeded:
 		m.mu.Unlock()
 		return false, errVoteVerificationPeerTrackingBudget
@@ -1749,7 +1753,9 @@ func (m *VoteManager) rejectIncomingVote(
 ) error {
 	m.rejectVote(reason, vote, err)
 	if errors.Is(err, errVoteVerificationProcessBudget) ||
-		errors.Is(err, errVoteVerificationPeerTrackingBudget) {
+		errors.Is(err, errVoteVerificationPeerTrackingBudget) ||
+		errors.Is(err, errVoteVerificationPeerBudget) ||
+		errors.Is(err, errVoteEquivocation) {
 		return nil
 	}
 	now := m.now()
@@ -2228,7 +2234,7 @@ func (m *VoteManager) insertVote(
 		// Equivocation: same voter and slot, different endorser
 		// block. The first vote wins for as long as its record
 		// lives, even after its serving entry is evicted.
-		if m.metrics != nil {
+		if verified && m.metrics != nil {
 			m.metrics.votesEquivocationTotal.Inc()
 		}
 		m.logger.Warn(

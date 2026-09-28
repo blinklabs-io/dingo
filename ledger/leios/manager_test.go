@@ -763,17 +763,16 @@ func TestVoteManagerBoundsPrototypeSignatureVerificationPerPeer(t *testing.T) {
 	}
 
 	lastSlot := uint64(500 + voteVerificationMaxPerPeer)
-	lastRbHash := lcommon.NewBlake2b256([]byte("prototype-rb-over-budget"))
-	fixture.mgr.ObserveAnnouncement(lastSlot, lastRbHash, ebHash)
-	lastVote := fixture.makePrototypeVote(t, 3, lastRbHash)
-	for range voteInvalidPeerLimit - 1 {
-		require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", lastVote))
+	for idx := range voteInvalidPeerLimit + 1 {
+		rbHash := lcommon.NewBlake2b256(
+			fmt.Appendf(nil, "prototype-rb-over-budget-%d", idx),
+		)
+		fixture.mgr.ObserveAnnouncement(lastSlot+uint64(idx), rbHash, ebHash)
+		require.NoError(t, fixture.mgr.HandlePrototypeVote(
+			"conn-a",
+			fixture.makePrototypeVote(t, 3, rbHash),
+		))
 	}
-	require.ErrorIs(
-		t,
-		fixture.mgr.HandlePrototypeVote("conn-a", lastVote),
-		ErrPeerMisbehavior,
-	)
 	assert.EqualValues(t, voteVerificationMaxPerPeer, verifyCalls.Load())
 
 	otherSlot := lastSlot + 1
@@ -1037,6 +1036,19 @@ func TestVoteManagerEquivocationFirstWins(t *testing.T) {
 		t, ebHashA, stored.EndorserBlockHash,
 		"first vote wins on equivocation",
 	)
+}
+
+func TestVoteManagerEquivocationDoesNotPenalizeRelayingPeer(t *testing.T) {
+	t.Parallel()
+	fixture := newManagerFixture(t)
+	hashA := lcommon.NewBlake2b256([]byte("eb-a"))
+	hashB := lcommon.NewBlake2b256([]byte("eb-b"))
+	for slot := uint64(600); slot < 600+voteInvalidPeerLimit; slot++ {
+		first := fixture.makeVote(t, 0, slot, hashA)
+		conflict := fixture.makeVote(t, 0, slot, hashB)
+		require.NoError(t, fixture.mgr.HandleVote("first-peer", first))
+		require.NoError(t, fixture.mgr.HandleVote("relaying-peer", conflict))
+	}
 }
 
 func TestVoteManagerRejectsInvalidVotes(t *testing.T) {

@@ -797,6 +797,32 @@ func TestAheadOfCurrentSlotLeiosAnnouncementStillPenalizesPeer(t *testing.T) {
 	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", err), err)
 }
 
+func TestEarlyWithinLeiosAnnouncementClockSkewDoesNotPenalizePeer(t *testing.T) {
+	t.Parallel()
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	header, err := decodeLeiosAnnouncementHeader(raw)
+	require.NoError(t, err)
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: header.SlotNumber(),
+		slotTime:    time.Now().Add(leiosAnnouncementClockSkew / 2),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	for range leiosInvalidAnnouncementLimit {
+		err := o.acceptLeiosAnnouncement(raw, "peer-a")
+		require.ErrorIs(t, err, errLeiosAnnouncementClockSkew)
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+	}
+	invalid := errors.New("invalid announcement")
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid))
+	}
+	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid), invalid)
+}
+
 var errLeiosEndorserBlockNotCached = errors.New(
 	"leios endorser block not cached",
 )

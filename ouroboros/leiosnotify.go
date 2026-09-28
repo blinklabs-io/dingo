@@ -79,6 +79,7 @@ type leiosForgedEBEntry struct {
 const (
 	leiosNotifyMaxAnnouncementAge   = 10 * time.Minute
 	leiosNotifyRelayAnnouncementAge = 5 * time.Minute
+	leiosAnnouncementClockSkew      = 2 * time.Second
 )
 
 type leiosAnnouncement struct {
@@ -113,6 +114,10 @@ var errLeiosAnnouncementValidationBudget = errors.New(
 
 var errLeiosAnnouncementLocalState = errors.New(
 	"local leios announcement state unavailable",
+)
+
+var errLeiosAnnouncementClockSkew = errors.New(
+	"announcement is within the permitted clock-skew window",
 )
 
 func (o *Ouroboros) recordInvalidLeiosAnnouncement(
@@ -721,7 +726,8 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 		return nil
 	}
 	if ledger.IsHeaderVerificationDeferred(err) ||
-		errors.Is(err, errLeiosAnnouncementLocalState) {
+		errors.Is(err, errLeiosAnnouncementLocalState) ||
+		errors.Is(err, errLeiosAnnouncementClockSkew) {
 		o.config.Logger.Debug(
 			"dropping leios announcement while local validation state is unavailable",
 			"component", "network",
@@ -1744,13 +1750,6 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			slotErr,
 		)
 	}
-	if header.SlotNumber() > currentSlot {
-		return fmt.Errorf(
-			"announcement slot %d is ahead of current slot %d",
-			header.SlotNumber(),
-			currentSlot,
-		)
-	}
 	announcementStart, timeErr := o.leiosAnnouncementLedger.SlotToTime(
 		header.SlotNumber(),
 	)
@@ -1761,8 +1760,33 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			timeErr,
 		)
 	}
+	if header.SlotNumber() > currentSlot {
+		earlyBy := time.Until(announcementStart)
+		if earlyBy >= 0 && earlyBy <= leiosAnnouncementClockSkew {
+			return fmt.Errorf(
+				"%w: announcement slot %d is ahead of current slot %d by %s",
+				errLeiosAnnouncementClockSkew,
+				header.SlotNumber(),
+				currentSlot,
+				earlyBy,
+			)
+		}
+		return fmt.Errorf(
+			"announcement slot %d is ahead of current slot %d",
+			header.SlotNumber(),
+			currentSlot,
+		)
+	}
 	age := time.Since(announcementStart)
 	if age < 0 {
+		if -age <= leiosAnnouncementClockSkew {
+			return fmt.Errorf(
+				"%w: announcement slot %d begins in %s",
+				errLeiosAnnouncementClockSkew,
+				header.SlotNumber(),
+				-age,
+			)
+		}
 		return fmt.Errorf(
 			"announcement slot %d is in the future",
 			header.SlotNumber(),
