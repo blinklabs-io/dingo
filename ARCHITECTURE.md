@@ -13725,6 +13725,14 @@ fault. Judging the recorded arrival rather than the later handler time means
 local decode, EventBus, or scheduler delay cannot make an invalid early header
 appear timely.
 
+This admission rule includes Byron main headers and epoch-boundary headers;
+its two-second allowance is measured in wall-clock time even for Byron's
+20-second slots. The subsequent PBFT guard compares slot onset directly with
+wall-clock time and requires the slot to have begun. It does not add the
+allowance a second time at application, and rejects even the epoch-zero EBB
+before system start. Historical Byron validation therefore needs only the
+header's known slot onset, not a forecast of the present wall-clock slot.
+
 `blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
 it does not forecast, mutate the cache, or rebuild `HardForkSummary` per
 block. `decodeReadChainBatch` enforces pipeline results only when the serial

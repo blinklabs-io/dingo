@@ -22,7 +22,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -327,4 +330,139 @@ func TestAwaitChainsyncHeaderAdmissionUsesCrossEraSlotOnset(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, accepted)
 	require.Equal(t, defaultHeaderClockSkew, waited)
+}
+
+// Both Byron header kinds share the peer admission gate, before PBFT validation.
+// Twenty-second slots make a one-slot lead insufficient to decide clock skew.
+func TestByronHeaderAdmissionClockSkew(t *testing.T) {
+	t.Parallel()
+	main := &byron.ByronMainBlockHeader{}
+	main.ConsensusData.SlotId.Epoch = 1
+	ebb := &byron.ByronEpochBoundaryBlockHeader{}
+	ebb.ConsensusData.Epoch = 1
+	start := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	blocks := map[string]gledger.Block{
+		"main": &byron.ByronMainBlock{BlockHeader: main},
+		"ebb":  &byron.ByronEpochBoundaryBlock{BlockHeader: ebb},
+	}
+	for name, block := range blocks {
+		header := block.Header()
+		t.Run(name, func(t *testing.T) {
+			for _, early := range []time.Duration{1999 * time.Millisecond, 2 * time.Second, 2001 * time.Millisecond} {
+				t.Run(early.String(), func(t *testing.T) {
+					provider := newMockSlotTimeProvider(
+						start,
+						20*time.Second,
+						21600,
+					)
+					onset, err := provider.SlotToTime(header.SlotNumber())
+					require.NoError(t, err)
+					arrival := onset.Add(-early)
+					ls, _ := newFutureHeaderTestLedger(t, start, arrival)
+					ls.slotClock.provider = provider
+					now := arrival
+					ls.slotClock.nowFunc = func() time.Time { return now }
+					require.Error(
+						t,
+						ls.validateByronPBFTCurrentSlot(block),
+						"PBFT must not apply a future block, even within the allowance",
+					)
+					waiting := make(chan time.Duration, 1)
+					release := make(chan struct{})
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					ls.slotClock.waitFunc = func(ctx context.Context, delay time.Duration) error {
+						waiting <- delay
+						select {
+						case <-release:
+							now = onset
+							return nil
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+					type result struct {
+						accepted bool
+						err      error
+					}
+					done := make(chan result, 1)
+					go func() {
+						accepted, err := ls.AwaitChainsyncHeaderAdmission(
+							ctx,
+							ChainsyncEvent{
+								BlockHeader: header, ArrivalTime: arrival,
+								Point: ocommon.NewPoint(
+									header.SlotNumber(),
+									nil,
+								),
+							},
+						)
+						done <- result{accepted, err}
+					}()
+					if early <= 2*time.Second {
+						delay := testutil.RequireReceive(
+							t,
+							waiting,
+							time.Second,
+							"Byron header must be deferred until slot onset",
+						)
+						require.Equal(t, early, delay)
+						select {
+						case <-done:
+							t.Fatal(
+								"future Byron header admitted before slot onset",
+							)
+						default:
+						}
+						close(release)
+					}
+					got := testutil.RequireReceive(
+						t,
+						done,
+						time.Second,
+						"Byron admission result",
+					)
+					require.NoError(t, got.err)
+					require.Equal(t, early <= 2*time.Second, got.accepted)
+					if got.accepted {
+						require.NoError(
+							t,
+							ls.validateByronPBFTCurrentSlot(block),
+						)
+						require.Equal(
+							t,
+							onset,
+							now,
+							"admission must finish only at slot onset",
+						)
+					} else {
+						require.Empty(t, waiting, "beyond-skew headers must be rejected without waiting")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestByronCurrentSlotUsesHeaderOnset(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	header := &byron.ByronEpochBoundaryBlockHeader{}
+	block := &byron.ByronEpochBoundaryBlock{BlockHeader: header}
+	ls, _ := newFutureHeaderTestLedger(t, start, start.Add(-time.Millisecond))
+	// Before genesis, TimeToSlot clamps to zero. Slot equality must not permit
+	// the epoch-zero EBB to be applied before its wall-clock onset.
+	require.Error(
+		t,
+		ls.validateByronPBFTCurrentSlot(block),
+		"epoch-zero EBB must not apply before system start",
+	)
+	ls.slotClock.nowFunc = func() time.Time { return start }
+	require.NoError(t, ls.validateByronPBFTCurrentSlot(block))
+	// A known historical onset remains usable when the current time is beyond
+	// the forecast horizon; validating it must not require forecasting now.
+	ls.slotClock.provider = arrivalPastHorizonSlotTimeProvider{
+		ls.slotClock.provider,
+	}
+	require.NoError(t, ls.validateByronPBFTCurrentSlot(block))
 }
