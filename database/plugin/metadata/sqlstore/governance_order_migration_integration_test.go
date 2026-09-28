@@ -65,7 +65,14 @@ func exerciseGovernanceProposalOrderUpgrade(
 	db, err := OpenDB(driver, dsn, dialect, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	require.Len(t, registry, 26)
+	migrationIndex := -1
+	for i, migration := range registry {
+		if migration.Name == "governance-proposal-order" {
+			migrationIndex = i
+			break
+		}
+	}
+	require.Greater(t, migrationIndex, 0, "governance proposal order migration must exist")
 	runTo := func(versions []migrations.Migration) {
 		t.Helper()
 		runner := migrations.Runner{
@@ -76,7 +83,7 @@ func exerciseGovernanceProposalOrderUpgrade(
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	runTo(registry[:25])
+	runTo(registry[:migrationIndex])
 
 	stored := make([]byte, 32)
 	stored[0] = 0x02
@@ -88,7 +95,7 @@ func exerciseGovernanceProposalOrderUpgrade(
 		_, err = db.Exec(insertProposal, hash, 0, 2, 9, 15, 1000, 900)
 		require.NoError(t, err)
 	}
-	runTo(registry)
+	runTo(registry[:migrationIndex+1])
 	runTo(registry)
 
 	rows, err := db.Query(
