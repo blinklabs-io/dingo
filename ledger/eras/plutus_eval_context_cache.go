@@ -15,8 +15,7 @@
 package eras
 
 import (
-	"strconv"
-	"strings"
+	"encoding/binary"
 	"sync"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -44,13 +43,13 @@ import (
 // construction, supposed to share the resulting context.
 type PlutusEvalContextCache struct {
 	mu      sync.Mutex
-	entries map[plutusEvalContextKey]*plutusEvalContextEntry
+	entries map[string]*plutusEvalContextEntry
 }
 
 // NewPlutusEvalContextCache returns an empty cache ready for use.
 func NewPlutusEvalContextCache() *PlutusEvalContextCache {
 	return &PlutusEvalContextCache{
-		entries: make(map[plutusEvalContextKey]*plutusEvalContextEntry),
+		entries: make(map[string]*plutusEvalContextEntry),
 	}
 }
 
@@ -66,13 +65,6 @@ type PlutusEvalContextCacheProvider interface {
 	PlutusEvalContextCache() *PlutusEvalContextCache
 }
 
-type plutusEvalContextKey struct {
-	version       lang.LanguageVersion
-	protocolMajor uint
-	syntheticV2   bool
-	costModel     string
-}
-
 type plutusEvalContextEntry struct {
 	once sync.Once
 	ctx  *cek.EvalContext
@@ -85,22 +77,38 @@ type plutusEvalContextEntry struct {
 // callers (see TestPlutusEvalContextCacheBuildsOncePerKeyConcurrently).
 var newEvalContextFunc = cek.NewEvalContext
 
-// encodeCostModelParams renders the full cost-model parameter list as an
-// exact, collision-free map-key component. It must reproduce every element:
-// plutigo's costModelFromList silently truncates a too-short list rather than
-// erroring, so a digest or truncated encoding here could conflate two
-// distinct lists that plutigo itself would treat differently. Each element is
-// followed by a delimiter that cannot appear inside strconv.FormatInt's
-// output, so no pair of distinct slices can render to the same string
-// (concatenation without a delimiter can collide: [1, 23] and [12, 3] would
-// both render "123").
-func encodeCostModelParams(params []int64) string {
-	var b strings.Builder
-	for _, p := range params {
-		b.WriteString(strconv.FormatInt(p, 10))
-		b.WriteByte(',')
+// appendPlutusEvalContextKey appends the cache key to buf: a fixed-width
+// header (the three language-version components, the protocol major version,
+// and the synthetic-V2 flag) followed by every cost-model parameter as eight
+// little-endian bytes. Every field is fixed width, so the encoding is
+// injective without delimiters. The list must be reproduced exactly:
+// plutigo's costModelFromList costs a parameter missing from a short list at
+// maxBound, so lists differing only in length or in one element build
+// different contexts, and a digest or prefix could conflate them. An exact
+// key can only over-distinguish lists that build identical contexts (values
+// past the name list are ignored), which costs a build, never a wrong
+// context.
+func appendPlutusEvalContextKey(
+	buf []byte,
+	version lang.LanguageVersion,
+	protocolMajor uint,
+	syntheticV2 bool,
+	costModelParams []int64,
+) []byte {
+	for _, v := range version {
+		buf = binary.LittleEndian.AppendUint32(buf, v)
 	}
-	return b.String()
+	buf = binary.LittleEndian.AppendUint64(buf, uint64(protocolMajor))
+	if syntheticV2 {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
+	for _, p := range costModelParams {
+		// #nosec G115 -- a bit-preserving reinterpretation, not arithmetic
+		buf = binary.LittleEndian.AppendUint64(buf, uint64(p))
+	}
+	return buf
 }
 
 // get returns the shared *cek.EvalContext for the given key, building it via
@@ -112,21 +120,30 @@ func (c *PlutusEvalContextCache) get(
 	costModelParams []int64,
 	syntheticV2 bool,
 ) (*cek.EvalContext, error) {
-	key := plutusEvalContextKey{
-		version:       version,
-		protocolMajor: protoVersion.Major,
-		syntheticV2:   syntheticV2,
-		costModel:     encodeCostModelParams(costModelParams),
-	}
+	// Sized for the largest current cost model (PlutusV3, a few hundred
+	// parameters) so a hit encodes its key without a heap allocation; the
+	// m[string(b)] lookup form does not copy the key.
+	var keyBuf [4096]byte
+	key := appendPlutusEvalContextKey(
+		keyBuf[:0],
+		version,
+		protoVersion.Major,
+		syntheticV2,
+		costModelParams,
+	)
 	c.mu.Lock()
-	entry, ok := c.entries[key]
+	entry, ok := c.entries[string(key)]
 	if !ok {
 		entry = &plutusEvalContextEntry{}
-		c.entries[key] = entry
+		c.entries[string(key)] = entry
 	}
 	c.mu.Unlock()
 	entry.once.Do(func() {
-		entry.ctx, entry.err = newEvalContextFunc(version, protoVersion, costModelParams)
+		entry.ctx, entry.err = newEvalContextFunc(
+			version,
+			protoVersion,
+			costModelParams,
+		)
 	})
 	return entry.ctx, entry.err
 }
@@ -143,7 +160,12 @@ func plutusEvalContext(
 ) (*cek.EvalContext, error) {
 	if provider, ok := ls.(PlutusEvalContextCacheProvider); ok {
 		if cache := provider.PlutusEvalContextCache(); cache != nil {
-			return cache.get(version, protoVersion, costModelParams, syntheticV2)
+			return cache.get(
+				version,
+				protoVersion,
+				costModelParams,
+				syntheticV2,
+			)
 		}
 	}
 	return newEvalContextFunc(version, protoVersion, costModelParams)

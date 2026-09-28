@@ -14573,10 +14573,11 @@ era's pparams used at an era-boundary transaction — either call came from.
 A governance-enacted cost-model change simply produces a new key rather than
 requiring the old one evicted, and the key's cost-model component is the
 exact parameter list (never a digest or truncated form), so it can never
-conflate two distinct lists into one entry — deliberately, since plutigo's
-`costModelFromList` silently truncates a too-short list rather than erroring,
-and a lossy cache key could paper over that gap instead of reproducing it
-faithfully.
+conflate two distinct lists into one entry. plutigo's `costModelFromList`
+costs any parameter missing from a short list at maxBound, so lists that
+differ only in length build different contexts and a lossy key would return
+the wrong one; values past the parameter-name list are ignored, so an exact
+key at worst builds a duplicate context.
 
 `*ledger.LedgerState` owns one `*eras.PlutusEvalContextCache` for its whole
 lifetime (`NewLedgerState`, never reassigned), reachable through
