@@ -3522,11 +3522,16 @@ ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index;
 `GetDRepVotingPowerBatch` and `GetDRepVotingPowerByType` first total each
 DRep's power from its delegators' `reward_live_stake.utxo_stake` running total
 plus `account.reward`, one indexed lookup per delegator
-(`drepVotingPowerFromLiveStake`), which equals the UTxO sum below because the
-aggregate is maintained transactionally with every UTxO write and verified at
-startup. A DRep with an active delegator that has no `reward_live_stake` row at
-the current `calculation_version` falls back to the UTxO-scanning query shown
-below. All three add a credited reward round's unfolded credits (see
+(`drepVotingPowerFromLiveStake`). The running total is intended to equal the
+UTxO sum below and is maintained transactionally with every UTxO write. At
+startup, `RewardLiveStakeNeedsBackfill` compares the aggregate with canonical
+UTxO and account values and requests a rebuild on mismatch, unless that check
+is disabled by configuration. The separate `verifyRewardLiveStakeRunningTotals`
+check used when Mithril historical backfill is finalized only requires a
+populated `utxo_stake` row for each credential with a live UTxO. A DRep with an
+active delegator that has no `reward_live_stake` row at the current
+`calculation_version` falls back to the UTxO-scanning query shown below. All
+three add a credited reward round's unfolded credits (see
 "Credited reward rounds") by the credited account's DRep delegation.
 
 All three DRep voting-power queries take an `expiryEpoch uint64` argument that
