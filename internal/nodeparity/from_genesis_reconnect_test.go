@@ -136,7 +136,7 @@ func TestRunProtocolParamsAndStake_RecoversFromMidSequenceConnDeath(t *testing.T
 	))
 	t.Cleanup(koiosSrv.Close)
 
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -202,7 +202,7 @@ func TestRunProtocolParamsAndStake_ExhaustedRetriesReportsOwnErrorsSeparately(t 
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
-	koios, err := NewKoiosClient("preview", "", koiosURL, true)
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
 	require.NoError(t, err)
 
 	// Bounded well under this test's own timeout: protocolParamsAndStakeRetries

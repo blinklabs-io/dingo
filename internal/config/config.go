@@ -357,6 +357,9 @@ type KoiosParityConfig struct {
 	// tamperable in flight -- a MITM could induce a false PASS. Local dev and
 	// test only, mirroring Mithril.AllowInsecureHTTP.
 	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"    envconfig:"DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP"`
+	// AllowPrivateAddresses permits a private, loopback, or special-use
+	// BaseURL. Leave false for the default outbound request guard.
+	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES"`
 	// Strict stops/cancels the node on the first Koios/tool error or
 	// non-pass parity result, rather than logging it and continuing normal
 	// operation. The one exception is an epoch whose only significant

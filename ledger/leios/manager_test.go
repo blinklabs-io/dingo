@@ -230,10 +230,10 @@ func (f *fakeSlotProvider) setSlot(slot uint64) {
 }
 
 type fakeParamsProvider struct {
-	mu     sync.Mutex
-	sigmaC *big.Rat
-	tau    *big.Rat
-	err    error
+	mu            sync.Mutex
+	committeeSize uint16
+	tau           *big.Rat
+	err           error
 }
 
 type blockingParamsProvider struct {
@@ -249,32 +249,32 @@ func newBlockingParamsProvider() *blockingParamsProvider {
 	}
 }
 
-func (f *blockingParamsProvider) LeiosCommitteeParameters() (
-	*big.Rat,
+func (f *blockingParamsProvider) LeiosCommitteeParameters(uint64) (
+	uint16,
 	*big.Rat,
 	error,
 ) {
 	f.once.Do(func() { close(f.entered) })
 	<-f.release
-	return big.NewRat(1, 1), big.NewRat(7, 10), nil
+	return 10, big.NewRat(7, 10), nil
 }
 
-func (f *fakeParamsProvider) LeiosCommitteeParameters() (
-	*big.Rat,
+func (f *fakeParamsProvider) LeiosCommitteeParameters(uint64) (
+	uint16,
 	*big.Rat,
 	error,
 ) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
-		return nil, nil, f.err
+		return 0, nil, f.err
 	}
-	return f.sigmaC, f.tau, nil
+	return f.committeeSize, f.tau, nil
 }
 
 // managerFixture wires a VoteManager against fake providers. The default
 // committee has 10 members with stakes 100,90,...,10 (total active stake
-// 550), sigma_c = 1, tau = 7/10 (385 stake required for quorum), current
+// 550), tau = 7/10 (385 stake required for quorum), current
 // epoch 5, and a registry covering every member.
 type managerFixture struct {
 	mgr             *VoteManager
@@ -300,7 +300,7 @@ func newManagerFixture(
 		total += stake
 	}
 	expected, err := ComputeCommittee(
-		5, 3, poolStakes, total, big.NewRat(1, 1),
+		5, 3, poolStakes, total, 10,
 	)
 	require.NoError(t, err)
 
@@ -325,8 +325,8 @@ func newManagerFixture(
 			total: total,
 		},
 		params: &fakeParamsProvider{
-			sigmaC: big.NewRat(1, 1),
-			tau:    big.NewRat(7, 10),
+			committeeSize: 10,
+			tau:           big.NewRat(7, 10),
 		},
 		epochs:          &fakeEpochProvider{currentEpoch: 5},
 		keys:            keys,
@@ -387,6 +387,121 @@ func (f *managerFixture) makePrototypeVote(
 		VoterId:          voterId,
 		VoteSignature:    sig,
 	}
+}
+
+func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
+	t.Parallel()
+	fixture := newManagerFixture(t, func(f *managerFixture, cfg *VoteManagerConfig) {
+		keys := make(map[string]*lcommon.LeiosKey, len(f.members))
+		for _, member := range f.members {
+			key := f.keys[member.VoterId]
+			proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
+			require.NoError(t, err)
+			keys[hex.EncodeToString(member.PoolKeyHash)] = &lcommon.LeiosKey{
+				PublicKey:       key.PublicKeyBytes(),
+				PossessionProof: proof,
+			}
+		}
+		cfg.KeyProvider = &fakeLeiosKeyProvider{keys: keys}
+	})
+
+	message := []byte("certificate message")
+	signers := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
+	signatures := make([][]byte, 0, 10)
+	for voterID := uint64(0); voterID < 10; voterID++ {
+		key := fixture.keys[voterID]
+		signature, err := SignVote(key, message)
+		require.NoError(t, err)
+		signatures = append(signatures, signature)
+		signers[voterID/8] |= 1 << (7 - voterID%8)
+	}
+	aggregatedSignature, err := AggregateSignatures(signatures)
+	require.NoError(t, err)
+	require.NoError(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		signers,
+		aggregatedSignature,
+		message,
+	))
+
+	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		signers,
+		aggregatedSignature,
+		[]byte("wrong message"),
+	))
+	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		signers[:1],
+		aggregatedSignature,
+		message,
+	))
+
+	wrongSizeAggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
+	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		signers,
+		wrongSizeAggregate,
+		message,
+	))
+
+	highBits := append([]byte(nil), signers...)
+	highBits[len(highBits)-1] |= 1
+	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		highBits,
+		aggregatedSignature,
+		message,
+	))
+
+	belowQuorum := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
+	belowQuorum[1] = 1 << 6 // only voter 9, with 10 of 550 active stake
+	belowQuorumSig, err := SignVote(fixture.keys[9], message)
+	require.NoError(t, err)
+	belowQuorumAggregate, err := AggregateSignatures([][]byte{belowQuorumSig})
+	require.NoError(t, err)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		belowQuorum,
+		belowQuorumAggregate,
+		message,
+	), ErrQuorumNotMet)
+}
+
+func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
+	t.Parallel()
+	fixture := newManagerFixture(t, func(f *managerFixture, cfg *VoteManagerConfig) {
+		keys := make(map[string]*lcommon.LeiosKey, len(f.members)-1)
+		for _, member := range f.members[1:] {
+			key := f.keys[member.VoterId]
+			proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
+			require.NoError(t, err)
+			keys[hex.EncodeToString(member.PoolKeyHash)] = &lcommon.LeiosKey{
+				PublicKey:       key.PublicKeyBytes(),
+				PossessionProof: proof,
+			}
+		}
+		cfg.KeyProvider = &fakeLeiosKeyProvider{keys: keys}
+	})
+
+	message := []byte("certificate message")
+	signers := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
+	signatures := make([][]byte, 0, 10)
+	for voterID := uint64(0); voterID < 10; voterID++ {
+		key := fixture.keys[voterID]
+		signature, err := SignVote(key, message)
+		require.NoError(t, err)
+		signatures = append(signatures, signature)
+		signers[voterID/8] |= 1 << (7 - voterID%8)
+	}
+	aggregatedSignature, err := AggregateSignatures(signatures)
+	require.NoError(t, err)
+	require.ErrorContains(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		signers,
+		aggregatedSignature,
+		message,
+	), "no usable key")
 }
 
 type nextVotesResult struct {
@@ -991,7 +1106,7 @@ func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			member = f.members[3]
 			key = f.keys[member.VoterId]
-			proof, err := SignVote(key, key.PublicKeyBytes())
+			proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 			require.NoError(t, err)
 			keyProvider.keys = map[string]*lcommon.LeiosKey{
 				hex.EncodeToString(member.PoolKeyHash): {
@@ -1506,7 +1621,7 @@ func TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee(
 	t.Parallel()
 
 	key := testSigningKey(t, 210)
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	var poolKeyHash lcommon.PoolKeyHash
 	poolKeyHash[0] = 0xfa // not one of the fixture's 10 staked pools
@@ -1550,7 +1665,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	t.Parallel()
 
 	key := testSigningKey(t, 123)
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	var keyProvider *fakeLeiosKeyProvider
@@ -1697,7 +1812,7 @@ func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(
 	t.Parallel()
 
 	onChainKey := testSigningKey(t, 203)
-	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	proof, err := signWithDST(onChainKey, onChainKey.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1754,7 +1869,7 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 
 	key := testSigningKey(t, 124)
 	wrongKey := testSigningKey(t, 125)
-	badProof, err := SignVote(wrongKey, key.PublicKeyBytes())
+	badProof, err := signWithDST(wrongKey, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1803,7 +1918,7 @@ func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(
 	t.Parallel()
 
 	key := testSigningKey(t, 126)
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	keyProvider := &fakeLeiosKeyProvider{
@@ -1920,7 +2035,7 @@ func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
 		"a deferred signing key must not emit a vote",
 	)
 
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	keyProvider.mu.Lock()
 	keyProvider.keys = map[string]*lcommon.LeiosKey{
@@ -1993,7 +2108,7 @@ func TestVoteManagerConfigureVotingReplaysPreloadedAnnouncements(
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			member = f.members[3]
 			key = f.keys[member.VoterId]
-			proof, err := SignVote(key, key.PublicKeyBytes())
+			proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 			require.NoError(t, err)
 			cfg.KeyProvider = &fakeLeiosKeyProvider{
 				keys: map[string]*lcommon.LeiosKey{
@@ -2063,7 +2178,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 				func(f *managerFixture, cfg *VoteManagerConfig) {
 					member = f.members[3]
 					key = f.keys[member.VoterId]
-					proof, err := SignVote(key, key.PublicKeyBytes())
+					proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 					require.NoError(t, err)
 					keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
 						hex.EncodeToString(member.PoolKeyHash): {
@@ -2081,10 +2196,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 			switch testCase.staleResult {
 			case "mismatch":
 				staleKey := testSigningKey(t, 212)
-				proof, err := SignVote(
-					staleKey,
-					staleKey.PublicKeyBytes(),
-				)
+				proof, err := signWithDST(staleKey, staleKey.PublicKeyBytes(), LeiosPoPDST)
 				require.NoError(t, err)
 				keyProvider.blockedKeys = map[string]*lcommon.LeiosKey{
 					hex.EncodeToString(member.PoolKeyHash): {
@@ -2216,10 +2328,7 @@ func TestVoteManagerConfigureVotingReportsSupersededDifferentPoolReplacement(
 
 			switch testCase.replacement {
 			case "success":
-				proof, err := SignVote(
-					replacementKey,
-					replacementKey.PublicKeyBytes(),
-				)
+				proof, err := signWithDST(replacementKey, replacementKey.PublicKeyBytes(), LeiosPoPDST)
 				require.NoError(t, err)
 				keyProvider.keys = map[string]*lcommon.LeiosKey{
 					hex.EncodeToString(replacementPool[:]): {
@@ -2239,10 +2348,7 @@ func TestVoteManagerConfigureVotingReportsSupersededDifferentPoolReplacement(
 				}
 			case "mismatch":
 				mismatchedKey := testSigningKey(t, 215)
-				proof, err := SignVote(
-					mismatchedKey,
-					mismatchedKey.PublicKeyBytes(),
-				)
+				proof, err := signWithDST(mismatchedKey, mismatchedKey.PublicKeyBytes(), LeiosPoPDST)
 				require.NoError(t, err)
 				keyProvider.keys = map[string]*lcommon.LeiosKey{
 					hex.EncodeToString(replacementPool[:]): {
@@ -2357,7 +2463,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 			var poolKeyHash lcommon.PoolKeyHash
 			copy(poolKeyHash[:], member.PoolKeyHash)
 			poolHash := hex.EncodeToString(member.PoolKeyHash)
-			validProof, err := SignVote(key, key.PublicKeyBytes())
+			validProof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 			require.NoError(t, err)
 			validKeys := map[string]*lcommon.LeiosKey{
 				poolHash: {
@@ -2383,10 +2489,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 				)
 			case "mismatch":
 				otherKey := testSigningKey(t, 213)
-				otherProof, signErr := SignVote(
-					otherKey,
-					otherKey.PublicKeyBytes(),
-				)
+				otherProof, signErr := signWithDST(otherKey, otherKey.PublicKeyBytes(), LeiosPoPDST)
 				require.NoError(t, signErr)
 				keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
 					poolHash: {
@@ -2476,7 +2579,7 @@ func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
 		},
 	)
 	require.NotNil(t, key)
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	keyProvider.blockedKeys = map[string]*lcommon.LeiosKey{
 		hex.EncodeToString(member.PoolKeyHash): {
@@ -2549,7 +2652,7 @@ func TestVoteManagerConfigureVotingReportsReplayPreparationFailure(
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			member = f.members[3]
 			key = f.keys[member.VoterId]
-			proof, err := SignVote(key, key.PublicKeyBytes())
+			proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 			require.NoError(t, err)
 			keyProvider.keys = map[string]*lcommon.LeiosKey{
 				hex.EncodeToString(member.PoolKeyHash): {
@@ -2617,7 +2720,7 @@ func TestVoteManagerDeferredVotingRetriesFailedReplayLookup(
 	fixture.mgr.HandleEndorserBlock(501, ebHash)
 	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
 
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	keyProvider.mu.Lock()
 	keyProvider.keys = map[string]*lcommon.LeiosKey{
@@ -2715,7 +2818,7 @@ func TestVoteManagerDeferredVotingRejectsInvalidAuthorization(
 	assert.Same(t, key, fixture.mgr.deferredVotingKey)
 	fixture.mgr.mu.Unlock()
 
-	validProof, err := SignVote(key, key.PublicKeyBytes())
+	validProof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	keyProvider.mu.Lock()
 	keyProvider.keys = map[string]*lcommon.LeiosKey{
@@ -2762,10 +2865,7 @@ func TestVoteManagerDeferredVotingRetryRetainsMismatchedKeyUntilRecovery(
 	fixture.mgr.ObserveAnnouncement(601, firstRB, firstEB)
 
 	mismatchedKey := testSigningKey(t, 211)
-	mismatchedProof, err := SignVote(
-		mismatchedKey,
-		mismatchedKey.PublicKeyBytes(),
-	)
+	mismatchedProof, err := signWithDST(mismatchedKey, mismatchedKey.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	keyProvider.mu.Lock()
 	keyProvider.keys = map[string]*lcommon.LeiosKey{
@@ -2799,7 +2899,7 @@ func TestVoteManagerDeferredVotingRetryRetainsMismatchedKeyUntilRecovery(
 	secondRB := lcommon.NewBlake2b256([]byte("mismatch-recovery-rb"))
 	fixture.mgr.HandleEndorserBlock(701, secondEB)
 	fixture.mgr.ObserveAnnouncement(701, secondRB, secondEB)
-	validProof, err := SignVote(key, key.PublicKeyBytes())
+	validProof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	keyProvider.mu.Lock()
 	keyProvider.keys = map[string]*lcommon.LeiosKey{
@@ -2880,7 +2980,7 @@ func TestVoteManagerDeferredVotingRetryRetainsProviderFailureUntilRecovery(
 	secondRB := lcommon.NewBlake2b256([]byte("provider-recovery-rb"))
 	fixture.mgr.HandleEndorserBlock(701, secondEB)
 	fixture.mgr.ObserveAnnouncement(701, secondRB, secondEB)
-	validProof, err := SignVote(key, key.PublicKeyBytes())
+	validProof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	keyProvider.mu.Lock()
 	keyProvider.err = nil
@@ -2912,7 +3012,7 @@ func TestVoteManagerConfigureVotingRejectsResolvedMismatch(t *testing.T) {
 	t.Parallel()
 
 	onChainKey := testSigningKey(t, 210)
-	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	proof, err := signWithDST(onChainKey, onChainKey.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -2990,7 +3090,7 @@ func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 	t.Parallel()
 
 	rotatedKey := testSigningKey(t, 200)
-	proof, err := SignVote(rotatedKey, rotatedKey.PublicKeyBytes())
+	proof, err := signWithDST(rotatedKey, rotatedKey.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -3039,7 +3139,7 @@ func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
 	t.Parallel()
 
 	onChainKey := testSigningKey(t, 201)
-	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	proof, err := signWithDST(onChainKey, onChainKey.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
 	wrongKey := testSigningKey(t, 202)
 	var member CommitteeMember
@@ -3459,9 +3559,7 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
-			f.params.err = errors.New(
-				"quorum stake threshold must be less than committee stake coverage",
-			)
+			f.params.err = errors.New("invalid historical Dijkstra parameters")
 		},
 	)
 	_, err := fixture.mgr.CommitteeForEpoch(5)

@@ -23,6 +23,7 @@
 #   ./start.sh               # all-dingo network (default)
 #   ./start.sh --conformance # dingo + cardano-node reference network
 #   ./start.sh --accelerated # bring the network up on the accelerated spec
+#   ./start.sh --leios       # Dijkstra/Leios producer-to-peer network
 
 set -euo pipefail
 
@@ -37,10 +38,12 @@ devnet_ports
 # Mode selection precedence: CLI, COMPOSE_PROFILES, then dingo.
 MODE=""
 ACCELERATED=false
+LEIOS=false
 for arg in "$@"; do
   case "${arg}" in
     --conformance) MODE="conformance" ;;
     --accelerated) ACCELERATED=true ;;
+    --leios)       LEIOS=true ;;
     *)
       echo "Unknown argument: ${arg}" >&2
       exit 1
@@ -48,6 +51,14 @@ for arg in "$@"; do
   esac
 done
 MODE="${MODE:-${COMPOSE_PROFILES:-dingo}}"
+if [[ "${LEIOS}" == "true" && "${MODE}" != "dingo" ]]; then
+  echo "--leios requires the all-Dingo profile" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" == "true" && "${ACCELERATED}" == "true" ]]; then
+  echo "--leios selects its own accelerated Dijkstra spec; do not combine it with --accelerated" >&2
+  exit 1
+fi
 case "${MODE}" in
   conformance) export COMPOSE_PROFILES="conformance" ;;
   dingo)       export COMPOSE_PROFILES="dingo" ;;
@@ -75,7 +86,31 @@ fi
 # accelerated spec compresses slot, epoch and security-parameter timing so
 # a full scenario fits the reference-runner budget; the canonical spec is
 # what soak and canary runs use.
-if [[ "${ACCELERATED}" == "true" ]]; then
+if [[ "${LEIOS}" == "true" ]]; then
+  export DEVNET_DINGO_SPEC="./testnet-dingo-leios.yaml"
+  export DEVNET_LEIOS_ENABLED=1
+  export DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE="/configs/keys/leios-vote.skey"
+  export DEVNET_DINGO_RUN_MODE=leios
+  export DEVNET_DINGO_START_ERA=dijkstra
+  export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
+  # Keep EB outputs in the tx pump's wallet quarantine until the scenario
+  # queries the relay ledger; this delay is not proof of on-chain confirmation.
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
+  ACTIVE_SPEC="${DEVNET_DINGO_SPEC}"
+  echo "Using Dijkstra/Leios network spec: ${ACTIVE_SPEC}"
+  echo "Run the producer-to-peer scenario with:"
+  echo "  DEVNET_LEIOS_ENABLED=1 \\"
+  echo "  DEVNET_TESTNET_YAML=${SCRIPT_DIR}/${ACTIVE_SPEC#./} \\"
+  echo "  DEVNET_COMPOSE_FILE=${SCRIPT_DIR}/docker-compose.yml \\"
+  echo "  DEVNET_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME} \\"
+  echo "  DEVNET_DINGO1_ADDR=localhost:${DINGO1_PORT} \\"
+  echo "  DEVNET_DINGO2_ADDR=localhost:${DINGO2_PORT} \\"
+  echo "  DEVNET_DINGO3_ADDR=localhost:${DINGO3_PORT} \\"
+  echo "  DEVNET_DINGO_RELAY_ADDR=localhost:${DINGO_RELAY_PORT} \\"
+  echo "  DEVNET_DINGO_RELAY_NTC_ADDR=localhost:${DEVNET_DINGO_RELAY_NTC_PORT:-3023} \\"
+  echo "  go test -tags devnet -run '^TestLeiosEndorserBlockProducerToPeer$' \\"
+  echo "    -timeout 12m ./internal/test/devnet/scenarios/"
+elif [[ "${ACCELERATED}" == "true" ]]; then
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=100
   if [[ "${MODE}" == "conformance" ]]; then
     export DEVNET_CONFORMANCE_SPEC="./testnet-accelerated.yaml"
@@ -108,6 +143,10 @@ if [[ "${ACCELERATED}" == "true" ]]; then
   echo "  go test -tags devnet -run TestAcceleratedScenarioTimeline \\"
   echo "    -timeout 8m ./internal/test/devnet/scenarios/"
 else
+  unset DEVNET_LEIOS_ENABLED DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE
+  unset DEVNET_DINGO_RUN_MODE
+  unset DEVNET_DINGO_START_ERA
+  unset DEVNET_TXPUMP_TRANSACTION_ERA
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
 fi
 

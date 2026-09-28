@@ -127,8 +127,12 @@ func poolKeyHashesFromActivePoolBytes(
 	return poolKeyHashes, nil
 }
 
-// emptyLedgerPeerSnapshot builds a well-formed empty (V1) snapshot at the
-// given point. A node with no active pools still returns a valid result.
+// emptyLedgerPeerSnapshot builds a well-formed empty snapshot at the given
+// point. A node with no active pools still returns a valid result.
+//
+// Version 0 is gouroboros's "unset" sentinel (LedgerPeerSnapshotResult docs,
+// gouroboros#2557): MarshalCBOR always emits its own currently-supported wire
+// version regardless of this value, so this does not pin V1 on the wire.
 func emptyLedgerPeerSnapshot(
 	slot olocalstatequery.WithOriginSlot,
 ) olocalstatequery.LedgerPeerSnapshotResult {

@@ -1356,6 +1356,8 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 				RewardAccount:              rewardAccount,
 				RewardAccountCredentialTag: 1,
 				MarginDen:                  1,
+				LeiosKeyPublic:             bytes.Repeat([]byte{0x71}, 96),
+				LeiosKeyPossessionProof:    bytes.Repeat([]byte{0x72}, 48),
 			},
 		},
 		456,
@@ -1379,6 +1381,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 		uint8(1),
 		pool.Registration[0].RewardAccountCredentialTag,
 	)
+	require.True(t, pool.Registration[0].LeiosKeyRegistrationAgeUnknown)
 }
 
 func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
