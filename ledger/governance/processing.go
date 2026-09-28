@@ -196,6 +196,11 @@ func ProcessProposals(
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := ResetDormantDRepExpiryBeforeCertificates(
+		tx, point, db, txn,
+	); err != nil {
+		return err
+	}
 	return persistGovernanceProposals(
 		tx,
 		point,
@@ -275,14 +280,19 @@ func ResetDormantDRepExpiryBeforeCertificates(
 }
 
 // BumpDormantDRepExpiryAtEpochBoundary extends dormant DRep expiries during
-// historical replay when no governance proposal is active at the boundary.
+// historical replay when no governance proposal was active in the epoch that
+// just ended, matching ProcessEpoch's RATIFY candidate set.
 func BumpDormantDRepExpiryAtEpochBoundary(
 	db *database.Database,
 	epoch uint64,
 	slot uint64,
 	txn *database.Txn,
 ) error {
-	proposals, err := db.GetActiveGovernanceProposals(epoch, txn)
+	activeEpoch := epoch
+	if activeEpoch > 0 {
+		activeEpoch--
+	}
+	proposals, err := db.GetActiveGovernanceProposals(activeEpoch, txn)
 	if err != nil {
 		return fmt.Errorf("get active proposals for DRep dormancy: %w", err)
 	}
@@ -307,10 +317,6 @@ func persistGovernanceProposals(
 	if len(proposals) == 0 {
 		return nil
 	}
-	if err := db.ResetDormantDRepEpochs(point.Slot, txn); err != nil {
-		return fmt.Errorf("reset dormant DRep epochs before proposal processing: %w", err)
-	}
-
 	txHash := tx.Id().Bytes()
 	if len(txHash) != 32 {
 		return fmt.Errorf("invalid tx hash length: got %d", len(txHash))

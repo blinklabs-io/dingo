@@ -367,6 +367,7 @@ type RewardAccountOutput struct {
 	Guarded       bool
 	CapturedSlot  int64
 	BoundarySlot  int64
+	Folded        bool
 }
 
 type RewardAdaPot struct {

@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 32)
+	require.Len(t, registry, 34)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -225,12 +225,25 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Len(t, registry[28].SQL["sqlite"].Expand, 1)
 	require.Contains(t, registry[28].SQL["sqlite"].Expand[0], "UPDATE `pool_stake_snapshot`")
 	require.Equal(t, 30, registry[29].Version)
-	require.Equal(t, drepExpiryHistorySchemaRelease, registry[29].Name)
-	require.Contains(t, strings.Join(registry[29].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
+	require.Equal(t, rewardOutputFoldedSchemaRelease, registry[29].Name)
+	require.Contains(
+		t,
+		registry[29].SQL["sqlite"].Expand,
+		"ALTER TABLE `reward_account_output` ADD COLUMN `folded` boolean NOT NULL DEFAULT false",
+	)
 	require.Equal(t, 31, registry[30].Version)
-	require.Equal(t, drepDormancyStateSchemaRelease, registry[30].Name)
+	require.Equal(t, rewardCreditRoundTableSchemaRelease, registry[30].Name)
+	require.Len(t, registry[30].SQL["sqlite"].Expand, 3)
+	require.Contains(t, registry[30].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `reward_credit_round`")
+	require.Contains(t, registry[30].SQL["sqlite"].Expand[2], "idx_reward_account_output_pending_round")
+	require.NotNil(t, registry[30].Backfill)
 	require.Equal(t, 32, registry[31].Version)
-	require.Equal(t, drepDelegatorStateSchemaRelease, registry[31].Name)
+	require.Equal(t, drepExpiryHistorySchemaRelease, registry[31].Name)
+	require.Contains(t, strings.Join(registry[31].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
+	require.Equal(t, 33, registry[32].Version)
+	require.Equal(t, drepDormancyStateSchemaRelease, registry[32].Name)
+	require.Equal(t, 34, registry[33].Version)
+	require.Equal(t, drepDelegatorStateSchemaRelease, registry[33].Name)
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -248,8 +261,8 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 32)
-			migration := registry[30]
+			require.Len(t, registry, 34)
+			migration := registry[32]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
 			require.Contains(t, seed, "WHERE NOT EXISTS")
@@ -381,12 +394,30 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 32)
+	require.Len(t, registry, 34)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,
 		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)",
 	)
+}
+
+func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+
+	postgres, err := PostgresRegistry()
+	require.NoError(t, err)
+	postgresSQL := strings.Join(postgres[30].SQL["postgres"].Expand, "\n")
+	require.Contains(t, postgresSQL, `CREATE INDEX IF NOT EXISTS "idx_reward_account_output_pending_round"`)
+	require.Contains(t, postgresSQL, `ON "reward_account_output"("spendable", "guarded", "folded", "epoch")`)
+	require.NotContains(t, postgresSQL, "`")
+
+	mysql, err := MySQLRegistry()
+	require.NoError(t, err)
+	mysqlSQL := strings.Join(mysql[30].SQL["mysql"].Expand, "\n")
+	require.Contains(t, mysqlSQL, "CREATE INDEX `idx_reward_account_output_pending_round`")
+	require.Contains(t, mysqlSQL, "ON `reward_account_output`(`spendable`, `guarded`, `folded`, `epoch`)")
+	require.NotContains(t, mysqlSQL, "CREATE INDEX IF NOT EXISTS")
 }
 
 func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {

@@ -593,8 +593,8 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
-// TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish is the
-// regression test for a CodeRabbit finding on this PR: IsVrfKeyInUse must
+// TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish verifies
+// that IsVrfKeyInUse must
 // use the epoch boundary pinned on the view at construction time, not
 // whatever ls.loadConsensusSnapshot() returns when it happens to be
 // called. A validation operation can run long enough that the writer

@@ -587,6 +587,16 @@ func applyRootPeerTargetFallback(cfg *config.Config, target int) {
 	}
 }
 
+// forgeEBCap resolves an optional endorser-block cap. Load applies the
+// defaults, so nil here means the Config was built directly rather than
+// loaded; an explicit 0 is preserved and disables the cap.
+func forgeEBCap(v *uint64, fallback uint64) uint64 {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
 // buildDingoConfig translates the loaded internal/config.Config, plus the
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
@@ -696,8 +706,16 @@ func buildDingoConfig(
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
+				MaxDecompressedBytes: cfg.TokenRegistry.
+					MaxDecompressedBytes,
 				MaxEntryBytes: cfg.TokenRegistry.
 					MaxEntryBytes,
+				MaxArchiveEntries: cfg.TokenRegistry.
+					MaxArchiveEntries,
+				MaxAcceptedEntries: cfg.TokenRegistry.
+					MaxAcceptedEntries,
+				MaxBatchBytes: cfg.TokenRegistry.
+					MaxBatchBytes,
 				StoreLogos: cfg.TokenRegistry.StoreLogos,
 				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,
@@ -835,6 +853,13 @@ func buildDingoConfig(
 		),
 		dingo.WithForgeEndorserBlockStalenessSlots(
 			cfg.ForgeEndorserBlockStalenessSlots,
+		),
+		dingo.WithForgeEBSelectionReserve(cfg.ForgeEBSelectionReserve),
+		dingo.WithForgeEBMaxTxRefs(
+			forgeEBCap(cfg.ForgeEBMaxTxRefs, config.DefaultForgeEBMaxTxRefs),
+		),
+		dingo.WithForgeEBMaxBytes(
+			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
 		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
