@@ -676,7 +676,9 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 		t.Fatal(err)
 	}
 	drepMap := append([]byte{0xa1}, drepCredential...)
-	drepMap = append(drepMap, 0x80)
+	drepState, err := cbor.Encode([]any{uint64(0), nil, uint64(0)})
+	require.NoError(t, err)
+	drepMap = append(drepMap, drepState...)
 
 	// DState must be the largest credential-keyed map so it is identified
 	// ahead of the DRep and committee maps.
@@ -767,6 +769,28 @@ func TestParseDRepMapPreservesReverseDelegators(t *testing.T) {
 // TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry pins the
 // flattened Mithril CertState layout where the dormant count follows the
 // nested committee state after the DRep map.
+func TestParseDRepMapRejectsMalformedStateFields(t *testing.T) {
+	t.Parallel()
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey), bytes.Repeat([]byte{0x41}, 28),
+	})
+	require.NoError(t, err)
+	for name, state := range map[string][]any{
+		"expiry":  {"10", nil, uint64(500)},
+		"anchor":  {uint64(10), "invalid", uint64(500)},
+		"deposit": {uint64(10), nil, "500"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rawState, encodeErr := cbor.Encode(state)
+			require.NoError(t, encodeErr)
+			drepMap := append([]byte{0xa1}, credential...)
+			drepMap = append(drepMap, rawState...)
+			_, parseErr := parseDRepMap(drepMap)
+			require.Error(t, parseErr)
+		})
+	}
+}
+
 func TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry(t *testing.T) {
 	t.Parallel()
 

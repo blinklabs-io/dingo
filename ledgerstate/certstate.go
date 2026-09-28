@@ -15,6 +15,7 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/hex"
 	"errors"
@@ -2059,66 +2060,62 @@ func parseDRepMap(data []byte) ([]ParsedDRep, error) {
 
 		// DRepState = [expiry, anchor, deposit, ...]
 		var state []cbor.RawMessage
-		if _, err := cbor.Decode(
-			entry.ValueRaw, &state,
-		); err == nil {
-			if len(state) > 0 {
-				var expiry uint64
-				if _, err := cbor.Decode(
-					state[0], &expiry,
-				); err == nil {
-					drep.ExpiryEpoch = expiry
-				}
+		if _, err := cbor.Decode(entry.ValueRaw, &state); err != nil {
+			return nil, fmt.Errorf("decoding DRep state for %x: %w", cred.Hash, err)
+		}
+		if len(state) < 3 {
+			return nil, fmt.Errorf(
+				"decoding DRep state for %x: expected at least 3 fields, got %d",
+				cred.Hash,
+				len(state),
+			)
+		}
+		if _, err := cbor.Decode(state[0], &drep.ExpiryEpoch); err != nil {
+			return nil, fmt.Errorf("decoding DRep expiry for %x: %w", cred.Hash, err)
+		}
+		var anchor []cbor.RawMessage
+		if !bytes.Equal(state[1], []byte{0xf6}) {
+			if _, err := cbor.Decode(state[1], &anchor); err != nil {
+				return nil, fmt.Errorf("decoding DRep anchor for %x: %w", cred.Hash, err)
 			}
-			if len(state) > 1 {
-				var anchor []cbor.RawMessage
-				if _, err := cbor.Decode(
-					state[1], &anchor,
-				); err == nil && len(anchor) >= 2 {
-					var url string
-					if _, err := cbor.Decode(
-						anchor[0], &url,
-					); err == nil {
-						drep.AnchorURL = url
-					}
-					var hash []byte
-					if _, err := cbor.Decode(
-						anchor[1], &hash,
-					); err == nil {
-						drep.AnchorHash = hash
-					}
-				}
+			if len(anchor) != 2 {
+				return nil, fmt.Errorf(
+					"decoding DRep anchor for %x: expected 2 fields, got %d",
+					cred.Hash,
+					len(anchor),
+				)
 			}
-			if len(state) > 2 {
-				var deposit uint64
-				if _, err := cbor.Decode(
-					state[2], &deposit,
-				); err == nil {
-					drep.Deposit = deposit
-				}
+			if _, err := cbor.Decode(anchor[0], &drep.AnchorURL); err != nil {
+				return nil, fmt.Errorf("decoding DRep anchor URL for %x: %w", cred.Hash, err)
 			}
-			if len(state) > 3 {
-				var rawDelegators []cbor.RawMessage
-				if _, err := cbor.Decode(state[3], &rawDelegators); err != nil {
+			if _, err := cbor.Decode(anchor[1], &drep.AnchorHash); err != nil {
+				return nil, fmt.Errorf("decoding DRep anchor hash for %x: %w", cred.Hash, err)
+			}
+		}
+		if _, err := cbor.Decode(state[2], &drep.Deposit); err != nil {
+			return nil, fmt.Errorf("decoding DRep deposit for %x: %w", cred.Hash, err)
+		}
+		if len(state) > 3 {
+			var rawDelegators []cbor.RawMessage
+			if _, err := cbor.Decode(state[3], &rawDelegators); err != nil {
+				return nil, fmt.Errorf(
+					"decoding DRep delegators for %x: %w",
+					cred.Hash,
+					err,
+				)
+			}
+			drep.Delegators = make([]Credential, 0, len(rawDelegators))
+			for index, rawDelegator := range rawDelegators {
+				delegator, err := parseCredential(rawDelegator)
+				if err != nil {
 					return nil, fmt.Errorf(
-						"decoding DRep delegators for %x: %w",
+						"decoding DRep delegator %d for %x: %w",
+						index,
 						cred.Hash,
 						err,
 					)
 				}
-				drep.Delegators = make([]Credential, 0, len(rawDelegators))
-				for index, rawDelegator := range rawDelegators {
-					delegator, err := parseCredential(rawDelegator)
-					if err != nil {
-						return nil, fmt.Errorf(
-							"decoding DRep delegator %d for %x: %w",
-							index,
-							cred.Hash,
-							err,
-						)
-					}
-					drep.Delegators = append(drep.Delegators, delegator)
-				}
+				drep.Delegators = append(drep.Delegators, delegator)
 			}
 		}
 
