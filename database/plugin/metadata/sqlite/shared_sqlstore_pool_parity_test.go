@@ -112,7 +112,7 @@ func TestSharedSQLStorePoolParity(t *testing.T) {
 	state := exercisePoolStore(t, store)
 	require.NotNil(t, state.Pool)
 	require.NotNil(t, state.ByVRF)
-	require.NotEmpty(t, state.Pools)
+	require.Len(t, state.Pools, 1)
 	require.Nil(t, state.Missing)
 	require.Equal(t, uint64(3), state.Sequence)
 	require.True(t, state.SequenceSet)

@@ -74,17 +74,22 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 	require.NotNil(t, state.live)
 	require.Nil(t, state.spentLiveLookup)
 	require.NotNil(t, state.spent)
-	require.NotEmpty(t, state.added)
+	require.Len(t, state.added, 1)
+	require.Equal(t, []byte("tx-script"), state.added[0].TxId)
 	require.Equal(t, []models.UtxoId{{Hash: []byte("tx-live"), Idx: 0}}, state.liveAtSlot)
 	require.ElementsMatch(t, []models.UtxoId{
 		{Hash: []byte("tx-live"), Idx: 0},
 		{Hash: []byte("tx-spent"), Idx: 1},
 	}, state.allAtSlot)
-	require.NotEmpty(t, state.deleted)
-	require.NotEmpty(t, state.byAddress)
-	require.NotZero(t, state.controlled)
-	require.NotEmpty(t, state.byAsset)
-	require.NotEmpty(t, state.iterated)
+	require.Len(t, state.deleted, 1)
+	require.Equal(t, []byte("tx-spent"), state.deleted[0].TxId)
+	require.Len(t, state.byAddress, 1)
+	require.Equal(t, []byte("tx-live"), state.byAddress[0].TxId)
+	require.Equal(t, uint64(100), state.controlled)
+	require.Equal(t, uint64(70), state.scriptLocked)
+	require.Len(t, state.byAsset, 1)
+	require.Equal(t, []byte("tx-live"), state.byAsset[0].TxId)
+	require.Len(t, state.iterated, 2)
 }
 
 // TestGetUtxosByAddressEmptyPatterns proves an empty patterns slice returns

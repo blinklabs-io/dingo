@@ -63,12 +63,17 @@ func TestSharedSQLStoreSnapshotParity(t *testing.T) {
 	store, _ := newSharedSQLStore(t)
 	state := exerciseSnapshotStore(t, store)
 	require.NotNil(t, state.pool)
-	require.NotEmpty(t, state.pools)
+	require.Equal(t, types.Uint64(20), state.pool.TotalStake)
+	require.Len(t, state.pools, 2)
 	require.Equal(t, uint64(50), state.totalBeforeReady)
 	require.Equal(t, uint64(888), state.totalAfterReady)
 	require.NotNil(t, state.summary)
+	require.Equal(t, types.Uint64(888), state.summary.TotalActiveStake)
+	require.Equal(t, uint64(22), state.summary.BoundarySlot)
 	require.NotNil(t, state.latest)
-	require.NotEmpty(t, state.remaining)
+	require.Equal(t, types.Uint64(888), state.latest.TotalActiveStake)
+	require.Equal(t, uint64(22), state.latest.BoundarySlot)
+	require.Len(t, state.remaining, 2)
 }
 
 func exerciseSnapshotStore(t *testing.T, store snapshotStore) snapshotState {
