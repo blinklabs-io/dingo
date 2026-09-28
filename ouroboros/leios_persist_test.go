@@ -133,8 +133,8 @@ func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 	require.Equal(t, point.Slot, second.MaxVerifiedEndorserBlockSlot())
 }
 
-// TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently is the cubic
-// P2 regression: the durable blob store used to be keyed by hash alone, so
+// TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently verifies that
+// durable blob records distinguish occurrences by hash and slot, so
 // when two live occurrences of the same content-addressed hash existed at
 // different slots, the second persist silently overwrote the first --
 // making it permanently unavailable for historical re-serving once its

@@ -668,6 +668,13 @@ func (params Parameters) rewardPassesPrefilter(registered bool) bool {
 	return params.forgoRewardPrefilter() || registered
 }
 
+// SupportsPerPoolMemberRewards reports whether ApplyPoolMemberRewards can
+// split this round pool by pool. Before Allegra a credential that earns from
+// several pools is paid only once, which needs the whole pool set at once.
+func (params Parameters) SupportsPerPoolMemberRewards() bool {
+	return params.aggregateRewards()
+}
+
 func (params Parameters) aggregateRewards() bool {
 	return params.ProtocolMajorVersion >= 3
 }

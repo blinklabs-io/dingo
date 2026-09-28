@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -1278,7 +1279,8 @@ func (a *NodeAdapter) predefinedDRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
 	drepType := *credential.Predefined
-	powers, err := a.ledgerState.Database().Metadata().
+	db := a.ledgerState.Database()
+	powers, err := db.Metadata().
 		GetDRepVotingPowerByType([]uint64{drepType}, 0, nil)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
@@ -1286,10 +1288,26 @@ func (a *NodeAdapter) predefinedDRep(
 			err,
 		)
 	}
+	power := powers[drepType]
+	// AlwaysAbstain never gains deposit power (see
+	// governance.ActiveProposalDepositDRepPower); only look it up for
+	// AlwaysNoConfidence.
+	if drepType == models.DrepTypeAlwaysNoConfidence {
+		_, depositPower, err := governance.ActiveProposalDepositDRepPower(
+			db, nil, a.ledgerState.CurrentEpoch(), 0,
+		)
+		if err != nil {
+			return DRepInfo{}, fmt.Errorf(
+				"get active proposal deposit voting power: %w",
+				err,
+			)
+		}
+		power += depositPower
+	}
 	return DRepInfo{
 		DRepID: credential.ID,
 		Hex:    "",
-		Amount: strconv.FormatUint(powers[drepType], 10),
+		Amount: strconv.FormatUint(power, 10),
 		Active: true,
 	}, nil
 }
@@ -1379,6 +1397,25 @@ func (a *NodeAdapter) drepByCredentialTag(
 			err,
 		)
 	}
+	currentEpoch := a.ledgerState.CurrentEpoch()
+	// Fold in any active governance proposal's deposit escrowed to a return
+	// account delegating to this DRep, matching the deposit-inclusive tally
+	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694;
+	// blinklabs-io/dingo#4355).
+	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
+		db, nil, currentEpoch, 0,
+	)
+	if err != nil {
+		return DRepInfo{}, fmt.Errorf(
+			"get active proposal deposit voting power %x: %w",
+			credential.Hash,
+			err,
+		)
+	}
+	power += drepDepositPower[models.StakeCredentialRef{
+		Tag: credentialTag,
+		Key: credential.Hash,
+	}.MapKey()]
 
 	// The most recent registration certificate is the active_epoch
 	// source; drep.added_slot is overwritten by update and
@@ -1412,7 +1449,7 @@ func (a *NodeAdapter) drepByCredentialTag(
 		drep.LastActivityEpoch,
 		drep.ExpiryEpoch,
 		registrationEpoch.EpochId,
-		a.ledgerState.CurrentEpoch(),
+		currentEpoch,
 		inactivityPeriod,
 		inactivityKnown,
 	)
@@ -1633,6 +1670,26 @@ func (a *NodeAdapter) DReps(
 				)
 			}
 			typePowers = byType
+		}
+		// Fold in any active governance proposal's deposit escrowed to a
+		// return account delegating to a listed DRep (or AlwaysNoConfidence),
+		// matching the deposit-inclusive tally
+		// ledger/governance.LoadDRepVotingState uses for ratification
+		// (CIP-1694; blinklabs-io/dingo#4355). AlwaysAbstain never gains
+		// deposit power, so typePowers' AlwaysAbstain entry is untouched.
+		depositRefPower, depositNoConfidencePower, depositErr := governance.
+			ActiveProposalDepositDRepPower(db, txn, currentEpoch, 0)
+		if depositErr != nil {
+			return fmt.Errorf(
+				"get active proposal deposit voting power: %w", depositErr,
+			)
+		}
+		for key, amount := range depositRefPower {
+			powers[key] += amount
+		}
+		if depositNoConfidencePower > 0 {
+			existing := typePowers[models.DrepTypeAlwaysNoConfidence]
+			typePowers[models.DrepTypeAlwaysNoConfidence] = existing + depositNoConfidencePower
 		}
 		for i := range items {
 			if items[i].predefined != nil {
@@ -2289,14 +2346,29 @@ func (a *NodeAdapter) Account(
 	}
 
 	db := a.ledgerState.Database()
-	account, err := db.GetAccountByCredential(
-		credentialTag,
-		stakeKey,
-		true,
-		nil,
-	)
-	if err != nil {
+	var account *models.Account
+	var pendingReward uint64
+	readTxn := db.Transaction(false)
+	if err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		account, err = db.GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			txn,
+		)
+		if err != nil {
+			return err
+		}
+		pendingReward, err = a.ledgerState.PendingRewardCredit(
+			txn, credentialTag, stakeKey,
+		)
+		return err
+	}); err != nil {
 		return AccountInfo{}, err
+	}
+	if account == nil {
+		return AccountInfo{}, models.ErrAccountNotFound
 	}
 	controlledAmount, err := a.ledgerState.Database().
 		GetControlledAmountByCredential(credentialTag, stakeKey, nil)
@@ -2354,7 +2426,7 @@ func (a *NodeAdapter) Account(
 		)
 	}
 
-	reward := strconv.FormatUint(uint64(account.Reward), 10)
+	reward := strconv.FormatUint(uint64(account.Reward)+pendingReward, 10)
 	return AccountInfo{
 		StakeAddress:       stakeAddress,
 		Active:             delegating,

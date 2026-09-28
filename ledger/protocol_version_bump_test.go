@@ -102,6 +102,10 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 	pparams := &babbage.BabbageProtocolParameters{
 		ProtocolMajor: 8,
 		ProtocolMinor: 0,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
 	}
 	ls := &LedgerState{
 		db:         db,
@@ -212,6 +216,10 @@ func TestHardForkSummary_ProtocolVersionBumpExtendsHorizonPastBoundary(
 	pparams := &babbage.BabbageProtocolParameters{
 		ProtocolMajor: 8,
 		ProtocolMinor: 0,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
 	}
 	ls := &LedgerState{
 		db: db,

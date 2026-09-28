@@ -83,6 +83,18 @@ func TestTranslateMySQLUpsertRewritesBigintCast(t *testing.T) {
 	)
 }
 
+func TestTranslateMySQLSyncStateUpsert(t *testing.T) {
+	t.Parallel()
+	query := `INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`
+	require.Equal(
+		t,
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+ON DUPLICATE KEY UPDATE value = VALUES(value)`,
+		translateMySQLUpsert(query),
+	)
+}
+
 func TestTranslateMySQLReservedIdentifiers(t *testing.T) {
 	t.Parallel()
 	query := `SELECT "transaction"."hash", "index" FROM "transaction"`

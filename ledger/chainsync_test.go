@@ -130,12 +130,7 @@ func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
 func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -187,12 +182,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	t.Parallel()
 
 	shelleyGenesisHash := "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -263,12 +253,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 	t.Parallel()
 
 	invalidHash := "not-a-valid-hex-string"
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -376,12 +361,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			byronGenesisJSON := fmt.Sprintf(`{
-				"protocolConsts": {
-					"k": %d,
-					"protocolMagic": 2
-				}
-			}`, tc.k)
+			byronGenesisJSON := testByronGenesisJSONForK(uint64(tc.k))
 			shelleyGenesisJSON := fmt.Sprintf(`{
 				"activeSlotsCoeff": %f,
 				"securityParam": %d,
@@ -511,12 +491,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			byronGenesisJSON := fmt.Sprintf(`{
-				"protocolConsts": {
-					"k": %d,
-					"protocolMagic": 2
-				}
-			}`, tc.k)
+			byronGenesisJSON := testByronGenesisJSONForK(uint64(tc.k))
 			shelleyGenesisJSON := fmt.Sprintf(`{
 				"activeSlotsCoeff": %f,
 				"securityParam": %d,
@@ -592,12 +567,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 1000,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(1000)
 	// Use a coefficient that produces fractional results
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.333333,
@@ -651,12 +621,7 @@ func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 	// This test verifies that the handleEventChainsyncBlockHeader function
 	// correctly uses calculateStabilityWindow instead of the old constant
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -698,12 +663,7 @@ func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 func TestCalculateEpochNonce_AllEras(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,

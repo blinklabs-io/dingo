@@ -43,6 +43,7 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 		{"testnet-dingo.yaml", 3},
 		{"testnet-accelerated.yaml", 2},
 		{"testnet-dingo-accelerated.yaml", 3},
+		{"testnet-dingo-leios.yaml", 3},
 	} {
 		t.Run(spec.file, func(t *testing.T) {
 			cfg, err := LoadDevNetConfigFrom(spec.file)
@@ -52,6 +53,15 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 			require.Equal(t, uint32(42), cfg.NetworkMagic)
 		})
 	}
+}
+
+func TestLeiosSpecActivatesDijkstraAtGenesis(t *testing.T) {
+	cfg, err := LoadDevNetConfigFrom("testnet-dingo-leios.yaml")
+	require.NoError(t, err)
+	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
+	require.Zero(t, *cfg.DijkstraHardForkAtEpoch)
+	require.Equal(t, uint64(120), cfg.EpochLength)
+	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
 }
 
 // The accelerated specs exist to make a full scenario fit the reference
@@ -342,6 +352,14 @@ func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
 			require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
 				environment["TXPUMP_CONFIRMATION_SLOTS"],
 				"direct Compose use must retain the canonical default")
+			if service == "txpump-dingo" {
+				require.Equal(
+					t,
+					"${DEVNET_TXPUMP_TRANSACTION_ERA:-conway}",
+					environment["TXPUMP_TRANSACTION_ERA"],
+					"Dingo Leios profile must select Dijkstra transactions explicitly",
+				)
+			}
 		})
 	}
 }

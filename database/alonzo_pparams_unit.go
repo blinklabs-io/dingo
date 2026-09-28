@@ -56,8 +56,7 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 		if repaired {
 			return nil
 		}
-		var unrepairable errAlonzoPParamsUnitUnrepairable
-		if errors.As(err, &unrepairable) {
+		if unrepairable, ok := errors.AsType[errAlonzoPParamsUnitUnrepairable](err); ok {
 			return fmt.Errorf(
 				"persisted Alonzo protocol parameters use legacy byte units "+
 					"and cannot be repaired in place (%s); "+
