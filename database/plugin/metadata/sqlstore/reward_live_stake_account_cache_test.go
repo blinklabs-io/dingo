@@ -244,7 +244,6 @@ func TestRefreshRewardLiveStakeAggregateMatchesOneShot(t *testing.T) {
 	}
 
 	for i, tc := range cases {
-		i, tc := i, tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cachedStore := newMigratedSQLiteStore(t)

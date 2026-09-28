@@ -314,8 +314,9 @@ type ParsedPool struct {
 	// verification does not happen here (ledgerstate must not depend on
 	// ledger/leios's BLS primitives); it happens where these keys are read
 	// back out for committee construction.
-	LeiosKeyPublic          []byte // 96 bytes
-	LeiosKeyPossessionProof []byte // 48 bytes
+	LeiosKeyPublic            []byte // 96 bytes
+	LeiosKeyPossessionProof   []byte // 48 bytes
+	LeiosKeyRegistrationEpoch *uint64
 }
 
 // ParsedRelay represents a pool relay from the stake pool
@@ -373,12 +374,13 @@ type ParsedSnapShot struct {
 // StakeNumerator/StakeDenominator are the exact sigma fraction used by
 // Praos leader eligibility.
 type ParsedActivePoolStake struct {
-	PoolKeyHash             []byte
-	StakeNumerator          uint64
-	StakeDenominator        uint64
-	VrfKeyHash              []byte
-	LeiosKeyPublic          []byte
-	LeiosKeyPossessionProof []byte
+	PoolKeyHash               []byte
+	StakeNumerator            uint64
+	StakeDenominator          uint64
+	VrfKeyHash                []byte
+	LeiosKeyPublic            []byte
+	LeiosKeyPossessionProof   []byte
+	LeiosKeyRegistrationEpoch *uint64
 }
 
 // ImportProgress reports progress during ledger state import.
@@ -1340,12 +1342,16 @@ func importPools(
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			LeiosKeyPublic:             pool.LeiosKeyPublic,
 			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
-			AddedSlot:                  slot,
-			DepositAmount:              types.Uint64(pool.Deposit),
-			Owners:                     owners,
-			Relays:                     relays,
-			MetadataUrl:                pool.MetadataUrl,
-			MetadataHash:               pool.MetadataHash,
+			LeiosKeyRegistrationAgeUnknown: (len(pool.LeiosKeyPublic) > 0 ||
+				len(pool.LeiosKeyPossessionProof) > 0) &&
+				pool.LeiosKeyRegistrationEpoch == nil,
+			LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
+			AddedSlot:                 slot,
+			DepositAmount:             types.Uint64(pool.Deposit),
+			Owners:                    owners,
+			Relays:                    relays,
+			MetadataUrl:               pool.MetadataUrl,
+			MetadataHash:              pool.MetadataHash,
 		}
 
 		if err := store.ImportPool(
@@ -2367,7 +2373,8 @@ func ActivePoolDistributionSnapshots(
 			LeiosKeyPossessionProof: append(
 				[]byte(nil), pool.LeiosKeyPossessionProof...,
 			),
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
 	return snapshots

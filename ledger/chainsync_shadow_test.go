@@ -254,7 +254,7 @@ func TestStartQueuedBlockfetchAfterForkRestartClearsShadowState(t *testing.T) {
 
 	// A block delivered on the previous shadow connection must be rejected
 	// because it is no longer the shadow for the active batch.
-	require.NoError(t, ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: staleShadow,
 		Block:        &mockBabbageBlock{slot: 99},
 		Point:        ocommon.Point{Slot: 99, Hash: []byte("stale-shadow")},

@@ -24,10 +24,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -443,6 +445,35 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 	}
 
 	return epoch, epochCache, nil
+}
+
+// validateHeaderEraOrder rejects a non-nil header whose era precedes the era
+// of the header or block it extends (chain.ErrEraRegression). The parent is
+// resolved only when it is the primary chain's header tip or block tip, which
+// covers every header this node would admit; a header extending anything else
+// is checked against its concrete parent at chain admission and by the inbound
+// block envelope.
+func (ls *LedgerState) validateHeaderEraOrder(header ledger.BlockHeader) error {
+	parentEra, found, err := ls.chain.ParentEra(header.PrevHash().Bytes())
+	if err != nil {
+		// Failing to load a local block says nothing about the peer's header.
+		return fmt.Errorf(
+			"%w: resolve parent era: %w",
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
+	if !found {
+		return nil
+	}
+	if err := chain.CheckEraOrder(header.Era().Id, parentEra); err != nil {
+		return fmt.Errorf(
+			"block header at slot %d: %w",
+			header.SlotNumber(),
+			err,
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) headerVerificationEpoch(
@@ -1047,28 +1078,29 @@ func (ls *LedgerState) ProtocolParameterUpdateWindow(
 	if ls.config.CardanoNodeConfig == nil {
 		return 0, 0, errors.New("unable to get cardano node config")
 	}
-	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if genesis == nil || genesis.ActiveSlotsCoeff.Rat == nil ||
-		genesis.ActiveSlotsCoeff.Sign() <= 0 || genesis.SecurityParam <= 0 {
-		return 0, 0, errors.New("invalid Shelley genesis PPUP parameters")
+	// Every Shelley-family era takes its stability window from Shelley
+	// genesis, so the transaction's era does not change the boundary.
+	stabilityWindow, err := eras.StabilityWindowForEra(
+		ls.config.CardanoNodeConfig,
+		eras.ShelleyEraDesc.Id,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("classic PPUP stability window: %w", err)
 	}
 	epochLength := uint64(epoch.LengthInSlots)
 	if epoch.StartSlot > ^uint64(0)-epochLength {
 		return 0, 0, errors.New("epoch end slot overflows")
 	}
-	// Shelley stops accepting proposals for the current epoch 6k/f slots
-	// before its end, where k is the security parameter and f the active-slot
-	// coefficient. Use the same integer slot boundary as the reference rule.
-	votingWindow := new(big.Rat).SetFrac(
-		new(big.Int).Mul(big.NewInt(6), big.NewInt(int64(genesis.SecurityParam))),
-		big.NewInt(1),
-	)
-	votingWindow.Quo(votingWindow, genesis.ActiveSlotsCoeff.Rat)
-	windowSlots := new(big.Int).Quo(votingWindow.Num(), votingWindow.Denom())
-	if !windowSlots.IsUint64() || windowSlots.Uint64() >= epochLength {
+	// The reference point of no return is the next epoch's first slot less
+	// twice the stability window, where the window is ceiling(3k/f)
+	// (Cardano.Ledger.Slot.getTheSlotOfNoReturn). Doubling the rounded window
+	// is not floor(6k/f): the two differ whenever 3k/f is not an integer.
+	// When the voting window covers the whole epoch every slot targets the
+	// next epoch, which the epoch's first slot expresses.
+	if stabilityWindow > (^uint64(0))/2 || 2*stabilityWindow >= epochLength {
 		return epoch.EpochId, epoch.StartSlot, nil
 	}
-	return epoch.EpochId, epoch.StartSlot + epochLength - windowSlots.Uint64(), nil
+	return epoch.EpochId, epoch.StartSlot + epochLength - 2*stabilityWindow, nil
 }
 
 func classifyGenesisOverlaySlot(

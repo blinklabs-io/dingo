@@ -127,12 +127,10 @@ github.com/blinklabs-io/bursa v0.17.1 h1:f8KkpggbAgrOwTb3PZkgPK4GMZL4AKE+mIqI7md
 github.com/blinklabs-io/bursa v0.17.1/go.mod h1:8PP8LVyh8OD+oK1RVxcrHGU/Rif0im6h3rQpuVccuOs=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
-github.com/blinklabs-io/gouroboros v0.207.4 h1:nGrgULwsJGVv+v+HAJjbDZXexG68NYMSnwv9cAoDx5c=
-github.com/blinklabs-io/gouroboros v0.207.4/go.mod h1:bKkoFOmtAiRyZv+l9QtSzHrLCC3LY4/VWUXsyohnxwU=
-github.com/blinklabs-io/gouroboros v0.207.5 h1:kNSGJR/OIKa/uQ973nh9KuAOAqkWczkwSK0kcmvsmaM=
-github.com/blinklabs-io/gouroboros v0.207.5/go.mod h1:4j53uNlCs4leIv7RnTMWHCI96FoUFM3YnX1uOAgVcXQ=
-github.com/blinklabs-io/ouroboros-mock v0.20.2 h1:TW7B7O6XgfWvj3vxWE8ZvFgoLuQa4XF4BnUSu2KDUBA=
-github.com/blinklabs-io/ouroboros-mock v0.20.2/go.mod h1:UqITUSH8u9y6Hx3IvqrCoQmu7poWPW8hUT+lJCQauFI=
+github.com/blinklabs-io/gouroboros v0.208.0 h1:LdLE6qU7WORB+U1tgawdgQAU7/M7qk9XKAkdjqMMezA=
+github.com/blinklabs-io/gouroboros v0.208.0/go.mod h1:nw/oc+rPceFj0Uri2QFX5K/XQPcxZrmuYbGcQFxfd2E=
+github.com/blinklabs-io/ouroboros-mock v0.20.3 h1:izl3ijoj5zU9kWhySX8ru4FCfjWTMFcwKMT7dpgIvjg=
+github.com/blinklabs-io/ouroboros-mock v0.20.3/go.mod h1:UqITUSH8u9y6Hx3IvqrCoQmu7poWPW8hUT+lJCQauFI=
 github.com/blinklabs-io/plutigo v0.7.2 h1:t66Z8ud5KVYz6qu2WSa/Ri4OhMWjH/oe19jX5gveWjQ=
 github.com/blinklabs-io/plutigo v0.7.2/go.mod h1:vVFey4OnERG6kVXZFadUvikf7i01rhQ8+HFc1RdvyX4=
 github.com/blockfrost/blockfrost-go v0.5.0 h1:I+qEQw5Re9UHolKZGJE0FtuQL3a7L0WqEYkEO4GisIw=

@@ -505,6 +505,28 @@ func leiosTestCertifiedBlockPair(
 	return parent, certifier, ebHash
 }
 
+func leiosTestEnableCertifiedBlock(
+	t *testing.T,
+	ls *LedgerState,
+	certifier *dijkstra.DijkstraBlock,
+) {
+	t.Helper()
+	certifier.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
+		Signers:             []byte{0x80},
+		AggregatedSignature: make([]byte, 48),
+	}
+	ls.config.ValidateLeiosCertificate = func(uint64, []byte, []byte, []byte) error {
+		return nil
+	}
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{{
+			EpochId:       5,
+			StartSlot:     0,
+			LengthInSlots: 200,
+		}},
+	})
+}
+
 func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 	t *testing.T,
 ) {
@@ -525,6 +547,7 @@ func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 			EndorserBlockWaitSlots: 0,
 		},
 	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	err := ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -582,6 +605,7 @@ func TestEnsureReferencedEndorserBlocksRejectsProviderResultAtWrongSlot(
 			EndorserBlockWaitSlots: 0,
 		},
 	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	err := ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -608,6 +632,7 @@ func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
 			LeiosApplyEndorserBlockTxs: true,
 		},
 	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -631,6 +656,7 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 			},
 		},
 	}
+	leiosTestEnableCertifiedBlock(t, ls, certifier)
 
 	err := ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -638,7 +664,7 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
-	require.Contains(t, err.Error(), "no resolvable parent announcement")
+	require.Contains(t, err.Error(), "resolve certified parent announcement")
 }
 
 // TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently is the concurrency

@@ -18,11 +18,13 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
@@ -56,6 +58,7 @@ type fakeLeiosVoteHandler struct {
 	requestedIds   []lcommon.LeiosVoteId
 	ebs            []handledEb
 	removed        []string
+	waitStarted    chan struct{}
 }
 
 func (f *fakeLeiosVoteHandler) HandleVote(
@@ -94,12 +97,20 @@ func (f *fakeLeiosVoteHandler) NextVotes(
 	count uint64,
 ) ([]lcommon.LeiosVote, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.nextRequests = append(f.nextRequests, count)
-	if f.nextErr != nil {
-		return nil, f.nextErr
+	waitStarted := f.waitStarted
+	nextErr := f.nextErr
+	nextVotes := f.nextVotes
+	f.mu.Unlock()
+	if waitStarted != nil {
+		close(waitStarted)
+		<-done
+		return nil, errors.New("vote request canceled")
 	}
-	return f.nextVotes, nil
+	if nextErr != nil {
+		return nil, nextErr
+	}
+	return nextVotes, nil
 }
 
 func (f *fakeLeiosVoteHandler) VotesByIds(
@@ -138,7 +149,9 @@ func testLeiosVote(voterId uint64) lcommon.LeiosVote {
 func TestLeiosVotesServerRequestNextUnavailableWithoutHandler(t *testing.T) {
 	t.Parallel()
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	// This test exercises the vote notification plumbing without enabling the
+	// semantic transaction gate, which requires a real ledger snapshot.
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	votes, err := o.leiosvotesServerRequestNext(
 		oleiosvotes.CallbackContext{},
 		3,
@@ -150,7 +163,9 @@ func TestLeiosVotesServerRequestNextUnavailableWithoutHandler(t *testing.T) {
 func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
 	t.Parallel()
 
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	// Keep this focused on occurrence binding; semantic validation is covered
+	// separately with an injected ledger validator.
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	handler := &fakeLeiosVoteHandler{
 		nextVotes: []lcommon.LeiosVote{
 			testLeiosVote(0),
@@ -168,6 +183,66 @@ func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
 	assert.Equal(t, uint64(0), votes[0].VoterId)
 	assert.Equal(t, uint64(1), votes[1].VoterId)
 	assert.Equal(t, []uint64{2}, handler.nextRequests)
+}
+
+func TestLeiosVotesServerRequestNextCanceledByProtocolStop(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	started := make(chan struct{})
+	o.leiosVotes = &fakeLeiosVoteHandler{waitStarted: started}
+	serverConfig := oleiosvotes.NewConfig()
+	server := oleiosvotes.NewServer(
+		protocol.ProtocolOptions{},
+		&serverConfig,
+	)
+	result := make(chan error, 1)
+	go func() {
+		_, err := o.leiosvotesServerRequestNext(
+			oleiosvotes.CallbackContext{Server: server},
+			1,
+		)
+		result <- err
+	}()
+	<-started
+	server.Stop()
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("vote request remained blocked after protocol stop")
+	}
+}
+
+func TestLeiosVotesServerRequestNextCanceledOnConnectionClose(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	started := make(chan struct{})
+	o.leiosVotes = &fakeLeiosVoteHandler{waitStarted: started}
+	connId := newTestConnId("127.0.0.1:3000", "127.0.0.2:3001")
+	connectionDone := make(chan any)
+	result := make(chan error, 1)
+	go func() {
+		_, err := o.leiosvotesServerRequestNext(
+			oleiosvotes.CallbackContext{
+				ConnectionId:       connId,
+				ConnectionDoneChan: connectionDone,
+			},
+			1,
+		)
+		result <- err
+	}()
+	<-started
+	close(connectionDone)
+
+	select {
+	case err := <-result:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("vote request remained blocked after connection close")
+	}
 }
 
 func TestLeiosVotesClientVoteDelegates(t *testing.T) {
@@ -286,7 +361,7 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
@@ -323,7 +398,7 @@ func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 

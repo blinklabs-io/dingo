@@ -35,6 +35,8 @@ var hotStatements = []string{
 	insertUtxoQueryIgnoreConflict,
 	importAssetQuery,
 	getAssetIDQuery,
+	getLiveUtxoByRefQuery,
+	getUtxoIncludingSpentByRefQuery,
 }
 
 // cacheableForDialect reports whether query is safe to serve from the
