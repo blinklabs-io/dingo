@@ -290,6 +290,14 @@ func deleteBlobBlocksAboveSlot(
 	db *database.Database,
 	slot uint64,
 ) error {
+	return deleteBlobBlocksAboveSlotExcept(db, slot, nil)
+}
+
+func deleteBlobBlocksAboveSlotExcept(
+	db *database.Database,
+	slot uint64,
+	preserved map[string]struct{},
+) error {
 	if slot == ^uint64(0) {
 		return nil
 	}
@@ -307,13 +315,16 @@ func deleteBlobBlocksAboveSlot(
 		if next == nil {
 			break
 		}
+		if _, keep := preserved[string(next.Hash)]; keep {
+			continue
+		}
 		stale = append(stale, ocommon.Point{
 			Slot: next.Slot,
 			Hash: append([]byte(nil), next.Hash...),
 		})
 	}
 	iter.Close()
-	if len(stale) == 0 {
+	if len(stale) == 0 && len(preserved) == 0 {
 		return nil
 	}
 	txn := db.Transaction(true)

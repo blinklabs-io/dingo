@@ -34,10 +34,10 @@ var errCatchUpLocalAhead = errors.New(
 	"local chain is ahead of the target Mithril artifact",
 )
 
-// ErrRewardStateRepairWaitingForSnapshot means the latest certified state is
-// an ancestor of the local chain, so repair must wait for a newer artifact.
+// ErrRewardStateRepairWaitingForSnapshot means the selected certified state
+// does not reach the database's existing stable Mithril ledger point.
 var ErrRewardStateRepairWaitingForSnapshot = errors.New(
-	"reward-state repair is waiting for a certified snapshot that covers the local chain tip",
+	"reward-state repair is waiting for a certified snapshot that reaches the existing stable ledger point",
 )
 
 // openBootstrappedImmutable opens the ImmutableDB a bootstrap produced, through
@@ -100,20 +100,16 @@ func openBootstrappedImmutable(
 // strictly-ahead local chain is mapped to (upToDate=true) after advancing the
 // import marker to targetImmutable, so later runs no-op without re-downloading.
 //
-// resuming reports that this run is completing an interrupted sync
-// (sync_status is still in_progress). A strictly-ahead local chain is then
-// expected — the interrupted run's volatile gap-fill stored blocks past the
-// artifact's sealed immutable range — and must NOT map to upToDate: the
-// short-circuit return in Sync would skip the completion bookkeeping, leaving
-// sync_status set (so `dingo serve` refuses to start), deferred indexes
-// unbuilt, and possibly gap blocks whose transactions were never processed.
-// The import proceeds instead; every phase is idempotent and the run ends
-// with the normal completion path.
+// continueAfterLocalAhead allows an interrupted sync or a reward repair to
+// finish importing when the local tip is a verified descendant of the
+// artifact. Interrupted syncs need completion bookkeeping; reward repair
+// validates the selected signed state against the existing trust point and
+// preserves the verified local tail for ordinary ledger replay.
 func verifyCatchupBeforeImport(
 	db *database.Database,
 	imm *immutable.ImmutableDb,
 	targetImmutable uint64,
-	resuming bool,
+	continueAfterLocalAhead bool,
 	logger *slog.Logger,
 ) (upToDate bool, err error) {
 	verifyErr := verifyCatchupIntersection(db, imm, logger)
@@ -123,10 +119,10 @@ func verifyCatchupBeforeImport(
 	if !errors.Is(verifyErr, errCatchUpLocalAhead) {
 		return false, verifyErr
 	}
-	if resuming {
+	if continueAfterLocalAhead {
 		logger.Info(
-			"catch-up: local chain is ahead of the target artifact while "+
-				"resuming an interrupted sync; continuing to complete it",
+			"catch-up: local chain is ahead of the target artifact; continuing "+
+				"after caller-specific safety checks",
 			"component", "mithril",
 		)
 		return false, nil
@@ -255,32 +251,43 @@ func localChainDescendsFromPoint(
 	localTip models.Block,
 	ancestor ocommon.Point,
 ) (bool, error) {
-	seen := make(map[string]struct{})
+	_, descends, err := localChainBlockHashesAfterPoint(
+		db, localTip, ancestor,
+	)
+	return descends, err
+}
+
+func localChainBlockHashesAfterPoint(
+	db *database.Database,
+	localTip models.Block,
+	ancestor ocommon.Point,
+) (map[string]struct{}, bool, error) {
+	path := make(map[string]struct{})
 	for cur := localTip; ; {
 		if cur.Slot < ancestor.Slot {
-			return false, nil
+			return nil, false, nil
 		}
 		if cur.Slot == ancestor.Slot && bytes.Equal(cur.Hash, ancestor.Hash) {
-			return true, nil
+			return path, true, nil
 		}
 		if len(cur.PrevHash) == 0 {
-			return false, nil
+			return nil, false, nil
 		}
 		key := string(cur.Hash)
-		if _, ok := seen[key]; ok {
-			return false, fmt.Errorf(
+		if _, ok := path[key]; ok {
+			return nil, false, fmt.Errorf(
 				"cycle while walking back from local tip slot %d block %x",
 				localTip.Slot, localTip.Hash,
 			)
 		}
-		seen[key] = struct{}{}
+		path[key] = struct{}{}
 
 		prev, err := database.BlockByHash(db, cur.PrevHash)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
-				return false, nil
+				return nil, false, nil
 			}
-			return false, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"looking up parent block %x for slot %d block %x: %w",
 				cur.PrevHash, cur.Slot, cur.Hash, err,
 			)

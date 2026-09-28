@@ -17,6 +17,7 @@ package mithril
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"testing"
@@ -205,6 +206,178 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot,
 			"repair must retain the existing chain anchor")
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	t.Run("legacy reward repair preserves a verified local tail", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		_, anchorHash := validImmutableFiles(t, 1000)
+		localTailHash := bytes.Repeat([]byte{0xcc}, 32)
+		dataDir := t.TempDir()
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1000,
+			Hash:     anchorHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1100,
+			Hash:     localTailHash,
+			PrevHash: anchorHash,
+			Cbor:     []byte{0x80},
+			Number:   3,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, setImmutableImportMarker(db, 0))
+		require.NoError(t, db.SetSyncState(
+			mithrilLedgerSlotSyncKey, "1000", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			mithrilLedgerHashSyncKey, hex.EncodeToString(anchorHash), nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		result, err := Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			AggregatorURL:           fixture.server.URL,
+			AllowInsecureHTTP:       true,
+			StoragePlugins:          testStoragePlugins(),
+			DatabaseWorkers:         1,
+			Logger:                  discard,
+			RepairLegacyRewardState: true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.Snapshot)
+
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		pending, err := RewardStateRepairPending(db)
+		require.NoError(t, err)
+		require.False(t, pending)
+		block, err := database.BlockByHash(db, localTailHash)
+		require.NoError(t, err)
+		require.EqualValues(t, 1100, block.Slot,
+			"validated local volatile blocks must remain for ordinary ledger replay")
+		stableTip, err := db.GetTip(nil)
+		require.NoError(t, err)
+		require.EqualValues(t, 1000, stableTip.Point.Slot)
+		require.Equal(t, anchorHash, stableTip.Point.Hash)
+		recent, err := database.BlocksRecent(db, 1)
+		require.NoError(t, err)
+		require.Len(t, recent, 1)
+		require.EqualValues(t, 1100, recent[0].Slot,
+			"the retained blob tail must remain the node's replay frontier")
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	t.Run("legacy reward repair refuses to rewind the stable ledger anchor", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{
+			immutableFileNumber: 0,
+			validImmutable:      true,
+			fallbackLedgerState: true,
+			missingAncillary:    true,
+		})
+		_, snapshotHash := validImmutableFiles(t, 1000)
+		stableHash := bytes.Repeat([]byte{0xdd}, 32)
+		localTipHash := bytes.Repeat([]byte{0xee}, 32)
+		dataDir := t.TempDir()
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1000,
+			Hash:     snapshotHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1050,
+			Hash:     stableHash,
+			PrevHash: snapshotHash,
+			Cbor:     []byte{0x80},
+			Number:   3,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     1100,
+			Hash:     localTipHash,
+			PrevHash: stableHash,
+			Cbor:     []byte{0x80},
+			Number:   4,
+			Type:     uint(shelley.BlockTypeShelley),
+		}, nil))
+		require.NoError(t, setImmutableImportMarker(db, 0))
+		require.NoError(t, db.SetSyncState(
+			mithrilLedgerSlotSyncKey, "1050", nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			mithrilLedgerHashSyncKey, hex.EncodeToString(stableHash), nil,
+		))
+		require.NoError(t, db.SetSyncState(
+			RewardStateRepairPendingKey, "1", nil,
+		))
+		require.NoError(t, dbtest.CloseDatabase(db))
+
+		_, err = Sync(context.Background(), SyncConfig{
+			Network:                 "preprod",
+			DataDir:                 dataDir,
+			StorageMode:             "core",
+			Backend:                 BackendV2,
+			PinnedDigest:            "original-bootstrap-pin",
+			AggregatorURL:           fixture.server.URL,
+			AllowInsecureHTTP:       true,
+			StoragePlugins:          testStoragePlugins(),
+			DatabaseWorkers:         1,
+			Logger:                  discard,
+			RepairLegacyRewardState: true,
+		})
+		require.ErrorIs(t, err, ErrRewardStateRepairWaitingForSnapshot)
+
+		db, err = dbtest.NewDatabase(t, &database.Config{
+			DataDir:     dataDir,
+			StorageMode: "core",
+			Logger:      discard,
+		})
+		require.NoError(t, err)
+		for _, hash := range [][]byte{snapshotHash, stableHash, localTipHash} {
+			_, err := database.BlockByHash(db, hash)
+			require.NoError(t, err, "the database must remain untouched before the trust check")
+		}
+		status, err := db.GetSyncState("sync_status", nil)
+		require.NoError(t, err)
+		require.Empty(t, status)
+		stableSlot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+		require.NoError(t, err)
+		require.Equal(t, "1050", stableSlot)
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
