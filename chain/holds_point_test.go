@@ -48,7 +48,9 @@ func TestChainHoldsPoint(t *testing.T) {
 	if c.HoldsPoint(ocommon.Point{Slot: held.Slot, Hash: []byte{0xde, 0xad}}) {
 		t.Fatal("expected wrong hash at a held slot to not be held")
 	}
-	if c.HoldsPoint(ocommon.Point{Slot: held.Slot + 1_000_000, Hash: held.Hash}) {
+	if c.HoldsPoint(
+		ocommon.Point{Slot: held.Slot + 1_000_000, Hash: held.Hash},
+	) {
 		t.Fatal("expected unknown point to not be held")
 	}
 	surviving := blockPoint(testBlocks[len(testBlocks)-2])

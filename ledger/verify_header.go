@@ -228,14 +228,13 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	if header == nil {
 		return errors.New("nil block header")
 	}
-	// A header on the applied chain was fully verified when it was applied.
-	// Re-verifying it here can fail only because the state it needs (pool
-	// snapshots older than the retention window) has since been pruned.
-	// The point carries the header hash, so a match is the same header.
-	if ls.chain != nil && ls.chain.HoldsPoint(ocommon.NewPoint(
-		header.SlotNumber(),
-		header.Hash().Bytes(),
-	)) {
+	// A header the ledger has applied was fully verified then. Re-verifying
+	// it here can fail only because the state it needs (pool snapshots older
+	// than the retention window) has since been pruned. The point carries the
+	// header hash, so a match is the same header. Holding the point alone is
+	// not enough: a block can join the chain with its state checks deferred
+	// until the ledger reaches it, so the ledger tip must also cover the slot.
+	if ls.headerApplied(header) {
 		return nil
 	}
 	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
@@ -247,6 +246,23 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 		return fmt.Errorf("%w: %w", errHeaderVerificationDeferred, err)
 	}
 	return err
+}
+
+// headerApplied reports whether the ledger has applied header: its point is on
+// the chain and the published ledger tip has reached its slot. An unpublished
+// tip counts as not applied, so the header is verified.
+func (ls *LedgerState) headerApplied(header ledger.BlockHeader) bool {
+	if ls.chain == nil {
+		return false
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil || tip.currentTip.Point.Slot < header.SlotNumber() {
+		return false
+	}
+	return ls.chain.HoldsPoint(ocommon.NewPoint(
+		header.SlotNumber(),
+		header.Hash().Bytes(),
+	))
 }
 
 // verifyBlockHeader performs cryptographic verification of a block header.

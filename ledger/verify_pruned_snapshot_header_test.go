@@ -98,6 +98,26 @@ func TestValidateChainSelectionHeaderCryptoAppliedHeaderSurvivesPruning(
 	}
 }
 
+// A block can join the chain with its state checks deferred until the ledger
+// applies it, so holding the point is not enough to skip verification while
+// the ledger tip is still behind the header's slot.
+func TestValidateChainSelectionHeaderCryptoChainHeldUnappliedHeaderStillVerified(
+	t *testing.T,
+) {
+	t.Parallel()
+	tb := createTestBlock(t, [32]byte{34}, 0, tamperVRFProof)
+	ls := prunedSnapshotFixture(t, tb, true, true)
+	ls.Lock()
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{
+		Slot: tb.block.SlotNumber() - 1,
+	}}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+	require.Error(t, err)
+	assert.False(t, IsHeaderVerificationDeferred(err), "%v", err)
+}
+
 // A header on a fork is still verified, but pruned history is "cannot
 // evaluate" (deferred), not proof the pool is absent.
 func TestValidateChainSelectionHeaderCryptoForkHeaderPrunedSnapshotDefers(

@@ -4651,10 +4651,12 @@ it. Dingo implements this as a **corroboration gate**
   applies (issue #3528); a result showing local state has not caught up to
   the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
   eligible — both preserve legitimate catch-up behavior. A header whose
-  point (slot and hash) is already on the applied chain
-  (`Chain.HoldsPoint`) returns success without re-verification: it was fully
-  verified when applied, and re-judging it against pool snapshots the
-  3-epoch retention window has since pruned would reject a valid header.
+  point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
+  ledger tip returns success without re-verification: it was fully verified
+  when applied, and re-judging it against pool snapshots the 3-epoch
+  retention window has since pruned would reject a valid header. A held
+  header above the ledger tip is still verified, since its state checks may
+  have been deferred until apply.
   A header on a fork whose mark snapshot has no rows and lies below
   `current-3` (`errPoolSnapshotPruned`, non-API storage modes only) is
   deferred rather than rejected, because the node no longer holds the state
