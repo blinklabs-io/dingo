@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -190,4 +191,69 @@ func redactLocationURI(raw string) string {
 		Path:   parsed.Path,
 	}
 	return redacted.String()
+}
+
+// redactedErrorText preserves an error's unwrap chain while replacing its
+// printable form. This lets retry classification continue to reach network
+// errors without returning a credential-bearing URL to logs or callers.
+type redactedErrorText struct {
+	message string
+	cause   error
+}
+
+func (e *redactedErrorText) Error() string { return e.message }
+
+func (e *redactedErrorText) Unwrap() error { return e.cause }
+
+// As prevents errors.As from exposing a credential-bearing url.Error from the
+// preserved chain. Other target types traverse that original chain unchanged,
+// retaining identity for intermediate wrappers and leaf errors.
+func (e *redactedErrorText) As(target any) bool {
+	urlErrTarget, ok := target.(**url.Error)
+	if !ok {
+		return false
+	}
+	var urlErr *url.Error
+	if !errors.As(e.cause, &urlErr) {
+		return false
+	}
+	redacted := *urlErr
+	redacted.URL = redactLocationURI(urlErr.URL)
+	redacted.Err = redactLocationError(urlErr.Err, "")
+	*urlErrTarget = &redacted
+	return true
+}
+
+var locationURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+// redactLocationText removes all URL-like locations from an error's printable
+// text. Redirect parsing errors quote a Location value only in their text, so
+// this cannot rely on the originating request or url.Error.URL alone.
+func redactLocationText(message string, rawLocation string) string {
+	if rawLocation != "" {
+		message = strings.ReplaceAll(
+			message,
+			rawLocation,
+			redactLocationURI(rawLocation),
+		)
+	}
+	return locationURLPattern.ReplaceAllStringFunc(
+		message,
+		redactLocationURI,
+	)
+}
+
+// redactLocationError replaces an error's printable URL locations while
+// preserving the complete original unwrap chain. The presentation wrapper
+// keeps errors.Is and errors.As useful, including for intermediate wrappers
+// that a copied url.Error would discard.
+func redactLocationError(err error, rawLocation string) error {
+	if err == nil {
+		return nil
+	}
+	message := redactLocationText(err.Error(), rawLocation)
+	if message == err.Error() {
+		return err
+	}
+	return &redactedErrorText{message: message, cause: err}
 }

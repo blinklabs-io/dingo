@@ -16,13 +16,18 @@ package conformance
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-// TestRulesConformanceVectors runs the Amaru ledger rules conformance test
-// vectors using Dingo's ledger implementation via the shared harness from
+const expectedBlueprintVectorCount = 2575
+
+// TestRulesConformanceVectors runs the Cardano Blueprint ledger-rule
+// conformance corpus using Dingo's ledger implementation via the shared
+// harness from
 // ouroboros-mock/conformance.
 //
-// The test vectors exercise Conway era ledger rules including:
+// The test vectors exercise ledger rules across the pinned eras, including:
 // - UTxO validation (inputs, outputs, fees, collateral)
 // - Certificate processing (stake, pool, DRep, committee)
 // - Governance (proposals, voting, enactment)
@@ -35,5 +40,6 @@ import (
 func TestRulesConformanceVectors(t *testing.T) {
 	results := sqliteCorpusResults(t)
 	reportCorpus(t, "sqlite", results)
+	require.Equal(t, expectedBlueprintVectorCount, len(results))
 	assertCorpus(t, "sqlite", results)
 }

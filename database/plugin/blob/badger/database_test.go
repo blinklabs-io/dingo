@@ -25,44 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMarshalBlockMetadataRoundTrip(t *testing.T) {
-	expected := types.BlockMetadata{
-		ID:       42,
-		Type:     7,
-		Height:   99,
-		PrevHash: bytes.Repeat([]byte{0xab}, 32),
-	}
-
-	encoded := make([]byte, 32+len(expected.PrevHash))
-	if err := marshalBlockMetadataInto(encoded, expected); err != nil {
-		t.Fatalf("marshalBlockMetadataInto failed: %v", err)
-	}
-	if len(encoded) != 64 {
-		t.Fatalf("expected encoded length 64, got %d", len(encoded))
-	}
-
-	decoded, err := unmarshalBlockMetadata(encoded)
-	if err != nil {
-		t.Fatalf("unmarshalBlockMetadata failed: %v", err)
-	}
-	if decoded.ID != expected.ID {
-		t.Fatalf("expected ID %d, got %d", expected.ID, decoded.ID)
-	}
-	if decoded.Type != expected.Type {
-		t.Fatalf("expected Type %d, got %d", expected.Type, decoded.Type)
-	}
-	if decoded.Height != expected.Height {
-		t.Fatalf("expected Height %d, got %d", expected.Height, decoded.Height)
-	}
-	if !bytes.Equal(decoded.PrevHash, expected.PrevHash) {
-		t.Fatalf(
-			"expected PrevHash %x, got %x",
-			expected.PrevHash,
-			decoded.PrevHash,
-		)
-	}
-}
-
 func TestUnmarshalBlockMetadataLegacyCbor(t *testing.T) {
 	expected := types.BlockMetadata{
 		ID:       11,

@@ -227,6 +227,9 @@ func ValidateTxBabbage(
 			)
 		}
 	}
+	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
@@ -283,13 +286,14 @@ func ValidateTxBabbage(
 	}
 	// Evaluate scripts
 	var txInfoV2 script.TxInfoV2
+	txInfos := newTxInfoCache(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
+	)
 	if txHasRedeemers(tx) {
-		txInfoV2, err = script.NewTxInfoV2FromTransaction(
-			ls,
-			tx,
-			slices.Concat(resolvedInputs, resolvedRefInputs),
-			script.StrictValidityUpperBoundForTransaction(tx),
-		)
+		txInfoV2, err = txInfos.v2()
 		if err != nil {
 			return err
 		}
@@ -310,12 +314,10 @@ func ValidateTxBabbage(
 		}
 		switch s := tmpScript.(type) {
 		case lcommon.PlutusV1Script:
-			txInfoV1, err := script.NewTxInfoV1FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
+			// Built at most once per transaction via txInfos, regardless of
+			// how many PlutusV1 redeemers share it (issue: redundant
+			// per-redeemer TxInfo rebuild).
+			txInfoV1, err := txInfos.v1()
 			if err != nil {
 				return err
 			}
@@ -387,15 +389,8 @@ func ValidateTxBabbage(
 					ErrNoCostModelForPlutusV2,
 				)
 			}
-			txInfoV2, err := script.NewTxInfoV2FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
-			if err != nil {
-				return err
-			}
+			// txInfoV2 is already built above (the .Redeemers this loop
+			// ranges over came from it); reused here rather than rebuilt.
 			// Get spent UTxO datum
 			var datum data.PlutusData
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
@@ -529,13 +524,14 @@ func EvaluateTxBabbage(
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
 	var txInfoV2 script.TxInfoV2
+	txInfos := newTxInfoCache(
+		ls,
+		tx,
+		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
+	)
 	if txHasRedeemers(tx) {
-		txInfoV2, err = script.NewTxInfoV2FromTransaction(
-			ls,
-			tx,
-			slices.Concat(resolvedInputs, resolvedRefInputs),
-			script.StrictValidityUpperBoundForTransaction(tx),
-		)
+		txInfoV2, err = txInfos.v2()
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
 		}
@@ -557,12 +553,9 @@ func EvaluateTxBabbage(
 		}
 		switch s := tmpScript.(type) {
 		case lcommon.PlutusV1Script:
-			txInfoV1, err := script.NewTxInfoV1FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
+			// Built at most once per transaction via txInfos, regardless of
+			// how many PlutusV1 redeemers share it.
+			txInfoV1, err := txInfos.v1()
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
@@ -616,15 +609,8 @@ func EvaluateTxBabbage(
 					ErrNoCostModelForPlutusV2,
 				)
 			}
-			txInfoV2, err := script.NewTxInfoV2FromTransaction(
-				ls,
-				tx,
-				slices.Concat(resolvedInputs, resolvedRefInputs),
-				script.StrictValidityUpperBoundForTransaction(tx),
-			)
-			if err != nil {
-				return 0, lcommon.ExUnits{}, nil, err
-			}
+			// txInfoV2 is already built above (the .Redeemers this loop
+			// ranges over came from it); reused here rather than rebuilt.
 			// Get spent UTxO datum
 			var datum data.PlutusData
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {

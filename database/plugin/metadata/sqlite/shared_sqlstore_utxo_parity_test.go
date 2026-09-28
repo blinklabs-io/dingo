@@ -101,7 +101,7 @@ func exerciseUtxoReadStore(t *testing.T, store utxoReadStore) utxoReadState {
 			AddedSlot:     10,
 			Amount:        100,
 			Assets: []models.Asset{{
-				Name: assetName, NameHex: []byte("6173736574"),
+				Name:     assetName,
 				PolicyId: policyID, Fingerprint: []byte("fingerprint"),
 				Amount: 5,
 			}},

@@ -17,109 +17,19 @@
 package gcs
 
 import (
-	"encoding/json"
-	"errors"
-	"math/big"
-	"time"
-
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/committimestamp"
-	dingosops "github.com/blinklabs-io/dingo/database/sops"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-const commitTimestampBlobKey = "metadata_commit_timestamp"
-
 func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
-	// No nil check: NewTransaction returns a concrete *gcsTxn as a types.Txn,
-	// and a non-nil pointer in an interface is never nil.
-	txn := b.NewTransaction(false)
-	defer txn.Rollback() //nolint:errcheck // no-op for this backend
-
-	r, err := b.Get(txn, []byte(commitTimestampBlobKey))
-	if err != nil {
-		// A missing key means no timestamp has been written yet —
-		// return 0 to mirror the metadata stores' missing-row
-		// behavior so a fresh blob does not look like a corrupt one.
-		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return 0, nil
-		}
-		return 0, err
-	}
-
-	// If SOPS is not enabled, read plaintext directly
-	if !dingosops.IsEnabled() {
-		return committimestamp.DecodeLegacy(r)
-	}
-
-	plaintext, err := dingosops.Decrypt(r)
-	if err != nil {
-		if !json.Valid(r) && len(r) <= 8 {
-			ts, decodeErr := committimestamp.DecodeLegacy(r)
-			// Validate timestamp is reasonable (post-2000, not in future)
-			now := time.Now().UnixMilli()
-			if decodeErr == nil && ts > 946684800000 &&
-				ts <= now { // post-2000, not in future
-				b.logger.Warningf(
-					"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
-					err,
-				)
-				// Create a new transaction for migration. As above, it
-				// cannot be nil, so there is nothing to check.
-				migrateTxn := b.NewTransaction(true)
-				defer migrateTxn.Rollback() //nolint:errcheck
-				if migrateErr := b.SetCommitTimestamp(ts, migrateTxn); migrateErr != nil {
-					b.logger.Errorf(
-						"failed to migrate plaintext commit timestamp: %v",
-						migrateErr,
-					)
-				} else {
-					if migrateErr := migrateTxn.Commit(); migrateErr != nil {
-						b.logger.Errorf(
-							"failed to commit plaintext commit timestamp migration: %v",
-							migrateErr,
-						)
-					}
-				}
-				return ts, nil
-			}
-		}
-		b.logger.Errorf("failed to decrypt commit timestamp: %v", err)
-		return 0, err
-	}
-
-	return committimestamp.DecodeLegacy(plaintext)
+	return committimestamp.GetEncrypted(b, b.logger, "GCS")
 }
 
 func (b *BlobStoreGCS) SetCommitTimestamp(
 	timestamp int64,
 	txn types.Txn,
 ) error {
-	if txn == nil {
-		return types.ErrNilTxn
-	}
-	raw := new(big.Int).SetInt64(timestamp).Bytes()
-
-	// If SOPS is not enabled, store plaintext directly
-	if !dingosops.IsEnabled() {
-		if err := b.Set(txn, []byte(commitTimestampBlobKey), raw); err != nil {
-			return err
-		}
-		b.logger.Infof(
-			"commit timestamp %d written to GCS (plaintext)",
-			timestamp,
-		)
-		return nil
-	}
-
-	ciphertext, err := dingosops.Encrypt(raw)
-	if err != nil {
-		b.logger.Errorf("failed to encrypt commit timestamp: %v", err)
-		return err
-	}
-
-	if err := b.Set(txn, []byte(commitTimestampBlobKey), ciphertext); err != nil {
-		return err
-	}
-	b.logger.Infof("commit timestamp %d written to GCS", timestamp)
-	return nil
+	return committimestamp.SetEncrypted(
+		b, b.logger, "GCS", timestamp, txn,
+	)
 }

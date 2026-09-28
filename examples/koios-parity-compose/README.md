@@ -32,6 +32,24 @@ The Grafana instance is pre-provisioned with a Prometheus datasource and a
   sync completes
 - Current epoch, chainsync header-cache size, and on-disk database size
 
+A second dashboard, "Dingo Koios Parity" (also folder **Dingo**), surfaces
+the in-process Koios reward-parity observer's results -- previously visible
+only by grepping the node's log or querying its `cache.db` directly:
+
+- Current epoch's mismatch count (`dingo_koiosparity_epoch_mismatch_count`),
+  colored red once nonzero
+- Last checked epoch, and the last epoch that failed/errored
+  (`dingo_koiosparity_last_checked_epoch`,
+  `..._last_fail_epoch`/`..._last_error_epoch` -- the latter two are sticky
+  and do not reset on a later pass)
+- Mismatches by category and severity, and epoch results by status, both over
+  time (`dingo_koiosparity_mismatch_total`, `dingo_koiosparity_epoch_result_total`)
+
+Every series carries a `queue` label (`aggregate` or `account`): the two
+queues check each epoch independently and the account queue can lag, so
+each panel shows one value per queue. These metrics are only populated when
+the koios-parity toggle below is on.
+
 Tear down (including synced chain data):
 
 ```sh

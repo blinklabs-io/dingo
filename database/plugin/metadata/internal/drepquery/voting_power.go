@@ -167,7 +167,15 @@ func VotingPowerBatchSQL(dialectName string, expiryEpoch uint64) string {
 `
 }
 
-// VotingPowerByTypeSQL builds the predefined-DRep voting-power query.
+// VotingPowerByTypeSQL builds the predefined-DRep voting-power query. The
+// inner subquery starts from the small, indexed set of accounts delegated to
+// the requested drep_type(s) and joins outward to utxo (the account-first
+// shape VotingPowerBatchSQL already uses), instead of scanning every live
+// utxo row and probing account with a correlated EXISTS per row. See
+// blinklabs-io/dingo#4364: on a live preview node with 2.86M live utxo rows
+// and ~4,610 drep-delegated accounts, the correlated-EXISTS shape cost
+// 620-650ms per call versus 16-35ms for this shape, with byte-identical
+// results.
 func VotingPowerByTypeSQL(dialectName string, expiryEpoch uint64) string {
 	dialect := sqlDialect(dialectName)
 	innerExpiry, outerExpiry := collectionExpiry(expiryEpoch)
@@ -179,17 +187,15 @@ func VotingPowerByTypeSQL(dialectName string, expiryEpoch uint64) string {
 			   ), 0) AS stake
 		FROM account a
 		LEFT JOIN (
-			SELECT credential_tag, staking_key,
-				   COALESCE(SUM(CAST(amount AS ` + dialect.castType + `)), 0) AS utxo_sum
-			FROM utxo
-			WHERE deleted_slot = 0
-			  AND EXISTS (
-				  SELECT 1 FROM account ax
-				  WHERE ax.credential_tag = utxo.credential_tag
-				    AND ax.staking_key = utxo.staking_key
-				    AND ax.active = ` + dialect.active + ` ` + innerExpiry + `AND ax.drep_type IN ?
-			  )
-			GROUP BY credential_tag, staking_key
+			SELECT ax.credential_tag, ax.staking_key,
+				   COALESCE(SUM(CAST(utxo.amount AS ` + dialect.castType + `)), 0) AS utxo_sum
+			FROM account ax
+			` + dialect.utxoJoin + `
+				     ON utxo.credential_tag = ax.credential_tag
+				     AND utxo.staking_key = ax.staking_key
+				     AND utxo.deleted_slot = 0
+			WHERE ax.active = ` + dialect.active + ` ` + innerExpiry + `AND ax.drep_type IN ?
+			GROUP BY ax.credential_tag, ax.staking_key
 		) u ON u.credential_tag = a.credential_tag
 			AND u.staking_key = a.staking_key
 		WHERE a.active = ` + dialect.active + ` ` + outerExpiry + `AND a.drep_type IN ?

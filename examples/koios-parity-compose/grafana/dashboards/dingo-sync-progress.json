@@ -148,6 +148,52 @@
         "defaults": { "unit": "bytes" },
         "overrides": []
       }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Block stage latency: p50 / p99",
+      "description": "histogram_quantile(0.50 or 0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage)) -- p50 and p99 wall-clock time per ledger-owned processing stage: header_verify, validate, apply, and epoch_rollover (the epoch-boundary transaction, during which no block is applied; blinklabs-io/dingo#4364 measured 25s to 318s). histogram_quantile is an estimate bounded by the bucket edges, which run from 100us to ~419s. epoch_rollover records once per epoch, so its quantile is only defined briefly after a boundary; see Block stage max observed duration for the exact worst case.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage))",
+          "legendFormat": "p50 {{stage}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(dingo_ledger_block_stage_duration_seconds_bucket[$__rate_interval])) by (le, stage))",
+          "legendFormat": "p99 {{stage}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Block stage max observed duration",
+      "description": "dingo_ledger_block_stage_max_duration_seconds -- the exact maximum wall-clock duration observed for each ledger-owned stage (header_verify, validate, apply, epoch_rollover) since process start. Monotonically non-decreasing. Unlike the p50/p99 panel it is not bucket-bounded, so the epoch_rollover series reads the full length of a blinklabs-io/dingo#4364-class boundary stall.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dingo_ledger_block_stage_max_duration_seconds",
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
     }
   ]
 }

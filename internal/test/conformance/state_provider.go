@@ -86,6 +86,13 @@ func (p *DingoStateProvider) NetworkId() uint {
 	return 0
 }
 
+// EpochForSlot returns the epoch carried by the current conformance state.
+// The corpus supplies epoch state directly; transaction slots are synthetic
+// markers and do not define the vector's epoch timeline.
+func (p *DingoStateProvider) EpochForSlot(_ uint64) (uint64, error) {
+	return p.manager.currentEpoch, nil
+}
+
 // CostModels returns which Plutus language versions have cost models
 // defined. CostModel values are empty markers (struct{} upstream).
 func (p *DingoStateProvider) CostModels() map[common.PlutusLanguage]common.CostModel {
@@ -518,22 +525,16 @@ func (p *DingoStateProvider) CommitteeMember(
 // CommitteeStateAvailable reports that the harness can answer committee
 // queries authoritatively whenever its backend is reachable.
 //
-// This deliberately differs from LedgerView.CommitteeStateAvailable, which
-// derives authority from the seated member set. The two providers have
-// different knowledge. A conformance vector declares its complete initial
-// committee, and seedGovernanceState writes exactly that set, so zero rows
+// A conformance vector declares its complete initial committee, and
+// seedGovernanceState writes exactly that set, so zero rows
 // here means the vector declared an empty committee -- authoritatively empty,
 // which must still reject a non-member's certificate. Deriving availability
 // from row count would instead report unavailable and decline to reject,
 // failing any vector that expects NotCommitteeMemberError against an empty
 // committee.
 //
-// Production instead derives authority from the include-deleted member set,
-// which distinguishes a committee emptied by NoConfidence (soft-deleted rows,
-// authoritative) from one never populated (no rows, ambiguous because Dingo
-// never persists the Conway genesis committee, blinklabs-io/dingo#3785). The
-// harness needs no such inference: it has no genesis-sync path, so reachable
-// already implies complete. Once #3785 lands the two answers converge.
+// Production needs persisted history or an explicit empty genesis declaration
+// to establish authority. The harness has the vector's complete initial state.
 func (p *DingoStateProvider) CommitteeStateAvailable() (bool, error) {
 	return p != nil && p.manager != nil && p.manager.db != nil, nil
 }
@@ -827,9 +828,22 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 func (p *DingoStateProvider) CommitteeHotCredentialMember(
 	hotCredential common.Credential,
 ) (*common.CommitteeMember, error) {
-	// Converted before the authorizations load so an unsupported tag is
-	// rejected even when the committee has no active authorizations, matching
-	// the production ordering in LedgerView.CommitteeHotCredentialMember.
+	members, err := p.CommitteeHotCredentialMembers(hotCredential)
+	if err != nil || len(members) == 0 {
+		return nil, err
+	}
+	return members[0], nil
+}
+
+// CommitteeHotCredentialMembers implements the optional gouroboros
+// ledger/common.CommitteeHotCredentialMembers capability (gouroboros#2574);
+// see LedgerView.CommitteeHotCredentialMembers for why a plural result is
+// required. Mirrors the production ordering in that method: an unsupported
+// hot credential tag is rejected even when the committee has no active
+// authorizations.
+func (p *DingoStateProvider) CommitteeHotCredentialMembers(
+	hotCredential common.Credential,
+) ([]*common.CommitteeMember, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
@@ -845,6 +859,7 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 			err,
 		)
 	}
+	var members []*common.CommitteeMember
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||
 			common.NewBlake2b224(authorization.HotCredential) !=
@@ -864,9 +879,9 @@ func (p *DingoStateProvider) CommitteeHotCredentialMember(
 		if member == nil || member.Resigned {
 			continue
 		}
-		return member, nil
+		members = append(members, member)
 	}
-	return nil, nil
+	return members, nil
 }
 
 // DRepRegistration looks up a DRep registration by its full credential.
@@ -1126,11 +1141,19 @@ func extractCostModels(
 }
 
 // Compile-time interface check
-var _ conformance.StateProvider = (*DingoStateProvider)(nil)
+var (
+	_ conformance.StateProvider = (*DingoStateProvider)(nil)
+	_ common.EpochState         = (*DingoStateProvider)(nil)
+)
 
 // Keep the conformance provider on the same credential-aware committee
 // capability as the production LedgerView.
 var _ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
+
+// Keep the conformance provider on the same plural committee-authorization
+// capability as the production LedgerView (gouroboros#2574); see
+// LedgerView.CommitteeHotCredentialMembers.
+var _ common.CommitteeHotCredentialMembers = (*DingoStateProvider)(nil)
 
 // conformance.StateProvider does not include DRepDelegationState: the Conway
 // reward-withdrawal rule discovers it with a runtime type assertion instead.

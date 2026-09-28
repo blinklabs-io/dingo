@@ -25,12 +25,10 @@ import (
 )
 
 // TestStakeRewardEpochsForInitialApplication pins the two bootstrap rounds.
-// cardano-ledger applies monetary expansion and the treasury tax at every
-// boundary from the first Shelley-era epoch onward, so a network that declares
-// Shelley at genesis has a round at the boundary into epoch 1 reading the
-// slot-0 pots, and another into epoch 2 reading epoch 1's. Both distribute
-// nothing. Byron-prefix networks are suppressed by applyStakeRewards' Byron
-// performance-epoch guard, not by this helper.
+// The round into epoch 1 reads genesis pots and empty previous block counts;
+// the round into epoch 2 reads epoch 1's pots and epoch 0's blocks. Both have
+// empty Go distributions. Byron-prefix networks are suppressed by
+// applyStakeRewards' Byron performance-epoch guard, not by this helper.
 func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	t.Parallel()
 

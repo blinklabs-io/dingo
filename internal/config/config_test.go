@@ -250,6 +250,8 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
+			// Unset in the file, so the default survives.
+			LimitOnPatienceEnabled: true,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
 		KoiosParity:   DefaultKoiosParityConfig(),

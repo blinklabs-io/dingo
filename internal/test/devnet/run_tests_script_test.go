@@ -50,6 +50,12 @@ case "${1:-}" in
     ;;
   compose)
     printf 'TXPUMP_WINDOW=%s\n' "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}" >>"${FAKE_DOCKER_LOG}"
+    printf 'DINGO_SPEC=%s\nLEIOS_ENABLED=%s\nLEIOS_KEY_FILE=%s\n' \
+      "${DEVNET_DINGO_SPEC:-}" "${DEVNET_LEIOS_ENABLED:-}" \
+      "${DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE:-}" >>"${FAKE_DOCKER_LOG}"
+    printf 'DINGO_RUN_MODE=%s\n' "${DEVNET_DINGO_RUN_MODE:-}" >>"${FAKE_DOCKER_LOG}"
+    printf 'DINGO_START_ERA=%s\n' "${DEVNET_DINGO_START_ERA:-}" >>"${FAKE_DOCKER_LOG}"
+    printf 'TXPUMP_TRANSACTION_ERA=%s\n' "${DEVNET_TXPUMP_TRANSACTION_ERA:-}" >>"${FAKE_DOCKER_LOG}"
     case " $* " in
       *" ps --status running --quiet "*) printf 'fake-container\n' ;;
       *" exec -T "*) printf '1 0 0\n' ;;
@@ -89,6 +95,14 @@ esac
 `
 
 const fakeGoScript = `#!/usr/bin/env bash
+printf 'GO_ARGS=' >>"${FAKE_DOCKER_LOG}"
+printf '%q ' "$@" >>"${FAKE_DOCKER_LOG}"
+printf '\n' >>"${FAKE_DOCKER_LOG}"
+if [[ " $* " == *' -run ^$ '* ]]; then
+  printf 'compile-tests\n' >>"${FAKE_DOCKER_LOG}"
+  exit "${FAKE_GO_COMPILE_EXIT:-0}"
+fi
+printf 'run-tests\n' >>"${FAKE_DOCKER_LOG}"
 exit "${FAKE_GO_EXIT}"
 `
 
@@ -102,6 +116,84 @@ type fakeDevnetResult struct {
 	dockerLog    string
 	stakeDirs    []string
 	artifactDirs []string
+}
+
+func TestRunTestsCompilesBeforeGenesis(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{nil, {"--conformance", "--accelerated"}} {
+		result := runFakeDevnet(t, 0, false, args...)
+		require.Zero(t, result.exitCode, result.output)
+		compile := strings.Index(result.dockerLog, "compile-tests\n")
+		start := strings.Index(result.dockerLog, " up -d")
+		run := strings.Index(result.dockerLog, "run-tests\n")
+		require.NotEqual(t, -1, compile, "tests must compile before genesis")
+		require.NotEqual(t, -1, start, "network did not start")
+		require.NotEqual(t, -1, run, "tests did not execute")
+		require.Less(t, compile, start, "cold compilation consumed chain time")
+		require.Less(t, start, run, "tests must execute against running nodes")
+	}
+}
+
+func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
+	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+		"DEVNET_LEIOS_ENABLED":               "0",
+		"DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE": "/stale/key",
+		"DEVNET_DINGO_SPEC":                  "./testnet-dingo.yaml",
+		"DEVNET_DINGO_RUN_MODE":              "serve",
+		"DEVNET_DINGO_START_ERA":             "",
+		"DEVNET_TXPUMP_TRANSACTION_ERA":      "conway",
+	}, "--leios")
+	require.Zero(t, result.exitCode, result.output)
+	require.Contains(t, result.dockerLog,
+		"DINGO_SPEC=./testnet-dingo-leios.yaml\n")
+	require.Contains(t, result.dockerLog, "LEIOS_ENABLED=1\n")
+	require.Contains(t, result.dockerLog,
+		"LEIOS_KEY_FILE=/configs/keys/leios-vote.skey\n")
+	require.Contains(t, result.dockerLog, "DINGO_RUN_MODE=leios\n")
+	require.Contains(t, result.dockerLog, "DINGO_START_ERA=dijkstra\n")
+	require.Contains(t, result.dockerLog, "TXPUMP_TRANSACTION_ERA=dijkstra\n")
+	require.Contains(t, result.dockerLog, "TXPUMP_WINDOW=1000\n")
+	require.Contains(t, result.dockerLog, "GO_ARGS=test -tags devnet")
+	require.Contains(t, result.dockerLog, "-timeout 12m")
+	require.Contains(t, result.dockerLog,
+		"TestLeiosEndorserBlockProducerToPeer")
+	require.Contains(t, result.dockerLog, "./internal/test/devnet/...")
+}
+
+func TestRunTestsDefaultClearsDijkstraOverrides(t *testing.T) {
+	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+		"DEVNET_DINGO_RUN_MODE":         "leios",
+		"DEVNET_DINGO_START_ERA":        "dijkstra",
+		"DEVNET_TXPUMP_TRANSACTION_ERA": "dijkstra",
+	}, "--keep-up")
+	require.Zero(t, result.exitCode, result.output)
+	require.Contains(t, result.dockerLog, "DINGO_RUN_MODE=\n")
+	require.Contains(t, result.dockerLog, "DINGO_START_ERA=\n")
+	require.Contains(t, result.dockerLog, "TXPUMP_TRANSACTION_ERA=\n")
+}
+
+func TestRunTestsLeiosRejectsIncompatibleModes(t *testing.T) {
+	for _, args := range [][]string{
+		{"--leios", "--conformance"},
+		{"--leios", "--accelerated"},
+		{"--leios", "-run", "TestAnything"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			result := runFakeDevnet(t, 0, false, args...)
+			require.NotZero(t, result.exitCode, result.output)
+			require.NotContains(t, result.dockerLog, " up -d")
+		})
+	}
+}
+
+func TestRunTestsCompileFailureDoesNotStartGenesis(t *testing.T) {
+	t.Parallel()
+	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+		"FAKE_GO_COMPILE_EXIT": "29",
+	})
+	require.Equal(t, 29, result.exitCode, result.output)
+	require.NotContains(t, result.dockerLog, " up -d")
+	require.NotContains(t, result.dockerLog, "run-tests\n")
 }
 
 func TestRunTestsPreservesTestStatusWhenCleanupFails(t *testing.T) {
@@ -252,9 +344,10 @@ func runFakeDevnetScript(
 	cmd := exec.CommandContext(ctx, "bash", args...)
 	cmd.Dir = root
 	env := map[string]string{
-		"FAKE_DOCKER_LOG": filepath.Join(tempRoot, "docker.log"),
-		"FAKE_GO_EXIT":    strconv.Itoa(testExit),
-		"MODE":            "dingo",
+		"FAKE_DOCKER_LOG":      filepath.Join(tempRoot, "docker.log"),
+		"FAKE_GO_EXIT":         strconv.Itoa(testExit),
+		"FAKE_GO_COMPILE_EXIT": "0",
+		"MODE":                 "dingo",
 		"PATH": fakeBin + string(
 			os.PathListSeparator,
 		) + os.Getenv(
@@ -307,16 +400,24 @@ func bashUserMapping(t *testing.T) string {
 
 func cleanRunnerEnv(overrides map[string]string) []string {
 	blocked := map[string]struct{}{
-		"COMPOSE_PROFILES":    {},
-		"DEVNET_ACCELERATED":  {},
-		"DEVNET_ARTIFACT_DIR": {},
-		"DEVNET_CIP50_TEST":   {},
-		"FAKE_DOCKER_LOG":     {},
-		"FAKE_GO_EXIT":        {},
-		"MODE":                {},
-		"PATH":                {},
-		"STAKE_KEYS_HOST_DIR": {},
-		"TMPDIR":              {},
+		"COMPOSE_PROFILES":                   {},
+		"DEVNET_ACCELERATED":                 {},
+		"DEVNET_DINGO_SPEC":                  {},
+		"DEVNET_LEIOS_ENABLED":               {},
+		"DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE": {},
+		"DEVNET_DINGO_RUN_MODE":              {},
+		"DEVNET_DINGO_START_ERA":             {},
+		"DEVNET_TXPUMP_TRANSACTION_ERA":      {},
+		"DEVNET_ARTIFACT_DIR":                {},
+		"DEVNET_CIP50_TEST":                  {},
+		"DEVNET_TESTNET_YAML":                {},
+		"FAKE_DOCKER_LOG":                    {},
+		"FAKE_GO_EXIT":                       {},
+		"FAKE_GO_COMPILE_EXIT":               {},
+		"MODE":                               {},
+		"PATH":                               {},
+		"STAKE_KEYS_HOST_DIR":                {},
+		"TMPDIR":                             {},
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, item := range os.Environ() {

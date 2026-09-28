@@ -22,33 +22,19 @@ func (d *Database) DeleteNetworkStateAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.DeleteNetworkStateAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete network state after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.DeleteNetworkStateAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete network state after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetSyncState retrieves a sync state value by key.

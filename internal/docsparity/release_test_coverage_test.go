@@ -66,6 +66,14 @@ func releaseStepEnv(
 // race suite covers the same packages with those optional backends disabled.
 // Running all three conformance backends under the race detector exceeds the
 // package timeout without identifying a stuck test.
+//
+// The two runs used to be consecutive steps of a single `ci` job. They are
+// sibling jobs now -- go-test (Linux) and go-test (Linux, race) -- so that the
+// 22-minute service suite and the 35-minute race suite run side by side
+// instead of adding up to a 57-minute job on the critical path of every merge.
+// This walks every job for that reason: what matters is that the release path
+// contains both runs and that the race one is not service-backed, not which
+// job each lives in.
 func TestReleaseValidationSeparatesServicesFromRace(t *testing.T) {
 	root := repoRoot(t)
 	raw := readRepoFile(t, root, publishWorkflow)
@@ -74,47 +82,45 @@ func TestReleaseValidationSeparatesServicesFromRace(t *testing.T) {
 		t.Fatalf("parse %s: %v", publishWorkflow, err)
 	}
 
-	job, ok := workflow.Jobs["ci"]
-	if !ok {
-		t.Fatalf("%s has no ci job", publishWorkflow)
-	}
-
 	serviceRun := false
 	raceRun := false
-	for _, step := range job.Steps {
-		if !strings.Contains(step.Run, "go test") ||
-			!strings.Contains(step.Run, "./...") {
-			continue
-		}
-		env := releaseStepEnv(workflow, job, step)
-		if strings.Contains(step.Run, "-race") {
-			raceRun = true
-			for _, key := range releaseServiceTestTriggers {
-				if env[key] != "" {
-					t.Errorf(
-						"release race step %q exposes %s; run service-backed conformance without -race",
-						step.Name,
-						key,
-					)
-				}
+	for jobName, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if !strings.Contains(step.Run, "go test") ||
+				!strings.Contains(step.Run, "./...") {
+				continue
 			}
-			continue
-		}
+			env := releaseStepEnv(workflow, job, step)
+			if strings.Contains(step.Run, "-race") {
+				raceRun = true
+				for _, key := range releaseServiceTestTriggers {
+					if env[key] != "" {
+						t.Errorf(
+							"release race step %q in job %q exposes %s; run service-backed conformance without -race",
+							step.Name,
+							jobName,
+							key,
+						)
+					}
+				}
+				continue
+			}
 
-		if env["POSTGRES_PASSWORD"] != "" &&
-			env["MYSQL_ROOT_PASSWORD"] != "" &&
-			env["DINGO_TEST_S3_BUCKET"] != "" {
-			serviceRun = true
+			if env["POSTGRES_PASSWORD"] != "" &&
+				env["MYSQL_ROOT_PASSWORD"] != "" &&
+				env["DINGO_TEST_S3_BUCKET"] != "" {
+				serviceRun = true
+			}
 		}
 	}
 
 	if !serviceRun {
 		t.Errorf(
-			"%s ci job has no service-backed uninstrumented full test run",
+			"%s has no service-backed uninstrumented full test run",
 			publishWorkflow,
 		)
 	}
 	if !raceRun {
-		t.Errorf("%s ci job has no full race test run", publishWorkflow)
+		t.Errorf("%s has no full race test run", publishWorkflow)
 	}
 }

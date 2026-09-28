@@ -51,6 +51,18 @@ func (s *Store) DeleteCertificatesAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	// Invalidate the cached committee-auth immutable slot before the delete
+	// runs: a rollback's legal target is bounded by securityParam blocks
+	// from whatever the tip was *at rollback time*, which a prior cached
+	// value -- resolved against an earlier, since-superseded tip -- does not
+	// necessarily bound (see committee_prune.go's "Suspension" section, and
+	// issue #4353). committeeAuthHorizon treats the resulting
+	// known-but-unset state as "suspend pruning" rather than fall back to
+	// the slot-window assumption, until the next sync resolves a fresh value
+	// against the post-rollback chain. Always safe to call even when no
+	// live syncer is wired (a no-op store field write) and even if the
+	// delete below fails.
+	s.committeeAuthImmutableSlotKnown.Store(false)
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {

@@ -158,6 +158,13 @@ type Pots struct {
 type Snapshot struct {
 	Pools            []Pool
 	TotalActiveStake uint64
+	// ExcludedActiveStake is the portion of TotalActiveStake belonging to
+	// pools the caller excluded from Pools for degraded registration data.
+	// A tracked value (dingo #4025), including zero, makes validateSnapshot
+	// check Pools' summed stake against TotalActiveStake exactly; nil means
+	// the caller cannot say how much, if any, was excluded, so only the
+	// legacy non-exceeding bound applies.
+	ExcludedActiveStake *uint64
 }
 
 type Pool struct {
@@ -267,10 +274,9 @@ func Calculate(
 			ErrInvalidParameters,
 		)
 	}
-	efficiency := rewardEfficiency(
+	efficiency := Efficiency(
 		totalBlocks,
-		expectedBlocks,
-		params.Decentralization,
+		params,
 	)
 	incentives, err := floorMulChecked(
 		minRat(oneRat(), efficiency),
@@ -937,12 +943,34 @@ func validateSnapshot(snapshot Snapshot) error {
 	// registered credential with a delegation, whether or not the pool it
 	// delegates to is present in Pools. A pool the caller could not resolve
 	// carries no reward but keeps contributing its delegators' stake to that
-	// denominator (cardano-ledger ssTotalActiveStake), so the pools passed here
-	// may sum to less than it. Summing to more means the caller's pool set and
-	// its declared active stake disagree.
-	if totalDelegated > snapshot.TotalActiveStake {
+	// denominator (cardano-ledger ssTotalActiveStake), so the pools passed
+	// here may sum to less than it. When the caller tracks exactly how much
+	// (dingo #4025, ExcludedActiveStake non-nil), the sums must add up to the
+	// total precisely, catching a pool set reduced by any amount rather than
+	// only a resolvable pool's worth; otherwise only the legacy bound of not
+	// summing to more applies, since the caller cannot say how much, if any,
+	// was excluded.
+	if snapshot.ExcludedActiveStake == nil {
+		if totalDelegated > snapshot.TotalActiveStake {
+			return fmt.Errorf(
+				"%w: total delegated stake %d exceeds active stake %d",
+				ErrInvalidParameters,
+				totalDelegated,
+				snapshot.TotalActiveStake,
+			)
+		}
+		return nil
+	}
+	total, overflow := addUint64(totalDelegated, *snapshot.ExcludedActiveStake)
+	if overflow {
 		return fmt.Errorf(
-			"%w: total delegated stake %d exceeds active stake %d",
+			"%w: total delegated stake plus excluded active stake overflow",
+			ErrInvalidParameters,
+		)
+	}
+	if total != snapshot.TotalActiveStake {
+		return fmt.Errorf(
+			"%w: total delegated stake %d does not match active stake %d",
 			ErrInvalidParameters,
 			totalDelegated,
 			snapshot.TotalActiveStake,
@@ -1054,6 +1082,15 @@ func calculatePoolRewards(
 	}
 	if pool.DelegatedStake == 0 ||
 		pool.Pledge > pool.OwnerStake {
+		return ret, nil
+	}
+	// mkPoolRewardInfo (Cardano.Ledger.Shelley.Rewards.hs) returns Left,
+	// excluding the pool from reward construction entirely, when the pool made
+	// no blocks this epoch. apparentPerformance alone does not encode that: it
+	// returns 1 once d >= 4/5 regardless of blocksProduced, matching
+	// mkApparentPerformance exactly, so without this guard a zero-block pool
+	// would be credited the pool's optimalReward instead of nothing (dingo#3978).
+	if pool.BlocksProduced == 0 {
 		return ret, nil
 	}
 
@@ -1233,6 +1270,17 @@ func rewardEfficiency(
 	return new(big.Rat).Quo(
 		uintRat(totalBlocks),
 		expectedBlocks,
+	)
+}
+
+// Efficiency returns the network reward efficiency for the observed total
+// block count and reward parameters. It is also used when logging a previously
+// computed reward application from its persisted inputs.
+func Efficiency(totalBlocks uint64, params Parameters) *big.Rat {
+	return rewardEfficiency(
+		totalBlocks,
+		expectedBlocks(params),
+		params.Decentralization,
 	)
 }
 

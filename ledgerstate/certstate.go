@@ -70,7 +70,7 @@ func parseCertState3(
 	result.CommitteeHotKeys = hotKeys
 	result.CommitteeResignations = resignations
 
-	pools, err := parsePState(certState[1])
+	pools, retirements, err := parsePStateWithRetirements(certState[1])
 	if err != nil {
 		if pools == nil {
 			return nil, fmt.Errorf(
@@ -80,6 +80,7 @@ func parseCertState3(
 		warnings = append(warnings, err)
 	}
 	result.Pools = pools
+	result.PendingPoolRetirements = retirements
 
 	accounts, err := parseDState(certState[2])
 	if err != nil {
@@ -254,7 +255,7 @@ func parseCertStateConway(
 
 	// Parse PState if found
 	if pIdx >= 0 {
-		pools, err := parsePStateConway(certState[pIdx])
+		pools, retirements, err := parsePStateConwayWithRetirements(certState[pIdx])
 		if err != nil {
 			if pools == nil {
 				return nil, fmt.Errorf(
@@ -264,6 +265,7 @@ func parseCertStateConway(
 			warnings = append(warnings, err)
 		}
 		result.Pools = pools
+		result.PendingPoolRetirements = retirements
 	} else {
 		warnings = append(warnings, fmt.Errorf(
 			"could not identify PState in Conway "+
@@ -301,10 +303,12 @@ func parseCertStateConway(
 // PState is encoded as an array of 7 elements rather than the
 // traditional {poolParams, futurePoolParams, retiring, deposits}
 // map.
-func parsePStateConway(data []byte) ([]ParsedPool, error) {
+func parsePStateConwayWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 
 	return parsePStateMaps(ps)
@@ -650,21 +654,21 @@ func parsePoolDelegation(data []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// parsePState decodes the pool state.
-// PState = [poolParams, futurePoolParams, retiring, poolDeposits]
-func parsePState(data []byte) ([]ParsedPool, error) {
+func parsePStateWithRetirements(
+	data []byte,
+) ([]ParsedPool, map[uint64][][]byte, error) {
 	ps, err := decodeRawElements(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding PState: %w", err)
+		return nil, nil, fmt.Errorf("decoding PState: %w", err)
 	}
 	if len(ps) < 1 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	return parsePStateMaps(ps)
 }
 
-func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
+func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	type mapEntry struct {
 		idx  int
 		size int
@@ -680,7 +684,7 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 		}
 	}
 	if len(maps) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	slices.SortFunc(
@@ -701,12 +705,31 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
 			bestIdx = m.idx
 		}
 	}
-	if len(bestPools) == 0 {
-		return bestPools, bestWarning
+	if len(bestPools) > 0 {
+		mergePoolDeposits(bestPools, ps, bestIdx)
 	}
-
-	mergePoolDeposits(bestPools, ps, bestIdx)
-	return bestPools, bestWarning
+	retirementIndices := make([]int, 0, len(ps))
+	if len(ps) == 4 && bestIdx == 0 {
+		// Shelley PState is [poolParams, futurePoolParams,
+		// retiring, poolDeposits]. The field position is the only
+		// reliable discriminator when a malformed deposit map contains
+		// small values.
+		retirementIndices = append(retirementIndices, 2)
+	} else {
+		for i, elem := range ps {
+			if i == bestIdx || len(elem) == 0 {
+				continue
+			}
+			major := elem[0] >> 5
+			if major == 5 || elem[0] == 0xbf {
+				retirementIndices = append(retirementIndices, i)
+			}
+		}
+	}
+	retirements := mergePoolRetirements(
+		bestPools, ps, retirementIndices,
+	)
+	return bestPools, retirements, bestWarning
 }
 
 func mergePoolDeposits(
@@ -718,7 +741,7 @@ func mergePoolDeposits(
 		if i == poolParamsIdx {
 			continue
 		}
-		deposits := parsePoolDeposits(elem)
+		deposits := parsePoolUint64Map(elem)
 		if deposits == nil || !looksLikeDeposits(deposits) {
 			continue
 		}
@@ -733,16 +756,20 @@ func mergePoolDeposits(
 	}
 }
 
-// parsePoolDeposits decodes the pool deposits map.
-// Returns nil on decode failure. Skipped entries are counted
-// but not reported since deposits are supplementary data.
-func parsePoolDeposits(data []byte) map[string]uint64 {
+// parsePoolUint64Map decodes a CBOR map of pool key hash -> unsigned
+// integer, keyed by hex-encoded pool key hash. Both PState maps that
+// carry scalar values have this shape: poolDeposits (lovelace) and
+// retiring (epoch numbers). Returns nil when the input is not a map;
+// entries whose key or value fails to decode are skipped, which is how
+// maps of a different value shape (futurePoolParams, whose values are
+// arrays) decode to an empty result rather than an error.
+func parsePoolUint64Map(data []byte) map[string]uint64 {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
 		return nil
 	}
 
-	deposits := make(map[string]uint64, len(entries))
+	values := make(map[string]uint64, len(entries))
 	for _, entry := range entries {
 		var keyHash []byte
 		if _, err := cbor.Decode(
@@ -758,10 +785,10 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 			continue
 		}
 
-		deposits[hex.EncodeToString(keyHash)] = amount
+		values[hex.EncodeToString(keyHash)] = amount
 	}
 
-	return deposits
+	return values
 }
 
 // looksLikeDeposits returns true if the map values are plausibly
@@ -770,7 +797,6 @@ func parsePoolDeposits(data []byte) map[string]uint64 {
 // numbers are small (currently < 1,000). We check whether the
 // majority of values exceed this threshold.
 func looksLikeDeposits(m map[string]uint64) bool {
-	const minDepositLovelace = 1_000_000 // 1 ADA
 	if len(m) == 0 {
 		return false
 	}
@@ -783,6 +809,92 @@ func looksLikeDeposits(m map[string]uint64) bool {
 	// Require at least half the values to look like deposits.
 	// Use multiplication to avoid integer division rounding.
 	return large*2 >= len(m)
+}
+
+// minDepositLovelace separates a pool deposit from a retirement epoch.
+// Pool deposits are at least 1 ADA on every network, while epoch numbers
+// are small (currently < 1,000), so the two PState maps that share the
+// pool-key-hash -> uint64 shape are told apart by magnitude.
+const minDepositLovelace = 1_000_000 // 1 ADA
+
+// poolKeyHashLen is the length in bytes of a pool key hash, whose
+// hex encoding is twice that.
+const poolKeyHashLen = 28
+
+// mergePoolRetirements decodes the selected PState retirement maps -- pool key
+// hash -> the epoch the pool is scheduled to retire at -- and records the
+// epoch on matching parsed pools. Unknown keys are retained so the importer
+// can report a partial pool-parameter decode instead of silently dropping a
+// scheduled retirement.
+func mergePoolRetirements(
+	pools []ParsedPool,
+	ps [][]byte,
+	retirementIndices []int,
+) map[uint64][][]byte {
+	known := make(map[string]struct{}, len(pools))
+	for i := range pools {
+		known[hex.EncodeToString(pools[i].PoolKeyHash)] = struct{}{}
+	}
+	for _, i := range retirementIndices {
+		elem := ps[i]
+		retiring := parsePoolUint64Map(elem)
+		if !looksLikeRetiringEpochs(retiring, known) {
+			continue
+		}
+		result := make(map[uint64][][]byte)
+		for j := range pools {
+			epoch, ok := retiring[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]
+			if !ok {
+				continue
+			}
+			pools[j].RetiringEpoch = &epoch
+			result[epoch] = append(result[epoch], slices.Clone(pools[j].PoolKeyHash))
+		}
+		for keyHash, epoch := range retiring {
+			if _, ok := known[keyHash]; !ok {
+				decoded, err := hex.DecodeString(keyHash)
+				if err == nil {
+					result[epoch] = append(result[epoch], decoded)
+				}
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+// looksLikeRetiringEpochs reports whether m is plausibly the PState
+// `retiring` map: non-empty, keyed by pool key hashes, every value small
+// enough to be an epoch number rather than a lovelace deposit, and mostly
+// naming pools that poolParams also registered.
+//
+// The poolParams check is a majority rather than a requirement on every key.
+// A retiring pool whose params entry failed to parse is absent from pools,
+// and rejecting the whole map over one such key would drop every other pool's
+// retirement too. Unknown keys are retained for import-time validation.
+func looksLikeRetiringEpochs(
+	m map[string]uint64,
+	known map[string]struct{},
+) bool {
+	if len(m) == 0 {
+		return false
+	}
+	var recognized int
+	for keyHash, epoch := range m {
+		if len(keyHash) != 2*poolKeyHashLen {
+			return false
+		}
+		if epoch >= minDepositLovelace {
+			return false
+		}
+		if _, ok := known[keyHash]; ok {
+			recognized++
+		}
+	}
+	// Use multiplication to avoid integer division rounding.
+	return recognized*2 >= len(m)
 }
 
 // ErrNotPoolParams signals that the input CBOR is not shaped like a full
@@ -857,7 +969,7 @@ func parsePoolParams(
 		)
 	}
 
-	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 2)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -872,6 +984,7 @@ func parsePoolParams(
 	if leiosKey != nil {
 		pool.LeiosKeyPublic = leiosKey.PublicKey
 		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+		pool.LeiosKeyRegistrationEpoch = keyRegistrationEpoch
 	}
 
 	// Pledge (legacy index 2; Dijkstra index 3 when Leios key/null is present)
@@ -955,7 +1068,7 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 1)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 1)
 	if err != nil {
 		return nil, true, err
 	}
@@ -969,6 +1082,7 @@ func parsePoolParamsWithoutOperator(
 	if leiosKey != nil {
 		pool.LeiosKeyPublic = leiosKey.PublicKey
 		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+		pool.LeiosKeyRegistrationEpoch = keyRegistrationEpoch
 	}
 
 	if _, err := cbor.Decode(
@@ -1037,25 +1151,25 @@ func parsePoolParamsWithoutOperator(
 func optionalLeiosKeyOffset(
 	params []cbor.RawMessage,
 	index int,
-) (int, *lcommon.LeiosKey, error) {
+) (int, *lcommon.LeiosKey, *uint64, error) {
 	if len(params) <= index || len(params[index]) == 0 {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
 	if len(params[index]) == 1 && params[index][0] == 0xf6 {
-		return 1, nil, nil
+		return 1, nil, nil, nil
 	}
 	// A legacy pledge/cost is an unsigned integer. Only an array at this
 	// position can be the new Leios key; if it is an array, validate its
 	// exact key/proof shape through gouroboros rather than shifting on a
 	// malformed value.
 	if params[index][0]>>5 != 4 {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
-	var key lcommon.LeiosKey
-	if _, err := cbor.Decode(params[index], &key); err != nil {
-		return 0, nil, fmt.Errorf("decoding Leios key: %w", err)
+	key, registrationEpoch, err := decodeOptionalLeiosKey(params[index])
+	if err != nil {
+		return 0, nil, nil, err
 	}
-	return 1, &key, nil
+	return 1, key, registrationEpoch, nil
 }
 
 func parseRewardAccount(data []byte) ([]byte, uint8, bool) {
@@ -1230,10 +1344,11 @@ func parseSnapshotPoolParams(
 	}
 	leiosOffset := 0
 	var leiosKey *lcommon.LeiosKey
+	var keyRegistrationEpoch *uint64
 	if len(fields) == snapshotPoolParamsFieldsLeios {
 		leiosOffset = 1
 		var err error
-		leiosKey, err = decodeOptionalLeiosKey(
+		leiosKey, keyRegistrationEpoch, err = decodeOptionalLeiosKey(
 			fields[snapshotPoolLeiosKeyIdx],
 		)
 		if err != nil {
@@ -1310,6 +1425,7 @@ func parseSnapshotPoolParams(
 		// #nosec G115 -- credential type is 0 or 1
 		RewardAccountCredentialTag: uint8(rewardAccount.Type),
 		Owners:                     owners,
+		LeiosKeyRegistrationEpoch:  keyRegistrationEpoch,
 	}
 	if leiosKey != nil {
 		pool.LeiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
@@ -1320,31 +1436,43 @@ func parseSnapshotPoolParams(
 	return pool, nil
 }
 
-func decodeOptionalLeiosKey(data []byte) (*lcommon.LeiosKey, error) {
+func decodeOptionalLeiosKey(data []byte) (
+	*lcommon.LeiosKey,
+	*uint64,
+	error,
+) {
 	if len(data) == 0 || (len(data) == 1 && data[0] == 0xf6) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	fields, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding optional Leios key: %w", err)
+		return nil, nil, fmt.Errorf("decoding optional Leios key: %w", err)
 	}
 	if len(fields) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	keyData := data
-	if len(fields) == 1 {
+	var registrationEpoch *uint64
+	switch len(fields) {
+	case 1:
 		keyData = fields[0]
-	} else if len(fields) != 2 {
-		return nil, fmt.Errorf(
-			"optional Leios key has %d fields, expected 0 or 1",
+	case 2:
+		var epoch uint64
+		if _, epochErr := cbor.Decode(fields[1], &epoch); epochErr == nil {
+			keyData = fields[0]
+			registrationEpoch = &epoch
+		}
+	default:
+		return nil, nil, fmt.Errorf(
+			"optional Leios key has %d fields, expected 0, 1, or 2",
 			len(fields),
 		)
 	}
 	var key lcommon.LeiosKey
 	if _, err := cbor.Decode(keyData, &key); err != nil {
-		return nil, fmt.Errorf("decoding Leios key: %w", err)
+		return nil, nil, fmt.Errorf("decoding Leios key: %w", err)
 	}
-	return &key, nil
+	return &key, registrationEpoch, nil
 }
 
 // parseSnapshotPoolOwners decodes the owner set, which is a CBOR set (tag

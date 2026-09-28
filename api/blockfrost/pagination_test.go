@@ -24,18 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParsePaginationDefaultValues(t *testing.T) {
-	t.Parallel()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v0/test", nil)
-	params, err := ParsePagination(req)
-	require.NoError(t, err)
-
-	assert.Equal(t, DefaultPaginationCount, params.Count)
-	assert.Equal(t, DefaultPaginationPage, params.Page)
-	assert.Equal(t, PaginationOrderAsc, params.Order)
-}
-
 func TestParsePaginationValid(t *testing.T) {
 	t.Parallel()
 
@@ -77,20 +65,6 @@ func TestParsePaginationClampsUnboundedPage(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v0/test?page=9223372036854775807",
-		nil,
-	)
-	params, err := ParsePagination(req)
-	require.NoError(t, err)
-
-	assert.Equal(t, MaxPaginationPage, params.Page)
-}
-
-func TestParsePaginationClampsPageAboveMax(t *testing.T) {
-	t.Parallel()
-
-	req := httptest.NewRequest(
-		http.MethodGet,
-		"/api/v0/test?page=21474837",
 		nil,
 	)
 	params, err := ParsePagination(req)

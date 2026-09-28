@@ -110,9 +110,9 @@ type BootstrapConfig struct {
 	// AggregatorURL overrides the default aggregator URL for the
 	// network. If empty, the default URL for the network is used.
 	AggregatorURL string
-	// AllowInsecureHTTP permits AggregatorURL and snapshot artifact
-	// locations to use plain HTTP instead of HTTPS. Defaults to false;
-	// this is an explicit escape hatch for local development and tests
+	// AllowInsecureHTTP permits AggregatorURL and snapshot artifact locations
+	// to use plain HTTP or resolve to local/private addresses. Defaults to
+	// false; this is an explicit escape hatch for local development and tests
 	// and should not be set in production.
 	AllowInsecureHTTP bool
 	// DownloadDir is the directory where the snapshot archive will
@@ -416,7 +416,7 @@ func Bootstrap(
 		"starting Mithril bootstrap",
 		"component", "mithril",
 		"network", cfg.Network,
-		"aggregator", aggregatorURL,
+		"aggregator", redactLocationURI(aggregatorURL),
 		"backend", cfg.Backend,
 	)
 

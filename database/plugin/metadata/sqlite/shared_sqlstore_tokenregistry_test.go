@@ -38,9 +38,6 @@ type tokenRegistryStore interface {
 	) (*models.TokenRegistryEntry, error)
 }
 
-//go:fix inline
-func intPtr(v int) *int { return new(v) }
-
 var testSyncedAt = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 const (

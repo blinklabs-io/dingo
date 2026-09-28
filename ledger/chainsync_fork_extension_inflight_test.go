@@ -68,9 +68,9 @@ func TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnecti
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 
 	require.NoError(
@@ -109,7 +109,7 @@ func TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnecti
 	// accept blocks from: this is the property that actually matters, since
 	// handleEventBlockfetchBlockDeferred keys acceptance on
 	// activeBlockfetchConnId, not on whether a restart was ever attempted.
-	require.NoError(t, ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: otherConn,
 		Block:        &mockBabbageBlock{slot: 1},
 		Point:        ocommon.Point{Slot: 1, Hash: []byte("fork-ext-hdr-1")},
@@ -149,9 +149,9 @@ func TestRestartQueuedBlockfetchAfterForkStillRestartsSameConnection(
 		connId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 
 	require.NoError(

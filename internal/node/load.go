@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -232,6 +233,9 @@ func ensureDB(
 		StartEra:       string(cfg.StartEra),
 		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
 		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			nil, cfg.CardanoConfig, cfg.Network,
+		),
 	}
 	runtime, err := internalplugins.OpenDatabase(
 		context.Background(),
@@ -346,6 +350,7 @@ func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
 // and clears the pending marker.
 type DeferredIndexRebuilder struct {
 	manager metadata.DeferredIndexManager
+	logger  *slog.Logger
 }
 
 func (r *DeferredIndexRebuilder) BuildCritical() error {
@@ -362,7 +367,11 @@ func (r *DeferredIndexRebuilder) BuildAll() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	if err := r.manager.BuildDeferredIndexes(); err != nil {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if err := ensureAllDeferredIndexes(r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding deferred indexes: %w", err)
 	}
 	return nil
@@ -392,9 +401,9 @@ func WithDeferredIndexes(
 				"continuing and repairing during rebuild phases",
 			"error", err,
 		)
-		return &DeferredIndexRebuilder{manager: manager}
+		return &DeferredIndexRebuilder{manager: manager, logger: logger}
 	}
-	return &DeferredIndexRebuilder{manager: manager}
+	return &DeferredIndexRebuilder{manager: manager, logger: logger}
 }
 
 // criticalIndexRebuildLogThreshold is how long the critical-index check
@@ -472,6 +481,69 @@ func ensureCriticalDeferredIndexes(
 	return nil
 }
 
+// ensureAllDeferredIndexes rebuilds the complete manifest, naming the entries
+// it is about to build and reporting how long the build took.
+//
+// BuildDeferredIndexes is as silent as BuildCriticalDeferredIndexes and has
+// the whole manifest to get through, so without this an operator watching a
+// restored database start up sees the critical announcement, then nothing at
+// all for however long the remaining entries take on a multi-million-row
+// table.
+func ensureAllDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	missing, listed := missingDeferredIndexes(manager, logger)
+	if listed && len(missing) > 0 {
+		logger.Info(
+			"rebuilding missing deferred metadata indexes",
+			"indexes", strings.Join(missing, ","),
+			"count", len(missing),
+		)
+	}
+	start := time.Now()
+	if err := manager.BuildDeferredIndexes(); err != nil {
+		return err
+	}
+	elapsed := time.Since(start)
+	if (listed && len(missing) > 0) ||
+		elapsed >= criticalIndexRebuildLogThreshold {
+		attrs := []any{"duration", elapsed}
+		if listed {
+			indexes := "none"
+			if len(missing) > 0 {
+				indexes = strings.Join(missing, ",")
+			}
+			attrs = append(attrs, "deferred_indexes_built", indexes)
+		}
+		logger.Info("deferred metadata index check complete", attrs...)
+	}
+	return nil
+}
+
+// missingDeferredIndexes names the manifest entries absent from the schema.
+// The second return reports whether the store could answer, on the same terms
+// as missingCriticalDeferredIndexes.
+func missingDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) ([]string, bool) {
+	lister, ok := manager.(metadata.MissingDeferredIndexLister)
+	if !ok {
+		return nil, false
+	}
+	missing, err := lister.MissingDeferredIndexes()
+	if err != nil {
+		logger.Warn(
+			"could not list missing deferred metadata indexes; "+
+				"rebuilding without naming them",
+			"error", err,
+		)
+		return nil, false
+	}
+	return missing, true
+}
+
 // missingCriticalDeferredIndexes names the critical manifest entries absent
 // from the schema. The second return reports whether the store could answer:
 // stores that do not implement the lister, and read errors on the catalog
@@ -497,10 +569,10 @@ func missingCriticalDeferredIndexes(
 	return missing, true
 }
 
-// RepairCriticalDeferredIndexes rebuilds the API/rollback-critical
-// subset, and reports when a prior run left deferred indexes pending. It
-// leaves the pending marker in place so RepairDeferredIndexes can finish
-// the lazy remainder later.
+// RepairCriticalDeferredIndexes rebuilds the full manifest when no bulk-load
+// cycle is pending. During a pending cycle, it preserves that marker and
+// rebuilds only the API/rollback-critical subset so RepairDeferredIndexes can
+// finish the lazy remainder later.
 func RepairCriticalDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -518,8 +590,15 @@ func RepairCriticalDeferredIndexes(
 			"critical deferred metadata indexes pending from a prior run; " +
 				"rebuilding before serving API traffic",
 		)
+		return ensureCriticalDeferredIndexes(manager, logger)
 	}
-	return ensureCriticalDeferredIndexes(manager, logger)
+	// A clear marker means no bulk-load cycle is active. Restore copies can
+	// still be missing any manifest entry because their recorded migrations do
+	// not re-run, so finish the whole manifest before accepting traffic.
+	if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+		return err
+	}
+	return ensureAllDeferredIndexes(manager, logger)
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
@@ -527,9 +606,8 @@ func RepairCriticalDeferredIndexes(
 // when no rebuild is outstanding: BuildDeferredIndexes is itself
 // idempotent and clears the marker.
 //
-// With no cycle outstanding it still restores any missing critical index,
-// because the rollback path the node is about to run depends on those and
-// the marker cannot answer whether they exist.
+// With no cycle outstanding it restores the complete manifest because a
+// restored database can have recorded migrations but missing index entries.
 func RepairDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -543,13 +621,19 @@ func RepairDeferredIndexes(
 		return err
 	}
 	if !pending {
-		return ensureCriticalDeferredIndexes(manager, logger)
+		// A restore can carry missing deferred indexes without the pending
+		// marker. Rebuild the complete manifest before any rollback or query
+		// runs; BuildDeferredIndexes is idempotent on a healthy database.
+		if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+			return err
+		}
+		return ensureAllDeferredIndexes(manager, logger)
 	}
 	logger.Warn(
 		"deferred metadata indexes pending from a prior run; " +
 			"rebuilding before continuing",
 	)
-	return manager.BuildDeferredIndexes()
+	return ensureAllDeferredIndexes(manager, logger)
 }
 
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,
@@ -568,7 +652,7 @@ func LoadWithDB(
 		if network == "" {
 			network = "preview"
 		}
-		cardanoConfigPath = network + "/config.json"
+		cardanoConfigPath = cardano.EmbeddedConfigPath(network)
 	}
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,
@@ -667,6 +751,13 @@ func LoadWithDB(
 			// serve node.
 			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
+			// Immutable load replays blocks already accepted into the trusted
+			// database. Structural Leios certificate checks still run;
+			// cryptographic verification belongs to live admission, where the
+			// vote manager is available.
+			ValidateLeiosCertificate: func(uint64, []byte, []byte, []byte) error {
+				return nil
+			},
 			ManualBlockProcessing: true,
 			// CIP-0163 reward-account inactivity expiry: consensus-affecting,
 			// must match serve mode (node.go) on replay of the same DB.
@@ -693,6 +784,20 @@ func LoadWithDB(
 	ls.SetEpochBoundarySnapshotStakeHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	)
+	// Governance's same-boundary SPO stake read (dingo#4441): RATIFY tallies
+	// mark[NewEpoch] -- this same boundary's own mark snapshot -- which is not
+	// durably written until the capture hook below runs, later in the same
+	// rollover. Load replays the exact same governance.ProcessEpoch path as
+	// serve mode, so it needs this wired too; without it, every SPO-gated
+	// action would silently see zero stake at every replayed boundary.
+	ls.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return snapshotMgr.CurrentBoundarySPOStakeRows(ctx, txn, evt)
 		},
 	)
 	if err := installEpochBoundarySnapshotHookForLoad(
@@ -1002,6 +1107,11 @@ func copyBlocksDirect(
 				"decoding block CBOR: %w", err,
 			)
 		}
+		if len(blockBatch) == 0 {
+			return blocksCopied, immutableTip.Slot, errors.New(
+				"decoding block CBOR: non-empty batch decoded to no blocks",
+			)
+		}
 		if err := c.AddBlocks(blockBatch); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(
 				"failed to import block: %w",
@@ -1050,6 +1160,25 @@ type immutableDecodeJob struct {
 	block immutable.Block
 }
 
+// immutableBlockDecoder is a test seam: production decoding ignores the
+// context and index, while tests can fail a selected job and observe the
+// derived cancellation context. NewBlockFromCbor itself is not cancellable.
+type immutableBlockDecoder func(
+	context.Context,
+	int,
+	immutable.Block,
+	lcommon.VerifyConfig,
+) (gledger.Block, error)
+
+func decodeImmutableBlock(
+	_ context.Context,
+	_ int,
+	block immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+) (gledger.Block, error) {
+	return gledger.NewBlockFromCbor(block.Type, block.Cbor, verifyCfg)
+}
+
 // decodeImmutableBlockBatch decodes a bounded batch with ordered results.
 // Sending jobs through a small buffered channel provides backpressure, while
 // the result index prevents completion order from changing chain order. A
@@ -1060,6 +1189,18 @@ func decodeImmutableBlockBatch(
 	rawBlocks []immutable.Block,
 	verifyCfg lcommon.VerifyConfig,
 	workerCount int,
+) ([]gledger.Block, error) {
+	return decodeImmutableBlockBatchWithDecoder(
+		ctx, rawBlocks, verifyCfg, workerCount, decodeImmutableBlock,
+	)
+}
+
+func decodeImmutableBlockBatchWithDecoder(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	verifyCfg lcommon.VerifyConfig,
+	workerCount int,
+	decoder immutableBlockDecoder,
 ) ([]gledger.Block, error) {
 	if len(rawBlocks) == 0 {
 		return nil, nil
@@ -1072,10 +1213,7 @@ func decodeImmutableBlockBatch(
 	}
 	decodeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	queueSize := workerCount * 2
-	if queueSize > len(rawBlocks) {
-		queueSize = len(rawBlocks)
-	}
+	queueSize := min(workerCount*2, len(rawBlocks))
 	jobs := make(chan immutableDecodeJob, queueSize)
 	results := make(chan immutableDecodeResult, queueSize)
 	var workers sync.WaitGroup
@@ -1091,8 +1229,8 @@ func decodeImmutableBlockBatch(
 					if !ok {
 						return
 					}
-					block, err := gledger.NewBlockFromCbor(
-						job.block.Type, job.block.Cbor, verifyCfg,
+					block, err := decoder(
+						decodeCtx, job.index, job.block, verifyCfg,
 					)
 					select {
 					case results <- immutableDecodeResult{

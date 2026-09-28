@@ -213,9 +213,9 @@ type GovernanceStore interface {
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
-	// GetExpiringGovernanceProposals returns proposals whose
-	// `expires_epoch` is strictly less than the given epoch and that
-	// have not yet been enacted, expired, or soft-deleted. Used at
+	// GetExpiringGovernanceProposals returns unratified proposals whose
+	// `expires_epoch` is strictly less than the given epoch and that have
+	// not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark proposals expired (ineligible for further
 	// ratification). Their deposit is not returned yet -- see
 	// GetExpiredAwaitingDropGovernanceProposals.
@@ -358,14 +358,15 @@ type GovernanceStore interface {
 
 	// ClearCommitteeQuorum records that the committee has no
 	// enacted quorum as of the given slot. Used by NoConfidence
-	// enactment so GetCommitteeQuorum falls back to Conway
-	// genesis until a subsequent UpdateCommittee sets a new
-	// quorum.
+	// enactment so GetCommitteeQuorum falls back to Conway genesis
+	// until a subsequent UpdateCommittee sets a new quorum. A zero
+	// quorum is a valid threshold and is distinct from this clear.
 	ClearCommitteeQuorum(uint64, types.Txn) error
 
 	// GetCommitteeQuorum retrieves the latest enacted committee quorum.
 	// Returns (nil, nil) when no quorum has been enacted or when the
-	// most recent record is a ClearCommitteeQuorum marker.
+	// most recent record is a ClearCommitteeQuorum marker. A zero
+	// threshold is returned as a non-nil rational.
 	GetCommitteeQuorum(types.Txn) (*types.Rat, error)
 
 	// GetCommitteeMembers retrieves all active (non-deleted)
@@ -839,9 +840,8 @@ type UtxoStore interface {
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
-	// row are silently ignored (the SQL filter is deleted_slot == 0,
-	// so already-deleted rows don't get rewritten). Rollback
-	// un-deletion is handled by SetUtxosNotDeletedAfterSlot.
+	// row are silently ignored. Rollback un-deletion is handled by
+	// SetUtxosNotDeletedAfterSlot.
 	MarkUtxosDeletedAtSlot(
 		txn types.Txn,
 		refs []types.UtxoKey,
@@ -1216,6 +1216,18 @@ type StakeSnapshotStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
+	// boundary reconstruction attributes stake to at the snapshot slot,
+	// including pools that are no longer registered. It is the historical-path
+	// counterpart of GetDelegatedPoolKeyHashes, and exists for the same reason:
+	// the sigma_a denominator must be enumerated from delegations, not from the
+	// stake-pool set (dingo #4660).
+	GetEpochBoundaryDelegatedPoolKeyHashes(
+		uint64, // snapshotSlot
+		uint64, // boundarySlot
+		types.Txn,
+	) ([][]byte, error)
+
 	// GetPointerStakeInputsForPools returns the per-credential stake held at a
 	// pointer address for pools in poolKeyHashes, resolved and delegated as of
 	// slot. It is additive: the caller adds it to what
@@ -1407,6 +1419,16 @@ type CertificateStore interface {
 	// the given slot. This is used during chain rollbacks to undo certificate
 	// state changes.
 	DeleteCertificatesAfterSlot(uint64, types.Txn) error
+
+	// SetCommitteeAuthImmutableSlot records the live rollback-safe immutable
+	// slot -- the slot of the block securityParam blocks behind the current
+	// tip -- that committee hot-key authorization pruning uses to bound its
+	// retention window. known false means no live value is available and
+	// pruning falls back to its slot-window assumption alone. The
+	// certificate store cannot resolve this itself (sqlstore cannot import
+	// chain), so a periodic caller outside the database package pushes it in;
+	// see committee_prune.go for the retention rule this feeds.
+	SetCommitteeAuthImmutableSlot(slot uint64, known bool)
 }
 
 // MetadataStore composes every capability for callers that predate the
@@ -1802,6 +1824,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
+	// sequence row recorded at exactly slot. A Mithril restore writes the
+	// certified HeaderState counter map at its anchor slot and applies no
+	// block there, so no row at a recorded trust boundary means the certified
+	// counters were never imported.
+	PoolOpCertSequencesExistAtSlot(
+		uint64, // slot
+		types.Txn,
+	) (bool, error)
+
 	// LatestPoolOpCertSequences returns the highest observed op-cert sequence
 	// for every pool that has issued a block, keyed by pool key hash. Pools
 	// that have never issued one are absent rather than reported as zero.
@@ -1873,12 +1905,11 @@ type MetadataStore interface {
 	// first-ever registration is immediate). Callers must pass the current
 	// epoch's start slot, not an arbitrary point in the past.
 	//
-	// A key a pool proposed earlier in the same epoch and then superseded
-	// with a later re-registration (A -> B -> C) also still counts as
-	// claimed by that pool for the rest of the epoch, even though it is
-	// no longer that pool's pending value either: psVRFKeyHashes retains
-	// every key placed in psFutureStakePoolParams during the epoch, not
-	// only the current one.
+	// Only the pool's latest same-epoch registration reserves its key. A
+	// key proposed earlier in the same epoch and then superseded by a
+	// later re-registration (A -> B -> C) is freed once superseded: it was
+	// never placed in psStakePools and is no longer the pending value in
+	// psFutureStakePoolParams, so a different pool may claim it.
 	GetPoolByVrfKeyHash(
 		vrfKeyHash []byte,
 		epochStartSlot uint64,
@@ -2014,6 +2045,14 @@ type MetadataStore interface {
 		uint64, // expiryEpoch (0 = gate off)
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
+
+	// GetDelegatedPoolKeyHashes returns every pool key hash the live reward
+	// stake aggregate attributes stake to, including pools that are no longer
+	// registered. cardano-ledger's ssTotalActiveStake sums registered
+	// credentials holding a delegation without consulting the stake-pool set,
+	// so the snapshot's sigma_a denominator must cover these pools too or every
+	// reward on the node is under-credited by their share (dingo #4660).
+	GetDelegatedPoolKeyHashes(types.Txn) ([][]byte, error)
 
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 	// canonical account and live UTxO metadata. Node startup uses it as an
@@ -2203,6 +2242,14 @@ type MetadataStore interface {
 	// decoder for the CBOR to decode.
 	GetPParams(
 		uint64, // epoch
+		uint, // eraId
+		types.Txn,
+	) ([]models.PParams, error)
+
+	// ListPParamsForEra returns every stored protocol-parameter row for an era
+	// in insertion order. Callers that need the era's initial parameters use
+	// the first row rather than substituting a later parameter update.
+	ListPParamsForEra(
 		uint, // eraId
 		types.Txn,
 	) ([]models.PParams, error)

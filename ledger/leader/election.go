@@ -161,7 +161,13 @@ type EpochInfoProvider interface {
 	// schedule calculator threads this into VRF input construction
 	// and threshold derivation; passing the wrong mode produces a
 	// leader-slot list that cardano-node will reject.
-	ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode
+	//
+	// It returns an error when the mode cannot be resolved for the
+	// epoch, which for a future epoch means the era forecast the
+	// provider needs is unavailable. Producing a schedule from a
+	// guessed mode is worse than producing none, so the caller must
+	// decline the schedule rather than substitute a default.
+	ConsensusModeForEpoch(epoch uint64) (consensus.ConsensusMode, error)
 }
 
 // ActiveSlotCoeffRatProvider is an optional extension of EpochInfoProvider
@@ -913,7 +919,10 @@ func (e *Election) computeSchedule(
 		}
 	}
 
-	mode := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
+	mode, err := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve consensus mode: %w", err)
+	}
 
 	// Resolve the coefficient up front so an invalid genesis value fails here
 	// with a clear message instead of deep inside the VRF loop, and so the

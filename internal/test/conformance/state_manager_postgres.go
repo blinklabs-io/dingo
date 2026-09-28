@@ -206,7 +206,7 @@ func newPostgresResetter(dsn, schema string) (*backendResetter, error) {
 }
 
 // listPostgresConformanceTables returns schema's base tables, excluding
-// schema_migrations.
+// schema_migrations and node_settings_gate.
 //
 // schema_migrations is the migration runner's own bookkeeping table
 // (database/plugin/metadata/sqlstore/migrations/runner.go), not conformance
@@ -215,6 +215,17 @@ func newPostgresResetter(dsn, schema string) (*backendResetter, error) {
 // already-migrated schema would see an empty schema_migrations, decide every
 // migration still needed to run, and fail with a duplicate column/table error
 // partway through re-applying already-applied DDL.
+//
+// node_settings_gate is the same kind of bookkeeping: it records what the
+// database is (network, storage mode, genesis hashes, plugin selection, and
+// the Alonzo protocol-parameter unit migration v20 seeds), none of which a
+// vector writes and none of which a Reset invalidates. Emptying it drops that
+// v20 marker, and database.checkAlonzoPParamsUnit fails closed without it, so
+// the first Reset made every later construction against the same database --
+// which the remote backends share across the whole process -- fail with
+// "alonzo protocol-parameter unit marker is missing". The one gate a Reset
+// does invalidate is blob_store_id, and only on SQLite, whose blob wipe drops
+// that row on its own (see forgetSqliteBlobStoreID).
 func listPostgresConformanceTables(
 	ctx context.Context,
 	db *sql.DB,
@@ -223,7 +234,8 @@ func listPostgresConformanceTables(
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT table_name FROM information_schema.tables
-WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name <> 'schema_migrations'`,
+WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+  AND table_name NOT IN ('schema_migrations', 'node_settings_gate')`,
 		schema,
 	)
 	if err != nil {

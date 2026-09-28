@@ -136,6 +136,12 @@ type forgingMetrics struct {
 	// selection, validation, publication), by phase.
 	forgePanicRecovered *prometheus.CounterVec
 
+	// Outcomes of forge attempts whose first transaction selection was
+	// aborted by the chain moving underneath it, by result. Only
+	// incremented when the abort happened, so a quiet producer reports
+	// zero on every series.
+	forgeSelectionFallback *prometheus.CounterVec
+
 	// Leios EB forging outcomes
 	// leiosEbSelectionSeconds records how long endorser-block transaction
 	// selection ran. It is the dominant cost of a Leios leader slot and
@@ -334,6 +340,23 @@ func initForgingMetrics(
 			Help: "Leios endorser-block selection passes stopped by the slot deadline before considering every candidate",
 		},
 	)
+
+	m.forgeSelectionFallback = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_selection_fallback_total",
+			Help: "forge attempts whose transaction selection was aborted by a concurrent ledger publication or chain-tip move, by how the slot ended, counted after local adoption: retried (a later selection attempt produced the adopted block), empty (a transaction-free block was adopted instead), lost (the slot produced no adopted block)",
+		},
+		[]string{"result"},
+	)
+	// Materialize every result so dashboards and alerts see a zero series
+	// before the first abort rather than a missing one.
+	for _, result := range []string{
+		forgeSelectionResultRetried,
+		forgeSelectionResultEmpty,
+		forgeSelectionResultLost,
+	} {
+		m.forgeSelectionFallback.WithLabelValues(result)
+	}
 	m.leiosEbForged = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_forge_eb_forged_total",

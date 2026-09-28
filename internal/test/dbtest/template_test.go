@@ -97,7 +97,7 @@ func openMetadataFile(tb testing.TB, path string) *sql.DB {
 	tb.Helper()
 	raw, err := sql.Open(
 		"sqlite",
-		"file:"+path+"?_pragma=busy_timeout(30000)",
+		"file:"+path+"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
 	)
 	if err != nil {
 		tb.Fatalf("open %s: %v", path, err)
@@ -271,7 +271,7 @@ func writeSentinel(tb testing.TB, path string) {
 	tb.Helper()
 	raw, err := sql.Open(
 		"sqlite",
-		"file:"+path+"?_pragma=busy_timeout(30000)",
+		"file:"+path+"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
 	)
 	if err != nil {
 		tb.Fatalf("open %s: %v", path, err)

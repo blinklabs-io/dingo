@@ -57,9 +57,10 @@ var errExactAddressCandidateScanLimit = errors.New(
 
 // deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
 // Metadata remains the authoritative source of truth; blob deletions are
-// supplementary. The caller [*Txn] is ignored — this function always creates
-// and commits its own blob-only batches via the [Database], so callers should
-// not expect blob deletes to participate in any outer transaction.
+// supplementary. A caller [*Txn] holding a blob handle stages the deletes in
+// that transaction, so they commit or roll back with the metadata delete they
+// accompany; without one, this function creates and commits its own blob-only
+// batches via the [Database].
 //
 // Failures do not stop the remaining deletes, but they are counted and
 // reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
@@ -117,7 +118,34 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 		if blob == nil {
 			return types.ErrBlobStoreUnavailable
 		}
-		deleteBatch(blob, txn.Blob(), utxos)
+		// Stage only what that transaction can still hold. Past its budget
+		// the store rejects every further staged write, including the
+		// commit timestamp Txn.Commit puts into this same transaction, so
+		// an unbounded stage costs the caller its whole commit rather than
+		// just the tail of this set (blinklabs-io/dingo#4657). What is left
+		// unstaged is counted with the deletes that failed and reported
+		// through ErrBlobDeleteIncomplete below: the metadata naming these
+		// objects goes away either way, so both are orphans rather than
+		// silently dropped work.
+		staged := len(utxos)
+		if staged > 0 {
+			staged = stagedBlobDeleteLimit(
+				blob,
+				txn.Blob(),
+				len(types.UtxoBlobKey(utxos[0].TxId, utxos[0].OutputIdx)),
+				staged,
+			)
+		}
+		deleteBatch(blob, txn.Blob(), utxos[:staged])
+		if skipped := len(utxos) - staged; skipped > 0 {
+			deleteErrors += skipped
+			d.logger.Warn(
+				"UTxO blob deletes left unstaged to keep the transaction committable",
+				"skipped", skipped,
+				"staged", staged,
+				"total", len(utxos),
+			)
+		}
 	} else {
 		for start := 0; start < len(utxos); start += batchSize {
 			end := min(start+batchSize, len(utxos))
@@ -1211,7 +1239,9 @@ func (d *Database) UtxosByAssets(
 // refuse a target older than what routine cleanup has already destroyed)
 // need to agree on this key, so it is exported from here as the single
 // source of truth for its name rather than duplicated as a string literal
-// in both packages.
+// in both packages. UtxosDeleteConsumed removes rows outright, while
+// TruncateAfterSlot can only restore rows that still exist; a rollback below
+// this marker would therefore leave the live UTxO set incomplete.
 const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 
 func (d *Database) UtxosDeleteConsumed(
@@ -1242,6 +1272,16 @@ func (d *Database) UtxosDeleteConsumed(
 		)
 	}
 	utxoCount := len(utxos)
+	var pruneFloor uint64
+	if utxoCount > 0 {
+		// Read the floor before deleting anything. A malformed or unreadable
+		// value must not follow irreversible blob deletes. No-op sweeps skip
+		// this read so they do not fail on an unused corrupt floor.
+		pruneFloor, err = d.ConsumedUtxoPruneFloor(txn)
+		if err != nil {
+			return 0, err
+		}
+	}
 	deleteUtxos := make([]models.UtxoId, utxoCount)
 	for idx, utxo := range utxos {
 		deleteUtxos[idx] = models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx}
@@ -1264,6 +1304,19 @@ func (d *Database) UtxosDeleteConsumed(
 	err = d.utxoStore().DeleteUtxos(deleteUtxos, txn.Metadata())
 	if err != nil {
 		return 0, err
+	}
+
+	// Record how deep spent rows have been removed, in the same transaction
+	// that removes them. TruncateAfterSlot restores spent UTxOs with an
+	// UPDATE, which cannot reach a row that no longer exists, so a rollback
+	// below this slot silently leaves the live set short of every output
+	// consumed above it (issue #3766). The floor only ever moves up: a sweep
+	// at a lower slot does not make rows an earlier, higher sweep removed
+	// restorable again.
+	if utxoCount > 0 && slot > pruneFloor {
+		if err := d.writeConsumedUtxoPruneFloor(slot, txn); err != nil {
+			return 0, err
+		}
 	}
 
 	if owned {

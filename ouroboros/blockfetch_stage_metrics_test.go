@@ -73,3 +73,37 @@ func TestBlockfetchClientBlockRawNoopDecodeStageWhenMetricsDisabled(
 	require.NoError(t, o.blockfetchClientBlockRaw(ctx, blockType, raw))
 	assert.Nil(t, o.blockfetchMetrics)
 }
+
+// TestBlockfetchStageDurationBucketsCoverTailStalls pins
+// dingo_blockfetch_stage_duration_seconds to the same range as
+// dingo_ledger_block_stage_duration_seconds (see
+// ledger.TestBlockStageDurationBucketsCoverTailStalls). The two histograms are
+// documented as sharing one bucket range so they stay comparable across the
+// same block's stages, so this must widen in lockstep.
+func TestBlockfetchStageDurationBucketsCoverTailStalls(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
+
+	metric := &dto.Metric{}
+	require.NoError(
+		t,
+		o.blockfetchMetrics.stageDecode.(prometheus.Histogram).Write(metric),
+	)
+
+	buckets := metric.GetHistogram().GetBucket()
+	require.NotEmpty(
+		t,
+		buckets,
+		"histogram must have at least one finite bucket boundary",
+	)
+	largest := buckets[len(buckets)-1].GetUpperBound()
+	assert.GreaterOrEqual(
+		t,
+		largest,
+		318.0,
+		"largest finite bucket boundary (%vs) must match "+
+			"dingo_ledger_block_stage_duration_seconds's widened range",
+		largest,
+	)
+}

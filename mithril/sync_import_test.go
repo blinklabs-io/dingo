@@ -124,6 +124,31 @@ func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
 	require.True(t, cp.UpdatedAt.After(startedAt))
 }
 
+func TestResetMithrilBackfillCheckpointReplaysFromFirstBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      node.BackfillPhase,
+			LastSlot:   1042527,
+			TotalSlots: 2000000,
+			StartedAt:  time.Now().Add(-time.Hour),
+			UpdatedAt:  time.Now().Add(-time.Minute),
+			Completed:  true,
+		},
+		nil,
+	))
+
+	require.NoError(t, resetMithrilBackfillCheckpoint(db))
+	cp, err := db.Metadata().GetBackfillCheckpoint(node.BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	require.Zero(t, cp.LastSlot)
+	require.Zero(t, cp.TotalSlots)
+	require.False(t, cp.Completed)
+}
+
 func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 	t *testing.T,
 ) {

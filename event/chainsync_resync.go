@@ -34,6 +34,7 @@ const (
 	ChainsyncResyncReasonRollbackExceedsK                  = "rollback exceeds security parameter K"
 	ChainsyncResyncReasonRollbackExceedsMithril            = "rollback exceeds Mithril trust boundary"
 	ChainsyncResyncReasonPeerTipBehindMithril              = "peer tip behind Mithril trust boundary"
+	ChainsyncResyncReasonRollbackBelowUtxoPruneFloor       = "rollback below consumed UTxO prune floor"
 	ChainsyncResyncReasonForkResolutionExceedsK            = "fork resolution exceeds security parameter K"
 	ChainsyncResyncReasonLocalLedgerRollback               = "local ledger rollback"
 	ChainsyncResyncReasonLiveTxValidationRecovery          = "live tx validation recovery"

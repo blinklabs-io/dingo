@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// One full replay of the Amaru vector corpus is expensive -- it was 917s of
+// One full replay of the Blueprint vector corpus is expensive -- it was 917s of
 // this package's Linux CI time with real Postgres and MySQL attached -- and
 // the corpus exercises gouroboros ledger rules, which do not vary by storage
 // backend. Replaying it more than once per backend therefore buys no rule
@@ -199,6 +199,19 @@ func reportCorpus(
 		t.Logf(
 			"  Pass rate: %.1f%%",
 			float64(passed)/float64(len(results))*100,
+		)
+	}
+	coverage := conformance.SummarizeCoverage(results)
+	t.Logf("  Coverage groups: %d", len(coverage))
+	for _, key := range conformance.SortedCoverageKeys(coverage) {
+		counts := coverage[key]
+		t.Logf(
+			"  Coverage %s/%s: total=%d passed=%d failed=%d",
+			key.Era,
+			key.RuleFamily,
+			counts.Total,
+			counts.Passed,
+			counts.Failed,
 		)
 	}
 

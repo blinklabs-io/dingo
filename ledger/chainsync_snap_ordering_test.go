@@ -38,6 +38,16 @@ import (
 // the read point and the write point are deliberately different places in the
 // sequence. This test locks the read point; TestProcessEpochRollover_RewardOrdering
 // and TestProcessEpochRollover_OrderingInvariant lock the rest of the sequence.
+//
+// currentBoundarySPOStakeState is a second read at the same point, resolving
+// mark[NewEpoch] for RATIFY's SPO tally (dingo#4441). Its position is load
+// bearing for the same reason: when no SNAP-point distribution was stashed it
+// reconstructs the boundary itself, and the reconstruction counts reward
+// deltas up to and including the boundary slot. Moved below
+// applyPoolRetirements or ProcessEpoch it would absorb the deposit refunds and
+// enactment credits those rules record at that slot, and every SPO-gated
+// action would be tallied against a mark that cardano-ledger's SNAP never
+// sees.
 func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 	t.Parallel()
 
@@ -47,6 +57,7 @@ func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 		"applyStakeRewards",                 // pre-SNAP: delayed reward update
 		"applyMIRCerts",                     // pre-SNAP: Shelley-era INSTANT rule
 		"captureEpochBoundarySnapshotStake", // SNAP read point
+		"currentBoundarySPOStakeState",      // SNAP read point: RATIFY's copy
 		"applyPoolRetirements",              // post-SNAP: POOLREAP refunds
 		"ProcessEpoch",                      // post-SNAP: enactment credits
 		"captureEpochBoundarySnapshot",      // snapshot write, end of rollover

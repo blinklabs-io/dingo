@@ -148,6 +148,9 @@ var logPlainConfigFields = []string{
 	"FullPotRewardsEnabled",
 	"GenesisBootstrap.CorroborationPeers",
 	"GenesisBootstrap.Enabled",
+	"GenesisBootstrap.LimitOnPatienceCapacity",
+	"GenesisBootstrap.LimitOnPatienceEnabled",
+	"GenesisBootstrap.LimitOnPatienceRate",
 	"GenesisBootstrap.PromotionMinDiversityGroups",
 	"GenesisBootstrap.WindowSlots",
 	"HealthPort",
@@ -168,6 +171,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.AccountChunkSize",
 	"KoiosParity.Accounts",
 	"KoiosParity.AllowInsecureHTTP",
+	"KoiosParity.AllowPrivateAddresses",
 	"KoiosParity.CachePath",
 	"KoiosParity.Enabled",
 	"KoiosParity.GraceHours",
@@ -179,6 +183,8 @@ var logPlainConfigFields = []string{
 	"Logging.Level",
 	"MaxConnectionsPerIP",
 	"MaxInboundConns",
+	"MaxNtCConns",
+	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
 	"MetricsPort",
 	"Midnight.AuthTokenAssetName",
@@ -206,6 +212,7 @@ var logPlainConfigFields = []string{
 	"Mithril.DownloadIdleTimeout",
 	"Mithril.DownloadMaxIdleRetries",
 	"Mithril.Enabled",
+	"Mithril.PinnedDigest",
 	"Mithril.VerifyCertificates",
 	"Network",
 	"NetworkMagic",
@@ -229,6 +236,13 @@ var logPlainConfigFields = []string{
 	"ReconcileInterval",
 	"RelayPort",
 	"RunMode",
+	// The agent socket is a filesystem path, classified the same way as the
+	// key and certificate paths below it: the path is not the secret, the
+	// material behind it is, and an operator diagnosing a misconfigured
+	// socket needs to see which path failed.
+	"ShelleyKESAgentMode",
+	"ShelleyKESAgentSignTimeout",
+	"ShelleyKESAgentSocket",
 	"ShelleyKESKey",
 	"ShelleyOperationalCertificate",
 	"ShelleyVRFKey",

@@ -83,6 +83,13 @@ var LockContentionBenchmarks = []string{
 	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/snapshot_parallel_bench_test.go
 }
 
+// ledger/benchmark_test.go's RealData query benchmarks are deliberately
+// absent from both lists. Seeding writes fixture blocks to the block store,
+// but the accounts, pools, DReps, datums, protocol-parameter, nonce and
+// registration tables they query are populated by applying a block rather
+// than storing one, so each still times the same table miss its NoData twin
+// times. There is no hit path for benchcheck to detect a regression in.
+
 // TrackedBenchmarks is the full set of benchmarks compared for CI regression
 // detection: CuratedBenchmarks plus LockContentionBenchmarks. The Makefile
 // bench-ci target concatenates both `go test` invocations' output into a

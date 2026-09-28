@@ -265,14 +265,14 @@ func TestLoadUtxoAssetsBatchPreservesGrouping(t *testing.T) {
 	store := newTestStore(t)
 	_, err := store.writeDB.Exec(`
 CREATE TABLE asset (
- name BLOB, name_hex BLOB, policy_id BLOB, fingerprint BLOB,
+ name BLOB, policy_id BLOB, fingerprint BLOB,
  id INTEGER PRIMARY KEY, utxo_id INTEGER, amount TEXT
 )`)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`
-INSERT INTO asset (name, name_hex, policy_id, fingerprint, id, utxo_id, amount)
-VALUES ('a', '61', 'p', 'f1', 1, 10, '18446744073709551615'),
-       ('b', '62', 'p', 'f2', 2, 20, '7')`)
+INSERT INTO asset (name, policy_id, fingerprint, id, utxo_id, amount)
+VALUES ('a', 'p', 'f1', 1, 10, '18446744073709551615'),
+       ('b', 'p', 'f2', 2, 20, '7')`)
 	require.NoError(t, err)
 	utxos := map[string][]models.Utxo{
 		"first":  {{ID: 10}},
@@ -302,13 +302,13 @@ func TestLoadUtxoAssetsDeduplicatesIDsAcrossChunks(t *testing.T) {
 	store := newTestStore(t)
 	_, err := store.writeDB.Exec(`
 CREATE TABLE asset (
- name BLOB, name_hex BLOB, policy_id BLOB, fingerprint BLOB,
+ name BLOB, policy_id BLOB, fingerprint BLOB,
  id INTEGER PRIMARY KEY, utxo_id INTEGER, amount TEXT
 )`)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`
-INSERT INTO asset (name, name_hex, policy_id, fingerprint, id, utxo_id, amount)
-VALUES ('a', '61', 'p', 'f1', 1, 10, '1')`)
+INSERT INTO asset (name, policy_id, fingerprint, id, utxo_id, amount)
+VALUES ('a', 'p', 'f1', 1, 10, '1')`)
 	require.NoError(t, err)
 
 	// Use enough repeated instances to force the same ID into two parameter

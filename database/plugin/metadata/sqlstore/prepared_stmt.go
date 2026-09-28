@@ -30,10 +30,13 @@ var hotStatements = []string{
 	sumCredentialUtxoStakeQuery,
 	rewardLiveStakeAccountQuery,
 	rewardLiveStakeUpsertQuery,
+	rewardLiveStakeUtxoStakeQuery,
 	insertUtxoQuery,
 	insertUtxoQueryIgnoreConflict,
 	importAssetQuery,
 	getAssetIDQuery,
+	getLiveUtxoByRefQuery,
+	getUtxoIncludingSpentByRefQuery,
 }
 
 // cacheableForDialect reports whether query is safe to serve from the

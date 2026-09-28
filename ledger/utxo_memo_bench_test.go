@@ -68,29 +68,6 @@ const (
 	utxoMemoBenchByronSlotSecs = 20
 )
 
-func utxoMemoBenchSlotToTime(slot uint64) (time.Time, error) {
-	if slot < utxoMemoBenchByronSlots {
-		return time.Unix(
-			utxoMemoBenchSystemStart+int64(slot)*utxoMemoBenchByronSlotSecs,
-			0,
-		).UTC(), nil
-	}
-	byronEnd := int64(utxoMemoBenchSystemStart) +
-		int64(utxoMemoBenchByronSlots)*utxoMemoBenchByronSlotSecs
-	return time.Unix(byronEnd+int64(slot-utxoMemoBenchByronSlots), 0).UTC(), nil
-}
-
-func utxoMemoBenchTimeToSlot(t time.Time) (uint64, error) {
-	byronEnd := int64(utxoMemoBenchSystemStart) +
-		int64(utxoMemoBenchByronSlots)*utxoMemoBenchByronSlotSecs
-	if t.Unix() < byronEnd {
-		return uint64(
-			(t.Unix() - utxoMemoBenchSystemStart) / utxoMemoBenchByronSlotSecs,
-		), nil
-	}
-	return utxoMemoBenchByronSlots + uint64(t.Unix()-byronEnd), nil
-}
-
 func readUtxoMemoBenchFixture(tb testing.TB, name string) []byte {
 	tb.Helper()
 	raw, err := os.ReadFile(filepath.Join(utxoMemoBenchFixtureDir, name))
@@ -241,8 +218,8 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 	// The production (*LedgerState).SlotToTime path (ledger/slot.go) has no
 	// Byron-era segment here: it extrapolates the single flat-rate epoch
 	// below (1000ms/slot from slot 0) using only ShelleyGenesis().SystemStart.
-	// Real Preprod mixes 86400 Byron slots at 20s with 1s Shelley+ slots
-	// (utxoMemoBenchSlotToTime above), so SystemStart is back-dated by the
+	// Real Preprod mixes 86400 Byron slots at 20s with 1s Shelley+ slots.
+	// SystemStart is back-dated by the
 	// Byron/Shelley slot-length difference so that a flat 1s/slot walk from
 	// slot 0 lands on the same wall-clock instant at the fixture's real slot
 	// that the real mixed schedule does.

@@ -17,48 +17,14 @@
 package gcs
 
 import (
-	"fmt"
-	"io"
 	"log/slog"
+
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/logadapter"
 )
 
 // GcsLogger is a wrapper type to give our logger a consistent interface
-type GcsLogger struct {
-	logger *slog.Logger
-}
+type GcsLogger = logadapter.Logger
 
 func NewGcsLogger(logger *slog.Logger) *GcsLogger {
-	if logger == nil {
-		// Create logger to throw away logs
-		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-	return &GcsLogger{logger: logger}
-}
-
-func (g *GcsLogger) Infof(msg string, args ...any) {
-	g.logger.Info(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (g *GcsLogger) Warningf(msg string, args ...any) {
-	g.logger.Warn(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (g *GcsLogger) Debugf(msg string, args ...any) {
-	g.logger.Debug(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (g *GcsLogger) Errorf(msg string, args ...any) {
-	g.logger.Error(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
+	return logadapter.New(logger)
 }

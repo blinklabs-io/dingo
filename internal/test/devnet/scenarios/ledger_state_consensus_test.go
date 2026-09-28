@@ -18,21 +18,24 @@ package scenarios
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/blinklabs-io/dingo/internal/test/devnet"
+	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
 
 // TestLedgerStateConsensus is Dingo's automated cross-node ledger-state
 // comparison against cardano-node (blinklabs-io/dingo#1900): it samples
 // dingo-producer's and cardano-producer's ledger state (current protocol
-// parameters, stake distribution, and the whole UTxO set, normalized into a
-// comparable form) at several points during the run and fails with a
-// diagnostic listing every divergence found.
+// parameters, stake distribution, ADA pots, absolute stake snapshots, and
+// the whole UTxO set) in epochs 1 and 2. This exercises both bootstrap reward
+// updates instead of sampling several points within an arbitrary epoch.
 //
 // Sampling, not true per-block comparison: Dingo's LocalStateQuery server
 // (ouroboros/localstatequery.go) currently answers every Acquire against
@@ -47,7 +50,7 @@ import (
 // the query round trip, discarding and retrying the sample if it did. This
 // still anchors every successful sample to one exact, agreed-upon block —
 // it just doesn't visit every block, since finding a settled common tip and
-// running three LocalStateQuery calls per node is far more expensive than a
+// running the LocalStateQuery calls per node is far more expensive than a
 // chain-tip poll. Revisit this once #382 lands: Acquire(point) would let
 // this walk every block, not just periodic settled samples.
 func TestLedgerStateConsensus(t *testing.T) {
@@ -72,16 +75,27 @@ func TestLedgerStateConsensus(t *testing.T) {
 	initialTip, err := h.GetChainTip(dingoEP)
 	require.NoError(t, err, "failed to get initial dingo-producer tip")
 
-	const (
-		samples             = 3
-		slotsBetweenSamples = 15
-	)
+	const slotsBetweenSamples = 15
 	sampleTimeout := time.Duration(slotsBetweenSamples)*cfg.SlotDuration() +
 		cfg.ExpectedBlockTime()*10
+	require.Less(
+		t,
+		initialTip.SlotNumber,
+		2*cfg.EpochLength,
+		"bootstrap conformance needs a fresh devnet; run with -run TestLedgerStateConsensus",
+	)
 
-	for i := 1; i <= samples; i++ {
-		targetSlot := initialTip.SlotNumber + uint64(i*slotsBetweenSamples)
-		h.WaitForNodeSlot(dingoEP, targetSlot, sampleTimeout)
+	var epoch1Pots localstatequery.AccountState
+	for _, targetSlot := range []uint64{
+		cfg.EpochLength + slotsBetweenSamples,
+		2*cfg.EpochLength + slotsBetweenSamples,
+		2*cfg.EpochLength + 2*slotsBetweenSamples,
+	} {
+		h.WaitForNodeSlot(
+			dingoEP,
+			targetSlot,
+			cfg.EpochDuration()+sampleTimeout,
+		)
 		h.WaitForNodeSlot(cardanoEP, targetSlot, sampleTimeout)
 
 		dingoState, cardanoState, tip := sampleLedgerStateAtStableTip(
@@ -89,18 +103,50 @@ func TestLedgerStateConsensus(t *testing.T) {
 			sampleTimeout,
 		)
 
-		diff := nodeparity.DiffSnapshots(dingoState, cardanoState)
+		epoch := tip.SlotNumber / cfg.EpochLength
+		require.Equal(t, targetSlot/cfg.EpochLength, epoch,
+			"stable sample missed the intended bootstrap epoch")
+		diff := nodeparity.DiffSnapshots(dingoState.ledger, cardanoState.ledger)
 		require.True(t, diff.Empty(),
 			"ledger state diverged between dingo-producer and"+
 				" cardano-producer at slot %d (block %d):\n%s",
 			tip.SlotNumber, tip.BlockNumber, strings.Join(diff.Lines(), "\n"),
 		)
+		require.Equal(
+			t,
+			cardanoState.pots,
+			dingoState.pots,
+			"treasury/reserves diverged at epoch %d slot %d",
+			epoch,
+			tip.SlotNumber,
+		)
+		require.Equal(
+			t,
+			cardanoState.stake,
+			dingoState.stake,
+			"absolute stake snapshots diverged at epoch %d slot %d",
+			epoch,
+			tip.SlotNumber,
+		)
+		if epoch == 1 {
+			require.Zero(t, cardanoState.pots.Treasury,
+				"d=0 genesis has no expansion from empty previous block counts")
+			epoch1Pots = cardanoState.pots
+		} else {
+			require.Positive(t, cardanoState.pots.Treasury,
+				"epoch 0 blocks must fund the update applied in epoch 2")
+			require.Less(t, cardanoState.pots.Reserves, epoch1Pots.Reserves)
+		}
 
 		t.Logf(
 			"ledger state matched at slot %d (block %d):"+
 				" %d utxos, %d pools in stake distribution",
-			tip.SlotNumber, tip.BlockNumber,
-			len(dingoState.UTxOEntries), len(dingoState.StakeDistribution),
+			tip.SlotNumber,
+			tip.BlockNumber,
+			len(
+				dingoState.ledger.UTxOEntries,
+			),
+			len(dingoState.ledger.StakeDistribution),
 		)
 	}
 }
@@ -113,27 +159,8 @@ func TestLedgerStateConsensus(t *testing.T) {
 // be meaningless noise rather than a real conformance failure, so the
 // sample is discarded and retried instead.
 //
-// Uses require.Eventually with harness.go's own 2*time.Second polling
-// interval (see e.g. WaitForNodeSlot). timeout is the caller's own
-// sampleTimeout (the same budget already given to each WaitForNodeSlot call
-// before this runs), not an independently-derived value: this helper's own
-// retries share the same inter-sample time budget the outer loop already
-// committed to, rather than a separately-computed timeout that could run
-// longer than the gap between two sample points. If this helper were
-// allowed to retry past that gap, the next iteration's WaitForNodeSlot
-// would find its target slot already passed and return immediately,
-// silently clustering samples at whatever tip happened to be current
-// instead of the evenly-spaced points across the run the test intends.
-// Transient tip divergence between two independently forging producers
-// around block-adoption time is the normal case here, not a rare one, so a
-// tight fixed-count retry with no backoff could exhaust its budget in well
-// under one block interval on a legitimate run -- hence a duration budget,
-// not an attempt count. Writing the result into the enclosing closure's
-// variables from inside the condition function, then reading them only
-// after require.Eventually returns, mirrors existing harness helpers --
-// testify's Eventually never runs the condition function twice concurrently
-// (it waits for one tick's result before scheduling the next), so this
-// needs no additional locking.
+// Queries and retries share the sample timeout. The caller also verifies
+// the observed epoch so a delayed sample cannot silently miss a boundary.
 func sampleLedgerStateAtStableTip(
 	t *testing.T,
 	h *devnet.TestHarness,
@@ -141,14 +168,16 @@ func sampleLedgerStateAtStableTip(
 	dingoNtc, cardanoNtc string,
 	magic uint32,
 	timeout time.Duration,
-) (dingoState, cardanoState *nodeparity.Snapshot, tip devnet.ChainTip) {
+) (dingoState, cardanoState *ledgerConsensusSample, tip devnet.ChainTip) {
 	t.Helper()
 
 	const pollInterval = 2 * time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
 
 	var (
 		attempt                int
-		resultDingo, resultRef *nodeparity.Snapshot
+		resultDingo, resultRef *ledgerConsensusSample
 		resultTip              devnet.ChainTip
 	)
 	require.Eventually(t, func() bool {
@@ -179,7 +208,7 @@ func sampleLedgerStateAtStableTip(
 			return false
 		}
 
-		ds, err := nodeparity.SnapshotAtTip(t.Context(), dingoNtc, magic)
+		ds, err := queryLedgerConsensusSample(ctx, dingoNtc, magic)
 		if err != nil {
 			t.Logf(
 				"sampleLedgerStateAtStableTip: attempt %d: dingo-producer"+
@@ -187,7 +216,7 @@ func sampleLedgerStateAtStableTip(
 			)
 			return false
 		}
-		cs, err := nodeparity.SnapshotAtTip(t.Context(), cardanoNtc, magic)
+		cs, err := queryLedgerConsensusSample(ctx, cardanoNtc, magic)
 		if err != nil {
 			t.Logf(
 				"sampleLedgerStateAtStableTip: attempt %d: cardano-producer"+
@@ -237,4 +266,43 @@ func sampleLedgerStateAtStableTip(
 	require.NotNil(t, resultRef, "internal error: no cardano-producer result")
 
 	return resultDingo, resultRef, resultTip
+}
+
+type ledgerConsensusSample struct {
+	ledger *nodeparity.Snapshot
+	pots   localstatequery.AccountState
+	stake  *localstatequery.StakeSnapshotsResult
+}
+
+// The caller's tip sandwich covers every query, including the second acquire.
+func queryLedgerConsensusSample(
+	ctx context.Context, addr string, magic uint32,
+) (*ledgerConsensusSample, error) {
+	conn, err := nodeparity.Dial(ctx, addr, magic)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close() //nolint:errcheck
+	snapshot, err := nodeparity.QuerySnapshot(conn, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := conn.LocalStateQuery().Client
+	if err := client.Acquire(nil); err != nil {
+		return nil, err
+	}
+	defer client.Release() //nolint:errcheck
+	pots, err := client.GetAccountState()
+	if err != nil {
+		return nil, fmt.Errorf("account state: %w", err)
+	}
+	stake, err := client.GetStakeSnapshots(nil)
+	if err != nil {
+		return nil, fmt.Errorf("stake snapshots: %w", err)
+	}
+	return &ledgerConsensusSample{
+		ledger: snapshot,
+		pots:   pots.State,
+		stake:  stake,
+	}, nil
 }

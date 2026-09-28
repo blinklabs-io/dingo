@@ -200,6 +200,37 @@ func TestImportUtxosReusesCachedStatementAcrossTransactions(t *testing.T) {
 	)
 }
 
+func TestImportUtxosDeferredRewardLiveStakeRefreshRebuildsCorrectly(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	utxo := *utxoForInsertCacheTest(23, 0, 5_000_000)
+	utxo.CredentialTag = 0
+	utxo.StakingKey = bytes.Repeat([]byte{0x23}, lcommon.AddressHashSize)
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(
+		[]models.Utxo{utxo},
+		nil,
+	))
+	var aggregateCount int
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		"SELECT COUNT(*) FROM reward_live_stake",
+	).Scan(&aggregateCount))
+	require.Zero(t, aggregateCount,
+		"deferred import must not refresh the aggregate per batch")
+
+	require.NoError(t, store.RebuildRewardLiveStake(utxo.AddedSlot, nil))
+	var utxoStake string
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		"SELECT utxo_stake FROM reward_live_stake WHERE credential_tag = 0 AND staking_key = ?",
+		utxo.StakingKey,
+	).Scan(&utxoStake))
+	require.Equal(t, "5000000", utxoStake)
+}
+
 // TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises
 // the production shape: one import batch keeps a write transaction open while
 // it inserts many outputs. Reusing one Tx-scoped derivative keeps database/sql
@@ -247,7 +278,6 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 	utxo.Assets = []models.Asset{
 		{
 			Name:        []byte("token"),
-			NameHex:     []byte("746f6b656e"),
 			PolicyId:    bytes.Repeat([]byte{0xAA}, 28),
 			Fingerprint: []byte("asset1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 			Amount:      types.Uint64(42),
@@ -269,7 +299,6 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 	utxo2.Assets = []models.Asset{
 		{
 			Name:        []byte("token2"),
-			NameHex:     []byte("746f6b656e32"),
 			PolicyId:    bytes.Repeat([]byte{0xBB}, 28),
 			Fingerprint: []byte("asset1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 			Amount:      types.Uint64(7),
@@ -327,7 +356,6 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 				utxo.Assets = []models.Asset{
 					{
 						Name:     []byte("token"),
-						NameHex:  []byte("746f6b656e"),
 						PolicyId: bytes.Repeat([]byte{0xCC}, 28),
 						Fingerprint: []byte(
 							"asset1cccccccccccccccccccccccccccccccccccccccc",

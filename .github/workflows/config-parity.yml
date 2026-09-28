@@ -1,14 +1,29 @@
 name: config-parity
 
+# Reports when blinklabs-io/docker-cardano-configs has moved ahead of the tag
+# the Dockerfile pins, which means a tag bump is due.
+#
+# The gating half of this check -- comparing config/cardano/ against the
+# cardano-configs image tag the Dockerfile actually pins -- now runs as a step
+# of the `lint` job in go-test.yml and publish.yml, so it sits in stage 1 of
+# the pipeline and fails a change before four platform jobs start. It was a
+# workflow of its own here, which cost a runner slot per pull request and
+# could not gate anything.
+#
+# This job stays separate because it has no pull-request trigger at all: drift
+# introduced in the configs repository produces no event in this one, hence
+# the schedule. It does not gate merges -- the pinned-tag comparison in `lint`
+# stays green while docker-cardano-configs moves ahead of that pin, and this
+# is what says it has.
+#
 # The network configs under config/cardano/ exist twice: embedded in the
-# binary here (config/cardano/embed.go), and in
-# blinklabs-io/docker-cardano-configs, which the release image ships as
-# /opt/cardano/config/ (see the cardano-configs stage in the Dockerfile) and
-# which downstream tooling copies out of the image. CARDANO_NETWORK=<net>
-# resolves to one or the other depending on how dingo was deployed, so the
-# same network name means the same chain only while the two stay identical.
+# binary here (config/cardano/embed.go), and in docker-cardano-configs, which
+# the release image ships as /opt/cardano/config/ (see the cardano-configs
+# stage in the Dockerfile) and which downstream tooling copies out of the
+# image. CARDANO_NETWORK=<net> resolves to one or the other depending on how
+# dingo was deployed, so the same network name means the same chain only while
+# the two stay identical.
 on:
-  pull_request:
   schedule:
     - cron: '0 7 * * 1' # Monday 07:00 UTC
   workflow_dispatch: {}
@@ -17,37 +32,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Gates merges. Compares against the cardano-configs image tag the
-  # Dockerfile pins, which is what a built image actually contains, so a
-  # config change is satisfiable inside one pull request here: bump the
-  # pinned tag and update config/cardano/ in the same commit. Comparing
-  # against the configs repository's main branch instead would pass as soon
-  # as that branch moved, while the image this repository builds still
-  # shipped the old config.
-  config-parity:
-    name: config-parity
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          persist-credentials: false
-      - name: config-parity
-        # Run through the Makefile so this CI check and `make config-parity`
-        # cannot drift apart.
-        run: make config-parity
-
-  # Does not gate merges. The job above pins to a released image, so it stays
-  # green while docker-cardano-configs moves ahead of that pin; this reports
-  # when it has, meaning a tag bump is due. Drift introduced in that
-  # repository produces no event here, hence the schedule.
   config-upstream:
     name: config-upstream
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:

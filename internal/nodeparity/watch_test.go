@@ -31,20 +31,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
-// unreachableAddr binds a TCP listener on an OS-assigned free port and
-// immediately closes it, returning that address. Nothing is listening
-// there afterward, so dialing it fails fast and deterministically --
-// unlike a hardcoded port number, this can never collide with something
-// already running on the test host.
-func unreachableAddr(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-	return addr
-}
-
 // TestNextBackoff_DoublesUntilCap covers the reconnect delay's growth for a
 // session that never gets established (a node that will not talk to us at
 // all): each failure must double the previous delay, and the delay must
@@ -154,7 +140,7 @@ func TestBlockEventSignal_NotifyNeverBlocks(t *testing.T) {
 }
 
 // TestWatchBlocks_CloseStopsPromptly covers Watcher lifecycle management
-// against a node that will never accept a connection: WatchBlocks starts a
+// against a node that will never accept a session: WatchBlocks starts a
 // background reconnect loop immediately, and Close must cancel it and wait
 // for that goroutine to actually exit, rather than returning while it is
 // still running (which would leak the goroutine) or hanging forever
@@ -162,7 +148,7 @@ func TestBlockEventSignal_NotifyNeverBlocks(t *testing.T) {
 func TestWatchBlocks_CloseStopsPromptly(t *testing.T) {
 	t.Parallel()
 
-	addr := unreachableAddr(t)
+	addr := refusingAddr(t)
 	w := WatchBlocks(context.Background(), addr, 2, nil)
 
 	done := make(chan struct{})
@@ -271,13 +257,13 @@ func TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer(t *testing.T) {
 // TestWatchBlocks_RetriesOnUnreachableAddr covers the actual retry
 // behavior end to end (short of a real ChainSync server, which would
 // require new shared mock infrastructure this package does not add
-// locally): pointed at an address nothing is listening on, the watcher
+// locally): pointed at a listener that drops every connection, the watcher
 // must keep attempting to reconnect on its own, logging each attempt,
 // rather than giving up after the first failure.
 func TestWatchBlocks_RetriesOnUnreachableAddr(t *testing.T) {
 	t.Parallel()
 
-	addr := unreachableAddr(t)
+	addr := refusingAddr(t)
 
 	var mu sync.Mutex
 	attempts := 0

@@ -15,49 +15,14 @@
 package badger
 
 import (
-	"fmt"
-	"io"
 	"log/slog"
+
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/logadapter"
 )
 
 // BadgerLogger is a wrapper type to give our logger the expected interface
-type BadgerLogger struct {
-	logger *slog.Logger
-}
+type BadgerLogger = logadapter.Logger
 
 func NewBadgerLogger(logger *slog.Logger) *BadgerLogger {
-	if logger == nil {
-		// Create logger to throw away logs
-		// We do this so we don't have to add guards around every log operation
-		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
-	return &BadgerLogger{logger: logger}
-}
-
-func (b *BadgerLogger) Infof(msg string, args ...any) {
-	b.logger.Info(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (b *BadgerLogger) Warningf(msg string, args ...any) {
-	b.logger.Warn(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (b *BadgerLogger) Debugf(msg string, args ...any) {
-	b.logger.Debug(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
-}
-
-func (b *BadgerLogger) Errorf(msg string, args ...any) {
-	b.logger.Error(
-		fmt.Sprintf(msg, args...),
-		"component", "database",
-	)
+	return logadapter.New(logger)
 }

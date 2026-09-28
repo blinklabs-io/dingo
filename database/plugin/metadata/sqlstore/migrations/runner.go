@@ -690,15 +690,18 @@ func execDDL(
 	for index, statement := range statements {
 		if _, err := exec.ExecContext(ctx, statement); err != nil {
 			if dialect == "mysql" &&
-				isMySQLDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
+				(isMySQLDDLAlreadyAppliedOnConn(ctx, exec, statement, err) ||
+					isMySQLDropAlreadyAppliedOnConn(ctx, exec, statement, err)) {
 				continue
 			}
 			if dialect == "sqlite" &&
-				isSQLiteDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
+				(isSQLiteDDLAlreadyAppliedOnConn(ctx, exec, statement, err) ||
+					isSQLiteDropColumnAlreadyAppliedOnConn(ctx, exec, statement, err)) {
 				continue
 			}
 			if dialect == "postgres" &&
-				isPostgresDDLAlreadyAppliedOnConn(ctx, exec, statement, err) {
+				(isPostgresDDLAlreadyAppliedOnConn(ctx, exec, statement, err) ||
+					isPostgresDropColumnAlreadyAppliedOnConn(ctx, exec, statement, err)) {
 				continue
 			}
 			return fmt.Errorf("statement %d: %w", index+1, err)
@@ -821,14 +824,54 @@ func isPostgresDDLAlreadyAppliedOnConn(
 	var reported sql.NullString
 	if queryErr := conn.QueryRowContext(
 		ctx,
-		`SELECT data_type FROM information_schema.columns
-WHERE table_name = $1 AND column_name = $2`,
+		postgresColumnTypeQuery,
 		table,
 		column,
 	).Scan(&reported); queryErr != nil {
 		return false
 	}
 	return addColumnTypeMatches(reported, definition)
+}
+
+// postgresColumnTypeQuery reports an existing column's declared type, scoped
+// to the one relation the migration's own unqualified DDL resolved against.
+//
+// to_regclass applies the connection's search_path exactly as the ALTER TABLE
+// statement did, so the answer describes the table the statement touched. A
+// bare "WHERE table_name = $1" would instead match a same-named table in any
+// schema of the same database, and a Dingo metadata schema is not necessarily
+// alone in its database: the postgres provider's schema is operator-selectable
+// through search_path (see storagetest.PostgresDSNWithSearchPath), the
+// conformance and storage-migration suites pin one schema per run inside a
+// shared database, and DATABASE.md already records why resetDatabase's
+// schema_migrations exemption is keyed on (schema, name) rather than on name
+// alone. Resolving to NULL yields no rows, which each caller treats as "not
+// determinable" rather than as a confirmed answer.
+const postgresColumnTypeQuery = `SELECT c.data_type
+FROM pg_class rel
+JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+JOIN information_schema.columns c
+  ON c.table_schema = ns.nspname AND c.table_name = rel.relname
+WHERE rel.oid = to_regclass($1) AND c.column_name = $2`
+
+// postgresRelationExists reports whether an unqualified table name resolves to
+// a relation on this connection. A DROP COLUMN guard needs it to tell "the
+// column is already gone" apart from "the whole table is missing"; only the
+// former is an idempotent replay.
+func postgresRelationExists(
+	ctx context.Context,
+	conn ddlExecer,
+	table string,
+) bool {
+	var resolved sql.NullString
+	if err := conn.QueryRowContext(
+		ctx,
+		`SELECT to_regclass($1)::text`,
+		table,
+	).Scan(&resolved); err != nil {
+		return false
+	}
+	return resolved.Valid
 }
 
 func isSQLiteDDLAlreadyAppliedOnConn(
@@ -857,6 +900,155 @@ func isSQLiteDDLAlreadyAppliedOnConn(
 		return false
 	}
 	return addColumnTypeMatches(reported, definition)
+}
+
+// parseDropColumnStatement extracts the table and column named by an
+// ALTER TABLE <table> DROP COLUMN <column> statement, mirroring
+// parseAddColumnStatement's quoting handling.
+func parseDropColumnStatement(statement string) (string, string, bool) {
+	fields := strings.Fields(
+		strings.TrimSuffix(strings.TrimSpace(statement), ";"),
+	)
+	if len(fields) != 6 ||
+		!strings.EqualFold(fields[0], "ALTER") ||
+		!strings.EqualFold(fields[1], "TABLE") ||
+		!strings.EqualFold(fields[3], "DROP") ||
+		!strings.EqualFold(fields[4], "COLUMN") {
+		return "", "", false
+	}
+	table := strings.Trim(fields[2], "`\"")
+	column := strings.Trim(fields[5], "`\"")
+	if table == "" || column == "" {
+		return "", "", false
+	}
+	return table, column, true
+}
+
+// parseMySQLDropIndexStatement extracts the index and table names from the
+// translated "DROP INDEX <name> ON <table>" MySQL form (see
+// translateSchemaSQLInSchema's `idx_asset_name_hex`/`idx_asset_amount`/
+// `idx_asset_fingerprint`/`idx_committee_member_cold_cred_hash` rewrites).
+// SQLite and PostgreSQL keep
+// "DROP INDEX IF EXISTS", which those engines already tolerate on replay
+// without reaching this guard at all, so only the MySQL form needs it.
+func parseMySQLDropIndexStatement(statement string) (string, string, bool) {
+	fields := strings.Fields(
+		strings.TrimSuffix(strings.TrimSpace(statement), ";"),
+	)
+	if len(fields) != 5 ||
+		!strings.EqualFold(fields[0], "DROP") ||
+		!strings.EqualFold(fields[1], "INDEX") ||
+		!strings.EqualFold(fields[3], "ON") {
+		return "", "", false
+	}
+	name := strings.Trim(fields[2], "`\"")
+	table := strings.Trim(fields[4], "`\"")
+	if name == "" || table == "" {
+		return "", "", false
+	}
+	return name, table, true
+}
+
+// isSQLiteDropColumnAlreadyAppliedOnConn is the DROP COLUMN mirror of
+// isSQLiteDDLAlreadyAppliedOnConn's ADD COLUMN handling: it reports whether
+// an ALTER TABLE ... DROP COLUMN expand statement failed only because a
+// previous run of the same expand phase already dropped it. Needed once a
+// migration removes rather than adds a column (dingo#4464 asset.name_hex was
+// the first).
+func isSQLiteDropColumnAlreadyAppliedOnConn(
+	ctx context.Context,
+	conn ddlExecer,
+	statement string,
+	err error,
+) bool {
+	if !strings.Contains(strings.ToLower(err.Error()), "no such column") {
+		return false
+	}
+	table, column, ok := parseDropColumnStatement(statement)
+	if !ok {
+		return false
+	}
+	var present sql.NullString
+	queryErr := conn.QueryRowContext(
+		ctx,
+		"SELECT name FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	).Scan(&present)
+	// A row means the column is still there, so the "no such column" error
+	// names something else (a stale index expression, a typo) and must not be
+	// swallowed.
+	return errors.Is(queryErr, sql.ErrNoRows)
+}
+
+// isPostgresDropColumnAlreadyAppliedOnConn is the DROP COLUMN mirror of
+// isPostgresDDLAlreadyAppliedOnConn's ADD COLUMN handling.
+func isPostgresDropColumnAlreadyAppliedOnConn(
+	ctx context.Context,
+	conn ddlExecer,
+	statement string,
+	err error,
+) bool {
+	if !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+		return false
+	}
+	table, column, ok := parseDropColumnStatement(statement)
+	if !ok {
+		return false
+	}
+	// A table that does not resolve at all means the "does not exist" error
+	// names the relation rather than the column, which is not a replay.
+	if !postgresRelationExists(ctx, conn, table) {
+		return false
+	}
+	var present sql.NullString
+	queryErr := conn.QueryRowContext(
+		ctx,
+		postgresColumnTypeQuery,
+		table,
+		column,
+	).Scan(&present)
+	return errors.Is(queryErr, sql.ErrNoRows)
+}
+
+// isMySQLDropAlreadyAppliedOnConn reports whether a DROP COLUMN or the
+// translated "DROP INDEX ... ON ..." expand statement failed only because a
+// previous run of the same expand phase already dropped it. MySQL raises
+// error 1091 ("check that column/key exists") for both a missing column and a
+// missing index, so one message check dispatches to whichever existence
+// query the statement shape calls for.
+func isMySQLDropAlreadyAppliedOnConn(
+	ctx context.Context,
+	conn ddlExecer,
+	statement string,
+	err error,
+) bool {
+	if !strings.Contains(strings.ToLower(err.Error()), "check that column/key exists") {
+		return false
+	}
+	if table, column, ok := parseDropColumnStatement(statement); ok {
+		var present sql.NullString
+		queryErr := conn.QueryRowContext(
+			ctx,
+			`SELECT column_name FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+			table,
+			column,
+		).Scan(&present)
+		return errors.Is(queryErr, sql.ErrNoRows)
+	}
+	if name, table, ok := parseMySQLDropIndexStatement(statement); ok {
+		var present sql.NullString
+		queryErr := conn.QueryRowContext(
+			ctx,
+			`SELECT index_name FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`,
+			table,
+			name,
+		).Scan(&present)
+		return errors.Is(queryErr, sql.ErrNoRows)
+	}
+	return false
 }
 
 func boundedCursor(cursor string) string {

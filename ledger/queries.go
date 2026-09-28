@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -218,10 +219,24 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 // (at.pinned() false) means live, resolving the live tip's own epoch
 // instead. Shared by every query handler that reconstructs epoch-keyed
 // historical state (blinklabs-io/dingo#382) -- PoolStakeDistribution,
-// queryShelleyCurrentProtocolParams, queryShelleyEpochNo -- so the
-// live-vs-pinned epoch lookup is written once rather than once per handler.
-// A slot with no covering epoch record (a chain that has applied no blocks
-// yet) resolves to epoch 0, matching epochAtTip's existing convention.
+// queryShelleyCurrentProtocolParams, queryShelleyEpochNo, queryHardFork,
+// queryShelleyStakeDistribution -- so the live-vs-pinned epoch lookup is
+// written once rather than once per handler.
+//
+// found is false only on the pinned path, when at.Slot has no covering
+// epoch record at all: a pinned point whose slot genuinely falls outside
+// every epoch record's range previously fell through to epoch 0 here, and
+// a caller that then looked up epoch 0's row got a real, successful answer
+// for the wrong epoch -- Byron/epoch-0 era, protocol params, or
+// circulating supply, silently substituted for whatever epoch the point
+// actually belonged to. Callers must reject with
+// ErrHistoricalStateUnavailable when found is false rather than proceeding
+// with epoch 0.
+//
+// The unpinned path's current == nil case is a different, legitimate
+// convention (epochAtTip's own, matched here): a chain that has applied no
+// blocks yet genuinely has no current epoch other than 0, so found is true
+// there -- only the pinned path's "no covering row" case is the bug.
 //
 // Takes the whole QueryPoint, not a bare slot: a point pinned at slot 0
 // (a real, validated chain point -- see QueryPoint.pinned()'s own doc
@@ -231,25 +246,35 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 func (ls *LedgerState) resolveAsOfEpoch(
 	txn *database.Txn,
 	at QueryPoint,
-) (uint64, error) {
+) (epoch uint64, found bool, err error) {
 	if !at.pinned() {
 		_, current, err := ls.epochAtTip(txn)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if current == nil {
-			return 0, nil
+			return 0, true, nil
 		}
-		return current.EpochId, nil
+		return current.EpochId, true, nil
 	}
-	epoch, err := ls.db.GetEpochBySlot(at.Slot, txn)
+	epochRow, err := ls.db.GetEpochBySlot(at.Slot, txn)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if epoch == nil {
-		return 0, nil
+	if epochRow == nil {
+		return 0, false, nil
 	}
-	return epoch.EpochId, nil
+	return epochRow.EpochId, true, nil
+}
+
+// errEpochNotResolved is returned by resolveAsOfEpoch's callers when it
+// reports found=false -- see that function's doc comment.
+func errEpochNotResolved(at QueryPoint) error {
+	return fmt.Errorf(
+		"%w: no epoch record covers slot %d",
+		ErrHistoricalStateUnavailable,
+		at.Slot,
+	)
 }
 
 // queryShelleyEpochNo answers GetEpochNo: the epoch containing at (unpinned
@@ -280,11 +305,108 @@ func (ls *LedgerState) queryShelleyEpochNo(
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		return nil, errEpochNotResolved(at)
+	}
 	return []any{epoch}, nil
+}
+
+// VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
+// answerable by every point-aware query type below -- not just that it is
+// still on this node's chain (verifyPointOnChain), but that it is not older
+// than the strictest per-query-type retention floor (UTxO whole/by-ref via
+// checkUtxoRetentionWindow, stake/pool distribution via
+// PoolStakeDistribution's own recency check, current protocol parameters
+// via queryShelleyCurrentProtocolParams's persisted-row lookup, current era
+// via queryHardFork's HardForkCurrentEraQuery case, which independently
+// returns ErrHistoricalStateUnavailable and so must be covered here too).
+//
+// Called from the LocalStateQuery server's Acquire handler
+// (ouroboros/localstatequery.go), not from Query itself: the Ouroboros
+// LocalStateQuery wire protocol has no way to fail an individual query
+// after a successful Acquire -- confirmed against gouroboros' own
+// StateMap, whose Querying state has exactly one transition (Result) and
+// no Failure transition at all, unlike Acquiring (which supports
+// AcquireFailurePointTooOld/PointNotOnChain). A point Acquire allowed but
+// a later query could not actually answer therefore has no protocol-legal
+// way to report that: the connection simply drops ("protocol is shutting
+// down" client-side) instead of returning a clean rejection, for any of
+// the retention-bounded query types above, whenever their own floor is
+// stricter than whatever check an earlier, successful call on the same
+// connection happened to exercise.
+//
+// Real cardano-node never hits this: its own historical retention is one
+// uniform window (the security parameter k) shared by every query type, so
+// a successful Acquire there already guarantees every query answers.
+// Checking every one of Dingo's independent, differently-sized retention
+// windows here, upfront, gives Dingo that same guarantee instead of
+// discovering the gap mid-query. The cost is symmetric: a connection that
+// only ever intended to ask a genuinely unbounded query (queryShelleyEpochNo)
+// at a point older than UTxO's or stake distribution's own floor is now
+// also refused at Acquire, even though that specific query alone could
+// have answered -- accepted deliberately, since the protocol gives no way
+// to know in advance which query type a session will ask, and refusing a
+// point upfront is a well-defined, protocol-legal AcquireFailure, unlike
+// discovering the same gap mid-query.
+//
+// Unpinned (at.pinned() false) always succeeds: the live tip trivially
+// satisfies every retention window.
+//
+// KNOWN GAP: this check runs in its own transaction, which closes before
+// the caller (localstatequeryServerAcquire) records at as this
+// connection's acquired point. cleanupConsumedUtxos runs
+// as an unsynchronized background goroutine (ledger/state.go, `go
+// ls.cleanupConsumedUtxos()`), not serialized against Acquire in any way, so
+// it -- or an equivalent cleanup pass in ledger/snapshot's rotation.go, or
+// pparams retention -- could in principle advance a retention floor past at
+// in the gap between this function returning and the point being recorded,
+// leaving a query against an already-acquired point exposed to the exact
+// mid-query failure this whole mechanism exists to prevent. Acquire-time
+// validation alone cannot close this: doing so needs every relevant pruning
+// path to know about and defer to currently-acquired points until Release,
+// ReAcquire, or disconnect -- a cross-cutting feature spanning three
+// independent pruning subsystems, not a fix scoped to this function.
+// Deferred rather than rushed; tracked as a follow-up issue.
+func (ls *LedgerState) VerifyPointQueryable(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	if !at.pinned() {
+		return nil
+	}
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+	}
+	if err := ls.verifyPointOnChain(txn, at); err != nil {
+		return err
+	}
+	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
+		return err
+	}
+	if err := ls.verifyStakeDistributionRetentionOnly(txn, at); err != nil {
+		return err
+	}
+	if _, err := ls.queryShelleyCurrentProtocolParams(at, txn); err != nil {
+		return err
+	}
+	// queryHardFork's HardForkCurrentEraQuery case (GetCurrentEra) is
+	// point-aware and returns ErrHistoricalStateUnavailable when
+	// resolveAsOfEpoch can't resolve at to an epoch -- exercised here for
+	// the same reason every other check above is: Querying has no Failure
+	// transition, so a rejection surfacing from Query instead of here
+	// drops the connection rather than returning a clean AcquireFailure.
+	if _, err := ls.queryHardFork(
+		&olocalstatequery.HardForkQuery{Query: &olocalstatequery.HardForkCurrentEraQuery{}},
+		at, txn,
+	); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Query answers a decoded LocalStateQuery message against Dingo's live
@@ -366,7 +488,7 @@ func (ls *LedgerState) queryBlock(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
-		return ls.queryHardFork(q)
+		return ls.queryHardFork(q, at, txn)
 	case *olocalstatequery.ShelleyQuery:
 		return ls.queryShelley(q, at, txn, protocolVersion)
 	default:
@@ -418,12 +540,77 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
 }
 
+// queryHardFork answers HardFork queries. at is Query's pinned point
+// (unpinned = live); only HardForkCurrentEraQuery honors it --
+// HardForkEraHistoryQuery answers the whole era-boundary table as known up
+// to the live tip, which is not itself a point-relative value the way a
+// single era ID is.
+//
+// HardForkCurrentEraQuery previously always answered with dingo's live era
+// regardless of at, a real point-pinning gap left open by #382's original
+// scope decision (queryShelleyCurrentProtocolParams and friends, not this
+// HardFork-mini-protocol query type). This mattered more than its own
+// query type suggests: gouroboros's client-side GetCurrentProtocolParams
+// (and several other era-dispatching client calls) queries
+// HardForkCurrentEraQuery first specifically to decide which era-shaped
+// struct to decode the *next* query's reply into. Even though
+// queryShelleyCurrentProtocolParams itself correctly resolves and encodes
+// the pinned point's own era-shaped parameters, a client told the wrong
+// era by this handler picks the wrong decode target for that correct
+// reply -- "cbor: cannot unmarshal array into Go value of type
+// babbage.BabbageProtocolParameters (cannot decode CBOR array to struct
+// with different number of elements)" when the pinned point's real era
+// differs from dingo's live one -- e.g. pinning at genesis (slot 0)
+// against a dingo instance already many eras past it
+// (blinklabs-io/dingo#1900 node-parity --from-genesis validation).
 func (ls *LedgerState) queryHardFork(
 	query *olocalstatequery.HardForkQuery,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
-		return ls.loadConsensusSnapshot().currentEra.Id, nil
+		if !at.pinned() {
+			return ls.loadConsensusSnapshot().currentEra.Id, nil
+		}
+		if txn == nil {
+			txn = ls.db.Transaction(false)
+			defer txn.Release()
+		}
+		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, errEpochNotResolved(at)
+		}
+		epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
+		if err != nil {
+			return nil, err
+		}
+		if epochRow == nil {
+			return nil, fmt.Errorf(
+				"%w: current era at slot %d (epoch %d) cannot be "+
+					"resolved -- no epoch record exists for epoch %d",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				targetEpoch,
+				targetEpoch,
+			)
+		}
+		era := eras.GetEraById(epochRow.EraId)
+		if era == nil {
+			return nil, fmt.Errorf(
+				"%w: current era at slot %d (epoch %d) cannot be "+
+					"resolved -- epoch %d names unknown era %d",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				targetEpoch,
+				targetEpoch,
+				epochRow.EraId,
+			)
+		}
+		return era.Id, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		return ls.queryHardForkEraHistory()
 	default:
@@ -1241,6 +1428,14 @@ func (ls *LedgerState) totalActiveStake(
 // caller who happens to name slot 0 still passes a non-nil pointer to it,
 // exactly the same "whole QueryPoint, not a bare uint64" caution
 // resolveAsOfEpoch's doc comment explains for other pinned-point callers.
+//
+// circulatingSupplyGenesis (below) decides whether this function reads
+// network_state at all -- shared with
+// verifyStakeDistributionRetentionOnly's own network_state floor
+// (ledger/pool_stake_distribution.go) so the two conditions cannot drift
+// apart: an unconditional floor there would reject a point every one of
+// this function's real callers would have answered just fine via the
+// totalActiveStake fallback below.
 func (ls *LedgerState) totalCirculatingSupply(
 	epoch uint64,
 	asOfSlot *uint64,
@@ -1250,11 +1445,8 @@ func (ls *LedgerState) totalCirculatingSupply(
 	fallback := func() (uint64, error) {
 		return ls.totalActiveStake(epoch, exists, txn)
 	}
-	if ls.config.CardanoNodeConfig == nil {
-		return fallback()
-	}
-	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+	genesis := ls.circulatingSupplyGenesis()
+	if genesis == nil {
 		return fallback()
 	}
 	var state *models.NetworkState
@@ -1296,6 +1488,26 @@ func (ls *LedgerState) totalCirculatingSupply(
 		return 1, nil
 	}
 	return circulation, nil
+}
+
+// circulatingSupplyGenesis returns the genesis config totalCirculatingSupply
+// needs to read network_state at all, or nil when it takes its
+// totalActiveStake fallback instead -- no CardanoNodeConfig, no
+// ShelleyGenesis, or a genesis with no MaxLovelaceSupply, matching only a
+// hand-built LedgerState a test constructs rather than one backing a real
+// node, which always has both. Shared with
+// verifyStakeDistributionRetentionOnly (ledger/pool_stake_distribution.go)
+// so its own network_state floor cannot silently drift stricter than what
+// totalCirculatingSupply itself actually requires.
+func (ls *LedgerState) circulatingSupplyGenesis() *gshelley.ShelleyGenesis {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+		return nil
+	}
+	return genesis
 }
 
 func (ls *LedgerState) queryShelleyGenesisConfig(
@@ -2180,6 +2392,18 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 //     transition changing the stability-window formula (Byron's small 2k
 //     vs every Shelley+ era's much larger 3k/f) -- see
 //     persistConsumedUtxoPruneFloor's doc comment for both cases in detail.
+//     This bound is skipped entirely (utxoPruningDeferredForCatchup) while
+//     this node is still catching up to a known upstream target, mirroring
+//     cleanupConsumedUtxos' own defer condition: cleanup never runs during
+//     catch-up, so nothing has actually been pruned yet, and computing
+//     this bound from the live tip anyway would be too STRICT rather than
+//     too lenient -- rejecting an Acquire the node had already promised was
+//     answerable, moments earlier, for a row that was never deleted (a
+//     from-genesis replay's tip advances far faster than real block
+//     cadence, so this window used to open within single-digit epochs of
+//     starting, tearing down the whole LocalStateQuery connection with no
+//     graceful per-query failure available; blinklabs-io/dingo#382 residual
+//     Acquire/Query race).
 //   - The durably persisted floor (readConsumedUtxoPruneFloor) recording
 //     the highest slot cleanup has ever actually begun pruning up to. This
 //     is exactly right for what's already been pruned, but reads zero on a
@@ -2208,7 +2432,8 @@ func (ls *LedgerState) checkUtxoRetentionWindow(
 	}
 	var retentionFloor uint64
 	stabilityWindow := ls.calculateStabilityWindow()
-	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow {
+	if stabilityWindow != 0 && tip.Point.Slot > stabilityWindow &&
+		!ls.utxoPruningDeferredForCatchup(tip.Point.Slot, stabilityWindow) {
 		retentionFloor = tip.Point.Slot - stabilityWindow
 	}
 	persistedFloor, err := ls.readConsumedUtxoPruneFloor(txn)

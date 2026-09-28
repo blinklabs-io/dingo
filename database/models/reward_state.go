@@ -28,13 +28,24 @@ const RewardStakeCalculationVersion uint = 2
 
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
-	ID           uint
-	Epoch        uint64
-	Treasury     types.Uint64
-	Reserves     types.Uint64
-	Fees         types.Uint64
-	Rewards      types.Uint64
-	CapturedSlot uint64
+	ID       uint
+	Epoch    uint64
+	Treasury types.Uint64
+	Reserves types.Uint64
+	Fees     types.Uint64
+	Rewards  types.Uint64
+	// ImportedEpochFees is the fee pot a Mithril bootstrap collected for this
+	// row's own epoch up to and including its anchor block
+	// (UTxOState.utxosFees minus SnapShots.ssFee at import time; see
+	// seedImportedRewardBasis). A live-computed row never sets it. It exists
+	// because this epoch's locally stored transactions only cover slots
+	// after CapturedSlot: rewardEpochFees adds it to a post-anchor local sum
+	// instead of summing the whole epoch, which would silently omit the
+	// fees collected before the anchor. Nil means the row was computed live
+	// or imported by a release predating this field; either way the
+	// whole-epoch local sum applies.
+	ImportedEpochFees *types.Uint64
+	CapturedSlot      uint64
 }
 
 // RewardSnapshot captures reward-calculation snapshot metadata for an epoch.
@@ -43,12 +54,22 @@ type RewardSnapshot struct {
 	Epoch            uint64
 	SnapshotType     string
 	TotalActiveStake types.Uint64
-	TotalPoolCount   uint64
-	TotalDelegators  uint64
-	CapturedSlot     uint64
-	BoundarySlot     uint64
-	EpochNonce       []byte
-	ProtocolVersion  uint
+	// ExcludedActiveStake is the portion of TotalActiveStake contributed by
+	// pools excluded from reward_pool_input for degraded registration data
+	// (see snapshot.buildRewardStateInputs). It lets reward calculation
+	// verify reward_pool_input's stake sum against TotalActiveStake exactly
+	// instead of only checking it does not exceed the total, closing a gap
+	// where a proportionally reduced (rather than merely incomplete) input
+	// set passed the same bound silently (dingo #4025). Nil means the
+	// snapshot predates this tracking: the exclusion, if any, is unknown, so
+	// only the non-exceeding bound can still be checked.
+	ExcludedActiveStake *types.Uint64
+	TotalPoolCount      uint64
+	TotalDelegators     uint64
+	CapturedSlot        uint64
+	BoundarySlot        uint64
+	EpochNonce          []byte
+	ProtocolVersion     uint
 	// Authoritative marks a snapshot captured inside the ledger epoch-rollover
 	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot). The
 	// event-driven fallback capture (captureMarkSnapshot) never overwrites an

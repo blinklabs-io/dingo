@@ -84,6 +84,9 @@ type DingoProtocolParams struct {
 	MaxValueSize         string
 	CollateralPercentage string
 	MaxCollateralInputs  string
+	// CoinsPerUtxoSize preserves the era-native unit: words in Alonzo and
+	// bytes from Babbage onward, matching Koios /epoch_params.
+	CoinsPerUtxoSize string
 
 	// CostModels holds the per-language Plutus operation prices, keyed by the
 	// same language names Koios uses ("PlutusV1", "PlutusV2", ...) rather
@@ -176,7 +179,7 @@ func decodeProtocolParams(
 			err,
 		)
 	}
-	out, err := protocolParamsFromNative(pparams)
+	out, err := ProtocolParamsFromNative(pparams)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +189,7 @@ func decodeProtocolParams(
 	return out, nil
 }
 
-// protocolParamsFromNative flattens a decoded era-specific parameter struct.
+// ProtocolParamsFromNative flattens a decoded era-specific parameter struct.
 //
 // A per-era switch is deliberate rather than routing through
 // ProtocolParameters.Utxorpc(): the values compared here are the ones the
@@ -196,14 +199,28 @@ func decodeProtocolParams(
 // era must be added here — which is why the default case is an error and not
 // a silent empty result: an unhandled era must surface as a dingo_db_error,
 // never as a PASS with nothing compared.
-func protocolParamsFromNative(
+//
+// Exported (not just decodeProtocolParams' own internal helper) because
+// cmd/node-parity's Koios-backed comparison (blinklabs-io/dingo#1900) needs
+// exactly the same conversion from a live LocalStateQuery
+// GetCurrentProtocolParams() result, which decodes to this same
+// lcommon.ProtocolParameters interface -- reusing this avoids a second,
+// drifting copy of the per-era field-extraction switch below.
+func ProtocolParamsFromNative(
 	pparams lcommon.ProtocolParameters,
 ) (*DingoProtocolParams, error) {
 	out := &DingoProtocolParams{}
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
 		// Also covers Allegra: allegra.AllegraProtocolParameters is a type
-		// alias for the Shelley struct, so it lands in this case.
+		// alias for the Shelley struct, so it lands in this case, and the
+		// two eras are indistinguishable from the struct type alone -- the
+		// caller (decodeProtocolParams) overwrites EraID/EraName with the
+		// epoch-correct one afterward when it knows which; a live
+		// LocalStateQuery caller (cmd/node-parity) has no such external
+		// signal, so Shelley is the honest default here.
+		out.EraID = shelley.EraIdShelley
+		out.EraName = shelley.EraNameShelley
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -212,6 +229,8 @@ func protocolParamsFromNative(
 			pp.MinPoolCost,
 		)
 	case *mary.MaryProtocolParameters:
+		out.EraID = mary.EraIdMary
+		out.EraName = mary.EraNameMary
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -220,6 +239,8 @@ func protocolParamsFromNative(
 			pp.MinPoolCost,
 		)
 	case *alonzo.AlonzoProtocolParameters:
+		out.EraID = alonzo.EraIdAlonzo
+		out.EraName = alonzo.EraNameAlonzo
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -230,9 +251,11 @@ func protocolParamsFromNative(
 		fillPlutusParams(
 			out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 			pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
-			pp.CostModels,
+			pp.AdaPerUtxoByte, pp.CostModels,
 		)
 	case *babbage.BabbageProtocolParameters:
+		out.EraID = babbage.EraIdBabbage
+		out.EraName = babbage.EraNameBabbage
 		fillShelleyFamilyParams(
 			out,
 			pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize,
@@ -243,13 +266,17 @@ func protocolParamsFromNative(
 		fillPlutusParams(
 			out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 			pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
-			pp.CostModels,
+			pp.AdaPerUtxoByte, pp.CostModels,
 		)
 	case *conway.ConwayProtocolParameters:
+		out.EraID = conway.EraIdConway
+		out.EraName = conway.EraNameConway
 		fillConwayFamilyParams(out, pp)
 	case *dijkstra.DijkstraProtocolParameters:
 		// Dijkstra embeds the Conway parameter set by value and adds
 		// reference-script fields, none of which are compared here.
+		out.EraID = dijkstra.EraIdDijkstra
+		out.EraName = dijkstra.EraNameDijkstra
 		fillConwayFamilyParams(out, &pp.ConwayProtocolParameters)
 	default:
 		return nil, fmt.Errorf(
@@ -275,7 +302,7 @@ func fillConwayFamilyParams(
 	fillPlutusParams(
 		out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 		pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
-		pp.CostModels,
+		pp.AdaPerUtxoByte, pp.CostModels,
 	)
 }
 
@@ -310,6 +337,7 @@ func fillPlutusParams(
 	executionCosts lcommon.ExUnitPrice,
 	maxTxExUnits, maxBlockExUnits lcommon.ExUnits,
 	maxValueSize, collateralPercentage, maxCollateralInputs uint,
+	coinsPerUtxoSize uint64,
 	costModels map[uint][]int64,
 ) {
 	out.CostModels = namedCostModels(costModels)
@@ -322,6 +350,7 @@ func fillPlutusParams(
 	out.MaxValueSize = uintString(maxValueSize)
 	out.CollateralPercentage = uintString(collateralPercentage)
 	out.MaxCollateralInputs = uintString(maxCollateralInputs)
+	out.CoinsPerUtxoSize = strconv.FormatUint(coinsPerUtxoSize, 10)
 }
 
 // namedCostModels re-keys Dingo's stored cost models from the numeric

@@ -190,6 +190,57 @@ func TestRunnerFreshDatabaseAndIdempotentRerun(t *testing.T) {
 	require.True(t, completed.Valid)
 }
 
+func TestImportedLeiosKeyMigrationKeepsAgeUnknown(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	_, err := db.Exec(`CREATE TABLE pool_registration (
+		id INTEGER PRIMARY KEY,
+		certificate_id INTEGER,
+		added_slot INTEGER,
+		leios_key_public BLOB,
+		leios_key_possession_proof BLOB
+	)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO pool_registration (
+		id, certificate_id, added_slot, leios_key_public,
+		leios_key_possession_proof
+	) VALUES
+		(1, NULL, 100, X'01', X'02'),
+		(2, 7, 100, X'03', X'04'),
+		(3, NULL, 0, X'05', X'06'),
+		(4, NULL, 100, NULL, NULL),
+		(5, 0, 100, X'07', X'08')`)
+	require.NoError(t, err)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	for _, statement := range registry[26].SQL["sqlite"].Expand {
+		_, err := db.Exec(statement)
+		require.NoError(t, err)
+	}
+	rows, err := db.Query(`
+SELECT id, leios_key_registration_age_unknown
+FROM pool_registration ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []struct {
+		id      int
+		unknown bool
+	}
+	for rows.Next() {
+		var row struct {
+			id      int
+			unknown bool
+		}
+		require.NoError(t, rows.Scan(&row.id, &row.unknown))
+		got = append(got, row)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []struct {
+		id      int
+		unknown bool
+	}{{1, true}, {2, false}, {3, false}, {4, false}, {5, true}}, got)
+}
+
 func TestRatificationHistoryMigrationBackfillsExistingMarker(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
@@ -453,8 +504,8 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 two, and v7/v8 one each.
-	const shippedAddColumns = 14
+	// v2 adds four columns, v5 adds two, and later migrations add thirteen.
+	const shippedAddColumns = 19
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after
@@ -713,11 +764,23 @@ func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	t.Parallel()
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
-	baseline := fullyMigratedBaseline(t, registry)
-	for _, migration := range registry {
+	// Each version replays against a database migrated exactly through that
+	// version, not through the latest one: that is the only state a crash
+	// mid-expand can actually leave behind, since a version only starts once
+	// every earlier one reached PhaseComplete and no version reopens after a
+	// later one has run. A single shared "migrated to latest" baseline worked
+	// for every version before v19 only because versions 1-18 are all purely
+	// additive (ADD COLUMN/CREATE TABLE/CREATE INDEX): replaying an old
+	// version's DDL against the newest schema was harmless. v19 (dingo#4464)
+	// drops a column and index a later replay can no longer see, so
+	// replaying v1's CREATE INDEX on `asset`(`name_hex`) against a database
+	// that already ran v19 fails with "no such column" -- a state v1 can
+	// never actually be found in.
+	baselines := perVersionBaselines(t, registry)
+	for i, migration := range registry {
 		t.Run(migration.Name, func(t *testing.T) {
 			t.Parallel()
-			db := openTestDBFromBaseline(t, baseline)
+			db := openTestDBFromBaseline(t, baselines[i])
 			runner := &Runner{
 				DB:       db,
 				Dialect:  "sqlite",
@@ -752,29 +815,36 @@ SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = ?`,
 	}
 }
 
-// fullyMigratedBaseline runs the full registry once against a fresh database
-// and returns its file bytes. journal_mode=MEMORY never materializes a
-// rollback journal file at all, so the closed database file alone is a
-// complete, valid database each subtest can copy.
-func fullyMigratedBaseline(t *testing.T, registry []Migration) []byte {
+// perVersionBaselines runs the registry once, incrementally, and returns the
+// database file bytes captured immediately after each version reaches
+// PhaseComplete -- baselines[i] is migrated exactly through registry[i], not
+// through the latest version. Calling Run repeatedly with a growing Registry
+// slice is the same incremental-upgrade path a real node takes release over
+// release, so this applies every migration's DDL only once in total, the
+// same total work fullyMigratedBaseline's single shared baseline did.
+func perVersionBaselines(t *testing.T, registry []Migration) [][]byte {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "baseline.sqlite")
-	db, err := sql.Open(
-		"sqlite",
-		"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
-	)
-	require.NoError(t, err)
-	runner := &Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry,
-		Locker:   NewProcessLocker(),
+	baselines := make([][]byte, len(registry))
+	for i := range registry {
+		db, err := sql.Open(
+			"sqlite",
+			"file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
+		)
+		require.NoError(t, err)
+		runner := &Runner{
+			DB:       db,
+			Dialect:  "sqlite",
+			Registry: registry[:i+1],
+			Locker:   NewProcessLocker(),
+		}
+		require.NoError(t, runner.Run(context.Background()))
+		require.NoError(t, db.Close())
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		baselines[i] = data
 	}
-	require.NoError(t, runner.Run(context.Background()))
-	require.NoError(t, db.Close())
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	return data
+	return baselines
 }
 
 // openTestDBFromBaseline seeds a subtest's own database file from a byte copy

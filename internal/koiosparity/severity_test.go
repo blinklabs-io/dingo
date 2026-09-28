@@ -55,6 +55,92 @@ func TestCountSignificantCountsErrors(t *testing.T) {
 	assert.Equal(t, StatusError, DetermineStatus(mismatches))
 }
 
+// TestReferenceLagOnly pins the one non-pass shape strict mode does not treat
+// as fatal (dingo #4645): at least one significant mismatch, all of them
+// reference_lag. The other ERROR-severity categories must not qualify, or a
+// row Dingo never wrote would stop failing a strict node once the grace
+// window closes.
+func TestReferenceLagOnly(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		categories []string
+		want       bool
+	}{
+		{"empty", nil, false},
+		{"informational only", []string{CategoryPoolDeparted}, false},
+		{
+			"lag only",
+			[]string{CategoryReferenceLag, CategoryReferenceLag},
+			true,
+		},
+		{
+			"lag plus informational",
+			[]string{CategoryReferenceLag, CategoryPoolDeparted},
+			true,
+		},
+		{
+			"lag plus db missing",
+			[]string{CategoryReferenceLag, CategoryDBMissing},
+			false,
+		},
+		{
+			"lag plus db error",
+			[]string{CategoryReferenceLag, CategoryDBError},
+			false,
+		},
+		{
+			"lag plus coverage incomplete",
+			[]string{CategoryReferenceLag, CategoryAcctCoverageIncomplete},
+			false,
+		},
+		{
+			"lag plus value mismatch",
+			[]string{CategoryReferenceLag, CategoryValueMismatch},
+			false,
+		},
+		{"db missing only", []string{CategoryDBMissing}, false},
+	}
+	for _, tc := range cases {
+		mismatches := make([]CheckMismatch, 0, len(tc.categories))
+		for _, c := range tc.categories {
+			mismatches = append(mismatches, CheckMismatch{Category: c})
+		}
+		assert.Equal(t, tc.want, referenceLagOnly(mismatches), tc.name)
+	}
+}
+
+// TestSeverityLabelCoversAllThreeTiers pins severityLabel's string mapping
+// against severityOf's classification of one category from each of the three
+// tiers, so the label dingo_koiosparity_mismatch_total exports (metrics.go)
+// cannot silently disagree with what DetermineStatus/CountSignificant treat
+// that category as.
+func TestSeverityLabelCoversAllThreeTiers(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		category string
+		want     string
+	}{
+		{"fail tier", CategoryValueMismatch, "fail"},
+		{"error tier", CategoryDBError, "error"},
+		{"informational tier", CategoryPoolDeparted, "informational"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(
+				t,
+				tc.want,
+				severityLabel(severityOf(tc.category)),
+				"category %q", tc.category,
+			)
+		})
+	}
+}
+
 // TestCountSignificantAgreesWithDetermineStatus is the invariant that matters
 // more than either number: a status of PASS and a non-zero significant count
 // cannot coexist, in either direction. The two must read the same

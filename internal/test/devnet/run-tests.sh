@@ -51,6 +51,7 @@ devnet_ports
 # Parse arguments
 KEEP_UP=false
 ACCELERATED=false
+LEIOS=false
 # Mode selection: default dingo (all-dingo network), --conformance for the
 # dingo + cardano-node reference network.
 MODE="${MODE:-dingo}"
@@ -61,11 +62,31 @@ for arg in "$@"; do
     --keep-up)     KEEP_UP=true ;;
     --conformance) MODE="conformance" ;;
     --accelerated) ACCELERATED=true ;;
+    --leios)       LEIOS=true ;;
     -run|-run=*|-test.run|-test.run=*)
                    USER_RUN_FILTER=true; TEST_ARGS+=("${arg}") ;;
     *)             TEST_ARGS+=("${arg}") ;;
   esac
 done
+
+if [[ "${LEIOS}" == "true" && "${MODE}" != "dingo" ]]; then
+  echo "[run-tests] ERROR: --leios requires the all-Dingo profile" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" == "true" && "${ACCELERATED}" == "true" ]]; then
+  echo "[run-tests] ERROR: --leios selects its own accelerated Dijkstra spec; do not combine it with --accelerated" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" == "true" && "${USER_RUN_FILTER}" == "true" ]]; then
+  echo "[run-tests] ERROR: --leios runs TestLeiosEndorserBlockProducerToPeer; do not combine it with -run" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" != "true" ]]; then
+  unset DEVNET_LEIOS_ENABLED DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE
+  unset DEVNET_DINGO_RUN_MODE
+  unset DEVNET_DINGO_START_ERA
+  unset DEVNET_TXPUMP_TRANSACTION_ERA
+fi
 
 # Derive mode-specific variables. COMPOSE_PROFILES is exported unconditionally
 # (not defaulted) so the --conformance flag always wins over any pre-existing
@@ -91,7 +112,19 @@ fi
 # Select the network spec the configurator generates genesis from, and
 # point the Go harness at the same file so its derived timings match the
 # network that is actually running.
-if [[ "${ACCELERATED}" == "true" ]]; then
+if [[ "${LEIOS}" == "true" ]]; then
+  ACTIVE_SPEC="./testnet-dingo-leios.yaml"
+  export DEVNET_LEIOS_ENABLED=1
+  export DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE="/configs/keys/leios-vote.skey"
+  export DEVNET_DINGO_RUN_MODE=leios
+  export DEVNET_DINGO_START_ERA=dijkstra
+  export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
+  # Keep EB outputs in the tx pump's wallet quarantine until the scenario
+  # queries the relay ledger; this delay is not proof of on-chain confirmation.
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
+  export DEVNET_DINGO_SPEC="${ACTIVE_SPEC}"
+  unset DEVNET_ACCELERATED
+elif [[ "${ACCELERATED}" == "true" ]]; then
   ACTIVE_SPEC="${ACCELERATED_SPEC}"
   export DEVNET_ACCELERATED=1
   # 100 slots is 50s on the accelerated specs, leaving time for another round.
@@ -219,6 +252,15 @@ log "Building DevNet Docker images..."
 # No service names: compose only builds services in the active
 # COMPOSE_PROFILES, so this is scoped correctly for either mode.
 docker compose -f "${COMPOSE_FILE}" build
+
+# Bootstrap conformance must observe epochs 1 and 2. A cold host-side Go
+# build after genesis can consume that entire window, especially with the
+# accelerated spec, so populate the test build cache before starting nodes.
+log "Compiling DevNet integration tests before genesis..."
+(
+  cd "${PROJECT_ROOT}"
+  go test -tags "${GO_TAGS}" -run '^$' ./internal/test/devnet/...
+)
 
 log "Starting DevNet containers..."
 devnet_compose_up "${COMPOSE_FILE}"
@@ -359,7 +401,12 @@ if [[ "${ACCELERATED}" == "true" ]]; then
     TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline')
   fi
 else
-  TEST_TIMEOUT="${TEST_TIMEOUT:-20m}"
+  if [[ "${LEIOS}" == "true" ]]; then
+    TEST_TIMEOUT="${TEST_TIMEOUT:-12m}"
+    TEST_ARGS+=(-run '^TestLeiosEndorserBlockProducerToPeer$')
+  else
+    TEST_TIMEOUT="${TEST_TIMEOUT:-20m}"
+  fi
 fi
 set +e
 go test \

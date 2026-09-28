@@ -161,6 +161,22 @@ WHERE epoch <= ? AND era_id = ?
 ORDER BY epoch DESC, id DESC
 LIMIT 1;
 
+-- name: CountPParamsByEra :one
+SELECT COUNT(*)
+FROM pparams
+WHERE era_id = ?;
+
+-- name: ListPParamsByEra :many
+SELECT cbor, id, added_slot, epoch, era_id
+FROM pparams
+WHERE era_id = ?
+ORDER BY id;
+
+-- name: UpdatePParamsCbor :exec
+UPDATE pparams
+SET cbor = ?
+WHERE id = ?;
+
 -- name: GetPParamUpdates :many
 SELECT genesis_hash, cbor, id, added_slot, epoch
 FROM pparam_update
@@ -311,20 +327,20 @@ WHERE deleted_slot > ?;
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
@@ -332,6 +348,7 @@ ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     captured_slot = excluded.captured_slot,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
+    leios_key_registration_epoch = excluded.leios_key_registration_epoch,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -342,6 +359,7 @@ RETURNING id;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -351,6 +369,7 @@ WHERE epoch = ? AND snapshot_type = ? AND pool_key_hash = ?;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -407,18 +426,21 @@ WHERE epoch > ?;
 
 -- name: SaveRewardAdaPots :one
 INSERT INTO reward_ada_pots (
-    epoch, treasury, reserves, fees, rewards, captured_slot
-) VALUES (?, ?, ?, ?, ?, ?)
+    epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch) DO UPDATE SET
     treasury = excluded.treasury,
     reserves = excluded.reserves,
     fees = excluded.fees,
     rewards = excluded.rewards,
-    captured_slot = excluded.captured_slot
+    captured_slot = excluded.captured_slot,
+    imported_epoch_fees = excluded.imported_epoch_fees
 RETURNING id;
 
 -- name: GetRewardAdaPots :one
-SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot
+SELECT id, epoch, treasury, reserves, fees, rewards, captured_slot,
+    imported_epoch_fees
 FROM reward_ada_pots
 WHERE epoch = ?;
 
@@ -426,8 +448,9 @@ WHERE epoch = ?;
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     total_active_stake = excluded.total_active_stake,
     total_pool_count = excluded.total_pool_count,
@@ -437,7 +460,8 @@ ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     epoch_nonce = excluded.epoch_nonce,
     protocol_version = excluded.protocol_version,
     authoritative = excluded.authoritative,
-    calculation_version = excluded.calculation_version
+    calculation_version = excluded.calculation_version,
+    excluded_active_stake = excluded.excluded_active_stake
 RETURNING id;
 
 -- name: DeleteProvisionalRewardSnapshot :exec
@@ -448,8 +472,9 @@ WHERE epoch = ? AND snapshot_type = ? AND authoritative = false;
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
     total_delegators, captured_slot, boundary_slot, epoch_nonce,
-    protocol_version, authoritative, calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    protocol_version, authoritative, calculation_version,
+    excluded_active_stake
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO NOTHING
 RETURNING id;
 
@@ -463,13 +488,15 @@ SET total_active_stake = ?,
     epoch_nonce = ?,
     protocol_version = ?,
     authoritative = FALSE,
-    calculation_version = ?
+    calculation_version = ?,
+    excluded_active_stake = ?
 WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE;
 
 -- name: GetRewardSnapshot :one
 SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
        total_delegators, captured_slot, boundary_slot, epoch_nonce,
-       protocol_version, authoritative, calculation_version
+       protocol_version, authoritative, calculation_version,
+       excluded_active_stake
 FROM reward_snapshot
 WHERE epoch = ? AND snapshot_type = ?;
 
@@ -923,7 +950,7 @@ FROM utxo
 WHERE tx_id = ? AND output_idx = ?;
 
 -- name: GetAssetsByUtxoID :many
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
@@ -1006,12 +1033,12 @@ RETURNING id;
 
 -- name: CreateAsset :one
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: GetAssetByPolicyAndName :one
-SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount
+SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE policy_id = ? AND name = ?
 ORDER BY id
@@ -1088,8 +1115,8 @@ RETURNING id;
 
 -- name: ImportAsset :exec
 INSERT INTO asset (
-    name, name_hex, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?, ?)
+    name, policy_id, fingerprint, utxo_id, amount
+) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING;
 
 -- name: GetUtxoIDByRef :one

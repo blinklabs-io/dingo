@@ -400,7 +400,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 
 	resyncCh := subscribeChainsyncResync(t, bus)
 
-	// A subscriber must exist for blocksAboveSlot to read anything at
+	// A subscriber must exist for readBlocksAboveSlot to read anything at
 	// all; asserting it sees nothing is what proves the declined,
 	// over-K reconciliation never emitted an undo for the common
 	// ancestor it did not actually rewind to.
@@ -1763,12 +1763,12 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 		requestConnId ouroboros.ConnectionId,
 		start ocommon.Point,
 		end ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
 		assert.True(t, sameConnectionId(connId, requestConnId))
 		assert.Equal(t, uint64(11), start.Slot)
 		assert.Equal(t, uint64(12), end.Slot)
-		return nil
+		return 0, nil
 	}
 
 	header1Hash := lcommon.NewBlake2b256(testHashBytes("rollback-replay-1"))
@@ -1879,12 +1879,12 @@ func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
 		connId ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requested = append(requested, connId)
 		if sameConnectionId(connId, activeConnId) {
-			return nil
+			return 0, nil
 		}
-		return errBlockfetchNoBlocks
+		return 0, errBlockfetchNoBlocks
 	}
 
 	header := mockHeader{
@@ -1967,8 +1967,8 @@ func TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails(
 		ouroboros.ConnectionId,
 		ocommon.Point,
 		ocommon.Point,
-	) error {
-		return errBlockfetchNoBlocks
+	) (uint64, error) {
+		return 0, errBlockfetchNoBlocks
 	}
 
 	header := mockHeader{
@@ -2026,9 +2026,9 @@ func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 		ouroboros.ConnectionId,
 		ocommon.Point,
 		ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return errBlockfetchNoBlocks
+		return 0, errBlockfetchNoBlocks
 	}
 
 	header := mockHeader{
@@ -2605,24 +2605,84 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-
-	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
-	err := fixture.ls.processChainIteratorRollback(
-		t.Context(),
-		fixture.ancestorTip.Point,
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
 	)
 	require.NoError(t, err)
+	removedBlock.Cbor = []byte{0xff}
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	fixture.ls.config.EventBus = bus
+	errSubID, errCh := bus.Subscribe(LedgerErrorEventType)
+	require.NotZero(t, errSubID)
+	require.NotNil(t, errCh)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.NoError(t, err)
+	evt := testutil.RequireReceive(
+		t,
+		errCh,
+		testutil.AsyncWait,
+		"undo decode event for the captured rollback block",
+	)
+	undoDecodeEvent, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "undo decode event type")
+	require.Equal(t, "rollback_tx_undo_decode", undoDecodeEvent.Operation)
+	require.Equal(t, fixture.currentTip.Point, undoDecodeEvent.Point)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
-	assert.True(
-		t,
-		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
-	)
-
+	assert.Equal(t, fixture.ancestorNonce, fixture.ls.currentTipBlockNonce)
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+	_, _, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	assert.False(t, pending)
+}
+
+func TestProcessChainIteratorRollbackRetainsIntentAfterMetadataTruncationFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	injected := errors.New("injected metadata truncation failure")
+	fixture.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.ErrorIs(t, err, injected)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	assert.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	assert.Equal(t, []models.Block{removedBlock}, intentBlocks)
 }
 
 func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
@@ -2643,6 +2703,7 @@ func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -2662,6 +2723,7 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 
@@ -2707,6 +2769,7 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 
@@ -2719,6 +2782,39 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestProcessChainIteratorRollbackUsesCapturedBlocksAfterChainDeletion(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	putPrimaryChainOnForkBeyondK(t, fixture, "captured-rollback-payload")
+
+	injected := errors.New("injected metadata truncation failure")
+	fixture.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.ErrorIs(t, err, injected)
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	require.Equal(t, []models.Block{removedBlock}, intentBlocks)
 }
 
 func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(

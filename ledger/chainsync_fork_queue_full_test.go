@@ -247,9 +247,9 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 
 	evt := ChainsyncEvent{
@@ -286,12 +286,16 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 	)
 	assert.Equal(
 		t,
-		1,
+		2,
 		requestCount,
 		"a queue-full fork-extension failure must still restart "+
 			"blockfetch for the headers it did manage to queue when "+
 			"nothing is currently fetching them -- otherwise the queue "+
-			"never drains and the node stops advancing permanently",
+			"never drains and the node stops advancing permanently. "+
+			"maxHeaders (10,000) is far deeper than BlockfetchBatchSize "+
+			"(500), so the restart is also pipelining-eligible (issue "+
+			"#4651) and pre-queues a second request for the remaining "+
+			"headers instead of waiting for the first batch's round trip",
 	)
 	assert.NotNil(
 		t,
@@ -331,8 +335,8 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
-		return errors.New("simulated blockfetch request failure")
+	) (uint64, error) {
+		return 0, errors.New("simulated blockfetch request failure")
 	}
 
 	bus := event.NewEventBus(nil, nil)
@@ -425,9 +429,9 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		controlRequests++
-		return nil
+		return 0, nil
 	}
 	control.ls.ensureBlockfetchDrainingAfterForkQueueFailure(
 		controlConnId,
@@ -455,9 +459,9 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		_ ouroboros.ConnectionId,
 		_ ocommon.Point,
 		_ ocommon.Point,
-	) error {
+	) (uint64, error) {
 		requestCount++
-		return nil
+		return 0, nil
 	}
 	// Simulate a blockfetch batch already in flight.
 	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})

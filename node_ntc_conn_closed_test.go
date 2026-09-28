@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -54,19 +55,6 @@ func (nilIterChainProvider) GetChainFromPoint(
 
 func (nilIterChainProvider) StabilityWindow() uint64 { return 0 }
 
-func newNtCTestConnId(port int) ouroboros.ConnectionId {
-	return ouroboros.ConnectionId{
-		LocalAddr: &net.TCPAddr{
-			IP:   net.IPv4(127, 0, 0, 1),
-			Port: 3001,
-		},
-		RemoteAddr: &net.TCPAddr{
-			IP:   net.IPv4(127, 0, 0, 1),
-			Port: port,
-		},
-	}
-}
-
 func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
 	t.Helper()
 	bus := event.NewEventBus(nil, nil)
@@ -80,28 +68,95 @@ func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
 	}
 }
 
-// TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState reproduces
+func newHandleConnManagerClosedOwnerConn(
+	t *testing.T,
+	o *ouroborosPkg.Ouroboros,
+) *ouroboros.Connection {
+	t.Helper()
+	listener := o.ConfigureListeners([]connmanager.ListenerConfig{{UseNtC: true}})[0]
+	localWire, peerWire := newLeiosNotifyTestConnPair(
+		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	)
+	t.Cleanup(func() {
+		_ = localWire.Close()
+		_ = peerWire.Close()
+	})
+	type result struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	localResult, peerResult := make(chan result, 1), make(chan result, 1)
+	go func() {
+		conn, err := ouroboros.NewConnection(append(
+			[]ouroboros.ConnectionOptionFunc{
+				ouroboros.WithConnection(localWire),
+			},
+			listener.ConnectionOpts...,
+		)...)
+		localResult <- result{conn: conn, err: err}
+	}()
+	go func() {
+		conn, err := ouroboros.NewConnection(append(
+			[]ouroboros.ConnectionOptionFunc{
+				ouroboros.WithConnection(peerWire),
+				ouroboros.WithServer(true),
+			},
+			listener.ConnectionOpts...,
+		)...)
+		peerResult <- result{conn: conn, err: err}
+	}()
+	local := testutil.RequireReceive(
+		t,
+		localResult,
+		10*time.Second,
+		"owner test local handshake",
+	)
+	peer := testutil.RequireReceive(
+		t,
+		peerResult,
+		10*time.Second,
+		"owner test peer handshake",
+	)
+	t.Cleanup(func() {
+		if local.conn != nil {
+			_ = local.conn.Close()
+		}
+		if peer.conn != nil {
+			_ = peer.conn.Close()
+		}
+	})
+	require.NoError(t, local.err)
+	require.NoError(t, peer.err)
+	require.NotNil(t, peer.conn.ChainSync())
+	require.NotNil(t, peer.conn.ChainSync().Server)
+	return peer.conn
+}
+
+// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces
 // issue #3508: NtC connections never received any close notification (the
 // EventBus's ConnectionClosedEventType is intentionally NtN-only), so
 // chainsync.State.RemoveClient -- which cancels the live chain iterator and
 // deletes the per-connection client state -- was never invoked for a closed
-// NtC connection. Without handleConnManagerClosed wired as the connection
-// manager's ConnClosedFunc, this assertion fails: the client state
+// NtC connection. Without handleConnManagerClosedOwner wired as the connection
+// manager's ConnClosedOwnerFunc, this assertion fails: the client state
 // registered by AddClient is still present after the simulated close.
-func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
+func TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	n := newHandleConnManagerClosedTestNode(t)
-	connId := newNtCTestConnId(1)
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	connId := conn.Id()
 
-	_, err := n.chainsyncState.AddClient(connId, ocommon.Point{})
+	_, err = n.chainsyncState.AddClient(connId, ocommon.Point{})
 	require.NoError(t, err)
 	_, ok := n.chainsyncState.LookupClient(connId)
 	require.True(t, ok, "precondition: server-side client state registered")
 
-	n.handleConnManagerClosed(connId, true, nil)
+	n.handleConnManagerClosedOwner(conn, true, nil)
 
 	_, ok = n.chainsyncState.LookupClient(connId)
 	require.False(
@@ -111,66 +166,75 @@ func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
 	)
 }
 
-// TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath guards the
-// "exactly once" half of the fix: NtN connections are already cleaned up via
-// Ouroboros.HandleConnClosedEvent, subscribed to the EventBus's
-// ConnectionClosedEventType. If handleConnManagerClosed also released state
-// for isNtC=false, an NtN close would race two independent RemoveClient
-// calls instead of exactly one.
-func TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath(t *testing.T) {
+// TestHandleConnManagerClosedOwner_NtN_ReleasesState covers the owner-aware
+// connmanager path used for both NtC and NtN. The EventBus path deliberately no
+// longer removes server-side state by connection ID because a delayed event
+// could delete a replacement connection's state.
+func TestHandleConnManagerClosedOwner_NtN_ReleasesState(t *testing.T) {
 	t.Parallel()
 
 	n := newHandleConnManagerClosedTestNode(t)
-	connId := newNtCTestConnId(2)
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	connId := conn.Id()
 
-	_, err := n.chainsyncState.AddClient(connId, ocommon.Point{})
+	_, err = n.chainsyncState.AddClient(connId, ocommon.Point{})
 	require.NoError(t, err)
 
-	n.handleConnManagerClosed(connId, false, nil)
+	n.handleConnManagerClosedOwner(conn, false, nil)
 
 	_, ok := n.chainsyncState.LookupClient(connId)
-	require.True(
+	require.False(
 		t,
 		ok,
-		"NtN close must not be released through the NtC-only callback",
+		"NtN close must release the chainsync server-side client state",
 	)
 }
 
 // TestHandleConnManagerClosed_NilChainsyncState guards the shutdown/restore
 // window (node_lifecycle.go nils n.chainsyncState while rebuilding it) so a
 // late NtC close callback cannot panic.
-func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
+func TestHandleConnManagerClosedOwner_NilChainsyncState(t *testing.T) {
 	t.Parallel()
 
 	n := &Node{}
 	require.NotPanics(t, func() {
-		n.handleConnManagerClosed(newNtCTestConnId(3), true, nil)
+		conn, err := ouroboros.NewConnection()
+		require.NoError(t, err)
+		n.handleConnManagerClosedOwner(conn, true, nil)
 	})
 }
 
-// TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters covers the node
-// half of the issue #3514 wiring. The connection manager's ConnClosedFunc is
+// TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters covers the node
+// half of the issue #3514 wiring. The connection manager's ConnClosedOwnerFunc is
 // the only close notification an NtC connection gets, and it is what wakes a
 // chainsync server callback parked waiting for a certified endorser closure --
 // the protocol's own done channel cannot close while that callback is running.
-// Without the ReleaseLeiosServeWaiters call in handleConnManagerClosed the
+// Without the owner-aware release in handleConnManagerClosedOwner the
 // registered waiter survives the close and this fails.
 //
 // The Ouroboros instance is built through the validating constructor with the
 // full dependency set, and the connection is registered with its connection
 // manager, so the waiter passes the liveness check the same way a live serve
 // does.
-func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
+func TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters(
+	t *testing.T,
+) {
 	t.Parallel()
 	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, true)
 }
 
-func TestHandleConnManagerClosed_NtN_ReleasesLeiosServeWaiters(t *testing.T) {
+func TestHandleConnManagerClosedOwner_NtN_ReleasesLeiosServeWaiters(
+	t *testing.T,
+) {
 	t.Parallel()
 	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, false)
 }
 
-func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bool) {
+func testHandleConnManagerClosedReleasesLeiosServeWaiters(
+	t *testing.T,
+	isNtC bool,
+) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	n := newHandleConnManagerClosedTestNode(t)
@@ -202,6 +266,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bo
 		Logger:         logger,
 		EventBus:       bus,
 		LedgerState:    ledgerState,
+		NetworkMagic:   ouroboros_mock.MockNetworkMagic,
 		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
 		ChainsyncState: chainsync.NewState(bus, ledgerState),
 		ConnManager:    connManager,
@@ -214,10 +279,9 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bo
 	require.NoError(t, err)
 	n.ouroborosRef.Store(o)
 
-	// Register a connection so the waiter is not short-circuited by the
-	// already-closed liveness check.
-	conn, err := ouroboros.NewConnection()
-	require.NoError(t, err)
+	// Register a real node-to-client connection so the waiter carries its
+	// chainsync server owner, as it does in production.
+	conn := newHandleConnManagerClosedOwnerConn(t, o)
 	require.True(t, connManager.AddConnection(conn, isNtC, "127.0.0.1:3002"))
 	connId := conn.Id()
 
@@ -231,7 +295,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bo
 		"waiter must not be released before the close",
 	)
 
-	n.handleConnManagerClosed(connId, isNtC, nil)
+	n.handleConnManagerClosedOwner(conn, isNtC, nil)
 
 	testutil.RequireReceive(
 		t,
@@ -241,17 +305,17 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(t *testing.T, isNtC bo
 	)
 }
 
-// TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint covers
+// TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint covers
 // the NtC-close half of blinklabs-io/dingo#382's point-pinning: a client
 // that pins a point and then disconnects without a clean Release must not
 // leak its map entry, since NtC closes never reach
 // Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType
 // is intentionally NtN-only) and localstatequeryServerRelease is therefore
 // never invoked for it. Without ReleaseLocalStateQueryAcquiredPoint wired
-// into handleConnManagerClosed, this assertion fails: the entry
+// into handleConnManagerClosedOwner, this assertion fails: the entry
 // SetLocalStateQueryAcquiredPointForTesting seeded is still present after
 // the simulated close.
-func TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint(
+func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -298,7 +362,9 @@ func TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	require.NoError(t, err)
 	n.ouroborosRef.Store(o)
 
-	connId := newNtCTestConnId(6)
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	connId := conn.Id()
 	o.SetLocalStateQueryAcquiredPointForTesting(connId, ledger.QueryPoint{
 		Slot: 100,
 		Hash: []byte{0xAB},
@@ -309,7 +375,7 @@ func TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint(
 		"precondition: pinned point recorded",
 	)
 
-	n.handleConnManagerClosed(connId, true, nil)
+	n.handleConnManagerClosedOwner(conn, true, nil)
 
 	require.False(
 		t,
@@ -318,15 +384,17 @@ func TestHandleConnManagerClosed_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	)
 }
 
-// TestHandleConnManagerClosed_NilOuroboros guards the same restore window as
-// TestHandleConnManagerClosed_NilChainsyncState for the added ouroboros
+// TestHandleConnManagerClosedOwner_NilOuroboros guards the same restore window as
+// TestHandleConnManagerClosedOwner_NilChainsyncState for the added ouroboros
 // dereference: n.ouroboros() is nil before Run wires it.
-func TestHandleConnManagerClosed_NilOuroboros(t *testing.T) {
+func TestHandleConnManagerClosedOwner_NilOuroboros(t *testing.T) {
 	t.Parallel()
 
 	n := newHandleConnManagerClosedTestNode(t)
 	require.Nil(t, n.ouroboros())
 	require.NotPanics(t, func() {
-		n.handleConnManagerClosed(newNtCTestConnId(5), true, nil)
+		conn, err := ouroboros.NewConnection()
+		require.NoError(t, err)
+		n.handleConnManagerClosedOwner(conn, true, nil)
 	})
 }

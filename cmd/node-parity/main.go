@@ -129,6 +129,7 @@ at a time.`,
 
 	rootCmd.AddCommand(checkCommand())
 	rootCmd.AddCommand(watchCommand())
+	rootCmd.AddCommand(fromGenesisCommand())
 
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		logger.Error(err.Error())

@@ -928,6 +928,98 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 	)
 }
 
+// TestGetRewardSnapshotImplementationsAgree is
+// TestGetPoolsRetiredByEpochImplementationsAgree's counterpart for dingo
+// #4691's completeness proof: DatabaseSource (the live in-process observer's
+// path, node_koiosparity.go's NewDatabaseSource) and DingoDB (the standalone
+// CLI's) must read the same reward_snapshot row identically, including the
+// known-zero vs. unknown (NULL, pre-dingo-#4025) ExcludedActiveStake
+// distinction and the absent-row case.
+func TestGetRewardSnapshotImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	require.NoError(t, err)
+	sqlDB := sourceSQLDB(t, db)
+
+	knownZero := types.Uint64(0)
+	knownNonzero := types.Uint64(750_000)
+	require.NoError(t, sqlDB.Create(&models.RewardSnapshot{
+		Epoch:               10,
+		SnapshotType:        "mark",
+		TotalActiveStake:    types.Uint64(5_000_000),
+		TotalPoolCount:      111,
+		ExcludedActiveStake: &knownZero,
+	}).Error)
+	require.NoError(t, sqlDB.Create(&models.RewardSnapshot{
+		Epoch:               11,
+		SnapshotType:        "mark",
+		TotalActiveStake:    types.Uint64(5_000_000),
+		TotalPoolCount:      108,
+		ExcludedActiveStake: &knownNonzero,
+	}).Error)
+	// No ExcludedActiveStake at all: a snapshot captured before dingo #4025
+	// added the column.
+	require.NoError(t, sqlDB.Create(&models.RewardSnapshot{
+		Epoch:            12,
+		SnapshotType:     "mark",
+		TotalActiveStake: types.Uint64(5_000_000),
+		TotalPoolCount:   90,
+	}).Error)
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	dingoDB, err := OpenDingoDB(DingoDBConfig{Plugin: "sqlite", DataDir: dir})
+	require.NoError(t, err)
+	defer dingoDB.Close() //nolint:errcheck
+
+	cases := []struct {
+		name  string
+		epoch uint64
+		want  *DingoRewardSnapshotSummary
+	}{
+		{
+			"known zero exclusion",
+			10,
+			&DingoRewardSnapshotSummary{
+				TotalPoolCount:           111,
+				ExcludedActiveStakeKnown: true,
+			},
+		},
+		{
+			"known nonzero exclusion",
+			11,
+			&DingoRewardSnapshotSummary{
+				TotalPoolCount:           108,
+				ExcludedActiveStake:      750_000,
+				ExcludedActiveStakeKnown: true,
+			},
+		},
+		{
+			"unknown (pre-dingo-#4025) exclusion",
+			12,
+			&DingoRewardSnapshotSummary{TotalPoolCount: 90},
+		},
+		{"no row for this epoch", 13, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fromStore, err := source.GetRewardSnapshot(
+				context.Background(), tc.epoch,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, fromStore, "DatabaseSource")
+
+			fromDingoDB, err := dingoDB.GetRewardSnapshot(
+				context.Background(), tc.epoch,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, fromDingoDB, "DingoDB")
+		})
+	}
+}
+
 // TestDatabaseSourceGetEarliestAvailableEpochNoBoundary covers a
 // non-Mithril, genesis-synced database: no mithril_ledger_slot sync-state
 // row was ever written, so ok must be false and callers must apply no lower

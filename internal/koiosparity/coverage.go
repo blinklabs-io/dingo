@@ -550,10 +550,11 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "a Shelley-era parameter absent from every live era's struct; cached for reference",
 	},
 	{
-		Endpoint: "/epoch_params",
-		Field:    "coins_per_utxo_size",
-		Class:    CoverageUnsupported,
-		Reason:   "Koios reports Alonzo's per-word figure where Dingo stores per-byte (34482 vs 4310 on preview epochs 0-2); cached for reference pending its own investigation",
+		Endpoint:   "/epoch_params",
+		Field:      "coins_per_utxo_size",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams era-native coins-per-UTxO unit",
+		Reason:     "exact equality in the era-native unit: words in Alonzo and bytes from Babbage onward",
 	},
 
 	// cost_models is modeled and compared; the fields after it are documented

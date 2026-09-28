@@ -89,6 +89,13 @@ are non-empty and tx-submission / mempool paths are continuously hit. The image
 is built from
 `internal/test/antithesis/` (`Dockerfile.txpump`, `cmd/txpump/`).
 
+The dedicated `--leios` runner uses the all-Dingo topology with
+`testnet-dingo-leios.yaml`: Dijkstra is active from genesis, test-only Leios
+keys are registered on the three pools, and a producer-to-peer scenario
+checks EB notification, relay fetch, ranking-header reference, and ledger
+application. It selects that feature scenario only; it does not change the
+canonical Conway specs or the `--accelerated` timeline.
+
 ## Network parameters
 
 Dingo mode reads `testnet-dingo.yaml`, conformance mode reads `testnet.yaml`.
@@ -268,6 +275,7 @@ node's NtC endpoint.
 ./run-tests.sh --conformance                 # conformance mode: dingo + cardano-node
 ./run-tests.sh --accelerated                # fast event-driven scenario timeline (see below)
 ./run-tests.sh --accelerated --conformance  # the same timeline against the reference topology
+./run-tests.sh --leios                      # Dijkstra/Leios producer-to-peer path
 ./run-tests.sh -run TestBasicBlockForging   # forward -run (and other flags) to `go test`
 ./run-tests.sh --keep-up                    # leave the network running on success (for poking around)
 DEVNET_MEMPOOL_PROVIDER=dag ./run-tests.sh  # exercise the DAG mempool on every Dingo node
@@ -382,6 +390,34 @@ would connect to the wrong ports. Then:
 `TestAcceleratedScenarioTimeline` skips unless `DEVNET_ACCELERATED=1` is
 set, so it never runs against the canonical-timing network, where its
 budget could not be met.
+
+## Dijkstra/Leios producer-to-peer scenario
+
+`--leios` selects `testnet-dingo-leios.yaml`, runs the all-Dingo profile,
+registers a valid test-only Leios key in each generated pool registration,
+starts each Dingo node in explicit `leios` run mode and Dijkstra start era,
+and activates Dijkstra at epoch 0. Its transaction pump submits signed Dijkstra
+payments so the endorser block contains ledger-valid transactions. The pump
+keeps their outputs unavailable for 1000 slots so it cannot spend them before
+the scenario queries the relay ledger; this wallet delay is not confirmation
+evidence. The test
+observes an endorser-block offer over LeiosNotify, fetches its manifest and
+every referenced body from the non-forging relay over LeiosFetch, matches the
+ranking header's announcement to that EB, and queries the relay's ledger for
+an output from the fetched transactions. This exercises the producer,
+network, and ledger path through Dingo's interfaces and protocol outputs.
+
+Run the complete scenario with:
+
+```bash
+./run-tests.sh --leios
+```
+
+For a manually started network, `./start.sh --leios` prints the environment
+and Go command for the matching producer-to-peer test. The test-only signing
+key and proof are paired fixtures under `testdata/`; a focused unit test
+checks that the registered proof and signing key agree. The configurator
+places the secret only in the generated local pool-key volume.
 
 ## Failure artifacts
 
@@ -498,6 +534,20 @@ current protocol parameters, stake distribution, and whole UTxO set
 session; `DiffSnapshots(a, b)` reports every divergence between two such
 snapshots.
 
+`TestLedgerStateConsensus` additionally queries treasury/reserves and absolute
+mark/set/go stake snapshots inside the same stable-tip check. Its samples cover
+epochs 1 and 2: the first update must leave the d=0 genesis treasury empty, and
+the next must use epoch 0's block production. Both samples compare pots and
+stake distribution with cardano-node. Run it on a fresh network so the epoch-1
+sample is still available:
+
+```bash
+./internal/test/devnet/run-tests.sh --conformance --accelerated -run TestLedgerStateConsensus
+```
+
+The runner compiles the host-side tests before starting the nodes so a cold
+build cannot consume the bootstrap sampling window.
+
 `GetStakeDistribution` and `GetUTxOWhole` (the two queries `SnapshotAtTip`
 needs beyond the ones already used elsewhere in this harness) did not have
 server-side support in Dingo before this scenario — they were part of the
@@ -591,6 +641,7 @@ dingo mode — no `cardano-node` reference exists for this feature:
 | Test | What it verifies |
 |------|-------------------|
 | `TestCIP50PledgeLeverageRewardEffect` | With `poolPledge: 0`, compares a leverage-off baseline (member rewards greater than zero by epoch 4) against a leveraged pass (member rewards exactly zero for every delegated stake credential). Skipped unless `DEVNET_CIP50_TEST=1` is set; requires two separately launched networks to run both passes (see above). |
+| `TestLeiosEndorserBlockProducerToPeer` | On the dedicated Dijkstra network, follows a producer EB offer through LeiosNotify, relay LeiosFetch, a Dijkstra ranking-header reference, and presence of a fetched transaction output in the relay ledger. Runs only via `run-tests.sh --leios`. |
 
 ## Port and address overrides
 
@@ -647,6 +698,7 @@ harness and the compose port mappings always agree.
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
 | `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
 | `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
+| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 120-slot epochs, 0.5s slots |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |

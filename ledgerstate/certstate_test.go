@@ -262,7 +262,7 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 		t.Fatalf("encoding PState: %v", err)
 	}
 
-	pools, err := parsePState(pstate)
+	pools, _, err := parsePStateWithRetirements(pstate)
 	if err != nil {
 		t.Fatalf("parsePState failed: %v", err)
 	}
@@ -325,13 +325,16 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 		bytes.Repeat([]byte{0x65}, 96),
 		bytes.Repeat([]byte{0x66}, 48),
 	}
+	effectiveEpoch := uint64(7)
 
 	for _, tc := range []struct {
 		name      string
 		leiosKey  any
+		wantEpoch *uint64
 		wantError bool
 	}{
 		{name: "registered key", leiosKey: leiosKey},
+		{name: "registered key with effective epoch", leiosKey: []any{leiosKey, uint64(7)}, wantEpoch: &effectiveEpoch},
 		{name: "explicit null", leiosKey: nil},
 		{
 			name: "malformed key",
@@ -370,7 +373,7 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 				t.Fatalf("encoding PState: %v", err)
 			}
 
-			pools, err := parsePState(pstate)
+			pools, _, err := parsePStateWithRetirements(pstate)
 			if tc.wantError {
 				if err == nil {
 					t.Fatal("expected malformed Leios key to fail")
@@ -387,6 +390,13 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 			pool := pools[0]
 			if !bytes.Equal(pool.VrfKeyHash, vrfHash) {
 				t.Fatalf("vrf hash mismatch: %x", pool.VrfKeyHash)
+			}
+			if tc.wantEpoch == nil {
+				if pool.LeiosKeyRegistrationEpoch != nil {
+					t.Fatalf("unexpected registration epoch: %d", *pool.LeiosKeyRegistrationEpoch)
+				}
+			} else if pool.LeiosKeyRegistrationEpoch == nil || *pool.LeiosKeyRegistrationEpoch != *tc.wantEpoch {
+				t.Fatalf("registration epoch mismatch: %v", pool.LeiosKeyRegistrationEpoch)
 			}
 			if pool.Pledge != 500_000_000 {
 				t.Fatalf("pledge mismatch: %d", pool.Pledge)

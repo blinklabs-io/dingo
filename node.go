@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -43,6 +44,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
+	"github.com/blinklabs-io/dingo/internal/committeeauth"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -50,6 +52,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -62,7 +65,9 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 type Node struct {
@@ -90,6 +95,7 @@ type Node struct {
 	leiosPipelineManager    *leios.PipelineManager
 	bark                    *bark.Bark
 	historyExpiry           *historyexpiry.Pruner
+	committeeAuthSync       *committeeauth.Syncer
 	koiosParityObserver     *koiosparity.Observer
 	midnightServer          *midnightserver.Server
 	offchainMetadataFetcher *offchainmetadata.Fetcher
@@ -105,8 +111,16 @@ type Node struct {
 	// ouroborosConfig retains the settings half of the config Run built, so a
 	// live restore can reconstruct ouroboros against rebuilt dependencies
 	// without recomputing them and drifting from Run.
-	ouroborosConfig              ouroborosPkg.OuroborosConfig
-	blockForger                  *forging.BlockForger
+	ouroborosConfig ouroborosPkg.OuroborosConfig
+	blockForger     *forging.BlockForger
+	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
+	// either serve-key or sign mode. validateBlockProducerStartup owns
+	// dialing/closing it (closing the prior one before replacing it, so a
+	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
+	// connection); node_shutdown.go closes it during graceful shutdown.
+	kesAgentClient               *kesagent.Client
+	kesAgentCancel               context.CancelFunc
+	kesAgentMetrics              *kesagent.Metrics
 	leaderElection               *leader.Election
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
@@ -605,6 +619,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
 	}
 	db, err := database.New(dbConfig, stores)
 	if db == nil {
@@ -766,28 +783,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
-		// The deferred phase 1 pass: database.New returned before ever
-		// calling CheckNodeSettings on this path (checkCommitTimestamp
-		// fails first, and New returns its error immediately rather than
-		// continuing on to phase 1), so storage_mode, network,
-		// network_magic, start_era, and the plugin selections have not
-		// been validated or persisted for this startup at all. The
-		// database is consistent now that recovery has completed, so it
-		// is safe to run that check here, before the deferred phase 2
-		// pass below.
-		n.config.logger.Info("running deferred node settings phase 1 check")
-		if err := n.db.CheckNodeSettings(); err != nil {
-			return fmt.Errorf("node settings phase 1: %w", err)
-		}
-		// The deferred phase 2 pass from above: the database is
-		// consistent now, so a gate mismatch can no longer be confused
-		// with the repair that just ran. This still lands before history
-		// expiry, the Midnight indexer, and every network listener below,
-		// so it completes before anything can apply a block or act on a
-		// ledger feature flag phase 2 would have rejected.
-		n.config.logger.Info("running deferred node settings gate enforcement")
-		if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
-			return fmt.Errorf("node settings: %w", err)
+		if err := n.enforceRecoveredNodeSettings(); err != nil {
+			return err
 		}
 	}
 
@@ -809,6 +806,29 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 		started = append(started, func() {
 			_ = n.historyExpiry.Stop(context.Background())
+		})
+	}
+
+	// Unconditional and independent of history expiry: the committee
+	// hot-key authorization pruner in the metadata store always runs and
+	// always needs the live immutable-slot bound to be safe on a sparse
+	// chain (issue #4353). A sync failure here is not fatal -- the pruner
+	// falls back to its slot-window assumption when no live value has been
+	// pushed -- so this only logs.
+	n.committeeAuthSync = committeeauth.NewSyncer(committeeauth.SyncerConfig{
+		PointAtDepth:     state.Chain().PointAtDepth,
+		SecurityParam:    state.SecurityParam,
+		SetImmutableSlot: n.db.SetCommitteeAuthImmutableSlot,
+		Logger:           n.config.logger,
+	})
+	if err := n.committeeAuthSync.Start(n.ctx); err != nil {
+		n.config.logger.Warn(
+			"failed to start committee auth immutable slot sync",
+			"error", err,
+		)
+	} else {
+		started = append(started, func() {
+			_ = n.committeeAuthSync.Stop(context.Background())
 		})
 	}
 
@@ -905,6 +925,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.ledgerState.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
+	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
+	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
+	// that row is not durably written until the hook above runs, later in
+	// the same rollover. Without this, governance would silently see zero
+	// SPO stake for every SPO-gated action at every boundary.
+	n.ledgerState.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
 		},
 	)
 
@@ -1043,31 +1076,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	)
 	// Set mempool adapter in ledger state for block forging.
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
-	// Initialize chainsync state with multi-client configuration
-	chainsyncCfg := chainsync.DefaultConfig()
-	if n.config.chainsyncMaxClients > 0 {
-		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
-	}
-	if n.config.chainsyncStallTimeout > 0 {
-		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
-	}
-	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
-	chainsyncCfg.PromRegistry = n.config.promRegistry
-	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
-		if n.chainSelector == nil {
-			return 0
-		}
-		active, window := n.chainSelector.GenesisSelectionState()
-		if !active {
-			return 0
-		}
-		if window > uint64(math.MaxInt) {
-			return math.MaxInt
-		}
-		// The MaxInt check above makes this conversion safe on both 32- and
-		// 64-bit platforms.
-		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
-	}
+	chainsyncCfg := n.chainsyncConfig()
 	// LedgerState.Start above starts its slot-clock goroutine before Run
 	// creates chainsync state. Use the same lock live Restore/Truncate use
 	// for this initial publication so late-bound ledger callbacks cannot
@@ -1079,11 +1088,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainsyncCfg,
 	)
 	n.liveLifecycleMu.Unlock()
-	n.eventBus.SubscribeFunc(
+	// Both consumers update state from one-shot eligibility transitions; a
+	// detach would leave peer governance or connection routing stale forever.
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		func(evt event.Event) {
 			n.ouroboros().HandlePeerEligibilityChangedEvent(evt)
@@ -1091,10 +1102,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	)
 	// Subscriber ID captured for the same reason as chainManager's above —
 	// n.chainsyncState is rebuilt during a live database restore/truncate.
-	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	// Client-removal requests are one-shot; dropping one leaves a chainsync
+	// client alive after its owner has asked it to stop.
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 	// Initialize chain selector for multi-peer chain selection
 	chainSelectorSecurityParam := uint64(0)
 	if k := n.ledgerState.SecurityParam(); k > 0 {
@@ -1104,7 +1114,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if genesisWindowSlots == 0 {
 		genesisWindowSlots = chainselection.GenesisWindowSlotsForParams(
 			chainSelectorSecurityParam,
-			n.ledgerState.ActiveSlotCoeff(),
+			n.ledgerState.ActiveSlotCoeffRat(),
 		)
 	}
 	genesisSelectionMode := n.config.genesisBootstrap &&
@@ -1156,10 +1166,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:        n.config.promRegistry,
-			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
-			MaxInboundConns:     n.config.maxInboundConns,
-			ConnClosedOwnerFunc: n.handleConnManagerClosedOwner,
+			PromRegistry:           n.config.promRegistry,
+			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
+			MaxInboundConns:        n.config.maxInboundConns,
+			MaxNtCConns:            n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
+			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -1286,7 +1298,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// pin this subscription to the replaced one forever, so outbound
 	// connections would be handled by a closed Ouroboros and the node would
 	// silently stop starting chainsync clients after any restore.
-	n.eventBus.SubscribeFunc(
+	// Outbound connection events are emitted once; losing one leaves an
+	// established connection without its Ouroboros protocols.
+	n.subscribeRequiredEvent(
 		peergov.OutboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleOutboundConnEvent(evt) },
 	)
@@ -1659,6 +1673,25 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				err,
 			)
 		}
+		// Registered before the checks below, not after the forger is
+		// built: validateBlockProducerStartup may have dialled a KES agent
+		// and started its serve-key loop, and every step between here and
+		// the end of this block can fail. Registering afterwards left that
+		// client and its background loop outside the rollback stack. Every
+		// stop in the closure is nil-guarded, so it is safe this early.
+		started = append(started, func() {
+			if n.blockForger != nil {
+				n.blockForger.Stop()
+			}
+			n.closeKESAgentClient()
+			if n.leaderElection != nil {
+				logErrIfNotNil(
+					n.config.logger,
+					"failed to stop leader election during cleanup",
+					n.leaderElection.Stop(),
+				)
+			}
+		})
 		// Cross-check loaded credentials against ledger state. Mismatch
 		// against on-chain pool registration is fatal; "not yet
 		// registered" is a warning so operators can stage credentials
@@ -1690,18 +1723,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				n.blockForger,
 			)
 		}
-		started = append(started, func() {
-			if n.blockForger != nil {
-				n.blockForger.Stop()
-			}
-			if n.leaderElection != nil {
-				logErrIfNotNil(
-					n.config.logger,
-					"failed to stop leader election during cleanup",
-					n.leaderElection.Stop(),
-				)
-			}
-		})
 	}
 
 	// All components started successfully
@@ -1799,54 +1820,79 @@ func taintValue(relaxed bool) string {
 	return nodesettings.LatchOff
 }
 
-// handleConnManagerClosed releases the chainsync server-side (N2C) client
-// state -- including its live chain iterator -- and any pending Leios
-// endorser-closure serving wait, for a node-to-client connection that just
-// closed.
-//
-// NtC closes are deliberately excluded from the ConnectionClosedEventType
-// fan-out (see the connection manager's publish site) because every current
-// subscriber does node-to-node work and a local client reconnecting in a
-// tight loop would otherwise wedge the EventBus. This callback is the NtC
-// counterpart to HandleConnClosedEvent, which already performs the
-// equivalent RemoveClient cleanup for NtN closes via that event. Guarding
-// chainsync cleanup on isNtC keeps RemoveClient exactly-once; serving waits
-// are released directly for both connection modes.
-func (n *Node) handleConnManagerClosed(
-	connId ouroboros.ConnectionId,
-	isNtC bool,
-	_ error,
-) {
-	// Release NtC closure waits independently of the protocol receive loop.
-	if o := n.ouroboros(); o != nil {
-		o.ReleaseLeiosServeWaiters(connId)
-	}
-	if !isNtC {
-		return
-	}
-	if n.chainsyncState != nil {
-		n.chainsyncState.RemoveClient(connId)
-	}
-	if o := n.ouroboros(); o != nil {
-		// Clear any LocalStateQuery pinned point this connection acquired:
-		// a client that disconnects without a clean Release must not leak
-		// its map entry (blinklabs-io/dingo#382).
-		o.ReleaseLocalStateQueryAcquiredPoint(connId)
-	}
-}
-
 func (n *Node) handleConnManagerClosedOwner(
 	conn *ouroboros.Connection,
-	isNtC bool,
-	err error,
+	_ bool,
+	_ error,
 ) {
 	if conn == nil {
 		return
 	}
-	n.handleConnManagerClosed(conn.Id(), isNtC, err)
-	if o := n.ouroboros(); o != nil && conn.LeiosNotify() != nil {
-		o.RemoveLeiosNotifyConnectionOwner(conn.Id(), conn.LeiosNotify().Server)
+	var chainsyncOwner *ochainsync.Server
+	if protocol := conn.ChainSync(); protocol != nil {
+		chainsyncOwner = protocol.Server
 	}
+	if n.chainsyncState != nil {
+		n.chainsyncState.RemoveClientOwner(conn.Id(), chainsyncOwner)
+	}
+	if o := n.ouroboros(); o != nil {
+		if chainsyncOwner != nil {
+			o.ReleaseLeiosServeWaitersOwner(
+				conn.Id(),
+				chainsyncOwner,
+			)
+		}
+		var localStateQueryOwner *olocalstatequery.Server
+		if protocol := conn.LocalStateQuery(); protocol != nil {
+			localStateQueryOwner = protocol.Server
+		}
+		o.ReleaseLocalStateQueryAcquiredPointOwner(
+			conn.Id(),
+			localStateQueryOwner,
+		)
+		if protocol := conn.LeiosNotify(); protocol != nil {
+			o.RemoveLeiosNotifyConnectionOwner(conn.Id(), protocol.Server)
+		}
+	}
+}
+
+// subscribeRequiredEvent keeps an internal node consumer attached when its
+// callback queue saturates. These event streams carry one-shot state
+// transitions that have no safe full-state replay after detachment. Its
+// handler must not synchronously publish to an EventBus path that can wait on
+// this subscriber; move such follow-up work out of the callback instead.
+func (n *Node) subscribeRequiredEvent(
+	eventType event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
+		eventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
+}
+
+// subscribeDetachableEvent is for observers whose missed events do not leave
+// node state stale. Such callbacks must not be used for state transitions that
+// have no replay or resynchronization path.
+func (n *Node) subscribeDetachableEvent(
+	eventType event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
+		eventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureDetach,
+		handler,
+	)
+}
+
+func (n *Node) subscribeChainsyncClientRemoveRequests() event.EventSubscriberId {
+	return n.subscribeRequiredEvent(
+		chainsync.ClientRemoveRequestedEventType,
+		n.chainsyncState.HandleClientRemoveRequestedEvent,
+	)
 }
 
 // subscribeConnectionRecycleRequests subscribes handler to
@@ -1924,13 +1970,16 @@ func (n *Node) subscribeConnectionEvents() {
 	// These are closures rather than method values because this runs before
 	// n.ouroboros is constructed; each resolves it when the event fires,
 	// which cannot happen until the listeners below are open.
-	n.eventBus.SubscribeFunc(
+	// Connection closure is a one-shot lifecycle transition. Ouroboros must
+	// release the protocols and state attached to that connection.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) { n.ouroboros().HandleConnClosedEvent(evt) },
 	)
 	// Translate connmanager connection-closed events to ledger-owned events so
 	// ledger/ does not import connmanager/.
-	n.eventBus.SubscribeFunc(
+	// The translated close event drives ledger cleanup and is not replayed.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
@@ -1949,7 +1998,9 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Inbound connections are delivered once; dropping the event leaves the
+	// accepted connection unhandled for its lifetime.
+	n.subscribeRequiredEvent(
 		connmanager.InboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
@@ -1993,11 +2044,15 @@ func (n *Node) buildChainSelectorConfig(
 // peergov/.
 func (n *Node) subscribeChainSelectorEvents() {
 	// Subscribe chain selector to peer tip update events
-	n.eventBus.SubscribeFunc(
+	// Every peer tip observation contributes to chain selection; detachment
+	// would leave its view stale with no complete resnapshot operation.
+	n.subscribeRequiredEvent(
 		chainselection.PeerTipUpdateEventType,
 		n.chainSelector.HandlePeerTipUpdateEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	// Peer activity refreshes liveness and selection state. A missed event
+	// cannot be recovered after permanent detachment.
+	n.subscribeRequiredEvent(
 		chainselection.PeerTipUpdateEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
@@ -2007,7 +2062,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 			n.peerGov.TouchPeerByConnId(e.ConnectionId)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Activity events refresh selector and peer-governance liveness; the
+	// subscription must resume after transient queue saturation.
+	n.subscribeRequiredEvent(
 		chainselection.PeerActivityEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chainselection.PeerActivityEvent)
@@ -2021,19 +2078,23 @@ func (n *Node) subscribeChainSelectorEvents() {
 		},
 	)
 	// Subscribe to chain switch events to update active connection
-	n.eventBus.SubscribeFunc(
+	// Chain switches update the active connection used by ledger processing.
+	n.subscribeRequiredEvent(
 		chainselection.ChainSwitchEventType,
 		n.handleChainSwitchEvent,
 	)
 	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
 	// uncorroborated Genesis fast source). The handler clears the ledger's active
 	// connection so it cannot retain a source ChainSelector no longer accepts.
-	n.eventBus.SubscribeFunc(
+	// A selected-to-none transition must clear the ledger's active connection;
+	// losing it can leave the node applying from a rejected source.
+	n.subscribeRequiredEvent(
 		chainselection.ChainSelectedNoneEventType,
 		n.handleChainSelectedNoneEvent,
 	)
 	// Subscribe to chain fork events for monitoring
-	n.eventBus.SubscribeFunc(
+	// This observer only emits diagnostics; dropping it does not affect state.
+	n.subscribeDetachableEvent(
 		chain.ChainForkEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chain.ChainForkEvent)
@@ -2050,7 +2111,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 		},
 	)
 	// Subscribe to connection closed events to remove peers from chain selector
-	n.eventBus.SubscribeFunc(
+	// Connection removal updates selector eligibility and ingress bookkeeping;
+	// the close event is not replayed if this subscription detaches.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
@@ -2064,7 +2127,8 @@ func (n *Node) subscribeChainSelectorEvents() {
 	// Forward peer-governance eligibility and priority updates to the chain
 	// selector. Subscription is placed here (node composition layer) so that
 	// chainselection/ has no dependency on peergov/.
-	n.eventBus.SubscribeFunc(
+	// Eligibility transitions gate future chain selection and must not be lost.
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
@@ -2074,7 +2138,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 			n.chainSelector.SetConnectionEligible(e.ConnectionId, e.Eligible)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Priority transitions affect source ranking and have no later full-state
+	// resynchronization, so keep this consumer attached under back-pressure.
+	n.subscribeRequiredEvent(
 		peergov.PeerPriorityChangedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
@@ -2088,11 +2154,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 
 // nodeSettingsGateValues assembles the phase 2 gate values -- the era
 // genesis hashes and the ledger-semantics gates -- from n.config, for
-// EnforceNodeSettings. It is called from two sites in Run: once for the
-// normal startup path, and once for the deferred pass that runs
-// immediately after RecoverCommitTimestampConflict when recovery was
-// needed. Factored out so both sites build the same map from a single
-// definition rather than two copies that could drift.
+// EnforceNodeSettings. Normal startup and the shared post-recovery helper use
+// the same map so ordinary Run and live restore/truncate reinitialization
+// cannot drift.
 func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 	gateValues := nodesettings.Values{
 		// The two validation taints live here, not in phase 1. Only full
@@ -2135,6 +2199,23 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 	return gateValues
 }
 
+// enforceRecoveredNodeSettings runs both settings phases after commit-
+// timestamp recovery. database.New returns before phase 1 on that path, and
+// phase 2 is deliberately deferred until storage is consistent. Both normal
+// startup and live restore/truncate reinitialization call this helper so
+// neither recovery route can resume against an incompatible database.
+func (n *Node) enforceRecoveredNodeSettings() error {
+	n.config.logger.Info("running deferred node settings phase 1 check")
+	if err := n.db.CheckNodeSettings(); err != nil {
+		return fmt.Errorf("node settings phase 1: %w", err)
+	}
+	n.config.logger.Info("running deferred node settings gate enforcement")
+	if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
+		return fmt.Errorf("node settings: %w", err)
+	}
+	return nil
+}
+
 // backfillRewardLiveStake repairs databases created before the live reward
 // stake aggregate existed. It runs after commit-timestamp recovery and before
 // ledger processing can advance the chain, so the next epoch-boundary snapshot
@@ -2148,7 +2229,9 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // it is safe when the database is already known to be consistent (e.g.
 // repeated restarts during investigation of an unrelated issue), but unsafe
 // to leave enabled permanently since it is what catches a stale or
-// pre-migration reward_live_stake table.
+// pre-migration reward_live_stake table -- and, since reward_live_stake.utxo_stake
+// became an incrementally maintained running total (dingo #4421), the only
+// automatic reconciliation of that total against the live UTxO set.
 //
 // Both probes are read-only and run on the read-only metadata connection; the
 // writer is opened only for an actual rebuild. See ARCHITECTURE.md.
@@ -2323,4 +2406,49 @@ func (n *Node) newTokenRegistrySync() (
 			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
 		},
 	)
+}
+
+// chainsyncConfig builds the chainsync state configuration. Run and the live
+// restore/truncate rebuild share it so a rebuilt state keeps the Genesis
+// hooks and Limit on Patience settings. The Genesis callbacks read
+// n.chainSelector lazily because it is created after the chainsync state.
+func (n *Node) chainsyncConfig() chainsync.Config {
+	chainsyncCfg := chainsync.DefaultConfig()
+	if n.config.chainsyncMaxClients > 0 {
+		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	}
+	if n.config.chainsyncStallTimeout > 0 {
+		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
+	}
+	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
+	chainsyncCfg.PromRegistry = n.config.promRegistry
+	genesisBootstrap := n.config.GenesisBootstrap()
+	chainsyncCfg.Patience = chainsync.PatienceConfig{
+		Enabled:  genesisBootstrap.LimitOnPatienceEnabled,
+		Capacity: genesisBootstrap.LimitOnPatienceCapacity,
+		Rate:     genesisBootstrap.LimitOnPatienceRate,
+	}
+	chainsyncCfg.PatienceActiveFunc = func() bool {
+		if n.chainSelector == nil {
+			return false
+		}
+		active, _ := n.chainSelector.GenesisSelectionState()
+		return active
+	}
+	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
+		if n.chainSelector == nil {
+			return 0
+		}
+		active, window := n.chainSelector.GenesisSelectionState()
+		if !active {
+			return 0
+		}
+		if window > uint64(math.MaxInt) {
+			return math.MaxInt
+		}
+		// The MaxInt check above makes this conversion safe on both 32- and
+		// 64-bit platforms.
+		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+	}
+	return chainsyncCfg
 }

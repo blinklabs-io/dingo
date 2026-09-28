@@ -39,12 +39,14 @@ func (d *Database) GetMidnightCandidates(
 func (d *Database) InsertMidnightGovernanceDatum(
 	datum *models.MidnightGovernanceDatum,
 ) error {
-	txn := d.MetadataTxn(true)
-	defer txn.Release()
-	if err := d.metadata.InsertMidnightGovernanceDatum(txn.Metadata(), datum); err != nil {
-		return fmt.Errorf("insert midnight governance datum: %w", err)
-	}
-	return txn.Commit()
+	return d.withMetadataWriteTxn(nil, func(txn *Txn) error {
+		if err := d.metadata.InsertMidnightGovernanceDatum(
+			txn.Metadata(), datum,
+		); err != nil {
+			return fmt.Errorf("insert midnight governance datum: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetLatestMidnightGovernanceDatum returns the newest datum of datumType at or
@@ -72,12 +74,14 @@ func (d *Database) GetLatestMidnightAriadneParams() (*models.MidnightAriadnePara
 func (d *Database) UpsertMidnightAriadneParams(
 	params *models.MidnightAriadneParams,
 ) error {
-	txn := d.MetadataTxn(true)
-	defer txn.Release()
-	if err := d.metadata.UpsertMidnightAriadneParams(txn.Metadata(), params); err != nil {
-		return fmt.Errorf("upsert midnight ariadne params: %w", err)
-	}
-	return txn.Commit()
+	return d.withMetadataWriteTxn(nil, func(txn *Txn) error {
+		if err := d.metadata.UpsertMidnightAriadneParams(
+			txn.Metadata(), params,
+		); err != nil {
+			return fmt.Errorf("upsert midnight ariadne params: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetMidnightAriadneParamsAtOrBeforeEpoch returns the newest Ariadne params
@@ -112,10 +116,12 @@ func (d *Database) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 func (d *Database) UpsertMidnightEpochCandidates(
 	ec *models.MidnightEpochCandidates,
 ) error {
-	txn := d.MetadataTxn(true)
-	defer txn.Release()
-	if err := d.metadata.UpsertMidnightEpochCandidates(txn.Metadata(), ec); err != nil {
-		return fmt.Errorf("upsert midnight epoch candidates: %w", err)
-	}
-	return txn.Commit()
+	return d.withMetadataWriteTxn(nil, func(txn *Txn) error {
+		if err := d.metadata.UpsertMidnightEpochCandidates(
+			txn.Metadata(), ec,
+		); err != nil {
+			return fmt.Errorf("upsert midnight epoch candidates: %w", err)
+		}
+		return nil
+	})
 }

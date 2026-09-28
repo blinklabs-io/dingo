@@ -63,12 +63,30 @@ func TestLedgerStateStartQueuesStartupRewardPrecompute(t *testing.T) {
 		ls.Close()
 	})
 
+	// Occupy the precompute worker slot before Start. queueRewardPrecompute
+	// hands the event to a worker goroutine that clears
+	// rewardPrecomputePending under the same mutex, so a worker that reaches
+	// the mutex before the hook leaves nothing for the hook to observe. With
+	// the slot taken the queued round stays pending, which is what Start owes
+	// the in-progress epoch.
+	ls.rewardPrecomputeMu.Lock()
+	ls.rewardPrecomputeRunning = true
+	ls.rewardPrecomputeMu.Unlock()
+
 	startupQueued := make(chan struct{})
 	ls.startupRewardPrecomputeHook = func() {
 		ls.rewardPrecomputeMu.Lock()
-		queued := ls.rewardPrecomputePending != nil
+		pending := ls.rewardPrecomputePending
+		var queued event.EpochTransitionEvent
+		if pending != nil {
+			queued = *pending
+		}
 		ls.rewardPrecomputeMu.Unlock()
-		require.True(t, queued, "Start must queue the established current epoch")
+		require.NotNil(
+			t, pending, "Start must queue the established current epoch",
+		)
+		require.Equal(t, uint64(0), queued.NewEpoch)
+		require.Equal(t, nonce, queued.EpochNonce)
 		close(startupQueued)
 	}
 

@@ -69,7 +69,7 @@ const busyTimeoutMargin = 5500 * time.Millisecond
 func TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter(
 	t *testing.T,
 ) {
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -161,7 +161,7 @@ func TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter(
 func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 	t *testing.T,
 ) {
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -236,7 +236,7 @@ func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 // one place rather than by accident in two.
 func TestOpenCacheLegacyColumnMigrationDoesNotDeadlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(path, nil)
+	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
 
 	// Recreate an older cache file: the three columns createCacheSchema
@@ -257,7 +257,7 @@ func TestOpenCacheLegacyColumnMigrationDoesNotDeadlock(t *testing.T) {
 	reopened := make(chan *Cache, 1)
 	reopenErr := make(chan error, 1)
 	go func() {
-		c, err := OpenCache(path, nil)
+		c, err := openTestCache(path, nil)
 		if err != nil {
 			reopenErr <- err
 			return
@@ -373,7 +373,7 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 			const iterations = 3000
 			path := filepath.Join(t.TempDir(), "cache.db")
 
-			writer, err := OpenCache(path, nil)
+			writer, err := openTestCache(path, nil)
 			require.NoError(t, err)
 			defer writer.Close() //nolint:errcheck
 			_, err = writer.RecordKoiosSource(network, sourceURL, now)
@@ -383,7 +383,7 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 			// so the WAL keeps advancing under the writer's transactions. It
 			// writes another network, so nothing it does can legitimately
 			// trip the claimed-source gate.
-			other, err := OpenCache(path, nil)
+			other, err := openTestCache(path, nil)
 			require.NoError(t, err)
 			defer other.Close() //nolint:errcheck
 			stop := make(chan struct{})

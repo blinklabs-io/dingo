@@ -282,13 +282,14 @@ func TestForgeEBCapsExplicitZeroSurvivesTheLoadPipeline(t *testing.T) {
 				t.Fatalf("write config file: %v", err)
 			}
 
+			cmd := &cobra.Command{Use: "dingo"}
+			RegisterFlags(cmd)
+
 			cfg, err := LoadConfig(configFile)
 			if err != nil {
 				t.Fatalf("load config: %v", err)
 			}
 
-			cmd := &cobra.Command{Use: "dingo"}
-			RegisterFlags(cmd)
 			if err := cmd.PersistentFlags().Parse(tc.flags); err != nil {
 				t.Fatalf("parse flags: %v", err)
 			}

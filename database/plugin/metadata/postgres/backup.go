@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -515,23 +516,23 @@ func refuseIfDependentViewsExist(
 
 type qualifiedTable struct{ schema, name string }
 
-// migrationsTableName is sqlstore/migrations' own bookkeeping table --
-// every real Start() populates it with one row per applied migration, so
-// it's the one table a freshly migrated, otherwise-empty database is
-// expected to already have data in.
-const migrationsTableName = "schema_migrations"
+const (
+	// migrationsTableName is sqlstore/migrations' bookkeeping table.
+	migrationsTableName = "schema_migrations"
+	// nodeSettingsGateTableName receives the v20 Alonzo-unit provenance
+	// marker while migrations bootstrap an otherwise-empty database.
+	nodeSettingsGateTableName = "node_settings_gate"
+)
 
 // refuseIfTargetHasData errors out, before resetDatabase drops anything,
-// if any table other than the migrations runner's own bookkeeping table
-// already contains a row. dingo's own migrations never insert into a
-// domain table -- only schema_migrations records bookkeeping rows
-// (verified: no migration file under sqlstore/migrations/v1 contains an
-// INSERT INTO a domain table) -- so a database restoreMetadataStore's
-// brief resolve-and-start just finished migrating has zero rows in
-// everything else. A nonzero count anywhere else means this target isn't
-// that: most plausibly a live node's own database, pointed at by a reused
-// or misconfigured DSN, whose accumulated real data resetDatabase's
-// unconditional DROP TABLE would otherwise destroy with no way back.
+// if any table contains data other than migration bookkeeping. Migration
+// v20 also seeds node_settings_gate with the Alonzo per-word provenance
+// marker, so that exact row is bootstrap data; any other row in the table
+// remains evidence of a previously used target. A nonzero count anywhere
+// else means this target is most plausibly a live node's own database,
+// pointed at by a reused or misconfigured DSN, whose accumulated real data
+// resetDatabase's unconditional DROP TABLE would otherwise destroy with no
+// way back.
 //
 // The exemption is scoped to (schema, name), not name alone: resetDatabase
 // scans every non-system schema, and migrations/runner.go's own
@@ -566,10 +567,19 @@ func refuseIfTargetHasData(
 			continue
 		}
 		quoted := pgQuoteIdentifier(t.schema) + "." + pgQuoteIdentifier(t.name)
+		query := "SELECT EXISTS (SELECT 1 FROM " + quoted + ")"
+		var args []any
+		if t.name == nodeSettingsGateTableName && t.schema == migrationsSchema {
+			query = "SELECT EXISTS (SELECT 1 FROM " + quoted +
+				" WHERE NOT (name = $1 AND value = $2" +
+				" AND recorded_epoch = 0 AND recorded_slot = 0))"
+			args = []any{
+				nodesettings.AlonzoPParamsUnitGateName,
+				nodesettings.AlonzoPParamsUnitWordV1,
+			}
+		}
 		var hasData bool
-		err := db.QueryRowContext(
-			ctx, "SELECT EXISTS (SELECT 1 FROM "+quoted+")",
-		).Scan(&hasData)
+		err := db.QueryRowContext(ctx, query, args...).Scan(&hasData)
 		if err != nil {
 			return fmt.Errorf("check table %s for data: %w", quoted, err)
 		}

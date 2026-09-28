@@ -29,7 +29,7 @@ func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 ) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -68,7 +68,7 @@ func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 func TestCommitEpochDataWithTotals(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -121,7 +121,7 @@ func TestCommitEpochDataWithTotals(t *testing.T) {
 func TestCommitAccountRewardsForEpoch(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -201,7 +201,7 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 // eviction so an old epoch still compares correctly after its resumability
 // state ages out.
 func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -268,7 +268,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 // lifecycle reporting retains its exact count and capped sample after the
 // per-address rows are evicted.
 func TestAccountCoveragePreservesBoundedZeroRewardSummary(t *testing.T) {
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -289,12 +289,18 @@ func TestAccountCoveragePreservesBoundedZeroRewardSummary(t *testing.T) {
 	require.Equal(t, []string{"stake1zero", "stake1zero2"}, summary.Sample)
 }
 
+// legacySeedPragmas relaxes durability for the throwaway files these tests
+// hand-build in a legacy shape before OpenCache migrates them; the same
+// settings as the migrations package's testDBPragmas.
+const legacySeedPragmas = "_pragma=journal_mode(MEMORY)&" +
+	"_pragma=synchronous(OFF)"
+
 // TestAccountCoverageSummaryMigrationBackfillsLegacyRows proves an existing
 // cache gets its bounded lifecycle summary before checkpoint eviction can
 // remove the legacy per-address evidence.
 func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
 	require.NoError(t, err)
 	_, err = db.Exec(`CREATE TABLE koios_account_coverage (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
@@ -321,7 +327,7 @@ func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	cache, err := OpenCache(path, nil)
+	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	summary, err := cache.GetZeroRewardSummary("preview", 100)
@@ -345,7 +351,7 @@ func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
 func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -400,7 +406,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
 
 	// Build the pre-#3097 shape directly, bypassing createCacheSchema.
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
 	require.NoError(t, err)
 	_, err = db.Exec(`CREATE TABLE koios_account_rewards (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
@@ -423,7 +429,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// Opening through the real path must migrate forward without error.
-	cache, err := OpenCache(path, nil)
+	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -469,7 +475,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 func TestCommitEpochMismatchesRollsBackOnFailedInsert(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -522,4 +528,392 @@ func TestCommitEpochMismatchesRollsBackOnFailedInsert(t *testing.T) {
 		"a failed replacement must leave the prior evidence intact",
 	)
 	require.Equal(t, "prior_evidence", got[0].Field)
+}
+
+// accountMismatch and aggregateMismatch build one mismatch row in each check
+// phase's scope, for the phase-isolation tests below.
+func accountMismatch(network string, epoch uint64, at time.Time) CheckMismatch {
+	return CheckMismatch{
+		Network:      network,
+		Epoch:        epoch,
+		StakeAddress: "stake_test1account",
+		Field:        "account_reward",
+		DingoValue:   "1",
+		KoiosValue:   "2",
+		Category:     CategoryValueMismatch,
+		CheckedAt:    at,
+		Scope:        ScopeAccount,
+	}
+}
+
+func aggregateMismatch(network string, epoch uint64, at time.Time) CheckMismatch {
+	return CheckMismatch{
+		Network:    network,
+		Epoch:      epoch,
+		PoolBech32: "pool1aggregate",
+		Field:      "active_stake",
+		DingoValue: "1",
+		KoiosValue: "2",
+		Category:   CategoryValueMismatch,
+		CheckedAt:  at,
+		Scope:      ScopeAggregate,
+	}
+}
+
+// TestCheckEpochStatusPhasesClearIndependently pins the contract the two
+// observer queues need from one (network, epoch) status row: the aggregate
+// phase and the account phase write it at unrelated times, so neither may
+// overwrite the other's verdict, and each must be able to clear its own
+// failure once it passes again. Letting either phase own the single status
+// column loses one of those two properties — a last-writer-wins column hides
+// an account failure behind a later aggregate pass, and a column that refuses
+// to leave a failure never records the recovery.
+func TestCheckEpochStatusPhasesClearIndependently(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const epoch = uint64(42)
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	readStatus := func() CheckEpochStatus {
+		t.Helper()
+		all, err := cache.GetStatusSummary(network)
+		require.NoError(t, err)
+		require.Len(t, all, 1)
+		return all[0]
+	}
+
+	// The account phase records a failure.
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:                network,
+		Epoch:                  epoch,
+		LastCheckedAt:          now,
+		AggregateStatus:        StatusPass,
+		AggregateMismatchCount: 0,
+		AccountStatus:          StatusFail,
+		AccountMismatchCount:   3,
+	}))
+	require.Equal(t, StatusFail, readStatus().Status)
+
+	// A later aggregate-only pass must not hide it. The aggregate phase
+	// leaves AccountStatus empty because it never ran that comparison.
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:         network,
+		Epoch:           epoch,
+		LastCheckedAt:   now.Add(time.Minute),
+		AggregateStatus: StatusPass,
+	}))
+	after := readStatus()
+	require.Equal(t, StatusFail, after.Status,
+		"an aggregate pass must not clear the account phase's failure")
+	require.Equal(t, 3, after.MismatchCount)
+	require.Equal(t, StatusFail, after.AccountStatus)
+	require.Equal(t, now.Add(time.Minute), after.LastCheckedAt.UTC())
+
+	// The account phase recovering must clear its own failure.
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:              network,
+		Epoch:                epoch,
+		LastCheckedAt:        now.Add(2 * time.Minute),
+		AggregateStatus:      StatusPass,
+		AccountStatus:        StatusPass,
+		AccountMismatchCount: 0,
+	}))
+	recovered := readStatus()
+	require.Equal(t, StatusPass, recovered.Status,
+		"a recovered account check must clear the stored account failure")
+	require.Equal(t, 0, recovered.MismatchCount)
+
+	// The same must hold in the other direction: an aggregate failure that an
+	// account-phase pass cannot clear, and that the aggregate phase's own
+	// later pass does.
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:                network,
+		Epoch:                  epoch,
+		LastCheckedAt:          now.Add(3 * time.Minute),
+		AggregateStatus:        StatusFail,
+		AggregateMismatchCount: 2,
+	}))
+	require.Equal(t, StatusFail, readStatus().Status)
+
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:         network,
+		Epoch:           epoch,
+		LastCheckedAt:   now.Add(4 * time.Minute),
+		AggregateStatus: StatusPass,
+		AccountStatus:   StatusPass,
+	}))
+	require.Equal(t, StatusPass, readStatus().Status,
+		"a recovered aggregate check must clear the stored aggregate failure")
+
+	// ERROR is merged by severity, not by recency: an account ERROR alongside
+	// an aggregate PASS surfaces as ERROR.
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:              network,
+		Epoch:                epoch,
+		LastCheckedAt:        now.Add(5 * time.Minute),
+		AggregateStatus:      StatusPass,
+		AccountStatus:        StatusError,
+		AccountMismatchCount: 1,
+	}))
+	require.Equal(t, StatusError, readStatus().Status)
+}
+
+// TestUpsertCheckEpochStatusDefaultsToAggregatePhase pins the reading of a
+// caller that sets only Status: it is an aggregate-phase result, so it clears
+// on its own next pass rather than sticking, and it never touches the account
+// phase's stored verdict.
+func TestUpsertCheckEpochStatusDefaultsToAggregatePhase(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const epoch = uint64(7)
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:       network,
+		Epoch:         epoch,
+		LastCheckedAt: now,
+		Status:        StatusFail,
+		MismatchCount: 4,
+	}))
+	all, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, StatusFail, all[0].AggregateStatus)
+	require.Equal(t, 4, all[0].AggregateMismatchCount)
+	require.Empty(t, all[0].AccountStatus)
+
+	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network:       network,
+		Epoch:         epoch,
+		LastCheckedAt: now.Add(time.Minute),
+		Status:        StatusPass,
+	}))
+	all, err = cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, StatusPass, all[0].Status)
+	require.Equal(t, 0, all[0].MismatchCount)
+}
+
+// TestCommitEpochMismatchesReplacesOnlyNamedScopes proves the evidence rows
+// follow the status: an aggregate-only run replaces its own rows and leaves
+// the account phase's in place. Deleting them would leave the account failure
+// recorded on check_epoch_status with nothing behind it, and a later report
+// would read a FAIL epoch with no mismatches to show for it.
+func TestCommitEpochMismatchesReplacesOnlyNamedScopes(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const epoch = uint64(12)
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, cache.CommitEpochMismatches(
+		network,
+		epoch,
+		[]CheckMismatch{
+			aggregateMismatch(network, epoch, now),
+			accountMismatch(network, epoch, now),
+		},
+		AllMismatchScopes...,
+	))
+
+	// The aggregate phase passing replaces its own rows only.
+	require.NoError(t, cache.CommitEpochMismatches(
+		network,
+		epoch,
+		nil,
+		ScopeAggregate,
+	))
+	got, err := cache.GetMismatches(network, epoch, "")
+	require.NoError(t, err)
+	require.Len(t, got, 1,
+		"an aggregate-only commit must not delete the account phase's evidence")
+	require.Equal(t, ScopeAccount, got[0].Scope)
+	require.Equal(t, "account_reward", got[0].Field)
+
+	// The account phase passing then clears its own.
+	require.NoError(t, cache.CommitEpochMismatches(
+		network,
+		epoch,
+		nil,
+		ScopeAccount,
+	))
+	got, err = cache.GetMismatches(network, epoch, "")
+	require.NoError(t, err)
+	require.Empty(t, got,
+		"a recovered account check must clear the account phase's evidence")
+}
+
+// TestCommitEpochMismatchesDefaultsScopeToAggregate pins the reading of a
+// caller that passes no scope and untagged rows: the whole epoch is replaced
+// and the rows land in the aggregate scope, which is what every caller
+// predating the phase split meant.
+func TestCommitEpochMismatchesDefaultsScopeToAggregate(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const epoch = uint64(13)
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, cache.CommitEpochMismatches(
+		network,
+		epoch,
+		[]CheckMismatch{accountMismatch(network, epoch, now)},
+		AllMismatchScopes...,
+	))
+	require.NoError(t, cache.CommitEpochMismatches(
+		network,
+		epoch,
+		[]CheckMismatch{{
+			Network:   network,
+			Epoch:     epoch,
+			Field:     "untagged",
+			Category:  CategoryValueMismatch,
+			CheckedAt: now,
+		}},
+	))
+	got, err := cache.GetMismatches(network, epoch, "")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "untagged", got[0].Field)
+	require.Equal(t, ScopeAggregate, got[0].Scope)
+}
+
+// TestCheckPhaseColumnMigration proves OpenCache migrates a cache file
+// written before the phase split forward without data loss, and that the
+// pre-existing verdict is attributed to the aggregate phase so it can clear
+// on that phase's next pass rather than outliving its cause.
+func TestCheckPhaseColumnMigration(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "cache.db")
+
+	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE check_epoch_status (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+		last_checked_at DATETIME NOT NULL, status TEXT NOT NULL, mismatch_count INTEGER NOT NULL,
+		dingo_pool_count INTEGER NOT NULL, koios_pool_count INTEGER NOT NULL,
+		only_dingo_pools TEXT NOT NULL, only_koios_pools TEXT NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE check_mismatches (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+		pool_bech32 TEXT NOT NULL, stake_address TEXT NOT NULL, field TEXT NOT NULL,
+		dingo_value TEXT NOT NULL, koios_value TEXT NOT NULL, category TEXT NOT NULL,
+		checked_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err = db.Exec(
+		`INSERT INTO check_epoch_status (network, epoch, last_checked_at, status,
+			mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"preview", 9, now, StatusFail, 5, 1, 1, "[]", "[]",
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(
+		`INSERT INTO check_mismatches (network, epoch, pool_bech32, stake_address, field,
+			dingo_value, koios_value, category, checked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"preview", 9, "pool1legacy", "", "legacy_field", "1", "2", CategoryValueMismatch, now,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	cache, err := openTestCache(path, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	statuses, err := cache.GetStatusSummary("preview")
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusFail, statuses[0].Status)
+	require.Equal(t, StatusFail, statuses[0].AggregateStatus,
+		"an unattributed stored verdict is the aggregate phase's, so it clears on that phase's next pass")
+	require.Equal(t, 5, statuses[0].AggregateMismatchCount)
+	require.Empty(t, statuses[0].AccountStatus)
+
+	mismatches, err := cache.GetMismatches("preview", 9, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "legacy_field", mismatches[0].Field)
+	require.Equal(t, ScopeAggregate, mismatches[0].Scope)
+}
+
+// TestTxInfoCacheRoundTripsAndScopesByNetwork proves koios_tx_info stores a
+// KoiosTxInfoItem losslessly (the datum/asset/reference-script detail
+// CanonicalKoiosUTxOEntry compares on, not just the hash), keys it by
+// network the way every other Koios-sourced table is keyed, and answers a
+// hash list longer than SQLite's 999-bound-parameter limit -- the case
+// txInfoLookupChunk exists for, which a chunk-sized test would never reach.
+func TestTxInfoCacheRoundTripsAndScopesByNetwork(t *testing.T) {
+	t.Parallel()
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	datumHash := "deadbeef"
+	rich := KoiosTxInfoItem{
+		TxHash: "rich",
+		Inputs: []KoiosTxInfoUtxoRef{{TxHash: "prev", TxIndex: 3}},
+		Outputs: []KoiosTxInfoOutput{{
+			TxHash:          "rich",
+			TxIndex:         0,
+			Value:           "42",
+			DatumHash:       &datumHash,
+			InlineDatum:     &KoiosTxInfoInlineDatum{Bytes: "d87980"},
+			ReferenceScript: &KoiosTxInfoReferenceScript{Hash: "cafe"},
+			AssetList: []KoiosTxInfoAsset{
+				{PolicyID: "aa", AssetName: "bb", Quantity: "9"},
+			},
+		}},
+	}
+
+	const bulk = 1500
+	items := []KoiosTxInfoItem{rich}
+	hashes := []string{"rich"}
+	for i := range bulk {
+		h := fmt.Sprintf("tx%04d", i)
+		items = append(items, KoiosTxInfoItem{TxHash: h})
+		hashes = append(hashes, h)
+	}
+	require.NoError(t, cache.UpsertTxInfos("preview", items, time.Now().UTC()))
+
+	got, err := cache.GetTxInfos("preview", hashes)
+	require.NoError(t, err)
+	require.Len(t, got, bulk+1,
+		"a hash list past SQLite's parameter limit must still be answered in full")
+	require.Equal(t, rich, got["rich"],
+		"a cached item must round-trip byte-identically, datum and assets included")
+
+	// A hash nobody cached is simply absent, not an error: that is the
+	// signal the caller uses to fetch exactly the misses.
+	partial, err := cache.GetTxInfos("preview", []string{"rich", "never-seen"})
+	require.NoError(t, err)
+	require.Len(t, partial, 1)
+	require.NotContains(t, partial, "never-seen")
+
+	// Rows are network-scoped like every other Koios-sourced table, so
+	// preprod never reads preview's answers.
+	other, err := cache.GetTxInfos("preprod", hashes)
+	require.NoError(t, err)
+	require.Empty(t, other)
 }

@@ -31,10 +31,13 @@ import (
 )
 
 type byronPBFTCache struct {
-	config      *byronconsensus.ByronConfig
-	state       byronPBFTState
-	tip         ocommon.Point
-	initialized bool
+	config *byronconsensus.ByronConfig
+	// noGenesisIssuers records a configured Byron genesis with no boot
+	// stakeholders; see errByronNoGenesisIssuers.
+	noGenesisIssuers bool
+	state            byronPBFTState
+	tip              ocommon.Point
+	initialized      bool
 }
 
 type byronPBFTState struct {
@@ -46,14 +49,39 @@ var errByronPBFTCurrentSlotUnavailable = errors.New(
 	"byron PBFT current slot unavailable",
 )
 
+// errByronNoGenesisIssuers rejects every Byron block on a chain whose Byron
+// genesis declares no boot stakeholders. OBFT assigns every Byron slot leader
+// from that set, so no Byron main block can be valid there. An epoch-boundary
+// block carries no PBFT signature and would otherwise pass header validation
+// on the genesis anchor and slot bound alone, so it is refused as well: the
+// only chains using this genesis shape hard-fork away from Byron at epoch 0,
+// where the reference admits no Byron block of either kind.
+var errByronNoGenesisIssuers = errors.New(
+	"byron genesis declares no boot stakeholders, so this chain cannot contain Byron blocks",
+)
+
 func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 	if lsConfig.CardanoNodeConfig == nil ||
 		lsConfig.CardanoNodeConfig.ByronGenesis() == nil {
 		return byronPBFTCache{}, nil
 	}
-	config, err := byronconsensus.NewByronConfigFromGenesis(
-		lsConfig.CardanoNodeConfig.ByronGenesis(),
-	)
+	genesis := lsConfig.CardanoNodeConfig.ByronGenesis()
+	// byronconsensus.NewPBFTDelegationState refuses an empty issuer set, but
+	// cardano-node starts from exactly this genesis when it hard-forks away
+	// from Byron at epoch 0. Record the shape instead of failing ledger-state
+	// construction, and reject every Byron block on this chain instead; see
+	// errByronNoGenesisIssuers.
+	keyHashes, err := genesis.GenesisDelegateKeyHashes()
+	if err != nil {
+		return byronPBFTCache{}, fmt.Errorf(
+			"build Byron PBFT config from genesis: %w",
+			err,
+		)
+	}
+	if len(keyHashes) == 0 {
+		return byronPBFTCache{noGenesisIssuers: true}, nil
+	}
+	config, err := byronconsensus.NewByronConfigFromGenesis(genesis)
 	if err != nil {
 		return byronPBFTCache{}, fmt.Errorf(
 			"build Byron PBFT config from genesis: %w",
@@ -67,16 +95,40 @@ func (ls *LedgerState) byronPBFTConfig() (byronconsensus.ByronConfig, error) {
 	if ls.byronPBFT.config != nil {
 		return *ls.byronPBFT.config, nil
 	}
-	cache, err := newByronPBFTCache(ls.config)
+	config, noGenesisIssuers, err := ls.byronPBFTGenesis()
 	if err != nil {
 		return byronconsensus.ByronConfig{}, err
 	}
-	if cache.config == nil {
+	if noGenesisIssuers {
+		return byronconsensus.ByronConfig{}, errByronNoGenesisIssuers
+	}
+	if config == nil {
 		return byronconsensus.ByronConfig{}, errors.New(
 			"byron PBFT validation requires Byron genesis configuration",
 		)
 	}
-	return *cache.config, nil
+	return *config, nil
+}
+
+// byronPBFTGenesis returns the cache's genesis-derived fields, deriving them
+// from the ledger config for a LedgerState constructed without the cache.
+// Header validation calls this without the ledger lock, which is safe only
+// because NewLedgerState sets these two fields once; the cache's state, tip
+// and initialized fields are written under the lock during apply and must not
+// be read here.
+func (ls *LedgerState) byronPBFTGenesis() (
+	*byronconsensus.ByronConfig,
+	bool,
+	error,
+) {
+	if ls.byronPBFT.config != nil || ls.byronPBFT.noGenesisIssuers {
+		return ls.byronPBFT.config, ls.byronPBFT.noGenesisIssuers, nil
+	}
+	cache, err := newByronPBFTCache(ls.config)
+	if err != nil {
+		return nil, false, err
+	}
+	return cache.config, cache.noGenesisIssuers, nil
 }
 
 func (ls *LedgerState) validateByronPBFTHeader(
@@ -122,13 +174,76 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 		)
 	}
 	// Header-only blocks cannot preserve the enclosing block discriminator, so
-	// distinguish EBBs from main blocks by their concrete header type.
+	// distinguish EBBs from main blocks by their concrete header type. Either
+	// may be a typed-nil pointer, and every check below, including the slot in
+	// their error messages, reads through the asserted header.
 	header := block.Header()
-	if _, ok := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader); ok {
+	ebbHeader, isEbb := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader)
+	mainHeader, isMain := header.(*ledgerbyron.ByronMainBlockHeader)
+	if header == nil || (isEbb && ebbHeader == nil) ||
+		(isMain && mainHeader == nil) {
+		return errors.New(
+			"cannot validate a Byron PBFT block with a nil header",
+		)
+	}
+	_, noGenesisIssuers, err := ls.byronPBFTGenesis()
+	if err != nil {
+		return err
+	}
+	if noGenesisIssuers {
+		return fmt.Errorf(
+			"byron block at slot %d: %w",
+			block.SlotNumber(),
+			errByronNoGenesisIssuers,
+		)
+	}
+	// Every header entry point routes a Byron header here, and an unsigned
+	// epoch-boundary header would otherwise pass on the anchor and slot bound
+	// alone when it extends a post-Byron block.
+	if err := ls.validateHeaderEraOrder(header); err != nil {
+		return err
+	}
+	if isEbb {
+		if ls.atByronChainOrigin() {
+			// An EBB's block number (Difficulty.Value) and slot (derived from
+			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
+			// only constrains the former, and validateByronPBFTCurrentSlot only
+			// rejects a future slot, not a past one. Without this, an EBB with
+			// Difficulty 0, PrevBlock equal to the configured genesis hash, and
+			// any past nonzero epoch would pass every other check here despite
+			// skipping every epoch before it -- the first EBB of any Byron chain
+			// is always epoch 0, unconditionally.
+			if ebbHeader.ConsensusData.Epoch != 0 {
+				return fmt.Errorf(
+					"byron epoch-boundary block at slot %d: the first block "+
+						"of a from-genesis chain must be epoch 0, got epoch %d",
+					block.SlotNumber(),
+					ebbHeader.ConsensusData.Epoch,
+				)
+			}
+			if err := ls.validateByronGenesisAnchor(ebbHeader); err != nil {
+				return err
+			}
+		}
 		return ls.validateByronPBFTCurrentSlot(block)
 	}
-	mainHeader, ok := header.(*ledgerbyron.ByronMainBlockHeader)
-	if !ok || header == nil {
+	// Only an epoch-boundary block may be the first block of a from-genesis
+	// (or post-rollback-to-origin) chain. The chain package's own anchor
+	// (chain.firstBlockNumberValid) only checks that the candidate's block
+	// number is 0; it cannot also require the candidate to be an EBB, because
+	// it has no notion of Byron block kinds at all. A PBFT-signed regular
+	// block claiming block number 0 would otherwise pass that check and reach
+	// the crypto verification below, which validates the signature but not
+	// that this is the right kind of block to open the chain
+	// (blinklabs-io/dingo#4399).
+	if ls.atByronChainOrigin() {
+		return fmt.Errorf(
+			"byron block at slot %d: only an epoch-boundary block may be "+
+				"the first block of a from-genesis chain",
+			block.SlotNumber(),
+		)
+	}
+	if !isMain {
 		return fmt.Errorf(
 			"byron main block at slot %d has unexpected header type %T",
 			block.SlotNumber(),
@@ -149,6 +264,73 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	}
 	if err := ls.validateByronPBFTCurrentSlot(block); err != nil {
 		return err
+	}
+	return nil
+}
+
+// atByronChainOrigin reports whether the primary chain currently sits at
+// origin -- no blocks yet -- either because this is a genuine from-genesis
+// start or because a rollback emptied the chain back to origin
+// (chain.Chain.atOriginAfterMutation covers the same two cases at the chain
+// layer, for the block-number half of this same anchor).
+//
+// A nil chain reports false rather than true. Production wiring always sets
+// a chain before any header reaches this validation; a nil chain only occurs
+// in a bare LedgerState built directly in a test, and treating that as
+// "at origin" would force every such test to configure a Byron genesis hash
+// it has no reason to care about.
+func (ls *LedgerState) atByronChainOrigin() bool {
+	ls.RLock()
+	c := ls.chain
+	ls.RUnlock()
+	if c == nil {
+		return false
+	}
+	tip := c.Tip()
+	return tip.Point.Slot == 0 && len(tip.Point.Hash) == 0
+}
+
+// validateByronGenesisAnchor requires the first epoch-boundary block of a
+// from-genesis (or post-rollback-to-origin) Byron chain to chain onto the
+// configured Byron genesis hash. The reference tracks the previous hash as
+// either the configured genesis hash or a prior header hash, and rejects a
+// mismatch at the first block with ChainValidationGenesisHashMismatch. The
+// chain package cannot enforce this itself -- it has no knowledge of the
+// network's genesis hash (see chain.firstBlockNumberValid) -- so binding the
+// anchor belongs here, in the ledger/config-aware layer
+// (blinklabs-io/dingo#4399).
+//
+// A ledger started from a snapshot or bulk import at a trusted non-origin
+// point never reaches this function with an unanchored EBB: its primary
+// chain tip is that trusted point, not origin, so atByronChainOrigin already
+// reports false and this check does not run.
+func (ls *LedgerState) validateByronGenesisAnchor(
+	header *ledgerbyron.ByronEpochBoundaryBlockHeader,
+) error {
+	if ls.config.CardanoNodeConfig == nil {
+		return errors.New(
+			"byron genesis hash is not configured; cannot anchor the first epoch-boundary block",
+		)
+	}
+	genesisHash := ls.config.CardanoNodeConfig.ByronGenesisHash
+	if genesisHash == "" {
+		return errors.New(
+			"byron genesis hash is not configured; cannot anchor the first epoch-boundary block",
+		)
+	}
+	if header == nil {
+		return errors.New(
+			"cannot anchor a nil Byron epoch-boundary block header",
+		)
+	}
+	prevHash := header.PrevBlock.String()
+	if prevHash != genesisHash {
+		return fmt.Errorf(
+			"byron epoch-boundary block at slot %d: previous hash %s does not match configured Byron genesis hash %s",
+			header.SlotNumber(),
+			prevHash,
+			genesisHash,
+		)
 	}
 	return nil
 }

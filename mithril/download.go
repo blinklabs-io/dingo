@@ -156,14 +156,23 @@ type DownloadConfig struct {
 	// HTTPClient, when non-nil, is reused for the download instead of
 	// constructing a fresh client per call. Callers that fetch many
 	// files (the v2 immutable pool) pass one shared keep-alive client so
-	// connections are pooled across files. When nil, a per-call client
-	// with keep-alives disabled is used (single-archive downloads).
+	// connections are pooled across files. Unless AllowInsecureHTTP is set,
+	// custom transports are cloned and restricted before use. When nil, a
+	// per-call client with keep-alives disabled is used.
 	HTTPClient *http.Client
-	// AllowInsecureHTTP permits URL to use plain HTTP instead of HTTPS.
-	// By default, Validate rejects a non-HTTPS URL; this is an explicit
-	// escape hatch for local development and tests (e.g. against an
+	// AllowInsecureHTTP permits URL to use plain HTTP or resolve to a
+	// local/private address. By default, Validate rejects either; this is an
+	// explicit escape hatch for local development and tests (e.g. against an
 	// httptest server) and should not be set in production.
 	AllowInsecureHTTP bool
+	// idleWatchdogs, when non-nil, replaces the wall-clock watchdog that
+	// decides a transfer has gone idle. It is unexported so only this
+	// package's own tests can supply one: they need idleness to occur at a
+	// chosen point in the byte stream, because a wall-clock bound short
+	// enough to keep a test fast is also short enough for a loaded machine
+	// to trip on its own, and one that is safely long makes every run wait
+	// for it. Production leaves this nil and gets newIdleTimer.
+	idleWatchdogs func(time.Duration, func()) idleWatchdog
 }
 
 // Validate checks DownloadConfig values before use.
@@ -213,36 +222,58 @@ func (cfg DownloadConfig) sizeLimitError() error {
 		ErrDownloadTooLarge, cfg.maxBytes())
 }
 
+// idleWatchdog bounds the time a download may spend making no progress.
+// A download arms one while it waits for response headers and re-arms one
+// around every body read; an armed watchdog that expires cancels the
+// download so the retry loop can resume from the bytes already on disk.
+// A watchdog is armed by its constructor.
+type idleWatchdog interface {
+	// Reset abandons any running idle period and starts a new one.
+	Reset()
+	// Stop abandons any running idle period without starting another. It
+	// returns only once a callback that was already firing has returned.
+	Stop()
+}
+
+// newIdleWatchdog builds the watchdog enforcing this download's idle
+// timeout, or nil when idle detection is disabled.
+func (cfg DownloadConfig) newIdleWatchdog(onIdle func()) idleWatchdog {
+	timeout := cfg.idleTimeout()
+	if timeout <= 0 {
+		return nil
+	}
+	if cfg.idleWatchdogs != nil {
+		return cfg.idleWatchdogs(timeout, onIdle)
+	}
+	return newIdleTimer(timeout, onIdle)
+}
+
 type idleTimeoutReader struct {
-	reader io.Reader
-	timer  *idleTimer
+	reader   io.Reader
+	watchdog idleWatchdog
 }
 
 func newIdleTimeoutReader(
 	reader io.Reader,
-	timeout time.Duration,
-	onIdle func(),
+	watchdog idleWatchdog,
 ) *idleTimeoutReader {
-	if timeout <= 0 {
-		return &idleTimeoutReader{reader: reader}
-	}
 	return &idleTimeoutReader{
-		reader: reader,
-		timer:  newIdleTimer(timeout, onIdle),
+		reader:   reader,
+		watchdog: watchdog,
 	}
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	if r.timer != nil {
-		r.timer.Reset()
-		defer r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Reset()
+		defer r.watchdog.Stop()
 	}
 	return r.reader.Read(p)
 }
 
 func (r *idleTimeoutReader) Stop() {
-	if r.timer != nil {
-		r.timer.Stop()
+	if r.watchdog != nil {
+		r.watchdog.Stop()
 	}
 }
 
@@ -425,16 +456,15 @@ func rootFileSize(root *os.Root, filename string) int64 {
 	return fi.Size()
 }
 
-func newDownloadTransport() *http.Transport {
+func newDownloadTransport(allowPrivate bool) *restrictedHTTPTransport {
+	var transport *http.Transport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport := base.Clone()
-		transport.DisableKeepAlives = true
-		return transport
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{}
 	}
-	return &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
-		DisableKeepAlives: true,
-	}
+	transport.DisableKeepAlives = true
+	return newRestrictedHTTPTransport(transport, allowPrivate)
 }
 
 // newPooledDownloadTransport returns a transport that keeps connections
@@ -447,7 +477,10 @@ func newDownloadTransport() *http.Transport {
 // default http.Transport caps idle connections per host at 2, so without
 // raising MaxIdleConnsPerHost most workers would close and re-handshake
 // their connection after every file and keep-alive would buy nothing.
-func newPooledDownloadTransport(maxConns int) *http.Transport {
+func newPooledDownloadTransport(
+	maxConns int,
+	allowPrivate bool,
+) *restrictedHTTPTransport {
 	if maxConns < 1 {
 		maxConns = 1
 	}
@@ -480,7 +513,7 @@ func newPooledDownloadTransport(maxConns int) *http.Transport {
 	}
 	tlsConfig.NextProtos = []string{"http/1.1"}
 	transport.TLSClientConfig = tlsConfig
-	return transport
+	return newRestrictedHTTPTransport(transport, allowPrivate)
 }
 
 // progressWriter wraps an io.Writer to track bytes written and
@@ -605,6 +638,22 @@ func downloadSnapshot(
 	if err := cfg.Validate(); err != nil {
 		return "", nil, err
 	}
+	if cfg.HTTPClient == nil {
+		transport := newDownloadTransport(cfg.AllowInsecureHTTP)
+		defer transport.CloseIdleConnections()
+		cfg.HTTPClient = &http.Client{
+			Timeout:   0, // No timeout for large downloads
+			Transport: transport,
+		}
+	}
+	client, err := secureMithrilHTTPClient(
+		cfg.HTTPClient,
+		cfg.AllowInsecureHTTP,
+	)
+	if err != nil {
+		return "", nil, err
+	}
+	cfg.HTTPClient = client
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -762,26 +811,15 @@ func downloadSnapshotOnce(
 		)
 	}
 
-	// Reuse a shared keep-alive client when the caller provides one (the
-	// v2 immutable pool); otherwise build a per-call client with
-	// keep-alives disabled for single-archive downloads.
+	// downloadSnapshot secures the client once before entering its retry loop.
+	// The v2 immutable pool's pre-secured transport is shared across calls.
 	client := cfg.HTTPClient
-	if client == nil {
-		transport := newDownloadTransport()
-		defer transport.CloseIdleConnections()
-		client = &http.Client{
-			Timeout:       0, // No timeout for large downloads
-			Transport:     transport,
-			CheckRedirect: httpsOnlyRedirect,
-		}
-	}
-	var headerTimer *idleTimer
-	if idleTimeout > 0 {
-		headerTimer = newIdleTimer(idleTimeout, func() {
-			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-		})
-	}
-	resp, err := client.Do( //nolint:gosec // URL from caller-provided config; HTTPS-only redirect policy prevents downgrade
+	headerTimer := cfg.newIdleWatchdog(func() {
+		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+	})
+	// Initial, redirect, and dial-time destinations are restricted by the
+	// secured client created before the retry loop.
+	resp, err := client.Do( //nolint:gosec
 		req,
 	)
 	if headerTimer != nil {
@@ -794,7 +832,10 @@ func downloadSnapshotOnce(
 		) {
 			return "", fmt.Errorf("downloading snapshot: %w", cause)
 		}
-		return "", fmt.Errorf("downloading snapshot: %w", err)
+		return "", fmt.Errorf(
+			"downloading snapshot: %w",
+			redactLocationError(err, cfg.URL),
+		)
 	}
 	if resp == nil || resp.Body == nil {
 		return "", errors.New("nil response from download server")
@@ -877,11 +918,9 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			if idleTimeout > 0 {
-				headerTimer = newIdleTimer(idleTimeout, func() {
-					cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-				})
-			}
+			headerTimer = cfg.newIdleWatchdog(func() {
+				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+			})
 			resp2, err := client.Do( //nolint:gosec // same URL retried after Content-Range mismatch
 				req,
 			)
@@ -899,7 +938,7 @@ func downloadSnapshotOnce(
 				}
 				return "", fmt.Errorf(
 					"restarting download: %w",
-					err,
+					redactLocationError(err, cfg.URL),
 				)
 			}
 			if resp2 == nil || resp2.Body == nil {
@@ -914,12 +953,12 @@ func downloadSnapshotOnce(
 				)
 				resp2.Body.Close()
 				file.Close()
-				return "", fmt.Errorf(
+				return "", redactLocationError(fmt.Errorf(
 					"restart download failed with "+
 						"status %d: %s",
 					resp2.StatusCode,
 					string(bodyBytes),
-				)
+				), cfg.URL)
 			}
 			// Replace the original response body with the
 			// fresh full-download stream.
@@ -1006,18 +1045,18 @@ func downloadSnapshotOnce(
 		)
 		if resp.StatusCode == http.StatusTooManyRequests ||
 			resp.StatusCode >= http.StatusInternalServerError {
-			return "", fmt.Errorf(
+			return "", redactLocationError(fmt.Errorf(
 				"%w: download failed with status %d: %s",
 				errDownloadTransient,
 				resp.StatusCode,
 				string(bodyBytes),
-			)
+			), cfg.URL)
 		}
-		return "", fmt.Errorf(
+		return "", redactLocationError(fmt.Errorf(
 			"download failed with status %d: %s",
 			resp.StatusCode,
 			string(bodyBytes),
-		)
+		), cfg.URL)
 	}
 	defer func() {
 		if file != nil {
@@ -1028,7 +1067,7 @@ func downloadSnapshotOnce(
 	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
-		"url", cfg.URL,
+		"url", redactLocationURI(cfg.URL),
 		"total_bytes", totalSize,
 		"destination", destPath,
 	)
@@ -1042,9 +1081,12 @@ func downloadSnapshotOnce(
 		onProgress:  cfg.OnProgress,
 	}
 
-	body := newIdleTimeoutReader(resp.Body, idleTimeout, func() {
-		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-	})
+	body := newIdleTimeoutReader(
+		resp.Body,
+		cfg.newIdleWatchdog(func() {
+			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+		}),
+	)
 	// Copy only the remaining file budget, then probe one byte without
 	// writing it. Separate probing avoids limit+1 overflow at MaxInt64.
 	_, copyErr := io.Copy(pw, io.LimitReader(body, cfg.sizeLimit()-existingSize))

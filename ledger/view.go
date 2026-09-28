@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -212,6 +213,86 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
+// MIRDelegState returns the move instantaneous rewards DELEG state that a
+// certificate at slot is checked against: the chain account pots, the
+// distributions and pot transfers committed this epoch at or before slot, and
+// the epoch's too-late cutoff. additive selects how repeated distributions to
+// one credential fold, per eras.MIRDelegState.Pending.
+//
+// Every transaction's certificates are written to the database immediately
+// after that transaction validates (see ledgerProcessBlock), before the next
+// transaction in the same block validates, so this already reflects every
+// prior transaction's MIR certificates this epoch, same block or earlier.
+// Certificates within the transaction being validated are folded in memory by
+// the eras package as it walks the certificate list.
+//
+// The epoch start slot comes from lv.epochStartSlot, pinned from the same
+// snapshot pp was captured from (see its field doc comment), never a fresh
+// read of LedgerState.currentEpoch, which a concurrent writer could advance
+// mid-validation.
+func (lv *LedgerView) MIRDelegState(
+	slot uint64,
+	additive bool,
+) (eras.MIRDelegState, error) {
+	ret := eras.MIRDelegState{
+		DeltaReserves: new(big.Int),
+		DeltaTreasury: new(big.Int),
+		Pending:       make(map[eras.MIRCredentialKey]*big.Int),
+	}
+	cutoff, err := lv.ls.mirCertificateCutoff(slot)
+	if err != nil {
+		return ret, err
+	}
+	ret.Cutoff = cutoff
+	ret.Treasury, ret.Reserves, err = lv.ls.readNetworkState(lv.txn)
+	if err != nil {
+		return ret, err
+	}
+	epochStartSlot := lv.epochStartSlot
+	if slot < epochStartSlot {
+		return ret, nil
+	}
+	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
+		epochStartSlot, slot+1, lv.txn,
+	)
+	if err != nil {
+		return ret, fmt.Errorf("get MIR certs in slot range: %w", err)
+	}
+	for _, effect := range effects {
+		if effect.OtherPot > 0 {
+			amount := new(big.Int).SetUint64(effect.OtherPot)
+			source, target := ret.DeltaReserves, ret.DeltaTreasury
+			if effect.Pot == mirPotTreasury {
+				source, target = target, source
+			}
+			source.Sub(source, amount)
+			target.Add(target, amount)
+			continue
+		}
+		for _, reward := range effect.Rewards {
+			if reward.Amount == nil {
+				continue
+			}
+			key := eras.MIRCredentialKey{
+				Tag:        reward.CredentialTag,
+				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Pot:        effect.Pot,
+			}
+			if existing, ok := ret.Pending[key]; ok && additive {
+				ret.Pending[key] = new(big.Int).Add(existing, reward.Amount)
+			} else {
+				ret.Pending[key] = new(big.Int).Set(reward.Amount)
+			}
+		}
+	}
+	return ret, nil
+}
+
+// var _ eras.MIRDelegStateProvider = (*LedgerView)(nil) makes any future
+// drift in the MIRDelegStateProvider method signature a compile error instead
+// of a silent runtime no-op for every MIR DELEG predicate that reads it.
+var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
+
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
 // drift would silently reject every transaction whose validation performs a
@@ -222,6 +303,16 @@ var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 // satisfies the upstream capability. Point it at the upstream type once the
 // gouroboros pin exports it.
 var _ eras.CommitteeCredentialState = (*LedgerView)(nil)
+
+// gouroboros ledger/common.CommitteeHotCredentialMembers (gouroboros#2574) is
+// the optional plural capability that lets upstream committee-vote
+// validation resolve every cold credential currently authorizing a shared
+// hot credential, rather than the single arbitrary witness
+// CommitteeHotCredentialMember can express. Without it, a vote cast under a
+// hot credential two cold credentials share can be wrongly rejected as
+// unknown when one sharer's authorization is touched by the same
+// transaction and the singular fallback happened to report that one.
+var _ lcommon.CommitteeHotCredentialMembers = (*LedgerView)(nil)
 
 // Keep the optional Conway governance capability wired to the concrete view
 // used for transaction validation. Without this interface, gouroboros falls
@@ -235,6 +326,13 @@ var _ lcommon.GovPurposeRootsState = (*LedgerView)(nil)
 // consensus-level break. Make it a compile error instead.
 var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 
+// PPUP and MIR rules discover these optional capabilities through the
+// transaction-scoped LedgerView passed to ValidateTx.
+var (
+	_ lcommon.GenesisDelegationState                    = (*LedgerView)(nil)
+	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerView)(nil)
+)
+
 // Byron redeem and bootstrap witness verification asserts this capability at
 // runtime and fails the transaction when it is absent, so drift in
 // ByronProtocolMagic would reject every Byron transaction carrying those
@@ -245,6 +343,9 @@ var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 // Pin the optional capability to the concrete validation view so interface
 // drift fails at build time instead of disabling the rule.
 var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
+
+// The same holds for the Byron ppMaxTxSize rule.
+var _ eras.ByronMaxTxSizeProvider = (*LedgerView)(nil)
 
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
@@ -275,6 +376,10 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 
 func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
 	return lv.ls.ByronFeePolicy()
+}
+
+func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
+	return lv.ls.ByronMaxTxSize()
 }
 
 func (lv *LedgerView) UtxoById(
@@ -604,6 +709,40 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 	return epoch.EpochId, nil
 }
 
+func (lv *LedgerView) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
+}
+
+func (lv *LedgerView) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return lv.ls.genesisDelegateForGenesisKey(
+		genesisKeyHash,
+		slot,
+		lv.metadataTxn(),
+	)
+}
+
+func (lv *LedgerView) GenesisUpdateQuorum() (uint, error) {
+	return lv.ls.GenesisUpdateQuorum()
+}
+
+func (lv *LedgerView) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	return lv.ls.ProtocolParameterUpdateWindow(slot)
+}
+
+func (lv *LedgerView) metadataTxn() types.Txn {
+	if lv.txn == nil {
+		return nil
+	}
+	return lv.txn.Metadata()
+}
+
 // IsPoolRegistered checks if a pool is currently registered
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
@@ -683,15 +822,26 @@ func (lv *LedgerView) CalculateRewards(
 	return nil, ErrNotImplemented
 }
 
-// GetAdaPots returns the current Ada pots.
-// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
-// tracked in network_state, but this interface also needs the current fee and
-// reward pots as one coherent validation snapshot.
+// GetAdaPots returns the current Ada pots, or a zero AdaPots when they cannot
+// be produced.
+//
+// It exists to satisfy common.RewardState, which gives it no way to report an
+// error, so an unavailable value is indistinguishable here from genuinely
+// zero pots. Every caller that can handle the difference must use
+// GetAdaPotsWithError; this one returns a zero value because a ledger rule
+// reaching it through the interface would otherwise kill the node.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
-	panic(ErrNotImplemented)
+	adaPots, err := lv.GetAdaPotsWithError()
+	if err != nil {
+		return lcommon.AdaPots{}
+	}
+	return adaPots
 }
 
 // GetAdaPotsWithError returns the current Ada pots.
+// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
+// tracked in network_state, but this interface also needs the current fee and
+// reward pots as one coherent validation snapshot.
 func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
 	return lcommon.AdaPots{}, ErrNotImplemented
 }
@@ -996,30 +1146,10 @@ func withoutV2CostModelKey(
 // CommitteeStateAvailable reports whether this view can authoritatively answer
 // committee credential queries for its snapshot.
 //
-// Availability is derived from whether a committee was ever seated, not from
-// the store being reachable and not from the currently seated set. Only two
-// paths ever write committee_member: UpdateCommittee enactment
-// (ledger/governance/enact.go) and Mithril snapshot import
-// (ledgerstate/import.go). Dingo does not seed the Conway genesis committee --
-// genesis.Committee.Threshold is read for the CC quorum, but
-// genesis.Committee.Members is never persisted (blinklabs-io/dingo#3785). A
-// node synced from genesis therefore holds no committee rows at all for the
-// whole Conway era until the first UpdateCommittee enacts, while the real
-// chain has the genesis committee seated from the hard fork. Claiming
-// authority there would reject an authorization from a real committee member,
-// because the lookup returns no member.
-//
-// Removal is a soft delete: both SoftDeleteAllCommitteeMembers on NoConfidence
-// and SoftDeleteCommitteeMembers on UpdateCommittee removal set deleted_slot
-// and leave the row. So the include-deleted set separates the two empty
-// states exactly. No rows at all means never populated, which is the
-// genesis-synced ambiguity and reports false. Rows that are all soft-deleted
-// mean the committee was seated and is now authoritatively empty, which
-// reports true so a former member's authorization or resignation fails closed,
-// as the real chain rejects it.
-//
-// Once #3785 lands, the no-rows case becomes unambiguously authoritative too
-// and this can report true unconditionally.
+// Persisted history establishes authority even after every member is removed.
+// An explicitly empty Conway genesis committee is also authoritative, though
+// genesis initialization has no members to persist. Without either source,
+// an empty store alone cannot establish non-membership.
 func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if lv == nil || lv.ls == nil || lv.ls.db == nil {
 		return false, nil
@@ -1033,7 +1163,14 @@ func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("get committee members: %w", err)
 	}
-	return len(members) > 0, nil
+	if len(members) > 0 {
+		return true, nil
+	}
+	if cfg := lv.ls.config.CardanoNodeConfig; cfg != nil {
+		genesis := cfg.ConwayGenesis()
+		return genesis != nil && len(genesis.Committee.Members) == 0, nil
+	}
+	return false, nil
 }
 
 // CommitteeMember preserves the legacy hash-only contract. It returns nil
@@ -1287,6 +1424,24 @@ func (lv *LedgerView) committeeSnapshot() (
 func (lv *LedgerView) CommitteeHotCredentialMember(
 	hotCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
+	members, err := lv.CommitteeHotCredentialMembers(hotCredential)
+	if err != nil || len(members) == 0 {
+		return nil, err
+	}
+	return members[0], nil
+}
+
+// CommitteeHotCredentialMembers implements the optional gouroboros
+// ledger/common.CommitteeHotCredentialMembers capability (gouroboros#2574):
+// it resolves every cold credential that currently authorizes hotCredential,
+// not just one. cardano-ledger's GOVCERT keeps one authorization entry per
+// cold credential, so a hot credential two cold credentials share has two
+// active authorizers at once, and upstream committee-vote validation needs
+// both to correctly determine which still authorize the hot credential
+// after a same-transaction certificate touches one of them.
+func (lv *LedgerView) CommitteeHotCredentialMembers(
+	hotCredential lcommon.Credential,
+) ([]*lcommon.CommitteeMember, error) {
 	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
@@ -1295,6 +1450,7 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("get active committee hot credentials: %w", err)
 	}
+	var members []*lcommon.CommitteeMember
 	for _, authorization := range authorizations {
 		if authorization.HotCredentialTag != hotTag ||
 			!bytes.Equal(
@@ -1313,9 +1469,9 @@ func (lv *LedgerView) CommitteeHotCredentialMember(
 		if member == nil || member.Resigned {
 			continue
 		}
-		return member, nil
+		members = append(members, member)
 	}
-	return nil, nil
+	return members, nil
 }
 
 // CommitteeMembers returns all seated committee members.
@@ -1436,6 +1592,109 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 	return members, nil
 }
 
+// drepRegistrationDeposit resolves the deposit reported to gouroboros for a
+// DRep registration.
+//
+// A recorded deposit -- including a recorded zero -- is authoritative and is
+// passed through unchanged. When nothing is recorded, this reports the DRep
+// deposit under the current era and protocol parameters instead of the
+// absence.
+//
+// The absence is not a harmless nil. gouroboros fails closed on it: a
+// DeregistrationDrepCertificate against a registration with Deposit == nil
+// returns DRepDepositStateInconsistentError, so the block is rejected and a
+// node that reaches it stops making progress. The reference ledger's DRepState
+// carries a non-optional deposit, so a registration without one is a state
+// only this implementation can produce -- and it does: InsertDrepIfAbsent
+// (ledger/governance/processing.go, the vote-replay recovery path) writes an
+// active drep row and no registration_drep row at all when a valid DRep vote
+// proves a credential exists but the metadata row was lost. That DRep is
+// active, can be deregistered, and has no recorded deposit.
+//
+// Reporting the current parameter is the same answer the write path would have
+// recorded: it runs the era's certificate-deposit function over the same
+// registration certificate type that ledger.calculateCertificateDeposit does,
+// so the value equals what a registration applied now would store. Absence is
+// still reported when the current era charges no DRep deposit, which leaves
+// gouroboros to fail closed rather than inventing a zero refund.
+//
+// The substitution is logged because it is not free. The recorded deposit is
+// historical and this one is current, so the two agree only while dRepDeposit
+// has not changed since the DRep registered. If it has, gouroboros compares
+// the block's refund against the wrong expected value and reports
+// CertificateRefundIncorrectError, which reads as a bad block rather than as
+// the local state gap it actually is. The log line is what keeps that
+// distinguishable from a node serving a genuinely recorded deposit.
+func (lv *LedgerView) drepRegistrationDeposit(
+	credential lcommon.Blake2b224,
+	recorded *uint64,
+) *uint64 {
+	if recorded != nil {
+		return recorded
+	}
+	deposit, ok := lv.currentDRepDeposit()
+	if !ok {
+		return nil
+	}
+	if lv.ls != nil && lv.ls.config.Logger != nil {
+		lv.ls.config.Logger.Warn(
+			"registered DRep has no recorded registration deposit; substituting the current protocol parameter",
+			"component",
+			"ledger",
+			"drep_credential",
+			hex.EncodeToString(credential[:]),
+			"substituted_deposit",
+			deposit,
+		)
+	}
+	return &deposit
+}
+
+// currentDRepDeposit returns the DRep registration deposit under the current
+// era and protocol parameters, read from a single published consensus
+// snapshot so the era and the parameters cannot be torn apart. The second
+// return is false when there is no current DRep deposit to report.
+//
+// Whether the era carries a DRep deposit is decided by asking the protocol
+// parameters for one, not by inferring it from what the era's
+// certificate-deposit function happens to return. CertDepositShelley through
+// CertDepositBabbage have no *RegistrationDrepCertificate case and fall
+// through to "default: return 0, nil", so a pre-Conway snapshot would
+// otherwise yield (0, true) and hand gouroboros a fabricated zero refund
+// where it must fail closed instead.
+//
+// drepDepositParams is the same capability
+// conway.UtxoValidateCertificateDeposits asserts to obtain the deposit it
+// compares against, so this guard admits exactly the eras whose parameters
+// that rule can read, and a future era gains it by implementing the accessor
+// rather than by being added to a list here.
+func (lv *LedgerView) currentDRepDeposit() (uint64, bool) {
+	snapshot := lv.ls.loadConsensusSnapshot()
+	if snapshot == nil || snapshot.currentPParams == nil ||
+		snapshot.currentEra.CertDepositFunc == nil {
+		return 0, false
+	}
+	if _, ok := snapshot.currentPParams.(drepDepositParams); !ok {
+		return 0, false
+	}
+	deposit, err := snapshot.currentEra.CertDepositFunc(
+		&lcommon.RegistrationDrepCertificate{},
+		snapshot.currentPParams,
+	)
+	if err != nil {
+		return 0, false
+	}
+	return deposit, true
+}
+
+// drepDepositParams is implemented by the protocol parameters of every era
+// that charges a DRep registration deposit. It mirrors the assertion
+// conway.UtxoValidateCertificateDeposits makes to read drepDeposit, so the
+// two agree on which eras have one.
+type drepDepositParams interface {
+	DRepDepositAmount() *big.Int
+}
+
 // DRepRegistration returns a DRep registration by credential.
 // Returns nil if the credential is not registered as an active DRep.
 func (lv *LedgerView) DRepRegistration(
@@ -1467,7 +1726,10 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
-		Deposit:    deposit,
+		Deposit: lv.drepRegistrationDeposit(
+			credential.Credential,
+			deposit,
+		),
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1524,7 +1786,10 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 				CredType:   uint(drep.CredentialTag),
 				Credential: lcommon.NewBlake2b224(drep.Credential),
 			},
-			Deposit: depositPtr,
+			Deposit: lv.drepRegistrationDeposit(
+				lcommon.NewBlake2b224(drep.Credential),
+				depositPtr,
+			),
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
@@ -1966,9 +2231,21 @@ func (lv *LedgerView) GetLeiosKeys(
 	if err != nil {
 		return nil, fmt.Errorf("get pool stake snapshots: %w", err)
 	}
+	maxKeyAgeEpochs, err := lv.ls.maxLeiosKeyAgeEpochs()
+	if err != nil {
+		return nil, fmt.Errorf("resolve maximum Leios key age: %w", err)
+	}
 	for _, snapshot := range snapshots {
 		if len(snapshot.LeiosKeyPublic) == 0 ||
 			len(snapshot.LeiosKeyPossessionProof) == 0 {
+			continue
+		}
+		// Reference ledger state carries a registration epoch with each BLS key.
+		// A snapshot without that epoch cannot establish key eligibility.
+		registrationEpoch := snapshot.LeiosKeyRegistrationEpoch
+		if registrationEpoch == nil ||
+			*registrationEpoch > epoch ||
+			epoch-*registrationEpoch >= maxKeyAgeEpochs {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{
@@ -1981,6 +2258,36 @@ func (lv *LedgerView) GetLeiosKeys(
 		}
 	}
 	return out, nil
+}
+
+func (ls *LedgerState) maxLeiosKeyAgeEpochs() (uint64, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("cardano configuration unavailable")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxKESEvolutions <= 0 {
+		return 0, errors.New("invalid MaxKESEvolutions")
+	}
+	slotsPerKESPeriod := ls.SlotsPerKESPeriod()
+	slotsPerEpoch := ls.SlotsPerEpoch()
+	if slotsPerKESPeriod == 0 || slotsPerEpoch == 0 {
+		return 0, errors.New("invalid KES-period or epoch length")
+	}
+	maxSlots := new(big.Int).Mul(
+		big.NewInt(int64(genesis.MaxKESEvolutions)),
+		new(big.Int).SetUint64(slotsPerKESPeriod),
+	)
+	divisor := new(big.Int).SetUint64(slotsPerEpoch)
+	epochs, remainder := new(big.Int), new(big.Int)
+	epochs.QuoRem(maxSlots, divisor, remainder)
+	if remainder.Sign() > 0 {
+		epochs.Add(epochs, big.NewInt(1))
+	}
+	epochs.Add(epochs, big.NewInt(2))
+	if !epochs.IsUint64() {
+		return 0, errors.New("maximum Leios key age overflows uint64")
+	}
+	return epochs.Uint64(), nil
 }
 
 // GetPoolStake returns the stake for a specific pool from the snapshot.
@@ -2035,6 +2342,23 @@ func (lv *LedgerView) GetDRepVotingPower(
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
+	// Fold in any active governance proposal's deposit escrowed to a return
+	// account delegating to this DRep, matching the deposit-inclusive tally
+	// governance.LoadDRepVotingState uses for ratification and the
+	// Blockfrost adapter's DRep voting-power reads (CIP-1694;
+	// blinklabs-io/dingo#4355).
+	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
+		lv.ls.db, lv.txn, lv.ls.CurrentEpoch(), 0,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get active proposal deposit voting power: %w", err,
+		)
+	}
+	power += drepDepositPower[models.StakeCredentialRef{
+		Tag: credentialTag,
+		Key: drepCredential,
+	}.MapKey()]
 	return power, nil
 }
 

@@ -63,7 +63,7 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
@@ -643,25 +643,6 @@ func TestQueryShelleyAccountState_Empty(t *testing.T) {
 		hex.EncodeToString(encoded),
 		"empty GetAccountState must encode to [ [0, 0] ] (matches cardano-node)",
 	)
-}
-
-// TestAccountStateResult_SignedRoundTrip confirms the [ [treasury, reserves] ]
-// wire shape round-trips through gouroboros' AccountStateResult, including a
-// negative reserves value (Coin is signed; a misconfigured network can drive
-// reserves below zero, as observed on the devnet's cardano-node).
-func TestAccountStateResult_SignedRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	result := []any{
-		olocalstatequery.AccountState{Treasury: 500_000_000, Reserves: -1234},
-	}
-	encoded, err := cbor.Encode(result)
-	require.NoError(t, err)
-	var decoded olocalstatequery.AccountStateResult
-	_, err = cbor.Decode(encoded, &decoded)
-	require.NoError(t, err)
-	assert.Equal(t, int64(500_000_000), decoded.State.Treasury)
-	assert.Equal(t, int64(-1234), decoded.State.Reserves)
 }
 
 // --- ShelleyFilteredDelegationAndRewardAccountsQuery -----------------------

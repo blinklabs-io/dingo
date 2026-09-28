@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // mockSubscriber returns an error on Deliver to simulate a failing remote client.
@@ -66,16 +68,25 @@ func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
 	}
 
 	// Deliver to the full buffer must wait rather than drop.
+	blocked := make(chan struct{})
+	sub.onBlocked = func() { close(blocked) }
 	done := make(chan error, 1)
 	go func() {
 		done <- sub.Deliver(NewEvent("test", "overflow"))
 	}()
-
+	testutil.RequireReceive(
+		t,
+		blocked,
+		testutil.AsyncWait,
+		"delivery never reached the full-buffer wait",
+	)
+	if len(sub.ch) != cap(sub.ch) {
+		t.Fatal("expected the delivery buffer to be full")
+	}
 	select {
 	case <-done:
 		t.Fatal("Deliver returned while the buffer was full; event was dropped")
-	case <-time.After(50 * time.Millisecond):
-		// Expected: Deliver is waiting for capacity.
+	default:
 	}
 
 	// Draining one slot releases the waiting Deliver.
