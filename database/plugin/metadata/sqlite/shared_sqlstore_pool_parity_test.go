@@ -114,16 +114,28 @@ func TestSharedSQLStorePoolParity(t *testing.T) {
 	require.NotNil(t, state.ByVRF)
 	require.NotEmpty(t, state.Pools)
 	require.Nil(t, state.Missing)
+	require.Equal(t, uint64(3), state.Sequence)
 	require.True(t, state.SequenceSet)
+	require.Equal(t, uint64(2), state.HistoricalSequence)
 	require.True(t, state.HistoricalSequenceSet)
-	require.NotEmpty(t, state.Issuers)
-	require.NotEmpty(t, state.Active)
-	require.NotEmpty(t, state.ActiveAtSlot)
-	require.NotZero(t, state.Total)
-	require.NotZero(t, state.Stake)
-	require.NotEmpty(t, state.StakeMap)
-	require.NotEmpty(t, state.DelegatorMap)
-	require.NotEmpty(t, state.Retiring)
+	require.Len(t, state.Issuers, 2)
+	require.Equal(t, uint64(2), state.Total)
+	require.Equal(t, map[string]uint64{
+		string(bytes.Repeat([]byte{0x91}, 28)): 2,
+	}, state.Counts)
+	require.Len(t, state.Active, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), state.Active[0])
+	require.Len(t, state.ActiveAtSlot, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), state.ActiveAtSlot[0])
+	require.Equal(t, uint64(700), state.Stake)
+	require.Equal(t, uint64(1), state.Delegators)
+	require.Equal(t, map[string]uint64{
+		string(bytes.Repeat([]byte{0x91}, 28)): 700,
+	}, state.StakeMap)
+	require.Equal(t, map[string]uint64{
+		string(bytes.Repeat([]byte{0x91}, 28)): 1,
+	}, state.DelegatorMap)
+	require.Len(t, state.Retiring, 1)
 }
 
 func exercisePoolStore(t *testing.T, store poolStore) poolState {
