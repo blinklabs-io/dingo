@@ -3577,6 +3577,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
+				ls.completeChainsyncHeaderAdmission(e, pending, true)
+				admissionResolved = true
 				return nil
 			}
 			localTip := ls.chain.Tip()
@@ -3618,6 +3620,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"local_tip_slot", localTip.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
+				ls.completeChainsyncHeaderAdmission(e, pending, true)
+				admissionResolved = true
 				return nil
 			}
 			// Header doesn't fit current chain tip. Clear stale queued

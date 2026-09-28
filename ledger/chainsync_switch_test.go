@@ -829,6 +829,73 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 	)
 }
 
+func TestReintersectedFarAheadPeerDoesNotTriggerFreshCursorLoop(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, switchCh := bus.SubscribeWithBuffer(
+		chainselection.ChainSwitchEventType,
+		4,
+	)
+	previousConn := testChainsyncConnId(6000, 3101)
+	newConn := fixture.connId
+	selector := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		EventBus:                  bus,
+		DisableEventSubscriptions: true,
+		SecurityParam:             2160,
+	})
+	localTip := fixture.currentTip
+	selector.SetLocalTip(localTip)
+	require.True(t, selector.UpdatePeerTip(previousConn, localTip, nil))
+	selector.EvaluateAndSwitch()
+	_ = testutil.RequireReceive(
+		t,
+		switchCh,
+		time.Second,
+		"initial peer selection",
+	)
+
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(localTip.Point.Slot+10000, []byte("far-tip")),
+		BlockNumber: localTip.BlockNumber + 10000,
+	}
+	selector.HandlePeerRollbackEvent(event.NewEvent(
+		chainselection.PeerRollbackEventType,
+		chainselection.PeerRollbackEvent{
+			ConnectionId: newConn,
+			Point:        localTip.Point,
+			Tip:          advertisedTip,
+		},
+	))
+	selector.RemovePeer(previousConn)
+	selector.EvaluateAndSwitch()
+
+	switchEvent := testutil.RequireReceive(
+		t,
+		switchCh,
+		time.Second,
+		"replacement peer selection",
+	).Data.(chainselection.ChainSwitchEvent)
+	require.Equal(t, previousConn, switchEvent.PreviousConnectionId)
+	require.Equal(t, newConn, switchEvent.NewConnectionId)
+	assert.Equal(t, advertisedTip, switchEvent.NewTip,
+		"the remote advertised tip remains available as untrusted metadata")
+	assert.True(t, switchEvent.NewObservedTipSet)
+	assert.Equal(t, localTip.Point, switchEvent.NewObservedTip.Point,
+		"a fresh intersection must be the only observed frontier before roll forward")
+
+	needsFreshCursor := fixture.ls.chainSwitchNeedsFreshCursorLocked(
+		switchEvent,
+		newConn,
+	)
+	assert.False(t, needsFreshCursor,
+		"an advertised-only far tip must not close the connection before it can deliver headers")
+}
+
 func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 	t *testing.T,
 ) {
@@ -1565,6 +1632,80 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 	assert.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot(),
 		"a rejected header must not publish its advertised target")
+}
+
+func TestDuplicatePrimaryHeadersResolvePeerTipAdmissionAsAdmitted(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testCases := []struct {
+		name           string
+		point          ocommon.Point
+		blockHeader    mockHeader
+		genesisEnabled bool
+	}{
+		{
+			name:  "already queued tip",
+			point: ocommon.NewPoint(20, testHashBytes("current-block")),
+			blockHeader: mockHeader{
+				hash:        lcommon.Blake2b256(testHashBytes("current-block")),
+				prevHash:    lcommon.Blake2b256(testHashBytes("ancestor-block")),
+				blockNumber: 2,
+				slot:        20,
+			},
+		},
+		{
+			name:           "historical primary chain block",
+			point:          ocommon.NewPoint(10, testHashBytes("ancestor-block")),
+			genesisEnabled: true,
+			blockHeader: mockHeader{
+				hash:        lcommon.Blake2b256(testHashBytes("ancestor-block")),
+				prevHash:    lcommon.Blake2b256{},
+				blockNumber: 1,
+				slot:        10,
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			ls := fixture.ls
+			ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
+			if tc.genesisEnabled {
+				ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+					return true, 100
+				}
+			}
+			ls.publishSnapshotsLocked()
+
+			var admitted *bool
+			advertisedTip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(10000, []byte("far-tip")),
+				BlockNumber: 10000,
+			}
+			err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				BlockHeader:  tc.blockHeader,
+				Point:        tc.point,
+				Tip:          advertisedTip,
+				PeerTipUpdate: &chainselection.PeerTipUpdateEvent{
+					ConnectionId: fixture.connId,
+					AdmissionID:  1,
+					Tip:          advertisedTip,
+					ObservedTip:  ochainsync.Tip{Point: tc.point},
+				},
+				PeerTipAdmission: func(value bool) {
+					admitted = &value
+				},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, admitted)
+			assert.True(t, *admitted,
+				"an already accepted primary-chain point must resolve its staged frontier")
+		})
+	}
 }
 
 func TestResetChainsyncResyncStateRejectsBufferedPeerTipsAfterUnlock(

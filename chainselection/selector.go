@@ -2816,6 +2816,8 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 	if !exists {
 		return false
 	}
+	delete(cs.pendingPeerTips, e.ConnectionId)
+	delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
 	peerTip.ApplyRollback(e.Point, e.Tip)
 	return true
 }

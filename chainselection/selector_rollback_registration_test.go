@@ -109,6 +109,101 @@ func TestHandlePeerRollbackRegistersPeerAfterConnectionRecycle(t *testing.T) {
 	assert.Equal(t, connId, *best)
 }
 
+func TestHandlePeerRollbackClearsPendingTipAdmissions(t *testing.T) {
+	t.Parallel()
+
+	connId := newTestConnectionId(21)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	cs.SetLocalTip(localTip)
+	require.True(t, cs.UpdatePeerTip(connId, localTip, nil))
+
+	for id := uint64(1); id <= 2; id++ {
+		update := PeerTipUpdateEvent{
+			ConnectionId: connId,
+			AdmissionID:  id,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100 + id, Hash: []byte("peer-tip")},
+				BlockNumber: 100 + id,
+			},
+			ObservedTip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100 + id, Hash: []byte("observed")},
+				BlockNumber: 100 + id,
+			},
+		}
+		require.True(t, cs.PreparePeerTipAdmission(update))
+	}
+	require.Len(t, cs.pendingPeerTips[connId], 2)
+	require.NotNil(t, cs.pendingPeerTipFrontiers[connId])
+
+	rollbackTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("rollback-tip")},
+		BlockNumber: 101,
+	}
+	cs.HandlePeerRollbackEvent(newRollbackEvent(
+		connId,
+		localTip.Point,
+		rollbackTip,
+	))
+
+	assert.NotContains(t, cs.pendingPeerTips, connId)
+	assert.NotContains(t, cs.pendingPeerTipFrontiers, connId)
+	assert.Equal(t, rollbackTip, cs.GetPeerTip(connId).Tip)
+}
+
+func TestHandlePeerRollbackDoesNotPromoteAdvertisedTipBeforeHeaderAdmission(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := newTestConnectionId(22)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 10000, Hash: []byte("far-tip")},
+		BlockNumber: 10000,
+	}
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(localTip)
+	cs.HandlePeerRollbackEvent(newRollbackEvent(
+		connId,
+		localTip.Point,
+		advertisedTip,
+	))
+
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, localTip.Point, peerTip.SelectionTip().Point)
+	assert.Zero(t, peerTip.SelectionTip().BlockNumber)
+
+	firstHeader := PeerTipUpdateEvent{
+		ConnectionId: connId,
+		AdmissionID:  1,
+		Tip:          advertisedTip,
+		ObservedTip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("first-header")},
+			BlockNumber: 101,
+		},
+	}
+	require.True(t, cs.PreparePeerTipAdmission(firstHeader))
+	assert.Equal(t, localTip.Point, cs.GetPeerTip(connId).SelectionTip().Point,
+		"an unadmitted header must not move the selected frontier")
+	assert.True(t, cs.CommitPeerTipAdmission(firstHeader))
+	assert.Equal(t, firstHeader.ObservedTip, cs.GetPeerTip(connId).SelectionTip(),
+		"admission should advance selection only to the delivered header")
+}
+
 // A rollback can race the ConnectionClosedEvent that removed the peer. The
 // roll-forward path drops tip updates from closed connections; registration
 // from a rollback must do the same rather than resurrect a dead peer.
