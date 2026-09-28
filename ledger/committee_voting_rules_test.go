@@ -203,9 +203,9 @@ func requireOnlyRuleError(t *testing.T, err error, target any) {
 }
 
 // requireUnelectedCommitteeVoter requires the elected-voter rejection. For
-// Dijkstra it tolerates a second rejection of the same voter: gOuroboros'
-// Dijkstra unknown-voter rule, which Dingo runs before its own, also rejects
-// an unseated committee voter from PV11. Both reject the same transaction.
+// Dijkstra, the upstream unknown-voter rule runs first at every governance
+// level and also rejects unseated committee voters from PV11. The top-level
+// elected-voter rule reports its typed error as well; both reject the vote.
 func requireUnelectedCommitteeVoter(
 	t *testing.T,
 	era committeeVotingEra,
