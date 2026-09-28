@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/plutigo/cek"
@@ -263,7 +265,9 @@ func TestPlutusEvalContextUsesProviderCache(t *testing.T) {
 // buildMintingV1Script returns a trivial always-succeeding PlutusV1 script
 // (a two-argument constant function, matching the shape a minting policy
 // evaluates: redeemer and script context) along with its hash.
-func buildMintingV1Script(t testing.TB) (lcommon.PlutusV1Script, lcommon.ScriptHash) {
+func buildMintingV1Script(
+	t testing.TB,
+) (lcommon.PlutusV1Script, lcommon.ScriptHash) {
 	t.Helper()
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
@@ -383,7 +387,9 @@ func TestConwayEvalContextCacheReusedAcrossValidateAndEvaluate(t *testing.T) {
 // though both calls share the same ls and its cache.
 //
 // Not t.Parallel: swaps the package-level newEvalContextFunc seam.
-func TestConwayEvalContextCacheNotSharedAcrossDifferentProtocolParams(t *testing.T) {
+func TestConwayEvalContextCacheNotSharedAcrossDifferentProtocolParams(
+	t *testing.T,
+) {
 	calls := withCountingEvalContextConstructor(t)
 
 	plutusScript, scriptHash := buildMintingV1Script(t)
@@ -481,4 +487,121 @@ func TestConwayEvalContextCacheNotSharedAcrossDifferentProtocolParams(t *testing
 	// (no leaked/overwritten entry from the prevEraPParams call).
 	require.NoError(t, ValidateTxConway(newTx(), 0, ls, currentEraPParams))
 	assert.Equal(t, int64(2), calls.Load())
+}
+
+// TestAlonzoBabbageEvalContextCacheReusedAcrossValidateAndEvaluate covers the
+// six Alonzo and Babbage call sites the Conway test above does not reach:
+// each era's validate and evaluate paths must share one construction per key
+// through ls's cache.
+//
+// Not t.Parallel: swaps the package-level newEvalContextFunc seam and the
+// era rule tables.
+func TestAlonzoBabbageEvalContextCacheReusedAcrossValidateAndEvaluate(
+	t *testing.T,
+) {
+	disablePhase1RulesForTest(t)
+	origAlonzo := alonzoUtxoValidationRules
+	t.Cleanup(func() { alonzoUtxoValidationRules = origAlonzo })
+	alonzoUtxoValidationRules = nil
+
+	exUnits := lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000}
+	testCases := []struct {
+		name     string
+		version  lang.LanguageVersion
+		validate func(lcommon.Transaction, lcommon.LedgerState) error
+		evaluate func(lcommon.Transaction, lcommon.LedgerState) error
+	}{
+		{
+			name:    "alonzo v1",
+			version: lang.LanguageVersionV1,
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+				return ValidateTxAlonzo(
+					tx,
+					0,
+					ls,
+					&alonzo.AlonzoProtocolParameters{
+						ProtocolMajor: 6,
+						MaxTxExUnits:  exUnits,
+						CostModels: map[uint][]int64{
+							0: defaultMachineCostModel(
+								t,
+								lang.LanguageVersionV1,
+							),
+						},
+					},
+				)
+			},
+			evaluate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+				_, _, _, err := EvaluateTxAlonzo(
+					tx,
+					ls,
+					&alonzo.AlonzoProtocolParameters{
+						ProtocolMajor: 6,
+						MaxTxExUnits:  exUnits,
+						CostModels: map[uint][]int64{
+							0: defaultMachineCostModel(
+								t,
+								lang.LanguageVersionV1,
+							),
+						},
+					},
+				)
+				return err
+			},
+		},
+		{
+			name:    "babbage v1",
+			version: lang.LanguageVersionV1,
+		},
+		{
+			name:    "babbage v2",
+			version: lang.LanguageVersionV2,
+		},
+	}
+	babbagePParams := func() *babbage.BabbageProtocolParameters {
+		return &babbage.BabbageProtocolParameters{
+			ProtocolMajor: 7,
+			MaxTxExUnits:  exUnits,
+			CostModels: map[uint][]int64{
+				0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
+		}
+	}
+	for i := range testCases {
+		if testCases[i].validate != nil {
+			continue
+		}
+		testCases[i].validate = func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			return ValidateTxBabbage(tx, 0, ls, babbagePParams())
+		}
+		testCases[i].evaluate = func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+			_, _, _, err := EvaluateTxBabbage(tx, ls, babbagePParams())
+			return err
+		}
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := withCountingEvalContextConstructor(t)
+			ls := newMockLedgerState()
+			ls.plutusEvalContextCache = NewPlutusEvalContextCache()
+			tx := newConwayValidityOutcomeTx(
+				t,
+				true,
+				tc.version,
+				false,
+				exUnits,
+			)
+
+			require.NoError(t, tc.validate(tx, ls))
+			require.NoError(t, tc.evaluate(tx, ls))
+			assert.Equal(
+				t,
+				int64(1),
+				calls.Load(),
+				"validate and evaluate sharing ls's cache must build once",
+			)
+		})
+	}
 }
