@@ -277,22 +277,9 @@ func fetchGapBlocksFromPeer(
 	return blocks, nil
 }
 
-// deleteBlobBlocksAboveSlot removes every block from the blob store
-// whose slot is greater than the given threshold AND drops any
-// metadata indexed for those blocks (transactions, UTxOs, governance
-// proposals/votes), and restores any UTxOs that the rejected gap
-// blocks had marked spent. Used to clean up rejected gap blocks from
-// a previous failed Mithril resume so the next BlocksRecent query and
-// any slot-ordered iterator (chainsync replay, etc.) cannot resurface
-// them, and so leftover metadata from the discarded fork cannot
-// shadow the refetched chain.
-func deleteBlobBlocksAboveSlot(
-	db *database.Database,
-	slot uint64,
-) error {
-	return deleteBlobBlocksAboveSlotExcept(db, slot, nil)
-}
-
+// deleteBlobBlocksAboveSlotExcept removes blocks above slot unless their
+// hashes are preserved for replay. It drops derived metadata above slot and
+// restores UTxOs spent by removed blocks.
 func deleteBlobBlocksAboveSlotExcept(
 	db *database.Database,
 	slot uint64,

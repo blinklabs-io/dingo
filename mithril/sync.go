@@ -102,7 +102,7 @@ func verifyRewardRepairLocalTail(
 	}
 	anchorHash, err := hex.DecodeString(anchorHashText)
 	if err != nil || len(anchorHash) != 32 {
-		return nil, fmt.Errorf(
+		return nil, errors.New(
 			"existing Mithril ledger hash is not a 32-byte hexadecimal block hash",
 		)
 	}

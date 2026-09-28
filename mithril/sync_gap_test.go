@@ -636,7 +636,7 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 		require.NoError(t, db.BlockCreate(b, nil))
 	}
 
-	require.NoError(t, deleteBlobBlocksAboveSlot(db, 150))
+	require.NoError(t, deleteBlobBlocksAboveSlotExcept(db, 150, nil))
 
 	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
@@ -644,7 +644,7 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 	assert.Equal(t, uint64(100), remaining[0].Slot)
 
 	// Idempotent re-run is a no-op.
-	require.NoError(t, deleteBlobBlocksAboveSlot(db, 150))
+	require.NoError(t, deleteBlobBlocksAboveSlotExcept(db, 150, nil))
 	remaining, err = loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
 	require.Len(t, remaining, 1)
@@ -686,7 +686,7 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 		require.NoError(t, db.BlockCreate(b, nil))
 	}
 
-	require.NoError(t, deleteBlobBlocksAboveSlot(db, 200))
+	require.NoError(t, deleteBlobBlocksAboveSlotExcept(db, 200, nil))
 
 	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
