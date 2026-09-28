@@ -8127,7 +8127,11 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		return
 	}
 
-	headerStart, headerEnd := ls.chain.HeaderRange(BlockfetchBatchSize)
+	headerStart, headerEnd, _ := ls.chain.HeaderRangeAfterBytes(
+		0,
+		BlockfetchBatchSize,
+		BlockfetchMaxRangeBytes,
+	)
 	retryConnId := ls.selectRetryBlockfetchConn(currentConnId)
 	ls.blockfetchRequestRangeCleanup()
 	ls.config.Logger.Warn(
