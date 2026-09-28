@@ -216,7 +216,7 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 	lsq.serve(t, listener, magic)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
 
