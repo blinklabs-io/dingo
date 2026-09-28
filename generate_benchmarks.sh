@@ -19,7 +19,7 @@
 #   --write: Write results to file (default: display only)
 
 WRITE_TO_FILE=false
-OUTPUT_FILE="benchmark_results.md"
+OUTPUT_FILE="docs/benchmarks/benchmark_results.md"
 BENCH_REGEX="."
 BENCH_PACKAGES="./..."
 REPORT_TITLE="Dingo Ledger & Database Benchmark Results"

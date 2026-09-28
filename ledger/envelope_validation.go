@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -38,6 +39,10 @@ type envelopeParent struct {
 	blockNumber uint64
 	origin      bool
 	byronEbb    bool
+	// eraId is meaningful only when eraKnown: a persisted tip whose block type
+	// was not loaded, or is not recognised, leaves the era rule unchecked.
+	eraId    uint8
+	eraKnown bool
 }
 
 // envelopeParentFromTip reconstructs the envelope metadata for a persisted
@@ -52,13 +57,17 @@ func envelopeParentFromTip(
 	blockTypeLoaded bool,
 ) envelopeParent {
 	origin := len(hash) == 0
-	return envelopeParent{
+	parent := envelopeParent{
 		slot:        slot,
 		blockNumber: blockNumber,
 		origin:      origin,
 		byronEbb: !origin && blockTypeLoaded &&
 			blockType == uint(gledger.BlockTypeByronEbb),
 	}
+	if !origin && blockTypeLoaded {
+		parent.eraId, parent.eraKnown = chain.EraIdForBlockType(blockType)
+	}
+	return parent
 }
 
 func envelopeParentFromBlock(block gledger.Block) envelopeParent {
@@ -67,6 +76,8 @@ func envelopeParentFromBlock(block gledger.Block) envelopeParent {
 		slot:        block.SlotNumber(),
 		blockNumber: block.BlockNumber(),
 		byronEbb:    isEbb,
+		eraId:       block.Era().Id,
+		eraKnown:    true,
 	}
 }
 
@@ -197,6 +208,18 @@ func isNilBlockHeader(header lcommon.BlockHeader) bool {
 func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
 	if parent.origin {
 		return nil
+	}
+	if parent.eraKnown {
+		if err := chain.CheckEraOrder(
+			block.Era().Id,
+			parent.eraId,
+		); err != nil {
+			return fmt.Errorf(
+				"block at slot %d: %w",
+				block.SlotNumber(),
+				err,
+			)
+		}
 	}
 	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
 	expectedBlockNumber := parent.blockNumber + 1

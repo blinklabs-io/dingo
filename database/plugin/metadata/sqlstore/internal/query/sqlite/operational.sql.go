@@ -402,10 +402,10 @@ const createPoolStakeSnapshot = `-- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -419,6 +419,7 @@ type CreatePoolStakeSnapshotParams struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -435,6 +436,7 @@ func (q *Queries) CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolSta
 		arg.CapturedSlot,
 		arg.LeiosKeyPublic,
 		arg.LeiosKeyPossessionProof,
+		arg.LeiosKeyRegistrationEpoch,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -874,17 +876,11 @@ func (q *Queries) DeleteProvisionalRewardSnapshot(ctx context.Context, arg Delet
 }
 
 const deleteRewardAccountOutputsAfterSlot = `-- name: DeleteRewardAccountOutputsAfterSlot :exec
-DELETE FROM reward_account_output
-WHERE captured_slot > ? OR boundary_slot > ?
+DELETE FROM reward_account_output WHERE captured_slot > ?
 `
 
-type DeleteRewardAccountOutputsAfterSlotParams struct {
-	CapturedSlot int64
-	BoundarySlot int64
-}
-
-func (q *Queries) DeleteRewardAccountOutputsAfterSlot(ctx context.Context, arg DeleteRewardAccountOutputsAfterSlotParams) error {
-	_, err := q.db.ExecContext(ctx, deleteRewardAccountOutputsAfterSlot, arg.CapturedSlot, arg.BoundarySlot)
+func (q *Queries) DeleteRewardAccountOutputsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardAccountOutputsAfterSlot, capturedSlot)
 	return err
 }
 
@@ -940,17 +936,11 @@ func (q *Queries) DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int6
 }
 
 const deleteRewardPoolOutputsAfterSlot = `-- name: DeleteRewardPoolOutputsAfterSlot :exec
-DELETE FROM reward_pool_output
-WHERE captured_slot > ? OR boundary_slot > ?
+DELETE FROM reward_pool_output WHERE captured_slot > ?
 `
 
-type DeleteRewardPoolOutputsAfterSlotParams struct {
-	CapturedSlot int64
-	BoundarySlot int64
-}
-
-func (q *Queries) DeleteRewardPoolOutputsAfterSlot(ctx context.Context, arg DeleteRewardPoolOutputsAfterSlotParams) error {
-	_, err := q.db.ExecContext(ctx, deleteRewardPoolOutputsAfterSlot, arg.CapturedSlot, arg.BoundarySlot)
+func (q *Queries) DeleteRewardPoolOutputsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardPoolOutputsAfterSlot, capturedSlot)
 	return err
 }
 
@@ -2949,6 +2939,7 @@ const getPoolStakeSnapshot = `-- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2975,6 +2966,7 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 		&i.CapturedSlot,
 		&i.LeiosKeyPublic,
 		&i.LeiosKeyPossessionProof,
+		&i.LeiosKeyRegistrationEpoch,
 		&i.CalculationVersion,
 		&i.RewardAccountAutoVote,
 		&i.RewardAccountAutoVoteResolved,
@@ -2986,6 +2978,7 @@ const getPoolStakeSnapshotsByEpoch = `-- name: GetPoolStakeSnapshotsByEpoch :man
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -3018,6 +3011,7 @@ func (q *Queries) GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolS
 			&i.CapturedSlot,
 			&i.LeiosKeyPublic,
 			&i.LeiosKeyPossessionProof,
+			&i.LeiosKeyRegistrationEpoch,
 			&i.CalculationVersion,
 			&i.RewardAccountAutoVote,
 			&i.RewardAccountAutoVoteResolved,
@@ -3044,15 +3038,29 @@ ORDER BY credential_tag ASC, staking_key ASC, pool_key_hash ASC,
          reward_type ASC
 `
 
-func (q *Queries) GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]RewardAccountOutput, error) {
+type GetRewardAccountOutputsRow struct {
+	StakingKey    []byte
+	PoolKeyHash   []byte
+	RewardType    string
+	ID            int64
+	Epoch         int64
+	CredentialTag int64
+	Amount        string
+	Spendable     bool
+	Guarded       bool
+	CapturedSlot  int64
+	BoundarySlot  int64
+}
+
+func (q *Queries) GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]GetRewardAccountOutputsRow, error) {
 	rows, err := q.db.QueryContext(ctx, getRewardAccountOutputs, epoch)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []RewardAccountOutput{}
+	items := []GetRewardAccountOutputsRow{}
 	for rows.Next() {
-		var i RewardAccountOutput
+		var i GetRewardAccountOutputsRow
 		if err := rows.Scan(
 			&i.StakingKey,
 			&i.PoolKeyHash,
@@ -3262,6 +3270,56 @@ ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC
 
 func (q *Queries) GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error) {
 	rows, err := q.db.QueryContext(ctx, getRewardStakeInputs, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RewardStakeInput{}
+	for rows.Next() {
+		var i RewardStakeInput
+		if err := rows.Scan(
+			&i.PoolKeyHash,
+			&i.StakingKey,
+			&i.ID,
+			&i.Epoch,
+			&i.CredentialTag,
+			&i.Stake,
+			&i.Owner,
+			&i.Registered,
+			&i.CapturedSlot,
+			&i.BoundarySlot,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getRewardStakeInputsInPoolKeyHashRange = `-- name: GetRewardStakeInputsInPoolKeyHashRange :many
+SELECT pool_key_hash, staking_key, id, epoch, credential_tag, stake, owner,
+       registered, captured_slot, boundary_slot
+FROM reward_stake_input
+WHERE epoch = ?
+  AND pool_key_hash >= ?
+  AND pool_key_hash <= ?
+ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC
+`
+
+type GetRewardStakeInputsInPoolKeyHashRangeParams struct {
+	Epoch         int64
+	PoolKeyHash   []byte
+	PoolKeyHash_2 []byte
+}
+
+func (q *Queries) GetRewardStakeInputsInPoolKeyHashRange(ctx context.Context, arg GetRewardStakeInputsInPoolKeyHashRangeParams) ([]RewardStakeInput, error) {
+	rows, err := q.db.QueryContext(ctx, getRewardStakeInputsInPoolKeyHashRange, arg.Epoch, arg.PoolKeyHash, arg.PoolKeyHash_2)
 	if err != nil {
 		return nil, err
 	}
@@ -4244,10 +4302,10 @@ const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
@@ -4255,6 +4313,7 @@ ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     captured_slot = excluded.captured_slot,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
+    leios_key_registration_epoch = excluded.leios_key_registration_epoch,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -4272,6 +4331,7 @@ type SavePoolStakeSnapshotParams struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -4288,6 +4348,7 @@ func (q *Queries) SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSn
 		arg.CapturedSlot,
 		arg.LeiosKeyPublic,
 		arg.LeiosKeyPossessionProof,
+		arg.LeiosKeyRegistrationEpoch,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,

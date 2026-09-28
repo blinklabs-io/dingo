@@ -1,2 +1,2 @@
-ALTER TABLE reward_pool_output
-ADD COLUMN leader_reward_deficit TEXT NOT NULL DEFAULT '0';
+ALTER TABLE `pool_stake_snapshot`
+    ADD COLUMN `leios_key_registration_epoch` INTEGER;
