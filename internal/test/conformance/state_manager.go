@@ -937,40 +937,23 @@ func (m *DingoStateManager) ApplyTransaction(
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
 	}
 
-	if votes := tx.VotingProcedures(); len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			tx, point, m.currentEpoch, drepInactivityPeriod, m.db, txn,
-		); err != nil {
-			return fmt.Errorf("process votes: %w", err)
-		}
+	if err := governance.ProcessTransactionEffects(
+		tx,
+		point,
+		m.currentEpoch,
+		drepInactivityPeriod,
+		govActionLifetime,
+		protocolMajor,
+		m.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("process transaction governance effects: %w", err)
+	}
+	if len(tx.VotingProcedures()) > 0 {
 		m.recordVotesInGovState(tx)
 	}
-
-	if governance.HasDRepActivityCertificates(tx) {
-		protocolMajor := uint64(0)
-		if conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
-			protocolMajor = uint64(conwayPP.ProtocolVersion.Major)
-		}
-		if err := governance.ProcessDRepActivityCertificates(
-			tx, point, m.currentEpoch, drepInactivityPeriod, protocolMajor, m.db, txn,
-		); err != nil {
-			return fmt.Errorf("process drep activity certs: %w", err)
-		}
-	}
-	if proposals := tx.ProposalProcedures(); len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, m.currentEpoch, govActionLifetime, m.db, txn,
-		); err != nil {
-			return fmt.Errorf("process proposals: %w", err)
-		}
+	if len(tx.ProposalProcedures()) > 0 {
 		m.recordProposalsInGovState(tx, govActionLifetime)
-	}
-	if governance.HasDRepDeregistrationCertificates(tx) {
-		if err := governance.ProcessDRepDeregistrationEffects(
-			tx, point, m.currentEpoch, m.db, txn,
-		); err != nil {
-			return fmt.Errorf("process drep deregistration effects: %w", err)
-		}
 	}
 
 	if err := txn.Commit(); err != nil {

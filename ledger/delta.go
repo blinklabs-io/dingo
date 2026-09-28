@@ -457,57 +457,17 @@ func (d *LedgerDelta) processGovernance(
 		)
 	}
 
-	// Process governance votes
-	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance votes: %w", err)
-		}
-	}
-
-	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
-			uint64(conwayPParams.ProtocolVersion.Major),
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process DRep activity certificates: %w", err)
-		}
-	}
-	// Process proposals after activity certificates, which consume dormant epochs.
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.GovActionValidityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance proposals: %w", err)
-		}
-	}
-
-	if hasDRepDeregistrations {
-		if err := governance.ProcessDRepDeregistrationEffects(
-			tx,
-			d.Point,
-			currentEpoch,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process DRep deregistration effects: %w", err)
-		}
+	if err := governance.ProcessTransactionEffects(
+		tx,
+		d.Point,
+		currentEpoch,
+		conwayPParams.DRepInactivityPeriod,
+		conwayPParams.GovActionValidityPeriod,
+		uint64(conwayPParams.ProtocolVersion.Major),
+		ls.db,
+		txn,
+	); err != nil {
+		return err
 	}
 
 	return nil

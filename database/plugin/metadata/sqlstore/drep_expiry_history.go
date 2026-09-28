@@ -225,7 +225,11 @@ FROM drep_dormancy_state
 WHERE id = 1`).Scan(&dormant); err != nil {
 		return fmt.Errorf("read dormant DRep epoch count: %w", err)
 	}
-	if dormant == math.MaxInt64 {
+	nextDormant, ok := types.CheckedAddUint64(uint64(dormant), 1)
+	if !ok {
+		return fmt.Errorf("dormant DRep epoch count overflows at slot %d", slot)
+	}
+	if _, err := checkedInt64(nextDormant); err != nil {
 		return fmt.Errorf("dormant DRep epoch count exceeds storage range at slot %d", slot)
 	}
 	if err := s.recordDormantDRepEpochHistory(db, ctx, slot, dormant); err != nil {

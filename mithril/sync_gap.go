@@ -523,6 +523,8 @@ func processGapBlocks(
 	// needs the Conway-typed record, and certificate deposits are derived
 	// from them for every era that has a CertDepositFunc.
 	pparamsCache := make(map[uint64]lcommon.ProtocolParameters)
+	var previousEpoch uint64
+	hasPreviousEpoch := false
 	for _, block := range blocks {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
@@ -542,21 +544,6 @@ func processGapBlocks(
 			)
 		}
 		txs := parsedBlock.Transactions()
-		if len(txs) == 0 {
-			continue
-		}
-		indexer := database.NewBlockIndexer(
-			block.Slot, block.Hash,
-		)
-		offsets, err := indexer.ComputeOffsets(
-			block.Cbor, parsedBlock,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"computing offsets for gap block at slot %d: %w",
-				block.Slot, err,
-			)
-		}
 		point := ocommon.NewPoint(block.Slot, block.Hash)
 		epoch, err := gapBlockEpoch(epochs, block.Slot)
 		if err != nil {
@@ -564,6 +551,33 @@ func processGapBlocks(
 				"resolving epoch for gap block at slot %d: %w",
 				block.Slot,
 				err,
+			)
+		}
+		epochBoundary := hasPreviousEpoch && previousEpoch != epoch.EpochId
+		previousEpoch = epoch.EpochId
+		hasPreviousEpoch = true
+		if len(txs) == 0 {
+			if epochBoundary {
+				if err := bumpGapBlockDRepDormancy(
+					db,
+					epoch.EpochId,
+					block.Slot,
+				); err != nil {
+					return fmt.Errorf(
+						"processing DRep dormancy at gap epoch %d: %w",
+						epoch.EpochId,
+						err,
+					)
+				}
+			}
+			continue
+		}
+		indexer := database.NewBlockIndexer(block.Slot, block.Hash)
+		offsets, err := indexer.ComputeOffsets(block.Cbor, parsedBlock)
+		if err != nil {
+			return fmt.Errorf(
+				"computing offsets for gap block at slot %d: %w",
+				block.Slot, err,
 			)
 		}
 		blockPParams, cached := pparamsCache[epoch.EpochId]
@@ -614,6 +628,7 @@ func processGapBlocks(
 			epoch.EraId,
 			blockPParams,
 			blockConwayPParams,
+			epochBoundary,
 		); err != nil {
 			return fmt.Errorf(
 				"processing gap block at slot %d: %w",
@@ -630,6 +645,27 @@ func processGapBlocks(
 	return nil
 }
 
+func bumpGapBlockDRepDormancy(
+	db *database.Database,
+	epoch uint64,
+	slot uint64,
+) error {
+	txn := db.Transaction(true)
+	defer txn.Release()
+	if err := governance.BumpDormantDRepExpiryAtEpochBoundary(
+		db,
+		epoch,
+		slot,
+		txn,
+	); err != nil {
+		return err
+	}
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("commit DRep dormancy epoch boundary: %w", err)
+	}
+	return nil
+}
+
 func processGapBlockTransactions(
 	db *database.Database,
 	logger *slog.Logger,
@@ -640,9 +676,20 @@ func processGapBlockTransactions(
 	eraId uint,
 	pparams lcommon.ProtocolParameters,
 	conwayPParams *conway.ConwayProtocolParameters,
+	epochBoundary ...bool,
 ) error {
 	txn := db.Transaction(true)
 	defer txn.Release()
+	if len(epochBoundary) > 0 && epochBoundary[0] {
+		if err := governance.BumpDormantDRepExpiryAtEpochBoundary(
+			db,
+			epochId,
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf("gap block DRep dormancy boundary: %w", err)
+		}
+	}
 	for i, tx := range txs {
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
@@ -687,53 +734,23 @@ func processGapBlockTransactions(
 				"missing Conway protocol parameters for governance gap block processing",
 			)
 		}
-		if hasGovernance {
-			if err := governance.ProcessVotes(
-				tx,
-				point,
-				epochId,
-				conwayPParams.DRepInactivityPeriod,
-				db,
-				txn,
-			); err != nil {
-				return fmt.Errorf("processing governance votes: %w", err)
-			}
+		drepInactivityPeriod := uint64(0)
+		govActionLifetime := uint64(0)
+		if conwayPParams != nil {
+			drepInactivityPeriod = conwayPParams.DRepInactivityPeriod
+			govActionLifetime = conwayPParams.GovActionValidityPeriod
 		}
-		if hasDRepActivity {
-			if err := governance.ProcessDRepActivityCertificates(
-				tx,
-				point,
-				epochId,
-				conwayPParams.DRepInactivityPeriod,
-				uint64(conwayPParams.ProtocolVersion.Major),
-				db,
-				txn,
-			); err != nil {
-				return fmt.Errorf("processing DRep activity certificates: %w", err)
-			}
-		}
-		if len(tx.ProposalProcedures()) > 0 {
-			if err := governance.ProcessProposals(
-				tx,
-				point,
-				epochId,
-				conwayPParams.GovActionValidityPeriod,
-				db,
-				txn,
-			); err != nil {
-				return fmt.Errorf("processing governance proposals: %w", err)
-			}
-		}
-		if hasDRepDeregistration {
-			if err := governance.ProcessDRepDeregistrationEffects(
-				tx,
-				point,
-				epochId,
-				db,
-				txn,
-			); err != nil {
-				return fmt.Errorf("processing DRep deregistration effects: %w", err)
-			}
+		if err := governance.ProcessTransactionEffects(
+			tx,
+			point,
+			epochId,
+			drepInactivityPeriod,
+			govActionLifetime,
+			protocolMajor,
+			db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("processing transaction governance: %w", err)
 		}
 	}
 	if err := txn.Commit(); err != nil {

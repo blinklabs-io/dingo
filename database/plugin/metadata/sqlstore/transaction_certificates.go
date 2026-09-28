@@ -662,11 +662,13 @@ WHERE credential_tag = ? AND staking_key = ?`, tag, key).Scan(
 		return 0, nil, err
 	}
 	if changesDrepDelegation {
-		removeOld := len(oldDrepCredential) > 0 &&
-			(oldDrepType <= models.DrepTypeScriptHash &&
-				(protocolMajor >= 10 ||
-					newDrepType > models.DrepTypeScriptHash ||
-					len(newDrepCredential) == 0))
+		removeOld := shouldRemovePriorDrepDelegation(
+			protocolMajor,
+			oldDrepType,
+			len(oldDrepCredential) > 0,
+			newDrepType,
+			len(newDrepCredential) > 0,
+		)
 		if removeOld {
 			if err := removeDrepDelegator(
 				ctx,
@@ -734,6 +736,22 @@ SELECT EXISTS (
 	)
 	ref := models.NewStakeCredentialRef(tag, key)
 	return id, &ref, err
+}
+
+func shouldRemovePriorDrepDelegation(
+	protocolMajor uint64,
+	oldDrepType uint64,
+	hasOldCredential bool,
+	newDrepType uint64,
+	hasNewCredential bool,
+) bool {
+	if !hasOldCredential || oldDrepType > models.DrepTypeScriptHash {
+		return false
+	}
+	if protocolMajor >= 10 {
+		return true
+	}
+	return newDrepType > models.DrepTypeScriptHash || !hasNewCredential
 }
 
 func updateCertificateAccount(
@@ -912,6 +930,8 @@ RETURNING id`,
 		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
+		false,
+		nil,
 	}, poolID, slot)
 	if err != nil {
 		return 0, err

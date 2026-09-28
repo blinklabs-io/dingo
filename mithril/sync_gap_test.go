@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -43,6 +44,57 @@ type mockGapGovernanceTransaction struct {
 	votingProcedures   lcommon.VotingProcedures
 	proposalProcedures []lcommon.ProposalProcedure
 	isValid            bool
+}
+
+func TestProcessGapBlocksBumpsDormantDRepAtEmptyEpochBoundary(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	credential := testGapHash28("dormant-gap-boundary")
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credential,
+		ExpiryEpoch:   20,
+		Active:        true,
+	}))
+	for epoch, slot := range []uint64{0, 1} {
+		require.NoError(t, db.SetEpoch(
+			slot,
+			uint64(epoch),
+			nil,
+			nil,
+			nil,
+			nil,
+			conway.EraIdConway,
+			1,
+			1,
+			nil,
+		))
+	}
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 2)
+	require.NoError(t, err)
+	gapBlocks := make([]models.Block, 0, len(blocks))
+	for _, block := range blocks {
+		gapBlocks = append(gapBlocks, models.Block{
+			Slot: block.SlotNumber(),
+			Hash: block.Hash().Bytes(),
+			Cbor: block.Cbor(),
+			Type: uint(block.Type()),
+		})
+	}
+	require.NoError(t, processGapBlocks(
+		t.Context(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		gapBlocks,
+	))
+	drep, err := db.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch)
 }
 
 func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {

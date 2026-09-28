@@ -346,21 +346,26 @@ Migrations `v24` (`reward-ada-pots-imported-epoch-fees`) and `v25`
 mark older imports that need reward repair. The `reward_ada_pots` table entry
 above describes the imported value and startup repair behavior.
 
-Migration `v26` (`drep-expiry-history`) adds `drep_expiry_history` and
+Migrations `v26` (`leios-key-registration-effective-epoch`), `v27`
+(`leios-imported-key-age-unknown`), `v28` (`leios-key-registration-epoch`),
+and `v29` (`leios-snapshot-registration-epoch-backfill`) preserve registration
+ages for Leios key eligibility across snapshots and imported registrations.
+
+Migration `v30` (`drep-expiry-history`) adds `drep_expiry_history` and
 `drep_expiry_epoch_event`. The history stores the pre-write expiry and activity
 epoch once per DRep and slot, allowing activity updates and dormant-epoch
 expiry extensions to roll back together. The event table makes each
 empty-governance boundary idempotent when the boundary is replayed after a
 restart.
 
-Migration `v27` (`drep-dormancy-state`) adds the singleton
+Migration `v31` (`drep-dormancy-state`) adds the singleton
 `drep_dormancy_state` counter and `drep_dormancy_history`. The counter preserves
 the consecutive no-proposal epoch count needed by PV9 DRep registration; each
 boundary increment and proposal-driven reset is journaled so rollback restores
 the prior count. Proposal-driven resets run before certificate processing, and
 snapshot import initializes the counter from parsed ledger state.
 
-Migration `v28` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
+Migration `v32` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
 reverse index of stake credentials recorded in each active DRep's ledger
 delegator set. The `added_slot`/`removed_slot` pair preserves membership
 history across rollback. Its initial backfill uses current account vote
@@ -1177,7 +1182,7 @@ updates preserve the previous activity and expiry epochs.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; a PV9 registration also includes accumulated dormant epochs. Each empty-proposal epoch boundary extends registered DRep expiry by one. Snapshot import adds the snapshot's dormant epoch count to each recorded expiry before persisting the effective expiry. Activity refresh, boundary extension, and their rollback state commit atomically. `expiry_epoch = 0` means unset and remains exempt from expiry. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; a PV9 registration also includes accumulated dormant epochs. Each empty-proposal epoch boundary extends registered DRep expiry by one. Snapshot import adds the snapshot's dormant epoch count to each recorded expiry before persisting the effective expiry. Mithril snapshot import currently does not carry `last_activity_epoch` and marks imported DReps active; this remains a known limitation tracked by issue #4492. Activity refresh, boundary extension, and their rollback state commit atomically. `expiry_epoch = 0` means unset and remains exempt from expiry. |
 | `drep_expiry_history` | `credential_tag`, `credential`, `added_slot`, `previous_expiry_epoch`, `previous_last_activity_epoch` | PK `(credential_tag, credential, added_slot)`; index `added_slot` | First pre-mutation DRep activity/expiry state at each slot. Rollback restores the captured values for rows after its target, then removes those history rows. |
 | `drep_expiry_epoch_event` | `added_slot` | PK `added_slot` | Idempotence marker for dormant DRep expiry extension at an empty-proposal epoch boundary. Rollback removes markers after its target. |
 | `drep_dormancy_state` | `id`, `dormant_epochs` | PK `id` (singleton row id 1) | Consecutive epoch count with no governance proposals. PV9 DRep registrations use this count when deriving the initial effective expiry. |

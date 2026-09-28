@@ -141,7 +141,11 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	}
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
-		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		MinFeeA:            44,
 	}
 	currentPParamsCbor, err := cbor.Encode(currentPParams)
 	require.NoError(t, err)
@@ -230,7 +234,11 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	))
 
 	currentPParams := &alonzo.AlonzoProtocolParameters{
-		CostModels: map[uint][]int64{0: {1, 2, 3}},
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		CostModels:         map[uint][]int64{0: {1, 2, 3}},
 	}
 	decodeFunc := func(data []byte) (any, error) {
 		var update alonzo.AlonzoProtocolParameterUpdate
@@ -346,7 +354,11 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	}
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
-		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		MinFeeA:            44,
 	}
 	decodeFunc := func(data []byte) (any, error) {
 		var update shelley.ShelleyProtocolParameterUpdate
@@ -414,7 +426,11 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 
 	currentPParams := lcommon.ProtocolParameters(
 		&shelley.ShelleyProtocolParameters{
-			MinFeeA: 44,
+			// Block sizes the votedFuturePParams guard accepts.
+			MaxBlockBodySize:   65536,
+			MaxTxSize:          16384,
+			MaxBlockHeaderSize: 1100,
+			MinFeeA:            44,
 		},
 	)
 	decodeFunc := func(data []byte) (any, error) {
@@ -505,7 +521,11 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	}
 
 	currentPParams := &shelley.ShelleyProtocolParameters{
-		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		MinFeeA:            44,
 	}
 	currentPParamsCbor, err := cbor.Encode(currentPParams)
 	require.NoError(t, err)
@@ -731,7 +751,13 @@ func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 		)
 	}
 
-	currentPParams := &shelley.ShelleyProtocolParameters{MinFeeA: 44}
+	currentPParams := &shelley.ShelleyProtocolParameters{
+		MinFeeA: 44,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+	}
 	decodeFunc, updateFunc := shelleyForecastFuncs()
 
 	result, err := db.ForecastPParamUpdates(

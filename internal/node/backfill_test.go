@@ -96,6 +96,49 @@ func addValidBackfillBlocksFrom(
 	}
 }
 
+func TestBackfillBumpsDormantDRepAtEmptyEpochBoundary(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	credential := bytes.Repeat([]byte{0xD4}, 28)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credential,
+		ExpiryEpoch:   20,
+		Active:        true,
+	}))
+	for epoch, slot := range []uint64{0, 1} {
+		require.NoError(t, db.SetEpoch(
+			slot,
+			uint64(epoch),
+			nil,
+			nil,
+			nil,
+			nil,
+			conway.EraIdConway,
+			1,
+			1,
+			nil,
+		))
+	}
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 2)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.DisableNonceComputation()
+	require.NoError(t, backfill.Run(context.Background()))
+	drep, err := db.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	t *testing.T,
 ) {

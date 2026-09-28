@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -155,10 +156,11 @@ func ProcessDRepActivityCertificates(
 		}
 		inactivityPeriod := drepInactivityPeriod
 		if registration && protocolMajor < 10 {
-			if dormantEpochs > ^uint64(0)-inactivityPeriod {
+			var ok bool
+			inactivityPeriod, ok = dbtypes.CheckedAddUint64(inactivityPeriod, dormantEpochs)
+			if !ok {
 				return fmt.Errorf("renew DRep activity for certificate %d: expiry overflows", i)
 			}
-			inactivityPeriod += dormantEpochs
 		}
 		if err := db.UpdateDRepActivity(
 			credentialTag,
@@ -204,6 +206,56 @@ func ProcessProposals(
 	)
 }
 
+// ProcessTransactionEffects applies transaction governance state after its
+// certificate records have been persisted. Keep this ordering shared by live
+// application, backfill, gap replay, and conformance state.
+func ProcessTransactionEffects(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	drepInactivityPeriod uint64,
+	govActionLifetime uint64,
+	protocolMajor uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	if len(tx.VotingProcedures()) > 0 {
+		if err := ProcessVotes(
+			tx, point, currentEpoch, drepInactivityPeriod, db, txn,
+		); err != nil {
+			return fmt.Errorf("process governance votes: %w", err)
+		}
+	}
+	if HasDRepActivityCertificates(tx) {
+		if err := ProcessDRepActivityCertificates(
+			tx,
+			point,
+			currentEpoch,
+			drepInactivityPeriod,
+			protocolMajor,
+			db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process DRep activity certificates: %w", err)
+		}
+	}
+	if len(tx.ProposalProcedures()) > 0 {
+		if err := persistGovernanceProposals(
+			tx, point, currentEpoch, govActionLifetime, db, txn,
+		); err != nil {
+			return fmt.Errorf("process governance proposals: %w", err)
+		}
+	}
+	if HasDRepDeregistrationCertificates(tx) {
+		if err := ProcessDRepDeregistrationEffects(
+			tx, point, currentEpoch, db, txn,
+		); err != nil {
+			return fmt.Errorf("process DRep deregistration effects: %w", err)
+		}
+	}
+	return nil
+}
+
 // ResetDormantDRepExpiryBeforeCertificates applies the proposal-induced
 // dormancy reset at the Conway CERTS boundary, before transaction
 // certificates can calculate DRep expiry epochs.
@@ -218,6 +270,27 @@ func ResetDormantDRepExpiryBeforeCertificates(
 	}
 	if err := db.ResetDormantDRepEpochs(point.Slot, txn); err != nil {
 		return fmt.Errorf("reset dormant DRep epochs before certificate processing: %w", err)
+	}
+	return nil
+}
+
+// BumpDormantDRepExpiryAtEpochBoundary extends dormant DRep expiries during
+// historical replay when no governance proposal is active at the boundary.
+func BumpDormantDRepExpiryAtEpochBoundary(
+	db *database.Database,
+	epoch uint64,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	proposals, err := db.GetActiveGovernanceProposals(epoch, txn)
+	if err != nil {
+		return fmt.Errorf("get active proposals for DRep dormancy: %w", err)
+	}
+	if len(proposals) != 0 {
+		return nil
+	}
+	if _, err := db.BumpDormantDRepExpiries(slot, txn); err != nil {
+		return fmt.Errorf("extend dormant DRep expiries: %w", err)
 	}
 	return nil
 }

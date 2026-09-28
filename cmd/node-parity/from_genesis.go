@@ -29,10 +29,11 @@ import (
 // koiosFlags are specific to the from-genesis command -- unlike
 // globalFlags.network/dingoAddr, nothing else in this tool needs them.
 var koiosFlags struct {
-	apiKey            string
-	baseURL           string
-	allowInsecureHTTP bool
-	verbose           bool
+	apiKey                string
+	baseURL               string
+	allowInsecureHTTP     bool
+	allowPrivateAddresses bool
+	verbose               bool
 	// cachePath, when set, points this run's CheckProtocolParams,
 	// CheckStakeDistribution and /tx_info lookups at a koiosparity.Cache
 	// (koios_check.go's doc comments on those functions) instead of calling
@@ -262,6 +263,10 @@ of re-deriving them from scratch.`,
 		"allow a plain-HTTP --koios-base-url (only for a trusted local/test instance)",
 	)
 	cmd.Flags().BoolVar(
+		&koiosFlags.allowPrivateAddresses, "koios-allow-private-addresses", false,
+		"allow Koios destinations with private or special-use IP addresses (only for a trusted local/self-hosted instance)",
+	)
+	cmd.Flags().BoolVar(
 		&koiosFlags.verbose, "verbose", false,
 		"log each individual UTxO ref that differs (address/amount/assets/datum/scriptref), not just per-epoch counts",
 	)
@@ -337,6 +342,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 
 	koios, err := nodeparity.NewKoiosClient(
 		network, koiosFlags.apiKey, koiosFlags.baseURL, koiosFlags.allowInsecureHTTP,
+		koiosFlags.allowPrivateAddresses,
 	)
 	if err != nil {
 		return err

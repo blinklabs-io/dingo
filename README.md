@@ -250,14 +250,14 @@ additional headroom for host I/O, memory pressure, and future network growth.
 
 ```bash
 # Run on preview (default)
-docker run -p 3001:3001 ghcr.io/blinklabs-io/dingo
+docker run -p 3001:3001 ghcr.io/blinklabs-io/dingo:${DINGO_VERSION}
 
 # Run on preprod with persistent storage
 docker run -p 3001:3001 \
   -e CARDANO_NETWORK=preprod \
   -v dingo-data:/data/db \
   -v dingo-ipc:/ipc \
-  ghcr.io/blinklabs-io/dingo
+  ghcr.io/blinklabs-io/dingo:${DINGO_VERSION}
 ```
 
 The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, and `txtop`. Mithril snapshot support is built into dingo natively (`dingo mithril sync`). The Dockerfile sets `CARDANO_DATABASE_PATH=/data/db` and `CARDANO_SOCKET_PATH=/ipc/dingo.socket`, overriding the local defaults of `.dingo` and `dingo.socket` — the volume mounts above map to these container paths.

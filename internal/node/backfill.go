@@ -655,51 +655,17 @@ func (b *Backfill) processBlockGovernance(
 	if conwayPP == nil {
 		return nil
 	}
-	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			tx, point, epochId,
-			conwayPP.DRepInactivityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance votes: %w", err,
-			)
-		}
-	}
-	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
-			tx,
-			point,
-			epochId,
-			conwayPP.DRepInactivityPeriod,
-			uint64(conwayPP.ProtocolVersion.Major),
-			b.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"DRep activity certificates: %w", err,
-			)
-		}
-	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, epochId,
-			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf("governance proposals: %w", err)
-		}
-	}
-	if hasDRepDeregistrations {
-		if err := governance.ProcessDRepDeregistrationEffects(
-			tx,
-			point,
-			epochId,
-			b.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("DRep deregistration effects: %w", err)
-		}
+	if err := governance.ProcessTransactionEffects(
+		tx,
+		point,
+		epochId,
+		conwayPP.DRepInactivityPeriod,
+		conwayPP.GovActionValidityPeriod,
+		uint64(conwayPP.ProtocolVersion.Major),
+		b.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("governance transaction effects: %w", err)
 	}
 	return nil
 }
@@ -988,6 +954,14 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// Detect epoch boundary and update pparams
 		if isNewEpoch {
 			b.processEpochBoundary(epochId, eraId)
+			if err := governance.BumpDormantDRepExpiryAtEpochBoundary(
+				b.db,
+				epochId,
+				blk.Slot,
+				batchTxn,
+			); err != nil {
+				return fmt.Errorf("backfill DRep dormancy boundary: %w", err)
+			}
 		}
 
 		pp := b.getPParams(epochId)

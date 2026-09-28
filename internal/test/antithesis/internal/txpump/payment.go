@@ -22,11 +22,14 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
-// conwayEraID is the Conway era ID (6) used in the LocalTxSubmission
-// MsgSubmitTx message. Babbage is era 5; Conway is era 6.
-const conwayEraID uint16 = 6
+const (
+	// Babbage is era 5, Conway is era 6, and Dijkstra is era 7.
+	conwayEraID   uint16 = 6
+	dijkstraEraID uint16 = 7
+)
 
 // MinFee is a fixed minimum fee applied to every transaction.  In a real node
 // the fee is computed precisely; here we use a conservative constant so that
@@ -212,6 +215,55 @@ func BuildPayment(p PaymentParams) (txBytes []byte, txID string, err error) {
 	txBytes, err = cbor.Encode(tx)
 	if err != nil {
 		return nil, "", fmt.Errorf("payment: CBOR encoding failed: %w", err)
+	}
+	return txBytes, txID, nil
+}
+
+// BuildDijkstraPayment builds a Dijkstra transaction from the same minimal
+// payment body and witnesses as BuildPayment. Dijkstra transactions omit
+// Conway's isValid element from their top-level CBOR array.
+func BuildDijkstraPayment(p PaymentParams) ([]byte, string, error) {
+	conwayTxBytes, txID, err := BuildPayment(p)
+	if err != nil {
+		return nil, "", err
+	}
+	var conwayParts []cbor.RawMessage
+	if _, err := cbor.Decode(conwayTxBytes, &conwayParts); err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Conway transaction decode failed: %w", err,
+		)
+	}
+	if len(conwayParts) != 4 {
+		return nil, "", fmt.Errorf(
+			"payment: expected 4 Conway transaction elements, got %d",
+			len(conwayParts),
+		)
+	}
+
+	var tx dijkstra.DijkstraTransaction
+	if _, err := cbor.Decode(conwayParts[0], &tx.Body); err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra body decode failed: %w", err,
+		)
+	}
+	if _, err := cbor.Decode(conwayParts[1], &tx.WitnessSet); err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra witness decode failed: %w", err,
+		)
+	}
+	tx.TxIsValid = true
+	txBytes, err := cbor.Encode(&tx)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra transaction encoding failed: %w", err,
+		)
+	}
+	if got := tx.Id().String(); got != txID {
+		return nil, "", fmt.Errorf(
+			"payment: Dijkstra transaction ID %s differs from body ID %s",
+			got,
+			txID,
+		)
 	}
 	return txBytes, txID, nil
 }

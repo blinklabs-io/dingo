@@ -103,49 +103,22 @@ func removeAllDrepDelegators(
 	if err != nil {
 		return err
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT stake_credential_tag, stake_credential
-FROM drep_delegator
-WHERE drep_credential_tag = ? AND drep_credential = ?
-  AND removed_slot IS NULL`,
-		drepTag,
-		drepCredential,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	type delegator struct {
-		tag uint8
-		key []byte
-	}
-	delegators := make([]delegator, 0)
-	for rows.Next() {
-		var item delegator
-		if err := rows.Scan(&item.tag, &item.key); err != nil {
-			return err
-		}
-		delegators = append(delegators, item)
-	}
-	if err := rows.Err(); err != nil {
-		return err
+	if _, err := db.ExecContext(ctx, `
+UPDATE account SET drep = NULL, drep_type = 0, added_slot = ?
+WHERE EXISTS (
+    SELECT 1 FROM drep_delegator
+    WHERE drep_credential_tag = ? AND drep_credential = ?
+      AND removed_slot IS NULL
+      AND account.credential_tag = drep_delegator.stake_credential_tag
+      AND account.staking_key = drep_delegator.stake_credential
+)`, removedSlot, drepTag, drepCredential); err != nil {
+		return fmt.Errorf("clear DRep delegator accounts: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 UPDATE drep_delegator SET removed_slot = ?
 WHERE drep_credential_tag = ? AND drep_credential = ?
   AND removed_slot IS NULL`, removedSlot, drepTag, drepCredential); err != nil {
 		return fmt.Errorf("remove reverse DRep delegations: %w", err)
-	}
-	for _, item := range delegators {
-		if _, err := db.ExecContext(ctx, `
-UPDATE account SET drep = NULL, drep_type = 0, added_slot = ?
-WHERE credential_tag = ? AND staking_key = ?`,
-			removedSlot,
-			item.tag,
-			item.key,
-		); err != nil {
-			return fmt.Errorf("clear DRep delegator account: %w", err)
-		}
 	}
 	return nil
 }

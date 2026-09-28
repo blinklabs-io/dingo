@@ -211,7 +211,7 @@ func runProtocolParamsAndStake(
 	stakeMismatches []StakeMismatch,
 	stakeErr error,
 ) {
-	for attempt := 0; attempt < protocolParamsAndStakeRetries; attempt++ {
+	for attempt := range protocolParamsAndStakeRetries {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -318,7 +318,7 @@ func acquireWithRetry(
 	point pcommon.Point,
 ) (conn *ouroboros.Connection, lsq *localstatequery.LocalStateQuery, err error) {
 	var lastErr error
-	for attempt := 0; attempt < acquireRetries; attempt++ {
+	for attempt := range acquireRetries {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
