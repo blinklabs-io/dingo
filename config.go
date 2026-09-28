@@ -155,7 +155,11 @@ type TokenRegistryConfig struct {
 	Interval              time.Duration
 	RequestTimeout        time.Duration
 	MaxBytes              int64
+	MaxDecompressedBytes  int64
 	MaxEntryBytes         int64
+	MaxArchiveEntries     int
+	MaxAcceptedEntries    int
+	MaxBatchBytes         int64
 	Enabled               bool
 	StoreLogos            bool
 	AllowPrivateAddresses bool
@@ -826,7 +830,11 @@ func (c *Config) syncCompatFields() {
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
 		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
+		MaxDecompressedBytes:  c.cfg.TokenRegistry.MaxDecompressedBytes,
 		MaxEntryBytes:         c.cfg.TokenRegistry.MaxEntryBytes,
+		MaxArchiveEntries:     c.cfg.TokenRegistry.MaxArchiveEntries,
+		MaxAcceptedEntries:    c.cfg.TokenRegistry.MaxAcceptedEntries,
+		MaxBatchBytes:         c.cfg.TokenRegistry.MaxBatchBytes,
 		Enabled:               c.cfg.TokenRegistry.Enabled,
 		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
 		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
@@ -1828,7 +1836,11 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
 			MaxBytes:              cfg.MaxBytes,
+			MaxDecompressedBytes:  cfg.MaxDecompressedBytes,
 			MaxEntryBytes:         cfg.MaxEntryBytes,
+			MaxArchiveEntries:     cfg.MaxArchiveEntries,
+			MaxAcceptedEntries:    cfg.MaxAcceptedEntries,
+			MaxBatchBytes:         cfg.MaxBatchBytes,
 			StoreLogos:            cfg.StoreLogos,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 		}
