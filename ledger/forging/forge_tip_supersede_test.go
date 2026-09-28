@@ -424,7 +424,9 @@ func requireStaleTipSkips(
 ) {
 	t.Helper()
 	for _, reason := range []string{
-		forgeStaleTipReasonSlotGap,
+		forgeStaleTipReasonPrimaryNotAncestor,
+		forgeStaleTipReasonBlockGap,
+		forgeStaleTipReasonPeerHeightGap,
 		forgeStaleTipReasonHashDiverged,
 		forgeStaleTipReasonPrimaryTipBehind,
 		forgeStaleTipReasonUnappliedRival,
@@ -575,14 +577,14 @@ func TestForgeRefusesTheRetryWhenThePrimaryTipIsReplacedAtTheAppliedSlot(
 	})
 }
 
-// TestForgeRefusesTheRetryOnEveryStaleTipReason covers the two remaining
-// stale-tip refusals the entry gate applies from the two tips, so the
-// per-attempt decision is pinned to the whole of the entry decision rather
-// than to the three cases above.
+// TestForgeRefusesTheRetryOnEveryStaleTipReason covers the remaining stale-tip
+// refusals so the per-attempt decision is pinned to the whole entry decision
+// rather than only the three positional cases above.
 func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 	applied := bytes.Repeat([]byte{0xAA}, 32)
 	cases := map[string]struct {
 		appliedSlot uint64
+		configure   func(*retryTestSlotClock)
 		move        func(*retryTestSlotClock)
 		reason      string
 	}{
@@ -594,16 +596,41 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 			},
 			reason: forgeStaleTipReasonPrimaryTipBehind,
 		},
-		"apply backlog beyond the tolerance": {
-			// Applied at 3, primary moves to 9: a gap of 6 against the
-			// default tolerance of 5, with the parent slot still below
-			// the forged slot so no ordering refusal fires first.
+		"apply backlog beyond the block limit": {
+			// Applied at 3, primary moves to 9: six unapplied blocks,
+			// with the parent slot still below the forged slot so no
+			// ordering refusal fires first.
 			appliedSlot: 3,
 			move: func(c *retryTestSlotClock) {
 				c.primaryTipSlot = 9
 				c.primaryTipHash = bytes.Repeat([]byte{0xCC}, 32)
 			},
-			reason: forgeStaleTipReasonSlotGap,
+			reason: forgeStaleTipReasonBlockGap,
+		},
+		"applied tip is no longer a primary-tip ancestor": {
+			appliedSlot: 8,
+			move: func(c *retryTestSlotClock) {
+				c.primaryTipSlot = 9
+				c.primaryTipHash = bytes.Repeat([]byte{0xCC}, 32)
+				c.primaryTipRelationSet = true
+				c.primaryTipDepth = 1
+				c.primaryTipAncestor = false
+			},
+			reason: forgeStaleTipReasonPrimaryNotAncestor,
+		},
+		"corroborated peer height gap opens during selection": {
+			appliedSlot: 9,
+			configure: func(c *retryTestSlotClock) {
+				c.chainTipBlockNumber = 100
+				c.upstreamTarget = 9
+				c.upstreamLive = true
+				c.upstreamBlockNumber = 105
+			},
+			move: func(c *retryTestSlotClock) {
+				c.chainTipSlot = 8
+				c.chainTipBlockNumber = 99
+			},
+			reason: forgeStaleTipReasonPeerHeightGap,
 		},
 	}
 	for name, tc := range cases {
@@ -615,6 +642,9 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 				applied,
 				time.Now().Add(2*time.Second),
 			)
+			if tc.configure != nil {
+				tc.configure(clock)
+			}
 			builder := &tipMovingBuilder{
 				block:     block,
 				cbor:      block.cbor,
@@ -788,10 +818,10 @@ func TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork(
 //     counts unapplied_rival_at_leader_slot, not dingo_forge_sync_skip_total.
 //
 //   - syncSkip above staleReason. An applied tip outside the tolerance whose
-//     apply backlog is also wider than forgePrimaryChainTipToleranceSlots.
+//     apply backlog is also wider than the local block limit.
 //     Entry takes the sync skip before the leader check and the stale-tip
 //     refusal only after it, so this counts dingo_forge_sync_skip_total, not
-//     slot_gap.
+//     a stale-tip reason.
 //
 //   - staleReason above appliedTipAtSlot. checkAndForgeProduction acts on
 //     staleTipReason after the leader check and takes its slot-battle
@@ -832,9 +862,9 @@ func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 		// The applied tip rolls back to 3, outside the tolerance of 3
 		// against the upstream target at 10, and far enough behind the
 		// primary chain tip at 9 for the apply backlog to exceed
-		// forgePrimaryChainTipToleranceSlots as well. Entry takes the
-		// sync skip before the leader check, so slot_gap must not move.
-		"sync skip outranks the slot-gap stale reason": {
+		// the local block limit as well. Entry takes the sync skip before
+		// the leader check, so the stale-tip counter must not move.
+		"sync skip outranks the block-gap stale reason": {
 			move: func(c *retryTestSlotClock) {
 				c.chainTipSlot = 3
 				c.primaryTipSlot = 9

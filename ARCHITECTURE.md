@@ -6221,7 +6221,8 @@ slot declines it without building; a primary chain tip already holding an
 unapplied block at the slot is counted as `unapplied_rival_at_leader_slot`;
 an applied tip that has fallen more than `forgeSyncToleranceSlots` behind the
 network refuses on `dingo_forge_sync_skip_total`; `primary_tip_behind_applied`,
-`primary_tip_hash_diverged`, `slot_gap` and the opt-in staleness bounds refuse
+`primary_tip_hash_diverged`, `applied_tip_not_primary_ancestor`,
+`unapplied_block_gap`, `peer_height_gap` and the opt-in staleness bounds refuse
 as they do at entry, counted on `dingo_forge_stale_tip_skip_total`; and last,
 an applied tip at the slot is counted once as a slot battle. When the chain
 context, durable forge fence and builder support it, the re-check refreshes
@@ -6474,12 +6475,17 @@ whose peer is substantially ahead in blocks even when the slot gap is within
 tolerance for bulk catch-up. Both limits use full tip snapshots, including
 block numbers.
 
+Production slot-clock implementations must also provide `ForgeSafetyTipProvider`
+snapshots for the applied tip and K, primary-tip ancestry, and upstream block
+height. Forging returns an error when those snapshots are unavailable or K is
+not positive.
+
 `dingo_forge_stale_tip_skip_total` records the specific refusal reason, and
 `dingo_forge_tip_gap_slots` continues to report the slot backlog for diagnosis.
-The former `forgePrimaryChainTipToleranceSlots` YAML field, environment
-variable, and CLI flag are removed. The local two-block limit and slot
-prefilter replace that slot-only setting; K remains the separate peer-height
-bound.
+The former `ForgePrimaryChainTipToleranceSlots` API field and
+`forgePrimaryChainTipToleranceSlots` YAML, environment, and CLI settings are
+removed. The local two-block limit and slot prefilter replace that slot-only
+setting; K remains the separate peer-height bound.
 The builder independently rechecks applied-tip ancestry before and after
 transaction selection against the tip it will actually use. Immediately before
 signing, `Chain.WithTip` holds the primary-chain lock while the builder confirms

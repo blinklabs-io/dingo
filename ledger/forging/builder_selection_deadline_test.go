@@ -364,6 +364,26 @@ func (c *advancingSlotClock) PrimaryChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.chainTipSlot}
 }
 
+func (c *advancingSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return ochainsync.Tip{Point: c.ChainTip()}, 5
+}
+
+func (c *advancingSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	depth := uint64(0)
+	ancestor := primary.Slot >= point.Slot
+	if primary.Slot > point.Slot {
+		depth = primary.Slot - point.Slot
+	}
+	return ochainsync.Tip{Point: primary}, depth, ancestor, nil
+}
+
+func (*advancingSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{}, false
+}
+
 func (c *advancingSlotClock) NextSlotTime() (time.Time, error) {
 	return c.nextSlotEnd, nil
 }

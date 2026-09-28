@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -34,26 +36,33 @@ import (
 // instant, so tests can put the forge either comfortably inside its slot or
 // past the end of it without sleeping.
 type retryTestSlotClock struct {
-	currentSlot  uint64
-	chainTipSlot uint64
-	chainTipHash []byte
+	currentSlot         uint64
+	chainTipSlot        uint64
+	chainTipHash        []byte
+	chainTipBlockNumber uint64
 	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
 	// used verbatim. When false the primary tip mirrors the applied tip,
 	// which is the caught-up steady state and what every test that does not
 	// care about the distinction wants. A test that needs an apply backlog
 	// -- the primary chain tip ahead of, behind, or replaced at the applied
 	// tip -- sets it and moves the primary tip on its own.
-	primaryTipExplicit bool
-	primaryTipSlot     uint64
-	primaryTipHash     []byte
-	slotsPerKESPeriod  uint64
-	slotEnd            time.Time
-	// upstreamTarget and upstreamLive are what UpstreamSyncStatus reports.
+	primaryTipExplicit    bool
+	primaryTipSlot        uint64
+	primaryTipHash        []byte
+	primaryTipBlockNumber uint64
+	primaryTipRelationSet bool
+	primaryTipDepth       uint64
+	primaryTipAncestor    bool
+	slotsPerKESPeriod     uint64
+	slotEnd               time.Time
+	// upstreamTarget, upstreamLive, and upstreamBlockNumber feed the single
+	// upstream sync snapshot.
 	// The zero value is (0, false) -- no upstream peer -- which is what
 	// every test that does not exercise the sync gate wants, and what this
 	// clock reported before the fields existed.
-	upstreamTarget uint64
-	upstreamLive   bool
+	upstreamTarget      uint64
+	upstreamLive        bool
+	upstreamBlockNumber uint64
 }
 
 func (c *retryTestSlotClock) CurrentSlot() (uint64, error) {
@@ -87,6 +96,50 @@ func (c *retryTestSlotClock) UpstreamTipSlot() uint64 { return 0 }
 
 func (c *retryTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return c.upstreamTarget, c.upstreamLive
+}
+
+func (c *retryTestSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	blockNumber := c.chainTipBlockNumber
+	if blockNumber == 0 {
+		blockNumber = c.chainTipSlot
+	}
+	return ochainsync.Tip{
+		Point:       c.ChainTip(),
+		BlockNumber: blockNumber,
+	}, 5
+}
+
+func (c *retryTestSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	if c.primaryTipRelationSet {
+		blockNumber := c.primaryTipBlockNumber
+		if blockNumber == 0 {
+			blockNumber = primary.Slot
+		}
+		return ochainsync.Tip{Point: primary, BlockNumber: blockNumber},
+			c.primaryTipDepth, c.primaryTipAncestor, nil
+	}
+	depth := uint64(0)
+	ancestor := true
+	if primary.Slot < point.Slot {
+		ancestor = false
+	} else if primary.Slot == point.Slot && len(primary.Hash) > 0 &&
+		len(point.Hash) > 0 && !bytes.Equal(primary.Hash, point.Hash) {
+		ancestor = false
+	} else if primary.Slot > point.Slot {
+		depth = primary.Slot - point.Slot
+	}
+	return ochainsync.Tip{Point: primary, BlockNumber: primary.Slot},
+		depth, ancestor, nil
+}
+
+func (c *retryTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: c.upstreamTarget},
+		BlockNumber: c.upstreamBlockNumber,
+	}, c.upstreamLive
 }
 
 // retryTestBuilder fails its first failCount build attempts with err and

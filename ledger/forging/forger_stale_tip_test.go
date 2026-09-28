@@ -97,7 +97,7 @@ func TestForgeSkipsWhenLedgerTipTrailsPrimaryChainTip(t *testing.T) {
 	require.Contains(
 		t,
 		logs.String(),
-		"forge skip: applied tip exceeds the primary-chain lag limit",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 }
@@ -163,7 +163,7 @@ func TestForgeProceedsWithinBlockAndSlotBounds(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: applied tip exceeds the primary-chain lag limit",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 	// The post-mortem line survives the forge path. It is emitted below the
 	// credential recheck, i.e. after the last gate that can still refuse the
@@ -415,7 +415,7 @@ func TestForgeSkipsOnEqualSlotPrimaryTipDivergence(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: applied tip exceeds the primary-chain lag limit",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 	require.Contains(t, logs.String(), `"reason":"primary_tip_hash_diverged"`)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
@@ -697,7 +697,7 @@ func TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks(t *testing.T) {
 		require.NotContains(
 			t,
 			logs.String(),
-			"forge skip: applied tip exceeds the primary-chain lag limit",
+			"forge skip: too many primary-chain blocks are unapplied",
 		)
 		// The backlog is still reported on every leader check.
 		require.Equal(
@@ -731,7 +731,7 @@ func TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks(t *testing.T) {
 		require.Contains(
 			t,
 			logs.String(),
-			"forge skip: applied tip exceeds the primary-chain lag limit",
+			"forge skip: too many primary-chain blocks are unapplied",
 		)
 	})
 }
@@ -1005,7 +1005,7 @@ func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: applied tip exceeds the primary-chain lag limit",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 }
 
@@ -1481,7 +1481,7 @@ func TestForgeRecoversPanicFromEndorserBlockSource(t *testing.T) {
 	require.Contains(t, logs.String(), "forge callback panic recovered")
 }
 
-// forgeStalenessCountingUpstreamClock answers UpstreamSyncStatus with a
+// forgeStalenessCountingUpstreamClock answers UpstreamSyncTip with a
 // DIFFERENT value on every call, so a forge cycle that reads it twice cannot
 // agree with itself.
 type forgeStalenessCountingUpstreamClock struct {
@@ -1518,7 +1518,7 @@ func (c forgeStalenessCountingUpstreamClock) UpstreamSyncStatus() (
 	return c.statuses[len(c.statuses)-1], true
 }
 
-// TestForgeReadsUpstreamSyncStatusOncePerCycle pins the single-read contract.
+// TestForgeReadsUpstreamSyncTipOncePerCycle pins the single-read contract.
 //
 // The staleness bound and the pre-existing sync gate both need (target,
 // active). Reading the clock twice let one forge cycle evaluate the two
@@ -1531,7 +1531,7 @@ func (c forgeStalenessCountingUpstreamClock) UpstreamSyncStatus() (
 // cycle sees only the zero, which is "no target published yet" and no evidence
 // of staleness, so the node at tip forges. With two reads the sync gate would
 // see the second value and refuse.
-func TestForgeReadsUpstreamSyncStatusOncePerCycle(t *testing.T) {
+func TestForgeReadsUpstreamSyncTipOncePerCycle(t *testing.T) {
 	var logs bytes.Buffer
 	calls := 0
 	block := newForgerTestBlock(300, 2)
@@ -1567,7 +1567,7 @@ func TestForgeReadsUpstreamSyncStatusOncePerCycle(t *testing.T) {
 		t,
 		1,
 		calls,
-		"one forge cycle must read UpstreamSyncStatus once, so the "+
+		"one forge cycle must read UpstreamSyncTip once, so the "+
 			"staleness bound, the sync gate and the log line all describe "+
 			"the same upstream snapshot",
 	)
