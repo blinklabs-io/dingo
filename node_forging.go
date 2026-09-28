@@ -687,6 +687,78 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
+// startBlockProducer validates the operator's credentials, starts leader
+// election and the block forger, and returns Run's startup-cleanup stack with
+// their stop appended.
+//
+// The stop is appended immediately after credential validation because that
+// step may start a KES agent loop, and every later startup check can fail.
+// Nil-guarded stops also cover failures while validating ledger credentials
+// or starting the forger.
+//
+// The stack is returned rather than mutated in place because append may
+// reallocate; the caller must use the returned slice on both the success and
+// the error path.
+func (n *Node) startBlockProducer(
+	ctx context.Context,
+	started []func(),
+) ([]func(), error) {
+	creds, err := n.validateBlockProducerStartup()
+	if err != nil {
+		return started, fmt.Errorf(
+			"block producer startup validation failed: %w",
+			err,
+		)
+	}
+	started = append(started, func() {
+		if n.blockForger != nil {
+			n.blockForger.Stop()
+		}
+		n.closeKESAgentClient()
+		if n.leaderElection != nil {
+			logErrIfNotNil(
+				n.config.logger,
+				"failed to stop leader election during cleanup",
+				n.leaderElection.Stop(),
+			)
+		}
+	})
+	// Cross-check loaded credentials against ledger state. Mismatch
+	// against on-chain pool registration is fatal; "not yet
+	// registered" is a warning so operators can stage credentials
+	// before submitting the registration cert.
+	if err := n.validateBlockProducerLedger(creds); err != nil {
+		return started, fmt.Errorf(
+			"block producer credentials failed ledger check: %w",
+			err,
+		)
+	}
+	if err := n.initBlockForger(ctx, creds); err != nil {
+		return started, fmt.Errorf(
+			"failed to initialize block forger: %w",
+			err,
+		)
+	}
+	// Enable Leios vote emission when a vote signing key is
+	// configured (experimental, leios mode only)
+	if err := n.enableLeiosVoting(creds); err != nil {
+		return started, fmt.Errorf("failed to enable leios voting: %w", err)
+	}
+	// Wire forger's slot tracker into ledger state for slot
+	// battle detection. The forger is created after the ledger
+	// state, so we use the late-binding setter.
+	if n.blockForger != nil {
+		n.ledgerState.SetForgedBlockChecker(
+			n.blockForger.SlotTracker(),
+		)
+		n.ledgerState.SetForgingEnabled(true)
+		n.ledgerState.SetSlotBattleRecorder(
+			n.blockForger,
+		)
+	}
+	return started, nil
+}
+
 // initBlockForger initializes the block forger for production mode.
 // This requires VRF, KES, and OpCert key files to be configured.
 func (n *Node) initBlockForger(
