@@ -285,8 +285,10 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 //
 // A peer-relative header (see headerOnlyBlock) is verified before it reaches
 // the queue -- the EBB's own queueing event is delivered asynchronously, so the
-// next header can be verified first -- and is never first here. The ledger's
-// own header-queue verification and block apply still enforce the rule.
+// next header can be verified first -- and is never first here. The rule is
+// enforced where headers enter the queue, and by blockfetch for a queued
+// header not yet verified. Ledger apply does not enforce it: the block is
+// already on the primary chain by then, so the tip is not origin.
 func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 	if hb, ok := block.(headerOnlyBlock); ok && hb.peerRelative {
 		return false
