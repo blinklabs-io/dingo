@@ -108,6 +108,7 @@ func TestSharedSQLStoreAccountParity(t *testing.T) {
 	require.Len(t, state.activeBatch, 1)
 	require.Len(t, state.allBatch, 2)
 	require.NotNil(t, state.renewed)
+	require.Equal(t, uint64(55), state.renewed.ExpirationEpoch)
 	require.NotEmpty(t, state.activeRefs)
 	require.Equal(t, int64(1), state.stamped)
 	require.NotNil(t, state.afterCredit)

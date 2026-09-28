@@ -75,8 +75,11 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 	require.Nil(t, state.spentLiveLookup)
 	require.NotNil(t, state.spent)
 	require.NotEmpty(t, state.added)
-	require.NotEmpty(t, state.liveAtSlot)
-	require.NotEmpty(t, state.allAtSlot)
+	require.Equal(t, []models.UtxoId{{Hash: []byte("tx-live"), Idx: 0}}, state.liveAtSlot)
+	require.ElementsMatch(t, []models.UtxoId{
+		{Hash: []byte("tx-live"), Idx: 0},
+		{Hash: []byte("tx-spent"), Idx: 1},
+	}, state.allAtSlot)
 	require.NotEmpty(t, state.deleted)
 	require.NotEmpty(t, state.byAddress)
 	require.NotZero(t, state.controlled)

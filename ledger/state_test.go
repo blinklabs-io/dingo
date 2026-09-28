@@ -2029,7 +2029,14 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	require.Error(t, err)
 
 	stack := make([]byte, 1<<20)
-	stackSize := runtime.Stack(stack, true)
+	var stackSize int
+	for {
+		stackSize = runtime.Stack(stack, true)
+		if stackSize < len(stack) {
+			break
+		}
+		stack = make([]byte, len(stack)*2)
+	}
 	shutdownWaiters := 0
 	for _, goroutine := range strings.Split(
 		string(stack[:stackSize]),
@@ -2037,8 +2044,8 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	) {
 		if strings.Contains(
 			goroutine,
-			"DatabaseWorkerPool).Shutdown",
-		) && strings.Contains(goroutine, "sync.(*WaitGroup).Wait") {
+			"created by github.com/blinklabs-io/dingo/ledger.(*DatabaseWorkerPool).Shutdown",
+		) {
 			shutdownWaiters++
 		}
 	}

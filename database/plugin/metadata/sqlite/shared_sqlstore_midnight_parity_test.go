@@ -143,8 +143,16 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	require.Len(t, state.rollbacks, 1)
 	require.NotNil(t, state.candidates)
 	require.Len(t, state.registrations, 1)
-	require.NotEmpty(t, state.deletedCreates)
-	require.NotEmpty(t, state.deletedRegistrations)
+	deletedCreateTxHashes := make([]string, len(state.deletedCreates))
+	for i, create := range state.deletedCreates {
+		deletedCreateTxHashes[i] = string(create.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-c"}, deletedCreateTxHashes)
+	deletedRegistrationTxHashes := make([]string, len(state.deletedRegistrations))
+	for i, registration := range state.deletedRegistrations {
+		deletedRegistrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, deletedRegistrationTxHashes)
 }
 
 func exerciseMidnightStore(t *testing.T, store midnightStore) midnightState {
