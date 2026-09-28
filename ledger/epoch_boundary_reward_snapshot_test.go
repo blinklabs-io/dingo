@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 
 	"github.com/stretchr/testify/require"
 )
@@ -138,6 +139,136 @@ func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 		t, treasuryKept+moved, treasuryDeregistered,
 		"exactly the deregistered delegators' rewards move to the treasury",
 	)
+}
+
+// TestBoundaryPromotesRewardAfterReregistration pins the other eligibility
+// transition: a row made nonspendable by a deregistration before precompute is
+// credited when the credential registers and delegates again before boundary.
+func TestBoundaryPromotesRewardAfterReregistration(t *testing.T) {
+	t.Parallel()
+	type outcome struct {
+		storedReward uint64
+		balance      *uint64
+		treasury     uint64
+		amount       uint64
+		spendable    bool
+	}
+	run := func(reregister bool) outcome {
+		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		key := epochBoundaryBenchHash(0x30, 1)
+		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+		require.NoError(t, err)
+		var pool []byte
+		require.NoError(t, raw.QueryRow(
+			`SELECT pool FROM account WHERE credential_tag = 0 AND staking_key = ?`,
+			key,
+		).Scan(&pool))
+		deregisterSlot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000
+		_, err = raw.Exec(`
+UPDATE account SET active = 0, pool = NULL, added_slot = ?
+WHERE credential_tag = 0 AND staking_key = ?`, deregisterSlot, key)
+		require.NoError(t, err)
+		_, err = raw.Exec(`
+UPDATE reward_live_stake SET registered = 0, pool_key_hash = NULL,
+    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
+			deregisterSlot, key,
+		)
+		require.NoError(t, err)
+		_, err = raw.Exec(`
+INSERT INTO deregistration (added_slot, staking_key, credential_tag, amount)
+VALUES (?, ?, 0, '2000000')`, deregisterSlot, key)
+		require.NoError(t, err)
+		require.NoError(t, raw.Close())
+
+		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
+			epochBoundaryBenchPrecomputeEvent(),
+		))
+		precomputed, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+		require.NoError(t, err)
+		var targetAmount uint64
+		for _, output := range precomputed {
+			if string(output.StakingKey) == string(key) {
+				require.False(t, output.Spendable,
+					"precompute observes the deregistered account")
+				targetAmount += uint64(output.Amount)
+			}
+		}
+		require.Positive(t, targetAmount)
+
+		if reregister {
+			raw, err = dbtest.RawSQLiteMetadata(t, f.db)
+			require.NoError(t, err)
+			registerSlot := deregisterSlot + 1_000
+			_, err = raw.Exec(`
+UPDATE account SET active = 1, pool = ?, added_slot = ?
+WHERE credential_tag = 0 AND staking_key = ?`, pool, registerSlot, key)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+UPDATE reward_live_stake SET registered = 1, pool_key_hash = ?,
+    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
+				pool, registerSlot, key,
+			)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO registration (staking_key, credential_tag, added_slot)
+VALUES (?, 0, ?)`, key, registerSlot)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO stake_delegation
+    (staking_key, credential_tag, pool_key_hash, added_slot)
+VALUES (?, 0, ?, ?)`, key, pool, registerSlot)
+			require.NoError(t, err)
+			require.NoError(t, raw.Close())
+		}
+
+		f.rollover(t)
+		f.ls.waitEpochBoundaryBenchBackground()
+		account, err := f.db.GetAccountByCredential(0, key, true, nil)
+		require.NoError(t, err)
+		var balance *uint64
+		if account.Active {
+			balance, err = (&LedgerView{ls: f.ls}).RewardAccountBalance(
+				lcommon.Credential{
+					CredType: lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.CredentialHash(
+						lcommon.NewBlake2b224(key),
+					),
+				},
+			)
+			require.NoError(t, err)
+			require.NotNil(t, balance)
+		}
+		outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+		require.NoError(t, err)
+		var spendable bool
+		for _, output := range outputs {
+			if string(output.StakingKey) == string(key) {
+				spendable = output.Spendable
+			}
+		}
+		state, err := f.db.Metadata().GetNetworkState(nil)
+		require.NoError(t, err)
+		return outcome{
+			storedReward: uint64(account.Reward), balance: balance,
+			treasury: uint64(state.Treasury),
+			amount:   targetAmount, spendable: spendable,
+		}
+	}
+
+	deregistered := run(false)
+	reregistered := run(true)
+	require.False(t, deregistered.spendable)
+	require.True(t, reregistered.spendable)
+	baseReward := stakeRewardSeedReward(string(epochBoundaryBenchHash(0x30, 1)))
+	require.Equal(t, baseReward, deregistered.storedReward)
+	require.Equal(t, baseReward, reregistered.storedReward,
+		"the boundary keeps deferred credits out of account.reward")
+	require.Nil(t, deregistered.balance)
+	require.NotNil(t, reregistered.balance)
+	require.Equal(t, baseReward+reregistered.amount, *reregistered.balance)
+	require.Equal(t, deregistered.treasury,
+		reregistered.treasury+reregistered.amount,
+		"the re-registered reward moves from treasury to the account")
 }
 
 // stakeRewardSeedReward is the reward balance the fixture seeds for a

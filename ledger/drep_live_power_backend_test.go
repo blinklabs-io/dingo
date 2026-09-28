@@ -158,6 +158,28 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 				}
 				return db.AddAccountRewardsByCredential(credits, txn)
 			}))
+			require.NoError(t, db.Metadata().RebuildRewardLiveStake(100, nil))
+			fastPathTypes := []uint64{
+				models.DrepTypeAlwaysAbstain,
+				models.DrepTypeAlwaysNoConfidence,
+			}
+			for _, expiryEpoch := range []uint64{0, 3} {
+				_, wantByType := drepPowerOracle(t, raw, expiryEpoch)
+				gotByType, err := db.GetDRepVotingPowerByType(
+					fastPathTypes,
+					expiryEpoch,
+					nil,
+				)
+				require.NoError(t, err)
+				for _, drepType := range fastPathTypes {
+					require.Equal(
+						t, wantByType[drepType], gotByType[drepType],
+						"live-stake fast path, type %d expiry %d",
+						drepType,
+						expiryEpoch,
+					)
+				}
+			}
 			for i := 3; i < accounts; i += 29 {
 				_, err := raw.Exec(backendRebind(backend.name,
 					`DELETE FROM reward_live_stake WHERE staking_key = ?`),

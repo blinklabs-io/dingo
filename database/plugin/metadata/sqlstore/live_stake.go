@@ -1345,33 +1345,35 @@ func (s *Store) GetLiveStakeInputsForPools(
 		)
 	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
-	pendingRounds, err := s.pendingRewardCreditRounds(ctx, db)
-	if err != nil {
-		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
-	}
 	// reward_stake carries account.reward; a credited round's unfolded
 	// credits are the rest of the balance.
 	stakeExpr := "rls.total_stake"
-	var pendingArgs []any
-	if len(pendingRounds) > 0 {
-		pendingEpochs := rewardCreditRoundEpochs(pendingRounds)
-		var pendingExpr string
-		pendingExpr, pendingArgs = s.pendingRewardCreditSubquery(
-			"rls.credential_tag", "rls.staking_key", pendingEpochs,
+	hasPending, err := s.HasPendingRewardCreditRounds(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
+	}
+	if hasPending {
+		pendingExpr := s.pendingRewardCreditSubquery(
+			"rls.credential_tag", "rls.staking_key",
 		)
 		stakeExpr = "CAST(rls.total_stake AS " + s.pendingCreditCastType() +
 			") + " + pendingExpr
 	}
-	chunkSize := s.dialect.ParameterLimit() - len(pendingArgs)
+	chunkSize := s.dialect.ParameterLimit()
 	if expiryEpoch > 0 {
 		chunkSize--
+	}
+	if chunkSize <= 0 {
+		return nil, fmt.Errorf(
+			"GetLiveStakeInputsForPools: dialect parameter limit %d cannot fit query filters",
+			s.dialect.ParameterLimit(),
+		)
 	}
 	ret := make([]*models.RewardStakeInput, 0)
 	for start := 0; start < len(poolKeyHashes); start += chunkSize {
 		end := min(start+chunkSize, len(poolKeyHashes))
 		chunk := poolKeyHashes[start:end]
-		args := make([]any, 0, len(pendingArgs)+len(chunk)+1)
-		args = append(args, pendingArgs...)
+		args := make([]any, 0, len(chunk)+1)
 		for i := range chunk {
 			args = append(args, chunk[i])
 		}

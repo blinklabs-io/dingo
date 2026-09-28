@@ -190,6 +190,12 @@ func TestPendingRewardRoundRollbackBelowBoundary(t *testing.T) {
 	f := creditedRewardRound(t)
 	credits := rewardedCredentials(t, f)
 	stored := accountRewards(t, f, credits)
+	raw := rewardCalcSQLDB(t, f.db)
+	var outputsBefore int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM reward_account_output WHERE epoch = 8`,
+	).Scan(&outputsBefore))
+	require.Positive(t, outputsBefore)
 	// Some credits are folded, as by withdrawals, before the rollback.
 	txn := f.db.Transaction(true)
 	folded := 0
@@ -218,9 +224,15 @@ func TestPendingRewardRoundRollbackBelowBoundary(t *testing.T) {
 	require.Empty(t, rounds, "a rollback below the boundary drops the round")
 	require.Equal(t, stored, accountRewards(t, f, credits),
 		"a rollback below the boundary reverts folded credits")
+	var outputsAfter int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM reward_account_output WHERE epoch = 8`,
+	).Scan(&outputsAfter))
+	require.Equal(t, outputsBefore, outputsAfter,
+		"rollback must preserve outputs that the re-applied boundary needs")
 	var stillFolded int
-	require.NoError(t, rewardCalcSQLDB(t, f.db).QueryRow(
-		`SELECT COUNT(*) FROM reward_account_output WHERE folded`,
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM reward_account_output WHERE epoch = 8 AND folded`,
 	).Scan(&stillFolded))
 	require.Zero(t, stillFolded,
 		"a reapplied round must count its outputs as unfolded again")

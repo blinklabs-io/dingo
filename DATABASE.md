@@ -597,21 +597,25 @@ outputs (`DeleteRewardOutputsForEpoch`) and starts over. A finished cursor whose
 output fingerprint matches the stored pool outputs is the precompute's
 completion record.
 
-**Credited reward rounds.** Key `dingo:reward-credit:pending-rounds`
-(`models.PendingRewardCreditRoundsKey`) holds a JSON list of
-`{snapshot_epoch, boundary_slot}` (`models.RewardCreditRound`): reward rounds an
-epoch boundary applied without writing account rows. A credential's balance is
-`account.reward` plus its `reward_account_output` rows in listed rounds with
-`spendable = TRUE`, `guarded = FALSE` and `folded = FALSE`.
-`GetLiveStakeInputsForPools`, the DRep voting-power reads and the historical
-stake reconstruction add those rows' amounts per credential, the last for
-rounds whose `boundary_slot` is at or before the slot read.
-`FoldRewardAccountOutputs` sets `folded` on one credential's rows in the
-transaction that writes them to its account. `GetPendingRewardCreditRounds`
-and `SetPendingRewardCreditRounds` read and replace the list, and
+**Credited reward rounds.** Table `reward_credit_round` holds one
+`{snapshot_epoch, boundary_slot}` (`models.RewardCreditRound`) row for each
+reward round an epoch boundary applied without writing account rows. The row
+remains until rollback crosses its boundary, preventing the same snapshot from
+being applied twice. A credential's balance is `account.reward` plus its
+output rows in an applied round with `spendable = TRUE`, `guarded = FALSE` and
+`folded = FALSE`.
+`GetLiveStakeInputsForPools`, DRep voting-power reads and historical stake
+reconstruction join through this table, so the set of applied rounds does not
+consume a growing SQL bind list. Historical reads include only rounds whose
+`boundary_slot` is at or before the requested slot. `FoldPendingRewardAccountOutputs`
+sets `folded` on one credential's rows in the transaction that writes them to
+its account. `GetPendingRewardCreditRounds` and
+`SetPendingRewardCreditRounds` read and replace the table rows.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
-the rollback slot and clears `folded` on its outputs.
-`DeleteRewardStateBeforeEpoch` keeps a listed round's unfolded rows.
+the rollback slot and clears `folded` on its surviving outputs.
+`DeleteRewardStateBeforeEpoch` keeps applied rounds' unfolded rows. Migration
+31 imports any earlier JSON list from
+`models.PendingRewardCreditRoundsKey` into this table.
 
 **Reward eligibility recheck.** Key `dingo:reward-credit:eligibility-recheck`
 (`models.RewardEligibilityRecheckKey`) holds the JSON list of credentials whose
@@ -1311,7 +1315,8 @@ process the same pointer unless the claim expires before a result is recorded.
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot` | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
-| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
+| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
+| `reward_credit_round` | `snapshot_epoch`, `boundary_slot` | PK `snapshot_epoch`; index `boundary_slot` | One row for a reward round applied at an epoch boundary while its per-account credits remain in `reward_account_output`. Bounded relational membership lets balance readers include all pending rounds without generating a growing SQL parameter list. Rollback removes rows by `boundary_slot`; migration 31 imports the previous `sync_state` JSON list. |
 
 For Mithril imports, the certified `NewEpochState.SnapShots` Mark/Set/Go
 members are stored as Mark rows for their rotation epochs. Their

@@ -1420,9 +1420,12 @@ UPDATE account SET reward = ? WHERE id = ?`,
 	)
 }
 
-// rewardCreditBatchSize bounds each derived-table lookup below: four bound
-// parameters per journal key, well inside SQLite's 999.
-const rewardCreditBatchSize = 200
+// maxRewardCreditBatchSize caps credit batches. The journal insert binds five
+// parameters per credit, so the actual batch is also limited by the dialect.
+const (
+	maxRewardCreditBatchSize            = 200
+	rewardCreditJournalInsertArgsPerRow = 5
+)
 
 type rewardCreditJournalKey struct {
 	sourceHash    string
@@ -1441,8 +1444,18 @@ func (s *Store) AddAccountRewardsByCredential(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			for start := 0; start < len(credits); start += rewardCreditBatchSize {
-				end := min(start+rewardCreditBatchSize, len(credits))
+			batchSize := min(
+				maxRewardCreditBatchSize,
+				s.dialect.ParameterLimit()/rewardCreditJournalInsertArgsPerRow,
+			)
+			if batchSize == 0 {
+				return fmt.Errorf(
+					"dialect parameter limit %d cannot fit reward credit insert",
+					s.dialect.ParameterLimit(),
+				)
+			}
+			for start := 0; start < len(credits); start += batchSize {
+				end := min(start+batchSize, len(credits))
 				if err := s.addAccountRewardCreditBatch(
 					ctx, db, credits[start:end],
 				); err != nil {

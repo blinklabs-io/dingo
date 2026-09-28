@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -34,20 +33,12 @@ import (
 // and foldRewardCreditFor writes them to the account, with the journal rows
 // the boundary would have written, only where a stored balance must change.
 
-func registerPendingRewardCreditRound(
+func registerAppliedRewardCreditRound(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	round models.RewardCreditRound,
 ) error {
-	rounds, err := meta.GetPendingRewardCreditRounds(metaTxn)
-	if err != nil {
-		return err
-	}
-	rounds = slices.DeleteFunc(rounds, func(r models.RewardCreditRound) bool {
-		return r.SnapshotEpoch == round.SnapshotEpoch
-	})
-	rounds = append(rounds, round)
-	return meta.SetPendingRewardCreditRounds(rounds, metaTxn)
+	return meta.AddAppliedRewardCreditRound(round, metaTxn)
 }
 
 // rewardCreditsForOutputs returns the credits a boundary writes for outputs:
@@ -91,13 +82,10 @@ func (ls *LedgerState) rewardRoundCredited(
 	if txn != nil {
 		metaTxn = txn.Metadata()
 	}
-	rounds, err := ls.db.Metadata().GetPendingRewardCreditRounds(metaTxn)
-	if err != nil {
-		return false, err
-	}
-	return slices.ContainsFunc(rounds, func(r models.RewardCreditRound) bool {
-		return r.SnapshotEpoch == epochs.snapshot
-	}), nil
+	return ls.db.Metadata().HasAppliedRewardCreditRound(
+		epochs.snapshot,
+		metaTxn,
+	)
 }
 
 // pendingRewardCreditOutputs returns one credential's unfolded credits in the
@@ -106,40 +94,33 @@ func (ls *LedgerState) pendingRewardCreditOutputs(
 	txn *database.Txn,
 	credentialTag uint8,
 	stakingKey []byte,
-) ([]models.AccountRewardCredit, []uint64, error) {
+) ([]models.AccountRewardCredit, error) {
 	var metaTxn types.Txn
 	if txn != nil {
 		metaTxn = txn.Metadata()
 	}
 	meta := ls.db.Metadata()
-	rounds, err := meta.GetPendingRewardCreditRounds(metaTxn)
-	if err != nil || len(rounds) == 0 {
-		return nil, nil, err
-	}
-	epochs := make([]uint64, 0, len(rounds))
-	byEpoch := make(map[uint64]models.RewardCreditRound, len(rounds))
-	for _, round := range rounds {
-		epochs = append(epochs, round.SnapshotEpoch)
-		byEpoch[round.SnapshotEpoch] = round
-	}
-	outputs, err := meta.GetRewardAccountOutputsForCredential(
-		epochs, credentialTag, stakingKey, metaTxn,
+	outputs, err := meta.GetPendingRewardAccountOutputsForCredential(
+		credentialTag, stakingKey, metaTxn,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var credits []models.AccountRewardCredit
 	for _, output := range outputs {
 		roundCredits, err := rewardCreditsForOutputs(
-			byEpoch[output.Epoch],
+			models.RewardCreditRound{
+				SnapshotEpoch: output.Epoch,
+				BoundarySlot:  output.BoundarySlot,
+			},
 			[]*models.RewardAccountOutput{output},
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		credits = append(credits, roundCredits...)
 	}
-	return credits, epochs, nil
+	return credits, nil
 }
 
 // pendingRewardCredit is the part of a credential's reward balance a pending
@@ -149,7 +130,7 @@ func (ls *LedgerState) pendingRewardCredit(
 	credentialTag uint8,
 	stakingKey []byte,
 ) (uint64, error) {
-	credits, _, err := ls.pendingRewardCreditOutputs(
+	credits, err := ls.pendingRewardCreditOutputs(
 		txn,
 		credentialTag,
 		stakingKey,
@@ -190,7 +171,7 @@ func (ls *LedgerState) foldRewardCreditFor(
 	credentialTag uint8,
 	stakingKey []byte,
 ) error {
-	credits, epochs, err := ls.pendingRewardCreditOutputs(
+	credits, err := ls.pendingRewardCreditOutputs(
 		txn,
 		credentialTag,
 		stakingKey,
@@ -205,8 +186,8 @@ func (ls *LedgerState) foldRewardCreditFor(
 	if txn != nil {
 		metaTxn = txn.Metadata()
 	}
-	return ls.db.Metadata().FoldRewardAccountOutputs(
-		epochs, credentialTag, stakingKey, metaTxn,
+	return ls.db.Metadata().FoldPendingRewardAccountOutputs(
+		credentialTag, stakingKey, metaTxn,
 	)
 }
 
@@ -224,8 +205,8 @@ func (ls *LedgerState) foldRewardCreditsForWithdrawals(
 	if txn != nil {
 		metaTxn = txn.Metadata()
 	}
-	rounds, err := ls.db.Metadata().GetPendingRewardCreditRounds(metaTxn)
-	if err != nil || len(rounds) == 0 {
+	hasPending, err := ls.db.Metadata().HasPendingRewardCreditRounds(metaTxn)
+	if err != nil || !hasPending {
 		return err
 	}
 	for address := range withdrawals {

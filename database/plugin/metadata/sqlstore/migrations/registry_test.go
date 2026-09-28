@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 30)
+	require.Len(t, registry, 31)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -231,6 +231,12 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[29].SQL["sqlite"].Expand,
 		"ALTER TABLE `reward_account_output` ADD COLUMN `folded` boolean NOT NULL DEFAULT false",
 	)
+	require.Equal(t, 31, registry[30].Version)
+	require.Equal(t, rewardCreditRoundTableSchemaRelease, registry[30].Name)
+	require.Len(t, registry[30].SQL["sqlite"].Expand, 3)
+	require.Contains(t, registry[30].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `reward_credit_round`")
+	require.Contains(t, registry[30].SQL["sqlite"].Expand[2], "idx_reward_account_output_pending_round")
+	require.NotNil(t, registry[30].Backfill)
 }
 
 // TestPointerStakeMigrationTranslatesForProviders pins the postgres and mysql
@@ -356,12 +362,30 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 30)
+	require.Len(t, registry, 31)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,
 		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)",
 	)
+}
+
+func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+
+	postgres, err := PostgresRegistry()
+	require.NoError(t, err)
+	postgresSQL := strings.Join(postgres[30].SQL["postgres"].Expand, "\n")
+	require.Contains(t, postgresSQL, `CREATE INDEX IF NOT EXISTS "idx_reward_account_output_pending_round"`)
+	require.Contains(t, postgresSQL, `ON "reward_account_output"("spendable", "guarded", "folded", "epoch")`)
+	require.NotContains(t, postgresSQL, "`")
+
+	mysql, err := MySQLRegistry()
+	require.NoError(t, err)
+	mysqlSQL := strings.Join(mysql[30].SQL["mysql"].Expand, "\n")
+	require.Contains(t, mysqlSQL, "CREATE INDEX `idx_reward_account_output_pending_round`")
+	require.Contains(t, mysqlSQL, "ON `reward_account_output`(`spendable`, `guarded`, `folded`, `epoch`)")
+	require.NotContains(t, mysqlSQL, "CREATE INDEX IF NOT EXISTS")
 }
 
 func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {

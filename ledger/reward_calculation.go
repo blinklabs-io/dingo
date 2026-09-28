@@ -300,7 +300,7 @@ func (ls *LedgerState) recheckRoundEligibility(
 	var changedOutputs []*models.RewardAccountOutput
 	changedPools := make(map[string]*models.RewardPoolOutput)
 	for _, ref := range refs {
-		outputs, err := meta.GetRewardAccountOutputsForCredential(
+		outputs, err := meta.GetRewardAccountOutputsForEligibility(
 			[]uint64{round.epochs.snapshot}, ref.Tag, ref.Key, metaTxn,
 		)
 		if err != nil {
@@ -905,7 +905,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 		SnapshotEpoch: app.epochs.snapshot,
 		BoundarySlot:  boundarySlot,
 	}
-	if err := registerPendingRewardCreditRound(meta, metaTxn, round); err != nil {
+	if err := registerAppliedRewardCreditRound(meta, metaTxn, round); err != nil {
 		return fmt.Errorf("register pending reward credits: %w", err)
 	}
 	ls.config.Logger.Info(
@@ -2772,13 +2772,14 @@ func saveStakeRewardOutputs(
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
-	rounds, err := meta.GetPendingRewardCreditRounds(metaTxn)
+	credited, err := meta.HasAppliedRewardCreditRound(
+		app.epochs.snapshot,
+		metaTxn,
+	)
 	if err != nil {
 		return err
 	}
-	if slices.ContainsFunc(rounds, func(r models.RewardCreditRound) bool {
-		return r.SnapshotEpoch == app.epochs.snapshot
-	}) {
+	if credited {
 		return fmt.Errorf(
 			"reward outputs for epoch %d are a credited round",
 			app.epochs.snapshot,

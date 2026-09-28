@@ -353,6 +353,13 @@ func (ls *LedgerState) ensureRewardStakeInputsReady(
 			epoch, err,
 		)
 	}
+	if len(rebuilt) == 0 && snapshot.TotalDelegators > 0 {
+		return fmt.Errorf(
+			"rebuild pending reward stake inputs for epoch %d returned no rows for %d snapshot delegators",
+			epoch,
+			snapshot.TotalDelegators,
+		)
+	}
 	if err := meta.DeleteRewardInputsForEpoch(epoch, metaTxn); err != nil {
 		return fmt.Errorf(
 			"clear partial reward inputs for epoch %d: %w", epoch, err,

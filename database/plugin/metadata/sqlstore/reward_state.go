@@ -1564,22 +1564,16 @@ func (s *Store) deleteRewardAccountOutputsBeforeEpoch(
 	if err != nil {
 		return err
 	}
-	rounds, err := s.pendingRewardCreditRounds(ctx, db)
-	if err != nil {
-		return err
-	}
-	keep := ""
-	args := []any{sqlEpoch}
-	if len(rounds) > 0 {
-		keep = ` AND NOT (spendable = TRUE AND guarded = FALSE AND folded = FALSE
-  AND epoch IN (` + bindPlaceholders(len(rounds)) + `))`
-		for _, round := range rounds {
-			args = append(args, round.SnapshotEpoch)
-		}
-	}
-	if _, err := db.ExecContext(ctx, s.dialect.Rebind(
-		`DELETE FROM reward_account_output WHERE epoch < ?`+keep,
-	), args...); err != nil {
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+DELETE FROM reward_account_output
+WHERE epoch < ?
+  AND NOT (
+      spendable = TRUE AND guarded = FALSE AND folded = FALSE
+      AND EXISTS (
+          SELECT 1 FROM reward_credit_round rcr
+          WHERE rcr.snapshot_epoch = reward_account_output.epoch
+      )
+  )`), sqlEpoch); err != nil {
 		return fmt.Errorf("delete reward account outputs before epoch: %w", err)
 	}
 	return nil

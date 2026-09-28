@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,7 +65,7 @@ func (s *Store) historicalRewardsAtBoundary(
 	boundarySlot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
-	rounds, err := s.pendingRewardCreditRounds(ctx, db)
+	hasPending, err := pendingRewardCreditOutputsExist(ctx, db)
 	if err != nil {
 		return nil, err
 	}
@@ -74,9 +73,6 @@ func (s *Store) historicalRewardsAtBoundary(
 	if boundarySlot > 0 {
 		visibleAt = boundarySlot
 	}
-	rounds = slices.DeleteFunc(rounds, func(r models.RewardCreditRound) bool {
-		return r.BoundarySlot > visibleAt
-	})
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
 		keys = append(keys, key)
@@ -104,17 +100,19 @@ func (s *Store) historicalRewardsAtBoundary(
 		if err != nil {
 			return nil, err
 		}
-		pending, err := s.pendingCreditsForCredentials(
-			ctx, db, rounds, batchSelected,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for ref, amount := range pending {
-			if ^uint64(0)-batch[ref] < amount {
-				return nil, errors.New("historical reward credit overflow")
+		if hasPending {
+			pending, err := s.pendingCreditsForCredentials(
+				ctx, db, visibleAt, batchSelected,
+			)
+			if err != nil {
+				return nil, err
 			}
-			batch[ref] += amount
+			for ref, amount := range pending {
+				if ^uint64(0)-batch[ref] < amount {
+					return nil, errors.New("historical reward credit overflow")
+				}
+				batch[ref] += amount
+			}
 		}
 		maps.Copy(ret, batch)
 	}

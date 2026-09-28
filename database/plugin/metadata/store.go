@@ -2538,11 +2538,23 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
 
-	// GetPendingRewardCreditRounds returns the reward rounds applied at an
-	// epoch boundary whose account credits are still being written.
+	// GetPendingRewardCreditRounds returns applied reward rounds retained until
+	// rollback crosses their boundary. Their outputs may already be folded.
 	GetPendingRewardCreditRounds(types.Txn) ([]models.RewardCreditRound, error)
 
-	// SetPendingRewardCreditRounds replaces the pending reward credit rounds.
+	// HasPendingRewardCreditRounds reports whether any applied round has
+	// spendable, unguarded account outputs not yet folded into account balances.
+	HasPendingRewardCreditRounds(types.Txn) (bool, error)
+
+	// AddAppliedRewardCreditRound registers an applied reward round in the
+	// caller's transaction.
+	AddAppliedRewardCreditRound(models.RewardCreditRound, types.Txn) error
+
+	// HasAppliedRewardCreditRound reports whether the snapshot epoch has been
+	// applied, regardless of whether its output rows have been folded.
+	HasAppliedRewardCreditRound(uint64, types.Txn) (bool, error)
+
+	// SetPendingRewardCreditRounds replaces the applied-round index.
 	SetPendingRewardCreditRounds([]models.RewardCreditRound, types.Txn) error
 
 	// RewardCreditsAlreadyApplied reports, for each credit, whether its
@@ -2582,6 +2594,27 @@ type MetadataStore interface {
 		[]byte, // stakingKey
 		types.Txn,
 	) ([]*models.RewardAccountOutput, error)
+	// GetRewardAccountOutputsForEligibility returns one credential's unfolded
+	// outputs in the given snapshot epochs, including outputs currently marked
+	// nonspendable so the boundary can recheck registration changes.
+	GetRewardAccountOutputsForEligibility(
+		[]uint64, // epochs
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// GetPendingRewardAccountOutputsForCredential returns unfolded outputs in
+	// applied reward rounds for one credential.
+	GetPendingRewardAccountOutputsForCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// FoldPendingRewardAccountOutputs marks all of a credential's unfolded
+	// applied reward outputs as added to its account balance.
+	FoldPendingRewardAccountOutputs(uint8, []byte, types.Txn) error
 
 	// GetRewardAccountOutputsInPoolKeyHashRange returns an epoch's reward
 	// account outputs whose pool_key_hash is in the inclusive [lo, hi] range.

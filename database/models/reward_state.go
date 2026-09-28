@@ -195,11 +195,10 @@ type RewardAccountOutput struct {
 	BoundarySlot uint64
 }
 
-// RewardCreditRound is a reward round applied at an epoch boundary whose
-// per-account credits are still being written to account balances. Until
-// they are, a credential's balance is its account reward plus its spendable,
-// unguarded reward_account_output rows for the round that have no
-// account_reward_delta journal row yet.
+// RewardCreditRound records a reward snapshot applied at an epoch boundary.
+// It remains indexed until rollback crosses that boundary; the folded flag on
+// reward_account_output rows tracks which account balances already include
+// those credits.
 type RewardCreditRound struct {
 	SnapshotEpoch uint64 `json:"snapshot_epoch"`
 	BoundarySlot  uint64 `json:"boundary_slot"`
@@ -230,8 +229,8 @@ func StakeRewardSourceHash(
 	return h.Sum(nil)
 }
 
-// PendingRewardCreditRoundsKey is the sync_state key holding the JSON list of
-// RewardCreditRound values still being credited.
+// PendingRewardCreditRoundsKey is the legacy sync_state key migrated into
+// the reward_credit_round table.
 const PendingRewardCreditRoundsKey = "dingo:reward-credit:pending-rounds" //nolint:gosec // a sync_state key, not a credential
 
 // RewardEligibilityRecheckKey is the sync_state key holding the credentials

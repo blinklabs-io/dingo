@@ -77,6 +77,44 @@ func seedMultiPoolRewardPrecomputeFixture(
 	return ls, db
 }
 
+func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
+	meta := db.Metadata()
+	const rewardSnapshotEpoch = uint64(1)
+	partial := &models.RewardStakeInput{
+		Epoch:         rewardSnapshotEpoch,
+		PoolKeyHash:   chunkedFixtureCredential(0x40, 1),
+		CredentialTag: 0,
+		StakingKey:    chunkedFixtureCredential(0x60, 1),
+		Stake:         123,
+		Registered:    true,
+		CapturedSlot:  100,
+		BoundarySlot:  100,
+	}
+	require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
+	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{partial}, nil))
+	require.NoError(t, markRewardStakeInputsPending(
+		meta, nil, rewardSnapshotEpoch, 100,
+	))
+
+	txn := db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		return ls.ensureRewardStakeInputsReady(txn, rewardSnapshotEpoch)
+	})
+	require.ErrorContains(t, err, "returned no rows")
+
+	inputs, err := meta.GetRewardStakeInputs(rewardSnapshotEpoch, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1, "empty reconstruction must not delete partial inputs")
+	require.Equal(t, partial.Stake, inputs[0].Stake)
+	pending, err := loadRewardStakeInputsPending(meta, nil)
+	require.NoError(t, err)
+	require.Len(t, pending.Entries, 1, "the snapshot must remain marked incomplete")
+}
+
 // seedMultiPoolRewardInputs writes seedMultiPoolRewardPrecomputeFixture's
 // reward round into db, on any metadata backend.
 func seedMultiPoolRewardInputs(
@@ -458,6 +496,79 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 		t, uninterruptedDB, rewardSnapshotEpoch, potsEpoch,
 	)
 	require.Equal(t, reference, resumed)
+}
+
+func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
+	t.Parallel()
+	const (
+		rewardSnapshotEpoch = uint64(1)
+		newEpoch            = rewardSnapshotEpoch + 3
+		capturedSlot        = uint64(200)
+		boundarySlot        = uint64(1_200)
+		poolCount           = 6
+		delegatorsPerPool   = 3
+	)
+	mutateInput := func(t *testing.T, db *database.Database) {
+		t.Helper()
+		inputs, err := db.Metadata().GetRewardPoolInputs(rewardSnapshotEpoch, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, inputs)
+		inputs[0].Margin = &types.Rat{Rat: big.NewRat(1, 5)}
+		require.NoError(t, db.Metadata().SaveRewardPoolInputs(inputs, nil))
+	}
+	buildChangedPartial := func(
+		t *testing.T,
+		ls *LedgerState,
+		db *database.Database,
+	) rewardPrecomputeOutputsSnapshot {
+		t.Helper()
+		ls.rewardPrecomputeChunkPoolsOverride = 2
+		round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+			newEpoch, capturedSlot, boundarySlot,
+		)
+		require.NoError(t, err)
+		require.True(t, ok)
+		done, err := ls.stakeRewardPrecomputeChunkStep(round)
+		require.NoError(t, err)
+		require.False(t, done)
+		return snapshotRewardPrecomputeOutputs(
+			t, db, rewardSnapshotEpoch, 3,
+		)
+	}
+
+	resumed, resumedDB := seedMultiPoolRewardPrecomputeFixture(
+		t, poolCount, delegatorsPerPool, 7,
+	)
+	resumed.rewardPrecomputeChunkPoolsOverride = 2
+	oldRound, ok, err := resumed.resolveStakeRewardPrecomputeRound(
+		newEpoch, capturedSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	done, err := resumed.stakeRewardPrecomputeChunkStep(oldRound)
+	require.NoError(t, err)
+	require.False(t, done)
+	oldCursor, err := loadRewardPrecomputeCursor(
+		resumedDB.Metadata(), nil, rewardSnapshotEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, oldCursor)
+	mutateInput(t, resumedDB)
+	newRound, ok, err := resumed.resolveStakeRewardPrecomputeRound(
+		newEpoch, capturedSlot, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEqual(t, oldCursor.InputFingerprint, newRound.inputFingerprint)
+	got := buildChangedPartial(t, resumed, resumedDB)
+	require.Len(t, got.poolOutputs, 2, "changed inputs must discard old chunk progress")
+
+	reference, referenceDB := seedMultiPoolRewardPrecomputeFixture(
+		t, poolCount, delegatorsPerPool, 7,
+	)
+	mutateInput(t, referenceDB)
+	want := buildChangedPartial(t, reference, referenceDB)
+	require.Equal(t, want, got)
 }
 
 // TestChunkedRewardPrecomputeRestartsOnGenerationChange proves the other

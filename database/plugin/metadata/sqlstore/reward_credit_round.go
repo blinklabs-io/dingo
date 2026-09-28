@@ -26,39 +26,116 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-func decodeRewardCreditRounds(raw string) ([]models.RewardCreditRound, error) {
-	if raw == "" {
-		return nil, nil
-	}
-	var rounds []models.RewardCreditRound
-	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
-		return nil, fmt.Errorf("decode pending reward credit rounds: %w", err)
-	}
-	return rounds, nil
-}
-
 func (s *Store) GetPendingRewardCreditRounds(
 	txn types.Txn,
 ) ([]models.RewardCreditRound, error) {
-	raw, err := s.GetSyncState(models.PendingRewardCreditRoundsKey, txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	return decodeRewardCreditRounds(raw)
+	return s.pendingRewardCreditRounds(ctx, db)
+}
+
+func (s *Store) HasPendingRewardCreditRounds(txn types.Txn) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	return pendingRewardCreditOutputsExist(ctx, db)
+}
+
+func pendingRewardCreditOutputsExist(ctx context.Context, db queryer) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM reward_account_output rao
+    WHERE rao.spendable = TRUE AND rao.guarded = FALSE AND rao.folded = FALSE
+      AND EXISTS (
+          SELECT 1 FROM reward_credit_round rcr
+          WHERE rcr.snapshot_epoch = rao.epoch
+      )
+)`).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check pending reward credit outputs: %w", err)
+	}
+	return exists, nil
 }
 
 func (s *Store) SetPendingRewardCreditRounds(
 	rounds []models.RewardCreditRound,
 	txn types.Txn,
 ) error {
-	if len(rounds) == 0 {
-		return s.DeleteSyncState(models.PendingRewardCreditRoundsKey, txn)
-	}
-	raw, err := json.Marshal(rounds)
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		if _, err := db.ExecContext(ctx, `DELETE FROM reward_credit_round`); err != nil {
+			return fmt.Errorf("replace pending reward credit rounds: %w", err)
+		}
+		for _, round := range rounds {
+			if err := insertRewardCreditRound(ctx, db, s.dialect, round); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *Store) AddAppliedRewardCreditRound(
+	round models.RewardCreditRound,
+	txn types.Txn,
+) error {
+	epoch, err := checkedInt64(round.SnapshotEpoch)
 	if err != nil {
-		return fmt.Errorf("encode pending reward credit rounds: %w", err)
+		return fmt.Errorf("applied reward credit epoch: %w", err)
 	}
-	return s.SetSyncState(models.PendingRewardCreditRoundsKey, string(raw), txn)
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+			`DELETE FROM reward_credit_round WHERE snapshot_epoch = ?`,
+		), epoch); err != nil {
+			return fmt.Errorf("replace applied reward credit round: %w", err)
+		}
+		return insertRewardCreditRound(ctx, db, s.dialect, round)
+	})
+}
+
+func (s *Store) HasAppliedRewardCreditRound(
+	epoch uint64,
+	txn types.Txn,
+) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return false, fmt.Errorf("applied reward credit epoch: %w", err)
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT EXISTS (SELECT 1 FROM reward_credit_round WHERE snapshot_epoch = ?)`,
+	), sqlEpoch).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check applied reward credit round: %w", err)
+	}
+	return exists, nil
+}
+
+func insertRewardCreditRound(
+	ctx context.Context,
+	db queryer,
+	dialect Dialect,
+	round models.RewardCreditRound,
+) error {
+	epoch, err := checkedInt64(round.SnapshotEpoch)
+	if err != nil {
+		return fmt.Errorf("pending reward credit epoch: %w", err)
+	}
+	boundarySlot, err := checkedInt64(round.BoundarySlot)
+	if err != nil {
+		return fmt.Errorf("pending reward credit boundary slot: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, dialect.Rebind(
+		`INSERT INTO reward_credit_round (snapshot_epoch, boundary_slot) VALUES (?, ?)`,
+	), epoch, boundarySlot); err != nil {
+		return fmt.Errorf("save pending reward credit round: %w", err)
+	}
+	return nil
 }
 
 // pendingRewardCreditRounds reads the pending rounds through the caller's own
@@ -68,47 +145,51 @@ func (s *Store) pendingRewardCreditRounds(
 	ctx context.Context,
 	db queryer,
 ) ([]models.RewardCreditRound, error) {
-	var raw string
-	err := db.QueryRowContext(
-		ctx,
-		s.dialect.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
-		models.PendingRewardCreditRoundsKey,
-	).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+		`SELECT snapshot_epoch, boundary_slot FROM reward_credit_round ORDER BY snapshot_epoch`,
+	))
 	if err != nil {
-		return nil, fmt.Errorf("read pending reward credit rounds: %w", err)
+		return nil, fmt.Errorf("list pending reward credit rounds: %w", err)
 	}
-	return decodeRewardCreditRounds(raw)
-}
-
-func rewardCreditRoundEpochs(rounds []models.RewardCreditRound) []uint64 {
-	epochs := make([]uint64, 0, len(rounds))
-	for _, round := range rounds {
-		epochs = append(epochs, round.SnapshotEpoch)
+	defer rows.Close()
+	var rounds []models.RewardCreditRound
+	for rows.Next() {
+		var epoch, slot int64
+		if err := rows.Scan(&epoch, &slot); err != nil {
+			return nil, err
+		}
+		if epoch < 0 || slot < 0 {
+			return nil, fmt.Errorf(
+				"invalid pending reward credit round epoch %d slot %d",
+				epoch,
+				slot,
+			)
+		}
+		rounds = append(rounds, models.RewardCreditRound{
+			SnapshotEpoch: uint64(epoch),
+			BoundarySlot:  uint64(slot),
+		})
 	}
-	return epochs
+	return rounds, rows.Err()
 }
 
 // pendingCreditsForCredentials totals, per credential, the unfolded credits
-// of the given credited rounds.
+// visible at a historical slot.
 func (s *Store) pendingCreditsForCredentials(
 	ctx context.Context,
 	db queryer,
-	rounds []models.RewardCreditRound,
+	visibleAt uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
 	ret := make(map[historicalRewardKey]uint64)
-	if len(rounds) == 0 || len(selected) == 0 {
+	if len(selected) == 0 {
 		return ret, nil
 	}
-	epochs := rewardCreditRoundEpochs(rounds)
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
 		keys = append(keys, key)
 	}
-	batch := max(1, (s.dialect.ParameterLimit()-len(epochs))/2)
+	batch := max(1, (s.dialect.ParameterLimit()-1)/2)
 	for start := 0; start < len(keys); start += batch {
 		end := min(start+batch, len(keys))
 		batchSelected := make(map[historicalRewardKey]struct{}, end-start)
@@ -118,20 +199,21 @@ func (s *Store) pendingCreditsForCredentials(
 		predicate, predicateArgs := historicalRewardCredentialPredicate(
 			batchSelected,
 		)
-		args := make([]any, 0, len(epochs)+len(predicateArgs))
-		for _, epoch := range epochs {
-			args = append(args, epoch)
-		}
+		args := make([]any, 0, 1+len(predicateArgs))
+		args = append(args, visibleAt)
 		args = append(args, predicateArgs...)
 		if err := func() error {
 			rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
-SELECT credential_tag, staking_key,
-       SUM(CAST(amount AS `+s.pendingCreditCastType()+`))
-FROM reward_account_output
-WHERE `+unfoldedRewardCreditPredicate+`
-  AND epoch IN (`+bindPlaceholders(len(epochs))+`)
+SELECT rao.credential_tag, rao.staking_key,
+       SUM(CAST(rao.amount AS `+s.pendingCreditCastType()+`))
+FROM reward_account_output rao
+WHERE rao.spendable = TRUE AND rao.guarded = FALSE AND rao.folded = FALSE
+  AND EXISTS (
+      SELECT 1 FROM reward_credit_round rcr
+      WHERE rcr.snapshot_epoch = rao.epoch AND rcr.boundary_slot <= ?
+  )
   AND (`+predicate+`)
-GROUP BY credential_tag, staking_key`), args...)
+GROUP BY rao.credential_tag, rao.staking_key`), args...)
 			if err != nil {
 				return fmt.Errorf("get unfolded reward credits: %w", err)
 			}
@@ -192,6 +274,29 @@ WHERE credential_tag = ? AND staking_key = ?
 	)
 }
 
+func (s *Store) FoldPendingRewardAccountOutputs(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) error {
+	if len(stakingKey) == 0 {
+		return nil
+	}
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+UPDATE reward_account_output SET folded = TRUE
+WHERE credential_tag = ? AND staking_key = ?
+  AND `+unfoldedRewardCreditPredicate+`
+  AND EXISTS (
+      SELECT 1 FROM reward_credit_round rcr
+      WHERE rcr.snapshot_epoch = reward_account_output.epoch
+  )`), credentialTag, stakingKey); err != nil {
+			return fmt.Errorf("fold pending reward account outputs: %w", err)
+		}
+		return nil
+	})
+}
+
 // deleteRewardCreditRoundsAfterSlot drops rounds applied at a boundary a
 // rollback undoes, and the fold progress recorded for them.
 func (s *Store) deleteRewardCreditRoundsAfterSlot(
@@ -199,59 +304,28 @@ func (s *Store) deleteRewardCreditRoundsAfterSlot(
 	db queryer,
 	slot uint64,
 ) error {
-	var raw string
-	err := db.QueryRowContext(
-		ctx,
-		s.dialect.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
-		models.PendingRewardCreditRoundsKey,
-	).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
+	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
-		return err
+		return fmt.Errorf("rollback slot: %w", err)
 	}
-	rounds, err := decodeRewardCreditRounds(raw)
-	if err != nil {
-		return err
-	}
-	kept := make([]models.RewardCreditRound, 0, len(rounds))
-	for _, round := range rounds {
-		if round.BoundarySlot > slot {
-			// The rollback reverts the folded credits' journal rows and
-			// account balances; the outputs, if they survive it, are
-			// unfolded credits again when the boundary reapplies the round.
-			if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+	// A rollback removes account deltas through the same transaction. Outputs
+	// that survive because their snapshot predates the rollback must be
+	// unfolded before their applied-round marker is removed.
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
 UPDATE reward_account_output SET folded = FALSE
-WHERE epoch = ? AND folded = TRUE`), round.SnapshotEpoch); err != nil {
-				return fmt.Errorf("unfold reward account outputs: %w", err)
-			}
-			continue
-		}
-		kept = append(kept, round)
+WHERE folded = TRUE AND EXISTS (
+    SELECT 1 FROM reward_credit_round rcr
+    WHERE rcr.snapshot_epoch = reward_account_output.epoch
+      AND rcr.boundary_slot > ?
+)`), sqlSlot); err != nil {
+		return fmt.Errorf("unfold reward account outputs: %w", err)
 	}
-	if len(kept) == len(rounds) {
-		return nil
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+		`DELETE FROM reward_credit_round WHERE boundary_slot > ?`,
+	), sqlSlot); err != nil {
+		return fmt.Errorf("delete rolled-back reward credit rounds: %w", err)
 	}
-	if len(kept) == 0 {
-		_, err := db.ExecContext(
-			ctx,
-			s.dialect.Rebind(`DELETE FROM sync_state WHERE sync_key = ?`),
-			models.PendingRewardCreditRoundsKey,
-		)
-		return err
-	}
-	encoded, err := json.Marshal(kept)
-	if err != nil {
-		return err
-	}
-	_, err = db.ExecContext(
-		ctx,
-		s.dialect.Rebind(`UPDATE sync_state SET value = ? WHERE sync_key = ?`),
-		string(encoded),
-		models.PendingRewardCreditRoundsKey,
-	)
-	return err
+	return nil
 }
 
 func (s *Store) pendingCreditCastType() string {
@@ -267,23 +341,17 @@ func (s *Store) pendingCreditCastType() string {
 
 // pendingRewardCreditSubquery is a scalar subquery totalling the pending
 // rounds' spendable, unguarded outputs for the credential named by tagCol and
-// keyCol. Its bind arguments are the epochs.
+// keyCol. The indexed round lookup keeps the query's bind count independent
+// of how many rounds remain unfolded.
 func (s *Store) pendingRewardCreditSubquery(
 	tagCol, keyCol string,
-	epochs []uint64,
-) (string, []any) {
-	args := make([]any, len(epochs))
-	for i, epoch := range epochs {
-		args[i] = epoch
-	}
+) string {
 	return `(SELECT COALESCE(SUM(CAST(prc.amount AS ` + s.pendingCreditCastType() +
 		`)), 0) FROM reward_account_output prc WHERE prc.credential_tag = ` +
 		tagCol + ` AND prc.staking_key = ` + keyCol +
 		` AND prc.spendable = TRUE AND prc.guarded = FALSE AND prc.folded = FALSE` +
-		` AND prc.epoch IN (` +
-		bindPlaceholders(
-			len(epochs),
-		) + `))`, args
+		` AND EXISTS (SELECT 1 FROM reward_credit_round rcr` +
+		` WHERE rcr.snapshot_epoch = prc.epoch))`
 }
 
 func scanRewardAccountOutputRows(
@@ -327,8 +395,35 @@ func (s *Store) GetRewardAccountOutputsForCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) ([]*models.RewardAccountOutput, error) {
+	return s.rewardAccountOutputsForCredential(
+		epochs, credentialTag, stakingKey, txn, true,
+	)
+}
+
+func (s *Store) GetRewardAccountOutputsForEligibility(
+	epochs []uint64,
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	return s.rewardAccountOutputsForCredential(
+		epochs, credentialTag, stakingKey, txn, false,
+	)
+}
+
+func (s *Store) rewardAccountOutputsForCredential(
+	epochs []uint64,
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+	spendableOnly bool,
+) ([]*models.RewardAccountOutput, error) {
 	if len(epochs) == 0 || len(stakingKey) == 0 {
 		return nil, nil
+	}
+	outputPredicate := "folded = FALSE"
+	if spendableOnly {
+		outputPredicate = unfoldedRewardCreditPredicate
 	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
@@ -343,12 +438,42 @@ SELECT `+rewardAccountOutputColumns+`
 FROM reward_account_output
 WHERE credential_tag = ? AND staking_key = ?
   AND epoch IN (`+bindPlaceholders(len(epochs))+`)
-  AND `+unfoldedRewardCreditPredicate+`
+  AND `+outputPredicate+`
 ORDER BY epoch, pool_key_hash, reward_type`), args...)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get reward account outputs for credential: %w", err,
 		)
+	}
+	return scanRewardAccountOutputRows(rows)
+}
+
+func (s *Store) GetPendingRewardAccountOutputsForCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	if len(stakingKey) == 0 {
+		return nil, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+SELECT `+rewardAccountOutputColumns+`
+FROM reward_account_output rao
+WHERE rao.credential_tag = ? AND rao.staking_key = ?
+  AND rao.spendable = TRUE AND rao.guarded = FALSE AND rao.folded = FALSE
+  AND EXISTS (
+      SELECT 1 FROM reward_credit_round rcr
+      WHERE rcr.snapshot_epoch = rao.epoch
+  )
+ORDER BY rao.epoch, rao.pool_key_hash, rao.reward_type`),
+		credentialTag, stakingKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pending reward account outputs for credential: %w", err)
 	}
 	return scanRewardAccountOutputRows(rows)
 }
@@ -383,23 +508,36 @@ ORDER BY pool_key_hash, credential_tag, staking_key, reward_type`),
 func (s *Store) pendingDRepCredits(
 	ctx context.Context,
 	db queryer,
-	rounds []models.RewardCreditRound,
 	expiryEpoch uint64,
 	filterCol string,
 	values []any,
 ) (map[string]uint64, map[uint64]uint64, error) {
 	byCredential := make(map[string]uint64)
 	byType := make(map[uint64]uint64)
-	if len(rounds) == 0 || len(values) == 0 {
+	if len(values) == 0 {
 		return byCredential, byType, nil
 	}
-	epochs := rewardCreditRoundEpochs(rounds)
-	chunkSize := max(1, s.dialect.ParameterLimit()-len(epochs)-1)
+	hasPending, err := pendingRewardCreditOutputsExist(ctx, db)
+	if err != nil {
+		return nil, nil, fmt.Errorf("check pending reward credit outputs for DRep power: %w", err)
+	}
+	if !hasPending {
+		return byCredential, byType, nil
+	}
+	fixedArgs := 0
+	if expiryEpoch > 0 {
+		fixedArgs++
+	}
+	chunkSize := s.dialect.ParameterLimit() - fixedArgs
+	if chunkSize <= 0 {
+		return nil, nil, fmt.Errorf("dialect parameter limit %d cannot fit pending DRep filters", s.dialect.ParameterLimit())
+	}
 	for start := 0; start < len(values); start += chunkSize {
 		end := min(start+chunkSize, len(values))
-		pendingExpr, args := s.pendingRewardCreditSubquery(
-			"a.credential_tag", "a.staking_key", epochs,
+		pendingExpr := s.pendingRewardCreditSubquery(
+			"a.credential_tag", "a.staking_key",
 		)
+		args := make([]any, 0, end-start+1)
 		args = append(args, values[start:end]...)
 		expiry := ""
 		if expiryEpoch > 0 {
