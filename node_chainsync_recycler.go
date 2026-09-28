@@ -31,31 +31,38 @@ const (
 	chainSelectedNoneMaxRetryInterval     = time.Second
 )
 
-// chainsyncObservePeerTip synchronously feeds a peer tip update into chain
-// selection (and peergov) when the Genesis corroboration gate is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-forward
-// handler reflects the header currently being admitted. This closes the race
-// where the apply gate would otherwise read corroboration state that predates
-// this header (the tip update is normally delivered asynchronously). It returns
-// true when it handled the observation synchronously, so the ouroboros layer
-// skips the async PeerTipUpdateEvent publish to avoid a double update.
-//
-// When corroboration is inactive the async path is used unchanged (returns
-// false), so normal high-throughput sync keeps its parallelism.
+// chainsyncObservePeerTip stages a header frontier for the Genesis apply gate.
+// The staged value is not selectable until ledger admission promotes it.
 func (n *Node) chainsyncObservePeerTip(
 	e chainselection.PeerTipUpdateEvent,
 ) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
+	if n.chainSelector == nil {
 		return false
 	}
-	n.chainSelector.HandlePeerTipUpdateEvent(
-		event.NewEvent(chainselection.PeerTipUpdateEventType, e),
-	)
+	n.chainSelector.PreparePeerTipAdmission(e)
 	if n.peerGov != nil {
 		n.peerGov.TouchPeerByConnId(e.ConnectionId)
 	}
 	return true
+}
+
+// chainsyncResolvePeerTip removes rejected candidates immediately and promotes
+// admitted candidates before the event-bus notification is dispatched.
+func (n *Node) chainsyncResolvePeerTip(
+	e chainselection.PeerTipUpdateEvent,
+	admitted bool,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	if admitted {
+		n.chainSelector.CommitPeerTipAdmission(e)
+		if n.peerGov != nil {
+			n.peerGov.TouchPeerByConnId(e.ConnectionId)
+		}
+		return
+	}
+	n.chainSelector.RejectPeerTipAdmission(e)
 }
 
 // chainsyncObservePeerRollback synchronously applies a peer rollback into chain

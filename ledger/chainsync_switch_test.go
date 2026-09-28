@@ -1161,7 +1161,7 @@ func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 	buffered := ls.shouldBufferHeaderEvent(ChainsyncEvent{
 		ConnectionId: connId2,
 		Point:        ocommon.NewPoint(1, []byte("hdr-1")),
-	})
+	}, nil)
 	require.False(t, buffered)
 	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId2))
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.selectedBlockfetchConnId)
@@ -1208,13 +1208,13 @@ func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(
 			ls.shouldBufferHeaderEvent(ChainsyncEvent{
 				ConnectionId: connId1,
 				Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
-			})
+			}, nil)
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			ls.discardBufferedPeerHeaders(connId2)
+			ls.discardBufferedPeerHeaders(connId2, nil)
 		}
 	}()
 	wg.Wait()
@@ -1261,7 +1261,7 @@ func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 		ls.bufferHeaderEvent(ChainsyncEvent{
 			ConnectionId: connIds[i],
 			Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
-		})
+		}, nil)
 	}
 
 	var wg sync.WaitGroup
@@ -1280,7 +1280,7 @@ func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 	go func() {
 		defer wg.Done()
 		for i := range 200 {
-			ls.discardBufferedPeerHeaders(connIds[i%conns])
+			ls.discardBufferedPeerHeaders(connIds[i%conns], nil)
 		}
 	}()
 	// The buffering write path, which bufferedHeaderMutex alone protects.
@@ -1294,7 +1294,7 @@ func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 			ls.bufferHeaderEvent(ChainsyncEvent{
 				ConnectionId: connIds[i%conns],
 				Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
-			})
+			}, nil)
 		}
 	}()
 	// The resync delete path, which reaches the map from callers that do
@@ -1444,8 +1444,15 @@ func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 	t.Parallel()
 
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, peerTipCh := bus.SubscribeWithBuffer(
+		chainselection.PeerTipUpdateEventType,
+		2,
+	)
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	ls.config.EventBus = bus
 	// Keep the test at header admission; no blockfetch worker is needed.
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	connID := fixture.connId
@@ -1473,6 +1480,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 	ls.mithrilLedgerSlot = accepted.slot
 	ls.publishSnapshotsLocked()
 	advertisedSlot := ^uint64(0)
+	var acceptedAdmission *bool
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  accepted,
@@ -1488,7 +1496,26 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 			Point: ocommon.NewPoint(accepted.slot, []byte("accepted-target")),
 		},
 		SyncTargetTrusted: true,
+		PeerTipUpdate: &chainselection.PeerTipUpdateEvent{
+			ConnectionId: connID,
+			Tip:          ochainsync.Tip{Point: ocommon.NewPoint(advertisedSlot, nil)},
+			ObservedTip:  ochainsync.Tip{Point: ocommon.NewPoint(accepted.slot, accepted.hash.Bytes())},
+			AdmissionID:  1,
+		},
+		PeerTipAdmission: func(admitted bool) {
+			acceptedAdmission = &admitted
+		},
 	}))
+	require.NotNil(t, acceptedAdmission)
+	assert.True(t, *acceptedAdmission)
+	acceptedTipEvent := testutil.RequireReceive(
+		t,
+		peerTipCh,
+		time.Second,
+		"accepted header must publish its peer tip after admission",
+	)
+	require.True(t,
+		acceptedTipEvent.Data.(chainselection.PeerTipUpdateEvent).Admitted)
 	require.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot())
 
@@ -1500,6 +1527,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		blockNumber: 3,
 		slot:        3,
 	}
+	var rejectedAdmission *bool
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  rejected,
@@ -1517,10 +1545,59 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 				[]byte("rejected-target"),
 			),
 		},
+		PeerTipUpdate: &chainselection.PeerTipUpdateEvent{
+			ConnectionId: connID,
+			Tip:          ochainsync.Tip{Point: ocommon.NewPoint(advertisedSlot-1, nil)},
+			ObservedTip:  ochainsync.Tip{Point: ocommon.NewPoint(rejected.slot, rejected.hash.Bytes())},
+			AdmissionID:  2,
+		},
+		PeerTipAdmission: func(admitted bool) {
+			rejectedAdmission = &admitted
+		},
 	}))
+	require.NotNil(t, rejectedAdmission)
+	assert.False(t, *rejectedAdmission)
+	select {
+	case evt := <-peerTipCh:
+		t.Fatalf("rejected header published a peer tip: %#v", evt.Data)
+	default:
+	}
 	assert.Equal(t, accepted.slot, ls.syncUpstreamTipSlot.Load())
 	assert.Equal(t, accepted.slot, ls.UpstreamTipSlot(),
 		"a rejected header must not publish its advertised target")
+}
+
+func TestResetChainsyncResyncStateRejectsBufferedPeerTipsAfterUnlock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	connID := fixture.connId
+	callbackCalls := 0
+	var admitted bool
+	ls.bufferedHeaderEvents = map[string][]ChainsyncEvent{
+		connIdKey(connID): {{
+			ConnectionId: connID,
+			PeerTipAdmission: func(value bool) {
+				callbackCalls++
+				admitted = value
+			},
+		}},
+	}
+	var pending pendingPublishes
+	ls.chainsyncMutex.Lock()
+	ls.resetChainsyncResyncState(&pending)
+	ls.chainsyncMutex.Unlock()
+
+	assert.Zero(t, callbackCalls,
+		"admission callback must wait for the outer ledger lock")
+	pending.flush()
+	assert.Equal(t, 1, callbackCalls)
+	assert.False(t, admitted,
+		"a buffered header discarded for resynchronization is rejected")
+	assert.Empty(t, ls.bufferedHeaderEvents)
 }
 
 func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(

@@ -112,13 +112,29 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 	candidate ouroboros.ConnectionId,
 	candidateTip *PeerChainTip,
 ) int {
+	return cs.corroboratingPeersIncludingCandidatesLocked(
+		candidate,
+		candidateTip,
+	)
+}
+
+func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
+	candidate ouroboros.ConnectionId,
+	candidateTip *PeerChainTip,
+) int {
 	if candidateTip == nil {
 		return 0
 	}
 	witnesses := make(map[string]struct{})
-	for connId, peerTip := range cs.peerTips {
+	seen := make(map[ouroboros.ConnectionId]struct{}, len(cs.peerTips))
+	for connId, committedTip := range cs.peerTips {
+		seen[connId] = struct{}{}
 		if connId == candidate {
 			continue
+		}
+		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		if peerTip == nil {
+			peerTip = committedTip
 		}
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
@@ -127,8 +143,21 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 			witnesses[corroboratorIdentity(connId)] = struct{}{}
 		}
 	}
-	// A witness on the candidate's own host is the same operator; it cannot
-	// count as independent corroboration.
+	for connId := range cs.pendingPeerTips {
+		if connId == candidate {
+			continue
+		}
+		if _, exists := seen[connId]; exists {
+			continue
+		}
+		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		if !cs.peerCanCorroborateLocked(connId, peerTip) {
+			continue
+		}
+		if candidateTip.confirmsRecentChain(peerTip) {
+			witnesses[corroboratorIdentity(connId)] = struct{}{}
+		}
+	}
 	delete(witnesses, corroboratorIdentity(candidate))
 	return len(witnesses)
 }
@@ -170,11 +199,15 @@ func (cs *ChainSelector) ShouldApplyIngress(
 	if !cs.genesisCorroborationActiveLocked() {
 		return true
 	}
-	peerTip := cs.peerTips[connId]
+	peerTip := cs.latestPeerTipCandidateLocked(connId)
+	if peerTip == nil {
+		peerTip = cs.peerTips[connId]
+	}
 	if peerTip == nil {
 		return false
 	}
-	return cs.isPeerCorroboratedLocked(connId, peerTip)
+	return cs.corroboratingPeersIncludingCandidatesLocked(connId, peerTip) >=
+		cs.config.MinCorroboratingPeers
 }
 
 // rawDensityLeaderLocked returns the connection with the highest observed

@@ -17,6 +17,7 @@ package ledger
 import (
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -90,9 +91,16 @@ type ChainsyncEvent struct {
 	// publication only after this header is admitted.
 	SyncTarget        ochainsync.Tip
 	SyncTargetTrusted bool
-	BlockNumber       uint64
-	Type              uint // Block or header type ID
-	Rollback          bool // Set to true for a Rollback event
+	// PeerTipUpdate is promoted into selector-visible state only after the
+	// ledger admits BlockHeader. A nil value is used by locally-built events.
+	PeerTipUpdate *chainselection.PeerTipUpdateEvent
+	// PeerTipAdmission reports definite admission or rejection synchronously
+	// to the ingress owner. It is not called while the header is buffered for a
+	// connection switch; the callback travels with that buffered event.
+	PeerTipAdmission func(admitted bool)
+	BlockNumber      uint64
+	Type             uint // Block or header type ID
+	Rollback         bool // Set to true for a Rollback event
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports

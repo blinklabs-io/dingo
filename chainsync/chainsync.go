@@ -852,13 +852,11 @@ func (s *State) UpdateClientTip(
 	return s.RecordHeaderForDedup(connId, point)
 }
 
-// UpdateClientTipWithoutDedup updates the cursor, tip, and
-// activity tracking for a tracked client without recording the header in the
-// shared dedup cache. The Ouroboros ingress path uses this before synchronous
-// chain selection so a switch event can verify that the client has delivered a
-// tip. It records the header for deduplication separately, and only when the
-// post-selection apply gate admits it. It reports whether the client was still
-// tracked and updated.
+// UpdateClientTipWithoutDedup updates the cursor, tip, and activity tracking
+// for a tracked client without recording the header in the shared dedup cache.
+// The Ouroboros ingress path calls it after ledger admission so selection
+// handoffs only observe a cursor backed by an accepted header. It reports
+// whether the client was still tracked and updated.
 func (s *State) UpdateClientTipWithoutDedup(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,

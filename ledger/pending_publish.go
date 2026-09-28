@@ -60,7 +60,8 @@ import (
 // function returned. Ordering between events queued by one call is
 // preserved.
 type pendingPublishes struct {
-	events []pendingPublish
+	events      []pendingPublish
+	afterUnlock []func()
 	// chainDrains holds chains whose chain-level sequencer must be drained
 	// after this queue flushes. The mutex-holding paths that add a block or
 	// roll back the chain no longer hand their chain.update event back for
@@ -70,6 +71,19 @@ type pendingPublishes struct {
 	// sequencer once the outer ledger mutex is released. See
 	// chain.Chain.PublishPendingChainUpdates and drainChain.
 	chainDrains []*chain.Chain
+}
+
+// addAfterUnlock queues a callback that may publish or acquire component
+// locks. The callback runs after the ledger's outer mutex has been released.
+func (p *pendingPublishes) addAfterUnlock(fn func()) {
+	if fn == nil {
+		return
+	}
+	if p == nil {
+		fn()
+		return
+	}
+	p.afterUnlock = append(p.afterUnlock, fn)
 }
 
 type pendingPublish struct {
@@ -132,6 +146,10 @@ func (p *pendingPublishes) drainChain(c *chain.Chain) {
 // directly-queued event has been published; each publishes its own events FIFO
 // in chain-mutation order (see chain.Chain.PublishPendingChainUpdates).
 func (p *pendingPublishes) flush() {
+	for _, fn := range p.afterUnlock {
+		fn()
+	}
+	p.afterUnlock = nil
 	for _, pub := range p.events {
 		pub.bus.Publish(pub.eventType, pub.evt)
 	}

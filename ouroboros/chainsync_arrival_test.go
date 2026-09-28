@@ -450,6 +450,15 @@ func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 		ochainsync.Tip{},
 		time.Now(),
 	))
+	acceptedEvent := testutil.RequireReceive(
+		t,
+		ledgerCh,
+		time.Second,
+		"restarted stream header admission",
+	)
+	acceptedHeader := acceptedEvent.Data.(ledger.ChainsyncEvent)
+	require.NotNil(t, acceptedHeader.PeerTipAdmission)
+	acceptedHeader.PeerTipAdmission(true)
 	droppedClient = state.GetTrackedClient(droppedConn)
 	require.NotNil(t, droppedClient)
 	require.Equal(t, uint64(103), droppedClient.Cursor.Slot)

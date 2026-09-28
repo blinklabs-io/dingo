@@ -390,6 +390,220 @@ func TestGenesisShouldApplyIngressGatesUncorroborated(t *testing.T) {
 		"apply must be denied again once corroboration is revoked")
 }
 
+func TestPeerTipAdmissionCandidatesStayOutOfSelectionUntilAdmitted(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(11)
+	witness := corrConn(12)
+	anchor := corrConn(13)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	feedFrontier(cs, anchor,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	bestBefore := cs.GetBestPeer()
+	require.NotNil(t, bestBefore)
+
+	updates := []PeerTipUpdateEvent{
+		{
+			ConnectionId: applicant,
+			AdmissionID:  1,
+			Tip:          genesisTip(100, "h100", 100),
+			ObservedTip:  genesisTip(100, "h100", 100),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  2,
+			Tip:          genesisTip(105, "h105", 105),
+			ObservedTip:  genesisTip(105, "h105", 105),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  3,
+			Tip:          genesisTip(110, "h110", 110),
+			ObservedTip:  genesisTip(110, "h110", 110),
+		},
+	}
+	var candidateFrontier *PeerChainTip
+	for _, update := range updates {
+		require.True(t, cs.PreparePeerTipAdmission(update))
+		if candidateFrontier == nil {
+			candidateFrontier = cs.pendingPeerTipFrontiers[applicant]
+		} else {
+			assert.Same(t, candidateFrontier,
+				cs.pendingPeerTipFrontiers[applicant],
+				"queued admissions should share one bounded frontier snapshot")
+		}
+	}
+	assert.True(t, cs.ShouldApplyIngress(applicant),
+		"Genesis corroboration should see the candidate frontier")
+	assert.NotContains(t, cs.GetAllPeerTips(), applicant,
+		"an unadmitted candidate must not be visible to chain selection")
+	assert.Equal(t, *bestBefore, *cs.GetBestPeer(),
+		"the candidate must not change the selected peer before admission")
+
+	rejected := updates[0]
+	rejected.Rejected = true
+	cs.HandlePeerTipUpdateEvent(event.NewEvent(
+		PeerTipUpdateEventType,
+		rejected,
+	))
+	assert.False(t, cs.ShouldApplyIngress(applicant),
+		"rejecting the candidate must remove it from corroboration")
+	assert.NotContains(t, cs.GetAllPeerTips(), applicant)
+	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
+}
+
+func TestPeerTipAdmissionCommitPromotesCandidate(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(21)
+	witness := corrConn(22)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+	)
+	update := PeerTipUpdateEvent{
+		ConnectionId: applicant,
+		AdmissionID:  1,
+		Tip:          genesisTip(105, "h105", 105),
+		ObservedTip:  genesisTip(105, "h105", 105),
+	}
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	assert.NotContains(t, cs.GetAllPeerTips(), applicant)
+
+	update.Admitted = true
+	require.True(t, cs.CommitPeerTipAdmission(update))
+	assert.Contains(t, cs.GetAllPeerTips(), applicant)
+	assert.True(t, cs.ShouldApplyIngress(applicant))
+}
+
+func TestPeerTipAdmissionCommitsQueuedFrontiersInOrder(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(31)
+	witness := corrConn(32)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	updates := []PeerTipUpdateEvent{
+		{
+			ConnectionId: applicant,
+			AdmissionID:  1,
+			Tip:          genesisTip(100, "h100", 100),
+			ObservedTip:  genesisTip(100, "h100", 100),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  2,
+			Tip:          genesisTip(105, "h105", 105),
+			ObservedTip:  genesisTip(105, "h105", 105),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  3,
+			Tip:          genesisTip(110, "h110", 110),
+			ObservedTip:  genesisTip(110, "h110", 110),
+		},
+	}
+	for _, update := range updates {
+		require.True(t, cs.PreparePeerTipAdmission(update))
+	}
+	for i, update := range updates {
+		require.True(t, cs.CommitPeerTipAdmission(update))
+		peerTip := cs.GetPeerTip(applicant)
+		require.NotNil(t, peerTip)
+		assert.Equal(t, update.ObservedTip.Point.Slot,
+			peerTip.ObservedTip.Point.Slot)
+		assert.Len(t, peerTip.observedTipHistory, i+1)
+	}
+	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
+}
+
+func TestPeerTipAdmissionDoesNotPromoteEarlierWithheldCandidate(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(41)
+	withheld := PeerTipUpdateEvent{
+		ConnectionId: applicant,
+		AdmissionID:  1,
+		Tip:          genesisTip(100, "h100", 100),
+		ObservedTip:  genesisTip(100, "h100", 100),
+	}
+	admitted := PeerTipUpdateEvent{
+		ConnectionId: applicant,
+		AdmissionID:  2,
+		Tip:          genesisTip(105, "h105", 105),
+		ObservedTip:  genesisTip(105, "h105", 105),
+	}
+	require.True(t, cs.PreparePeerTipAdmission(withheld))
+	require.True(t, cs.PreparePeerTipAdmission(admitted))
+
+	require.True(t, cs.CommitPeerTipAdmission(admitted))
+	peerTip := cs.GetPeerTip(applicant)
+	require.NotNil(t, peerTip)
+	require.Len(t, peerTip.observedTipHistory, 1,
+		"only the admitted header may enter the committed peer frontier")
+	assert.Equal(t, admitted.ObservedTip.Point,
+		peerTip.observedTipHistory[0].Point)
+}
+
+func TestPeerTipAdmissionCandidatesRespectTrackedPeerLimit(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		MaxTrackedPeers: 1,
+	})
+	first := corrConn(51)
+	second := corrConn(52)
+	update := func(
+		conn ouroboros.ConnectionId,
+		admissionID uint64,
+	) PeerTipUpdateEvent {
+		tip := genesisTip(100, "h100", 100)
+		return PeerTipUpdateEvent{
+			ConnectionId: conn,
+			AdmissionID:  admissionID,
+			Tip:          tip,
+			ObservedTip:  tip,
+		}
+	}
+
+	require.True(t, cs.PreparePeerTipAdmission(update(first, 1)))
+	assert.False(t, cs.PreparePeerTipAdmission(update(second, 2)),
+		"pending candidates must share the selector's tracked-peer bound")
+	assert.Len(t, cs.pendingPeerTips, 1)
+	assert.Contains(t, cs.pendingPeerTips, first)
+	assert.NotContains(t, cs.pendingPeerTips, second)
+}
+
 // Outside Genesis corroboration (Praos, or Genesis with the gate disabled) every
 // peer is apply-eligible — no behavior change.
 func TestShouldApplyIngressAllowsWhenCorroborationInactive(t *testing.T) {
