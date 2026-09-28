@@ -17,9 +17,12 @@ package cardano
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -122,4 +125,81 @@ func TestConwayGenesisRejectsQuorumWithoutThreshold(t *testing.T) {
 	require.NoError(t, err)
 	var c CardanoNodeConfig
 	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+}
+
+// TestConwayGenesisRejectsQuorumWithNullThreshold pins that a null threshold
+// does not count as present: stripping quorum beside it would decode to a nil
+// threshold, which cardano-ledger rejects.
+func TestConwayGenesisRejectsQuorumWithNullThreshold(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join(testDataDir, "conway-genesis.json"))
+	require.NoError(t, err)
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	doc["committee"] = json.RawMessage(
+		`{"members":{},"quorum":0.5,"threshold":null}`,
+	)
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	var c CardanoNodeConfig
+	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+}
+
+// TestConwayGenesisRejectsDuplicateMembersWhenNormalizing pins that removing
+// genDelegs or quorum does not collapse duplicate members, which would discard
+// an earlier occurrence before the strict decoder could reject it.
+func TestConwayGenesisRejectsDuplicateMembersWhenNormalizing(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join(testDataDir, "conway-genesis.json"))
+	require.NoError(t, err)
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	for name, tc := range map[string]struct {
+		committee string
+		extra     string
+	}{
+		// The earlier committee carries an unknown member; collapsing to the
+		// later occurrence would hide it from the strict decoder.
+		"top-level": {
+			committee: `{"members":{},"threshold":0,"notACommitteeField":1}`,
+			extra: `,"genDelegs":{}` +
+				`,"committee":{"members":{},"threshold":0}`,
+		},
+		"committee": {
+			committee: `{"members":{},"quorum":0,` +
+				`"threshold":{"notARational":1},"threshold":0}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d := maps.Clone(doc)
+			d["committee"] = json.RawMessage(tc.committee)
+			out, err := json.Marshal(d)
+			require.NoError(t, err)
+			out = append(out[:len(out)-1], tc.extra+"}"...)
+			var c CardanoNodeConfig
+			require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+		})
+	}
+}
+
+// TestLoadConwayGenesisFromReaderStopsAfterValue pins that the reader loader
+// returns once it has read one complete JSON value, without waiting for EOF.
+func TestLoadConwayGenesisFromReaderStopsAfterValue(t *testing.T) {
+	t.Parallel()
+	genesis := conwayGenesisWithGenDelegs(t, `{}`)
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	go func() { _, _ = pw.Write(genesis) }()
+	done := make(chan error, 1)
+	go func() {
+		var c CardanoNodeConfig
+		done <- c.LoadConwayGenesisFromReader(pr)
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("LoadConwayGenesisFromReader blocked waiting for EOF")
+	}
 }
