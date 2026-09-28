@@ -14,7 +14,7 @@
 
 # DevNet Docker Compose configuration
 #
-# Two profiles are defined; select one via COMPOSE_PROFILES (.env defaults to
+# Select a profile via COMPOSE_PROFILES (.env defaults to
 # COMPOSE_PROFILES=dingo).
 #
 # Default profile: dingo (all-dingo network)
@@ -35,6 +35,11 @@
 #   from its unix socket by socat via SOCAT_PORT). cardano-relay has no NtC
 #   host port; only the two producers' ledger states are compared
 #   (blinklabs-io/dingo#1900).
+#
+# Opt-in profile: koios-parity (Preview sync and observability)
+#   - dingo-preview:          Dingo node syncing Preview, optional Koios parity
+#   - koios-parity-prometheus: Prometheus scrape and storage
+#   - koios-parity-grafana:    Provisioned dashboards
 #
 # Usage:
 #   docker compose up -d       # Start all services in the selected profile
@@ -470,6 +475,62 @@ services:
       retries: 30
       start_period: 10s
 
+  dingo-preview:
+    build:
+      context: ../../..
+    profiles: ["koios-parity"]
+    image: ${DINGO_IMAGE:-dingo-koios-parity:local}
+    restart: unless-stopped
+    entrypoint: ["/koios-parity/entrypoint-wrapper.sh"]
+    command: ["-n", "preview", "serve"]
+    environment:
+      CARDANO_NETWORK: preview
+      CARDANO_DATABASE_PATH: /data/db
+      DINGO_SOCKET_PATH: /ipc/dingo.socket
+      KOIOS_PARITY_ENABLED: "${DEVNET_KOIOS_PARITY_ENABLED:-false}"
+      KOIOS_PARITY_BASE_URL: "${DEVNET_KOIOS_PARITY_BASE_URL:-https://preview-koios.tosidrop.me/api/v1}"
+    volumes:
+      - koios-parity-dingo-data:/data/db
+      - koios-parity-dingo-ipc:/ipc
+      - ./koios-parity/entrypoint-wrapper.sh:/koios-parity/entrypoint-wrapper.sh:ro
+    ports:
+      - "${DEVNET_KOIOS_PARITY_RELAY_PORT:-13701}:3001"
+      - "127.0.0.1:${DEVNET_KOIOS_PARITY_METRICS_PORT:-13798}:12798"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12798/metrics"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  koios-parity-prometheus:
+    image: prom/prometheus:v3.0.1
+    profiles: ["koios-parity"]
+    restart: unless-stopped
+    depends_on:
+      - dingo-preview
+    volumes:
+      - ./koios-parity/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - koios-parity-prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${DEVNET_KOIOS_PARITY_PROMETHEUS_PORT:-13900}:9090"
+
+  koios-parity-grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["koios-parity"]
+    restart: unless-stopped
+    depends_on:
+      - koios-parity-prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: "${DEVNET_GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${DEVNET_GRAFANA_ADMIN_PASSWORD:-admin}"
+    volumes:
+      - ./koios-parity/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./koios-parity/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - koios-parity-grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${DEVNET_KOIOS_PARITY_GRAFANA_PORT:-13930}:3000"
+
 networks:
   devnet:
     driver: bridge
@@ -497,3 +558,7 @@ volumes:
   dingo-2-ipc:
   dingo-3-ipc:
   dingo-relay-ipc:
+  koios-parity-dingo-data:
+  koios-parity-dingo-ipc:
+  koios-parity-prometheus-data:
+  koios-parity-grafana-data:
