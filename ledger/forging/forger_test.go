@@ -200,8 +200,12 @@ func (c forgerTestSlotClock) PrimaryChainTipRelation(
 	}, depth, ancestor, nil
 }
 
+// NextSlotTime reports a boundary that is still ahead, which is what a
+// healthy clock reports for a leader forging inside its own slot. Handing
+// back the current instant would instead mean the slot has already closed,
+// and endorser-block production is skipped for a closed slot.
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
-	return time.Now(), nil
+	return time.Now().Add(time.Second), nil
 }
 
 // ChainTipHash satisfies the optional ChainTipHashProvider. It returns
@@ -233,10 +237,11 @@ func (c forgerTestSlotClock) SecurityParam() int {
 	return 5
 }
 
-// TestCheckAndForgeProductionAllowsUnknownUpstreamTarget verifies that an
-// active upstream with no admitted target is not treated as evidence that this
-// node is behind the network.
-func TestCheckAndForgeProductionAllowsUnknownUpstreamTarget(
+// TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget verifies that
+// an active upstream with no admitted target does not suppress forging based on
+// wall-clock distance from the local tip. That distance describes a network
+// quiet stretch, not whether a peer is ahead (issue #4201).
+func TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget(
 	t *testing.T,
 ) {
 	creds := setupTestCredentials(t)
@@ -251,9 +256,8 @@ func TestCheckAndForgeProductionAllowsUnknownUpstreamTarget(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			// The wall clock is far ahead of the tip, but an unknown
-			// upstream target cannot establish that the canonical chain
-			// advanced during this quiet stretch.
+			// The tip lags the current slot by 991 slots, well past the
+			// tolerance below, so this node is behind on its own reckoning.
 			currentSlot:       1000,
 			chainTipSlot:      9,
 			upstreamActive:    true,

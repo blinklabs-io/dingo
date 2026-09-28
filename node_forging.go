@@ -687,6 +687,20 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
+// applyForgeTuning is the runtime mapping for operator-configured forge knobs.
+// Keeping the mapping together lets its test catch any setting that would
+// otherwise stop affecting the forger when configuration wiring changes.
+func applyForgeTuning(fc *forging.ForgerConfig, cfg *Config) {
+	fc.ForgeSyncToleranceSlots = cfg.forgeSyncToleranceSlots
+	fc.ForgeStaleGapThresholdSlots = cfg.forgeStaleGapThresholdSlots
+	fc.ForgeUpstreamStalenessSlots = cfg.forgeUpstreamStalenessSlots
+	fc.ForgeAppliedTipStalenessSlots = cfg.forgeAppliedTipStalenessSlots
+	fc.ForgeEndorserBlockStalenessSlots = cfg.forgeEndorserBlockStalenessSlots
+	fc.ForgeEBSelectionReserve = cfg.forgeEBSelectionReserve
+	fc.ForgeEBMaxTxRefs = cfg.forgeEBMaxTxRefs
+	fc.ForgeEBMaxBytes = cfg.forgeEBMaxBytes
+}
+
 // startBlockProducer validates the operator's credentials, starts leader
 // election and the block forger, and returns Run's startup-cleanup stack with
 // their stop appended.
@@ -894,7 +908,7 @@ func (n *Node) initBlockForger(
 	)
 
 	// Create the block forger with the real leader election
-	forger, err := forging.NewBlockForger(forging.ForgerConfig{
+	forgerCfg := forging.ForgerConfig{
 		Mode:             forging.ModeProduction,
 		Logger:           n.config.logger,
 		Credentials:      creds,
@@ -911,13 +925,8 @@ func (n *Node) initBlockForger(
 		// mkCurrentBlockContext's EQ case. The primary chain supplies the
 		// fork context; LedgerState arbitrates with the same Praos
 		// comparison a peer's competing block goes through.
-		ChainContext:                     n.chainManager.PrimaryChain(),
-		SiblingAdopter:                   n.ledgerState,
-		ForgeSyncToleranceSlots:          n.config.forgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:      n.config.forgeStaleGapThresholdSlots,
-		ForgeUpstreamStalenessSlots:      n.config.forgeUpstreamStalenessSlots,
-		ForgeAppliedTipStalenessSlots:    n.config.forgeAppliedTipStalenessSlots,
-		ForgeEndorserBlockStalenessSlots: n.config.forgeEndorserBlockStalenessSlots,
+		ChainContext:   n.chainManager.PrimaryChain(),
+		SiblingAdopter: n.ledgerState,
 		// Closure, not a method value: n.ouroboros is rebuilt live, so this
 		// resolves the current instance when the forge loop asks.
 		LeiosVerifiedEbSlot: func() uint64 {
@@ -936,7 +945,9 @@ func (n *Node) initBlockForger(
 			ls: n.ledgerState,
 		},
 		EraParams: n.ledgerState,
-	})
+	}
+	applyForgeTuning(&forgerCfg, &n.config)
+	forger, err := forging.NewBlockForger(forgerCfg)
 	if err != nil {
 		// Stop election to prevent goroutine leak
 		_ = election.Stop()
