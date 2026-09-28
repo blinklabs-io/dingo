@@ -34,12 +34,18 @@ import (
 // transaction, the epoch and slot at which enactment takes effect,
 // and the protocol-parameter update function for the current era.
 type EnactmentContext struct {
-	DB       *database.Database
-	Txn      *database.Txn
-	Epoch    uint64
-	Slot     uint64
-	PParams  lcommon.ProtocolParameters
-	UpdateFn func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
+	DB    *database.Database
+	Txn   *database.Txn
+	Epoch uint64
+	Slot  uint64
+	// PrevEpochStartSlot is the first slot of the epoch this boundary
+	// closes. cardano-ledger drops the committee state of every cold
+	// credential outside the enacted committee at each epoch boundary
+	// (Conway EPOCH, updateCommitteeState), so a credential newly seated here
+	// keeps only the certificates recorded since the previous boundary.
+	PrevEpochStartSlot uint64
+	PParams            lcommon.ProtocolParameters
+	UpdateFn           func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
 
 	// TreasuryWithdrawalRemaining tracks the ENACT rule's cumulative
 	// withdrawal limit across all treasury-withdrawal actions enacted in
@@ -544,7 +550,10 @@ func AddUnclaimedToTreasury(
 // Only a credential genuinely new to the committee, or rejoining after having
 // been removed at some point since its last authorization, gets a fresh
 // TermStartSlot; that is what correctly excludes its stale pre-removal
-// authorization once it rejoins.
+// authorization once it rejoins. The fresh start is the later of the
+// proposal's slot and ctx.PrevEpochStartSlot: certificates the credential
+// recorded while pending before the closing epoch were dropped at that
+// epoch's own boundary, when it was not yet a member.
 func applyUpdateCommittee(
 	ctx *EnactmentContext,
 	a *lcommon.UpdateCommitteeGovAction,
@@ -607,7 +616,7 @@ func applyUpdateCommittee(
 		if err != nil {
 			return fmt.Errorf("add member credential: %w", err)
 		}
-		memberTermStart := termStartSlot
+		memberTermStart := max(termStartSlot, ctx.PrevEpochStartSlot)
 		key := models.CommitteeCredential{
 			CredentialTag: credentialTag,
 			Credential:    hash[:],

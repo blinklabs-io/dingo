@@ -123,6 +123,14 @@ type DingoStateManager struct {
 	// currentEpoch tracks the current epoch
 	currentEpoch uint64
 
+	// appliedSlotMax is the highest slot ApplyTransaction has seen, and
+	// committeeEpochStartSlot is the first slot after the last epoch
+	// boundary. Conformance slots come from the vector rather than from
+	// conformanceSlotsPerEpoch, so the current epoch's committee window is
+	// located by the transactions applied since the boundary.
+	appliedSlotMax          uint64
+	committeeEpochStartSlot uint64
+
 	// committeeRemovals tracks the remove-set of pending UpdateCommittee
 	// proposals, keyed by gov action id. The upstream conformance
 	// GovActionInfo only carries the add-set (ProposedMembers), so this
@@ -264,6 +272,8 @@ func (m *DingoStateManager) Close() error {
 func (m *DingoStateManager) Reset() error {
 	m.protocolParams = nil
 	m.currentEpoch = 0
+	m.appliedSlotMax = 0
+	m.committeeEpochStartSlot = 0
 	m.govState = conformance.NewGovernanceState()
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
@@ -364,6 +374,8 @@ func (m *DingoStateManager) LoadInitialState(
 ) error {
 	m.protocolParams = pp
 	m.currentEpoch = state.CurrentEpoch
+	m.appliedSlotMax = 0
+	m.committeeEpochStartSlot = 0
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
 
@@ -587,7 +599,9 @@ func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
 	}
 	deposit := provider.DRepDepositAmount()
 	if deposit == nil || deposit.Sign() < 0 || !deposit.IsUint64() {
-		return 0, errors.New("protocol parameters contain an invalid DRep deposit")
+		return 0, errors.New(
+			"protocol parameters contain an invalid DRep deposit",
+		)
 	}
 	return deposit.Uint64(), nil
 }
@@ -874,6 +888,7 @@ func (m *DingoStateManager) ApplyTransaction(
 ) error {
 	point := m.pointForSlot(slot)
 	idx := m.nextBlockIndex(slot)
+	m.appliedSlotMax = max(m.appliedSlotMax, slot)
 
 	txn := m.db.Transaction(true)
 	defer txn.Release()
@@ -1046,7 +1061,8 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 			m.govState.SetPoolDelegation(c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeStakeDelegation:
-		if c, ok := cert.(*common.StakeDelegationCertificate); ok && c.StakeCredential != nil {
+		if c, ok := cert.(*common.StakeDelegationCertificate); ok &&
+			c.StakeCredential != nil {
 			m.govState.SetPoolDelegation(*c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeVoteDelegation:
@@ -1070,7 +1086,10 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 		if c, ok := cert.(*common.PoolRegistrationCertificate); ok {
 			m.govState.RegisterPool(c.Operator)
 			credential := c.RewardAccountCredential()
-			m.govState.SetPoolRewardAccount(c.Operator, rewardAccountKey(credential))
+			m.govState.SetPoolRewardAccount(
+				c.Operator,
+				rewardAccountKey(credential),
+			)
 		}
 	case common.CertificateTypePoolRetirement:
 		if c, ok := cert.(*common.PoolRetirementCertificate); ok {
@@ -1183,7 +1202,9 @@ func (m *DingoStateManager) updateStakeDepositForCertificate(
 	}
 }
 
-func rewardAccountKey(credential common.Credential) mockledger.RewardAccountKey {
+func rewardAccountKey(
+	credential common.Credential,
+) mockledger.RewardAccountKey {
 	return mockledger.RewardAccountKey{
 		CredType:   credential.CredType,
 		Credential: credential.Credential,
@@ -1360,7 +1381,11 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 		}
 	}
 
-	return txn.Commit()
+	if err := txn.Commit(); err != nil {
+		return err
+	}
+	m.committeeEpochStartSlot = m.appliedSlotMax + 1
+	return nil
 }
 
 // pruneCommitteeResignations drops the resignation recorded for a cold
@@ -1985,12 +2010,13 @@ func (m *DingoStateManager) persistEnactment(
 		)
 	}
 	result, err := governance.EnactProposal(&governance.EnactmentContext{
-		DB:       m.db,
-		Txn:      txn,
-		Epoch:    m.currentEpoch,
-		Slot:     boundarySlot,
-		PParams:  conwayPP,
-		UpdateFn: eras.ConwayEraDesc.PParamsUpdateFunc,
+		DB:                 m.db,
+		Txn:                txn,
+		Epoch:              m.currentEpoch,
+		Slot:               boundarySlot,
+		PrevEpochStartSlot: m.committeeEpochStartSlot,
+		PParams:            conwayPP,
+		UpdateFn:           eras.ConwayEraDesc.PParamsUpdateFunc,
 	}, dbProposal)
 	if err != nil {
 		return fmt.Errorf("enact governance proposal: %w", err)
@@ -2063,13 +2089,19 @@ func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
 	}
 	sort.Strings(utxoIDs)
 	return &conformance.StateSnapshot{
-		CurrentEpoch:                   m.currentEpoch,
-		UtxoIDs:                        utxoIDs,
-		StakeRegistrationsByCredential: maps.Clone(m.govState.StakeRegistrationsByCredential),
-		RewardAccountBalances:          maps.Clone(m.govState.RewardAccountBalances),
-		StakeCredentialDeposits:        maps.Clone(m.stakeDeposits),
-		PoolRegistrations:              maps.Clone(m.govState.PoolRegistrations),
-		Governance:                     m.govState,
+		CurrentEpoch: m.currentEpoch,
+		UtxoIDs:      utxoIDs,
+		StakeRegistrationsByCredential: maps.Clone(
+			m.govState.StakeRegistrationsByCredential,
+		),
+		RewardAccountBalances: maps.Clone(
+			m.govState.RewardAccountBalances,
+		),
+		StakeCredentialDeposits: maps.Clone(m.stakeDeposits),
+		PoolRegistrations: maps.Clone(
+			m.govState.PoolRegistrations,
+		),
+		Governance: m.govState,
 	}
 }
 
@@ -2214,7 +2246,10 @@ func initialCommitteeProposalCbor(info conformance.GovActionInfo) []byte {
 		Quorum:      cbor.Rat{Rat: big.NewRat(0, 1)},
 	}
 	for credential := range info.RemovedMembers {
-		action.Credentials = append(action.Credentials, credential.AsCredential())
+		action.Credentials = append(
+			action.Credentials,
+			credential.AsCredential(),
+		)
 	}
 	for credential, epoch := range info.ProposedMembersByCredential {
 		cred := credential.AsCredential()

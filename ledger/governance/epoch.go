@@ -73,6 +73,10 @@ type EpochInput struct {
 	// boundary slot is used so rollback-to-slot-N-1 correctly reverts
 	// this tick's changes.
 	BoundarySlot uint64
+	// PrevEpochStartSlot is the first slot of PrevEpoch. It bounds the
+	// committee certificates a member newly seated at this boundary keeps;
+	// see EnactmentContext.PrevEpochStartSlot.
+	PrevEpochStartSlot uint64
 	// PParams coming out of the legacy (Byron) pparam-update pass.
 	// Enactment may mutate and return a new pparams.
 	PParams  lcommon.ProtocolParameters
@@ -196,6 +200,7 @@ func ProcessEpoch(
 		Txn:                            in.Txn,
 		Epoch:                          in.NewEpoch,
 		Slot:                           in.BoundarySlot,
+		PrevEpochStartSlot:             in.PrevEpochStartSlot,
 		PParams:                        in.PParams,
 		UpdateFn:                       in.UpdateFn,
 		TreasuryWithdrawalRemaining:    treasuryWithdrawalRemaining,
