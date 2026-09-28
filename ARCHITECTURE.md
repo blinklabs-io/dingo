@@ -2818,6 +2818,15 @@ This path can't refuse to run those later stops the way
 of skipping the fix entirely: a `Run()`-scoped `ledgerStateDrainConfirmed`
 flag, set false by the `ledgerState.Close` stop on a non-nil error, makes
 the `db.Close`/`pluginHost.Stop` stops log and skip rather than run.
+The same rollback also constrains *where* a stop is registered, not just
+what it does: `cleanupFailedStartup` cancels `n.ctx` but joins only the
+stops already on `started`, so a component's stop belongs immediately
+after its start returns, ahead of anything else that can fail.
+`Run()`'s block-producer step uses `startBlockProducer` from
+`node_forging.go`. Its stop is registered immediately after credential
+validation, which may start the KES agent loop, and before ledger checks,
+forger startup, or Leios voting can fail. The nil-guarded stop closes the KES
+agent and joins any started forger and election workers.
 `handleChainSwitchEvent` is one of the
 "closure over `n` itself, self-healing" handlers `Run()`'s subscriber-ID
 doc comment describes as needing no tracked subscription — correct, since
