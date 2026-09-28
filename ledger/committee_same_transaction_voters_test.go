@@ -381,3 +381,42 @@ func TestValidateTxDijkstraTopLevelVoterSeesSubTransactionCertificates(
 		})
 	}
 }
+
+func TestValidateTxDijkstraRejectsUnelectedSubTransactionCommitteeVoter(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	pparams := committeeVotingDijkstra.pparams(
+		lcommon.ProtocolVersionVanRossem + 1,
+	)
+	lv, db := committeeTestView(t, pparams)
+	seatedCold := committeeTestCredential(0x61)
+	unelectedCold := committeeTestCredential(0x62)
+	unelectedHot := committeeTestCredential(0x63)
+	seatCommitteeMembers(t, db, seatedCold)
+	seedCommitteeCredentialAuthorization(t, db, unelectedCold, unelectedHot, 1, 1)
+	actionID := storeCommitteeVotingTarget(
+		t, db, 0x64, lcommon.GovActionTypeInfo,
+	)
+	tx := &gdijkstra.DijkstraTransaction{
+		TxIsValid: true,
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{{
+					Body: gdijkstra.DijkstraSubTransactionBody{
+						TxVotingProcedures: lcommon.VotingProcedures{
+							committeeVoter(unelectedHot): {
+								actionID: {Vote: lcommon.GovVoteYes},
+							},
+						},
+					},
+				}},
+				true,
+			),
+		},
+	}
+	err := eras.ValidateTxDijkstra(tx, 0, lv, pparams)
+	var unknown conway.UnknownVoterError
+	require.ErrorAs(t, err, &unknown, "%v", err)
+}

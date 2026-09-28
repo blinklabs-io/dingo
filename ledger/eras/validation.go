@@ -324,6 +324,11 @@ func validateUnknownVoters(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
+		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
+			return err
+		}
+	}
 	// Votes belong to the GOV state transition, which a phase-2-invalid
 	// transaction does not apply.
 	if !tx.IsValid() {
@@ -332,7 +337,7 @@ func validateUnknownVoters(
 	state, ok := ls.(CommitteeCredentialState)
 	if !ok {
 		if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
-			return gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp)
+			return nil
 		}
 		return conway.UtxoValidateUnknownVoters(tx, slot, ls, pp)
 	}
