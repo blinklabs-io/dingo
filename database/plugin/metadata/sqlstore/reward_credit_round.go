@@ -46,14 +46,18 @@ func (s *Store) HasPendingRewardCreditRounds(txn types.Txn) (bool, error) {
 
 func pendingRewardCreditOutputsExist(ctx context.Context, db queryer) (bool, error) {
 	var exists bool
+	// Driven from the few credited rounds: each probes the pending index for
+	// its epoch. Driven from the outputs instead, the probe walks every
+	// unfolded row of the round precomputed for the next boundary, which is
+	// not credited yet, on every call.
 	if err := db.QueryRowContext(ctx, `
 SELECT EXISTS (
-    SELECT 1 FROM reward_account_output rao
-    WHERE rao.spendable = TRUE AND rao.guarded = FALSE AND rao.folded = FALSE
-      AND EXISTS (
-          SELECT 1 FROM reward_credit_round rcr
-          WHERE rcr.snapshot_epoch = rao.epoch
-      )
+    SELECT 1 FROM reward_credit_round rcr
+    WHERE EXISTS (
+        SELECT 1 FROM reward_account_output rao
+        WHERE rao.spendable = TRUE AND rao.guarded = FALSE
+          AND rao.folded = FALSE AND rao.epoch = rcr.snapshot_epoch
+    )
 )`).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check pending reward credit outputs: %w", err)
 	}
@@ -207,7 +211,7 @@ func (s *Store) pendingCreditsForCredentials(
 SELECT rao.credential_tag, rao.staking_key,
        SUM(CAST(rao.amount AS `+s.pendingCreditCastType()+`))
 FROM reward_account_output rao
-WHERE rao.spendable = TRUE AND rao.guarded = FALSE AND rao.folded = FALSE
+WHERE rao.spendable = TRUE AND rao.guarded = FALSE AND NOT rao.folded
   AND EXISTS (
       SELECT 1 FROM reward_credit_round rcr
       WHERE rcr.snapshot_epoch = rao.epoch AND rcr.boundary_slot <= ?
@@ -238,10 +242,13 @@ GROUP BY rao.credential_tag, rao.staking_key`), args...)
 	return ret, nil
 }
 
-// unfoldedRewardCreditPredicate selects a credited round's reward_account_output
-// rows that are part of their account's balance but not yet in
-// account.reward.
-const unfoldedRewardCreditPredicate = `spendable = TRUE AND guarded = FALSE AND folded = FALSE`
+// credentialUnfoldedRewardCreditPredicate selects the rows of a stake
+// credential's credits not yet in account.reward, for a query that looks up
+// one stake credential. Written with NOT folded, the flag tests stop matching
+// the (spendable, guarded, folded, epoch) index as equalities, so SQLite looks
+// the rows up on the credential index instead of walking every unfolded row
+// for each stake credential.
+const credentialUnfoldedRewardCreditPredicate = `spendable = TRUE AND guarded = FALSE AND NOT folded`
 
 // FoldRewardAccountOutputs marks a credential's unfolded credits of the given
 // rounds as added to account.reward, in the transaction that adds them.
@@ -266,7 +273,7 @@ func (s *Store) FoldRewardAccountOutputs(
 UPDATE reward_account_output SET folded = TRUE
 WHERE credential_tag = ? AND staking_key = ?
   AND epoch IN (`+bindPlaceholders(len(epochs))+`)
-  AND `+unfoldedRewardCreditPredicate), args...); err != nil {
+  AND `+credentialUnfoldedRewardCreditPredicate), args...); err != nil {
 				return fmt.Errorf("fold reward account outputs: %w", err)
 			}
 			return nil
@@ -286,7 +293,7 @@ func (s *Store) FoldPendingRewardAccountOutputs(
 		if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
 UPDATE reward_account_output SET folded = TRUE
 WHERE credential_tag = ? AND staking_key = ?
-  AND `+unfoldedRewardCreditPredicate+`
+  AND `+credentialUnfoldedRewardCreditPredicate+`
   AND EXISTS (
       SELECT 1 FROM reward_credit_round rcr
       WHERE rcr.snapshot_epoch = reward_account_output.epoch
@@ -295,6 +302,98 @@ WHERE credential_tag = ? AND staking_key = ?
 		}
 		return nil
 	})
+}
+
+// claimUnfoldedRewardCredits marks the unfolded credits the query selects as
+// folded and returns them, so the caller writes exactly those to their
+// accounts in the same transaction. On PostgreSQL and MySQL the selected rows
+// are locked first: a concurrent claim of the same row waits, re-reads it as
+// folded and skips it, so no credit is written twice.
+func (s *Store) claimUnfoldedRewardCredits(
+	txn types.Txn,
+	where string,
+	args ...any,
+) ([]*models.RewardAccountOutput, error) {
+	var ret []*models.RewardAccountOutput
+	err := s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		query := `
+SELECT ` + rewardAccountOutputColumns + `
+FROM reward_account_output rao
+WHERE ` + where + `
+  AND rao.spendable = TRUE AND rao.guarded = FALSE AND NOT rao.folded
+  AND EXISTS (
+      SELECT 1 FROM reward_credit_round rcr
+      WHERE rcr.snapshot_epoch = rao.epoch
+  )
+ORDER BY rao.id`
+		if s.dialect.Name() != "sqlite" {
+			query += " FOR UPDATE"
+		}
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
+		if err != nil {
+			return fmt.Errorf("claim unfolded reward credits: %w", err)
+		}
+		ret, err = scanRewardAccountOutputRows(rows)
+		if err != nil {
+			return err
+		}
+		chunk := max(1, s.dialect.ParameterLimit())
+		for start := 0; start < len(ret); start += chunk {
+			end := min(start+chunk, len(ret))
+			ids := make([]any, 0, end-start)
+			for _, output := range ret[start:end] {
+				ids = append(ids, output.ID)
+			}
+			if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+				`UPDATE reward_account_output SET folded = TRUE WHERE id IN (`+
+					bindPlaceholders(len(ids))+`)`,
+			), ids...); err != nil {
+				return fmt.Errorf("fold claimed reward credits: %w", err)
+			}
+		}
+		return nil
+	})
+	return ret, err
+}
+
+// ClaimPendingRewardCreditsForCredential claims every unfolded credit of one
+// stake credential in the credited rounds.
+func (s *Store) ClaimPendingRewardCreditsForCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	if len(stakingKey) == 0 {
+		return nil, nil
+	}
+	return s.claimUnfoldedRewardCredits(
+		txn,
+		"rao.credential_tag = ? AND rao.staking_key = ?",
+		credentialTag, stakingKey,
+	)
+}
+
+// ClaimUnfoldedRewardCredits claims up to limit unfolded credits of one
+// credited round, in row order.
+func (s *Store) ClaimUnfoldedRewardCredits(
+	snapshotEpoch uint64,
+	limit int,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	epoch, err := checkedInt64(snapshotEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("claim reward credits epoch: %w", err)
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	return s.claimUnfoldedRewardCredits(
+		txn,
+		"rao.id IN (SELECT id FROM (SELECT o.id FROM reward_account_output o "+
+			"WHERE o.epoch = ? AND o.spendable = TRUE AND o.guarded = FALSE "+
+			"AND o.folded = FALSE ORDER BY o.id LIMIT ?) AS next_ids)",
+		epoch, limit,
+	)
 }
 
 const rollbackUnfoldRewardAccountOutputsSQL = `
@@ -350,7 +449,7 @@ func (s *Store) pendingRewardCreditSubquery(
 	return `(SELECT COALESCE(SUM(CAST(prc.amount AS ` + s.pendingCreditCastType() +
 		`)), 0) FROM reward_account_output prc WHERE prc.credential_tag = ` +
 		tagCol + ` AND prc.staking_key = ` + keyCol +
-		` AND prc.spendable = TRUE AND prc.guarded = FALSE AND prc.folded = FALSE` +
+		` AND prc.spendable = TRUE AND prc.guarded = FALSE AND NOT prc.folded` +
 		` AND EXISTS (SELECT 1 FROM reward_credit_round rcr` +
 		` WHERE rcr.snapshot_epoch = prc.epoch))`
 }
@@ -422,9 +521,9 @@ func (s *Store) rewardAccountOutputsForCredential(
 	if len(epochs) == 0 || len(stakingKey) == 0 {
 		return nil, nil
 	}
-	outputPredicate := "folded = FALSE"
+	outputPredicate := "NOT folded"
 	if spendableOnly {
-		outputPredicate = unfoldedRewardCreditPredicate
+		outputPredicate = credentialUnfoldedRewardCreditPredicate
 	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
@@ -465,7 +564,7 @@ func (s *Store) GetPendingRewardAccountOutputsForCredential(
 SELECT `+rewardAccountOutputColumns+`
 FROM reward_account_output rao
 WHERE rao.credential_tag = ? AND rao.staking_key = ?
-  AND rao.spendable = TRUE AND rao.guarded = FALSE AND rao.folded = FALSE
+  AND rao.spendable = TRUE AND rao.guarded = FALSE AND NOT rao.folded
   AND EXISTS (
       SELECT 1 FROM reward_credit_round rcr
       WHERE rcr.snapshot_epoch = rao.epoch

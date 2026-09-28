@@ -13522,8 +13522,22 @@ A credential's credits are folded into its account only where its stored
 balance changes: a transaction withdrawing from it first writes them with the
 journal rows and `reward_live_stake` refresh an eager boundary writes
 (`foldRewardCreditsForWithdrawals`, `AddAccountRewardsByCredential`) and marks
-the rows `folded` in the same transaction (`FoldRewardAccountOutputs`), so no
-reader counts a credit twice. A rollback below the boundary removes the round
+the rows `folded` in the same transaction, so no reader counts a credit twice.
+The rows are claimed before they are written
+(`ClaimPendingRewardCreditsForCredential`, `ClaimUnfoldedRewardCredits`): the
+claim marks them folded and, on PostgreSQL and MySQL, locks them first, so a
+concurrent claim of the same row skips it.
+
+Compaction folds every credited round older than the newest two
+(`rewardCreditRoundsKeptUnfolded`) into account rows in the background
+(`queueRewardCreditCompaction`, queued when a boundary credits a round and at
+start), `rewardCreditCompactionChunk` (1,000) credits per transaction under
+`rewardPrecomputeWriteMu`, so the derived-balance sums cover the last few rounds.
+Folding never changes a balance, so no reader needs an old round unfolded; the
+newest two stay unfolded because a rollback within the stability window can
+reach the boundaries that applied them. The folded flag is the job's progress
+record, so a stopped job resumes where it left off, and a rollback over a
+compacted round reverts it the same way as a withdrawal's folds. A rollback below the boundary removes the round
 and clears `folded` on its surviving outputs in the transaction that reverts
 the folded credits' journal rows. Core-mode retention keeps a credited round's
 unfolded rows. A precompute for a credited round does nothing, and replacing a

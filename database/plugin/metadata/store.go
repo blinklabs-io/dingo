@@ -2612,6 +2612,24 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardAccountOutput, error)
 
+	// ClaimPendingRewardCreditsForCredential marks every unfolded credit of
+	// one stake credential in the credited rounds folded and returns them,
+	// for the caller to write to the account in the same transaction.
+	ClaimPendingRewardCreditsForCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// ClaimUnfoldedRewardCredits marks up to limit unfolded credits of one
+	// credited round folded and returns them, for the caller to write to
+	// their accounts in the same transaction.
+	ClaimUnfoldedRewardCredits(
+		uint64, // snapshotEpoch
+		int, // limit
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
 	// FoldPendingRewardAccountOutputs marks all of a credential's unfolded
 	// applied reward outputs as added to its account balance.
 	FoldPendingRewardAccountOutputs(uint8, []byte, types.Txn) error

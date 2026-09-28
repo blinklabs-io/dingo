@@ -607,9 +607,17 @@ output rows in an applied round with `spendable = TRUE`, `guarded = FALSE` and
 `GetLiveStakeInputsForPools`, DRep voting-power reads and historical stake
 reconstruction join through this table, so the set of applied rounds does not
 consume a growing SQL bind list. Historical reads include only rounds whose
-`boundary_slot` is at or before the requested slot. `FoldPendingRewardAccountOutputs`
-sets `folded` on one credential's rows in the transaction that writes them to
-its account. `GetPendingRewardCreditRounds` and
+`boundary_slot` is at or before the requested slot.
+`ClaimPendingRewardCreditsForCredential` (one stake credential's rows) and
+`ClaimUnfoldedRewardCredits` (up to a limit of one round's rows, in `id` order)
+select a credited round's unfolded rows, with `FOR UPDATE` on PostgreSQL and
+MySQL, set `folded` on them and return them for the caller to write to their
+accounts in the same transaction. `FoldPendingRewardAccountOutputs` sets
+`folded` on one credential's rows. Lookups of one stake credential's unfolded
+rows test the flag as `NOT folded`, so SQLite reads them on the credential
+index rather than the `(spendable, guarded, folded, epoch)` pending index,
+which serves the per-round probes (`HasPendingRewardCreditRounds`,
+`ClaimUnfoldedRewardCredits`). `GetPendingRewardCreditRounds` and
 `SetPendingRewardCreditRounds` read and replace the table rows.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
 the rollback slot and clears `folded` on its surviving outputs.

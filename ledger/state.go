@@ -1500,6 +1500,12 @@ type LedgerState struct {
 	// rewardPrecomputeMu like the precompute worker's registration.
 	deferredStakeInputsWG      sync.WaitGroup
 	deferredStakeInputsWriting map[uint64]struct{}
+	// rewardCreditCompactionWG tracks queueRewardCreditCompaction's job;
+	// rewardCreditCompacting and rewardCreditCompactAgain are guarded by
+	// rewardPrecomputeMu.
+	rewardCreditCompactionWG sync.WaitGroup
+	rewardCreditCompacting   bool
+	rewardCreditCompactAgain bool
 	// deferredStakeInputsFailHook is a test seam, nil in production. A
 	// non-nil error it returns fails that deferred stake-input chunk.
 	deferredStakeInputsFailHook func() error
@@ -2071,6 +2077,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Without it, a node started mid-epoch calculates that round inline inside
 	// the next epoch-rollover transaction instead of ahead of it.
 	ls.queueStartupRewardPrecompute()
+	ls.queueRewardCreditCompaction()
 	if ls.startupRewardPrecomputeHook != nil {
 		ls.startupRewardPrecomputeHook()
 	}
@@ -2844,6 +2851,7 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.rewardPrecomputeMu.Unlock()
 	ls.rewardPrecomputeWG.Wait()
 	ls.deferredStakeInputsWG.Wait()
+	ls.rewardCreditCompactionWG.Wait()
 	ls.config.Logger.Info(
 		"reward precompute handlers finished",
 		"elapsed", time.Since(rewardStart).Round(time.Millisecond),
