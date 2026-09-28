@@ -30,16 +30,21 @@ const (
 	ChainComparisonUnknown ChainComparisonResult = 2
 )
 
-// ComparePraosTips compares two Praos-era tips using cardano-node's
-// equal-length tiebreaker shape:
+// ComparePraosTips compares two tips using cardano-node's equal-length
+// tiebreaker shape:
 //  1. Higher block number wins.
-//  2. At equal block number, prefer a candidate with the same issuer and slot
-//     only when it has a higher opcert issue number.
-//  3. Otherwise compare the tip VRF only when the era's VRF tiebreaker flavor
+//  2. At equal block number, a Byron epoch-boundary block beats a Byron
+//     regular block sharing its predecessor's block number: canonical Byron
+//     PBFT counts the boundary block as an additional block despite the
+//     shared number. This rule only fires when at least one side is a Byron
+//     header (view.Byron != ByronBlockKindNone); Shelley-family tips are
+//     unaffected and fall through to the rules below exactly as before.
+//  3. Otherwise, for a Praos-era view, prefer a candidate with the same
+//     issuer and slot only when it has a higher opcert issue number.
+//  4. Otherwise compare the tip VRF only when the era's VRF tiebreaker flavor
 //     is armed. Conway restricts this to tips at most 5 slots apart.
 //
-// If neither reference implementation rule applies, this returns ChainEqual so
-// callers keep the incumbent.
+// If no rule applies, this returns ChainEqual so callers keep the incumbent.
 func ComparePraosTips(
 	tipA, tipB ochainsync.Tip,
 	viewA, viewB PraosTiebreakerView,
@@ -56,6 +61,10 @@ func ComparePraosTips(
 		return ChainEqual
 	}
 
+	if result := compareByronBlockKind(viewA.Byron, viewB.Byron); result != ChainEqual {
+		return result
+	}
+
 	if PreferPraosCandidate(viewB, viewA) {
 		return ChainABetter
 	}
@@ -63,6 +72,21 @@ func ComparePraosTips(
 		return ChainBBetter
 	}
 	return ChainEqual
+}
+
+// compareByronBlockKind applies the Byron EBB-over-regular tiebreak. It is a
+// no-op (ChainEqual) unless both sides are Byron headers: a Shelley-family
+// tip always reports ByronBlockKindNone, and mixing a Byron kind with None
+// (an era-transition tip pair) is left to the existing Praos rules, which
+// already return ChainEqual for a view with no issuer/VRF data.
+func compareByronBlockKind(a, b ByronBlockKind) ChainComparisonResult {
+	if a == ByronBlockKindNone || b == ByronBlockKindNone || a == b {
+		return ChainEqual
+	}
+	if a == ByronBlockKindEBB {
+		return ChainABetter
+	}
+	return ChainBBetter
 }
 
 // PreferPraosCandidate mirrors ouroboros-consensus'

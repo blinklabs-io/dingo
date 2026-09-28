@@ -4284,6 +4284,22 @@ The `ChainSelector` (`chainselection/`) implements Ouroboros Praos rules:
    is close enough to the best advertised peer tip (the network tip) to switch
    back to Praos
 
+Byron has no Praos select-view data (no opcert or VRF), so rule 3 alone
+leaves a Byron epoch-boundary block (EBB) and the regular block it shares a
+protocol block number with as `ChainEqual`. `PraosTiebreakerView` carries an
+era-aware `Byron` kind field (`ByronBlockKindNone`/`Main`/`EBB`, set by
+`GetPraosTiebreakerView`'s header type switch) for exactly this case;
+`ComparePraosTips` (`consensus/praos/comparison.go`) checks it ahead of the
+opcert/VRF rule and prefers an EBB over a regular tip at equal block number,
+matching canonical Byron PBFT (the boundary block is an additional block
+despite sharing its predecessor's number). The check is a no-op whenever
+either side is not a Byron header, so it never arms for Shelley-family tips
+and rule 3 there is unchanged. Because the kind rides the same
+`PraosTiebreakerView` already threaded into `PeerChainTip.PraosView` and into
+the incoming-header comparison in `ledger/chainsync.go`, both multi-peer
+selection and incoming-header comparison get the tiebreak with no separate
+plumbing.
+
 The selector tracks tips from all connected peers, honors peer eligibility and
 priority updates from peer governance, and switches the active chainsync
 connection when a better chain is found. A chain switch does not assume that the
