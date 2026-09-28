@@ -887,8 +887,13 @@ func (o *Ouroboros) blockfetchClientBlock(
 	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// Enqueued rather than published inline: see enqueueBlockfetchEvent's
+		// doc comment (#4782) for why blockfetchClientBlock must never block
+		// on ledger consumption. Sized by the block's own raw CBOR bytes,
+		// which is what the peer actually delivered and what this in-flight
+		// bound is meant to track.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -902,6 +907,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 					Block: block,
 				},
 			),
+			len(block.Cbor()),
 		)
 	}
 	return nil
@@ -931,8 +937,12 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 	o.blockFetchMutex.Unlock()
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// Enqueued, not published inline -- see blockfetchClientBlock and
+		// enqueueBlockfetchEvent (#4782). Also keeps this BatchDone strictly
+		// after every Block event this same request queued: both share one
+		// connection-scoped FIFO drained by a single goroutine at a time.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -942,6 +952,7 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 					RangeErr:     rangeErr,
 				},
 			),
+			0,
 		)
 	}
 	return nil

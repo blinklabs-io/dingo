@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -22,6 +23,33 @@ import (
 	"github.com/blinklabs-io/gouroboros/connection"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
+
+// keepaliveTimeoutErrSubstring is the fragment of gouroboros protocol.go's
+// state-transition timeout error
+// ("%s: timeout waiting on transition from protocol state %s") that survives
+// regardless of which state the client was waiting in.
+const keepaliveTimeoutErrSubstring = "timeout waiting on transition"
+
+// classifyKeepaliveTimeoutClose reports whether err is this connection's
+// keep-alive client timing out waiting for a pong -- gouroboros' generic
+// per-protocol state-transition timeout (protocol.go), scoped to the
+// keep-alive protocol by its "keep-alive: " prefix (keepalive.ProtocolName).
+// gouroboros v0.208.0 has no dedicated keep-alive timeout type or hook to
+// match on instead (see blockfetch_forward.go's package doc and #4782's
+// discussion of the same gap for a keep-alive RTT hook), so this is a string
+// match against the one existing error shape.
+//
+// Returns false for a nil error, a close from any other protocol, or a clean
+// shutdown -- this counts keep-alive timeouts specifically, not connection
+// closes in general.
+func classifyKeepaliveTimeoutClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, okeepalive.ProtocolName+":") &&
+		strings.Contains(msg, keepaliveTimeoutErrSubstring)
+}
 
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
 	opts := []okeepalive.KeepAliveOptionFunc{

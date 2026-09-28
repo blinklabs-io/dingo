@@ -140,6 +140,14 @@ type Ouroboros struct {
 	// one and only terminal callback has already run.
 	blockFetchDoneEarly map[blockFetchKey]struct{}
 	blockFetchMutex     sync.Mutex
+	// blockfetchForward holds, per connection, the queue of received
+	// blockfetch events not yet handed to the ledger and whether a forwarder
+	// goroutine is currently draining it. See blockfetch_forward.go for why
+	// this exists (#4782): it decouples blockfetchClientBlock and
+	// blockfetchClientRangeDone, which run on the gouroboros blockfetch
+	// receive goroutine, from the ledger's own consumption rate.
+	blockfetchForward   map[ouroboros.ConnectionId]*blockfetchForwardState
+	blockfetchForwardMu sync.Mutex
 	// blockfetchConnClient resolves the live request-range client for a
 	// connection. Defaults to blockfetchConnClientLive; tests override it to
 	// exercise BlockfetchClientRequestRange without a live connection.
@@ -470,8 +478,30 @@ type blockfetchMetrics struct {
 	// dingo_ledger_block_stage_duration_seconds in the ledger package for
 	// the header-verify/validate/apply stages that follow once a decoded
 	// block reaches the ledger.
-	stageDuration *prometheus.HistogramVec
-	stageDecode   prometheus.Observer
+	//
+	// Two more stages validate the #4782 fix: "enqueue" is the time
+	// blockfetchClientBlock/blockfetchClientRangeDone spend handing an event
+	// to the per-connection forward queue (see blockfetch_forward.go) --
+	// expected to stay near zero regardless of ledger speed, since that is
+	// exactly what must no longer block the gouroboros receive goroutine.
+	// "ledger_publish" is the time the decoupled forwarder goroutine spends
+	// in the same EventBus.Publish call that used to run inline here; it
+	// carries the ledger backpressure this fix moved off the hot path, so it
+	// is expected to show the multi-second stalls the enqueue stage no
+	// longer does.
+	stageDuration      *prometheus.HistogramVec
+	stageDecode        prometheus.Observer
+	stageEnqueue       prometheus.Observer
+	stageLedgerPublish prometheus.Observer
+	// inFlightBytes/inFlightBlocks are the aggregate size and count of
+	// blockfetch events received from peers but not yet handed to the
+	// ledger by the per-connection forwarder (blockfetch_forward.go).
+	// Aggregated across every connection rather than labelled by
+	// connection_id: a per-connection-id label on a gauge grows unbounded
+	// with reconnects (a prior gauge on this same subsystem reached 98
+	// series in 2h of reconnects).
+	inFlightBytes  prometheus.Gauge
+	inFlightBlocks prometheus.Gauge
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -644,6 +674,22 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
 		WithLabelValues("decode")
+	o.blockfetchMetrics.stageEnqueue = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("enqueue")
+	o.blockfetchMetrics.stageLedgerPublish = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("ledger_publish")
+	o.blockfetchMetrics.inFlightBytes = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_bytes",
+			Help: "aggregate bytes of blockfetch blocks received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.inFlightBlocks = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_blocks",
+			Help: "aggregate count of blockfetch events (blocks and batch-done markers) received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
@@ -900,6 +946,15 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
+
+	// Count a keep-alive pong timeout by outcome, complementing the success
+	// counter recorded in instrumentKeepaliveResponse. See #4782: this and
+	// the blockfetch in-flight/enqueue metrics together validate whether the
+	// backpressure fix keeps keep-alives completing within the timeout on a
+	// live sync.
+	if classifyKeepaliveTimeoutClose(e.Error) {
+		o.recordKeepaliveTimeout()
+	}
 
 	// Record connection stability observation for peer scoring
 	// Connection closure indicates reduced stability

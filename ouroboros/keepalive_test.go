@@ -15,12 +15,16 @@
 package ouroboros
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -82,5 +86,105 @@ func TestKeepaliveConnOptsTimeout(t *testing.T) {
 		t,
 		okeepalive.ServerTimeout,
 		keepaliveTimeoutFor(okeepalive.ServerTimeout+30*time.Second),
+	)
+}
+
+// TestClassifyKeepaliveTimeoutClose covers #4782's keep-alive outcome
+// metric: it must fire only for the keep-alive protocol's own
+// state-transition timeout (gouroboros protocol.go's "%s: timeout waiting on
+// transition from protocol state %s", scoped by the "keep-alive: " prefix),
+// not for a nil close reason, a clean shutdown, or another protocol's error
+// -- including another protocol's own timeout, which shares the same
+// generic message shape and would false-positive on a substring match alone.
+func TestClassifyKeepaliveTimeoutClose(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{
+			"keepalive timeout",
+			errors.New(
+				"keep-alive: timeout waiting on transition from protocol state Server",
+			),
+			true,
+		},
+		{
+			"keepalive timeout, different state",
+			errors.New(
+				"keep-alive: timeout waiting on transition from protocol state Client",
+			),
+			true,
+		},
+		{
+			"other protocol timeout",
+			errors.New(
+				"chain-sync: timeout waiting on transition from protocol state Idle",
+			),
+			false,
+		},
+		{
+			"keepalive non-timeout error",
+			errors.New(
+				"keep-alive: unexpected cookie in response, expected 4 but received 5",
+			),
+			false,
+		},
+		{"unrelated error", errors.New("connection reset by peer"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, classifyKeepaliveTimeoutClose(tc.err))
+		})
+	}
+}
+
+// TestHandleConnClosedEventRecordsKeepaliveTimeoutOutcome checks that
+// HandleConnClosedEvent increments dingo_keepalive_timeout_total only when
+// the connection's close reason is a keep-alive timeout, and leaves it
+// unchanged for an unrelated close reason -- the counter must distinguish
+// outcomes, not just count every connection close.
+func TestHandleConnClosedEventRecordsKeepaliveTimeoutOutcome(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 3001},
+	}
+
+	o.HandleConnClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error:        errors.New("blockfetch: connection reset by peer"),
+		},
+	})
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(o.protocolMetrics.keepaliveTimeouts),
+		"an unrelated close reason must not count as a keep-alive timeout",
+	)
+
+	o.HandleConnClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error: errors.New(
+				"keep-alive: timeout waiting on transition from protocol state Server",
+			),
+		},
+	})
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(o.protocolMetrics.keepaliveTimeouts),
+		"a keep-alive timeout close must be counted",
 	)
 }
