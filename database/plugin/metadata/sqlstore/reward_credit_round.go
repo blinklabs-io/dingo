@@ -297,6 +297,13 @@ WHERE credential_tag = ? AND staking_key = ?
 	})
 }
 
+const rollbackUnfoldRewardAccountOutputsSQL = `
+UPDATE reward_account_output SET folded = FALSE
+WHERE folded = TRUE
+  AND epoch IN (
+      SELECT snapshot_epoch FROM reward_credit_round WHERE boundary_slot > ?
+  )`
+
 // deleteRewardCreditRoundsAfterSlot drops rounds applied at a boundary a
 // rollback undoes, and the fold progress recorded for them.
 func (s *Store) deleteRewardCreditRoundsAfterSlot(
@@ -311,13 +318,7 @@ func (s *Store) deleteRewardCreditRoundsAfterSlot(
 	// A rollback removes account deltas through the same transaction. Outputs
 	// that survive because their snapshot predates the rollback must be
 	// unfolded before their applied-round marker is removed.
-	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
-UPDATE reward_account_output SET folded = FALSE
-WHERE folded = TRUE AND EXISTS (
-    SELECT 1 FROM reward_credit_round rcr
-    WHERE rcr.snapshot_epoch = reward_account_output.epoch
-      AND rcr.boundary_slot > ?
-)`), sqlSlot); err != nil {
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(rollbackUnfoldRewardAccountOutputsSQL), sqlSlot); err != nil {
 		return fmt.Errorf("unfold reward account outputs: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, s.dialect.Rebind(

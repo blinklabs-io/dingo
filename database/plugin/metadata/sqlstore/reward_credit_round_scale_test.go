@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -181,4 +182,13 @@ func bytesRepeat(value byte, count int) []byte {
 		ret[index] = value
 	}
 	return ret
+}
+
+func TestRollbackRewardCreditUnfoldUsesEpochIndex(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	plan := queryPlan(t, store.writeDB, rollbackUnfoldRewardAccountOutputsSQL, 100)
+	require.Contains(t, plan, "idx_reward_account_output_epoch_cred_pool_type")
+	require.NotContains(t, plan, "SCAN reward_account_output")
+	require.True(t, strings.Contains(plan, "SEARCH reward_account_output"), plan)
 }
