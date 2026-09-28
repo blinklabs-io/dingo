@@ -83,7 +83,7 @@ func TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs(
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls, "stake_test1a", "stake_test1b")
 	koios := newUniverseTestClient(srv)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -125,7 +125,7 @@ func TestResolveKoiosAccountUniverseCachedRefreshesForNewerEpoch(t *testing.T) {
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls, "stake_test1a")
 	koios := newUniverseTestClient(srv)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -153,7 +153,7 @@ func TestResolveKoiosAccountUniverseCachedRefreshesForNewerEpoch(t *testing.T) {
 func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -205,7 +205,7 @@ func TestResolveKoiosAccountUniverseCachedWithEmptyCrawl(t *testing.T) {
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls)
 	koios := newUniverseTestClient(srv)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -232,7 +232,7 @@ func TestResolveKoiosAccountUniverseCachedRefusesUnboundedReuse(t *testing.T) {
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls, "stake_test1a")
 	koios := newUniverseTestClient(srv)
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	logger := slog.New(slog.DiscardHandler)
@@ -263,7 +263,7 @@ func TestAccountUniverseStateBackfilledOnUpgrade(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(path, nil)
+	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
 
 	fetchedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
@@ -276,7 +276,7 @@ func TestAccountUniverseStateBackfilledOnUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cache.Close())
 
-	reopened, err := OpenCache(path, nil)
+	reopened, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer reopened.Close() //nolint:errcheck
 

@@ -116,7 +116,7 @@ func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -213,7 +213,7 @@ func TestFetchAccountRewardsForEpochInvalidatesOnlyChangedChunksOnUniverseChange
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -331,7 +331,7 @@ func TestFetchAccountRewardsForEpochDoesNotTrustEmptyCheckpointWithinGraceWindow
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -439,7 +439,7 @@ func TestFetchAccountRewardsForEpochRequiresEveryChunkCurrentBeforeComplete(
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -508,7 +508,7 @@ func TestFetchAccountRewardsForEpochEmptyUniverseInvalidatesPriorCheckpointData(
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -580,7 +580,7 @@ func TestFetchAccountRewardsForEpochForceRefreshBypassesRetainedCheckpoints(
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -673,7 +673,7 @@ func TestFetchAccountRewardsForEpochFailedForceRefreshPreservesUntouchedCheckpoi
 		http:    &http.Client{Timeout: 100 * time.Millisecond},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -779,7 +779,7 @@ func TestFetchAccountRewardsForEpochIncompleteCoverageAfterForceRefreshSelfHeals
 		http:    &http.Client{Timeout: 100 * time.Millisecond},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -862,7 +862,7 @@ func TestFetchAccountRewardsForEpochForceRefreshDowngradesCoverageOnPostDispatch
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -924,7 +924,7 @@ func TestFetchAccountRewardsForEpochForceRefreshDowngradesCoverageOnPostDispatch
 func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -1197,7 +1197,7 @@ func TestFetchAccountRewardsForEpochRequestBodyNeverExceedsConfiguredMaxBytes(
 		http:    &http.Client{Timeout: 2 * time.Second},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 

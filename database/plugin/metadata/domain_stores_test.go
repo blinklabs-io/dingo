@@ -66,6 +66,7 @@ var governanceStoreMethods = []string{
 	// Committee
 	"GetCommitteeMember",
 	"GetActiveCommitteeMembers",
+	"GetCommitteeHotAuthorizationsSince",
 	"IsCommitteeMemberResigned",
 	"GetResignedCommitteeMembers",
 	"GetCommitteeActiveCount",
@@ -226,6 +227,7 @@ var stakeSnapshotStoreMethods = []string{
 	"GetStakeByPoolsAtSlot",
 	"GetEpochBoundaryStakeByPools",
 	"GetPoolOwnerStakeAtSlot",
+	"GetEpochBoundaryDelegatedPoolKeyHashes",
 	"GetEpochBoundaryRewardStakeInputsForPools",
 	"GetPointerStakeInputsForPools",
 }

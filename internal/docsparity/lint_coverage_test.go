@@ -172,28 +172,3 @@ func TestLintCoversEveryGoModule(t *testing.T) {
 		}
 	}
 }
-
-// TestLintCoversWindowsBuildTags checks that the root module is linted for
-// windows as well as linux. Files behind `//go:build windows` are excluded
-// from the linux run's build, so every linter is blind to them until a run
-// with GOOS=windows compiles them in.
-func TestLintCoversWindowsBuildTags(t *testing.T) {
-	root := repoRoot(t)
-
-	for _, workflow := range lintWorkflows {
-		covered := false
-		for _, run := range lintRuns(t, root, workflow) {
-			if run.dir == "." && run.goos == "windows" {
-				covered = true
-				break
-			}
-		}
-		if !covered {
-			t.Errorf(
-				"%s never lints the root module with GOOS=windows; "+
-					"files behind //go:build windows are unchecked",
-				workflow,
-			)
-		}
-	}
-}

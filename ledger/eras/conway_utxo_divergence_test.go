@@ -78,6 +78,7 @@ func newConwayDivergenceTxWithReference(
 				[]any{inputHash, uint64(0)},
 			},
 		},
+		1: []any{},
 		2: fee,
 	}
 	if outputAmount > 0 {

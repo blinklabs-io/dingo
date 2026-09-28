@@ -169,8 +169,7 @@ func (s *cursorState) setRollback(point Tip) (IncrementalCursor, error) {
 // This is deliberately computed fresh from two stable, monotonic
 // quantities (the cursor's current Tip.BlockNumber and this request's own
 // at.BlockNumber) rather than by subtracting a snapshot of the counter's
-// own earlier absolute value, which an earlier version of this fix did and
-// which broke under overlapping requests (blinklabs-io/dingo#4183 review):
+// own earlier absolute value, which breaks under overlapping requests:
 // a full check can take several minutes, long enough for the ChainSync
 // callback goroutine to both advance the counter *and* dispatch a second
 // request before the first one completes. That second request's baseline
@@ -1055,13 +1054,11 @@ func incrementalSession(
 // block (both a caller supplies as -1 when the epoch lookup failed, per
 // checkBlockDelta's contract, which decideFullCheckReason treats as "unknown,
 // do not report a transition"); blocksSinceFullCheck and fullCheckInterval
-// are the values checkpointing this block would compare. Priority order
-// matches the switch statement this replaced: a mismatch always wins over an
-// epoch transition, which always wins over a plain interval checkpoint --
-// deliberate, since a mismatch is the most actionable of the three and an
-// operator investigating one should not have it overwritten in the log by a
-// merely-due interval checkpoint that happened to line up with the same
-// block.
+// are the values checkpointing this block would compare. A mismatch always
+// wins over an epoch transition, which always wins over a plain interval
+// checkpoint: a mismatch is the most actionable of the three, and an
+// operator investigating one must not have it overwritten in the log by a
+// merely-due interval checkpoint that happened to land on the same block.
 func decideFullCheckReason(
 	diffEmpty bool,
 	epoch, beforeEpoch int,

@@ -234,7 +234,16 @@ func TestBlockfetchClientRequestRangeUnblocksOnStopWhileWaitingForCapacity(
 		"second RequestRange returned before Stop() gave it a reason to",
 	)
 
-	require.NoError(t, peer.client.Stop())
+	// Client.Stop()'s own doc comment allows a delivery error here: this
+	// client parked its RequestRange mid-batch, so ClientDone is not
+	// pipelinable in Busy/Streaming (StateMap's PipelinedMessageTypes carries
+	// only MessageTypeRequestRange there) and cannot go out until agency
+	// returns -- which nothing in this test ever grants. Stop() still fully
+	// tears down the protocol either way.
+	stopErr := peer.client.Stop()
+	if stopErr != nil {
+		require.ErrorIs(t, stopErr, context.DeadlineExceeded)
+	}
 
 	select {
 	case err := <-blocked:

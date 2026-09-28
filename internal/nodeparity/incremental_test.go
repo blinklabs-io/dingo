@@ -831,18 +831,18 @@ func TestCursorState_ResetFullCheckCounterIsRelativeToAt(t *testing.T) {
 	assert.Equal(t, uint64(100), persisted.BlocksSinceFullCheck)
 }
 
-// TestCursorState_ResetFullCheckCounterHandlesOverlappingRequests covers a
-// second maintainer review finding: an earlier version of this fix
-// subtracted a snapshot of the counter's own absolute value (captured at
-// each request's dispatch time) instead of recomputing from at.BlockNumber.
-// That broke under two overlapping requests -- exactly what this test
-// reproduces. Request A is dispatched, then request B is dispatched later
-// (more blocks having landed by then, while A is still conceptually "in
-// flight"), then A completes first and resets against its own point, then
-// more blocks land during B's own "run", then B completes and resets
-// against its own point. Under the old baseline-subtraction design, B's
-// captured baseline (1100) would already exceed the counter A's completion
-// had reduced to (100), so B's completion would incorrectly floor the
+// TestCursorState_ResetFullCheckCounterHandlesOverlappingRequests guards
+// against subtracting a snapshot of the counter's own absolute value
+// (captured at each request's dispatch time) instead of recomputing from
+// at.BlockNumber. That design breaks under two overlapping requests --
+// exactly what this test reproduces. Request A is dispatched, then request
+// B is dispatched later (more blocks having landed by then, while A is
+// still conceptually "in flight"), then A completes first and resets
+// against its own point, then more blocks land during B's own "run", then
+// B completes and resets against its own point. Under the
+// baseline-subtraction design, B's captured baseline (1100) would already
+// exceed the counter A's completion had reduced to (100), so B's completion
+// would incorrectly floor the
 // counter to 0 -- discarding the real blocks that arrived during B's own
 // run. Recomputing from each request's own at.BlockNumber sidesteps this
 // entirely: neither completion's arithmetic depends on whether the other

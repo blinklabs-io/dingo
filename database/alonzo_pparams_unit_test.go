@@ -74,10 +74,7 @@ func TestCheckNodeSettingsRejectsUnsafeAlonzoPParamsUnit(t *testing.T) {
 			}
 			require.NoError(t, closeTestDatabase(db))
 
-			sqlDB, err := sql.Open(
-				"sqlite",
-				filepath.Join(dataDir, "metadata.sqlite"),
-			)
+			sqlDB, err := openMetadataSQLite(dataDir)
 			require.NoError(t, err)
 			if tt.delete {
 				_, err = sqlDB.Exec(
@@ -151,10 +148,7 @@ func TestReconcileAlonzoPParamsUnitAfterRecovery(t *testing.T) {
 					nil,
 				))
 			} else {
-				sqlDB, err := sql.Open(
-					"sqlite",
-					filepath.Join(dataDir, "metadata.sqlite"),
-				)
+				sqlDB, err := openMetadataSQLite(dataDir)
 				require.NoError(t, err)
 				_, err = sqlDB.Exec(`
 INSERT INTO pparams (cbor, added_slot, epoch, era_id)
@@ -268,10 +262,7 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 // database's metadata store.
 func alonzoPParamsUnitMarkerAt(t *testing.T, dataDir string) string {
 	t.Helper()
-	sqlDB, err := sql.Open(
-		"sqlite",
-		filepath.Join(dataDir, "metadata.sqlite"),
-	)
+	sqlDB, err := openMetadataSQLite(dataDir)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, sqlDB.Close()) }()
 	var marker string
@@ -297,10 +288,7 @@ func alonzoPParamsCbor(t *testing.T, adaPerUtxoByte uint64) []byte {
 // alonzoRowKey17 reads key 17 back out of the single persisted Alonzo row.
 func alonzoRowKey17(t *testing.T, dataDir string) uint64 {
 	t.Helper()
-	sqlDB, err := sql.Open(
-		"sqlite",
-		filepath.Join(dataDir, "metadata.sqlite"),
-	)
+	sqlDB, err := openMetadataSQLite(dataDir)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, sqlDB.Close()) }()
 	var stored []byte
@@ -379,10 +367,7 @@ func TestRepairAlonzoPParamsUnitFromGenesis(t *testing.T) {
 			))
 			require.NoError(t, closeTestDatabase(db))
 
-			sqlDB, err := sql.Open(
-				"sqlite",
-				filepath.Join(dataDir, "metadata.sqlite"),
-			)
+			sqlDB, err := openMetadataSQLite(dataDir)
 			require.NoError(t, err)
 			_, err = sqlDB.Exec(
 				`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
@@ -441,7 +426,7 @@ func TestRepairAlonzoPParamsUnitIsIdempotent(t *testing.T) {
 	))
 	require.NoError(t, closeTestDatabase(db))
 
-	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite"))
+	sqlDB, err := openMetadataSQLite(dataDir)
 	require.NoError(t, err)
 	_, err = sqlDB.Exec(
 		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
@@ -469,10 +454,7 @@ func TestRepairAlonzoPParamsUnitIsIdempotent(t *testing.T) {
 // only that the decoded key 17 still reads the same.
 func alonzoRowCbor(t *testing.T, dataDir string) []byte {
 	t.Helper()
-	sqlDB, err := sql.Open(
-		"sqlite",
-		filepath.Join(dataDir, "metadata.sqlite"),
-	)
+	sqlDB, err := openMetadataSQLite(dataDir)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, sqlDB.Close()) }()
 	var stored []byte
@@ -537,7 +519,7 @@ func TestRepairAlonzoPParamsUnitRefusesRowThatDoesNotRoundTrip(t *testing.T) {
 		"the store must keep the row's bytes verbatim for this to test anything",
 	)
 
-	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite"))
+	sqlDB, err := openMetadataSQLite(dataDir)
 	require.NoError(t, err)
 	_, err = sqlDB.Exec(
 		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
@@ -585,7 +567,7 @@ func TestRepairAlonzoPParamsUnitRefusesWordBelowEight(t *testing.T) {
 	)
 	require.NoError(t, closeTestDatabase(db))
 
-	sqlDB, err := sql.Open("sqlite", filepath.Join(dataDir, "metadata.sqlite"))
+	sqlDB, err := openMetadataSQLite(dataDir)
 	require.NoError(t, err)
 	_, err = sqlDB.Exec(
 		`UPDATE node_settings_gate SET value = ? WHERE name = ?`,
@@ -603,5 +585,17 @@ func TestRepairAlonzoPParamsUnitRefusesWordBelowEight(t *testing.T) {
 		nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		alonzoPParamsUnitMarkerAt(t, dataDir),
 		"a refused repair must leave the legacy marker in place",
+	)
+}
+
+// openMetadataSQLite opens the store's metadata file for seeding or reading
+// back a state the provider could not produce. Durability is irrelevant to a
+// database the test discards, so synchronous=OFF skips the flush per write;
+// journal_mode is left alone because the provider's WAL mode is file state.
+func openMetadataSQLite(dataDir string) (*sql.DB, error) {
+	return sql.Open(
+		"sqlite",
+		filepath.Join(dataDir, "metadata.sqlite")+
+			"?_pragma=synchronous(OFF)",
 	)
 }

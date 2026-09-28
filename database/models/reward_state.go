@@ -28,13 +28,24 @@ const RewardStakeCalculationVersion uint = 2
 
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
-	ID           uint
-	Epoch        uint64
-	Treasury     types.Uint64
-	Reserves     types.Uint64
-	Fees         types.Uint64
-	Rewards      types.Uint64
-	CapturedSlot uint64
+	ID       uint
+	Epoch    uint64
+	Treasury types.Uint64
+	Reserves types.Uint64
+	Fees     types.Uint64
+	Rewards  types.Uint64
+	// ImportedEpochFees is the fee pot a Mithril bootstrap collected for this
+	// row's own epoch up to and including its anchor block
+	// (UTxOState.utxosFees minus SnapShots.ssFee at import time; see
+	// seedImportedRewardBasis). A live-computed row never sets it. It exists
+	// because this epoch's locally stored transactions only cover slots
+	// after CapturedSlot: rewardEpochFees adds it to a post-anchor local sum
+	// instead of summing the whole epoch, which would silently omit the
+	// fees collected before the anchor. Nil means the row was computed live
+	// or imported by a release predating this field; either way the
+	// whole-epoch local sum applies.
+	ImportedEpochFees *types.Uint64
+	CapturedSlot      uint64
 }
 
 // RewardSnapshot captures reward-calculation snapshot metadata for an epoch.

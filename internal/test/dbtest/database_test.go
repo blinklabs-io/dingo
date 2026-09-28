@@ -124,6 +124,32 @@ func TestNewDatabaseWithOptionsSeedsCallerDataDir(t *testing.T) {
 	}
 }
 
+// TestRawSQLiteMetadataRelaxesSynchronous pins the raw fixture's connection
+// to synchronous=OFF (0). It is a test-only handle onto a throwaway database,
+// so it has no use for the driver's per-autocommit flush; the provider's own
+// connections, which this handle sits beside, are not affected.
+func TestRawSQLiteMetadataRelaxesSynchronous(t *testing.T) {
+	db, err := NewDatabaseWithOptions(t, Options{
+		Config: &database.Config{DataDir: t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("NewDatabaseWithOptions: %v", err)
+	}
+	raw, err := RawSQLiteMetadata(t, db)
+	if err != nil {
+		t.Fatalf("RawSQLiteMetadata: %v", err)
+	}
+	var synchronous int
+	if err := raw.QueryRow(
+		"PRAGMA synchronous",
+	).Scan(&synchronous); err != nil {
+		t.Fatalf("read synchronous pragma: %v", err)
+	}
+	if synchronous != 0 {
+		t.Errorf("PRAGMA synchronous = %d, want 0 (OFF)", synchronous)
+	}
+}
+
 // TestNewDatabaseWithOptionsWithoutDataDir covers the other branch: with no
 // DataDir the provider is pointed at a directory of the fixture's own, which
 // is still a file-backed database rather than the in-memory store the

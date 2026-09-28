@@ -43,6 +43,30 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	assert.Same(t, pparams, out.UpdatedPParams)
 }
 
+func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
+	t.Parallel()
+
+	action := &lcommon.UpdateCommitteeGovAction{
+		Type:   uint(lcommon.GovActionTypeUpdateCommittee),
+		Quorum: cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	actionCbor, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+		GovActionCbor: actionCbor,
+	}
+
+	remaining, err := ratificationEnactmentPrecondition(
+		conwayPParamsFixture(10),
+		nil,
+		proposal,
+		0,
+	)
+	require.NoError(t, err)
+	assert.Zero(t, remaining)
+}
+
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	t.Parallel()
 
@@ -455,7 +479,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 		nil, nil, &ratifiedEpoch, &ratifiedSlot,
 	), nil))
 	require.NoError(t, db.SetGovernanceProposal(buildNoConfidenceProposal(
-		t, siblingHash, 0, 12, 25, siblingAddr, 101,
+		t, siblingHash, 0, 4, 25, siblingAddr, 101,
 		nil, nil, nil, nil,
 	), nil))
 
@@ -483,6 +507,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	}
 
 	out := runEpoch(5, 500)
+	assert.Equal(t, 1, out.EnactedCount)
 	assert.Equal(t, 1, out.OrphanedCount)
 
 	winner, err := store.GetAccountByCredential(0, winnerCred, false, nil)
@@ -783,7 +808,7 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 					ActionIndex:   0,
 					ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
 					ProposedEpoch: 4,
-					ExpiresEpoch:  10,
+					ExpiresEpoch:  4,
 					AnchorURL:     "https://example.invalid/no-confidence",
 					AnchorHash:    testBytes(32, 0xA2),
 					ReturnAddress: testBytes(29, 0xA3),
@@ -822,6 +847,11 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, proposal.RatifiedEpoch)
 			assert.Equal(t, uint64(5), *proposal.RatifiedEpoch)
+			assert.Nil(
+				t,
+				proposal.ExpiredEpoch,
+				"a proposal ratified at its final boundary must not also expire",
+			)
 		})
 	}
 }
@@ -1396,21 +1426,45 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 		},
 		{
 			Credential:  testBytes(28, 2),
-			ExpiryEpoch: 10,
+			ExpiryEpoch: 99,
 			Active:      true,
 		},
 		{
 			Credential:  testBytes(28, 3),
-			ExpiryEpoch: 11,
+			ExpiryEpoch: 100,
+			Active:      true,
+		},
+		{
+			Credential:  testBytes(28, 4),
+			ExpiryEpoch: 101,
 			Active:      true,
 		},
 	} {
 		require.NoError(t, store.CreateDrep(nil, &drep))
 	}
 
-	count, err := countActiveDReps(db, nil, 10)
-	require.NoError(t, err)
-	assert.Equal(t, 2, count)
+	for _, test := range []struct {
+		epoch uint64
+		count int
+	}{
+		{epoch: 99, count: 4},
+		{epoch: 100, count: 3},
+		{epoch: 101, count: 2},
+	} {
+		count, err := countActiveDReps(db, nil, test.epoch)
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			test.count,
+			count,
+			"active DRep count at epoch %d",
+			test.epoch,
+		)
+		state, err := LoadDRepVotingState(db, nil, test.epoch, false)
+		require.NoError(t, err)
+		assert.Len(t, state.Dreps, test.count,
+			"voting DRep set at epoch %d", test.epoch)
+	}
 }
 
 func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
@@ -1425,17 +1479,44 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 	}))
 }
 
+func TestCommitteeAbsentUsesEnactedStateAndGenesis(t *testing.T) {
+	t.Parallel()
+
+	genesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{"keyHash-committee-member": 500},
+		},
+	}
+	emptyGenesis := &conway.ConwayGenesis{
+		Committee: conway.ConwayGenesisCommittee{
+			Members: map[string]int{},
+		},
+	}
+	require.True(t, committeeAbsent(nil, nil, false))
+	require.False(t, committeeAbsent(nil, genesis, false))
+	require.False(t, committeeAbsent(nil, emptyGenesis, false))
+	require.False(t, committeeAbsent(nil, nil, true))
+	require.False(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeUpdateCommittee),
+	}, nil, false))
+	require.True(t, committeeAbsent(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
+	}, genesis, true))
+}
+
 func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 	t.Parallel()
 
 	const currentEpoch = uint64(10)
 	uintPtr := func(value uint64) *uint64 { return &value }
 	tests := []struct {
-		name         string
-		termLimit    uint64
-		memberExpiry *uint64
-		actionType   lcommon.GovActionType
-		wantRatified bool
+		name          string
+		termLimit     uint64
+		memberExpiry  *uint64
+		actionType    lcommon.GovActionType
+		wantRatified  bool
+		zeroQuorum    bool
+		wantEnactment bool
 	}{
 		{
 			name:         "within limit",
@@ -1443,6 +1524,15 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			memberExpiry: uintPtr(14),
 			actionType:   lcommon.GovActionTypeUpdateCommittee,
 			wantRatified: true,
+		},
+		{
+			name:          "zero quorum ratifies and enacts",
+			termLimit:     5,
+			memberExpiry:  uintPtr(14),
+			actionType:    lcommon.GovActionTypeUpdateCommittee,
+			wantRatified:  true,
+			zeroQuorum:    true,
+			wantEnactment: true,
 		},
 		{
 			name:         "exact boundary",
@@ -1496,10 +1586,14 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 					)
 					members[credential] = *test.memberExpiry
 				}
+				quorum := newRat(2, 3)
+				if test.zeroQuorum {
+					quorum = newRat(0, 1)
+				}
 				action = &lcommon.UpdateCommitteeGovAction{
 					Type:       uint(test.actionType),
 					CredEpochs: members,
-					Quorum:     newRat(2, 3),
+					Quorum:     quorum,
 				}
 			case lcommon.GovActionTypeNoConfidence:
 				action = &lcommon.NoConfidenceGovAction{
@@ -1564,6 +1658,31 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			if test.wantRatified {
 				require.NotNil(t, proposal.RatifiedEpoch)
 				assert.Equal(t, currentEpoch, *proposal.RatifiedEpoch)
+				if test.wantEnactment {
+					nextTxn := db.MetadataTxn(true)
+					nextOut, nextErr := ProcessEpoch(&EpochInput{
+						DB:           db,
+						Txn:          nextTxn,
+						PrevEpoch:    currentEpoch,
+						NewEpoch:     currentEpoch + 1,
+						BoundarySlot: 600,
+						PParams:      out.UpdatedPParams,
+						UpdateFn: func(
+							pparams lcommon.ProtocolParameters,
+							_ any,
+						) (lcommon.ProtocolParameters, error) {
+							return pparams, nil
+						},
+					})
+					require.NoError(t, nextErr)
+					require.NoError(t, nextTxn.Commit())
+					nextTxn.Release()
+					require.Equal(t, 1, nextOut.EnactedCount)
+					proposal, err = db.GetGovernanceProposal(txHash, 0, nil)
+					require.NoError(t, err)
+					require.NotNil(t, proposal.EnactedEpoch)
+					assert.Equal(t, currentEpoch+1, *proposal.EnactedEpoch)
+				}
 			} else {
 				assert.Nil(t, proposal.RatifiedEpoch)
 				assert.Nil(t, proposal.RatifiedSlot)

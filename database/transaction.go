@@ -409,7 +409,7 @@ func (d *Database) SetTransactionWithOpts(
 		)
 	}
 
-	if updateEpoch > 0 && tx.IsValid() {
+	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(genesisHash.Bytes(), update.Cbor(), point.Slot, updateEpoch, txn); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
@@ -1858,6 +1858,9 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	if d.Blob() == nil {
 		return types.ErrBlobStoreUnavailable
 	}
+	if len(txHashes) == 0 {
+		return nil
+	}
 
 	var deleteErrors int
 	deleteBatch := func(
@@ -1898,14 +1901,12 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		// objects goes away either way, so both are orphans rather than
 		// silently dropped work.
 		staged := len(txHashes)
-		if staged > 0 {
-			staged = stagedBlobDeleteLimit(
-				blob,
-				txn.Blob(),
-				len(types.TxBlobKey(txHashes[0])),
-				staged,
-			)
-		}
+		staged = stagedBlobDeleteLimit(
+			blob,
+			txn.Blob(),
+			len(types.TxBlobKey(txHashes[0])),
+			staged,
+		)
 		deleteBatch(blob, txn.Blob(), txHashes[:staged])
 		if skipped := len(txHashes) - staged; skipped > 0 {
 			deleteErrors += skipped

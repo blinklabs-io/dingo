@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -366,6 +367,66 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_PersistedFloorOverridesLenientLi
 			"still be rejected using the durably persisted floor",
 	)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestQueryShelleyUtxoByTxIn_RetentionWindow_DeferredForCatchup_NotRejected
+// covers checkUtxoRetentionWindow's utxoPruningDeferredForCatchup conjunct
+// (ledger/queries.go): while this node is still catching up to a known
+// upstream target, cleanupConsumedUtxos itself defers pruning entirely (see
+// utxoPruningDeferredForCatchup's doc comment), so nothing has actually been
+// pruned yet and the live-tip-derived retention floor must not apply either
+// -- only the durably persisted floor (unset here, so zero) still can.
+//
+// Same shape as TestQueryShelleyUtxoByTxIn_RetentionWindow_TooOldRejected
+// (identical tip and default 50_000 stability window, so the live-tip floor
+// would otherwise be 150_000) except an active upstream connection with no
+// admitted target yet marks pruning as deferred for catchup -- mirroring
+// utxo_pruning_catchup_test.go's "active upstream, target not yet known"
+// case. No-opping the !ls.utxoPruningDeferredForCatchup(...) conjunct in
+// checkUtxoRetentionWindow makes this test fail with
+// ErrHistoricalStateUnavailable instead of the required nil.
+func TestQueryShelleyUtxoByTxIn_RetentionWindow_DeferredForCatchup_NotRejected(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	// newPoolDistr2Ledger leaves CardanoNodeConfig nil, so
+	// calculateStabilityWindow returns the default (50_000).
+	const tipSlot = 200_000
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	// An active upstream connection with no admitted target yet: "still
+	// syncing," per utxoPruningDeferredForCatchup's own doc comment, so it
+	// reports deferred regardless of tipSlot/stabilityWindow.
+	connA := testChainsyncConnId(6301, 3301)
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &connA
+	}
+	ls.publishActiveUpstream(connA)
+
+	// Without deferral this would compute floor = 200_000 - 50_000 =
+	// 150_000 (see RetentionWindow_TooOldRejected) and reject slot 1
+	// outright.
+	txIn := ledger.NewShelleyTransactionInput(
+		hex.EncodeToString(repeatedBytes(32, 0xEE)),
+		0,
+	)
+	_, err := ls.queryShelleyUtxoByTxIn(
+		[]ledger.ShelleyTransactionInput{txIn},
+		QueryPoint{Slot: 1},
+		nil,
+	)
+	require.NoError(
+		t,
+		err,
+		"pruning deferred for catchup means nothing has actually been "+
+			"pruned yet, so the live-tip retention floor must not reject "+
+			"this pin",
+	)
 }
 
 // TestQuery_UtxoByTxIn_WiredThroughDispatch is an end-to-end check that

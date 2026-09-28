@@ -744,13 +744,22 @@ func checkEpoch(
 	// while it stays in the pool set, a skipped bundle, an unread pool map —
 	// leaves membership unproven and keeps the stricter classification
 	// (dingo #3795, preserving #3485's direction).
-	if paramEpochPools == nil && declaredParamPools > 0 && dingoPoolErr == nil {
-		paramInputs := make(map[string]struct{}, len(dingoPoolMap))
+	// paramInputs is every pool with a K+1 reward_pool_input row
+	// (ParamsPresent), independent of which completeness route below ends up
+	// using it. Both the epoch_summary-based departure fallback immediately
+	// below and the reward_snapshot-based zero-stake route further down
+	// (dingo #4691) need the same set, so it is built once here regardless
+	// of whether paramEpochPools is already resolved.
+	var paramInputs map[string]struct{}
+	if dingoPoolErr == nil {
+		paramInputs = make(map[string]struct{}, len(dingoPoolMap))
 		for keyHex, dingoPool := range dingoPoolMap {
 			if dingoPool != nil && dingoPool.ParamsPresent {
 				paramInputs[keyHex] = struct{}{}
 			}
 		}
+	}
+	if paramEpochPools == nil && declaredParamPools > 0 && paramInputs != nil {
 		if uint64(len(paramInputs)) == declaredParamPools {
 			paramEpochPools = paramInputs
 		} else {
@@ -801,6 +810,66 @@ func checkEpoch(
 			)
 		} else {
 			retiredByParamEpoch = retired
+		}
+	}
+	// paramEpochPositiveStakeProven: whether paramInputs is provably the
+	// network's complete positive-stake pool set at K+1 (dingo #4691).
+	// reward_snapshot.TotalPoolCount is written by
+	// ledger/snapshot/rotation.go's buildRewardStateInputs from exactly the
+	// set reward_pool_input holds rows for -- the reward-stake distribution
+	// after rewardStakeDistribution has already dropped every zero-stake
+	// pool -- unlike epoch_summary.TotalPoolCount above, which counts any
+	// pool with a delegator regardless of stake and can therefore never
+	// equal len(paramInputs) on a network with any zero-stake-but-delegated
+	// pool (observed on Preview: epoch 160 declared 113 pools via
+	// epoch_summary against 111 real reward-input rows). Equality against
+	// reward_snapshot's count is a genuine completeness proof instead of one
+	// that route can structurally never satisfy.
+	//
+	// ExcludedActiveStake must be known and exactly zero. A degraded pool
+	// dropped from reward_pool_input for stale registration data (dingo
+	// #4025) is excluded from paramInputs for a reason that IS a genuine
+	// gap, and reward_snapshot.TotalPoolCount already reflects that
+	// exclusion -- so a nonzero (or unknown, pre-#4025) ExcludedActiveStake
+	// means a matching count proves nothing about whether any particular
+	// absent pool is safe, and the route must stay closed.
+	//
+	// A pool absent from this proven-complete set genuinely has no positive
+	// stake at K+1 -- not departed, just contributing nothing to the
+	// reward-stake distribution -- so ComparePoolEpoch reports it under
+	// CategoryPoolZeroStake rather than folding it into CategoryPoolDeparted
+	// (poolDepartedAtParamEpoch above), which would misstate that the pool
+	// left the network.
+	var paramEpochPositiveStakeProven bool
+	if paramInputs != nil {
+		rewardSnapshot, rsErr := dingo.GetRewardSnapshot(ctx, paramEpoch)
+		switch {
+		case rsErr != nil:
+			logger.Debug(
+				"koiosparity: could not resolve param-epoch reward snapshot",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"error", rsErr,
+			)
+		case rewardSnapshot == nil:
+			// No mark reward_snapshot captured for this param epoch.
+		case !rewardSnapshot.ExcludedActiveStakeKnown ||
+			rewardSnapshot.ExcludedActiveStake != 0:
+			// Unknown or nonzero exclusion: a degraded pool may account for
+			// some of paramInputs's shortfall, so completeness is unproven.
+		case rewardSnapshot.TotalPoolCount != uint64(len(paramInputs)):
+			logger.Debug(
+				"koiosparity: param-epoch reward snapshot pool count does "+
+					"not match the reward-input set",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"reward_inputs", len(paramInputs),
+				"snapshot_total", rewardSnapshot.TotalPoolCount,
+			)
+		default:
+			paramEpochPositiveStakeProven = true
 		}
 	}
 	if dingoPoolErr != nil {
@@ -864,6 +933,7 @@ func checkEpoch(
 					retiredByParamEpoch,
 					keyHex,
 				),
+				paramEpochPositiveStakeProven,
 			)
 			allMismatches = append(allMismatches, poolMismatches...)
 

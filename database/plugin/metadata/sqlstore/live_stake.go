@@ -1435,3 +1435,50 @@ func dedupeByteSlices(values [][]byte) [][]byte {
 	}
 	return ret
 }
+
+// GetDelegatedPoolKeyHashes returns every pool key hash the live reward stake
+// aggregate currently attributes stake to, whether or not that pool is still
+// registered.
+//
+// It exists for the sigma_a denominator. cardano-ledger's ssTotalActiveStake
+// sums every registered credential holding a delegation, without consulting
+// the stake-pool set (Cardano.Ledger.State.SnapShots.mkSnapShot over
+// resolveInstantStake), so a snapshot whose stake is enumerated from the
+// active pool set alone silently drops the stake of any credential whose pool
+// is absent from it -- which raises sigma_a for every surviving pool and
+// under-credits every reward on the node by that stake's share (dingo #4660,
+// the same failure #3969 and #4025 fixed on the exclusion side). Unioning this
+// set into the one the distribution is fetched for restores the ledger's
+// credential-first denominator while leaving which pools earn rewards alone.
+//
+// The result is deliberately a superset: it applies no registration or expiry
+// predicate, because those are applied by the stake fetch this feeds, and a
+// pool with no qualifying credential simply contributes no rows there.
+func (s *Store) GetDelegatedPoolKeyHashes(
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetDelegatedPoolKeyHashes: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT DISTINCT pool_key_hash
+FROM reward_live_stake
+WHERE pool_key_hash IS NOT NULL AND LENGTH(pool_key_hash) > 0`)
+	if err != nil {
+		return nil, fmt.Errorf("GetDelegatedPoolKeyHashes: %w", err)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		ret = append(ret, hash)
+	}
+	return ret, rows.Err()
+}

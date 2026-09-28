@@ -176,6 +176,16 @@ type fakeChainsyncState struct {
 	activeConn    *ouroboros.ConnectionId
 	stalledChecks int
 	rotationCalls int
+	// impatient is returned, once, by the next CheckPatienceExhausted.
+	impatient []ouroboros.ConnectionId
+}
+
+func (f *fakeChainsyncState) CheckPatienceExhausted() []ouroboros.ConnectionId {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ret := f.impatient
+	f.impatient = nil
+	return ret
 }
 
 func (f *fakeChainsyncState) CheckStalledClients() []ouroboros.ConnectionId {

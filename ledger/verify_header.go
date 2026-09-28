@@ -24,9 +24,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -442,6 +445,35 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 	}
 
 	return epoch, epochCache, nil
+}
+
+// validateHeaderEraOrder rejects a non-nil header whose era precedes the era
+// of the header or block it extends (chain.ErrEraRegression). The parent is
+// resolved only when it is the primary chain's header tip or block tip, which
+// covers every header this node would admit; a header extending anything else
+// is checked against its concrete parent at chain admission and by the inbound
+// block envelope.
+func (ls *LedgerState) validateHeaderEraOrder(header ledger.BlockHeader) error {
+	parentEra, found, err := ls.chain.ParentEra(header.PrevHash().Bytes())
+	if err != nil {
+		// Failing to load a local block says nothing about the peer's header.
+		return fmt.Errorf(
+			"%w: resolve parent era: %w",
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
+	if !found {
+		return nil
+	}
+	if err := chain.CheckEraOrder(header.Era().Id, parentEra); err != nil {
+		return fmt.Errorf(
+			"block header at slot %d: %w",
+			header.SlotNumber(),
+			err,
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) headerVerificationEpoch(
@@ -888,10 +920,23 @@ func (ls *LedgerState) activeGenesisDelegationForSlot(
 	initial genesisDelegation,
 	slot uint64,
 ) (genesisDelegation, error) {
+	return ls.activeGenesisDelegationForSlotWithTxn(initial, slot, nil)
+}
+
+func (ls *LedgerState) activeGenesisDelegationForSlotWithTxn(
+	initial genesisDelegation,
+	slot uint64,
+	txn types.Txn,
+) (genesisDelegation, error) {
+	if ls.db == nil {
+		return genesisDelegation{}, errors.New(
+			"genesis delegation state has no metadata database",
+		)
+	}
 	row, err := ls.db.Metadata().GetGenesisDelegationForSlot(
 		initial.genesisHash,
 		slot,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return genesisDelegation{}, fmt.Errorf(
@@ -918,6 +963,144 @@ func (ls *LedgerState) activeGenesisDelegationForSlot(
 		delegateHash: append([]byte(nil), row.GenesisDelegateHash...),
 		vrfHash:      append([]byte(nil), row.VrfKeyHash...),
 	}, nil
+}
+
+// GenesisDelegateKeyHashes returns the active Shelley genesis delegate keys
+// used by the classic PPUP and MIR rules at slot.
+func (ls *LedgerState) GenesisDelegateKeyHashes(
+	slot uint64,
+) ([]lcommon.Blake2b224, error) {
+	return ls.genesisDelegateKeyHashes(slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateKeyHashes(
+	slot uint64,
+	txn types.Txn,
+) ([]lcommon.Blake2b224, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil, errors.New("unable to get cardano node config")
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	delegates := make(map[lcommon.Blake2b224]struct{}, len(genesis))
+	for _, initial := range genesis {
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		delegates[delegate] = struct{}{}
+	}
+	ret := make([]lcommon.Blake2b224, 0, len(delegates))
+	for delegate := range delegates {
+		ret = append(ret, delegate)
+	}
+	slices.SortFunc(ret, func(a, b lcommon.Blake2b224) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return ret, nil
+}
+
+// GenesisDelegateForGenesisKey resolves the active delegate for a Shelley
+// genesis key at slot.
+func (ls *LedgerState) GenesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+) (lcommon.Blake2b224, bool, error) {
+	return ls.genesisDelegateForGenesisKey(genesisKeyHash, slot, nil)
+}
+
+func (ls *LedgerState) genesisDelegateForGenesisKey(
+	genesisKeyHash lcommon.Blake2b224,
+	slot uint64,
+	txn types.Txn,
+) (lcommon.Blake2b224, bool, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return lcommon.Blake2b224{}, false, errors.New(
+			"unable to get cardano node config",
+		)
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return lcommon.Blake2b224{}, false, err
+	}
+	for _, initial := range genesis {
+		if !bytes.Equal(initial.genesisHash, genesisKeyHash[:]) {
+			continue
+		}
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return lcommon.Blake2b224{}, false, err
+		}
+		var delegate lcommon.Blake2b224
+		copy(delegate[:], active.delegateHash)
+		return delegate, true, nil
+	}
+	return lcommon.Blake2b224{}, false, nil
+}
+
+// GenesisUpdateQuorum returns the quorum configured by Shelley genesis.
+func (ls *LedgerState) GenesisUpdateQuorum() (uint, error) {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("unable to get cardano node config")
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return 0, errors.New("unable to get shelley genesis")
+	}
+	return uint(genesis.UpdateQuorum), nil
+}
+
+// ProtocolParameterUpdateWindow returns the current epoch and the first slot
+// where proposals target the following epoch.
+func (ls *LedgerState) ProtocolParameterUpdateWindow(
+	slot uint64,
+) (uint64, uint64, error) {
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, 0, errors.New("unable to get cardano node config")
+	}
+	// Every Shelley-family era takes its stability window from Shelley
+	// genesis, so the transaction's era does not change the boundary.
+	stabilityWindow, err := eras.StabilityWindowForEra(
+		ls.config.CardanoNodeConfig,
+		eras.ShelleyEraDesc.Id,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("classic PPUP stability window: %w", err)
+	}
+	epochLength := uint64(epoch.LengthInSlots)
+	if epoch.StartSlot > ^uint64(0)-epochLength {
+		return 0, 0, errors.New("epoch end slot overflows")
+	}
+	// The reference point of no return is the next epoch's first slot less
+	// twice the stability window, where the window is ceiling(3k/f)
+	// (Cardano.Ledger.Slot.getTheSlotOfNoReturn). Doubling the rounded window
+	// is not floor(6k/f): the two differ whenever 3k/f is not an integer.
+	// When the voting window covers the whole epoch every slot targets the
+	// next epoch, which the epoch's first slot expresses.
+	if stabilityWindow > (^uint64(0))/2 || 2*stabilityWindow >= epochLength {
+		return epoch.EpochId, epoch.StartSlot, nil
+	}
+	return epoch.EpochId, epoch.StartSlot + epochLength - 2*stabilityWindow, nil
 }
 
 func classifyGenesisOverlaySlot(
@@ -2662,7 +2845,21 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return nil, nil, nil, nil, err
 	}
 
-	if len(labForEta) == 0 {
+	// The extraEntropy protocol parameter is the third term of the TICKN
+	// assembly. This path runs before the rollover enacts the new epoch's
+	// parameters, so the value is forecast the way cardano-ledger's TICKF
+	// supplies it to TICKN. Mainnet set a non-neutral value for exactly one
+	// epoch (259); everywhere else this resolves to NeutralNonce and leaves
+	// the result unchanged.
+	extraEntropy, err := ls.forecastExtraEntropyForEpoch(
+		prevEpoch.EpochId+1,
+		prevEpoch.EraId,
+	)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	if len(labForEta) == 0 && len(extraEntropy) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		ls.config.Logger.Debug(
@@ -2679,10 +2876,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	result, err := lcommon.CalculateEpochNonce(
+	result, err := assembleEpochNonce(
 		candidateNonce,
 		labForEta,
-		nil,
+		extraEntropy,
 	)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf(
@@ -2700,9 +2897,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		hex.EncodeToString(labNonceToSave),
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
 		"evolving_nonce", hex.EncodeToString(evolvingNonce),
-		"epoch_nonce", hex.EncodeToString(result.Bytes()),
+		"epoch_nonce", hex.EncodeToString(result),
+		"extra_entropy", hex.EncodeToString(extraEntropy),
 		"component", "ledger",
 	)
 
-	return result.Bytes(), evolvingNonce, candidateNonce, labNonceToSave, nil
+	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
 }

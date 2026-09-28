@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // deepCatchupRequest records one BlockfetchRequestRangeFunc call for the
@@ -67,6 +68,54 @@ func buildDeepCatchupChain(
 	}
 	require.Equal(t, headerCount, testChain.HeaderCount())
 	return testChain, hashes
+}
+
+func TestBlockfetchMetadataWriteReleasesBlockfetchMutex(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{}
+	ls.chainsyncBlockfetchMutex.Lock()
+	writeStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		err := ls.withBlockfetchMutexReleased(func() error {
+			close(writeStarted)
+			<-releaseWrite
+			return nil
+		})
+		ls.chainsyncBlockfetchMutex.Unlock()
+		done <- err
+	}()
+	defer func() {
+		select {
+		case <-releaseWrite:
+		default:
+			close(releaseWrite)
+		}
+	}()
+	select {
+	case <-writeStarted:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("metadata operation did not start")
+	}
+	lockAcquired := make(chan struct{})
+	go func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		close(lockAcquired)
+		ls.chainsyncBlockfetchMutex.Unlock()
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("chainsync handler remained blocked by metadata write")
+	}
+	close(releaseWrite)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("blockfetch handler did not reacquire its mutex")
+	}
 }
 
 // TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup is the
@@ -315,12 +364,11 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 	// "next" was pre-queued while both generations were 0, exactly like
 	// startQueuedBlockfetchPrefetchLocked records them.
 	ls.chainsyncBlockfetchMutex.Lock()
-	ls.beginBlockfetchRequestLocked(connId) // active's own tracked request
-	ls.beginBlockfetchRequestLocked(
-		connId,
-	) // next's tracked request (FIFO: second)
+	ls.activeBlockfetchRequestDone = ls.beginBlockfetchRequestLocked(connId)
+	nextDone := ls.beginBlockfetchRequestLocked(connId)
 	ls.nextBlockfetchRequest = &queuedBlockfetchRequest{
 		connId:      connId,
+		done:        nextDone,
 		headerStart: ocommon.NewPoint(51, hashes[50].Bytes()),
 		headerEnd:   ocommon.NewPoint(80, hashes[79].Bytes()),
 		headerCount: 30,
@@ -363,11 +411,12 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 	)
 	assert.Equal(t, 1, ls.blockfetchDiscardBatchesRemaining)
 	ls.chainsyncBlockfetchMutex.Unlock()
+	requireBlockfetchReservationOpen(t, nextDone)
 
 	// While the discard window is still open, a block for connId must be
 	// dropped rather than misattributed to whatever dispatch follows.
 	ls.chainsyncBlockfetchMutex.Lock()
-	err = ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err = handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Point:        ocommon.NewPoint(51, hashes[50].Bytes()),
 		Block: &blockfetchTestBlock{
@@ -422,7 +471,7 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 	// Once the discard window has closed, a block for connId belongs to the
 	// fresh dispatch and must be accepted.
 	ls.chainsyncBlockfetchMutex.Lock()
-	err = ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err = handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Point:        ocommon.NewPoint(51, hashes[50].Bytes()),
 		Block: &blockfetchTestBlock{
@@ -839,11 +888,12 @@ func TestHandleEventBlockfetchBatchDoneRefusesPartiallyAppliedPromotion(
 	ls.batchBlocksApplied = appliedSlots
 
 	ls.chainsyncBlockfetchMutex.Lock()
-	ls.beginBlockfetchRequestLocked(connId) // the active batch's own request
-	ls.beginBlockfetchRequestLocked(connId) // the pre-queued one (FIFO: second)
+	ls.activeBlockfetchRequestDone = ls.beginBlockfetchRequestLocked(connId)
+	nextDone := ls.beginBlockfetchRequestLocked(connId)
 	ls.nextBlockfetchRequest = &queuedBlockfetchRequest{
 		connId:    connId,
 		requestId: 2,
+		done:      nextDone,
 		headerStart: ocommon.NewPoint(
 			BlockfetchBatchSize+1,
 			hashes[BlockfetchBatchSize+1].Bytes(),
@@ -888,6 +938,7 @@ func TestHandleEventBlockfetchBatchDoneRefusesPartiallyAppliedPromotion(
 		"the refused request's late terminal event must be filtered",
 	)
 	ls.chainsyncBlockfetchMutex.Unlock()
+	requireBlockfetchReservationOpen(t, nextDone)
 
 	// Unblock and drain the fresh-dispatch continuation the refusal falls
 	// through to, then check what it asked the peer for.
@@ -994,4 +1045,23 @@ func TestBlockfetchRequestRangeCleanupFiltersAbandonedQueuedRequest(
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+// requireBlockfetchReservationOpen fails if done, a refused pre-queued
+// request's blockfetchRequestsInFlight entry, was released before that
+// request's own terminal event. The continuation worker a refusal spawns waits
+// on this entry before dispatching, so releasing it early lets the worker
+// dispatch and pre-queue a new request while the test is still asserting on
+// the refusal's own state.
+func requireBlockfetchReservationOpen(t *testing.T, done chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+		require.FailNow(
+			t,
+			"the refused request's reservation must stay held until its "+
+				"own terminal event drains it",
+		)
+	default:
+	}
 }

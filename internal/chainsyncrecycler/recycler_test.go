@@ -302,6 +302,49 @@ func TestTickSkipsRecyclingOnlyEligiblePeer(t *testing.T) {
 	assert.Equal(t, now.Add(30*time.Second), dueAt)
 }
 
+// TestTickDisconnectsPatienceExhaustedPeer pins that a Genesis Limit on
+// Patience exhaustion closes the connection immediately, with its own reason,
+// even for the only eligible peer and a client that is not stalled.
+func TestTickDisconnectsPatienceExhaustedPeer(t *testing.T) {
+	t.Parallel()
+	connId := testConnId(1)
+	active := connId
+	ledger := &fakeLedger{tip: testTip(100, 50)}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{{
+			ConnId: connId,
+			Status: chainsync.ClientStatusSyncing,
+		}},
+		activeConn: &active,
+		impatient:  []ouroboros.ConnectionId{connId},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, nil, pub, Config{
+		Grace:    time.Hour,
+		Cooldown: time.Hour,
+	})
+	now := time.Now()
+	st := newTestTickState(100, now)
+	live := LiveComponents{Ledger: ledger, ChainsyncState: state}
+
+	runTickWith(r, st, live, now, 100)
+
+	events := pub.byType(connmanager.ConnectionRecycleRequestedEventType)
+	require.Len(t, events, 1)
+	recycleEvt, ok := events[0].evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, recycleEvt.ConnectionId)
+	assert.Equal(t, ReasonPatienceExhausted, recycleEvt.Reason)
+
+	runTickWith(r, st, live, now.Add(time.Second), 100)
+	assert.Len(
+		t,
+		pub.byType(connmanager.ConnectionRecycleRequestedEventType),
+		1,
+		"an exhausted client is disconnected once",
+	)
+}
+
 func TestTickSchedulesGuardedRecycleForNewlyStalledClient(t *testing.T) {
 	connId := testConnId(1)
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}

@@ -155,6 +155,7 @@ func TestConwayWithdrawalOrderPlacesScriptCredentialFirst(t *testing.T) {
 					nil,
 					nil,
 					nil,
+					0,
 				)
 				require.NoError(t, err)
 				rewarding, ok := purpose.(script.ScriptPurposeRewarding)

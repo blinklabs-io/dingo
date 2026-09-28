@@ -206,12 +206,16 @@ func EvaluateRatifiableHardForkInitiation(
 			return nil, fmt.Errorf("tally proposal: %w", err)
 		}
 		decision := ShouldRatify(RatifyInputs{
-			Tally:                 tally,
-			PParams:               conwayPParams,
-			GovAction:             action,
-			CurrentEpoch:          in.CurrentEpoch,
-			ActiveDRepCount:       activeDRepCount,
-			ActiveCCCount:         committeeState.ActiveMemberCount,
+			Tally:           tally,
+			PParams:         conwayPParams,
+			GovAction:       action,
+			CurrentEpoch:    in.CurrentEpoch,
+			ActiveDRepCount: activeDRepCount,
+			ActiveCCCount:   committeeState.ActiveMemberCount,
+			CommitteeAbsent: committeeAbsent(
+				committeeRoot, in.ConwayGenesis,
+				committeeState.CommitteePresent,
+			),
 			CCQuorum:              ccQuorum,
 			MajorVersion:          conwayPParams.ProtocolVersion.Major,
 			CommitteeNoConfidence: committeeNoConfidence,

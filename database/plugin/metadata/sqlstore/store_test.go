@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -494,13 +495,7 @@ func TestStoreCheckpointLifecycle(t *testing.T) {
 	require.Equal(t, uint32(1), calls.Load())
 }
 
-// TestStoreCheckpointTickerIndependentOfMaintenance proves the two tickers
-// run on separate cadences: a Checkpoint ticking every millisecond fires
-// several times while a single Maintenance call (configured to run once,
-// slowly) is still in flight, so a slow VACUUM can never delay or skip a WAL
-// checkpoint and vice versa -- the two must not share one ticker or one
-// admission gate.
-func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
+func TestStoreVacuumTickerIsIndependentFromMaintenance(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open(
 		"sqlite",
@@ -510,28 +505,117 @@ func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
-	maintenanceStarted := make(chan struct{})
-	maintenanceRelease := make(chan struct{})
+	started := make(chan struct{})
 	var maintenanceCalls atomic.Uint32
+	var vacuumCalls atomic.Uint32
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Maintenance: func(context.Context) error {
+			maintenanceCalls.Add(1)
+			return nil
+		},
+		MaintenanceInterval: 24 * time.Hour,
+		Vacuum: func(ctx context.Context) error {
+			if vacuumCalls.Add(1) == 1 {
+				close(started)
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		VacuumInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("vacuum did not start on its own ticker")
+	}
+	require.Equal(t, uint32(0), maintenanceCalls.Load())
+	require.NoError(t, store.Close())
+	require.Equal(t, uint32(1), vacuumCalls.Load())
+	require.Zero(t, maintenanceCalls.Load())
+}
+
+func TestStoreCloseContextCanWaitAfterVacuumTimeout(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Vacuum: func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			<-release
+			return ctx.Err()
+		},
+		VacuumInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	defer store.Close()
+	defer releaseOnce.Do(func() { close(release) })
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("vacuum did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, store.CloseContext(ctx), context.DeadlineExceeded)
+	require.NoError(t, db.Ping(), "pool closed before vacuum callback drained")
+	cancelledCtx, cancelLater := context.WithCancel(context.Background())
+	cancelLater()
+	require.ErrorIs(t, store.CloseContext(cancelledCtx), context.Canceled)
+
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, store.CloseContext(context.Background()))
+	require.Error(t, db.Ping())
+}
+
+// TestStoreCheckpointTickerIndependentOfVacuum proves a slow VACUUM cannot
+// delay or skip WAL checkpoint ticks: they use separate tickers and admission
+// gates.
+func TestStoreCheckpointTickerIndependentOfVacuum(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	vacuumStarted := make(chan struct{})
+	vacuumRelease := make(chan struct{})
+	var vacuumCalls atomic.Uint32
 	var checkpointCalls atomic.Uint32
 	store, err := New(Config{
 		WriteDB: db,
 		Dialect: SQLiteDialect(),
-		Maintenance: func(ctx context.Context) error {
-			// The 1ms MaintenanceInterval can re-admit and call this again
-			// before the test calls store.Close(), which is what actually
-			// stops the ticker: guard the one-shot close(maintenanceStarted)
-			// against a second invocation rather than closing it unconditionally.
-			if maintenanceCalls.Add(1) == 1 {
-				close(maintenanceStarted)
+		Vacuum: func(ctx context.Context) error {
+			if vacuumCalls.Add(1) == 1 {
+				close(vacuumStarted)
 			}
 			select {
-			case <-maintenanceRelease:
+			case <-vacuumRelease:
 			case <-ctx.Done():
 			}
 			return ctx.Err()
 		},
-		MaintenanceInterval: time.Millisecond,
+		VacuumInterval: time.Millisecond,
 		Checkpoint: func(ctx context.Context) error {
 			checkpointCalls.Add(1)
 			return nil
@@ -542,17 +626,17 @@ func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
 	require.NoError(t, store.Start(context.Background()))
 
 	select {
-	case <-maintenanceStarted:
+	case <-vacuumStarted:
 	case <-time.After(2 * time.Second):
-		t.Fatal("maintenance did not start")
+		t.Fatal("vacuum did not start")
 	}
-	// Maintenance is now blocked in-flight (holding its own admission slot).
+	// Vacuum is now blocked in-flight (holding its own admission slot).
 	// Give the checkpoint ticker time to fire multiple times regardless.
 	require.Eventually(t, func() bool {
 		return checkpointCalls.Load() >= 3
-	}, 2*time.Second, time.Millisecond, "checkpoint ticker must keep running while maintenance is blocked")
+	}, 2*time.Second, time.Millisecond, "checkpoint ticker must keep running while vacuum is blocked")
 
-	close(maintenanceRelease)
+	close(vacuumRelease)
 	require.NoError(t, store.Close())
 }
 

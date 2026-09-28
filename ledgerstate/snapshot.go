@@ -619,12 +619,18 @@ func parseCurrentEra(
 		)
 	}
 
-	// UTxOState[2] is the fee pot accumulated so far this epoch. It is one
+	// UTxOState[2] (utxosFees) is ssFee plus the fees this epoch has
+	// collected up to and including the snapshot's anchor block, not a
+	// partial "so far" total in isolation -- cardano-ledger's NEWEPOCH rule
+	// subtracts ssFee out of it and SNAP resets ssFee from it every epoch, so
+	// it only ever grows across a single epoch's ssFee baseline. It is one
 	// of the three addends of the reward pot (see ledger/rewards: the pot is
 	// incentives + fees), so a reward round computed without it understates
 	// every pool's reward. Decoding it is what lets a Mithril bootstrap seed
-	// a complete RewardAdaPots row rather than a partial one. Older eras may
-	// carry a shorter array, so its absence is tolerated and left at zero.
+	// a complete RewardAdaPots row rather than a partial one, and lets
+	// seedImportedRewardBasis recover the epoch's pre-anchor fee pot as
+	// utxosFees minus ssFee. Older eras may carry a shorter array, so its
+	// absence is tolerated and left at zero.
 	var fees uint64
 	if len(utxoState) > 2 {
 		if _, err := cbor.Decode(utxoState[2], &fees); err != nil {
@@ -1365,8 +1371,9 @@ func ParseActivePoolDistribution(
 		}
 
 		var leiosKey *lcommon.LeiosKey
+		var keyRegistrationEpoch *uint64
 		if len(fields) == 4 {
-			leiosKey, err = decodeOptionalLeiosKey(fields[3])
+			leiosKey, keyRegistrationEpoch, err = decodeOptionalLeiosKey(fields[3])
 			if err != nil {
 				return nil, fmt.Errorf(
 					"active pool distribution entry %d: %w",
@@ -1384,12 +1391,13 @@ func ParseActivePoolDistribution(
 		}
 
 		result = append(result, ParsedActivePoolStake{
-			PoolKeyHash:             slices.Clone(poolKeyHash),
-			StakeNumerator:          stakeNumerator,
-			StakeDenominator:        stakeDenominator,
-			VrfKeyHash:              slices.Clone(vrfKeyHash),
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
+			PoolKeyHash:               slices.Clone(poolKeyHash),
+			StakeNumerator:            stakeNumerator,
+			StakeDenominator:          stakeDenominator,
+			VrfKeyHash:                slices.Clone(vrfKeyHash),
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: keyRegistrationEpoch,
 		})
 	}
 	return result, nil
@@ -1785,23 +1793,29 @@ func AggregatePoolStake(
 
 		pool := snap.PoolParams[poolHex]
 		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		var leiosKeyRegistrationEpoch *uint64
 		if pool != nil {
 			leiosKeyPublic = append([]byte(nil), pool.LeiosKeyPublic...)
 			leiosKeyPossessionProof = append(
 				[]byte(nil), pool.LeiosKeyPossessionProof...,
 			)
+			if pool.LeiosKeyRegistrationEpoch != nil {
+				epoch := *pool.LeiosKeyRegistrationEpoch
+				leiosKeyRegistrationEpoch = &epoch
+			}
 		}
 
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:                   epoch,
-			SnapshotType:            snapshotType,
-			PoolKeyHash:             poolKeyHash,
-			TotalStake:              types.Uint64(agg.totalStake),
-			DelegatorCount:          agg.delegatorCount,
-			CapturedSlot:            capturedSlot,
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
-			CalculationVersion:      models.RewardStakeCalculationVersion,
+			Epoch:                     epoch,
+			SnapshotType:              snapshotType,
+			PoolKeyHash:               poolKeyHash,
+			TotalStake:                types.Uint64(agg.totalStake),
+			DelegatorCount:            agg.delegatorCount,
+			CapturedSlot:              capturedSlot,
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: leiosKeyRegistrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
 

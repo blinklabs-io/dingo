@@ -130,12 +130,7 @@ func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
 func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -146,7 +141,7 @@ func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: shelleyGenesisHash,
 	}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -172,6 +167,7 @@ func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -186,12 +182,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	t.Parallel()
 
 	shelleyGenesisHash := "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -201,7 +192,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: shelleyGenesisHash,
 	}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -227,6 +218,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -261,12 +253,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 	t.Parallel()
 
 	invalidHash := "not-a-valid-hex-string"
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -276,7 +263,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: invalidHash,
 	}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -301,6 +288,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error for invalid genesis hash, got nil")
@@ -331,6 +319,7 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 		86400,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error for missing Shelley genesis, got nil")
@@ -359,7 +348,7 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 	}
-	_ = cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	_ = cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
 
 	ls := &LedgerState{
@@ -382,6 +371,7 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 		86400,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	// Either genesis loading fails or calculateEpochNonce catches negative k
 	if err == nil {
@@ -421,12 +411,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			byronGenesisJSON := fmt.Sprintf(`{
-				"protocolConsts": {
-					"k": %d,
-					"protocolMagic": 2
-				}
-			}`, tc.k)
+			byronGenesisJSON := testByronGenesisJSONForK(uint64(tc.k))
 			shelleyGenesisJSON := fmt.Sprintf(`{
 				"activeSlotsCoeff": %f,
 				"securityParam": %d,
@@ -436,7 +421,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 			cfg := &cardano.CardanoNodeConfig{
 				ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 			}
-			if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
 			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -464,6 +449,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 				0,
 				ls.currentEra,
 				ls.currentEpoch,
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("%s: unexpected error: %v", tc.description, err)
@@ -555,12 +541,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			byronGenesisJSON := fmt.Sprintf(`{
-				"protocolConsts": {
-					"k": %d,
-					"protocolMagic": 2
-				}
-			}`, tc.k)
+			byronGenesisJSON := testByronGenesisJSONForK(uint64(tc.k))
 			shelleyGenesisJSON := fmt.Sprintf(`{
 				"activeSlotsCoeff": %f,
 				"securityParam": %d,
@@ -570,7 +551,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 			cfg := &cardano.CardanoNodeConfig{
 				ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 			}
-			if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
 			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -599,6 +580,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 					0,
 					ls.currentEra,
 					ls.currentEpoch,
+					nil,
 				)
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -618,6 +600,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 				0,
 				ls.currentEra,
 				ls.currentEpoch,
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -634,12 +617,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 1000,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(1000)
 	// Use a coefficient that produces fractional results
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.333333,
@@ -650,7 +628,7 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 	}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -676,6 +654,7 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 		0,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error with fractional coefficient: %v", err)
@@ -692,12 +671,7 @@ func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 	// This test verifies that the handleEventChainsyncBlockHeader function
 	// correctly uses calculateStabilityWindow instead of the old constant
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -705,7 +679,7 @@ func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 	}`
 
 	cfg := &cardano.CardanoNodeConfig{}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -739,12 +713,7 @@ func TestHandleEventChainsyncBlockHeader_StabilityWindowUsage(t *testing.T) {
 func TestCalculateEpochNonce_AllEras(t *testing.T) {
 	t.Parallel()
 
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
+	byronGenesisJSON := testByronGenesisJSONForK(432)
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -754,7 +723,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 	}
-	if err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON)); err != nil {
+	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
@@ -833,6 +802,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 				0,
 				ls.currentEra,
 				ls.currentEpoch,
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("%s: unexpected error: %v", tc.description, err)
@@ -891,6 +861,7 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 		86400,
 		ls.currentEra,
 		ls.currentEpoch,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error for Byron era: %v", err)

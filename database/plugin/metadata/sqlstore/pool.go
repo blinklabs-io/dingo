@@ -54,8 +54,9 @@ INSERT INTO pool_registration (
     margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
     reward_account_credential_tag, metadata_hash, pledge, cost,
     certificate_id, pool_id, added_slot, deposit_amount, deposit_held,
-    leios_key_public, leios_key_possession_proof
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    leios_key_public, leios_key_possession_proof,
+    leios_key_registration_age_unknown, leios_key_registration_epoch
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (pool_id, added_slot) DO NOTHING
 RETURNING id`
 
@@ -428,6 +429,8 @@ RETURNING id`,
 				decimalUint64(registration.DepositAmount),
 				nullBytes(registration.LeiosKeyPublic),
 				nullBytes(registration.LeiosKeyPossessionProof),
+				registration.LeiosKeyRegistrationAgeUnknown,
+				registration.LeiosKeyRegistrationEpoch,
 			}, int64(registration.PoolID), registration.AddedSlot)
 			if err != nil {
 				return fmt.Errorf("import pool registration: %w", err)
@@ -531,12 +534,14 @@ func (s *Store) GetPool(
 //     GetPoolEarliestVrfKeyHashAtSlot's forward-direction resolution of the
 //     same rule (see electingVrfKeyHashWithCache in ledger/verify_header.go)
 //     -- this is the reverse lookup, given a key, finding the pool.
-//  2. Any pool whose registration THIS epoch (added_slot >= epochStartSlot)
-//     used this key, even if a later same-epoch re-registration superseded
-//     it. psVRFKeyHashes retains every key placed in
-//     psFutureStakePoolParams during the epoch, not only the current
-//     pending value, so a pool cycling A -> B -> C must still be refused a
-//     later same-epoch reuse of B. LedgerView.IsVrfKeyInUse's caller
+//  2. The pool whose LATEST registration this epoch (added_slot >=
+//     epochStartSlot) used this key. psFutureStakePoolParams holds only the
+//     current pending value, not every key a pool cycled through -- a pool
+//     re-registering A -> B -> C within one epoch frees B the moment C
+//     supersedes it, since B was never placed in psStakePools and is no
+//     longer pending. Only the earliest registration in the epoch (A here,
+//     handled by tier 1 as the still-effective key) and the latest pending
+//     one (C) remain reserved. LedgerView.IsVrfKeyInUse's caller
 //     (gouroboros's validatePoolRegistration) already special-cases
 //     "owningPool == cert.Operator" by comparing against PoolCurrentState,
 //     which is not this pool's effective key but its latest registration --
@@ -684,12 +689,31 @@ active_owner AS (
     JOIN pool_active pa ON pa.pool_id = er.pool_id
     WHERE er.vrf_key_hash = ?
 ),
-same_epoch_claimant AS (
-    SELECT DISTINCT pr.pool_id
+-- Only the latest same-epoch registration per pool reserves its key --
+-- an earlier same-epoch registration that a later one has already
+-- superseded is neither this pool's effective key (tier 1 covers that,
+-- resolved before the epoch began) nor its current pending key, so it
+-- must not still claim this candidate the way an unqualified scan over
+-- every same-epoch pool_registration row would.
+latest_same_epoch_registration AS (
+    SELECT pr.pool_id, pr.vrf_key_hash,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
     FROM pool_registration pr
     JOIN candidates cd ON cd.pool_id = pr.pool_id
-    JOIN pool_active pa ON pa.pool_id = pr.pool_id
-    WHERE pr.vrf_key_hash = ? AND pr.added_slot >= ?
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.added_slot >= ?
+),
+same_epoch_claimant AS (
+    SELECT DISTINCT lser.pool_id
+    FROM latest_same_epoch_registration lser
+    JOIN pool_active pa ON pa.pool_id = lser.pool_id
+    WHERE lser.vrf_key_hash = ? AND lser.rn = 1
 )
 SELECT pool_id, 0 AS tier FROM active_owner
 UNION
@@ -699,8 +723,8 @@ ORDER BY tier, pool_id`,
 		slotValue,
 		slotValue,
 		vrfKeyHash,
-		vrfKeyHash,
 		slotValue,
+		vrfKeyHash,
 	)
 	if err != nil {
 		return nil, err
@@ -947,6 +971,37 @@ WHERE pool_key_hash = ? AND slot > ?`,
 		afterSlot,
 	).Scan(&sequence, &count)
 	return uint64(sequence), count > 0, err
+}
+
+// PoolOpCertSequencesExistAtSlot reports whether any pool_opcert_sequence row
+// is recorded at exactly slot, served from idx_pool_opcert_sequence_slot.
+func (s *Store) PoolOpCertSequencesExistAtSlot(
+	slot uint64,
+	txn types.Txn,
+) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return false, err
+	}
+	var one int64
+	err = db.QueryRowContext(ctx, `
+SELECT 1
+FROM pool_opcert_sequence
+WHERE slot = ?
+LIMIT 1`,
+		slotValue,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
@@ -2020,7 +2075,9 @@ SELECT pr.margin, pr.metadata_url, pr.vrf_key_hash, pr.pool_key_hash,
        pr.reward_account, pr.reward_account_credential_tag, pr.metadata_hash,
        pr.pledge, pr.cost, pr.certificate_id, pr.id, pr.pool_id,
        pr.added_slot, pr.deposit_amount, pr.leios_key_public,
-       pr.leios_key_possession_proof
+       pr.leios_key_possession_proof,
+       pr.leios_key_registration_age_unknown,
+       pr.leios_key_registration_epoch
 FROM ranked r
 JOIN pool_registration pr ON pr.id = r.id
 WHERE r.rn = 1`,
@@ -2228,7 +2285,9 @@ SELECT id FROM ranked WHERE rn = 1`,
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-       p.leios_key_public, p.leios_key_possession_proof
+       p.leios_key_public, p.leios_key_possession_proof,
+       p.leios_key_registration_age_unknown,
+       p.leios_key_registration_epoch
 FROM pool_registration p
 WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 			args...,
@@ -2274,7 +2333,9 @@ func (s *Store) GetPoolRegistrations(
 	SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
 	       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
 	       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-	       p.leios_key_public, p.leios_key_possession_proof
+	       p.leios_key_public, p.leios_key_possession_proof,
+	       p.leios_key_registration_age_unknown,
+	       p.leios_key_registration_epoch
 FROM pool_registration p
 WHERE p.pool_key_hash = ?
 ORDER BY p.id DESC`,
@@ -2846,7 +2907,9 @@ func (s *Store) loadPoolAssociations(
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-       p.leios_key_public, p.leios_key_possession_proof
+       p.leios_key_public, p.leios_key_possession_proof,
+       p.leios_key_registration_age_unknown,
+       p.leios_key_registration_epoch
 FROM pool_registration p
 LEFT JOIN certs c ON c.id = p.certificate_id
 LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
@@ -2964,7 +3027,9 @@ func (s *Store) loadPoolsAssociations(
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
-       p.leios_key_public, p.leios_key_possession_proof
+       p.leios_key_public, p.leios_key_possession_proof,
+       p.leios_key_registration_age_unknown,
+       p.leios_key_registration_epoch
 FROM pool_registration p
 LEFT JOIN certs c ON c.id = p.certificate_id
 LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
@@ -3119,6 +3184,8 @@ func scanPoolRegistration(
 		&deposit,
 		&registration.LeiosKeyPublic,
 		&registration.LeiosKeyPossessionProof,
+		&registration.LeiosKeyRegistrationAgeUnknown,
+		&registration.LeiosKeyRegistrationEpoch,
 	)
 	if err != nil {
 		return nil, err

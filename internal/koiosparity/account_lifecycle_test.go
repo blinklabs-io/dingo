@@ -41,7 +41,7 @@ import (
 func TestAccountLifecycleMismatchesReportsZeroReward(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -85,7 +85,7 @@ func TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered(
 ) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -170,7 +170,7 @@ func TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered(
 func TestAccountLifecycleMismatchesZeroRewardRowCountIsBounded(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -215,7 +215,7 @@ func TestAccountLifecycleMismatchesStakeEpochZeroSkipsLifecycleReport(
 ) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -232,7 +232,7 @@ func TestAccountLifecycleMismatchesStakeEpochZeroSkipsLifecycleReport(
 func TestAccountLifecycleMismatchesPropagatesDingoErrorAsDBError(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -272,7 +272,7 @@ func TestAccountLifecycleMismatchesReportsMalformedPreviousRowAsDBError(
 ) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -330,7 +330,7 @@ func TestAccountLifecycleMismatchesSkipsLifecycleDiffWhenCurrentRowsFailToDecode
 ) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -415,7 +415,7 @@ func TestAccountLifecycleMismatchesSkipsLifecycleDiffForPrunableSource(
 ) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -460,7 +460,7 @@ func TestAccountLifecycleMismatchesSkipsLifecycleDiffForPrunableSource(
 func TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 

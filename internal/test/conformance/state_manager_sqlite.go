@@ -99,9 +99,15 @@ func newSqliteResetter(databasePath string) (*backendResetter, error) {
 	// hoists it ahead of the rest of the _pragma list regardless of DSN
 	// order; anything ahead of it would otherwise run with no busy handler
 	// installed.
+	//
+	// synchronous(OFF): this connection deletes rows once per vector in a
+	// database that is discarded with the run. The store under test keeps its
+	// own connections and settings, and journal_mode is left alone because
+	// the store's WAL mode is shared file state.
 	dsn := sqliteResetFileURI(databasePath) +
 		"?_pragma=busy_timeout(30000)" +
-		"&_pragma=foreign_keys(0)"
+		"&_pragma=foreign_keys(0)" +
+		"&_pragma=synchronous(OFF)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf(

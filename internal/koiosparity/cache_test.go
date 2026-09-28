@@ -29,7 +29,7 @@ func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 ) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -68,7 +68,7 @@ func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 func TestCommitEpochDataWithTotals(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -121,7 +121,7 @@ func TestCommitEpochDataWithTotals(t *testing.T) {
 func TestCommitAccountRewardsForEpoch(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -201,7 +201,7 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 // eviction so an old epoch still compares correctly after its resumability
 // state ages out.
 func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -268,7 +268,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 // lifecycle reporting retains its exact count and capped sample after the
 // per-address rows are evicted.
 func TestAccountCoveragePreservesBoundedZeroRewardSummary(t *testing.T) {
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -289,12 +289,18 @@ func TestAccountCoveragePreservesBoundedZeroRewardSummary(t *testing.T) {
 	require.Equal(t, []string{"stake1zero", "stake1zero2"}, summary.Sample)
 }
 
+// legacySeedPragmas relaxes durability for the throwaway files these tests
+// hand-build in a legacy shape before OpenCache migrates them; the same
+// settings as the migrations package's testDBPragmas.
+const legacySeedPragmas = "_pragma=journal_mode(MEMORY)&" +
+	"_pragma=synchronous(OFF)"
+
 // TestAccountCoverageSummaryMigrationBackfillsLegacyRows proves an existing
 // cache gets its bounded lifecycle summary before checkpoint eviction can
 // remove the legacy per-address evidence.
 func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
 	require.NoError(t, err)
 	_, err = db.Exec(`CREATE TABLE koios_account_coverage (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
@@ -321,7 +327,7 @@ func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	cache, err := OpenCache(path, nil)
+	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	summary, err := cache.GetZeroRewardSummary("preview", 100)
@@ -345,7 +351,7 @@ func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
 func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -400,7 +406,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
 
 	// Build the pre-#3097 shape directly, bypassing createCacheSchema.
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
 	require.NoError(t, err)
 	_, err = db.Exec(`CREATE TABLE koios_account_rewards (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
@@ -423,7 +429,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// Opening through the real path must migrate forward without error.
-	cache, err := OpenCache(path, nil)
+	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -469,7 +475,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 func TestCommitEpochMismatchesRollsBackOnFailedInsert(t *testing.T) {
 	t.Parallel()
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -568,7 +574,7 @@ func TestCheckEpochStatusPhasesClearIndependently(t *testing.T) {
 	const network = "preview"
 	const epoch = uint64(42)
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -667,7 +673,7 @@ func TestUpsertCheckEpochStatusDefaultsToAggregatePhase(t *testing.T) {
 	const network = "preview"
 	const epoch = uint64(7)
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -710,7 +716,7 @@ func TestCommitEpochMismatchesReplacesOnlyNamedScopes(t *testing.T) {
 	const network = "preview"
 	const epoch = uint64(12)
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -762,7 +768,7 @@ func TestCommitEpochMismatchesDefaultsScopeToAggregate(t *testing.T) {
 	const network = "preview"
 	const epoch = uint64(13)
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -800,7 +806,7 @@ func TestCheckPhaseColumnMigration(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "cache.db")
 
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
 	require.NoError(t, err)
 	_, err = db.Exec(`CREATE TABLE check_epoch_status (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
@@ -831,7 +837,7 @@ func TestCheckPhaseColumnMigration(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	cache, err := OpenCache(path, nil)
+	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -849,4 +855,65 @@ func TestCheckPhaseColumnMigration(t *testing.T) {
 	require.Len(t, mismatches, 1)
 	require.Equal(t, "legacy_field", mismatches[0].Field)
 	require.Equal(t, ScopeAggregate, mismatches[0].Scope)
+}
+
+// TestTxInfoCacheRoundTripsAndScopesByNetwork proves koios_tx_info stores a
+// KoiosTxInfoItem losslessly (the datum/asset/reference-script detail
+// CanonicalKoiosUTxOEntry compares on, not just the hash), keys it by
+// network the way every other Koios-sourced table is keyed, and answers a
+// hash list longer than SQLite's 999-bound-parameter limit -- the case
+// txInfoLookupChunk exists for, which a chunk-sized test would never reach.
+func TestTxInfoCacheRoundTripsAndScopesByNetwork(t *testing.T) {
+	t.Parallel()
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	datumHash := "deadbeef"
+	rich := KoiosTxInfoItem{
+		TxHash: "rich",
+		Inputs: []KoiosTxInfoUtxoRef{{TxHash: "prev", TxIndex: 3}},
+		Outputs: []KoiosTxInfoOutput{{
+			TxHash:          "rich",
+			TxIndex:         0,
+			Value:           "42",
+			DatumHash:       &datumHash,
+			InlineDatum:     &KoiosTxInfoInlineDatum{Bytes: "d87980"},
+			ReferenceScript: &KoiosTxInfoReferenceScript{Hash: "cafe"},
+			AssetList: []KoiosTxInfoAsset{
+				{PolicyID: "aa", AssetName: "bb", Quantity: "9"},
+			},
+		}},
+	}
+
+	const bulk = 1500
+	items := []KoiosTxInfoItem{rich}
+	hashes := []string{"rich"}
+	for i := range bulk {
+		h := fmt.Sprintf("tx%04d", i)
+		items = append(items, KoiosTxInfoItem{TxHash: h})
+		hashes = append(hashes, h)
+	}
+	require.NoError(t, cache.UpsertTxInfos("preview", items, time.Now().UTC()))
+
+	got, err := cache.GetTxInfos("preview", hashes)
+	require.NoError(t, err)
+	require.Len(t, got, bulk+1,
+		"a hash list past SQLite's parameter limit must still be answered in full")
+	require.Equal(t, rich, got["rich"],
+		"a cached item must round-trip byte-identically, datum and assets included")
+
+	// A hash nobody cached is simply absent, not an error: that is the
+	// signal the caller uses to fetch exactly the misses.
+	partial, err := cache.GetTxInfos("preview", []string{"rich", "never-seen"})
+	require.NoError(t, err)
+	require.Len(t, partial, 1)
+	require.NotContains(t, partial, "never-seen")
+
+	// Rows are network-scoped like every other Koios-sourced table, so
+	// preprod never reads preview's answers.
+	other, err := cache.GetTxInfos("preprod", hashes)
+	require.NoError(t, err)
+	require.Empty(t, other)
 }

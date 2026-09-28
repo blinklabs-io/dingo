@@ -1435,7 +1435,7 @@ type LedgerView interface {
 	// LatestOpCertSequence returns the highest opcert IssueNumber
 	// observed on chain for poolID. found is false when on-chain
 	// counter tracking is not implemented or this pool has never
-	// minted a block.
+	// minted a block; the counter rule then uses a baseline of zero.
 	LatestOpCertSequence(
 		poolID [28]byte,
 	) (sequence uint64, found bool, err error)

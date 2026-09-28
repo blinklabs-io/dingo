@@ -17,6 +17,7 @@ package governance
 import (
 	"io"
 	"log/slog"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -69,6 +70,85 @@ func TestEpochContainsSlotZeroLengthRejectsAll(t *testing.T) {
 	epoch := models.Epoch{EpochId: 1, StartSlot: 100, LengthInSlots: 0}
 	require.False(t, epochContainsSlot(epoch, 100))
 	require.False(t, epochContainsSlot(epoch, 200))
+}
+
+func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		testHash28("committee-expiry-reward"),
+	)
+	require.NoError(t, err)
+	anchor := lcommon.GovAnchor{
+		Url:      "https://example.test/committee-expiry",
+		DataHash: lcommon.Blake2b256Hash(testHash32("committee-expiry-anchor")),
+	}
+
+	for _, test := range []struct {
+		name      string
+		expiry    uint64
+		wantError bool
+	}{
+		{name: "current epoch", expiry: 100, wantError: true},
+		{name: "next epoch", expiry: 101},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			credential := lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.Blake2b224Hash(testHash28("committee-expiry")),
+			}
+			action := &lcommon.UpdateCommitteeGovAction{
+				Type: uint(lcommon.GovActionTypeUpdateCommittee),
+				CredEpochs: map[*lcommon.Credential]uint64{
+					&credential: test.expiry,
+				},
+				Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
+			}
+			procedure, err := conway.NewConwayProposalProcedure(
+				0, rewardAccount, action, anchor,
+			)
+			require.NoError(t, err)
+			txHash := testHash32(test.name)
+			tx := mockledger.NewTransactionBuilder()
+			tx.WithId(txHash)
+			tx.WithProposalProcedures(procedure)
+
+			err = ProcessProposals(
+				tx,
+				ocommon.Point{Slot: 100},
+				100,
+				20,
+				db,
+				nil,
+			)
+			stored, getErr := db.GetGovernanceProposal(txHash, 0, nil)
+			if test.wantError {
+				require.Error(t, err)
+				require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
+				require.Nil(t, stored)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, getErr)
+			var storedAction lcommon.UpdateCommitteeGovAction
+			_, err = cbor.Decode(stored.GovActionCbor, &storedAction)
+			require.NoError(t, err)
+			require.Len(t, storedAction.CredEpochs, 1)
+			for _, expiryEpoch := range storedAction.CredEpochs {
+				require.Equal(t, test.expiry, expiryEpoch)
+			}
+		})
+	}
 }
 
 func TestMapVoterType(t *testing.T) {

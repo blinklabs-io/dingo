@@ -59,7 +59,7 @@ func newByronPBFTTestKey(seedByte byte) byronPBFTTestKey {
 }
 
 func newSignedByronPBFTDelegationCertificate(
-	t *testing.T,
+	t testing.TB,
 	protocolMagic uint32,
 	epoch uint64,
 	issuer byronPBFTTestKey,
@@ -122,7 +122,7 @@ func newSignedByronPBFTBlock(
 	if delegationPayload == nil {
 		delegationPayload = []any{}
 	}
-	delegationPayloadCbor, err := cbor.Encode(delegationPayload)
+	delegationPayloadCbor, err := cbor.Encode(cbor.IndefLengthList(delegationPayload))
 	require.NoError(t, err)
 	bodyProof, ok := header.BodyProof.([]any)
 	require.True(t, ok)
@@ -208,6 +208,17 @@ func newSignedByronPBFTBlock(
 	return rebuilt
 }
 
+func encodeIndefiniteByronList(t *testing.T, values []any) []byte {
+	t.Helper()
+	encoded := []byte{0x9f}
+	for _, value := range values {
+		item, err := cbor.Encode(value)
+		require.NoError(t, err)
+		encoded = append(encoded, item...)
+	}
+	return append(encoded, 0xff)
+}
+
 func rawByronPBFTBlock(
 	t *testing.T,
 	block *byron.ByronMainBlock,
@@ -250,14 +261,23 @@ func newGeneratedByronPBFTTestNodeConfig(
 		"mainnet/config.json",
 	)
 	require.NoError(t, err)
-	require.NoError(t, nodeConfig.LoadByronGenesisFromReader(strings.NewReader(
+	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {},
+			"bootStakeholders": {%q: 1},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": 0}
 			},
@@ -266,6 +286,7 @@ func newGeneratedByronPBFTTestNodeConfig(
 		}`,
 			securityParam,
 			protocolMagic,
+			issuerHash.String(),
 			issuerHash.String(),
 			hex.EncodeToString(genesisCertificate[3].([]byte)),
 			base64.StdEncoding.EncodeToString(initialDelegate.verificationKey),
@@ -303,14 +324,23 @@ func newByronPBFTTestNodeConfig(
 		"mainnet/config.json",
 	)
 	require.NoError(t, err)
-	require.NoError(t, nodeConfig.LoadByronGenesisFromReader(strings.NewReader(
+	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
-			"bootStakeholders": {},
+			"bootStakeholders": {%q: 1},
 			"heavyDelegation": {
 				%q: {"cert": %q, "delegatePk": %q, "issuerPk": %q, "omega": %d}
 			},
@@ -319,6 +349,7 @@ func newByronPBFTTestNodeConfig(
 		}`,
 			securityParam,
 			header.ProtocolMagic,
+			issuerHash.String(),
 			issuerHash.String(),
 			hex.EncodeToString(certificateSignature),
 			base64.StdEncoding.EncodeToString(delegateKey),
@@ -474,7 +505,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleAtActivation, true)
-	require.ErrorContains(t, err, "active delegate mismatch")
+	require.ErrorContains(t, err, "does not authorize delegate")
 
 	activated := newSignedByronPBFTBlock(
 		t,
@@ -542,7 +573,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleAfterRevocation, true)
-	require.ErrorContains(t, err, "active delegate mismatch")
+	require.ErrorContains(t, err, "does not authorize delegate")
 
 	revoked := newSignedByronPBFTBlock(
 		t,
@@ -666,7 +697,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 		nil,
 	)
 	_, err = ls.advanceByronPBFTState(state, staleDelegate, true)
-	require.ErrorContains(t, err, "active delegate mismatch")
+	require.ErrorContains(t, err, "does not authorize delegate")
 	revoked := newSignedByronPBFTBlock(
 		t,
 		template,
@@ -1249,4 +1280,48 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 
 	err := ls.validateByronPBFTHeaderCrypto(ebb)
 	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
+// validator with typed-nil headers, the shape a Byron block type can carry
+// in process. It must return an error rather than read through the header.
+func TestValidateByronPBFTHeaderCryptoRejectsNilHeaders(t *testing.T) {
+	t.Parallel()
+
+	blocks := map[string]gledger.Block{
+		"header-only main": headerOnlyBlock{
+			header: (*byron.ByronMainBlockHeader)(nil),
+		},
+		"header-only EBB": headerOnlyBlock{
+			header: (*byron.ByronEpochBoundaryBlockHeader)(nil),
+		},
+		"main block":     &byron.ByronMainBlock{},
+		"boundary block": &byron.ByronEpochBoundaryBlock{},
+	}
+	for name, block := range blocks {
+		for _, atOrigin := range []bool{true, false} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				ls, primaryChain := newByronGenesisAnchorTestLedger(
+					t,
+					lcommon.Blake2b256Hash([]byte("genesis")).String(),
+				)
+				if !atOrigin {
+					require.NoError(t, primaryChain.AddBlock(
+						loadBoundaryBlock(
+							t,
+							"mainnet-byron-last-4492799.cbor",
+							gledger.BlockTypeByronMain,
+						),
+						nil,
+					))
+				}
+				var err error
+				require.NotPanics(t, func() {
+					err = ls.validateByronPBFTHeaderCrypto(block)
+				})
+				require.ErrorContains(t, err, "nil header")
+			})
+		}
+	}
 }

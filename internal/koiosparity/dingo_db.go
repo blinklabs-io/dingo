@@ -97,6 +97,29 @@ type DingoEpochData struct {
 	RewardAdaPotsPresent bool
 }
 
+// DingoRewardSnapshotSummary holds the reward_snapshot completeness fields
+// checkEpoch's paramEpochPositiveStakeProven route needs (dingo #4691). See
+// GetRewardSnapshot on RewardParitySource for what the two fields prove.
+type DingoRewardSnapshotSummary struct {
+	// TotalPoolCount is reward_snapshot.total_pool_count: the number of
+	// pools reward_pool_input actually holds rows for at this epoch boundary
+	// -- the reduced, positive-stake set rewardStakeDistribution and any
+	// degraded-registration exclusion left behind (rotation.go's
+	// buildRewardStateInputs) -- unlike epoch_summary.TotalPoolCount, which
+	// counts every delegated pool regardless of stake and can never equal
+	// this on a network with any zero-stake-but-delegated pool.
+	TotalPoolCount uint64
+	// ExcludedActiveStake is reward_snapshot.excluded_active_stake: nonzero
+	// when a degraded pool's stake was excluded from reward_pool_input
+	// (dingo #4025). ExcludedActiveStakeKnown is false for a snapshot
+	// captured before that tracking existed, meaning "unknown", not "known
+	// zero" -- see models.RewardSnapshot.ExcludedActiveStake's doc comment.
+	// A caller must treat unknown the same as nonzero: proving completeness
+	// from TotalPoolCount alone would silently re-admit the #4025 gap.
+	ExcludedActiveStake      uint64
+	ExcludedActiveStakeKnown bool
+}
+
 // DingoPoolEpochData holds per-pool reward-input data assembled for one Koios
 // reporting epoch. It is built from up to three separate Dingo rows spread
 // across two different reward_pool_input epochs plus one reward_pool_output
@@ -705,6 +728,46 @@ WHERE ret.epoch <= ?
 		retired[hex.EncodeToString(poolHash)] = struct{}{}
 	}
 	return retired, rows.Err()
+}
+
+// GetRewardSnapshot implements RewardParitySource against the reward_snapshot
+// table directly. excluded_active_stake is nullable TEXT: NULL is scanned as
+// unset (ExcludedActiveStakeKnown = false) rather than as zero, matching
+// DatabaseSource's handling of models.RewardSnapshot.ExcludedActiveStake's
+// nil-pointer convention — see DingoRewardSnapshotSummary's doc comment for
+// why the two must not be conflated.
+func (d *DingoDB) GetRewardSnapshot(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoRewardSnapshotSummary, error) {
+	var totalPoolCount uint64
+	var excluded sql.NullString
+	err := d.queryRow(
+		ctx,
+		`SELECT total_pool_count, excluded_active_stake FROM reward_snapshot WHERE epoch = ? AND snapshot_type = ?`,
+		epoch,
+		snapshotTypeMark,
+	).Scan(&totalPoolCount, &excluded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reward_snapshot epoch %d: %w", epoch, err)
+	}
+	out := &DingoRewardSnapshotSummary{TotalPoolCount: totalPoolCount}
+	if excluded.Valid {
+		value, parseErr := strconv.ParseUint(excluded.String, 10, 64)
+		if parseErr != nil {
+			return nil, fmt.Errorf(
+				"parse reward_snapshot.excluded_active_stake epoch %d: %w",
+				epoch,
+				parseErr,
+			)
+		}
+		out.ExcludedActiveStake = value
+		out.ExcludedActiveStakeKnown = true
+	}
+	return out, nil
 }
 
 func (d *DingoDB) GetPoolEpochDataMap(
