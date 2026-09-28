@@ -15,7 +15,8 @@
 package ouroboros
 
 import (
-	"strings"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -24,31 +25,28 @@ import (
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
-// keepaliveTimeoutErrSubstring is the fragment of gouroboros protocol.go's
-// state-transition timeout error
-// ("%s: timeout waiting on transition from protocol state %s") that survives
-// regardless of which state the client was waiting in.
-const keepaliveTimeoutErrSubstring = "timeout waiting on transition"
+// keepalivePongTimeoutErr is the exact message gouroboros protocol.go
+// reports when the keep-alive client's transition timer for the Server state
+// (waiting on the peer's pong) fires. The server side's ping-wait timeout
+// reports the Client state instead, so it does not match.
+var keepalivePongTimeoutErr = fmt.Sprintf(
+	"%s: timeout waiting on transition from protocol state %s",
+	okeepalive.ProtocolName,
+	okeepalive.StateServer,
+)
 
-// classifyKeepaliveTimeoutClose reports whether err is this connection's
-// keep-alive client timing out waiting for a pong -- gouroboros' generic
-// per-protocol state-transition timeout (protocol.go), scoped to the
-// keep-alive protocol by its "keep-alive: " prefix (keepalive.ProtocolName).
-// gouroboros v0.208.0 has no dedicated keep-alive timeout type or hook to
-// match on instead (see blockfetch_forward.go's package doc and #4782's
-// discussion of the same gap for a keep-alive RTT hook), so this is a string
-// match against the one existing error shape.
-//
-// Returns false for a nil error, a close from any other protocol, or a clean
-// shutdown -- this counts keep-alive timeouts specifically, not connection
-// closes in general.
+// classifyKeepaliveTimeoutClose reports whether err is a keep-alive pong
+// timeout. gouroboros v0.208.0 has no typed error for it, and its connection
+// wraps every forwarded mini-protocol error ("protocol error: %w" in
+// connection.go), so this matches the protocol.go message exactly at any
+// level of the wrap chain rather than against the outer string.
 func classifyKeepaliveTimeoutClose(err error) bool {
-	if err == nil {
-		return false
+	for ; err != nil; err = errors.Unwrap(err) {
+		if err.Error() == keepalivePongTimeoutErr {
+			return true
+		}
 	}
-	msg := err.Error()
-	return strings.HasPrefix(msg, okeepalive.ProtocolName+":") &&
-		strings.Contains(msg, keepaliveTimeoutErrSubstring)
+	return false
 }
 
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {

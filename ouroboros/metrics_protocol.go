@@ -40,16 +40,10 @@ type protocolMetrics struct {
 	txsubmissionAdmissionRetries  prometheus.Histogram
 	txsubmissionReplySizeMismatch *prometheus.CounterVec
 	// keepaliveTimeouts counts connections closed because this node's
-	// keep-alive client timed out waiting for a pong (protocol.go's "%s:
-	// timeout waiting on transition from protocol state %s", classified by
-	// classifyKeepaliveTimeoutClose in keepalive.go). A successful response
-	// is already counted by messagesReceived{protocol="keepalive",
-	// outcome="success"}; this is the complementary failure outcome, which
-	// that counter has no path to record since a timeout never reaches
-	// instrumentKeepaliveResponse. See #4782: this and the blockfetch
-	// in-flight/enqueue metrics together validate that the blockfetch
-	// backpressure fix actually keeps keep-alives completing within the 10s
-	// timeout on a live sync.
+	// keep-alive client timed out waiting for a pong, as classified by
+	// classifyKeepaliveTimeoutClose. A timeout never reaches
+	// instrumentKeepaliveResponse, so messagesReceived{protocol="keepalive"}
+	// has no failure outcome to record it under.
 	keepaliveTimeouts prometheus.Counter
 }
 
