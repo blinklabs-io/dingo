@@ -17,13 +17,16 @@ package ledger
 import (
 	"crypto/ed25519"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -382,41 +385,126 @@ func TestValidateTxDijkstraTopLevelVoterSeesSubTransactionCertificates(
 	}
 }
 
-func TestValidateTxDijkstraRejectsUnelectedSubTransactionCommitteeVoter(
+func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	pparams := committeeVotingDijkstra.pparams(
-		lcommon.ProtocolVersionVanRossem + 1,
-	)
-	lv, db := committeeTestView(t, pparams)
-	seatedCold := committeeTestCredential(0x61)
-	unelectedCold := committeeTestCredential(0x62)
-	unelectedHot := committeeTestCredential(0x63)
-	seatCommitteeMembers(t, db, seatedCold)
-	seedCommitteeCredentialAuthorization(t, db, unelectedCold, unelectedHot, 1, 1)
-	actionID := storeCommitteeVotingTarget(
-		t, db, 0x64, lcommon.GovActionTypeInfo,
-	)
-	tx := &gdijkstra.DijkstraTransaction{
-		TxIsValid: true,
-		Body: gdijkstra.DijkstraTransactionBody{
-			TxSubTransactions: cbor.NewSetType(
-				[]gdijkstra.DijkstraSubTransaction{{
-					Body: gdijkstra.DijkstraSubTransactionBody{
-						TxVotingProcedures: lcommon.VotingProcedures{
-							committeeVoter(unelectedHot): {
-								actionID: {Vote: lcommon.GovVoteYes},
-							},
+	for _, tc := range []struct {
+		name            string
+		protocolVersion uint
+		elected         bool
+	}{
+		{
+			name:            "elected voter at PV11 is accepted",
+			protocolVersion: lcommon.ProtocolVersionVanRossem,
+			elected:         true,
+		},
+		{
+			name:            "unelected voter at PV12 is rejected",
+			protocolVersion: lcommon.ProtocolVersionVanRossem + 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pparams := committeeVotingDijkstra.pparams(tc.protocolVersion)
+			lv, db := committeeTestView(t, pparams)
+			seatedCold := committeeTestCredential(0x61)
+			voterCold := seatedCold
+			if !tc.elected {
+				voterCold = committeeTestCredential(0x62)
+			}
+			voterHot, voterKey := committeeTestVotingKey(0x63)
+			seatCommitteeMembers(t, db, seatedCold)
+			seedCommitteeCredentialAuthorization(t, db, voterCold, voterHot, 1, 1)
+			actionID := storeCommitteeVotingTarget(
+				t, db, 0x64, lcommon.GovActionTypeInfo,
+			)
+
+			// Each Dijkstra UTxO level needs its own spend and witnesses for
+			// full transaction validation.
+			_, rootPaymentKey := committeeTestVotingKey(0x65)
+			rootPaymentHash := lcommon.Blake2b224Hash(
+				rootPaymentKey.Public().(ed25519.PublicKey),
+			)
+			rootInput, rootAddress := committeeTestAddSpend(
+				t,
+				lv,
+				rootPaymentHash[:],
+			)
+
+			_, subPaymentKey := committeeTestVotingKey(0x66)
+			subPaymentHash := lcommon.Blake2b224Hash(
+				subPaymentKey.Public().(ed25519.PublicKey),
+			)
+			subInput := shelley.NewShelleyTransactionInput(
+				strings.Repeat("b8", lcommon.Blake2b256Size),
+				0,
+			)
+			subAddress := mustCommitteeTestAddress(t, subPaymentHash[:])
+			subOutput := &shelley.ShelleyTransactionOutput{
+				OutputAddress: subAddress,
+				OutputAmount:  2_000_000,
+			}
+			lv.intraBlockUtxos[utxoref.ForInput(subInput)] = lcommon.Utxo{
+				Id:     subInput,
+				Output: subOutput,
+			}
+
+			tx := committeeVotingDijkstra.build(
+				rootInput,
+				&shelley.ShelleyTransactionOutput{
+					OutputAddress: rootAddress,
+					OutputAmount:  2_000_000,
+				},
+				nil,
+				nil,
+			).(*gdijkstra.DijkstraTransaction)
+			baseSubTransaction := committeeVotingDijkstra.build(
+				subInput,
+				subOutput,
+				nil,
+				nil,
+			).(*gdijkstra.DijkstraTransaction)
+			subTransactions := []gdijkstra.DijkstraSubTransaction{{
+				Body: gdijkstra.DijkstraSubTransactionBody{
+					TxInputs:  baseSubTransaction.Body.TxInputs,
+					TxOutputs: baseSubTransaction.Body.TxOutputs,
+					TxVotingProcedures: lcommon.VotingProcedures{
+						committeeVoter(voterHot): {
+							actionID: {Vote: lcommon.GovVoteYes},
 						},
 					},
-				}},
+				},
+			}}
+			subTransactionBody, err := cbor.Encode(subTransactions[0].Body)
+			require.NoError(t, err)
+			subTransactions[0].Body.SetCbor(subTransactionBody)
+			subTransactionHash := subTransactions[0].Body.Id()
+			subTransactions[0].WitnessSet.VkeyWitnesses = cbor.NewSetType(
+				[]lcommon.VkeyWitness{
+					{
+						Vkey:      subPaymentKey.Public().(ed25519.PublicKey),
+						Signature: ed25519.Sign(subPaymentKey, subTransactionHash[:]),
+					},
+					{
+						Vkey:      voterKey.Public().(ed25519.PublicKey),
+						Signature: ed25519.Sign(voterKey, subTransactionHash[:]),
+					},
+				},
 				true,
-			),
-		},
+			)
+			tx.Body.TxSubTransactions = cbor.NewSetType(subTransactions, true)
+			committeeVotingDijkstra.witness(tx, []lcommon.VkeyWitness{
+				committeeTestVKeyWitness(tx, rootPaymentKey),
+			})
+			err = eras.ValidateTxDijkstra(tx, 0, lv, pparams)
+			if tc.elected {
+				require.NoError(t, err)
+			} else {
+				var unknown conway.UnknownVoterError
+				require.ErrorAs(t, err, &unknown, "%v", err)
+			}
+		})
 	}
-	err := eras.ValidateTxDijkstra(tx, 0, lv, pparams)
-	var unknown conway.UnknownVoterError
-	require.ErrorAs(t, err, &unknown, "%v", err)
 }
