@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
@@ -82,6 +83,13 @@ var (
 	// a separate, authoritative rejection that never carries this sentinel.
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
+	)
+	// errPoolSnapshotPruned marks a leader-stake snapshot whose rows the
+	// default pool-snapshot retention window has already deleted. It always
+	// wraps errLeaderStakeSnapshotUnavailable. The header may be valid; the
+	// node simply no longer holds the state to check it.
+	errPoolSnapshotPruned = errors.New(
+		"pool stake snapshot pruned by retention",
 	)
 	errVrfKeyRegistrationHistoryUnavailable = errors.New(
 		"VRF key registration history unavailable",
@@ -220,11 +228,25 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	if header == nil {
 		return errors.New("nil block header")
 	}
-	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+	// A header on the applied chain was fully verified when it was applied.
+	// Re-verifying it here can fail only because the state it needs (pool
+	// snapshots older than the retention window) has since been pruned.
+	// The point carries the header hash, so a match is the same header.
+	if ls.chain != nil && ls.chain.HoldsPoint(ocommon.NewPoint(
+		header.SlotNumber(),
+		header.Hash().Bytes(),
+	)) {
+		return nil
+	}
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		headerOnlyBlock{header: header},
 		false,
 		true,
 	)
+	if errors.Is(err, errPoolSnapshotPruned) {
+		return fmt.Errorf("%w: %w", errHeaderVerificationDeferred, err)
+	}
+	return err
 }
 
 // verifyBlockHeader performs cryptographic verification of a block header.
@@ -1506,6 +1528,31 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	return nil
 }
 
+// poolSnapshotPruned reports whether the pool-stake rows for an epoch are
+// gone because they fell below the retention window (currentEpoch-3, see
+// snapshot.Manager.cleanupOldSnapshots). Pruning deletes whole epochs, and
+// epoch_summary rows survive it, so an epoch with no rows at all is the
+// signature; a populated snapshot that lacks the pool is not pruned. API
+// storage mode never prunes.
+func (ls *LedgerState) poolSnapshotPruned(
+	snapshotEpoch uint64,
+	snapshotType string,
+) bool {
+	if ls.db.StorageMode() == types.StorageModeAPI {
+		return false
+	}
+	current := ls.loadConsensusSnapshot().currentEpoch.EpochId
+	if current < 3 || snapshotEpoch >= current-3 {
+		return false
+	}
+	rows, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		snapshotEpoch,
+		snapshotType,
+		nil,
+	)
+	return err == nil && len(rows) == 0
+}
+
 func (ls *LedgerState) leaderEligibilityStakeWithCache(
 	block ledger.Block,
 	epochId uint64,
@@ -1607,6 +1654,17 @@ func (ls *LedgerState) leaderEligibilityStakeWithCache(
 			)
 	}
 	if snapshot == nil || snapshot.TotalStake == 0 {
+		if ls.poolSnapshotPruned(snapshotEpoch, snapshotType) {
+			return 0, 0, snapshotEpoch, snapshotType, false,
+				fmt.Errorf(
+					"%w: %w: block header verification rejected at slot %d: "+
+						"epoch %d mark snapshot is below the retention window",
+					errLeaderStakeSnapshotUnavailable,
+					errPoolSnapshotPruned,
+					block.SlotNumber(),
+					snapshotEpoch,
+				)
+		}
 		// Mirror cardano-ledger: a pool absent from the leader stake
 		// distribution is a hard rejection (the reference node's
 		// VRFKeyUnknown). The reference distribution (nesPd) is always
