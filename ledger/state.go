@@ -8722,6 +8722,14 @@ func (ls *LedgerState) latestOpCertCounterForValidation(
 // stale relative to the certified boundary. mithrilLedgerSlot is passed in
 // rather than read from ls directly so each caller controls how it is
 // obtained (a lock-safe snapshot, or a value already captured under one).
+//
+// found is false only when the pool is absent from a counter state this node
+// actually holds, which the counter rule reads as the reference's zero
+// baseline. A Mithril-restored database without the certified counter map at
+// its boundary (one imported before that map was persisted) does not hold that
+// state: the pool may have rotated many times before the boundary, so zero
+// would reject its next valid block. That case returns
+// errOpCertBaselineNotImported instead.
 func (ls *LedgerState) latestOpCertCounterAfterMithril(
 	poolKeyHash lcommon.PoolKeyHash,
 	mithrilLedgerSlot uint64,
@@ -8736,11 +8744,34 @@ func (ls *LedgerState) latestOpCertCounterAfterMithril(
 		if err != nil || found {
 			return sequence, found, err
 		}
-		return ls.db.LatestPoolOpCertSequenceAfter(
+		sequence, found, err = ls.db.LatestPoolOpCertSequenceAfter(
 			poolKeyHash,
 			mithrilLedgerSlot-1,
 			txn,
 		)
+		if err != nil || found {
+			return sequence, found, err
+		}
+		imported, err := ls.db.PoolOpCertSequencesExistAtSlot(
+			mithrilLedgerSlot,
+			txn,
+		)
+		if err != nil {
+			return 0, false, fmt.Errorf(
+				"read certified opcert counters at Mithril boundary slot %d: %w",
+				mithrilLedgerSlot,
+				err,
+			)
+		}
+		if !imported {
+			return 0, false, fmt.Errorf(
+				"%w: slot %d has no certified counters, so pool %x has no known counter; rebootstrap from a current Mithril snapshot",
+				errOpCertBaselineNotImported,
+				mithrilLedgerSlot,
+				poolKeyHash.Bytes(),
+			)
+		}
+		return 0, false, nil
 	}
 	return ls.db.LatestPoolOpCertSequence(poolKeyHash, txn)
 }

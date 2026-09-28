@@ -63,9 +63,10 @@ func TestObserverSendsRequestsToTheConfiguredBaseURL(t *testing.T) {
 		// httptest serves plain HTTP, so the override needs the same escape
 		// hatch an operator would use for a local deployment. That keeps the
 		// transport guard in the path rather than bypassing it.
-		BaseURL:           overrideSrv.URL,
-		AllowInsecureHTTP: true,
-		Logger:            slog.New(slog.DiscardHandler),
+		BaseURL:               overrideSrv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Logger:                slog.New(slog.DiscardHandler),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = o.Stop(context.Background()) })
@@ -124,12 +125,13 @@ func TestFetchSendsRequestsToTheConfiguredBaseURL(t *testing.T) {
 	_, _ = Fetch(
 		context.Background(),
 		FetchConfig{
-			Network:           "preview",
-			CachePath:         cachePath,
-			BaseURL:           overrideSrv.URL,
-			AllowInsecureHTTP: true,
-			FromEpoch:         1,
-			ThroughEpoch:      1,
+			Network:               "preview",
+			CachePath:             cachePath,
+			BaseURL:               overrideSrv.URL,
+			AllowInsecureHTTP:     true,
+			AllowPrivateAddresses: true,
+			FromEpoch:             1,
+			ThroughEpoch:          1,
 		},
 		slog.New(slog.DiscardHandler),
 	)
