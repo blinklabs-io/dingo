@@ -100,20 +100,21 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
-		Network:              network,
-		APIKey:               koiosAPIKey(cmd),
-		BaseURL:              koiosBaseURL(cmd),
-		AllowInsecureHTTP:    koiosAllowInsecureHTTP(cmd),
-		CachePath:            resolveCachePath(),
-		Concurrency:          concurrency,
-		FromEpoch:            fromEpoch,
-		ThroughEpoch:         throughEpoch,
-		ForceRefresh:         forceRefresh,
-		AccountsEnabled:      accounts,
-		AccountsSource:       accountsSource,
-		GraceHours:           graceHours,
-		AccountChunkSize:     accountChunkSize,
-		AccountChunkMaxBytes: accountChunkMaxBytes,
+		Network:               network,
+		APIKey:                koiosAPIKey(cmd),
+		BaseURL:               koiosBaseURL(cmd),
+		AllowInsecureHTTP:     koiosAllowInsecureHTTP(cmd),
+		AllowPrivateAddresses: koiosAllowPrivateAddresses(cmd),
+		CachePath:             resolveCachePath(),
+		Concurrency:           concurrency,
+		FromEpoch:             fromEpoch,
+		ThroughEpoch:          throughEpoch,
+		ForceRefresh:          forceRefresh,
+		AccountsEnabled:       accounts,
+		AccountsSource:        accountsSource,
+		GraceHours:            graceHours,
+		AccountChunkSize:      accountChunkSize,
+		AccountChunkMaxBytes:  accountChunkMaxBytes,
 	}, slog.Default())
 	if err != nil {
 		return err

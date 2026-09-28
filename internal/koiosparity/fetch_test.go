@@ -112,13 +112,14 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 	defer cache.Close() //nolint:errcheck
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		BaseURL:           srv.URL,
-		AllowInsecureHTTP: true,
-		Network:           "preview",
-		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
-		Concurrency:       1,
-		FromEpoch:         10,
-		ThroughEpoch:      15,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Concurrency:           1,
+		FromEpoch:             10,
+		ThroughEpoch:          15,
 	}, slog.New(slog.DiscardHandler))
 	require.Error(
 		t,
@@ -189,13 +190,14 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 	defer cache.Close() //nolint:errcheck
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		BaseURL:           srv.URL,
-		AllowInsecureHTTP: true,
-		Network:           "preview",
-		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
-		Concurrency:       3,
-		FromEpoch:         20,
-		ThroughEpoch:      22,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Concurrency:           3,
+		FromEpoch:             20,
+		ThroughEpoch:          22,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(
 		t,
@@ -284,13 +286,14 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 	defer cache.Close() //nolint:errcheck
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		BaseURL:           srv.URL,
-		AllowInsecureHTTP: true,
-		Network:           "preview",
-		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
-		Concurrency:       1,
-		FromEpoch:         30,
-		ThroughEpoch:      30,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Concurrency:           1,
+		FromEpoch:             30,
+		ThroughEpoch:          30,
 	}, slog.New(slog.DiscardHandler))
 	require.Error(t, err)
 	require.Nil(t, result)
@@ -428,14 +431,15 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 	require.NoError(t, cache.Close())
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		BaseURL:           srv.URL,
-		AllowInsecureHTTP: true,
-		Network:           network,
-		CachePath:         cachePath,
-		Concurrency:       1,
-		FromEpoch:         epoch,
-		ThroughEpoch:      epoch,
-		AccountsEnabled:   true,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               network,
+		CachePath:             cachePath,
+		Concurrency:           1,
+		FromEpoch:             epoch,
+		ThroughEpoch:          epoch,
+		AccountsEnabled:       true,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -573,13 +577,14 @@ func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
 	require.NoError(t, cache.Close())
 
 	_, err = Fetch(context.Background(), FetchConfig{
-		BaseURL:           srv.URL,
-		AllowInsecureHTTP: true,
-		Network:           network,
-		CachePath:         cachePath,
-		Concurrency:       1,
-		FromEpoch:         epoch,
-		ThroughEpoch:      epoch,
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               network,
+		CachePath:             cachePath,
+		Concurrency:           1,
+		FromEpoch:             epoch,
+		ThroughEpoch:          epoch,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
