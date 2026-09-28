@@ -1857,8 +1857,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	// slot at once (two elections producing an identical transaction-
 	// reference set). There is nothing to reject here -- a second live
 	// announcement of the same hash at a different slot is added to the set
-	// below rather than compared against a single scalar (cubic review;
-	// issue #3513 review).
+	// below rather than compared against a single scalar.
 	slot := header.SlotNumber()
 	if previous, exists := o.leiosAnnouncements[key]; exists {
 		if previous.ebHash != ebHash || previous.ebSize != ebSize ||

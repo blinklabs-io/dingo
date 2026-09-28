@@ -566,8 +566,7 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 // re-testing membership AFTER it and RE-PERSISTING the marker for any key that
 // came back, rather than by holding the lock across the delete. Re-persisting
 // is idempotent (SetSyncState of the same key/value) and runs with no lock
-// held, so it closes the window without reintroducing the lock inversion
-// (issue #3717 review / cubic P1: re-admission after the live check).
+// held, so it closes the window without reintroducing the lock inversion.
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
 		return nil
