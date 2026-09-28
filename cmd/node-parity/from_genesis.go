@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
@@ -103,6 +104,35 @@ type fromGenesisCounters struct {
 	// outright if these ever total zero across a run that reached at
 	// least one epoch boundary.
 	ppVerified, stakeVerified, utxoVerified int
+
+	// metrics is nil unless --metrics-addr is set. from-genesis previously
+	// reported only through this struct's counters, the log, and the exit
+	// code, so a divergence moved no Prometheus series at all and the
+	// alert rules in docs/dashboards/alerts.yaml -- which fire on
+	// node_parity_divergence_total -- could never see a from-genesis run.
+	// Recording here rather than at the call site keeps the counter and
+	// the metric incrementing from the same branch, so they cannot drift.
+	metrics *parityMetrics
+}
+
+// recordDivergence increments the same divergenceTotal{field} series a
+// check/watch cycle uses. A mismatch is a mismatch regardless of which
+// subcommand found it, so a dashboard built on divergenceTotal alone sees
+// from-genesis findings too.
+func (c *fromGenesisCounters) recordDivergence(field string) {
+	if c.metrics != nil {
+		c.metrics.divergenceTotal.WithLabelValues(field).Inc()
+	}
+}
+
+// recordIncomplete increments checksSkippedTotal{reason} for a check that
+// could not be trusted. Kept distinct from a divergence: "Koios was
+// unreachable" and "Dingo answered the wrong value" are very different
+// things to page someone about.
+func (c *fromGenesisCounters) recordIncomplete(reason string) {
+	if c.metrics != nil {
+		c.metrics.recordSkip(reason)
+	}
 }
 
 // recordEpoch is documented on fromGenesisCounters.
@@ -111,6 +141,9 @@ func (c *fromGenesisCounters) recordEpoch(
 	logger *slog.Logger,
 ) {
 	c.epochsChecked++
+	if c.metrics != nil {
+		c.metrics.checksTotal.Inc()
+	}
 
 	logger.Debug("epoch timing",
 		"epoch", r.Epoch,
@@ -131,6 +164,7 @@ func (c *fromGenesisCounters) recordEpoch(
 	// which are very different things to page someone about.
 	if r.ProtocolParamsErr != nil {
 		c.ppIncomplete++
+		c.recordIncomplete("protocol_params")
 		logger.Warn("protocol params check did not run",
 			"epoch", r.Epoch, "error", r.ProtocolParamsErr)
 	} else {
@@ -138,6 +172,7 @@ func (c *fromGenesisCounters) recordEpoch(
 		case koiosparity.StatusFail:
 			c.ppMismatches++
 			c.ppVerified++
+			c.recordDivergence("protocol_params")
 			for _, m := range r.ProtocolParamsMismatches {
 				logger.Warn("protocol params mismatch",
 					"epoch", r.Epoch, "field", m.Field,
@@ -146,6 +181,7 @@ func (c *fromGenesisCounters) recordEpoch(
 			}
 		case koiosparity.StatusError:
 			c.ppIncomplete++
+			c.recordIncomplete("protocol_params")
 			for _, m := range r.ProtocolParamsMismatches {
 				logger.Warn("protocol params check incomplete",
 					"epoch", r.Epoch, "field", m.Field,
@@ -159,12 +195,14 @@ func (c *fromGenesisCounters) recordEpoch(
 
 	if r.StakeErr != nil {
 		c.stakeIncomplete++
+		c.recordIncomplete("stake_distribution")
 		logger.Warn("stake distribution check did not run",
 			"epoch", r.Epoch, "error", r.StakeErr)
 	} else {
 		realMismatches, faults := splitStakeMismatches(r.StakeMismatches)
 		if len(faults) > 0 {
 			c.stakeIncomplete++
+			c.recordIncomplete("stake_distribution")
 		} else {
 			c.stakeVerified++
 		}
@@ -176,6 +214,7 @@ func (c *fromGenesisCounters) recordEpoch(
 		}
 		if len(realMismatches) > 0 {
 			c.stakeMismatches++
+			c.recordDivergence("stake_distribution")
 			for _, m := range realMismatches {
 				logger.Warn("stake distribution mismatch",
 					"epoch", r.Epoch, "pool", m.PoolIDBech32,
@@ -189,14 +228,17 @@ func (c *fromGenesisCounters) recordEpoch(
 
 	if !r.UTxOAttempted {
 		c.utxoIncomplete++
+		c.recordIncomplete("utxo")
 		logger.Debug("utxo check skipped (no genesis baseline)", "epoch", r.Epoch)
 	} else if r.UTxOErr != nil {
 		c.utxoIncomplete++
+		c.recordIncomplete("utxo")
 		logger.Warn("utxo check did not run",
 			"epoch", r.Epoch, "error", r.UTxOErr)
 	} else if len(r.UTxOMissing) > 0 || len(r.UTxOExtra) > 0 || len(r.UTxODiffers) > 0 {
 		c.utxoMismatches++
 		c.utxoVerified++
+		c.recordDivergence("utxo")
 		logger.Warn("utxo set mismatch",
 			"epoch", r.Epoch, "missing", len(r.UTxOMissing),
 			"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
@@ -372,7 +414,26 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		)
 	}
 
+	// Serving metrics is opt-in through --metrics-addr, the same flag and
+	// default port watch uses, so a from-genesis run can be scraped by the
+	// same Prometheus job and alerted on by the same rules. Left nil when
+	// the flag is empty, which keeps a plain one-shot run free of a
+	// listening socket.
 	var counters fromGenesisCounters
+	if globalFlags.metricsAddr != "" {
+		counters.metrics = newParityMetrics(network)
+		metricsServer, err := serveMetrics(globalFlags.metricsAddr, logger)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(
+				context.Background(), 5*time.Second,
+			)
+			defer cancel()
+			_ = metricsServer.Shutdown(shutdownCtx) //nolint:errcheck
+		}()
+	}
 	report := func(r nodeparity.EpochResult) {
 		counters.recordEpoch(r, logger)
 	}
