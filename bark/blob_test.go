@@ -31,8 +31,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gconway "github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -510,15 +512,14 @@ func generatedUnclassifiableBabbageBlock(t *testing.T) ([]byte, uint) {
 	return blocks[0].Cbor(), gledger.BlockTypeBabbage
 }
 
-// TestGetBlock_RejectsArchiveBlockTypeMismatch covers an archive that serves
-// valid block bytes while misreporting their era.
-//
-// The block hash for Shelley and later is taken over the header alone, and
-// adjacent eras share that header layout, so the same bytes decode under more
-// than one era with an identical hash and slot. The hash check therefore
-// cannot police the era, and without an independent derivation the archive
-// would dictate BlockMetadata.Type.
-func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
+// TestGetBlock_AcceptsArchiveBlockTypeMismatch covers an archive that serves
+// genuine block bytes under an adjacent, layout-compatible era. The block
+// hash for Shelley and later covers the header alone, and adjacent eras share
+// its layout, so the bytes decode under the claimed era with an identical
+// hash and slot. The returned bytes are therefore still the requested block;
+// only BlockMetadata.Type follows the claim, the residual
+// internal/blockverify.TestHashAcceptsAdjacentEraMisclassification pins too.
+func TestGetBlock_AcceptsArchiveBlockTypeMismatch(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -526,7 +527,6 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 		block    func(*testing.T) ([]byte, uint)
 		claimed  archive.BlockType
 		claimedN uint
-		wantErr  error
 	}{
 		{
 			name: "babbage served as conway",
@@ -539,7 +539,6 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			},
 			claimed:  archive.BlockType_BLOCK_TYPE_CONWAY,
 			claimedN: gledger.BlockTypeConway,
-			wantErr:  ErrArchiveBlockTypeMismatch,
 		},
 		{
 			name: "shelley served as mary",
@@ -552,7 +551,6 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			},
 			claimed:  archive.BlockType_BLOCK_TYPE_MARY,
 			claimedN: gledger.BlockTypeMary,
-			wantErr:  ErrArchiveBlockTypeMismatch,
 		},
 	}
 	for _, tc := range tests {
@@ -565,16 +563,14 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			require.NoError(t, err,
 				"fixture must decode in its genuine era")
 			hash := decoded.Hash()
-			if tc.wantErr == ErrArchiveBlockTypeMismatch {
-				// The misreported era must still decode, otherwise the test
-				// would pass for the wrong reason.
-				_, err = gledger.NewBlockFromCbor(tc.claimedN, raw)
-				require.NoError(
-					t,
-					err,
-					"cross-era decode must succeed for this test to be meaningful",
-				)
-			}
+			// The misreported era must still decode, otherwise the test
+			// would pass for the wrong reason.
+			_, err = gledger.NewBlockFromCbor(tc.claimedN, raw)
+			require.NoError(
+				t,
+				err,
+				"cross-era decode must succeed for this test to be meaningful",
+			)
 
 			db := newTestDB(t)
 			baseURL, fakeArch, httpClient := startFakeArchive(
@@ -589,8 +585,10 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 			rTxn := store.NewTransaction(false)
 			t.Cleanup(func() { _ = rTxn.Rollback() })
 
-			_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-			require.ErrorIs(t, err, tc.wantErr)
+			cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+			require.NoError(t, err)
+			assert.Equal(t, raw, cbor)
+			assert.Equal(t, tc.claimedN, meta.Type)
 		})
 	}
 }
@@ -663,15 +661,10 @@ func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
 	assert.Equal(t, uint(gledger.BlockTypeByronEbb), meta.Type)
 }
 
-// TestGetBlock_RejectsUnclassifiableEra pins the fail-closed behaviour when a
-// block's era cannot be derived from its header.
-//
-// The generated Babbage block carries a structurally valid header with a
-// protocol version that DetermineBlockType does not map, which stands in for a
-// block from an era this node does not know. Trusting the archive's claim in
-// that case would hand era selection straight back to it, so the fetch is
-// refused. A node that cannot classify a block could not process it anyway.
-func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
+// TestGetBlock_AcceptsUnclassifiableEra covers a genuine block whose header
+// announces a protocol major (99) that gledger.DetermineBlockType maps to no
+// era. The era is the claimed type the bytes decode under, not that field.
+func TestGetBlock_AcceptsUnclassifiableEra(t *testing.T) {
 	t.Parallel()
 
 	raw, trueType := generatedUnclassifiableBabbageBlock(t)
@@ -694,10 +687,164 @@ func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
 	rTxn := store.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })
 
-	// Even though the archive reported the fixture's own era, the era cannot
-	// be confirmed from the header, so the block is not accepted.
-	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-	require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
+	cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.NoError(t, err)
+	assert.Equal(t, raw, cbor)
+	assert.Equal(t, trueType, meta.Type)
+}
+
+// TestGetBlock_AcceptsHardForkBoundaryProtocolMajor covers a genuine Babbage
+// block whose header announces Conway's protocol major, as a producer does
+// once it is ready for the next hard fork. The archive's Babbage claim must
+// be accepted even though gledger.DetermineBlockType would not map that
+// header to Babbage.
+func TestGetBlock_AcceptsHardForkBoundaryProtocolMajor(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := fixtures.GenerateBabbageChainWithProtocolVersion(
+		1, lcommon.Blake2b256{}, 2, 1,
+		gconway.MinProtocolVersionConway, 0,
+		1,
+	)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	raw := blocks[0].Cbor()
+	trueType := uint(gledger.BlockTypeBabbage)
+
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err, "fixture must decode as a genuine Babbage block")
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType_BLOCK_TYPE_BABBAGE
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.NoError(t, err)
+	assert.Equal(t, raw, cbor)
+	assert.Equal(t, uint(trueType), meta.Type)
+}
+
+// TestGetBlock_RejectsMisreportedEraThatChangesTheBlock covers an archive
+// that misreports a block's era in a way that would change the block the node
+// accepts: a claimed era whose decoder cannot read the bytes, and a body
+// re-encoded under the genuine header and served as an adjacent era. Both
+// must be rejected; the only misreport that succeeds is the layout-compatible
+// one TestGetBlock_AcceptsArchiveBlockTypeMismatch pins, which returns the
+// genuine bytes.
+func TestGetBlock_RejectsMisreportedEraThatChangesTheBlock(t *testing.T) {
+	t.Parallel()
+
+	babbage := func(t *testing.T) ([]byte, uint) {
+		return generatedEraBlock(
+			t,
+			fixtures.GenerateBabbageChain,
+			gledger.BlockTypeBabbage,
+		)
+	}
+	tests := []struct {
+		name    string
+		block   func(*testing.T) ([]byte, uint)
+		claimed archive.BlockType
+		tamper  bool
+	}{
+		{
+			name:    "babbage served as alonzo",
+			block:   babbage,
+			claimed: archive.BlockType_BLOCK_TYPE_ALONZO,
+		},
+		{
+			name: "shelley served as babbage",
+			block: func(t *testing.T) ([]byte, uint) {
+				return generatedEraBlock(
+					t,
+					fixtures.GenerateShelleyChain,
+					gledger.BlockTypeShelley,
+				)
+			},
+			claimed: archive.BlockType_BLOCK_TYPE_BABBAGE,
+		},
+		{
+			name:    "babbage served as byron main",
+			block:   babbage,
+			claimed: archive.BlockType_BLOCK_TYPE_BYRON_MAIN,
+		},
+		{
+			name:    "babbage with a re-encoded body served as conway",
+			block:   babbage,
+			claimed: archive.BlockType_BLOCK_TYPE_CONWAY,
+			tamper:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, trueType := tc.block(t)
+			decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+			require.NoError(t, err, "fixture must decode in its genuine era")
+			hash := decoded.Hash()
+			served := raw
+			if tc.tamper {
+				served = reencodeBlockBody(t, raw)
+				// The re-encoded block keeps its header, so only the body hash
+				// can tell it apart: it must decode once that check is skipped.
+				_, err = gledger.NewBlockFromCbor(
+					gledger.BlockTypeConway,
+					served,
+					lcommon.VerifyConfig{SkipBodyHashValidation: true},
+				)
+				require.NoError(t, err)
+			}
+
+			db := newTestDB(t)
+			baseURL, fakeArch, httpClient := startFakeArchive(
+				t, map[string][]byte{hex.EncodeToString(hash[:]): served},
+			)
+			fakeArch.blockType = tc.claimed
+			fakeArch.height = decoded.BlockNumber()
+			prevHash := decoded.PrevHash()
+			fakeArch.prevHash = prevHash[:]
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			body, _, err := store.GetBlock(
+				rTxn,
+				decoded.SlotNumber(),
+				hash[:],
+			)
+			require.ErrorIs(t, err, ErrArchiveBlockUndecodable)
+			require.Nil(t, body)
+		})
+	}
+}
+
+// reencodeBlockBody re-encodes a Shelley-family block's invalid-transactions
+// list as an indefinite-length array. The header, and so the block hash, is
+// unchanged; the decoded content is unchanged; only the body hash no longer
+// matches the bytes.
+func reencodeBlockBody(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var parts []cbor.RawMessage
+	_, err := cbor.Decode(raw, &parts)
+	require.NoError(t, err)
+	require.Len(t, parts, 5, "expected a five-element block array")
+	require.Equal(t, cbor.RawMessage{0x80}, parts[4])
+	parts[4] = cbor.RawMessage{0x9f, 0xff}
+	out, err := cbor.Encode(parts)
+	require.NoError(t, err)
+	return out
 }
 
 // TestGetBlock_RejectsArchiveBlockForDifferentPoint is the core regression for

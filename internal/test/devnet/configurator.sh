@@ -73,6 +73,50 @@ config_config_json() {
     esac
 }
 
+configure_leios_dijkstra() {
+    local pool_dir="$1"
+    local configs_dir="${pool_dir}/configs"
+
+    if [ "${DEVNET_LEIOS_ENABLED:-0}" != "1" ]; then
+        return
+    fi
+
+    # Register one deterministic, test-only BLS key for each generated pool
+    # and activate Dijkstra at genesis. The devnet has equal pool stake, so
+    # all three producers can form a quorum without bypassing signature or
+    # on-chain key-registration checks.
+    cp /dijkstra-genesis.json "${configs_dir}/dijkstra-genesis.json"
+    jq --slurpfile leios_key /leios-key.json \
+        '(.staking.pools[]).leiosKey = $leios_key[0]' \
+        "${configs_dir}/shelley-genesis.json" \
+        | write_file "${configs_dir}/shelley-genesis.json"
+    jq '.DijkstraGenesisFile = "dijkstra-genesis.json"
+        | .DijkstraGenesisHash = ""
+        | .TestDijkstraHardForkAtEpoch = 0
+        | .ExperimentalHardForksEnabled = true
+        | .ExperimentalProtocolsEnabled = true' \
+        "${configs_dir}/config.json" \
+        | write_file "${configs_dir}/config.json"
+    cp /leios-vote.skey "${pool_dir}/keys/leios-vote.skey"
+}
+
+configure_byron_delegation() {
+    local pool_dir="$1"
+    local genesis="${pool_dir}/configs/byron-genesis.json"
+
+    if [ "${DEVNET_LEIOS_ENABLED:-0}" != "1" ]; then
+        return
+    fi
+
+    # The testnet generator omits Byron issuers for Shelley-first testnets.
+    # Dingo still validates the Byron genesis trust root while loading its
+    # ledger, even when this network immediately hard-forks past Byron.
+    jq --slurpfile delegation /byron-heavy-delegation.json \
+        '.bootStakeholders = $delegation[0].bootStakeholders
+         | .heavyDelegation = $delegation[0].heavyDelegation' \
+        "${genesis}" | write_file "${genesis}"
+}
+
 config_topology_json() {
     # Generate a ring topology, where pool_n is connected to pool_{n-1} and pool_{n+1}
 
@@ -208,7 +252,9 @@ for pool in $pools; do
     '.bootStakeholders[$key] = 1' \
     "${byron_genesis}" | write_file "${byron_genesis}"
   set_start_time "$pool"
+  configure_byron_delegation "$pool"
   config_config_json "$pool"
+  configure_leios_dijkstra "$pool"
 done
 
 # Expose the Shelley genesis (updated system start) to txpump so it can

@@ -208,6 +208,17 @@ func newSignedByronPBFTBlock(
 	return rebuilt
 }
 
+func encodeIndefiniteByronList(t *testing.T, values []any) []byte {
+	t.Helper()
+	encoded := []byte{0x9f}
+	for _, value := range values {
+		item, err := cbor.Encode(value)
+		require.NoError(t, err)
+		encoded = append(encoded, item...)
+	}
+	return append(encoded, 0xff)
+}
+
 func rawByronPBFTBlock(
 	t *testing.T,
 	block *byron.ByronMainBlock,
@@ -253,7 +264,16 @@ func newGeneratedByronPBFTTestNodeConfig(
 	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
@@ -307,7 +327,16 @@ func newByronPBFTTestNodeConfig(
 	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
@@ -960,13 +989,6 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 	)
 }
 
-func TestValidateByronPBFTSlotRejectsFuture(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, validateByronPBFTSlot(42, 42))
-	require.ErrorContains(t, validateByronPBFTSlot(43, 42), "current slot")
-}
-
 func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
 	t.Parallel()
 
@@ -1251,4 +1273,48 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 
 	err := ls.validateByronPBFTHeaderCrypto(ebb)
 	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
+// validator with typed-nil headers, the shape a Byron block type can carry
+// in process. It must return an error rather than read through the header.
+func TestValidateByronPBFTHeaderCryptoRejectsNilHeaders(t *testing.T) {
+	t.Parallel()
+
+	blocks := map[string]gledger.Block{
+		"header-only main": headerOnlyBlock{
+			header: (*byron.ByronMainBlockHeader)(nil),
+		},
+		"header-only EBB": headerOnlyBlock{
+			header: (*byron.ByronEpochBoundaryBlockHeader)(nil),
+		},
+		"main block":     &byron.ByronMainBlock{},
+		"boundary block": &byron.ByronEpochBoundaryBlock{},
+	}
+	for name, block := range blocks {
+		for _, atOrigin := range []bool{true, false} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				ls, primaryChain := newByronGenesisAnchorTestLedger(
+					t,
+					lcommon.Blake2b256Hash([]byte("genesis")).String(),
+				)
+				if !atOrigin {
+					require.NoError(t, primaryChain.AddBlock(
+						loadBoundaryBlock(
+							t,
+							"mainnet-byron-last-4492799.cbor",
+							gledger.BlockTypeByronMain,
+						),
+						nil,
+					))
+				}
+				var err error
+				require.NotPanics(t, func() {
+					err = ls.validateByronPBFTHeaderCrypto(block)
+				})
+				require.ErrorContains(t, err, "nil header")
+			})
+		}
+	}
 }

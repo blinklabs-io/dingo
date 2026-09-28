@@ -46,7 +46,7 @@ func txsubmissionLoggedMessages(
 ) []string {
 	t.Helper()
 	var ret []string
-	for _, line := range strings.Split(buf, "\n") {
+	for line := range strings.SplitSeq(buf, "\n") {
 		if line == "" {
 			continue
 		}

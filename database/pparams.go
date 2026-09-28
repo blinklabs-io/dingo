@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -75,49 +76,9 @@ func (d *Database) SetPParams(
 	return nil
 }
 
-// selectPParamUpdateForEnactment picks the proposed protocol-parameter update
-// to enact as the parameters for the boundary INTO enactEpoch, and reports
-// whether quorum was met.
-//
-// Per the Shelley update system (and cardano-ledger), a proposal carries its
-// SUBMISSION epoch e in the stored `epoch` field and is enacted as epoch e+1's
-// parameters. So the update enacted for enactEpoch is the one submitted in
-// enactEpoch-1; callers fetch and filter by that submission epoch. Epoch 0 has
-// no prior epoch, so nothing can be enacted for it.
-//
-// Quorum is the number of DISTINCT genesis-key delegates among the matching
-// proposals; the update applied is the most recent one (rows arrive ordered
-// id DESC, so the first match is newest). Returns (nil, count, false) when
-// enactEpoch is 0 or quorum is not met.
-func selectPParamUpdateForEnactment(
-	rows []models.PParamUpdate,
-	enactEpoch uint64,
-	quorum int,
-) (*models.PParamUpdate, int, bool) {
-	if enactEpoch == 0 {
-		return nil, 0, false
-	}
-	submissionEpoch := enactEpoch - 1
-	uniqueGenesis := make(map[string]struct{})
-	var latest *models.PParamUpdate
-	for i := range rows {
-		if rows[i].Epoch != submissionEpoch {
-			continue
-		}
-		uniqueGenesis[string(rows[i].GenesisHash)] = struct{}{}
-		if latest == nil {
-			latest = &rows[i]
-		}
-	}
-	if latest == nil || len(uniqueGenesis) < quorum {
-		return nil, len(uniqueGenesis), false
-	}
-	return latest, len(uniqueGenesis), true
-}
-
-// ApplyPParamUpdates enacts, for the boundary INTO epoch, the pending pparam
-// update submitted in epoch-1 (see selectPParamUpdateForEnactment for the
-// submission-epoch semantics), mutating *currentPParams and persisting the
+// ApplyPParamUpdates enacts, for the boundary INTO epoch, the update the
+// Shelley update system agreed on among the proposals targeting epoch-1 (see
+// selectClassicPParamUpdate), mutating *currentPParams and persisting the
 // result for epoch.
 func (d *Database) ApplyPParamUpdates(
 	slot, epoch uint64,
@@ -157,22 +118,28 @@ func (d *Database) ApplyPParamUpdates(
 			"get pparam updates for epoch %d: %w", submissionEpoch, err,
 		)
 	}
-	latestUpdate, uniqueCount, ok := selectPParamUpdateForEnactment(
-		pparamUpdates, epoch, quorum,
+	submissionStart, err := d.classicSubmissionEpochStart(
+		pparamUpdates, epoch, decodeFunc, txn.Metadata(),
 	)
-	if !ok {
+	if err != nil {
+		return err
+	}
+	enactment, err := selectClassicPParamUpdate(
+		pparamUpdates, epoch, submissionStart, quorum,
+		*currentPParams, decodeFunc,
+	)
+	if err != nil {
+		return err
+	}
+	if enactment == nil {
 		d.logger.Debug(
-			"pparam update quorum not met or none pending, skipping",
+			"no pparam update reached quorum, skipping",
 			"enact_epoch", epoch,
 			"submission_epoch", submissionEpoch,
-			"uniqueProposals", uniqueCount,
+			"proposers", classicPParamProposers(pparamUpdates, submissionEpoch),
 			"quorum", quorum,
 		)
 		return nil
-	}
-	tmpPParamUpdate, err := decodeFunc(latestUpdate.Cbor)
-	if err != nil {
-		return fmt.Errorf("decode pparam update: %w", err)
 	}
 	// Update current pparams
 	if *currentPParams == nil {
@@ -183,7 +150,7 @@ func (d *Database) ApplyPParamUpdates(
 	}
 	newPParams, err := updateFunc(
 		*currentPParams,
-		tmpPParamUpdate,
+		enactment.update,
 	)
 	if err != nil {
 		return fmt.Errorf("apply pparam update: %w", err)
@@ -193,7 +160,7 @@ func (d *Database) ApplyPParamUpdates(
 		"updated protocol params",
 		"enact_epoch", epoch,
 		"submission_epoch", submissionEpoch,
-		"uniqueProposals", uniqueCount,
+		"votes", enactment.votes,
 		"quorum", quorum,
 		"pparams", fmt.Sprintf("%#v", currentPParams),
 	)
@@ -245,9 +212,8 @@ func (d *Database) pparamEnactmentPending(
 				err,
 			)
 		}
-		_, uniqueCount, pending = selectPParamUpdateForEnactment(
-			pparamUpdates, epoch, quorum,
-		)
+		uniqueCount = classicPParamProposers(pparamUpdates, submissionEpoch)
+		pending = uniqueCount > 0 && uniqueCount >= quorum
 		return nil
 	}); err != nil {
 		return false, err
@@ -268,10 +234,10 @@ func (d *Database) pparamEnactmentPending(
 // the pending update to enact for the given epoch, and persists the result for
 // that epoch. The epoch parameter is the epoch where the updates take effect
 // (currentEpoch + 1 during epoch rollover); per the Shelley update system the
-// enacted proposal is the one submitted in epoch-1 (see
-// selectPParamUpdateForEnactment). The quorum parameter is the minimum number
-// of unique genesis-key delegates that must have submitted proposals (from
-// shelley-genesis.json updateQuorum).
+// enacted update is the one at least quorum genesis keys proposed, with
+// identical values, for epoch-1 (see selectClassicPParamUpdate). The quorum
+// parameter comes from shelley-genesis.json updateQuorum. The epoch-1 record
+// must exist when a proposal for it carries a protocol version update.
 // Although the interface is passed by value, era-specific update functions may
 // mutate its underlying concrete protocol-parameter pointer in place. Callers
 // that need the original value preserved must pass an independently owned copy;
@@ -350,22 +316,28 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 			err,
 		)
 	}
-	latestUpdate, uniqueCount, ok := selectPParamUpdateForEnactment(
-		pparamUpdates, epoch, quorum,
+	submissionStart, err := d.classicSubmissionEpochStart(
+		pparamUpdates, epoch, decodeFunc, txn.Metadata(),
 	)
-	if !ok {
+	if err != nil {
+		return nil, false, err
+	}
+	enactment, err := selectClassicPParamUpdate(
+		pparamUpdates, epoch, submissionStart, quorum,
+		currentPParams, decodeFunc,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if enactment == nil {
 		d.logger.Debug(
-			"pparam update quorum not met or none pending, skipping",
+			"no pparam update reached quorum, skipping",
 			"enact_epoch", epoch,
 			"submission_epoch", submissionEpoch,
-			"uniqueProposals", uniqueCount,
+			"proposers", classicPParamProposers(pparamUpdates, submissionEpoch),
 			"quorum", quorum,
 		)
 		return currentPParams, false, nil
-	}
-	tmpPParamUpdate, err := decodeFunc(latestUpdate.Cbor)
-	if err != nil {
-		return nil, false, fmt.Errorf("decode pparam update: %w", err)
 	}
 	// Compute updated pparams
 	if currentPParams == nil {
@@ -374,6 +346,7 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 			epoch,
 		)
 	}
+	tmpPParamUpdate := enactment.update
 	newPParams, err := updateFunc(
 		currentPParams,
 		tmpPParamUpdate,
@@ -385,7 +358,7 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		"computed updated protocol params",
 		"enact_epoch", epoch,
 		"submission_epoch", submissionEpoch,
-		"uniqueProposals", uniqueCount,
+		"votes", enactment.votes,
 		"quorum", quorum,
 		"pparams", fmt.Sprintf("%#v", newPParams),
 	)
@@ -413,11 +386,9 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 // ForecastPParamUpdates computes the protocol parameters that the epoch
 // rollover will enact for the given epoch by applying the pending proposed
 // protocol-parameter update already collected in ledger state, WITHOUT
-// persisting anything. It mirrors ComputeAndApplyPParamUpdates' quorum,
-// decode, and apply semantics exactly — same submission-epoch lookup
-// (updates submitted in epoch-1), same unique-genesis quorum count, same
-// latest-update selection via selectPParamUpdateForEnactment — but performs
-// no writes, so it is safe to call from header verification and concurrently.
+// persisting anything. It selects the update with selectClassicPParamUpdate,
+// exactly as ComputeAndApplyPParamUpdates does, but performs no writes, so it
+// is safe to call from header verification and concurrently.
 //
 // It does not mutate currentPParams: era update functions mutate their
 // concrete pointer in place (see PParamsUpdateShelley), so before applying
@@ -467,16 +438,27 @@ func (d *Database) ForecastPParamUpdates(
 			err,
 		)
 	}
-	latestUpdate, _, ok := selectPParamUpdateForEnactment(
-		pparamUpdates, epoch, quorum,
+	var metadataTxn types.Txn
+	if txn != nil {
+		metadataTxn = txn.Metadata()
+	}
+	submissionStart, err := d.classicSubmissionEpochStart(
+		pparamUpdates, epoch, decodeFunc, metadataTxn,
 	)
-	if !ok {
+	if err != nil {
+		return nil, err
+	}
+	enactment, err := selectClassicPParamUpdate(
+		pparamUpdates, epoch, submissionStart, quorum,
+		currentPParams, decodeFunc,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if enactment == nil {
 		return currentPParams, nil
 	}
-	tmpPParamUpdate, err := decodeFunc(latestUpdate.Cbor)
-	if err != nil {
-		return nil, fmt.Errorf("decode pparam update: %w", err)
-	}
+	tmpPParamUpdate := enactment.update
 	// Clone before applying: updateFunc mutates its concrete pointer in
 	// place, and this forecast must not touch the caller's currentPParams.
 	owned, err := cloneFunc(currentPParams)

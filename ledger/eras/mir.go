@@ -17,6 +17,7 @@ package eras
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -345,9 +346,7 @@ func (m *mirDeleg) applyDistribution(
 			Available: available,
 		}
 	}
-	for key, amount := range updates {
-		m.state.Pending[key] = amount
-	}
+	maps.Copy(m.state.Pending, updates)
 	return nil
 }
 

@@ -25,7 +25,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -307,149 +306,46 @@ func validateCommitteeCertificates(
 	return nil
 }
 
-// validateUnknownVoters preserves the full hot credential identity for
-// committee voters. DRep and stake-pool checks intentionally mirror the
-// upstream rule so replacing it does not change their behavior.
+// validateUnknownVoters rejects a vote cast by a voter that does not exist
+// (Conway GOV, VotersDoNotExist). cardano-ledger resolves every voter against
+// the certificate state after the transaction's own certificates (Conway
+// LEDGER passes certStateAfterCERTS to GOV), so a DRep, stake pool or
+// committee hot credential registered or authorized earlier in the same
+// transaction is known, and a DRep deregistered or a hot credential replaced
+// or resigned there is not. Dijkstra sub-transactions are resolved in order
+// before the top-level transaction, each seeing the certificates of the
+// levels before it. Credentials keep their key/script tags throughout, and a
+// committee hot credential is known while any cold credential authorizes it:
+// the mapping from hot to cold credential is not unique
+// (authorizedHotCommitteeCredentials).
 func validateUnknownVoters(
 	tx lcommon.Transaction,
 	slot uint64,
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
+		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
+			return err
+		}
+	}
 	// Votes belong to the GOV state transition, which a phase-2-invalid
 	// transaction does not apply.
 	if !tx.IsValid() {
 		return nil
 	}
-	if _, ok := tx.(*gdijkstra.DijkstraTransaction); ok {
-		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
-			return err
-		}
-	}
 	state, ok := ls.(CommitteeCredentialState)
 	if !ok {
+		if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
+			return nil
+		}
 		return conway.UtxoValidateUnknownVoters(tx, slot, ls, pp)
 	}
-	votes := tx.VotingProcedures()
-	if len(votes) == 0 {
-		return nil
-	}
-	// Resolved on the first committee voter rather than up front, so a
-	// transaction with only DRep or pool votes never pays for the query. The
-	// second result reports whether the answer is authoritative.
-	var availabilityKnown, available bool
-	committeeHotMember := func(
-		hotCredential lcommon.Credential,
-	) (*lcommon.CommitteeMember, bool, error) {
-		if !availabilityKnown {
-			resolved, err := state.CommitteeStateAvailable()
-			if err != nil {
-				return nil, false, err
-			}
-			available, availabilityKnown = resolved, true
-		}
-		if !available {
-			return nil, false, nil
-		}
-		member, err := state.CommitteeHotCredentialMember(hotCredential)
-		return member, true, err
-	}
-	for voter := range votes {
-		if voter == nil {
-			continue
-		}
-		switch voter.Type {
-		case lcommon.VoterTypeDRepKeyHash,
-			lcommon.VoterTypeDRepScriptHash:
-			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
-			if voter.Type == lcommon.VoterTypeDRepScriptHash {
-				credentialType = lcommon.CredentialTypeScriptHash
-			}
-			registration, err := ls.DRepRegistration(
-				lcommon.Credential{
-					CredType:   credentialType,
-					Credential: lcommon.Blake2b224(voter.Hash),
-				},
-			)
-			if err != nil {
-				return err
-			}
-			if registration == nil {
-				return conway.UnknownVoterError{Voter: *voter}
-			}
-		case lcommon.VoterTypeStakingPoolKeyHash:
-			if !ls.IsPoolRegistered(lcommon.PoolKeyHash(voter.Hash)) {
-				return conway.UnknownVoterError{Voter: *voter}
-			}
-		case lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
-			lcommon.VoterTypeConstitutionalCommitteeHotScriptHash:
-			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
-			if voter.Type ==
-				lcommon.VoterTypeConstitutionalCommitteeHotScriptHash {
-				credentialType = uint(lcommon.CredentialTypeScriptHash)
-			}
-			hotCredential := lcommon.Credential{
-				CredType:   credentialType,
-				Credential: lcommon.Blake2b224(voter.Hash),
-			}
-			member, authoritative, err := committeeHotMember(hotCredential)
-			if err != nil {
-				// A failed lookup is never a known voter: fail closed.
-				return conway.CommitteeMemberLookupError{
-					Credential: hotCredential.Credential,
-					Err:        err,
-				}
-			}
-			// An unauthoritative nil member cannot establish an unknown
-			// voter. See
-			// LedgerView.CommitteeStateAvailable.
-			if (member == nil && authoritative) ||
-				(member != nil && member.Resigned) {
-				return conway.UnknownVoterError{Voter: *voter}
-			}
-		default:
-			return conway.UnknownVoterError{Voter: *voter}
-		}
-	}
-	return nil
-}
-
-func validateDijkstraPlutusV3ReferenceInputs(
-	tx lcommon.Transaction,
-	_ uint64,
-	_ lcommon.LedgerState,
-	pp lcommon.ProtocolParameters,
-) error {
-	protocolMajor := protocolMajorVersion(pp)
-	if tx == nil || protocolMajor < lcommon.ProtocolVersionVanRossem {
-		return nil
-	}
-	if err := script.ValidatePlutusV3ReferenceInputs(tx, protocolMajor); err != nil {
-		return conway.ScriptContextConstructionError{Err: err}
-	}
-	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
-	if !ok {
-		return nil
-	}
-	for _, subTx := range dijkstraTx.Body.TxSubTransactions.Items() {
-		body := &subTx.Body
-		type inputKey struct {
-			id    lcommon.Blake2b256
-			index uint32
-		}
-		inputs := make(map[inputKey]struct{}, len(body.Inputs()))
-		for _, input := range body.Inputs() {
-			inputs[inputKey{id: input.Id(), index: input.Index()}] = struct{}{}
-		}
-		for _, input := range body.ReferenceInputs() {
-			if _, exists := inputs[inputKey{
-				id: input.Id(), index: input.Index(),
-			}]; exists {
-				return conway.ScriptContextConstructionError{Err: fmt.Errorf(
-					"plutus V3 reference input %s is also a regular input",
-					input.String(),
-				)}
-			}
+	overlay := newVoterOverlay(ls, state)
+	for _, level := range governanceLevels(tx) {
+		overlay.applyCertificates(level.certificates)
+		if err := overlay.validateVoters(level.votes); err != nil {
+			return err
 		}
 	}
 	return nil

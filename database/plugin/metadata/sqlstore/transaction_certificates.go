@@ -811,6 +811,8 @@ RETURNING id`,
 		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
+		false,
+		nil,
 	}, poolID, slot)
 	if err != nil {
 		return 0, err

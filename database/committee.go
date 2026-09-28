@@ -49,6 +49,23 @@ func (d *Database) GetCommitteeMember(
 	return ret, nil
 }
 
+// GetCommitteeHotAuthorizationsSince returns, for each cold credential, its
+// latest hot-key authorization when that authorization was recorded at or
+// after minSlot. Seated and unseated cold credentials are both included.
+func (d *Database) GetCommitteeHotAuthorizationsSince(
+	minSlot uint64,
+	txn *Txn,
+) ([]*models.AuthCommitteeHot, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetCommitteeHotAuthorizationsSince(
+		minSlot,
+		txn.Metadata(),
+	)
+}
+
 // GetActiveCommitteeMembers returns all active committee members
 func (d *Database) GetActiveCommitteeMembers(
 	txn *Txn,

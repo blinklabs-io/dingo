@@ -70,6 +70,50 @@ func TestPrepareHotStatementsPopulatesCacheOnStart(t *testing.T) {
 	require.Equal(t, len(hotStatements), entries)
 }
 
+func TestGetUtxoUsesPreparedLiveAndIncludingSpentStatements(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	txID := make([]byte, 32)
+	txID[0] = 0xa7
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId:      txID,
+		OutputIdx: 3,
+		AddedSlot: 42,
+	}))
+
+	liveStmt, ok := store.lookupCachedStmt(getLiveUtxoByRefQuery)
+	require.True(t, ok)
+	require.NotNil(t, liveStmt)
+	spentStmt, ok := store.lookupCachedStmt(getUtxoIncludingSpentByRefQuery)
+	require.True(t, ok)
+	require.NotNil(t, spentStmt)
+
+	live, err := store.GetUtxo(txID, 3, nil)
+	require.NoError(t, err)
+	require.NotNil(t, live)
+	require.Equal(t, txID, live.TxId)
+	require.Equal(t, uint32(3), live.OutputIdx)
+	require.Equal(t, uint64(42), live.AddedSlot)
+
+	_, err = store.writeDB.ExecContext(
+		t.Context(),
+		"UPDATE utxo SET deleted_slot = 43 WHERE tx_id = ? AND output_idx = ?",
+		txID,
+		3,
+	)
+	require.NoError(t, err)
+
+	live, err = store.GetUtxo(txID, 3, nil)
+	require.NoError(t, err)
+	require.Nil(t, live)
+
+	includingSpent, err := store.GetUtxoIncludingSpent(txID, 3, nil)
+	require.NoError(t, err)
+	require.NotNil(t, includingSpent)
+	require.Equal(t, uint64(43), includingSpent.DeletedSlot)
+}
+
 // TestPrepareHotStatementsIsBestEffortWithoutMigrations proves a Store
 // constructed without its full migration registry (as many unrelated
 // sqlstore unit tests do, via newTestStore, to exercise transaction/

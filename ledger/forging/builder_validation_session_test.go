@@ -16,6 +16,7 @@ package forging
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -43,11 +44,22 @@ type sessionMockTxValidator struct {
 	// parameter change) landing while transaction selection is still in
 	// progress.
 	staleAfterCalls int
+	// alwaysStale makes stillCurrent() report false from the moment the
+	// session opens, so a test can prove a candidate that validates
+	// nothing never consults it.
+	alwaysStale bool
 	// onValidate, when set, runs synchronously inside each validate call
 	// with the 1-indexed call number. Tests use it to mutate shared state
 	// (e.g. the chain tip) partway through selection, deterministically,
 	// rather than racing real goroutines against a sleep.
 	onValidate func(callNumber int)
+	// validateErr, when set, decides the result of each validate call by
+	// transaction hash, so a test can reject one candidate and accept the
+	// rest the way a UTxO consumed since mempool admission does.
+	validateErr func(txHash string) error
+	// validatedHashes records the hash of every transaction actually
+	// re-validated, so a test can prove which candidates paid for it.
+	validatedHashes []string
 }
 
 func (v *sessionMockTxValidator) ValidateTx(tx ledger.Transaction) error {
@@ -77,9 +89,9 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 	) error,
 ) error {
 	v.sessions++
-	stale := false
+	stale := v.alwaysStale
 	validate := func(
-		_ ledger.Transaction,
+		tx ledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
 	) error {
@@ -89,6 +101,15 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 		}
 		if v.staleAfterCalls > 0 && v.validateCalls >= v.staleAfterCalls {
 			stale = true
+		}
+		if tx != nil {
+			v.validatedHashes = append(
+				v.validatedHashes,
+				tx.Hash().String(),
+			)
+		}
+		if v.validateErr != nil && tx != nil {
+			return v.validateErr(tx.Hash().String())
 		}
 		return nil
 	}
@@ -212,6 +233,59 @@ func TestBuildBlockRejectsWhenValidationSnapshotGoesStale(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, block)
 	require.ErrorIs(t, err, errTxValidationSnapshotChanged)
+}
+
+// TestBuildBlockRejectsWhenSnapshotGoesStaleOnTheFinalCandidate covers the
+// publication that lands while the last mempool transaction is being
+// re-validated. stillCurrent() is consulted before each candidate, so no
+// later iteration exists to observe it: only the check after the selection
+// loop stands between that publication and a block returned from a
+// superseded snapshot, bypassing the forge loop's in-slot retry. The
+// candidate's own outcome must not matter -- a final candidate rejected by
+// re-validation ends the pass the same way an accepted one does.
+func TestBuildBlockRejectsWhenSnapshotGoesStaleOnTheFinalCandidate(
+	t *testing.T,
+) {
+	for _, tc := range []struct {
+		name          string
+		rejectFinalTx bool
+	}{
+		{name: "final candidate accepted"},
+		{name: "final candidate rejected", rejectFinalTx: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mempool := threeTxMempoolForSelection(t)
+			validator := &sessionMockTxValidator{
+				staleAfterCalls: len(mempool.transactions),
+			}
+			if tc.rejectFinalTx {
+				validator.validateErr = func(string) error {
+					if validator.validateCalls ==
+						len(mempool.transactions) {
+						return errors.New("input already spent")
+					}
+					return nil
+				}
+			}
+			builder := newSelectionTestBuilder(
+				t,
+				mempool,
+				selectionTestChainTip(),
+				validator,
+			)
+
+			block, _, err := builder.BuildBlock(1001, 0)
+			require.ErrorIs(t, err, errTxValidationSnapshotChanged)
+			require.Nil(t, block)
+			require.Equal(
+				t,
+				len(mempool.transactions),
+				validator.validateCalls,
+				"every candidate is validated before the publication is observed",
+			)
+			require.Equal(t, 1, validator.sessions)
+		})
+	}
 }
 
 // TestBuildBlockRejectsWhenParentChangesDuringSelection simulates a peer

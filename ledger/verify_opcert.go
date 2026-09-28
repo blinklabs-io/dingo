@@ -45,6 +45,13 @@ const (
 	LeiosAnnouncementStaleOCIN
 )
 
+// errOpCertBaselineNotImported reports a Mithril-restored database that holds
+// no certified operational-certificate counter at its trust boundary, so a
+// pool with no later observation has no known counter at all.
+var errOpCertBaselineNotImported = errors.New(
+	"certified opcert counter baseline missing at the Mithril trust boundary",
+)
+
 // opCertFromHeader extracts the operational certificate from a Praos/TPraos
 // block header. The Shelley-family headers carry the opcert fields flat on the
 // header body; the Babbage-family headers (Babbage/Conway/Dijkstra) nest them
@@ -142,13 +149,13 @@ func opCertNoGapRuleApplies(eraId uint8) bool {
 // gap check must be scoped by era rather than by validation mode. See
 // opCertNoGapRuleApplies.
 //
-// When the pool has no recorded counter (found is false) there is no baseline
-// to compare against — a genuine first sighting, or a pool that last forged
-// before this node's local history begins (e.g. a Mithril-restored start) — so
-// the candidate is accepted and becomes the baseline. Enforcing a baseline of
-// zero here would falsely reject a valid high-counter block and stall the
-// chain; the honest chain we follow already enforced monotonicity at that
-// pool's real baseline.
+// When the pool has no recorded counter (found is false), the reference rules
+// use zero as the baseline for a registered active pool. Header validation
+// establishes producer eligibility before block application reaches this
+// stateful check. Mithril-restored counters are read from the certified
+// boundary by latestOpCertCounterForValidation and therefore retain their
+// actual baseline; a restored database that never imported them fails that
+// read rather than reaching here with found false.
 func validateOpCertCounter(
 	stored uint64,
 	found bool,

@@ -164,6 +164,7 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 const poolStakeSnapshotColumns = `id, epoch, snapshot_type, pool_key_hash,
 total_stake, stake_denominator, delegator_count, captured_slot,
 leios_key_public, leios_key_possession_proof,
+leios_key_registration_epoch,
 calculation_version, reward_account_auto_vote,
 reward_account_auto_vote_resolved`
 
@@ -269,6 +270,7 @@ func (s *Store) scanPoolStakeSnapshots(
 			&row.CapturedSlot,
 			&row.LeiosKeyPublic,
 			&row.LeiosKeyPossessionProof,
+			&row.LeiosKeyRegistrationEpoch,
 			&row.CalculationVersion,
 			&row.RewardAccountAutoVote,
 			&row.RewardAccountAutoVoteResolved,
@@ -531,6 +533,7 @@ type poolStakeSnapshotQueryParams struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -555,6 +558,16 @@ func poolStakeSnapshotParams(
 	if err != nil {
 		return poolStakeSnapshotQueryParams{}, err
 	}
+	var keyRegistrationEpoch sql.NullInt64
+	if snapshot.LeiosKeyRegistrationEpoch != nil {
+		value, err := checkedInt64(*snapshot.LeiosKeyRegistrationEpoch)
+		if err != nil {
+			return poolStakeSnapshotQueryParams{}, fmt.Errorf(
+				"encode Leios key registration epoch: %w", err,
+			)
+		}
+		keyRegistrationEpoch = sql.NullInt64{Int64: value, Valid: true}
+	}
 	return poolStakeSnapshotQueryParams{
 		Epoch:        epoch,
 		SnapshotType: snapshot.SnapshotType,
@@ -572,7 +585,8 @@ func poolStakeSnapshotParams(
 		LeiosKeyPossessionProof: append(
 			[]byte(nil), snapshot.LeiosKeyPossessionProof...,
 		),
-		CalculationVersion: calculationVersion,
+		LeiosKeyRegistrationEpoch: keyRegistrationEpoch,
+		CalculationVersion:        calculationVersion,
 		RewardAccountAutoVote: int64(
 			snapshot.RewardAccountAutoVote,
 		),
@@ -595,6 +609,14 @@ func poolStakeSnapshotFromSQLite(
 	if err != nil {
 		return nil, fmt.Errorf("decode pool stake denominator: %w", err)
 	}
+	var keyRegistrationEpoch *uint64
+	if row.LeiosKeyRegistrationEpoch.Valid {
+		if row.LeiosKeyRegistrationEpoch.Int64 < 0 {
+			return nil, errors.New("decode negative Leios key registration epoch")
+		}
+		value := uint64(row.LeiosKeyRegistrationEpoch.Int64)
+		keyRegistrationEpoch = &value
+	}
 	return &models.PoolStakeSnapshot{
 		ID:               uint(row.ID),
 		Epoch:            uint64(row.Epoch),
@@ -610,6 +632,7 @@ func poolStakeSnapshotFromSQLite(
 		LeiosKeyPossessionProof: append(
 			[]byte(nil), row.LeiosKeyPossessionProof...,
 		),
+		LeiosKeyRegistrationEpoch: keyRegistrationEpoch,
 		CalculationVersion: uint(
 			row.CalculationVersion,
 		),

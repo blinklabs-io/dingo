@@ -1,0 +1,49 @@
+# Private all-Dingo Leios integration network. Its timing is kept short so the
+# producer-to-peer scenario can exercise forging, voting, certification, fetch,
+# and ledger application in one CI job.
+
+--- # Required Testnet Parameters
+poolCount: 3
+poolCost: 0
+poolMargin: 0.015
+poolPledge: 0
+delegatedSupply: 2100000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 10
+
+--- # Shelley Genesis Override
+epochLength: 120
+slotLength: 0.5
+activeSlotsCoeff: 0.4
+securityParam: 10
+maxLovelaceSupply: 6000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+TestDijkstraHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true
