@@ -19,8 +19,10 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database/models"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -238,4 +240,79 @@ func TestValidateByronEbbPlacementRejectsUnrepresentableBoundarySlot(
 	require.NoError(t, validateByronEbbPlacement(
 		byronOrderingEbb(3, 0), byronEpochSlots(nodeConfig),
 	))
+}
+
+// TestValidateInboundBlockEnvelopeByronOrderingFromStoredLongEpochTip covers
+// the first block of a ledger batch, whose parent is the persisted tip, on a
+// genesis whose epoch is longer than gouroboros' fixed 21,600 slots. The
+// stored slot cannot be split back into epoch and slot there, so the parent's
+// position is read from the stored block itself.
+func TestValidateInboundBlockEnvelopeByronOrderingFromStoredLongEpochTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	nodeConfig := newByronEpochLengthConfig(t, 3000)
+	template := loadRealByronMainBlock(t)
+	key := newByronPBFTTestKey(0x71)
+	certificate := newSignedByronPBFTDelegationCertificate(
+		t, 42, 0, key, key,
+	)
+	storedTip := func(epoch, slot uint64) envelopeParent {
+		block := newSignedByronPBFTBlock(
+			t, template, 42, epoch, slot, 5, lcommon.Blake2b256{},
+			key, key, certificate, nil,
+		)
+		stored := models.Block{
+			Hash:   block.Hash().Bytes(),
+			Slot:   block.SlotNumber(),
+			Number: block.BlockNumber(),
+			Type:   uint(gledger.BlockTypeByronMain),
+			Cbor:   block.Cbor(),
+		}
+		parent, err := envelopeParentFromTip(
+			stored.Slot, stored.Number, stored.Hash, stored.Type, true,
+		).withStoredByronPosition(stored)
+		require.NoError(t, err)
+		return parent
+	}
+	tests := []struct {
+		name    string
+		block   gledger.Block
+		parent  envelopeParent
+		wantErr string
+	}{
+		{
+			"regular to EBB after the fixed-length boundary",
+			byronOrderingEbb(1, 5),
+			storedTip(0, 25000),
+			"",
+		},
+		{
+			"regular to regular across the epoch boundary",
+			byronOrderingMain(1, 5, 6),
+			storedTip(0, 25000),
+			"",
+		},
+		{
+			// Both parents store slot 25,000 in the fixed frame.
+			"regular to regular in an earlier epoch",
+			byronOrderingMain(0, 25001, 6),
+			storedTip(1, 3400),
+			"does not follow parent slot",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateInboundBlockEnvelope(
+				test.block, nil, nodeConfig, test.parent,
+			)
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
 }

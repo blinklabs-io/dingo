@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -45,9 +46,10 @@ type envelopeParent struct {
 	eraId    uint8
 	eraKnown bool
 	// byronEpoch and byronSlot are a Byron parent's raw epoch and slot within
-	// it, set only when the parent is a decoded Byron block. A persisted tip
-	// keeps just the slot the chain stored, which is numbered with gouroboros'
-	// fixed epoch length; see byronParentPosition.
+	// it, set when the parent is a decoded Byron block or a persisted tip
+	// positioned by withStoredByronPosition. Otherwise only the stored slot is
+	// known, numbered with gouroboros' fixed epoch length; see
+	// byronParentPosition.
 	byronEpoch      uint64
 	byronSlot       uint64
 	byronPositioned bool
@@ -76,6 +78,32 @@ func envelopeParentFromTip(
 		parent.eraId, parent.eraKnown = chain.EraIdForBlockType(blockType)
 	}
 	return parent
+}
+
+// withStoredByronPosition sets a persisted Byron tip's epoch and slot within
+// it from the stored block. The stored slot is numbered with gouroboros'
+// fixed epoch length and cannot be split back once the configured epoch is
+// longer, so the header's own fields are the only exact source. A parent that
+// is not a Byron block, or is already positioned, is returned unchanged.
+func (p envelopeParent) withStoredByronPosition(
+	stored models.Block,
+) (envelopeParent, error) {
+	if p.byronPositioned || !p.eraKnown || p.eraId != byron.EraIdByron {
+		return p, nil
+	}
+	decoded, err := stored.Decode()
+	if err != nil {
+		return p, fmt.Errorf("decode stored Byron parent: %w", err)
+	}
+	if decoded.SlotNumber() != p.slot {
+		return p, fmt.Errorf(
+			"stored Byron parent decodes to slot %d, not tip slot %d",
+			decoded.SlotNumber(),
+			p.slot,
+		)
+	}
+	p.byronEpoch, p.byronSlot, p.byronPositioned = byronBlockPosition(decoded)
+	return p, nil
 }
 
 func envelopeParentFromBlock(block gledger.Block) envelopeParent {
