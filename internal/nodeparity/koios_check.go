@@ -299,10 +299,11 @@ type StakeMismatch struct {
 	// knows a pool is missing but not which one.
 	PoolIDBech32 string
 	DingoStake   uint64
-	// KoiosStake is Koios's literal decimal string, kept exact -- "" when
-	// Koios has no pool_history row for this pool/epoch at all, and for
-	// ReasonNoKoiosActiveStake (Reason explains why either still counts as
-	// a mismatch here).
+	// KoiosStake is Koios's literal decimal string, kept exact -- "" for
+	// every case where Koios produced no value to record: no pool_history
+	// row for this pool/epoch, ReasonNoKoiosActiveStake, and
+	// ReasonKoiosEpochInfoUnavailable. Reason explains why each still
+	// counts as a mismatch here.
 	KoiosStake string
 	// DiffLovelace is the exact signed difference (Dingo - Koios), in whole
 	// lovelace. Left 0 for every Reason that has no numeric Koios value to
@@ -318,10 +319,14 @@ type StakeMismatch struct {
 	//   - "stake difference too large to represent ..."
 	//   - ReasonTotalActiveStakeMismatch (numeric; see DiffLovelace)
 	//   - ReasonNoKoiosActiveStake (KoiosFault)
+	//   - ReasonKoiosEpochInfoUnavailable, followed by ": " and the fetch
+	//     error (KoiosFault) -- the only Reason that is not a fixed
+	//     string, so match it by prefix rather than equality
 	Reason string
-	// KoiosFault is true for the cases Koios's own data made untrustworthy
-	// rather than a real Dingo/Koios disagreement: an unparseable
-	// active_stake value, and ReasonNoKoiosActiveStake. It matches
+	// KoiosFault is true for the cases Koios's own data or availability
+	// made the comparison untrustworthy rather than a real Dingo/Koios
+	// disagreement: an unparseable active_stake value,
+	// ReasonNoKoiosActiveStake, and ReasonKoiosEpochInfoUnavailable. It matches
 	// koiosparity.StatusError's treatment of a Koios-side fetch failure,
 	// and is deliberately false for "no koios pool_history row for nonzero
 	// dingo stake" and for the overflow case, both of which are genuine
