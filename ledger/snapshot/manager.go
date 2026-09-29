@@ -1027,6 +1027,16 @@ func (m *Manager) DeferEpochBoundaryCapture(
 	return nil
 }
 
+// DiscardEpochBoundaryCapture forgets the SNAP-point capture
+// DeferEpochBoundaryCapture registered for epoch, for a boundary that captures
+// its mark snapshot itself after all. The epoch-transition handler then takes
+// its fallback capture when the boundary's own capture does not persist.
+func (m *Manager) DiscardEpochBoundaryCapture(epoch uint64) {
+	m.mu.Lock()
+	delete(m.deferredCaptures, epoch)
+	m.mu.Unlock()
+}
+
 // deferredSnapPointRows turns the live rows a committed boundary leaves into
 // the rows its SNAP point read: less each stake credential's PostSnapshot
 // credits, and with the delegations to the pools POOLREAP retired as the SNAP

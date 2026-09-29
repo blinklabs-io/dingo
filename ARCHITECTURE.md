@@ -13321,7 +13321,10 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    RATIFY marks. The boundary keeps the capture when HARDFORK or an era
    transition follows it and when CIP-0163 inactivity is on, and the snapshot
    manager skips its epoch-transition fallback capture for an epoch the ledger
-   announced (`DeferEpochBoundaryCapture`). LSQ queries and
+   announced (`DeferEpochBoundaryCapture`). HARDFORK is known only after SNAP,
+   so a hard-fork boundary withdraws that announcement
+   (`DiscardEpochBoundaryCapture`) and the fallback still covers a capture that
+   does not persist. LSQ queries and
    `PoolStakeDistribution` wait for the job; consensus reads of mark[epoch]
    first happen after the next boundary, which writes the job's work before
    anything else.

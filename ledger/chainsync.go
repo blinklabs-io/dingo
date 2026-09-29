@@ -7121,7 +7121,11 @@ func (ls *LedgerState) processEpochRollover(
 		return nil, errors.New("process governance epoch: nil output")
 	}
 	hardForkHere := majorVersionChanges(currentPParams, govOut.UpdatedPParams)
-	if hardForkHere {
+	if hardForkHere && snapDeferred {
+		// The SNAP-point capture registered above would otherwise stop the
+		// epoch-transition fallback when this boundary's own capture does not
+		// persist.
+		ls.discardDeferredBoundarySnapshot(currentEpoch.EpochId + 1)
 		snapDeferred = false
 	}
 	var deferredPlan *governance.RatificationPlan

@@ -454,6 +454,7 @@ func (ls *LedgerState) resumePendingRatificationIntent() error {
 
 type deferredBoundarySnapshotHookHolder struct {
 	capture func(*database.Txn, event.EpochTransitionEvent) error
+	discard func(uint64)
 	prepare func(*database.Txn, event.EpochTransitionEvent) (
 		DeferredBoundarySnapshot, error,
 	)
@@ -461,22 +462,24 @@ type deferredBoundarySnapshotHookHolder struct {
 
 // SetDeferredEpochBoundarySnapshotHooks installs what a boundary needs to
 // leave mark[NewEpoch] to its background job: capture runs in the boundary
-// transaction at the SNAP point, and prepare builds the snapshot reading only
-// the given transaction. Without them every boundary captures its snapshot
-// itself.
+// transaction at the SNAP point, discard withdraws that capture for a boundary
+// that finds after SNAP that it must capture the snapshot itself, and prepare
+// builds the snapshot reading only the given transaction. Without them every
+// boundary captures its snapshot itself.
 func (ls *LedgerState) SetDeferredEpochBoundarySnapshotHooks(
 	capture func(*database.Txn, event.EpochTransitionEvent) error,
+	discard func(epoch uint64),
 	prepare func(*database.Txn, event.EpochTransitionEvent) (
 		DeferredBoundarySnapshot, error,
 	),
 ) {
-	if capture == nil || prepare == nil {
+	if capture == nil || discard == nil || prepare == nil {
 		ls.deferredBoundarySnapshotHook.Store(nil)
 		return
 	}
 	ls.deferredBoundarySnapshotHook.Store(
 		&deferredBoundarySnapshotHookHolder{
-			capture: capture, prepare: prepare,
+			capture: capture, discard: discard, prepare: prepare,
 		},
 	)
 }
@@ -497,6 +500,12 @@ func (ls *LedgerState) captureDeferredBoundarySnapshot(
 		BoundarySlot:  boundarySlot,
 		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
 	})
+}
+
+func (ls *LedgerState) discardDeferredBoundarySnapshot(epoch uint64) {
+	if h := ls.deferredBoundarySnapshotHook.Load(); h != nil {
+		h.discard(epoch)
+	}
 }
 
 func (ls *LedgerState) prepareDeferredBoundarySnapshot(

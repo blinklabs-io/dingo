@@ -68,6 +68,7 @@ func (ls *LedgerState) waitEpochBoundaryBenchBackground() {
 func wireDeferredBoundarySnapshot(ls *LedgerState, mgr *snapshot.Manager) {
 	ls.SetDeferredEpochBoundarySnapshotHooks(
 		mgr.DeferEpochBoundaryCapture,
+		mgr.DiscardEpochBoundaryCapture,
 		func(
 			txn *database.Txn,
 			evt event.EpochTransitionEvent,

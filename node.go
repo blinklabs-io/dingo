@@ -946,6 +946,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// boundary's commit.
 	n.ledgerState.SetDeferredEpochBoundarySnapshotHooks(
 		n.snapshotMgr.DeferEpochBoundaryCapture,
+		n.snapshotMgr.DiscardEpochBoundaryCapture,
 		func(
 			txn *database.Txn,
 			evt event.EpochTransitionEvent,
