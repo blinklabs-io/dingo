@@ -26,9 +26,12 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
@@ -309,6 +312,42 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 		"a rollback ahead of the applied ledger must disarm any prior audit",
 	)
 	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
+}
+
+// TestRollbackAheadOfLedgerDoesNotPersistIntent covers genesis and snapshot
+// catch-up, where the primary chain may already contain blocks beyond the
+// applied ledger tip. A rollback to that primary-chain point does not move the
+// ledger, so it must not leave a durable undo intent for a later restart.
+func TestRollbackAheadOfLedgerDoesNotPersistIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 1)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+
+	durableTip := ochainsync.Tip{}
+	ls.Lock()
+	ls.currentTip = durableTip
+	ls.currentTipBlockNonce = nil
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	require.NoError(t, ls.db.SetTip(durableTip, nil))
+	emitted, err := ls.validateAndEmitRollbackUndoEmitted(
+		fixture.ancestorTip.Point,
+	)
+	require.NoError(t, err)
+	assert.False(t, emitted)
+	_, _, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	assert.False(
+		t,
+		pending,
+		"validation must not create an intent ahead of the applied tip",
+	)
 }
 
 // TestContinuationAuditAcceptsProducerInSameWindow guards the audit against
@@ -1307,7 +1346,39 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 			ls.continuationAudit.Load(),
 			"a refused rewind deletes nothing the window describes",
 		)
+		_, _, pending, err := loadRollbackIntent(ls.db)
+		require.NoError(t, err)
+		assert.False(t, pending, "a refused rewind must not leave a new intent")
 	})
+}
+
+func TestReconcileRefusedRewindRestoresPreviousRollbackIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	oldBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	priorBlocks := []models.Block{oldBlock}
+	require.NoError(t, persistRollbackIntent(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+		priorBlocks,
+	))
+	putPrimaryChainOnForkBeyondK(t, fixture, "reconcile-prior-intent")
+	chainTip := fixture.ls.chain.Tip()
+
+	err = fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+	require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
+	require.Equal(t, chainTip, fixture.ls.chain.Tip())
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.currentTip.Point, intentPoint)
+	require.Equal(t, priorBlocks, intentBlocks)
 }
 
 // TestPrimaryChainTipRegressed pins which tip movements a recovery rewind may

@@ -94,6 +94,12 @@ type PoolStakeSnapshot struct {
 	// using the key.
 	LeiosKeyPublic          []byte
 	LeiosKeyPossessionProof []byte
+	// LeiosKeyRegistrationEpoch records when the frozen key became effective.
+	// Nil means the age cannot be established (including legacy/imported
+	// snapshots). Key bytes may still be present, but consumers cannot establish
+	// that the key satisfies its protocol TTL and must not use it to validate a
+	// certificate.
+	LeiosKeyRegistrationEpoch *uint64
 	// CalculationVersion identifies the stake-accounting algorithm used to
 	// produce Mark/Set/Go rows. Zero denotes a pre-provenance snapshot.
 	CalculationVersion uint

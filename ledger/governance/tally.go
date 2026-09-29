@@ -313,11 +313,42 @@ func LoadDRepVotingState(
 	if err != nil {
 		return nil, fmt.Errorf("predefined drep voting power: %w", err)
 	}
+
+	// CIP-1694: an active governance proposal's own deposit still counts as
+	// part of the depositor's active voting stake, so it must be folded into
+	// its return account's delegated DRep voting power here (see
+	// ActiveProposalDepositDRepPower's doc comment / dingo#4355).
+	drepDepositPower, noConfidenceDepositPower, err := ActiveProposalDepositDRepPower(
+		db, txn, currentEpoch, expiryEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("active proposal deposit voting power: %w", err)
+	}
+	for key, amount := range drepDepositPower {
+		sum, err := addUint64(powers[key], amount)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"drep voting power with active proposal deposits: %w", err,
+			)
+		}
+		powers[key] = sum
+	}
+	noConfidencePower, err := addUint64(
+		virtualPowers[models.DrepTypeAlwaysNoConfidence],
+		noConfidenceDepositPower,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"no-confidence voting power with active proposal deposits: %w",
+			err,
+		)
+	}
+
 	return &DRepVotingState{
 		Dreps:             dreps,
 		Powers:            powers,
 		AbstainPower:      virtualPowers[models.DrepTypeAlwaysAbstain],
-		NoConfidencePower: virtualPowers[models.DrepTypeAlwaysNoConfidence],
+		NoConfidencePower: noConfidencePower,
 	}, nil
 }
 

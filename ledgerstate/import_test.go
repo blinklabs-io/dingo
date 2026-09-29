@@ -1352,6 +1352,8 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 				RewardAccount:              rewardAccount,
 				RewardAccountCredentialTag: 1,
 				MarginDen:                  1,
+				LeiosKeyPublic:             bytes.Repeat([]byte{0x71}, 96),
+				LeiosKeyPossessionProof:    bytes.Repeat([]byte{0x72}, 48),
 			},
 		},
 		456,
@@ -1375,6 +1377,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 		uint8(1),
 		pool.Registration[0].RewardAccountCredentialTag,
 	)
+	require.True(t, pool.Registration[0].LeiosKeyRegistrationAgeUnknown)
 }
 
 func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
@@ -1485,8 +1488,8 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 	require.Empty(t, retiring)
 }
 
-// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
-// review finding on ledgerstate/utxo.go: the indefinite-length UTxO map's
+// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry verifies that the
+// indefinite-length UTxO map's
 // running entry-count check can only reject entry `limit`+1 after earlier
 // batches have already been streamed to the UTxO callback and committed to
 // the database (there is no header count to check up front, unlike the

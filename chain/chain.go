@@ -440,6 +440,23 @@ func (c *Chain) addBlockHeader(
 				headerTip.BlockNumber,
 			)
 		}
+		// The prev-hash check above makes the header tip this header's
+		// parent. A Byron epoch-boundary header passes the block-number rule
+		// with its parent's number and carries no signature, so this is the
+		// only check that keeps one from extending a post-Byron block.
+		parentEra, found, err := c.parentEraLocked(queued.prevHash)
+		if err != nil {
+			return fmt.Errorf(
+				"resolve parent era of header %s: %w",
+				headerHash.String(),
+				err,
+			)
+		}
+		if found {
+			if err := CheckEraOrder(header.Era().Id, parentEra); err != nil {
+				return fmt.Errorf("header %s: %w", headerHash.String(), err)
+			}
+		}
 	} else if c.atOriginAfterMutation() &&
 		!firstBlockNumberValid(queued.blockNumber) {
 		// The chain was rolled back to origin, so there is no tip to chain
@@ -1703,7 +1720,7 @@ func (c *Chain) rollbackPointBlock(
 		occupantHash = occupant.Hash
 	}
 	c.manager.recordRollbackPointNotOnChain()
-	slog.Default().Error(
+	slog.Default().Warn(
 		"cross-fork splice prevented: rejecting rollback to a point this chain no longer holds",
 		"component", "chain",
 		"chain_id", c.id,
@@ -1984,8 +2001,24 @@ func (c *Chain) rollbackLocked(
 	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
-	// Collect and delete rolled-back blocks in a single pass
 	var rolledBackBlocks []models.Block
+	// An ephemeral rollback mutates an in-memory slice one block at a time.
+	// Resolve the complete undo payload first so a corrupt lookup cannot leave
+	// the chain shortened with an incomplete rollback event.
+	if !c.persistent {
+		for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
+			block, err := c.blockByIndexLocked(i)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"preflight rollback block at index %d: %w",
+					i,
+					err,
+				)
+			}
+			rolledBackBlocks = append(rolledBackBlocks, block)
+		}
+	}
+	// Delete only after every fallible ephemeral lookup has succeeded.
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
 			// Remove block from persistent store, returns the removed block
@@ -1995,23 +2028,8 @@ func (c *Chain) rollbackLocked(
 					"remove block at index %d: %w", i, err,
 				)
 			}
-			if c.eventBus != nil {
-				rolledBackBlocks = append(rolledBackBlocks, block)
-			}
+			rolledBackBlocks = append(rolledBackBlocks, block)
 		} else {
-			// Collect block for event emission before deletion
-			if c.eventBus != nil {
-				block, err := c.blockByIndexLocked(i)
-				if err != nil {
-					slog.Default().Warn(
-						"failed to get block for rollback event",
-						"index", i,
-						"error", err,
-					)
-				} else {
-					rolledBackBlocks = append(rolledBackBlocks, block)
-				}
-			}
 			// Blocks at or below the fork point belong to the
 			// common prefix held by the primary chain, not to this
 			// fork's in-memory buffer, so there is nothing to delete
@@ -2076,6 +2094,20 @@ func (c *Chain) rollbackLocked(
 			// Don't update rollback point if the iterator already has an older one pending
 			if iter.needsRollback && point.Slot > iter.rollbackPoint.Slot {
 				continue
+			}
+			// The iterator cannot deliver blocks while a rollback marker is
+			// pending. A later rollback may remove regrown blocks above the
+			// first marker that were never delivered, but it can also remove
+			// blocks below that marker that were delivered before it. Retain
+			// the former payload and append only the latter.
+			if !iter.needsRollback {
+				iter.rollbackBlocks = slices.Clone(rolledBackBlocks)
+			} else if point.Slot < iter.rollbackPoint.Slot {
+				for _, block := range rolledBackBlocks {
+					if block.Slot <= iter.rollbackPoint.Slot {
+						iter.rollbackBlocks = append(iter.rollbackBlocks, block)
+					}
+				}
 			}
 			iter.rollbackPoint = point
 			iter.needsRollback = true
@@ -2599,6 +2631,22 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	return result, nil
 }
 
+// HoldsPoint reports whether point is currently part of this chain. A block
+// that remains resolvable only through the manager's retained-block cache
+// after a rollback, or that lives on a fork, is not held.
+func (c *Chain) HoldsPoint(point ocommon.Point) bool {
+	if c == nil || c.manager == nil {
+		return false
+	}
+	blk, err := c.BlockByPoint(point, nil)
+	if err != nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.holdsBlockAtIndex(blk.ID, point.Hash)
+}
+
 // holdsBlockAtIndex reports whether this chain currently has the block with
 // the given hash at the given index. It distinguishes a point that is still
 // part of the chain from one that merely remains resolvable through the
@@ -2769,8 +2817,10 @@ func (c *Chain) iterNext(
 			ret := &ChainIteratorResult{}
 			ret.Point = iter.rollbackPoint
 			ret.Rollback = true
+			ret.RollbackBlocks = iter.rollbackBlocks
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
+			iter.rollbackBlocks = nil
 			if iter.rollbackPoint.Slot > 0 ||
 				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point

@@ -400,7 +400,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 
 	resyncCh := subscribeChainsyncResync(t, bus)
 
-	// A subscriber must exist for blocksAboveSlot to read anything at
+	// A subscriber must exist for readBlocksAboveSlot to read anything at
 	// all; asserting it sees nothing is what proves the declined,
 	// over-K reconciliation never emitted an undo for the common
 	// ancestor it did not actually rewind to.
@@ -562,16 +562,11 @@ func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	)
 }
 
-// TestLedgerReadChainRequestsResyncOnOverKReconcile covers a Cubic finding
-// on PR #3611: unlike handleEventChainsyncRollback/tryResolveFork,
-// ledgerReadChain's own retry loop treated any reconcilePrimaryChainTipWithLedgerTip
-// error identically -- log and stop the reader goroutine -- with no
-// over-K-specific handling. Before #3516 bounded RewindPrimaryChainToPoint,
-// this reader could never observe ErrRollbackExceedsSecurityParam at all;
-// now that it can, it must surface the same ChainsyncResyncEventType/reason
-// the other two call sites use, not just a generic error log, so connection
-// management gets the signal to reconnect and negotiate a fresh
-// intersection.
+// TestLedgerReadChainRequestsResyncOnOverKReconcile verifies that the reader
+// emits a resync event when reconciliation exceeds the security parameter,
+// matching the behavior of handleEventChainsyncRollback and tryResolveFork.
+// This lets connection management reconnect and negotiate a fresh
+// intersection instead of silently stopping the reader.
 func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	t.Parallel()
 
@@ -617,17 +612,10 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
-// TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile covers a
-// Cubic finding on PR #3611: reconcilePrimaryChainTipWithLedgerTip's new
-// Mithril-boundary pre-check (added the same round, to stop it emitting an
-// undo for a rollback ls.rollback would then deterministically reject) can
-// now return ErrRollbackExceedsMithrilBoundary to ledgerReadChain's retry
-// loop -- a case that loop did not classify, unlike the sibling
-// over-K/ErrRollbackExceedsSecurityParam case it already handles. It must
-// surface the same ChainsyncResyncEventType/
-// ChainsyncResyncReasonRollbackExceedsMithril handleEventChainsyncRollback
-// uses for a peer-driven Mithril-boundary rejection, not just a generic
-// error log.
+// TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile verifies that
+// ledgerReadChain emits the same resync reason as
+// handleEventChainsyncRollback when reconciliation reaches the Mithril
+// boundary, rather than only logging an error.
 func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 	t *testing.T,
 ) {
@@ -2605,24 +2593,84 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-
-	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
-	err := fixture.ls.processChainIteratorRollback(
-		t.Context(),
-		fixture.ancestorTip.Point,
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
 	)
 	require.NoError(t, err)
+	removedBlock.Cbor = []byte{0xff}
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	fixture.ls.config.EventBus = bus
+	errSubID, errCh := bus.Subscribe(LedgerErrorEventType)
+	require.NotZero(t, errSubID)
+	require.NotNil(t, errCh)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.NoError(t, err)
+	evt := testutil.RequireReceive(
+		t,
+		errCh,
+		testutil.AsyncWait,
+		"undo decode event for the captured rollback block",
+	)
+	undoDecodeEvent, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "undo decode event type")
+	require.Equal(t, "rollback_tx_undo_decode", undoDecodeEvent.Operation)
+	require.Equal(t, fixture.currentTip.Point, undoDecodeEvent.Point)
 
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
-	assert.True(
-		t,
-		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
-	)
-
+	assert.Equal(t, fixture.ancestorNonce, fixture.ls.currentTipBlockNonce)
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+	_, _, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	assert.False(t, pending)
+}
+
+func TestProcessChainIteratorRollbackRetainsIntentAfterMetadataTruncationFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	injected := errors.New("injected metadata truncation failure")
+	fixture.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.ErrorIs(t, err, injected)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	assert.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	assert.Equal(t, []models.Block{removedBlock}, intentBlocks)
 }
 
 func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
@@ -2643,6 +2691,7 @@ func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -2662,6 +2711,7 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 
@@ -2707,6 +2757,7 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 
@@ -2719,6 +2770,39 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestProcessChainIteratorRollbackUsesCapturedBlocksAfterChainDeletion(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	putPrimaryChainOnForkBeyondK(t, fixture, "captured-rollback-payload")
+
+	injected := errors.New("injected metadata truncation failure")
+	fixture.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.ErrorIs(t, err, injected)
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	require.Equal(t, []models.Block{removedBlock}, intentBlocks)
 }
 
 func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(

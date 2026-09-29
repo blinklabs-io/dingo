@@ -35,10 +35,13 @@ import (
 )
 
 type byronPBFTCache struct {
-	config      *byronconsensus.ByronConfig
-	state       byronPBFTState
-	tip         ocommon.Point
-	initialized bool
+	config *byronconsensus.ByronConfig
+	// noGenesisIssuers records a configured Byron genesis with no boot
+	// stakeholders; see errByronNoGenesisIssuers.
+	noGenesisIssuers bool
+	state            byronPBFTState
+	tip              ocommon.Point
+	initialized      bool
 }
 
 type byronPBFTState struct {
@@ -54,14 +57,39 @@ var errByronPBFTCurrentSlotUnavailable = errors.New(
 	"byron PBFT current slot unavailable",
 )
 
+// errByronNoGenesisIssuers rejects every Byron block on a chain whose Byron
+// genesis declares no boot stakeholders. OBFT assigns every Byron slot leader
+// from that set, so no Byron main block can be valid there. An epoch-boundary
+// block carries no PBFT signature and would otherwise pass header validation
+// on the genesis anchor and slot bound alone, so it is refused as well: the
+// only chains using this genesis shape hard-fork away from Byron at epoch 0,
+// where the reference admits no Byron block of either kind.
+var errByronNoGenesisIssuers = errors.New(
+	"byron genesis declares no boot stakeholders, so this chain cannot contain Byron blocks",
+)
+
 func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 	if lsConfig.CardanoNodeConfig == nil ||
 		lsConfig.CardanoNodeConfig.ByronGenesis() == nil {
 		return byronPBFTCache{}, nil
 	}
-	config, err := byronconsensus.NewByronConfigFromGenesis(
-		lsConfig.CardanoNodeConfig.ByronGenesis(),
-	)
+	genesis := lsConfig.CardanoNodeConfig.ByronGenesis()
+	// byronconsensus.NewPBFTDelegationState refuses an empty issuer set, but
+	// cardano-node starts from exactly this genesis when it hard-forks away
+	// from Byron at epoch 0. Record the shape instead of failing ledger-state
+	// construction, and reject every Byron block on this chain instead; see
+	// errByronNoGenesisIssuers.
+	keyHashes, err := genesis.GenesisDelegateKeyHashes()
+	if err != nil {
+		return byronPBFTCache{}, fmt.Errorf(
+			"build Byron PBFT config from genesis: %w",
+			err,
+		)
+	}
+	if len(keyHashes) == 0 {
+		return byronPBFTCache{noGenesisIssuers: true}, nil
+	}
+	config, err := byronconsensus.NewByronConfigFromGenesis(genesis)
 	if err != nil {
 		return byronPBFTCache{}, fmt.Errorf(
 			"build Byron PBFT config from genesis: %w",
@@ -75,16 +103,40 @@ func (ls *LedgerState) byronPBFTConfig() (byronconsensus.ByronConfig, error) {
 	if ls.byronPBFT.config != nil {
 		return *ls.byronPBFT.config, nil
 	}
-	cache, err := newByronPBFTCache(ls.config)
+	config, noGenesisIssuers, err := ls.byronPBFTGenesis()
 	if err != nil {
 		return byronconsensus.ByronConfig{}, err
 	}
-	if cache.config == nil {
+	if noGenesisIssuers {
+		return byronconsensus.ByronConfig{}, errByronNoGenesisIssuers
+	}
+	if config == nil {
 		return byronconsensus.ByronConfig{}, errors.New(
 			"byron PBFT validation requires Byron genesis configuration",
 		)
 	}
-	return *cache.config, nil
+	return *config, nil
+}
+
+// byronPBFTGenesis returns the cache's genesis-derived fields, deriving them
+// from the ledger config for a LedgerState constructed without the cache.
+// Header validation calls this without the ledger lock, which is safe only
+// because NewLedgerState sets these two fields once; the cache's state, tip
+// and initialized fields are written under the lock during apply and must not
+// be read here.
+func (ls *LedgerState) byronPBFTGenesis() (
+	*byronconsensus.ByronConfig,
+	bool,
+	error,
+) {
+	if ls.byronPBFT.config != nil || ls.byronPBFT.noGenesisIssuers {
+		return ls.byronPBFT.config, ls.byronPBFT.noGenesisIssuers, nil
+	}
+	cache, err := newByronPBFTCache(ls.config)
+	if err != nil {
+		return nil, false, err
+	}
+	return cache.config, cache.noGenesisIssuers, nil
 }
 
 func (ls *LedgerState) validateByronPBFTHeader(
@@ -130,9 +182,36 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 		)
 	}
 	// Header-only blocks cannot preserve the enclosing block discriminator, so
-	// distinguish EBBs from main blocks by their concrete header type.
+	// distinguish EBBs from main blocks by their concrete header type. Either
+	// may be a typed-nil pointer, and every check below, including the slot in
+	// their error messages, reads through the asserted header.
 	header := block.Header()
-	if ebbHeader, ok := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader); ok {
+	ebbHeader, isEbb := header.(*ledgerbyron.ByronEpochBoundaryBlockHeader)
+	mainHeader, isMain := header.(*ledgerbyron.ByronMainBlockHeader)
+	if header == nil || (isEbb && ebbHeader == nil) ||
+		(isMain && mainHeader == nil) {
+		return errors.New(
+			"cannot validate a Byron PBFT block with a nil header",
+		)
+	}
+	_, noGenesisIssuers, err := ls.byronPBFTGenesis()
+	if err != nil {
+		return err
+	}
+	if noGenesisIssuers {
+		return fmt.Errorf(
+			"byron block at slot %d: %w",
+			block.SlotNumber(),
+			errByronNoGenesisIssuers,
+		)
+	}
+	// Every header entry point routes a Byron header here, and an unsigned
+	// epoch-boundary header would otherwise pass on the anchor and slot bound
+	// alone when it extends a post-Byron block.
+	if err := ls.validateHeaderEraOrder(header); err != nil {
+		return err
+	}
+	if isEbb {
 		if ls.atByronChainOrigin() {
 			// An EBB's block number (Difficulty.Value) and slot (derived from
 			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
@@ -184,8 +263,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 			block.SlotNumber(),
 		)
 	}
-	mainHeader, ok := header.(*ledgerbyron.ByronMainBlockHeader)
-	if !ok || header == nil {
+	if !isMain {
 		return fmt.Errorf(
 			"byron main block at slot %d has unexpected header type %T",
 			block.SlotNumber(),
@@ -278,7 +356,13 @@ func (ls *LedgerState) validateByronGenesisAnchor(
 }
 
 func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
-	currentSlot, err := ls.CurrentSlot()
+	if ls.slotClock == nil {
+		return fmt.Errorf(
+			"%w: slot clock not initialized",
+			errByronPBFTCurrentSlotUnavailable,
+		)
+	}
+	slotTime, err := ls.slotClock.SlotToTime(block.SlotNumber())
 	if err != nil {
 		return fmt.Errorf(
 			"%w for header at slot %d: %w",
@@ -287,8 +371,17 @@ func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
 			err,
 		)
 	}
-	if err := validateByronPBFTSlot(block.SlotNumber(), currentSlot); err != nil {
-		return err
+	// The peer admission gate retains headers within the clock-skew allowance
+	// until onset. This final guard must not apply that allowance again: doing
+	// so would let a future header advance ledger state before its slot starts.
+	// Compare onset directly, including slot zero before system start, without
+	// requiring a forecast of the current wall-clock slot during catch-up.
+	if now := ls.slotClock.nowFunc(); slotTime.After(now) {
+		return fmt.Errorf(
+			"byron PBFT block slot %d is after current slot: slot onset is %s in the future",
+			block.SlotNumber(),
+			slotTime.Sub(now),
+		)
 	}
 	return nil
 }
@@ -305,17 +398,6 @@ func classifyByronPBFTApplyError(
 		}
 	}
 	return err
-}
-
-func validateByronPBFTSlot(blockSlot, currentSlot uint64) error {
-	if blockSlot > currentSlot {
-		return fmt.Errorf(
-			"byron PBFT block slot %d is after current slot %d",
-			blockSlot,
-			currentSlot,
-		)
-	}
-	return nil
 }
 
 func batchContainsByronBlocks(blocks []ledger.Block) bool {

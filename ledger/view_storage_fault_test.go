@@ -48,6 +48,16 @@ type errInjectingMetadataStore struct {
 	getPoolErr                error
 	getAccountByCredentialErr error
 	getGovernanceProposalErr  error
+	getCommitteeMembersErr    error
+}
+
+func (s *errInjectingMetadataStore) GetCommitteeMembersIncludeDeleted(
+	txn types.Txn,
+) ([]*models.CommitteeMember, error) {
+	if s.getCommitteeMembersErr != nil {
+		return nil, s.getCommitteeMembersErr
+	}
+	return s.MetadataStore.GetCommitteeMembersIncludeDeleted(txn)
 }
 
 func (s *errInjectingMetadataStore) GetPool(

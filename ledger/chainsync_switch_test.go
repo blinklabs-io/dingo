@@ -482,7 +482,7 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
@@ -583,7 +583,7 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId1Dup,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
@@ -627,7 +627,7 @@ func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},

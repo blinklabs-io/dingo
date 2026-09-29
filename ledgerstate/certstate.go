@@ -969,7 +969,7 @@ func parsePoolParams(
 		)
 	}
 
-	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 2)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -984,6 +984,7 @@ func parsePoolParams(
 	if leiosKey != nil {
 		pool.LeiosKeyPublic = leiosKey.PublicKey
 		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+		pool.LeiosKeyRegistrationEpoch = keyRegistrationEpoch
 	}
 
 	// Pledge (legacy index 2; Dijkstra index 3 when Leios key/null is present)
@@ -1067,7 +1068,7 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 1)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 1)
 	if err != nil {
 		return nil, true, err
 	}
@@ -1081,6 +1082,7 @@ func parsePoolParamsWithoutOperator(
 	if leiosKey != nil {
 		pool.LeiosKeyPublic = leiosKey.PublicKey
 		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
+		pool.LeiosKeyRegistrationEpoch = keyRegistrationEpoch
 	}
 
 	if _, err := cbor.Decode(
@@ -1149,25 +1151,25 @@ func parsePoolParamsWithoutOperator(
 func optionalLeiosKeyOffset(
 	params []cbor.RawMessage,
 	index int,
-) (int, *lcommon.LeiosKey, error) {
+) (int, *lcommon.LeiosKey, *uint64, error) {
 	if len(params) <= index || len(params[index]) == 0 {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
 	if len(params[index]) == 1 && params[index][0] == 0xf6 {
-		return 1, nil, nil
+		return 1, nil, nil, nil
 	}
 	// A legacy pledge/cost is an unsigned integer. Only an array at this
 	// position can be the new Leios key; if it is an array, validate its
 	// exact key/proof shape through gouroboros rather than shifting on a
 	// malformed value.
 	if params[index][0]>>5 != 4 {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
-	var key lcommon.LeiosKey
-	if _, err := cbor.Decode(params[index], &key); err != nil {
-		return 0, nil, fmt.Errorf("decoding Leios key: %w", err)
+	key, registrationEpoch, err := decodeOptionalLeiosKey(params[index])
+	if err != nil {
+		return 0, nil, nil, err
 	}
-	return 1, &key, nil
+	return 1, key, registrationEpoch, nil
 }
 
 func parseRewardAccount(data []byte) ([]byte, uint8, bool) {
@@ -1342,10 +1344,11 @@ func parseSnapshotPoolParams(
 	}
 	leiosOffset := 0
 	var leiosKey *lcommon.LeiosKey
+	var keyRegistrationEpoch *uint64
 	if len(fields) == snapshotPoolParamsFieldsLeios {
 		leiosOffset = 1
 		var err error
-		leiosKey, err = decodeOptionalLeiosKey(
+		leiosKey, keyRegistrationEpoch, err = decodeOptionalLeiosKey(
 			fields[snapshotPoolLeiosKeyIdx],
 		)
 		if err != nil {
@@ -1422,6 +1425,7 @@ func parseSnapshotPoolParams(
 		// #nosec G115 -- credential type is 0 or 1
 		RewardAccountCredentialTag: uint8(rewardAccount.Type),
 		Owners:                     owners,
+		LeiosKeyRegistrationEpoch:  keyRegistrationEpoch,
 	}
 	if leiosKey != nil {
 		pool.LeiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
@@ -1432,31 +1436,43 @@ func parseSnapshotPoolParams(
 	return pool, nil
 }
 
-func decodeOptionalLeiosKey(data []byte) (*lcommon.LeiosKey, error) {
+func decodeOptionalLeiosKey(data []byte) (
+	*lcommon.LeiosKey,
+	*uint64,
+	error,
+) {
 	if len(data) == 0 || (len(data) == 1 && data[0] == 0xf6) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	fields, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding optional Leios key: %w", err)
+		return nil, nil, fmt.Errorf("decoding optional Leios key: %w", err)
 	}
 	if len(fields) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	keyData := data
-	if len(fields) == 1 {
+	var registrationEpoch *uint64
+	switch len(fields) {
+	case 1:
 		keyData = fields[0]
-	} else if len(fields) != 2 {
-		return nil, fmt.Errorf(
-			"optional Leios key has %d fields, expected 0 or 1",
+	case 2:
+		var epoch uint64
+		if _, epochErr := cbor.Decode(fields[1], &epoch); epochErr == nil {
+			keyData = fields[0]
+			registrationEpoch = &epoch
+		}
+	default:
+		return nil, nil, fmt.Errorf(
+			"optional Leios key has %d fields, expected 0, 1, or 2",
 			len(fields),
 		)
 	}
 	var key lcommon.LeiosKey
 	if _, err := cbor.Decode(keyData, &key); err != nil {
-		return nil, fmt.Errorf("decoding Leios key: %w", err)
+		return nil, nil, fmt.Errorf("decoding Leios key: %w", err)
 	}
-	return &key, nil
+	return &key, registrationEpoch, nil
 }
 
 // parseSnapshotPoolOwners decodes the owner set, which is a CBOR set (tag

@@ -730,12 +730,12 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 	}
 
 	t.Run("matching batch", func(t *testing.T) {
-		validated, err := validateTxsubmissionReply(requested, returned)
+		validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, len(returned))
 	})
 	t.Run("ordered subset", func(t *testing.T) {
-		validated, err := validateTxsubmissionReply(requested, returned[1:])
+		validated, err := validateTxsubmissionReply(requested, returned[1:], gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 1)
 		require.Equal(t, returned[1], validated[0].body)
@@ -765,7 +765,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 					TxId: fixtures[0].txId,
 					Size: uint32(testCase.advertised), // #nosec G115 -- bounded fixture
 				}}
-				validated, err := validateTxsubmissionReply(want, returned[:1])
+				validated, err := validateTxsubmissionReply(want, returned[:1], gledger.NewTransactionFromCbor)
 				if testCase.shouldPass {
 					require.NoError(t, err)
 					require.Len(t, validated, 1)
@@ -784,11 +784,11 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 				Size: uint32(len(fixture.body) - 32), // #nosec G115 -- real fixtures
 			}
 		}
-		validated, err := validateTxsubmissionReply(want, returned)
+		validated, err := validateTxsubmissionReply(want, returned, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, len(returned))
 
-		validated, err = validateTxsubmissionReply(want, returned[:1])
+		validated, err = validateTxsubmissionReply(want, returned[:1], gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 1)
 	})
@@ -799,13 +799,13 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			{TxId: fixtures[0].txId, Size: uint32(len(fixtures[0].body) - 60)}, // #nosec G115 -- real fixture
 			{TxId: fixtures[1].txId, Size: uint32(len(fixtures[1].body) - 4)},  // #nosec G115 -- real fixture
 		}
-		validated, err := validateTxsubmissionReply(want, returned)
+		validated, err := validateTxsubmissionReply(want, returned, gledger.NewTransactionFromCbor)
 		require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
 		require.Nil(t, validated)
 	})
 	t.Run("reordered reply preserves admission order", func(t *testing.T) {
 		got := []txsubmission.TxBody{returned[1], returned[0]}
-		validated, err := validateTxsubmissionReply(requested, got)
+		validated, err := validateTxsubmissionReply(requested, got, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 2)
 		require.Equal(t, returned[0], validated[0].body)
@@ -866,7 +866,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(want, got)
 			}
-			validated, err := validateTxsubmissionReply(want, got)
+			validated, err := validateTxsubmissionReply(want, got, gledger.NewTransactionFromCbor)
 			require.ErrorContains(t, err, tt.match)
 			require.Nil(t, validated)
 			if tt.name == "hash" {
@@ -928,7 +928,7 @@ func TestValidateTxsubmissionReplyChecksByteBudgetBeforeDecode(t *testing.T) {
 					TxBody: testCase.bodies[index],
 				}
 			}
-			validated, err := validateTxsubmissionReply(requested, returned)
+			validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 			require.Nil(t, validated)
 			if testCase.overLimit {
 				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
@@ -984,6 +984,8 @@ type txSubmissionRelayHarness struct {
 	cmB   *connmanager.ConnectionManager
 	mA    *mempool.Mempool
 	mB    *mempool.Mempool
+	busA  *event.EventBus
+	busB  *event.EventBus
 }
 
 // newTxSubmissionRelayHarness intentionally does not register any
@@ -1045,8 +1047,13 @@ func newTxSubmissionRelayHarnessWithOpts(
 	if capacityA == 0 {
 		capacityA = 1024 * 1024
 	}
+	// Without an EventBus a blocking NextTx returns at once, so node B would
+	// answer a blocking RequestTxIds with no ids, a protocol violation.
+	busA := event.NewEventBus(nil, logger)
+	busB := event.NewEventBus(nil, logger)
 	configA := mempool.MempoolConfig{
 		Logger:          logger,
+		EventBus:        busA,
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       validatorA,
 		MempoolCapacity: capacityA,
@@ -1072,6 +1079,7 @@ func newTxSubmissionRelayHarnessWithOpts(
 	}
 	mB, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
+		EventBus:        busB,
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       validatorB,
 		MempoolCapacity: 1024 * 1024,
@@ -1229,6 +1237,8 @@ func newTxSubmissionRelayHarnessWithOpts(
 		cmB:   cmB,
 		mA:    mA,
 		mB:    mB,
+		busA:  busA,
+		busB:  busB,
 	}
 }
 
@@ -1244,6 +1254,25 @@ func (h *txSubmissionRelayHarness) close(t *testing.T) {
 	_ = h.cmB.Stop(stopCtx)
 	_ = h.mA.Stop(context.Background())
 	_ = h.mB.Stop(context.Background())
+	h.busA.Close()
+	h.busB.Close()
+}
+
+// requireSessionEnds waits for node A to drop the connection. gouroboros
+// validates every reply body against the request and advertised sizes on
+// both ends, so a mismatched reply is a protocol violation that ends the
+// session rather than a reply for the relay loop to discard.
+func (h *txSubmissionRelayHarness) requireSessionEnds(t *testing.T) {
+	t.Helper()
+	require.Eventually(
+		t,
+		func() bool {
+			return h.cmA.GetConnectionById(h.connA.Id()) == nil
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the mismatched reply to end the session",
+	)
 }
 
 // TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd drives the real
@@ -1315,15 +1344,7 @@ func TestTxSubmissionServerInitAcceptsReferenceSizeDiscrepancy(t *testing.T) {
 func TestTxSubmissionServerInitRejectsOutOfRangeAdvertisedSize(t *testing.T) {
 	t.Parallel()
 
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:             logger,
 		advertiseSizeDelta: 40,
 	})
 	defer h.close(t)
@@ -1331,20 +1352,7 @@ func TestTxSubmissionServerInitRejectsOutOfRangeAdvertisedSize(t *testing.T) {
 	addTxSubmissionTestFixtures(t, h.mB, fixture)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"rejected mismatched txsubmission reply",
-			)
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"expected the out-of-range size reply to be rejected",
-	)
-	logOutput := logBuf.String()
-	require.Contains(t, logOutput, "txsubmission reply size mismatch")
+	h.requireSessionEnds(t)
 	_, admitted := h.mA.GetTransaction(fixture.hash)
 	require.False(t, admitted, "out-of-range advertised body was admitted")
 }
@@ -1554,26 +1562,13 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	)
 }
 
-// TestTxSubmissionServerInitRejectsMalformedReply verifies a mismatched reply
-// is dropped in full and that the per-peer pull loop keeps running, so one
-// bad reply cannot end tx ingest from that peer for the life of the
-// connection.
+// TestTxSubmissionServerInitRejectsMalformedReply verifies a reply body that
+// does not match the requested id is never admitted.
 func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	t.Parallel()
 
-	fixtures := txsubmissionTestFixtures(t)
-	malformed := fixtures[0]
-	accepted := fixtures[1]
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-
+	malformed := txsubmissionTestFixtures(t)[0]
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:           logger,
 		corruptOfferHash: malformed.hash,
 	})
 	defer h.close(t)
@@ -1581,83 +1576,9 @@ func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	addTxSubmissionTestFixtures(t, h.mB, malformed)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"rejected mismatched txsubmission reply",
-			)
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"expected the malformed transaction to be logged",
-	)
-	require.Contains(t, logBuf.String(), "decode failed")
-	require.Contains(t, logBuf.String(), h.connA.Id().String())
+	h.requireSessionEnds(t)
 	_, admitted := h.mA.GetTransaction(malformed.hash)
 	require.False(t, admitted, "mismatched body was admitted")
-
-	// The pull loop must survive the rejection and admit the next offer.
-	addTxSubmissionTestFixtures(t, h.mB, accepted)
-	require.Eventually(
-		t,
-		func() bool {
-			_, ok := h.mA.GetTransaction(accepted.hash)
-			return ok
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"pull loop stopped after rejecting a single mismatched reply",
-	)
-	require.NotContains(
-		t,
-		logBuf.String(),
-		"stopping tx ingest after repeated mismatched txsubmission replies",
-	)
-}
-
-// TestTxSubmissionServerInitStopsAfterRepeatedMismatches verifies a peer
-// that returns nothing but mismatched replies is eventually given up on,
-// so continuing the pull loop cannot become an unbounded hot loop.
-func TestTxSubmissionServerInitStopsAfterRepeatedMismatches(t *testing.T) {
-	t.Parallel()
-
-	fixtures := txsubmissionTestFixtures(t)
-	require.GreaterOrEqual(
-		t,
-		len(fixtures),
-		txsubmissionMaxConsecutiveReplyMismatches,
-	)
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-
-	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:           logger,
-		corruptAllOffers: true,
-	})
-	defer h.close(t)
-
-	addTxSubmissionTestFixtures(t, h.mB, fixtures...)
-	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
-
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"stopping tx ingest after repeated mismatched txsubmission replies",
-			)
-		},
-		10*time.Second,
-		10*time.Millisecond,
-		"expected tx ingest to stop after repeated mismatched replies",
-	)
 }
 
 // TestTxSubmissionServerInitRejectsBatchAtomically verifies a valid prefix is
@@ -1670,16 +1591,7 @@ func TestTxSubmissionServerInitRejectsBatchAtomically(
 	fixtures := txsubmissionTestFixtures(t)
 	omitted := fixtures[0]
 	malformed := fixtures[1]
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:           logger,
 		corruptOfferHash: malformed.hash,
 		batchRequestsA:   true,
 	})
@@ -1688,20 +1600,7 @@ func TestTxSubmissionServerInitRejectsBatchAtomically(
 	addTxSubmissionTestFixtures(t, h.mB, omitted, malformed)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"rejected mismatched txsubmission reply",
-			)
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"expected the mismatched batch to be rejected",
-	)
-	logOutput := logBuf.String()
-	require.Contains(t, logOutput, "transaction 1 decode failed")
+	h.requireSessionEnds(t)
 	_, admitted := h.mA.GetTransaction(omitted.hash)
 	require.False(t, admitted, "valid prefix was partially admitted")
 }

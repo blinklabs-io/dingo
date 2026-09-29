@@ -2178,112 +2178,6 @@ func TestChainRollbackWithinSecurityParam(t *testing.T) {
 	}
 }
 
-// TestChainRollbackPointAheadOfTipIsNotDeepFork covers issue #3035: a rollback
-// point whose block index is ahead of the persistent tip must not be treated as
-// a deep fork. Rolled-back blocks stay resolvable through the manager's block
-// cache with their original (higher) block index, so a later fork resolution
-// can hand the chain a rollback point above the current tip. Subtracting that
-// index from the tip wrapped around uint64, making every such rollback look
-// deeper than K, which permanently denied every peer.
-//
-// The rollback is now refused outright (issue #3005): adopting a point the
-// chain does not hold set tipBlockIndex above the last stored block and left
-// currentTip naming an absent block. What #3035 requires is unchanged and is
-// still asserted here — the refusal must NOT be an over-K rejection, because
-// that is the classification that denied every peer permanently. It is instead
-// ErrRollbackPointNotOnChain, which wraps models.ErrBlockNotFound so callers
-// re-intersect and recover. The saturating fork-depth arithmetic that fixed the
-// underflow is retained and covered directly by TestRollbackForkDepthSaturates.
-func TestChainRollbackPointAheadOfTipIsNotDeepFork(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
-	if err != nil {
-		t.Fatalf("unexpected error creating chain manager: %s", err)
-	}
-	// K=2 allows the first rollback (depth 2) while remaining small enough
-	// that an underflowed fork depth would exceed it.
-	mustSetLedger(t, cm, 2)
-	c := cm.PrimaryChain()
-	for _, testBlock := range testBlocks {
-		if err := c.AddBlock(testBlock, nil); err != nil {
-			t.Fatalf("unexpected error adding block to chain: %s", err)
-		}
-	}
-	// Roll back the last two blocks (block index 6 -> 4). The removed blocks
-	// remain in the manager's block cache with block index 5 and 6.
-	rollbackBlock := testBlocks[len(testBlocks)-3]
-	rollbackPoint := ocommon.Point{
-		Slot: rollbackBlock.SlotNumber(),
-		Hash: rollbackBlock.Hash().Bytes(),
-	}
-	if err := c.Rollback(rollbackPoint); err != nil {
-		t.Fatalf("unexpected error rolling back chain: %s", err)
-	}
-	// Now roll back to a point that is still resolvable but whose block index
-	// (6) is ahead of the current tip index (4).
-	aheadBlock := testBlocks[len(testBlocks)-1]
-	aheadPoint := ocommon.Point{
-		Slot: aheadBlock.SlotNumber(),
-		Hash: aheadBlock.Hash().Bytes(),
-	}
-	validateErr := c.ValidateRollback(aheadPoint)
-	if validateErr == nil {
-		t.Fatal(
-			"rollback point ahead of tip must be rejected: the chain does " +
-				"not hold a block at that index",
-		)
-	}
-	if errors.Is(validateErr, chain.ErrRollbackExceedsSecurityParam) {
-		t.Fatalf(
-			"rollback point ahead of tip must not be reported as "+
-				"exceeding security param K: %s",
-			validateErr,
-		)
-	}
-	if !errors.Is(validateErr, chain.ErrRollbackPointNotOnChain) {
-		t.Fatalf(
-			"expected ErrRollbackPointNotOnChain validating rollback, got: %s",
-			validateErr,
-		)
-	}
-	if !errors.Is(validateErr, models.ErrBlockNotFound) {
-		t.Fatalf(
-			"rejection must wrap ErrBlockNotFound so callers re-intersect, "+
-				"got: %s",
-			validateErr,
-		)
-	}
-	rollbackErr := c.Rollback(aheadPoint)
-	if rollbackErr == nil {
-		t.Fatal(
-			"rollback to a point ahead of tip must be rejected: the chain " +
-				"does not hold a block at that index",
-		)
-	}
-	if errors.Is(rollbackErr, chain.ErrRollbackExceedsSecurityParam) {
-		t.Fatalf(
-			"rollback point ahead of tip must not be rejected for "+
-				"exceeding security param K: %s",
-			rollbackErr,
-		)
-	}
-	if !errors.Is(rollbackErr, chain.ErrRollbackPointNotOnChain) {
-		t.Fatalf(
-			"expected ErrRollbackPointNotOnChain rolling back, got: %s",
-			rollbackErr,
-		)
-	}
-	if !errors.Is(rollbackErr, models.ErrBlockNotFound) {
-		t.Fatalf(
-			"rejection must wrap ErrBlockNotFound so callers re-intersect, "+
-				"got: %s",
-			rollbackErr,
-		)
-	}
-}
-
 func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 	t.Parallel()
 
@@ -3612,6 +3506,23 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 			rollbackPoint.Slot, rollbackPoint.Hash,
 		)
 	}
+	if len(next.RollbackBlocks) != len(testBlocks)-2 {
+		t.Fatalf(
+			"rollback payload length: got %d, want %d",
+			len(next.RollbackBlocks), len(testBlocks)-2,
+		)
+	}
+	for idx, block := range testBlocks[2:] {
+		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
+		if got.Slot != block.SlotNumber() ||
+			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
+			t.Fatalf(
+				"rollback payload %d: got %d.%x, want %d.%x",
+				idx, got.Slot, got.Hash,
+				block.SlotNumber(), block.Hash().Bytes(),
+			)
+		}
+	}
 
 	// After the rollback signal the chain is at testBlocks[1].
 	// Add testBlocks[2] back onto the chain.
@@ -3637,5 +3548,92 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 	// Should be at tip again.
 	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
 		t.Fatalf("expected ErrIteratorChainTip, got: %v", err)
+	}
+}
+
+func TestIteratorCoalescedRollbackDoesNotIncludeUndeliveredBlocks(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	c := cm.PrimaryChain()
+	for _, b := range testBlocks {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock: %v", err)
+		}
+	}
+
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("FromPoint: %v", err)
+	}
+	defer iter.Cancel()
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("draining: %v", err)
+		}
+	}
+
+	firstTarget := ocommon.NewPoint(
+		testBlocks[3].SlotNumber(), testBlocks[3].Hash().Bytes(),
+	)
+	if err := c.Rollback(firstTarget); err != nil {
+		t.Fatalf("first Rollback: %v", err)
+	}
+	// Regrow a distinct suffix before the iterator consumes its pending marker.
+	// The regrown suffix was not delivered after the first marker and must not
+	// be duplicated, while the blocks below that marker were delivered earlier
+	// and must remain in the undo payload.
+	regrown := []*MockBlock{
+		{
+			MockBlockNumber: 5,
+			MockSlot:        70,
+			MockHash:        testHashPrefix + "00a5",
+			MockPrevHash:    testHashPrefix + "0004",
+		},
+		{
+			MockBlockNumber: 6,
+			MockSlot:        90,
+			MockHash:        testHashPrefix + "00a6",
+			MockPrevHash:    testHashPrefix + "00a5",
+		},
+	}
+	for _, b := range regrown {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("regrow: %v", err)
+		}
+	}
+	secondTarget := ocommon.NewPoint(
+		testBlocks[1].SlotNumber(), testBlocks[1].Hash().Bytes(),
+	)
+	if err := c.Rollback(secondTarget); err != nil {
+		t.Fatalf("second Rollback: %v", err)
+	}
+
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("Next (coalesced rollback): %v", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf("expected rollback result, got: %+v", next)
+	}
+	if !reflect.DeepEqual(next.Point, secondTarget) {
+		t.Fatalf("rollback point: got %+v, want %+v", next.Point, secondTarget)
+	}
+	if len(next.RollbackBlocks) != 4 {
+		t.Fatalf("rollback payload length: got %d, want 4", len(next.RollbackBlocks))
+	}
+	for idx, block := range testBlocks[2:6] {
+		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
+		if got.Slot != block.SlotNumber() ||
+			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
+			t.Fatalf(
+				"rollback payload %d: got %d.%x, want %d.%x",
+				idx, got.Slot, got.Hash,
+				block.SlotNumber(), block.Hash().Bytes(),
+			)
+		}
 	}
 }

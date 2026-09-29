@@ -17,14 +17,21 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"math"
+	"path/filepath"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,6 +44,207 @@ var musashiGenesisCommitteeColdKeys = []string{
 }
 
 const musashiGenesisCommitteeExpiry = 293
+
+func TestGenesisCommitteeStateUnavailableWithoutHistory(t *testing.T) {
+	t.Parallel()
+	ls, db := genesisConstitutionTestState(t)
+	for _, cfg := range []*cardano.CardanoNodeConfig{
+		ls.config.CardanoNodeConfig,
+		{},
+		nil,
+	} {
+		ls.config.CardanoNodeConfig = cfg
+		require.Zero(t, committeeMemberRowCount(t, db))
+		available, err := ls.NewView(nil).CommitteeStateAvailable()
+		require.NoError(t, err)
+		require.False(t, available)
+	}
+}
+
+func TestEmptyGenesisCommitteeLookupFailure(t *testing.T) {
+	t.Parallel()
+	ls, _ := genesisConstitutionTestState(t)
+	ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = nil
+	wantErr := errors.New("committee storage unavailable")
+	ls.db = newStorageFaultTestDB(t, errInjectingMetadataStore{
+		getCommitteeMembersErr: wantErr,
+	})
+	available, err := ls.NewView(nil).CommitteeStateAvailable()
+	require.ErrorIs(t, err, wantErr)
+	require.False(t, available)
+}
+
+func TestEmptyGenesisCommitteeStateAvailable(t *testing.T) {
+	t.Parallel()
+
+	for _, members := range []map[string]int{nil, {}} {
+		name := "empty map"
+		if members == nil {
+			name = "nil map"
+		}
+		t.Run(name, func(t *testing.T) {
+			ls, db := genesisConstitutionTestState(t)
+			ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = members
+			for range 2 {
+				require.NoError(t, ls.createGenesisBlock())
+				require.Zero(t, committeeMemberRowCount(t, db))
+				available, err := ls.NewView(nil).CommitteeStateAvailable()
+				require.NoError(t, err)
+				require.True(
+					t,
+					available,
+					"empty genesis committee is authoritative",
+				)
+			}
+		})
+	}
+}
+
+func TestEmptyGenesisCommitteeValidation(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = map[string]int{}
+	require.NoError(t, ls.createGenesisBlock())
+	require.Zero(t, committeeMemberRowCount(t, db))
+	pp := &conway.ConwayProtocolParameters{}
+	ls.currentPParams = pp
+	ls.publishSnapshotsLocked()
+	lv := ls.NewView(nil)
+
+	for _, tag := range []uint{
+		lcommon.CredentialTypeAddrKeyHash,
+		lcommon.CredentialTypeScriptHash,
+	} {
+		cold := committeeTestCredential(0xe1)
+		cold.CredType = tag
+		hot := committeeTestCredential(0xe2)
+		hot.CredType = tag
+		certs := []lcommon.Certificate{
+			&lcommon.AuthCommitteeHotCertificate{
+				CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+				ColdCredential: cold,
+				HotCredential:  hot,
+			},
+			&lcommon.ResignCommitteeColdCertificate{
+				CertType: uint(
+					lcommon.CertificateTypeResignCommitteeCold,
+				),
+				ColdCredential: cold,
+			},
+		}
+		for _, cert := range certs {
+			t.Run(
+				fmt.Sprintf("tag %d/%s", tag, certificateName(cert)),
+				func(t *testing.T) {
+					tx := &conway.ConwayTransaction{
+						TxIsValid: true,
+						Body: conway.ConwayTransactionBody{
+							TxCertificates: []lcommon.CertificateWrapper{{
+								Type: cert.Type(), Certificate: cert,
+							}},
+						},
+					}
+					err := eras.ValidateTxConway(tx, 0, lv, pp)
+					var notMember conway.NotCommitteeMemberError
+					require.ErrorAs(t, err, &notMember)
+					require.Equal(t, cold.Credential, notMember.Credential)
+					require.Equal(t, certificateName(cert), notMember.Operation)
+				},
+			)
+		}
+
+		voterType := uint8(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash)
+		if tag == lcommon.CredentialTypeScriptHash {
+			voterType = lcommon.VoterTypeConstitutionalCommitteeHotScriptHash
+		}
+		voter := &lcommon.Voter{Type: voterType, Hash: hot.Credential}
+		tx := &conway.ConwayTransaction{
+			TxIsValid: true,
+			Body: conway.ConwayTransactionBody{
+				TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+			},
+		}
+		t.Run(fmt.Sprintf("tag %d/vote", tag), func(t *testing.T) {
+			err := eras.ValidateTxConway(tx, 0, lv, pp)
+			var unknown conway.UnknownVoterError
+			require.ErrorAs(t, err, &unknown)
+			require.Equal(t, *voter, unknown.Voter)
+		})
+
+		// GOVCERT permits a proposed member even when no committee is seated.
+		storeCommitteeUpdateProposal(t, db, byte(0xe3+tag), cold, 90)
+		for _, cert := range certs {
+			tx := &conway.ConwayTransaction{
+				TxIsValid: true,
+				Body: conway.ConwayTransactionBody{
+					TxCertificates: []lcommon.CertificateWrapper{{
+						Type: cert.Type(), Certificate: cert,
+					}},
+				},
+			}
+			err := eras.ValidateTxConway(tx, 0, lv, pp)
+			var notMember conway.NotCommitteeMemberError
+			require.False(t, errors.As(err, &notMember), "%v", err)
+			var lookup conway.CommitteeMemberLookupError
+			require.False(t, errors.As(err, &lookup), "%v", err)
+		}
+	}
+}
+
+func TestEmptyGenesisCommitteeReferenceResignation(t *testing.T) {
+	t.Parallel()
+
+	root, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
+	require.NoError(t, err)
+	vector, err := conformance.DecodeTestVector(filepath.Join(
+		root,
+		"eras",
+		"conway",
+		"impl",
+		"dump",
+		"Conway.Imp.ConwayImpSpec_-_Version_10.GOVCERT.fails_for.resigning_a_nonexistent_CC_member_hotkey",
+		"1",
+	))
+	require.NoError(t, err)
+	initial, err := conformance.ParseInitialState(vector.InitialState)
+	require.NoError(t, err)
+	require.Len(t, vector.Events, 1)
+	event := vector.Events[0]
+	require.Equal(t, conformance.EventTypeTransaction, event.Type)
+	require.False(t, event.Success)
+	tx, err := conway.NewConwayTransactionFromCbor(event.TxBytes)
+	require.NoError(t, err)
+	require.Len(t, tx.Certificates(), 1)
+	cert, ok := tx.Certificates()[0].(*lcommon.ResignCommitteeColdCertificate)
+	require.True(t, ok)
+	for credential := range initial.CommitteeMembersByCredential {
+		require.NotEqual(
+			t,
+			cert.ColdCredential.Credential,
+			credential.Credential,
+		)
+	}
+	pp, err := conformance.NewPParamsLoaderFromTestdata(root).
+		LoadForVector(vector, initial)
+	require.NoError(t, err)
+
+	ls, _ := genesisConstitutionTestState(t)
+	ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = map[string]int{}
+	require.NoError(t, ls.createGenesisBlock())
+	ls.currentPParams = pp
+	ls.currentEpoch = models.Epoch{EpochId: initial.CurrentEpoch}
+	ls.publishSnapshotsLocked()
+	// The reference rejects this unknown cold credential with a seated
+	// committee. Removing that committee cannot make the credential eligible.
+	// Check that same GOVCERT error with the production empty-genesis view;
+	// this is a rule-level projection, not a replay of the full vector state.
+	err = eras.ValidateTxConway(tx, event.Slot, ls.NewView(nil), pp)
+	var notMember conway.NotCommitteeMemberError
+	require.ErrorAs(t, err, &notMember)
+	require.Equal(t, cert.ColdCredential.Credential, notMember.Credential)
+	require.Equal(t, "resign", notMember.Operation)
+}
 
 // TestCreateGenesisBlockSeedsCommittee proves a node initialized from Conway
 // genesis recognizes every genesis Constitutional Committee member for
