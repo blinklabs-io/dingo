@@ -470,9 +470,13 @@ func ProcessEpoch(
 // treasury left after enacted withdrawals. Every other RATIFY input is read
 // through the transaction handed to Decide.
 type RatificationPlan struct {
-	in                EpochInput
-	out               EpochOutput
-	conwayPParams     *conway.ConwayProtocolParameters
+	in            EpochInput
+	out           EpochOutput
+	conwayPParams *conway.ConwayProtocolParameters
+	// treasuryRemaining is read in the boundary transaction. A deferred
+	// Decide reads a snapshot that already holds the boundary's later pot
+	// writes, such as the epoch's donations, so a RATIFY seed derived from
+	// the pots belongs here, not in Decide.
 	treasuryRemaining uint64
 }
 
