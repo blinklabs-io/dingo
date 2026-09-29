@@ -322,3 +322,37 @@ func TestLedgerRollbackDiscardsPendingRatification(t *testing.T) {
 		})
 	}
 }
+
+// Ledger-state queries wait for the boundary job, so none answers from a
+// state missing the boundary's mark snapshot or RATIFY marks.
+func TestLedgerStateQueryWaitsForBoundaryJob(t *testing.T) {
+	t.Parallel()
+
+	s := newGovDiffScenario(t)
+	wireDeferredBoundarySnapshot(s.ls, s.snapshotMgr)
+	held, release := holdRatificationApply(t, s)
+	s.run(t, 1, func(*LedgerState) {})
+	requireHeld(t, held, 742)
+
+	answered := make(chan error, 1)
+	go func() {
+		_, err := s.ls.Query(&olocalstatequery.BlockQuery{}, QueryPoint{})
+		answered <- err
+	}()
+	require.Never(t, func() bool { return len(answered) > 0 },
+		300*time.Millisecond, 10*time.Millisecond,
+		"a ledger-state query answered before the boundary job wrote")
+	rows, err := s.db.GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
+	require.NoError(t, err)
+	require.Empty(t, rows, "the boundary wrote the mark snapshot itself")
+
+	release()
+	select {
+	case <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("query still waiting after the boundary job wrote")
+	}
+	rows, err = s.db.GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, rows)
+}

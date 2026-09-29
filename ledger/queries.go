@@ -451,9 +451,12 @@ func (ls *LedgerState) query(
 	protocolVersion uint16,
 ) (any, error) {
 	// The latest boundary's mark snapshot and RATIFY marks may still be
-	// written by its background job; answer from the state it decided.
-	if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
-		return nil, err
+	// written by its background job; answer ledger-state queries from the
+	// state it decided, and before any pinned read opens.
+	if _, ok := query.(*olocalstatequery.BlockQuery); ok {
+		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+			return nil, err
+		}
 	}
 	// txn is nil on the live (unpinned) path -- every handler below falls
 	// back to opening its own transaction in that case, unchanged from
