@@ -608,3 +608,75 @@ func TestCheckStakeDistributionReportsATotalShortfall(t *testing.T) {
 	require.False(t, mismatches[0].KoiosFault,
 		"a shortfall is a real divergence, not a Koios-side fault")
 }
+
+// TestCheckStakeDistributionFailsWhenTheEpochTotalCannotBeFetched pins the
+// call site's error handling, which the shortfall test above does not reach.
+//
+// Raised in review on #4781: replacing the call site with
+// `total, _ := compareTotalActiveStake(...)` leaves every other test in this
+// package green, because the only test covering that error drives the helper
+// directly. The regression it hides is the one this PR exists to prevent --
+// an epoch where the per-pool loop finds nothing wrong and the total check
+// never ran gets reported as verified, so a Koios outage becomes
+// indistinguishable from a clean epoch.
+//
+// The pool row is cached so the per-pool half succeeds without touching the
+// network; only /epoch_info fails. That combination is what makes the bug
+// reachable, and it is why a test of either half alone cannot see it.
+func TestCheckStakeDistributionFailsWhenTheEpochTotalCannotBeFetched(t *testing.T) {
+	const magic = 764824073
+	const epoch = uint64(503)
+	const dingoStake = uint64(1_000_000)
+
+	var poolID ledger.PoolId
+	poolID[0] = 0xEF
+	bech32 := poolID.String()
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setPoolDistr(&localstatequery.PoolDistr2Result{
+		Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{
+			poolID: {
+				StakeFraction:  &cbor.Rat{Rat: big.NewRat(1, 1)},
+				TotalPoolStake: dingoStake,
+			},
+		},
+		TotalActiveStake: dingoStake,
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+	koiosURL, _ := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	// Cached, and agreeing exactly: the per-pool loop makes no request and
+	// reports nothing, so the epoch looks clean right up until the total
+	// check cannot run.
+	require.NoError(t, cache.UpsertPoolEpoch(koiosparity.KoiosPoolEpoch{
+		Network:     "preview",
+		Epoch:       epoch,
+		PoolBech32:  bech32,
+		ActiveStake: "1000000",
+		FetchedAt:   time.Now().UTC(),
+	}))
+	// No epoch_info row, so the total check goes to the failing Koios above.
+
+	mismatches, err := CheckStakeDistribution(
+		ctx, client, koios, cache, "preview", epoch,
+	)
+	require.Error(t, err,
+		"a failed epoch_info fetch must fail the whole stake check, not "+
+			"report a clean epoch the total comparison never validated")
+	require.Contains(t, err.Error(), "epoch_info")
+	require.Nil(t, mismatches)
+}
