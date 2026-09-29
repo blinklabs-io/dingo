@@ -558,7 +558,11 @@ func TestValidateBlockOrderAllowsOriginParent(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, validateBlockOrder(block, envelopeParent{origin: true}))
+	require.NoError(t, validateBlockOrder(
+		block,
+		envelopeParent{origin: true},
+		byron.ByronSlotsPerEpoch,
+	))
 }
 
 // TestValidateBlockOrderAllowsByronMainBlockAfterEbb verifies that the main
@@ -579,7 +583,7 @@ func TestValidateBlockOrderAllowsByronMainBlockAfterEbb(t *testing.T) {
 		byronEbb:    true,
 	}
 
-	require.NoError(t, validateBlockOrder(block, parent))
+	require.NoError(t, validateBlockOrder(block, parent, byron.ByronSlotsPerEpoch))
 }
 
 // TestEnvelopeParentFromTipPreservesByronEbb verifies that reconstructing a
@@ -604,7 +608,7 @@ func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
 	}
 
 	require.True(t, parent.byronEbb)
-	require.NoError(t, validateBlockOrder(block, parent))
+	require.NoError(t, validateBlockOrder(block, parent, byron.ByronSlotsPerEpoch))
 }
 
 func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
@@ -630,7 +634,7 @@ func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
 	require.False(t, parent.byronEbb)
 	require.ErrorContains(
 		t,
-		validateBlockOrder(block, parent),
+		validateBlockOrder(block, parent, byron.ByronSlotsPerEpoch),
 		"does not follow parent slot",
 	)
 }
@@ -761,7 +765,10 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 func TestValidateByronEbbPlacementRejectsNilHeader(t *testing.T) {
 	t.Parallel()
 
-	err := validateByronEbbPlacement(&byron.ByronEpochBoundaryBlock{})
+	err := validateByronEbbPlacement(
+		&byron.ByronEpochBoundaryBlock{},
+		byron.ByronSlotsPerEpoch,
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nil header")
 
@@ -933,7 +940,7 @@ func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
 	err := validateBlockOrder(sameSlotParent, envelopeParent{
 		slot:        contestedSlot,
 		blockNumber: rivalNumber,
-	})
+	}, byron.ByronSlotsPerEpoch)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not follow parent slot")
 
@@ -949,7 +956,7 @@ func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
 	require.NoError(t, validateBlockOrder(alternative, envelopeParent{
 		slot:        predecessorSlot,
 		blockNumber: predecessorNumber,
-	}))
+	}, byron.ByronSlotsPerEpoch))
 }
 
 // TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof covers the
