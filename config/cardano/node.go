@@ -17,6 +17,7 @@ package cardano
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -310,7 +311,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 			return err
 		}
 		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := conway.NewConwayGenesisFromFile(conwayGenesisPath)
+		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -600,9 +601,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := conway.NewConwayGenesisFromReader(
-			bytes.NewReader(conwayGenesisBytes),
-		)
+		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -731,7 +730,12 @@ func (c *CardanoNodeConfig) ConwayGenesis() *conway.ConwayGenesis {
 // LoadConwayGenesisFromReader loads a Conway genesis config from an io.Reader
 // This is useful mostly for tests
 func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
-	conwayGenesis, err := conway.NewConwayGenesisFromReader(r)
+	// Decode one value rather than io.ReadAll: the reader need not reach EOF.
+	var conwayGenesisBytes json.RawMessage
+	if err := json.NewDecoder(r).Decode(&conwayGenesisBytes); err != nil {
+		return err
+	}
+	conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 	if err != nil {
 		return err
 	}
@@ -844,6 +848,92 @@ func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
 		return nil, err
 	}
 	return renderByronCanonicalHash(parsed), nil
+}
+
+// loadConwayGenesisFromBytes parses a Conway genesis, tolerating members that
+// cardano-node's lenient JSON parser ignores but gouroboros's strict decoder
+// rejects: the top-level genDelegs and the legacy committee.quorum, both
+// present in Vector Testnet's genesis. Dingo consumes neither. quorum is
+// stripped only beside threshold. Any other unknown member is still rejected.
+func loadConwayGenesisFromBytes(
+	genesisBytes []byte,
+) (conway.ConwayGenesis, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(genesisBytes, &doc); err != nil {
+		return conway.ConwayGenesis{}, err
+	}
+	stripped := false
+	if _, ok := doc["genDelegs"]; ok {
+		delete(doc, "genDelegs")
+		stripped = true
+	}
+	if rawCommittee, ok := doc["committee"]; ok {
+		var committee map[string]json.RawMessage
+		if err := json.Unmarshal(rawCommittee, &committee); err == nil {
+			// cardano-ledger requires threshold and ignores quorum; stripping
+			// quorum beside a missing or null threshold would decode to a nil
+			// threshold and silently fall back to the default committee quorum.
+			_, hasQuorum := committee["quorum"]
+			threshold, hasThreshold := committee["threshold"]
+			if hasQuorum && hasThreshold &&
+				!bytes.Equal(bytes.TrimSpace(threshold), []byte("null")) {
+				// Re-encoding the map keeps only the last of duplicate
+				// members, hiding an earlier one from the strict decoder.
+				if err := rejectDuplicateJSONMembers(rawCommittee); err != nil {
+					return conway.ConwayGenesis{}, fmt.Errorf(
+						"conway genesis committee: %w", err,
+					)
+				}
+				delete(committee, "quorum")
+				out, err := json.Marshal(committee)
+				if err != nil {
+					return conway.ConwayGenesis{}, err
+				}
+				doc["committee"] = out
+				stripped = true
+			}
+		}
+	}
+	if stripped {
+		if err := rejectDuplicateJSONMembers(genesisBytes); err != nil {
+			return conway.ConwayGenesis{}, fmt.Errorf("conway genesis: %w", err)
+		}
+		out, err := json.Marshal(doc)
+		if err != nil {
+			return conway.ConwayGenesis{}, err
+		}
+		genesisBytes = out
+	}
+	return conway.NewConwayGenesisFromReader(bytes.NewReader(genesisBytes))
+}
+
+// rejectDuplicateJSONMembers returns an error if the JSON object in raw names
+// any member more than once. Only the object's own members are checked.
+func rejectDuplicateJSONMembers(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{})
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("unexpected JSON token %v", tok)
+		}
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("duplicate member %q", key)
+		}
+		seen[key] = struct{}{}
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // loadByronGenesisFromBytes decodes a Byron genesis document into the
