@@ -4725,7 +4725,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 }
 
 // TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete
-// closes the marker delete's TOCTOU window (issue #3717 review / cubic P1). The
+// closes the marker delete's TOCTOU window. The
 // membership test in deletePersistedDeferredMarkers cannot be atomic with the
 // delete -- holding deferredHeaderValidationMu across the DB write would invert
 // the lock order against block apply and deadlock the node -- so a point

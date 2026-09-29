@@ -212,6 +212,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				}
 			}
 
+			// A withdrawal writes the balance it reads, so a credential with a
+			// pending reward round has that round's credit written first.
+			if err := ls.foldRewardCreditsForWithdrawals(level, txn); err != nil {
+				certDepositsMapPool.Put(certDeposits)
+				return err
+			}
 			setErr := ls.db.SetTransactionWithOpts(
 				level,
 				d.Point,

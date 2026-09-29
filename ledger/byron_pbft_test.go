@@ -122,7 +122,9 @@ func newSignedByronPBFTBlock(
 	if delegationPayload == nil {
 		delegationPayload = []any{}
 	}
-	delegationPayloadCbor, err := cbor.Encode(cbor.IndefLengthList(delegationPayload))
+	delegationPayloadCbor, err := cbor.Encode(
+		cbor.IndefLengthList(delegationPayload),
+	)
 	require.NoError(t, err)
 	bodyProof, ok := header.BodyProof.([]any)
 	require.True(t, ok)
@@ -382,7 +384,7 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	state, err = ls.advanceByronPBFTState(state, block, true)
@@ -392,6 +394,52 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	_, err = ls.advanceByronPBFTState(state, block, true)
 	require.ErrorContains(t, err, "signature threshold")
 	require.Len(t, state.issuerState.SignatureHistory(), 2)
+}
+
+func TestByronPBFTStateUsesCardanoNodeThreshold(t *testing.T) {
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name        string
+		threshold   float64
+		k           uint64
+		maxAllowed  uint64
+		shouldBlock bool
+	}{
+		{name: "default", k: 10, maxAllowed: 2, shouldBlock: true},
+		{name: "0.10", threshold: 0.10, k: 10, maxAllowed: 1, shouldBlock: true},
+		{name: "0.22", threshold: 0.22, k: 10, maxAllowed: 2, shouldBlock: true},
+		{name: "0.50", threshold: 0.50, k: 10, maxAllowed: 5, shouldBlock: true},
+		{name: "1.1", threshold: 1.1, k: 10, maxAllowed: 10},
+		// 0.57 * 100 is 56.99999999999999 in Double.
+		{name: "0.57", threshold: 0.57, k: 100, maxAllowed: 56, shouldBlock: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeConfig := newByronPBFTTestNodeConfig(t, block, tc.k)
+			if tc.threshold != 0 {
+				threshold := cardano.CardanoNodeDouble(tc.threshold)
+				nodeConfig.PBftSignatureThreshold = &threshold
+			}
+			ls := &LedgerState{config: LedgerStateConfig{
+				CardanoNodeConfig: nodeConfig,
+			}}
+
+			state, err := ls.byronPBFTStateAtTip(context.Background(), ocommon.Tip{})
+			require.NoError(t, err)
+			issuer := lcommon.Blake2b224Hash([]byte("configured issuer"))
+			for range tc.maxAllowed {
+				state.issuerState, err = state.issuerState.Transition(issuer)
+				require.NoError(t, err)
+			}
+			_, err = state.issuerState.Transition(issuer)
+			if tc.shouldBlock {
+				require.ErrorContains(t, err, "signature threshold")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
@@ -448,7 +496,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -648,7 +696,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -1129,9 +1177,9 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "genesis hash")
 }
 
-// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
-// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
-// (derived from ConsensusData.Epoch) are independent fields.
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin verifies that an
+// EBB's block number (Difficulty.Value) and slot (derived from
+// ConsensusData.Epoch) are independent fields.
 // chain.firstBlockNumberValid only constrains the former, and
 // validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
 // Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to

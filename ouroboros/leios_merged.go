@@ -1075,7 +1075,7 @@ func (o *Ouroboros) restoreLeiosVerifiedEbSlot() {
 // external vote/pipeline/persistence handlers, and running those under a
 // mutex shared by every concurrent announcement would stall them all for the
 // duration of a slow handler, or deadlock one that re-enters announcement
-// recording (cubic review). Callers with nothing else held (the backfill
+// recording. Callers with nothing else held (the backfill
 // paths in leios_backfill.go) can just call the closure immediately.
 func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 	ebHash []byte,
@@ -1912,9 +1912,11 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
-// three, and the existing transactions segment must be empty. ebTxsRaw must be
-// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
-// auxiliary_data/nil]) in endorser-block order.
+// three, and the existing transactions segment must be empty. Three-field
+// transactions are normalized with is_valid=true. Four-field transactions in
+// mempool order ([body, witnesses, is_valid, auxiliary_data]) are converted to
+// Dijkstra block order ([body, witnesses, auxiliary_data, is_valid]); inputs
+// already in block order are preserved.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
 	ebTxsRaw []cbor.RawMessage,

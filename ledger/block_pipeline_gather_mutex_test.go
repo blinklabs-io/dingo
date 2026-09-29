@@ -64,9 +64,9 @@ func (p *pausingLedgerReadIterator) Next(
 	return nil, p.ctx.Err()
 }
 
-// TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather is a regression
-// test for the cubic-flagged gap in issue #1894 phase 5's rollback
-// coordination: drainBlockPipelineBeforeRollback only waits for work
+// TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather verifies that
+// rollback coordination holds the gather mutex across iterator gathering:
+// drainBlockPipelineBeforeRollback only waits for work
 // already Submitted to blockPipeline, so a rollback landing while
 // ledgerReadChainIterator has already pulled raw blocks off the chain
 // iterator into its local batch, but has not yet reached decodeReadChainBatch
