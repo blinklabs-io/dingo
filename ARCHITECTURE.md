@@ -3410,7 +3410,9 @@ slots by the epoch's first slot, replacing the protocol version and
 parameters and clearing every pending proposal, vote and endorsement. A main
 block then registers its update proposal, its votes in order and its issuer's
 endorsement of the header's protocol version, reading the delegation map as
-ticked to the block's slot. A failure rejects the block. Genesis initializes the
+ticked to the block's slot. A failure rejects the block. As in the reference's
+`registerSoftwareUpdate`, a proposal's system tags are checked only when it
+registers a software update. Genesis initializes the
 parameters, which feed the Byron block-size, transaction-size and fee rules
 above. Slots are numbered as the reference does, epoch times `10k` plus the
 slot in the epoch. The state also records the block number at which each

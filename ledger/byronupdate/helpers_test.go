@@ -118,6 +118,8 @@ type proposalSpec struct {
 	// padding lengthens the metadata so the proposal can exceed
 	// maxProposalSize.
 	padding int
+	// systemTag, when set, adds a metadata entry under that tag.
+	systemTag string
 }
 
 func optional(value any) []any {
@@ -149,6 +151,11 @@ func (spec proposalSpec) build(
 		[]any{}, []any{}, []any{}, []any{},
 	}
 	metadata := map[string]any{}
+	if spec.systemTag != "" {
+		metadata[spec.systemTag] = []any{
+			[]byte{}, make([]byte, 32), []byte{}, []byte{},
+		}
+	}
 	if spec.padding > 0 {
 		metadata["linux"] = []any{
 			[]byte{}, make([]byte, 32), []byte{}, make([]byte, spec.padding),

@@ -148,7 +148,7 @@ func registerProposal(
 	}
 	if softwareChanged {
 		if err := registerSoftwareUpdate(s,
-			upId, appName, appVersion,
+			upId, proposal, appName, appVersion,
 		); err != nil {
 			return err
 		}
@@ -215,9 +215,15 @@ func registerProtocolUpdate(
 func registerSoftwareUpdate(
 	s *State,
 	upId UpId,
+	proposal *byron.ByronUpdateProposal,
 	appName string,
 	appVersion uint32,
 ) error {
+	// checkSystemTag runs only here, for a proposal that registers a
+	// software update, so a protocol-only proposal's tags are unchecked.
+	if err := proposal.ValidateSystemTags(); err != nil {
+		return ProposalInvalidSystemTagError{Err: err}
+	}
 	for _, registered := range s.softwareProposals {
 		if registered.appName == appName {
 			return ProposalDuplicateSoftwareVersionError{

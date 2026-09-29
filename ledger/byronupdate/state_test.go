@@ -429,3 +429,58 @@ func TestCheckTransition(t *testing.T) {
 		"an unstable candidate does not force the transition")
 	require.NoError(t, none.CheckTransition(testConfig, major, 5, false))
 }
+
+// TestSystemTagsCheckedOnlyForSoftwareUpdates follows the reference, which
+// applies checkSystemTag only in registerSoftwareUpdate: a protocol-only
+// proposal may carry any tag.
+func TestSystemTagsCheckedOnlyForSoftwareUpdates(t *testing.T) {
+	t.Parallel()
+	delegates := newDelegates(t, 7)
+	env := testEnv(delegates)
+	const longTag = "linux-armv8" // 11 characters
+
+	// Adopt csl-daedalus 1.
+	software := proposalSpec{
+		version: v0,
+		appVer:  1,
+	}.build(
+		t,
+		delegates[0],
+		false,
+	)
+	state, err := apply(
+		t, NewState(testGenesisParams()), env, 1, delegates[0], v0, software,
+	)
+	require.NoError(t, err)
+	state = confirm(t, state, env, delegates, upIdOf(software), 2)
+	require.Equal(t, uint32(1), state.appVersions["csl-daedalus"].version)
+
+	// A protocol update naming the adopted csl-daedalus 1 registers no
+	// software update, so its long tag is accepted.
+	protocolOnly := proposalSpec{
+		version:   v1,
+		appVer:    1,
+		systemTag: longTag,
+	}.build(t, delegates[1], false)
+	next, err := apply(t, state, env, 3, delegates[0], v0, protocolOnly)
+	require.NoError(t, err)
+	require.Contains(t, next.protocolProposals, upIdOf(protocolOnly))
+
+	// The same tag on a software update is rejected, as is a non-ASCII one.
+	for _, tag := range []string{longTag, "linüx"} {
+		update := proposalSpec{
+			version:   v0,
+			appVer:    2,
+			systemTag: tag,
+		}.build(t, delegates[1], false)
+		_, err = apply(t, state, env, 3, delegates[0], v0, update)
+		require.ErrorAs(t, err, &ProposalInvalidSystemTagError{}, tag)
+	}
+	valid := proposalSpec{
+		version:   v0,
+		appVer:    2,
+		systemTag: "linux",
+	}.build(t, delegates[1], false)
+	_, err = apply(t, state, env, 3, delegates[0], v0, valid)
+	require.NoError(t, err)
+}

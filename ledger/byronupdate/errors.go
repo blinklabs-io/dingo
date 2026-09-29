@@ -162,6 +162,20 @@ func (e ProposalInvalidApplicationNameError) Error() string {
 	)
 }
 
+// ProposalInvalidSystemTagError is Registration.SystemTagError: a software
+// update names a system tag longer than 10 characters or not ASCII.
+type ProposalInvalidSystemTagError struct {
+	Err error
+}
+
+func (e ProposalInvalidSystemTagError) Error() string {
+	return "update proposal system tag is invalid: " + e.Err.Error()
+}
+
+func (e ProposalInvalidSystemTagError) Unwrap() error {
+	return e.Err
+}
+
 // ProposalInvalidSoftwareVersionError is
 // Registration.InvalidSoftwareVersion: the version must be the next one for
 // the application, or 0 or 1 for a new application.
