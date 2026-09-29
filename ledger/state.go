@@ -990,11 +990,11 @@ type LedgerState struct {
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
 	// plutusEvalCtxCache holds one *cek.EvalContext per distinct (language
 	// version, protocol major version, cost-model parameter list,
-	// synthetic-V2 flag) combination observed by script evaluation. It is
-	// never reset: cek.NewEvalContext is a pure function of that key, so an
-	// entry stays correct across every epoch/era boundary that does not
-	// itself change the key (see PlutusEvalContextCache's doc comment for
-	// why no explicit invalidation is needed). Set once in NewLedgerState
+	// synthetic-V2 flag) combination observed by script evaluation, bounded
+	// with least-recently-used eviction. It is never reset:
+	// cek.NewEvalContext is a pure function of that key, so an entry stays
+	// correct across every epoch/era boundary that does not itself change
+	// the key (see PlutusEvalContextCache's doc comment). Set once in NewLedgerState
 	// and never reassigned; safe for concurrent readers without a lock.
 	plutusEvalCtxCache *eras.PlutusEvalContextCache
 	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates

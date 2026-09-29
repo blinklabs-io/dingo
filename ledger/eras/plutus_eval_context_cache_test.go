@@ -667,3 +667,85 @@ func TestPlutusEvalContextCacheEntryAfterPanicReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, ctx)
 }
+
+// evalContextCacheTestCostModel returns a cost-model list unique to i, so
+// each i is a distinct cache key.
+func evalContextCacheTestCostModel(i int) []int64 {
+	return []int64{1, 2, 3, int64(i)}
+}
+
+func evalContextCacheLen(c *PlutusEvalContextCache) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
+
+// TestPlutusEvalContextCacheBoundsEntries proves a stream of distinct keys,
+// such as successive governance cost-model updates, cannot grow the cache
+// past plutusEvalContextCacheMaxEntries.
+//
+// Not t.Parallel: swaps the package-level newEvalContextFunc seam.
+func TestPlutusEvalContextCacheBoundsEntries(t *testing.T) {
+	withCountingEvalContextConstructor(t)
+	cache := NewPlutusEvalContextCache()
+	protoVersion := cek.ProtoVersion{Major: 10, Minor: 0}
+	for i := range plutusEvalContextCacheMaxEntries * 3 {
+		ctx, err := cache.get(
+			lang.LanguageVersionV2,
+			protoVersion,
+			evalContextCacheTestCostModel(i),
+			false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, ctx)
+		require.LessOrEqual(
+			t,
+			evalContextCacheLen(cache),
+			plutusEvalContextCacheMaxEntries,
+		)
+	}
+	require.Equal(
+		t,
+		plutusEvalContextCacheMaxEntries,
+		evalContextCacheLen(cache),
+	)
+}
+
+// TestPlutusEvalContextCacheEvictsLeastRecentlyUsed proves admission to a
+// full cache evicts the least recently used key, not a key still in use, and
+// that an evicted key is rebuilt on its next lookup.
+//
+// Not t.Parallel: swaps the package-level newEvalContextFunc seam.
+func TestPlutusEvalContextCacheEvictsLeastRecentlyUsed(t *testing.T) {
+	calls := withCountingEvalContextConstructor(t)
+	cache := NewPlutusEvalContextCache()
+	protoVersion := cek.ProtoVersion{Major: 10, Minor: 0}
+	get := func(i int) *cek.EvalContext {
+		t.Helper()
+		ctx, err := cache.get(
+			lang.LanguageVersionV2,
+			protoVersion,
+			evalContextCacheTestCostModel(i),
+			false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, ctx)
+		return ctx
+	}
+	first := make([]*cek.EvalContext, plutusEvalContextCacheMaxEntries)
+	for i := range plutusEvalContextCacheMaxEntries {
+		first[i] = get(i)
+	}
+	// Key 0 is the oldest insertion but the most recent use, so key 1 is the
+	// least recently used when the new key is admitted.
+	require.Same(t, first[0], get(0))
+	get(plutusEvalContextCacheMaxEntries)
+	built := calls.Load()
+
+	require.Same(t, first[0], get(0), "a recently used key must survive")
+	require.Equal(t, built, calls.Load())
+
+	rebuilt := get(1)
+	require.Equal(t, built+1, calls.Load(), "the evicted key must rebuild")
+	require.NotSame(t, first[1], rebuilt)
+}

@@ -37,15 +37,29 @@ import (
 // keys on -- see the field's call sites), reusing an entry across any two
 // calls that share the full key is always correct, regardless of which
 // protocol-parameter snapshot, era, or transaction either call came from.
-// That is why this cache has no explicit invalidation: a governance-enacted
-// cost-model change simply produces a new key rather than requiring the old
-// one to be evicted, and distinct eras (including the previous-era pparams
-// path era-boundary transactions use) that happen to share a key are, by
-// construction, supposed to share the resulting context.
+// That is why this cache needs no correctness invalidation: a
+// governance-enacted cost-model change simply produces a new key, and distinct
+// eras (including the previous-era pparams path era-boundary transactions use)
+// that happen to share a key are, by construction, supposed to share the
+// resulting context.
+//
+// Each such change would otherwise retain its superseded context for the life
+// of the node, so the cache holds at most plutusEvalContextCacheMaxEntries
+// entries and evicts the least recently used one to admit a new key. Eviction
+// only drops the cache's reference: a caller already holding the evicted
+// *cek.EvalContext keeps using it, and a later call for that key rebuilds it.
 type PlutusEvalContextCache struct {
 	mu      sync.Mutex
 	entries map[string]*plutusEvalContextEntry
+	// clock orders entries by last use for eviction; guarded by mu.
+	clock uint64
 }
+
+// plutusEvalContextCacheMaxEntries bounds the cache. Evaluation needs at most
+// three languages for each of the current and previous-era parameter
+// snapshots, plus a synthetic-V2 variant, so live keys fit with room for the
+// keys a cost-model change supersedes to age out instead of being rebuilt.
+const plutusEvalContextCacheMaxEntries = 16
 
 // NewPlutusEvalContextCache returns an empty cache ready for use.
 func NewPlutusEvalContextCache() *PlutusEvalContextCache {
@@ -67,9 +81,12 @@ type PlutusEvalContextCacheProvider interface {
 }
 
 type plutusEvalContextEntry struct {
-	once sync.Once
-	ctx  *cek.EvalContext
-	err  error
+	// lastUsed is the cache clock at this entry's latest lookup; guarded by
+	// the cache's mu.
+	lastUsed uint64
+	once     sync.Once
+	ctx      *cek.EvalContext
+	err      error
 }
 
 var errPlutusEvalContextBuildPanicked = errors.New(
@@ -139,9 +156,14 @@ func (c *PlutusEvalContextCache) get(
 	c.mu.Lock()
 	entry, ok := c.entries[string(key)]
 	if !ok {
+		if len(c.entries) >= plutusEvalContextCacheMaxEntries {
+			c.evictLeastRecentlyUsedLocked()
+		}
 		entry = &plutusEvalContextEntry{}
 		c.entries[string(key)] = entry
 	}
+	c.clock++
+	entry.lastUsed = c.clock
 	c.mu.Unlock()
 	entry.once.Do(func() {
 		// sync.Once marks the entry done even when construction panics; the
@@ -154,6 +176,25 @@ func (c *PlutusEvalContextCache) get(
 		)
 	})
 	return entry.ctx, entry.err
+}
+
+// evictLeastRecentlyUsedLocked removes the entry with the oldest lastUsed.
+// A linear scan is cheaper than maintaining a list at this bound, and it runs
+// only when a new key is admitted to a full cache. c.mu must be held.
+func (c *PlutusEvalContextCache) evictLeastRecentlyUsedLocked() {
+	var (
+		oldestKey  string
+		oldestUsed uint64
+		found      bool
+	)
+	for k, e := range c.entries {
+		if !found || e.lastUsed < oldestUsed {
+			oldestKey, oldestUsed, found = k, e.lastUsed, true
+		}
+	}
+	if found {
+		delete(c.entries, oldestKey)
+	}
 }
 
 // plutusEvalContext returns the *cek.EvalContext for the given key, using

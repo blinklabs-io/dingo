@@ -14562,7 +14562,8 @@ version, cost-model parameter list, synthetic-V2 flag)` key and is consulted
 instead of calling `cek.NewEvalContext` directly at all nine call sites
 across the three era files.
 
-The cache has no explicit invalidation and no snapshot-scoped lifetime:
+The cache needs no correctness invalidation and has no snapshot-scoped
+lifetime:
 `cek.NewEvalContext` is a pure function of that four-part key (see
 `cek.EvalContext`'s doc comment in `blinklabs-io/plutigo`, which also
 establishes that a built `*cek.EvalContext` is immutable and safe to share
@@ -14571,13 +14572,21 @@ any two calls that share the full key is always correct regardless of which
 era, transaction, or protocol-parameter snapshot — including the previous
 era's pparams used at an era-boundary transaction — either call came from.
 A governance-enacted cost-model change simply produces a new key rather than
-requiring the old one evicted, and the key's cost-model component is the
+making the old one wrong, and the key's cost-model component is the
 exact parameter list (never a digest or truncated form), so it can never
 conflate two distinct lists into one entry. plutigo's `costModelFromList`
 costs any parameter missing from a short list at maxBound, so lists that
 differ only in length build different contexts and a lossy key would return
 the wrong one; values past the parameter-name list are ignored, so an exact
 key at worst builds a duplicate context.
+
+Because each cost-model change adds a key and the cache lives as long as the
+ledger state, it is bounded at 16 entries (`plutusEvalContextCacheMaxEntries`)
+and evicts the least recently used entry to admit a new key. Live keys — up
+to three languages for each of the current and previous-era pparams, plus the
+synthetic-V2 variant — fit well under the bound. Eviction drops only the
+cache's reference: an evaluation already holding the evicted
+`*cek.EvalContext` keeps it, and the next lookup for that key rebuilds it.
 
 `*ledger.LedgerState` owns one `*eras.PlutusEvalContextCache` for its whole
 lifetime (`NewLedgerState`, never reassigned), reachable through
