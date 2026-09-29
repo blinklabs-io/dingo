@@ -255,30 +255,43 @@ func TestDrepStatus_UsesAvailabilityNotZeroSentinel(t *testing.T) {
 	})
 
 	// The epoch-zero case: a DRep registered in epoch 0 that has never acted,
-	// on a chain with drep_activity 0. The derived expiry is legitimately 0,
-	// and a numeric "expiry > 0" guard reads that as "no expiry known" and
-	// reports the DRep active forever — the same zero-as-sentinel confusion
-	// the inactivityKnown flag exists to end, one level further down.
-	t.Run("configured zero at epoch zero expires", func(t *testing.T) {
-		for _, current := range []uint64{0, 5} {
+	// on a chain with drep_activity 0. Expiry epoch 0 is real, but that epoch
+	// remains active; expiration starts in the following epoch.
+	t.Run("configured zero at epoch zero expires after that epoch", func(t *testing.T) {
+		for _, test := range []struct {
+			current uint64
+			expired bool
+		}{{current: 0}, {current: 1, expired: true}, {current: 5, expired: true}} {
 			retired, expired, lastActive := drepStatus(
 				true, // active
 				0,    // lastActivityEpoch: never acted
 				0,    // expiryEpoch: none recorded
 				0,    // registrationEpoch: genesis
-				current,
+				test.current,
 				0,    // drep_activity configured to 0
 				true, // available
 			)
 
 			assert.False(t, retired)
-			assert.True(
+			assert.Equal(
 				t,
+				test.expired,
 				expired,
-				"derived expiry 0 is a real expiry at epoch %d",
-				current,
+				"expiry at epoch 0 is active through that epoch",
 			)
 			assert.Zero(t, lastActive)
+		}
+	})
+
+	t.Run("stored expiry remains active through its epoch", func(t *testing.T) {
+		for _, test := range []struct {
+			current uint64
+			expired bool
+		}{{current: currentEpoch}, {current: currentEpoch + 1, expired: true}} {
+			_, expired, _ := drepStatus(
+				true, lastActivity, currentEpoch, 5, test.current, 0, false,
+			)
+			assert.Equal(t, test.expired, expired)
 		}
 	})
 
