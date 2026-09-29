@@ -117,6 +117,11 @@ type EpochInput struct {
 	// snapshot, because the one this field carries does not exist until the
 	// boundary runs. See predictedBoundaryStakeEpochFor.
 	CurrentBoundarySPOState *SPOVotingState
+	// DeferRatification returns the RATIFY step as EpochOutput.Ratification
+	// instead of running it in Txn. It needs CurrentBoundarySPOState: the
+	// fallback reads mark[NewEpoch], which the boundary writes later in the
+	// same transaction, so a later read would see rows RATIFY must not.
+	DeferRatification bool
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -136,6 +141,9 @@ type EpochOutput struct {
 	// comment for why this must come from the enacted update itself rather
 	// than from comparing UpdatedPParams's value before and after.
 	PlutusV2CostModelWritten bool
+	// Ratification is set when EpochInput.DeferRatification was: RATIFY has
+	// not run, and RatifiedCount and ExpiredCount are zero.
+	Ratification *RatificationPlan
 }
 
 // ProcessEpoch runs the ordered governance tick at an epoch
@@ -432,13 +440,22 @@ func ProcessEpoch(
 	}
 	out.OrphanedCount = orphanCount
 
-	decision, err := decideRatification(
-		in, out, conwayPParams, enactCtx.TreasuryWithdrawalRemaining,
-	)
+	plan := &RatificationPlan{
+		in:                *in,
+		out:               *out,
+		conwayPParams:     conwayPParams,
+		treasuryRemaining: enactCtx.TreasuryWithdrawalRemaining,
+	}
+	plan.in.Txn = nil
+	if in.DeferRatification && in.CurrentBoundarySPOState != nil {
+		out.Ratification = plan
+		return out, nil
+	}
+	decision, err := plan.Decide(in.Txn)
 	if err != nil {
 		return nil, err
 	}
-	expiredOrphanCount, err := applyRatification(in, decision)
+	expiredOrphanCount, err := plan.Apply(decision, in.Txn)
 	if err != nil {
 		return nil, err
 	}
@@ -448,9 +465,51 @@ func ProcessEpoch(
 	return out, nil
 }
 
-// ratificationDecision is one boundary's RATIFY and EXPIRY verdicts: which
+// RatificationPlan is what RATIFY at one boundary takes from the boundary
+// itself: the epoch input, the post-enactment protocol parameters and the
+// treasury left after enacted withdrawals. Every other RATIFY input is read
+// through the transaction handed to Decide.
+type RatificationPlan struct {
+	in                EpochInput
+	out               EpochOutput
+	conwayPParams     *conway.ConwayProtocolParameters
+	treasuryRemaining uint64
+}
+
+// Epoch returns the epoch whose opening boundary the plan ratifies at.
+func (p *RatificationPlan) Epoch() uint64 { return p.in.NewEpoch }
+
+// BoundarySlot returns the slot of the boundary the plan ratifies at.
+func (p *RatificationPlan) BoundarySlot() uint64 { return p.in.BoundarySlot }
+
+// Decide computes the plan's RATIFY and EXPIRY verdicts without writing.
+// txn must observe the ledger state the boundary transaction committed and
+// nothing later, which a read transaction pinned before the next write
+// commits provides.
+func (p *RatificationPlan) Decide(
+	txn *database.Txn,
+) (*RatificationDecision, error) {
+	in := p.in
+	in.Txn = txn
+	out := p.out
+	return decideRatification(&in, &out, p.conwayPParams, p.treasuryRemaining)
+}
+
+// Apply writes a decision's ratified and expired marks at the plan's boundary
+// slot, and marks the expired actions' descendants, through txn. It returns
+// the number of descendants marked.
+func (p *RatificationPlan) Apply(
+	decision *RatificationDecision,
+	txn *database.Txn,
+) (int, error) {
+	in := p.in
+	in.Txn = txn
+	return applyRatification(&in, decision)
+}
+
+// RatificationDecision is one boundary's RATIFY and EXPIRY verdicts: which
 // pending actions are accepted and which are classified expired.
-type ratificationDecision struct {
+type RatificationDecision struct {
 	Ratified []*models.GovernanceProposal
 	Expired  []*models.GovernanceProposal
 }
@@ -463,8 +522,8 @@ func decideRatification(
 	out *EpochOutput,
 	conwayPParams *conway.ConwayProtocolParameters,
 	treasuryRemaining uint64,
-) (*ratificationDecision, error) {
-	verdicts := &ratificationDecision{}
+) (*RatificationDecision, error) {
+	verdicts := &RatificationDecision{}
 	// RATIFY uses the preceding epoch's pulser state, which includes actions
 	// expiring at this boundary. Querying at PrevEpoch preserves the database's
 	// canonical proposal order for both current and final-boundary candidates.
@@ -886,7 +945,7 @@ func decideRatification(
 // boundary slot and marks the expired actions' descendants.
 func applyRatification(
 	in *EpochInput,
-	decision *ratificationDecision,
+	decision *RatificationDecision,
 ) (int, error) {
 	for _, proposal := range decision.Ratified {
 		if err := in.DB.SetGovernanceProposal(

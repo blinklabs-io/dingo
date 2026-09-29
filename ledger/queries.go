@@ -2209,8 +2209,9 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 func (ls *LedgerState) queryShelleyGetProposals(
 	actionIds []lcommon.GovActionId,
 ) (any, error) {
-	epoch := ls.loadConsensusSnapshot().currentEpoch.EpochId
-	proposals, err := ls.db.GetActiveGovernanceProposals(epoch, nil)
+	// GetProposals returns the Conway proposals set, which keeps an action
+	// RATIFY classified expired until the boundary that drops it.
+	proposals, err := ls.db.GetGovernanceProposalSet(nil)
 	if err != nil {
 		return nil, err
 	}

@@ -6901,6 +6901,14 @@ func (ls *LedgerState) processEpochRollover(
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "ratify_consume", func() error {
+			return ls.consumePendingRatification(txn)
+		},
+	); err != nil {
+		return nil, fmt.Errorf("apply pending ratification: %w", err)
+	}
+
+	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
 			return ls.applyStakeRewards(
 				txn, currentEpoch.EpochId+1, epochStartSlot,
@@ -7071,6 +7079,7 @@ func (ls *LedgerState) processEpochRollover(
 				ConwayGenesis:           conwayGenesis,
 				DelegatorInactivityOn:   ls.config.DelegatorInactivityEnabled,
 				CurrentBoundarySPOState: currentBoundarySPOState,
+				DeferRatification:       true,
 			})
 			return err
 		},
@@ -7083,6 +7092,29 @@ func (ls *LedgerState) processEpochRollover(
 		// indirection loses that invariant for static analysis, so check it
 		// explicitly rather than dereference below.
 		return nil, errors.New("process governance epoch: nil output")
+	}
+	if plan := govOut.Ratification; plan != nil {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "ratify", func() error {
+				// A major-version change runs HARDFORK and an era
+				// transition rewrites state later in this transaction;
+				// RATIFY reads the state before either.
+				if ls.ratifyAtBoundary || deferBoundarySnapshot ||
+					majorVersionChanges(
+						currentPParams, govOut.UpdatedPParams,
+					) {
+					decision, err := plan.Decide(txn)
+					if err != nil {
+						return err
+					}
+					_, err = plan.Apply(decision, txn)
+					return err
+				}
+				return ls.deferRatification(txn, plan)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("ratify governance: %w", err)
+		}
 	}
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
@@ -7322,6 +7354,12 @@ func (ls *LedgerState) processEpochRollover(
 // protocol parameters. This matters for fields removed by the successor era,
 // such as Alonzo's decentralization parameter, which remains present in the
 // legacy update CBOR but is not a valid Babbage update field.
+func majorVersionChanges(before, after lcommon.ProtocolParameters) bool {
+	oldVer, oldErr := GetProtocolVersion(before)
+	newVer, newErr := GetProtocolVersion(after)
+	return oldErr == nil && newErr == nil && oldVer.Major != newVer.Major
+}
+
 func splitEraTransitionsForRollover(
 	transitionPath []uint,
 ) (before, after []uint) {

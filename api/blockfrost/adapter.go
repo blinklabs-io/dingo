@@ -17,6 +17,7 @@ package blockfrost
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1246,11 +1247,30 @@ func paginateAssetHolders(
 	return holders[start:end]
 }
 
+// drepRatificationWait bounds how long a DRep request waits for the latest
+// boundary's RATIFY decision, whose expiry marks decide which proposal
+// deposits count toward DRep power.
+const drepRatificationWait = 2 * time.Minute
+
+func (a *NodeAdapter) waitGovernanceRatification() error {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), drepRatificationWait,
+	)
+	defer cancel()
+	if err := a.ledgerState.WaitGovernanceRatification(ctx); err != nil {
+		return fmt.Errorf("wait for governance ratification: %w", err)
+	}
+	return nil
+}
+
 // DRep returns governance DRep information for the requested
 // credential.
 func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
+	if err := a.waitGovernanceRatification(); err != nil {
+		return DRepInfo{}, err
+	}
 	if credential.Predefined != nil {
 		return a.predefinedDRep(credential)
 	}
@@ -1500,6 +1520,9 @@ func cip129DRepHeader(hasScript bool) byte {
 func (a *NodeAdapter) DReps(
 	params DRepListParams,
 ) ([]DRepListItemInfo, int, error) {
+	if err := a.waitGovernanceRatification(); err != nil {
+		return nil, 0, err
+	}
 	db := a.ledgerState.Database()
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
