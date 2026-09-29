@@ -2963,6 +2963,16 @@ epoch it runs in. The two sources agree whenever the parameters did not change
 across the boundary, so a network that never moves them cannot tell the
 difference.
 
+One exception is d. Babbage's `PParams` defines `ppDG = to (const minBound)` and
+translating the previous era's parameters into Babbage drops the field, so a
+round computed during a Babbage-or-later epoch reads d as 0 even when the
+performance epoch's Alonzo parameters held a non-zero value. `rewardParameters`
+therefore zeroes d whenever the pots epoch is Babbage or later. Prime Mainnet
+crosses from d = 7/10 at epoch 39 into Babbage at epoch 40, so its epoch-39
+round uses d = 0. Block counting still uses the performance epoch's d, because
+BBODY skipped that epoch's overlay slots under its own parameters when it
+accumulated `BlocksMade`.
+
 Both bootstrap rounds resolve against mark snapshot epoch 0, so that row must
 exist even when it is empty. `snapshot.Manager.CaptureGenesisSnapshot` persists
 it on a fresh sync whose genesis registers no pools — preview, whose pools
