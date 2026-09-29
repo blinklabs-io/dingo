@@ -185,5 +185,11 @@ func (ls *LedgerState) rewardCreditRoundDue() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(rounds) > rewardCreditRoundsKeptUnfolded, nil
+	if len(rounds) <= rewardCreditRoundsKeptUnfolded {
+		return false, nil
+	}
+	return ls.db.Metadata().HasUnfoldedRewardCreditsThroughEpoch(
+		rounds[len(rounds)-rewardCreditRoundsKeptUnfolded-1].SnapshotEpoch,
+		txn.Metadata(),
+	)
 }

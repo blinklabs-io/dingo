@@ -44,6 +44,34 @@ func (s *Store) HasPendingRewardCreditRounds(txn types.Txn) (bool, error) {
 	return pendingRewardCreditOutputsExist(ctx, db)
 }
 
+func (s *Store) HasUnfoldedRewardCreditsThroughEpoch(
+	snapshotEpoch uint64,
+	txn types.Txn,
+) (bool, error) {
+	epoch, err := checkedInt64(snapshotEpoch)
+	if err != nil {
+		return false, fmt.Errorf("reward credit epoch: %w", err)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	var exists bool
+	if err := db.QueryRowContext(ctx, s.dialect.Rebind(`
+SELECT EXISTS (
+    SELECT 1 FROM reward_credit_round rcr
+    WHERE rcr.snapshot_epoch <= ?
+      AND EXISTS (
+          SELECT 1 FROM reward_account_output rao
+          WHERE rao.spendable = TRUE AND rao.guarded = FALSE
+            AND rao.folded = FALSE AND rao.epoch = rcr.snapshot_epoch
+      )
+)`), epoch).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check unfolded reward credits through epoch %d: %w", snapshotEpoch, err)
+	}
+	return exists, nil
+}
+
 func pendingRewardCreditOutputsExist(ctx context.Context, db queryer) (bool, error) {
 	var exists bool
 	// Driven from the few credited rounds: each probes the pending index for

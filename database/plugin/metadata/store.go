@@ -2561,6 +2561,10 @@ type MetadataStore interface {
 	// spendable, unguarded account outputs not yet folded into account balances.
 	HasPendingRewardCreditRounds(types.Txn) (bool, error)
 
+	// HasUnfoldedRewardCreditsThroughEpoch reports whether any applied round
+	// through snapshotEpoch has spendable, unguarded outputs not yet folded.
+	HasUnfoldedRewardCreditsThroughEpoch(uint64, types.Txn) (bool, error)
+
 	// AddAppliedRewardCreditRound registers an applied reward round in the
 	// caller's transaction.
 	AddAppliedRewardCreditRound(models.RewardCreditRound, types.Txn) error

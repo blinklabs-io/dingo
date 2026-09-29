@@ -17,7 +17,6 @@ package ledger
 import (
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -51,21 +50,16 @@ WHERE spendable AND NOT guarded AND NOT folded`).Scan(&n))
 	return n
 }
 
-// With no round due, compaction commits nothing: a write commit would restamp
-// the commit timestamps at every start and credited round.
-func TestRewardCreditCompactionWithoutDueRoundCommitsNothing(t *testing.T) {
+// A fully folded aged round is not due even though its round marker remains
+// for rollback.
+func TestRewardCreditCompactionWithFoldedRoundIsNotDue(t *testing.T) {
 	t.Parallel()
-	f := creditedRewardRound(t)
-	before, err := f.db.Metadata().GetCommitTimestamp()
+	f := agedCreditedRound(t)
+	require.NoError(t, f.ls.compactRewardCreditRounds())
+	require.Zero(t, unfoldedCreditCount(t, f))
+	due, err := f.ls.rewardCreditRoundDue()
 	require.NoError(t, err)
-	time.Sleep(5 * time.Millisecond)
-
-	done, err := f.ls.compactRewardCreditChunk(rewardCreditCompactionChunk)
-	require.NoError(t, err)
-	require.True(t, done)
-	after, err := f.db.Metadata().GetCommitTimestamp()
-	require.NoError(t, err)
-	require.Equal(t, before, after)
+	require.False(t, due)
 }
 
 // TestRewardCreditCompactionFoldsDueRoundsExactly pins compaction: a due
