@@ -67,10 +67,9 @@ func TestCompareTotalActiveStakeDetectsADroppedPool(t *testing.T) {
 		// pool1ccc, stake 300, dropped by Dingo.
 	}
 
-	got, err := compareTotalActiveStake(
+	got := compareTotalActiveStake(
 		context.Background(), nil, cache, network, epoch, reported,
 	)
-	require.NoError(t, err)
 	require.NotNil(t, got, "a dropped pool carrying stake must be reported")
 	require.Equal(t, ReasonTotalActiveStakeMismatch, got.Reason)
 	require.Empty(t, got.PoolIDBech32,
@@ -98,11 +97,9 @@ func TestCompareTotalActiveStakeQuietWhenTotalsAgree(t *testing.T) {
 		{bech32: "pool1ccc", stake: 300},
 	}
 
-	got, err := compareTotalActiveStake(
+	require.Nil(t, compareTotalActiveStake(
 		context.Background(), nil, cache, network, epoch, reported,
-	)
-	require.NoError(t, err)
-	require.Nil(t, got, "agreeing totals must not be reported as a divergence")
+	), "agreeing totals must not be reported as a divergence")
 }
 
 // TestCompareTotalActiveStakeFlagsAnUnusableKoiosValueAsAFault pins that a
@@ -118,10 +115,9 @@ func TestCompareTotalActiveStakeFlagsAnUnusableKoiosValueAsAFault(t *testing.T) 
 	reported := []poolStake{{bech32: "pool1aaa", stake: 100}}
 
 	cache := cacheWithEpochInfo(t, network, epoch, "not-a-number")
-	got, err := compareTotalActiveStake(
+	got := compareTotalActiveStake(
 		context.Background(), nil, cache, network, epoch, reported,
 	)
-	require.NoError(t, err, "a Koios data fault is not a check failure")
 	require.NotNil(t, got, "an unusable Koios value must still be reported")
 	require.True(t, got.KoiosFault,
 		"an unusable Koios value is not a Dingo divergence")
@@ -152,10 +148,9 @@ func TestCompareTotalActiveStakeWorksWithoutACache(t *testing.T) {
 		// 300 missing.
 	}
 
-	got, err := compareTotalActiveStake(
+	got := compareTotalActiveStake(
 		context.Background(), koios, nil, network, epoch, reported,
 	)
-	require.NoError(t, err)
 	require.NotNil(t, got,
 		"a nil cache must still compare, not silently skip the check")
 	require.Equal(t, ReasonTotalActiveStakeMismatch, got.Reason)
@@ -164,13 +159,17 @@ func TestCompareTotalActiveStakeWorksWithoutACache(t *testing.T) {
 		"exactly one epoch_info request when there is no cache to read")
 }
 
-// TestCompareTotalActiveStakeReturnsAFetchError pins that an epoch_info fetch
-// failure is propagated, not swallowed into a clean result. A nil mismatch
-// and a nil error mean "compared, and they agree"; returning that for a
-// comparison that never ran would recreate #4321's blind spot in a new place
-// -- CheckStakeDistribution would report the epoch verified having skipped
-// the only check able to see a wholly missing pool.
-func TestCompareTotalActiveStakeReturnsAFetchError(t *testing.T) {
+// TestCompareTotalActiveStakeFlagsAFetchFailure pins that an epoch_info
+// fetch failure is reported, not swallowed into a clean result: nil means
+// "compared, and they agree", and returning that for a comparison that never
+// ran would recreate #4321's blind spot one level up.
+//
+// It is a KoiosFault mismatch rather than an error on purpose. Reviewed on
+// #4781: an error return discards the per-pool mismatches
+// CheckStakeDistribution has already collected, so an outage of this one
+// endpoint would hide a pool divergence the per-pool half had found. A fault
+// keeps the epoch unverified and keeps those findings.
+func TestCompareTotalActiveStakeFlagsAFetchFailure(t *testing.T) {
 	t.Parallel()
 	const network = "preview"
 	const epoch = 995
@@ -182,12 +181,16 @@ func TestCompareTotalActiveStakeReturnsAFetchError(t *testing.T) {
 	koios, err := NewKoiosClient(network, "", koiosURL, true, true)
 	require.NoError(t, err)
 
-	got, err := compareTotalActiveStake(
+	got := compareTotalActiveStake(
 		context.Background(), koios, nil, network, epoch,
 		[]poolStake{{bech32: "pool1aaa", stake: 100}},
 	)
-	require.Error(t, err, "a failed epoch_info fetch must not read as a match")
-	require.Nil(t, got)
+	require.NotNil(t, got,
+		"a failed epoch_info fetch must not read as a match")
+	require.True(t, got.KoiosFault,
+		"an unreachable reference is not a dingo divergence")
+	require.Contains(t, got.Reason, ReasonKoiosEpochInfoUnavailable)
+	require.Equal(t, uint64(100), got.DingoStake)
 }
 
 // TestCompareTotalActiveStakeFlagsAMissingKoiosTotal covers the other
@@ -210,11 +213,10 @@ func TestCompareTotalActiveStakeFlagsAMissingKoiosTotal(t *testing.T) {
 	koios, err := NewKoiosClient(network, "", koiosURL, true, true)
 	require.NoError(t, err)
 
-	got, err := compareTotalActiveStake(
+	got := compareTotalActiveStake(
 		context.Background(), koios, nil, network, epoch,
 		[]poolStake{{bech32: "pool1aaa", stake: 100}},
 	)
-	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, ReasonNoKoiosActiveStake, got.Reason)
 	require.True(t, got.KoiosFault)
@@ -260,11 +262,10 @@ func TestCompareTotalActiveStakeDoesNotClobberCachedEpochInfo(t *testing.T) {
 	koios, err := NewKoiosClient(network, "", koiosURL, true, true)
 	require.NoError(t, err)
 
-	_, err = compareTotalActiveStake(
+	_ = compareTotalActiveStake(
 		context.Background(), koios, cache, network, epoch,
 		[]poolStake{{bech32: "pool1aaa", stake: 600}},
 	)
-	require.NoError(t, err)
 
 	after, err := cache.GetEpochInfo(network, epoch)
 	require.NoError(t, err)
@@ -316,11 +317,10 @@ func TestCompareTotalActiveStakeSkipsPreStakingEpochs(t *testing.T) {
 			koios, err := NewKoiosClient(network, "", koiosURL, true, true)
 			require.NoError(t, err)
 
-			got, err := compareTotalActiveStake(
+			got := compareTotalActiveStake(
 				context.Background(), koios, nil, network, tc.epoch,
 				[]poolStake{{bech32: "pool1aaa", stake: 100}},
 			)
-			require.NoError(t, err)
 			if !tc.wantFault {
 				require.Nil(t, got,
 					"a pre-staking epoch has nothing to compare and must not "+
@@ -334,4 +334,34 @@ func TestCompareTotalActiveStakeSkipsPreStakingEpochs(t *testing.T) {
 			require.True(t, got.KoiosFault)
 		})
 	}
+}
+
+// TestCompareTotalActiveStakeReportsADingoSurplus pins the other direction.
+// Raised in review on #4781: changing the final guard to `diff >= 0` left
+// every test in this package green, so the total check could silently stop
+// reporting Dingo over-reporting. A surplus is as much a divergence as a
+// shortfall -- it means Dingo reports stake Koios's epoch total does not
+// account for, which is what a duplicated or phantom pool looks like.
+func TestCompareTotalActiveStakeReportsADingoSurplus(t *testing.T) {
+	t.Parallel()
+	const network = "preview"
+	const epoch = 995
+
+	cache := cacheWithEpochInfo(t, network, epoch, "600")
+	reported := []poolStake{
+		{bech32: "pool1aaa", stake: 100},
+		{bech32: "pool1bbb", stake: 200},
+		{bech32: "pool1ccc", stake: 300},
+		{bech32: "pool1ddd", stake: 150}, // Koios's total covers only 600.
+	}
+
+	got := compareTotalActiveStake(
+		context.Background(), nil, cache, network, epoch, reported,
+	)
+	require.NotNil(t, got, "a dingo surplus must be reported, not only a shortfall")
+	require.Equal(t, ReasonTotalActiveStakeMismatch, got.Reason)
+	require.Equal(t, int64(150), got.DiffLovelace,
+		"the surplus is positive: dingo reports more than koios accounts for")
+	require.False(t, got.KoiosFault,
+		"a surplus is a real divergence, not a koios-side fault")
 }

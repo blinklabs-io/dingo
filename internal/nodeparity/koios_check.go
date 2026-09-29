@@ -63,8 +63,10 @@ package nodeparity
 //     closes that: Dingo's per-pool stakes are summed and compared against
 //     Koios's epoch-wide active_stake, so a dropped pool carrying stake
 //     moves the sum and is reported, without needing Koios's own
-//     historical pool set. Verified identical across 1,317 cached Preview
-//     epochs. It reports THAT a pool is missing, not which one; naming the
+//     historical pool set. Verified across 1,321 cached Preview epochs
+//     (2-1322), where Koios's own per-pool active_stake values sum to its
+//     epoch_info active_stake with no epoch disagreeing, so the comparison
+//     needs no tolerance. It reports THAT a pool is missing, not which one; naming the
 //     culprit would need a per-epoch pool_history call per pool, and is
 //     only worth paying for once the totals actually disagree.
 //   - UTxO set: full content (address, ADA amount, multi-asset tokens,
@@ -518,6 +520,16 @@ type poolStake struct {
 // per-process single-connection WAL pool). A cache error (read or write)
 // never fails the check: it degrades to "fetch this pool live from Koios,"
 // never to a hard error.
+//
+// Beyond the per-pool comparison it also reads Koios's epoch-wide
+// active_stake from /epoch_info (cache first) and compares Dingo's summed
+// pool stakes against it, which is the only way a pool Dingo lost entirely
+// surfaces -- see compareTotalActiveStake. That mismatch carries an empty
+// PoolIDBech32 and Reason ReasonTotalActiveStakeMismatch. A failure to
+// fetch /epoch_info is likewise reported as a mismatch, carrying
+// KoiosFault, rather than returned as an error: an error would discard the
+// per-pool mismatches already found, letting an outage of that endpoint
+// hide a real divergence.
 func CheckStakeDistribution(
 	ctx context.Context,
 	client *localstatequery.Client,
@@ -598,13 +610,14 @@ func CheckStakeDistribution(
 			mismatches = append(mismatches, *m)
 		}
 	}
-	total, err := compareTotalActiveStake(
+	// Appended, never returned as an error: an error here would discard
+	// every per-pool mismatch collected above, so an /epoch_info outage
+	// would hide a real pool divergence the per-pool half had already
+	// found. A KoiosFault entry keeps the epoch unverified (from-genesis
+	// counts any fault as incomplete) AND keeps those findings reportable.
+	if total := compareTotalActiveStake(
 		ctx, koios, cache, network, epoch, pools,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if total != nil {
+	); total != nil {
 		mismatches = append(mismatches, *total)
 	}
 	sort.Slice(mismatches, func(i, j int) bool {
@@ -628,6 +641,14 @@ const ReasonTotalActiveStakeMismatch = "dingo pool stakes do not sum to koios ac
 // null is permanent and correct there, so those epochs are skipped outright
 // rather than reported.
 const ReasonNoKoiosActiveStake = "koios reported no active_stake for the epoch"
+
+// ReasonKoiosEpochInfoUnavailable marks a total-stake comparison that could
+// not run because /epoch_info could not be fetched at all, as opposed to
+// answering without an active_stake. Like that case it carries KoiosFault,
+// which is what keeps the epoch unverified without discarding the per-pool
+// mismatches found alongside it -- returning an error instead would throw
+// those away and let an outage of this endpoint hide a real divergence.
+const ReasonKoiosEpochInfoUnavailable = "koios epoch_info fetch failed"
 
 // koiosActiveStakeForEpoch returns Koios's epoch-wide active_stake as its
 // literal decimal string, cache first, "" when Koios has none for the epoch.
@@ -680,13 +701,15 @@ func koiosActiveStakeForEpoch(
 // distribution. Summing has no such ambiguity, because a stakeless pool
 // contributes zero.
 //
-// A nil mismatch and a nil error mean the totals agree. An error means the
-// comparison could not run at all, and is returned rather than swallowed:
-// reporting no mismatch for a check that never executed would restore
-// exactly the blind spot this function exists to close. The two Koios-side
-// data faults -- no active_stake, or one that will not parse -- come back as
-// a KoiosFault mismatch instead, matching how the per-pool path reports an
-// unusable Koios value.
+// nil means the totals agree, or the epoch predates any stake snapshot and
+// there is nothing to compare. Every way the comparison can fail to run --
+// /epoch_info unfetchable, answered without an active_stake, or answered
+// with one that will not parse -- comes back as a KoiosFault mismatch
+// rather than an error. That is deliberate: CheckStakeDistribution has
+// already collected the per-pool mismatches by this point, and an error
+// return would discard them, so an outage of this one endpoint could hide a
+// pool divergence the per-pool half had found. A fault keeps the epoch
+// unverified and keeps those findings.
 func compareTotalActiveStake(
 	ctx context.Context,
 	koios *koiosparity.KoiosClient,
@@ -694,12 +717,14 @@ func compareTotalActiveStake(
 	network string,
 	epoch uint64,
 	pools []poolStake,
-) (*StakeMismatch, error) {
-	koiosTotal, err := koiosActiveStakeForEpoch(
-		ctx, koios, cache, network, epoch,
-	)
-	if err != nil {
-		return nil, err
+) *StakeMismatch {
+	// Koios has no active_stake for these epochs permanently and
+	// correctly, because no valid "go" stake snapshot exists yet -- an
+	// epoch with nothing to compare, not a fault, and not worth a request.
+	// Reporting it as one would make the first two stake checks of every
+	// from-genesis replay look degraded.
+	if koiosparity.IsPreStakingEpoch(epoch) {
+		return nil
 	}
 
 	// No overflow guard on the sum: wrapping uint64 would take total stake
@@ -710,19 +735,23 @@ func compareTotalActiveStake(
 		got += p.stake
 	}
 
-	if koiosTotal == "" {
-		if koiosparity.IsPreStakingEpoch(epoch) {
-			// Koios returns active_stake=null here permanently, because no
-			// valid "go" stake snapshot exists yet -- an epoch with nothing
-			// to compare, not a fault. Reporting it as one would make the
-			// first two epochs of every from-genesis replay look degraded.
-			return nil, nil
+	koiosTotal, err := koiosActiveStakeForEpoch(
+		ctx, koios, cache, network, epoch,
+	)
+	if err != nil {
+		return &StakeMismatch{
+			DingoStake: got,
+			Reason:     ReasonKoiosEpochInfoUnavailable + ": " + err.Error(),
+			KoiosFault: true,
 		}
+	}
+
+	if koiosTotal == "" {
 		return &StakeMismatch{
 			DingoStake: got,
 			Reason:     ReasonNoKoiosActiveStake,
 			KoiosFault: true,
-		}, nil
+		}
 	}
 
 	diff, kind := stakeDiffLovelace(got, koiosTotal)
@@ -735,24 +764,27 @@ func compareTotalActiveStake(
 			KoiosStake: koiosTotal,
 			Reason:     "unparseable koios active_stake value",
 			KoiosFault: true,
-		}, nil
+		}
 	case stakeDiffOverflow:
 		return &StakeMismatch{
 			DingoStake: got,
 			KoiosStake: koiosTotal,
 			Reason: "stake difference too large to represent -- " +
 				"dingo's reported stake is implausible",
-		}, nil
+		}
 	}
+	// Strictly != 0, both directions. A Dingo surplus is as much a
+	// divergence as a shortfall: it means Dingo reports stake Koios's
+	// epoch total does not account for.
 	if diff == 0 {
-		return nil, nil
+		return nil
 	}
 	return &StakeMismatch{
 		DingoStake:   got,
 		KoiosStake:   koiosTotal,
 		DiffLovelace: diff,
 		Reason:       ReasonTotalActiveStakeMismatch,
-	}, nil
+	}
 }
 
 // fetchTxInfosCached is the cache-first counterpart to

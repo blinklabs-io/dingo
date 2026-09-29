@@ -609,27 +609,28 @@ func TestCheckStakeDistributionReportsATotalShortfall(t *testing.T) {
 		"a shortfall is a real divergence, not a Koios-side fault")
 }
 
-// TestCheckStakeDistributionFailsWhenTheEpochTotalCannotBeFetched pins the
-// call site's error handling, which the shortfall test above does not reach.
+// TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails is the
+// blocker raised in review on #4781, and the reason the epoch_info failure
+// is a KoiosFault mismatch rather than an error return.
 //
-// Raised in review on #4781: replacing the call site with
-// `total, _ := compareTotalActiveStake(...)` leaves every other test in this
-// package green, because the only test covering that error drives the helper
-// directly. The regression it hides is the one this PR exists to prevent --
-// an epoch where the per-pool loop finds nothing wrong and the total check
-// never ran gets reported as verified, so a Koios outage becomes
-// indistinguishable from a clean epoch.
+// An error return discards every per-pool mismatch CheckStakeDistribution
+// has already collected. from-genesis's recordEpoch then logs only "stake
+// distribution check did not run" and never inspects StakeMismatches, so a
+// divergence the base branch reports plainly would be hidden by an outage
+// of the endpoint this branch added. The check meant to close a blind spot
+// would have opened a worse one.
 //
-// The pool row is cached so the per-pool half succeeds without touching the
-// network; only /epoch_info fails. That combination is what makes the bug
-// reachable, and it is why a test of either half alone cannot see it.
-func TestCheckStakeDistributionFailsWhenTheEpochTotalCannotBeFetched(t *testing.T) {
+// Dingo reports 1,000,000 for a pool Koios has cached at 900,000, so the
+// per-pool half finds a real divergence with no network call; /epoch_info
+// then fails. Both must survive: the pool mismatch as a real finding, the
+// fetch failure as a fault that leaves the epoch unverified.
+func TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails(t *testing.T) {
 	const magic = 764824073
-	const epoch = uint64(503)
+	const epoch = uint64(504)
 	const dingoStake = uint64(1_000_000)
 
 	var poolID ledger.PoolId
-	poolID[0] = 0xEF
+	poolID[0] = 0x5A
 	bech32 := poolID.String()
 
 	lsq := newWiringFakeLSQServer()
@@ -659,14 +660,12 @@ func TestCheckStakeDistributionFailsWhenTheEpochTotalCannotBeFetched(t *testing.
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
-	// Cached, and agreeing exactly: the per-pool loop makes no request and
-	// reports nothing, so the epoch looks clean right up until the total
-	// check cannot run.
+	// Cached and disagreeing: the per-pool half finds this without a request.
 	require.NoError(t, cache.UpsertPoolEpoch(koiosparity.KoiosPoolEpoch{
 		Network:     "preview",
 		Epoch:       epoch,
 		PoolBech32:  bech32,
-		ActiveStake: "1000000",
+		ActiveStake: "900000",
 		FetchedAt:   time.Now().UTC(),
 	}))
 	// No epoch_info row, so the total check goes to the failing Koios above.
@@ -674,9 +673,27 @@ func TestCheckStakeDistributionFailsWhenTheEpochTotalCannotBeFetched(t *testing.
 	mismatches, err := CheckStakeDistribution(
 		ctx, client, koios, cache, "preview", epoch,
 	)
-	require.Error(t, err,
-		"a failed epoch_info fetch must fail the whole stake check, not "+
-			"report a clean epoch the total comparison never validated")
-	require.Contains(t, err.Error(), "epoch_info")
-	require.Nil(t, mismatches)
+	require.NoError(t, err,
+		"an epoch_info outage must not fail the whole check and throw away "+
+			"the per-pool findings")
+
+	var pool, fault *StakeMismatch
+	for i := range mismatches {
+		if mismatches[i].KoiosFault {
+			fault = &mismatches[i]
+		} else {
+			pool = &mismatches[i]
+		}
+	}
+
+	require.NotNil(t, pool,
+		"the real per-pool divergence must survive the epoch_info failure")
+	require.Equal(t, bech32, pool.PoolIDBech32)
+	require.Equal(t, int64(100_000), pool.DiffLovelace)
+
+	require.NotNil(t, fault,
+		"the epoch_info failure must still be reported, or the epoch reads "+
+			"as fully verified when the total check never ran")
+	require.Empty(t, fault.PoolIDBech32)
+	require.Contains(t, fault.Reason, ReasonKoiosEpochInfoUnavailable)
 }
