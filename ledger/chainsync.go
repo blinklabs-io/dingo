@@ -6956,16 +6956,24 @@ func (ls *LedgerState) processEpochRollover(
 		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
 		!ls.config.DelegatorInactivityEnabled
-	if !snapDeferred {
+	if snapDeferred {
 		if err := ls.timeRolloverPhase(
-			currentEpoch.EpochId+1, "snap", func() error {
-				return ls.captureEpochBoundarySnapshotStake(
-					txn, currentEpoch, epochStartSlot,
+			currentEpoch.EpochId+1, "snap_capture", func() error {
+				return ls.captureDeferredBoundarySnapshot(
+					txn, currentEpoch.EpochId, epochStartSlot,
 				)
 			},
 		); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("capture SNAP-point pool retirements: %w", err)
 		}
+	} else if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "snap", func() error {
+			return ls.captureEpochBoundarySnapshotStake(
+				txn, currentEpoch, epochStartSlot,
+			)
+		},
+	); err != nil {
+		return nil, err
 	}
 
 	// governance.ProcessEpoch's RATIFY phase tallies every SPO-gated action

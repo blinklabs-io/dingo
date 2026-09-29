@@ -13303,14 +13303,18 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    proposals.
 
    A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
-   leaves its mark snapshot to the same job. The boundary skips the SNAP-point
-   stake read, the same-boundary SPO state and the snapshot write; the job
-   builds mark[new epoch] on the pinned snapshot with the epoch-boundary
-   reconstruction (`snapshot.Manager.PrepareEpochBoundarySnapshot`):
-   delegations as of the snapshot slot, which keeps the ones POOLREAP cleared,
-   and boundary credits other than those marked
-   `AccountRewardDelta.PostSnapshot`, which excludes POOLREAP deposit refunds,
-   enacted treasury withdrawals and proposal-deposit refunds. Its persist-time
+   leaves its mark snapshot to the same job. At the SNAP point the boundary
+   only reads the stake rows of the pools POOLREAP is about to retire
+   (`snapshot.Manager.DeferEpochBoundaryCapture`, O(their delegators)),
+   because POOLREAP clears those delegations; it skips the full stake read,
+   the same-boundary SPO state and the snapshot write. The job builds
+   mark[new epoch] on the pinned snapshot
+   (`snapshot.Manager.PrepareEpochBoundarySnapshot`): the live stake read,
+   less each stake credential's credits marked
+   `AccountRewardDelta.PostSnapshot` at the boundary slot (POOLREAP deposit
+   refunds, enacted treasury withdrawals, proposal-deposit refunds;
+   `GetPostSnapshotRewardCredits`), with the retired pools' rows replaced by
+   the ones read at the SNAP point. Its persist-time
    reads (reward inputs, Leios keys, reward-account auto-votes) see the whole
    committed boundary, as the in-boundary write does. RATIFY takes its SPO
    state from those rows, and one transaction writes the snapshot and the

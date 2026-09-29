@@ -67,8 +67,9 @@ type Manager struct {
 	// transaction; see TakeDeferredRewardStakeInputs.
 	deferRewardStakeInputs bool
 	// deferredCaptures are the epochs whose mark snapshot the ledger captures
-	// after the boundary commits, guarded by mu.
-	deferredCaptures    map[uint64]struct{}
+	// after the boundary commits, with the stake rows their boundary read for
+	// the pools it retires; guarded by mu.
+	deferredCaptures    map[uint64]*deferredCapture
 	deferredStakeInputs *DeferredRewardStakeInputs
 
 	mu             sync.RWMutex
@@ -624,7 +625,6 @@ func (m *Manager) handleEpochTransition(
 	// sees a fresh WAL snapshot when it begins.
 	m.mu.Lock()
 	_, deferred := m.deferredCaptures[evt.NewEpoch]
-	delete(m.deferredCaptures, evt.NewEpoch)
 	m.mu.Unlock()
 	if deferred {
 		m.logger.Debug(
@@ -957,23 +957,127 @@ type DeferredEpochBoundarySnapshot struct {
 	prepared *preparedSnapshot
 }
 
-// DeferEpochBoundaryCapture records that the ledger captures epoch's mark
-// snapshot after its boundary commits, so the epoch-transition handler must not
-// capture a fallback one from later state.
-func (m *Manager) DeferEpochBoundaryCapture(epoch uint64) {
+type deferredCapture struct {
+	boundarySlot uint64
+	retiring     map[string]struct{}
+	retiringRows []*models.RewardStakeInput
+}
+
+// DeferEpochBoundaryCapture runs in the boundary transaction at the SNAP point,
+// before POOLREAP, when the ledger builds evt.NewEpoch's mark snapshot after
+// the boundary commits. POOLREAP clears the delegations to the pools it
+// retires, so it reads their stake rows now; it also stops the
+// epoch-transition handler capturing a fallback snapshot from later state.
+func (m *Manager) DeferEpochBoundaryCapture(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) error {
+	m.lockConfiguration()
+	refunds, err := m.db.GetPoolsRetiringAtEpoch(
+		evt.NewEpoch, evt.BoundarySlot, txn,
+	)
+	if err != nil {
+		return fmt.Errorf("get retiring pools: %w", err)
+	}
+	capture := &deferredCapture{
+		boundarySlot: evt.BoundarySlot,
+		retiring:     make(map[string]struct{}, len(refunds)),
+	}
+	pools := make([][]byte, 0, len(refunds))
+	for _, refund := range refunds {
+		key := string(refund.PoolKeyHash)
+		if _, dup := capture.retiring[key]; dup {
+			continue
+		}
+		capture.retiring[key] = struct{}{}
+		pools = append(pools, refund.PoolKeyHash)
+	}
+	if len(pools) > 0 {
+		meta := m.db.Metadata()
+		metaTxn := txn.Metadata()
+		expiryEpoch := m.expiryEpoch(evt.NewEpoch)
+		rows, err := meta.GetLiveStakeInputsForPools(
+			pools, expiryEpoch, metaTxn,
+		)
+		if err != nil {
+			return fmt.Errorf("get retiring pool stake inputs: %w", err)
+		}
+		pointerRows, err := meta.GetPointerStakeInputsForPools(
+			pools, evt.SnapshotSlot, evt.BoundarySlot, expiryEpoch, metaTxn,
+		)
+		if err != nil {
+			return fmt.Errorf("get retiring pool pointer inputs: %w", err)
+		}
+		capture.retiringRows, err = mergePointerStakeInputs(rows, pointerRows)
+		if err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.deferredCaptures == nil {
-		m.deferredCaptures = make(map[uint64]struct{})
+		m.deferredCaptures = make(map[uint64]*deferredCapture)
 	}
-	m.deferredCaptures[epoch] = struct{}{}
+	for epoch := range m.deferredCaptures {
+		if epoch+2 < evt.NewEpoch {
+			delete(m.deferredCaptures, epoch)
+		}
+	}
+	m.deferredCaptures[evt.NewEpoch] = capture
+	return nil
+}
+
+// deferredSnapPointRows turns the live rows a committed boundary leaves into
+// the rows its SNAP point read: less each stake credential's PostSnapshot
+// credits, and with the delegations to the pools POOLREAP retired as the SNAP
+// point had them.
+func deferredSnapPointRows(
+	rows []*models.RewardStakeInput,
+	capture *deferredCapture,
+	postSnapshot []*models.AccountRewardDelta,
+) ([]*models.RewardStakeInput, error) {
+	credits := make(map[string]uint64, len(postSnapshot))
+	for _, credit := range postSnapshot {
+		credits[string([]byte{credit.CredentialTag})+
+			string(credit.StakingKey)] += uint64(credit.Amount)
+	}
+	ret := make(
+		[]*models.RewardStakeInput, 0, len(rows)+len(capture.retiringRows),
+	)
+	for _, row := range rows {
+		if row == nil {
+			return nil, errors.New("nil reward stake input")
+		}
+		if _, retired := capture.retiring[string(row.PoolKeyHash)]; retired {
+			continue
+		}
+		credit := credits[string([]byte{row.CredentialTag})+
+			string(row.StakingKey)]
+		if credit > 0 {
+			if uint64(row.Stake) < credit {
+				return nil, fmt.Errorf(
+					"stake %d of %x below its post-snapshot credits %d",
+					row.Stake, row.StakingKey, credit,
+				)
+			}
+			clone := *row
+			clone.Stake = types.Uint64(uint64(row.Stake) - credit)
+			row = &clone
+		}
+		ret = append(ret, row)
+	}
+	for _, row := range capture.retiringRows {
+		clone := *row
+		ret = append(ret, &clone)
+	}
+	return ret, nil
 }
 
 // PrepareEpochBoundarySnapshot builds mark[evt.NewEpoch] from txn, which must
 // observe the committed boundary and nothing later. The SNAP point precedes
-// the boundary's POOLREAP and governance credits, so the stake is the
-// epoch-boundary reconstruction: delegations as of the snapshot slot, and
-// boundary credits other than those marked PostSnapshot. The persist-time
+// the boundary's POOLREAP and governance credits, so the stake is the live
+// read less the credits marked PostSnapshot, with the retired pools' rows
+// DeferEpochBoundaryCapture read before POOLREAP cleared them. The persist-time
 // reads (reward inputs, Leios keys, reward-account auto-votes) see the whole
 // committed boundary, as they do when the boundary persists its own snapshot.
 func (m *Manager) PrepareEpochBoundarySnapshot(
@@ -982,18 +1086,40 @@ func (m *Manager) PrepareEpochBoundarySnapshot(
 	evt event.EpochTransitionEvent,
 ) (*DeferredEpochBoundarySnapshot, error) {
 	m.lockConfiguration()
+	m.mu.Lock()
+	capture := m.deferredCaptures[evt.NewEpoch]
+	m.mu.Unlock()
+	if capture == nil || capture.boundarySlot != evt.BoundarySlot {
+		return nil, fmt.Errorf(
+			"no SNAP-point capture for epoch %d at slot %d",
+			evt.NewEpoch, evt.BoundarySlot,
+		)
+	}
+	postSnapshot, err := m.db.Metadata().GetPostSnapshotRewardCredits(
+		evt.BoundarySlot, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get post-snapshot credits: %w", err)
+	}
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
 	calculator := NewCalculator(m.db)
-	distribution, err := calculator.calculateHistoricalBoundaryStakeDistributionInTxn(
+	distribution, err := calculator.calculateAdjustedLiveStakeDistributionInTxn(
 		ctx,
 		txn,
 		evt.SnapshotSlot,
 		evt.BoundarySlot,
 		expiryEpoch,
-		m.inactivityPeriod(),
+		func(
+			rows []*models.RewardStakeInput,
+		) ([]*models.RewardStakeInput, error) {
+			return deferredSnapPointRows(rows, capture, postSnapshot)
+		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate stake distribution: %w", err)
+	}
+	if _, err := rewardStakeDistribution(distribution); err != nil {
+		return nil, fmt.Errorf("validate reward stake inputs: %w", err)
 	}
 	prepared, err := m.prepareSnapshot(
 		evt.NewEpoch, "mark", distribution, evt, true, true, txn,

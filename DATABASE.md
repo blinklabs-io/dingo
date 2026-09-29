@@ -585,7 +585,10 @@ prevent startup.
 `sync_state` holds a JSON record (`epoch`, `boundary_slot`, `id`, and
 `snapshot` when the boundary left that epoch's `pool_stake_snapshot`,
 `epoch_summary` and reward-input rows to the same job) naming the latest
-boundary whose RATIFY decision or mark snapshot has not been written yet. The boundary
+boundary whose RATIFY decision or mark snapshot has not been written yet. `GetPostSnapshotRewardCredits(slot)` returns
+each stake credential's total of the `account_reward_delta` credits at `slot`
+with `post_snapshot` set, which the deferred mark snapshot subtracts from the
+live stake read to recover the SNAP point. The boundary
 transaction writes it; the transaction that writes the decision's ratified and
 expired marks -- the background ratification job's, or the next boundary's --
 deletes it. A rollback below `boundary_slot` deletes it in the rollback

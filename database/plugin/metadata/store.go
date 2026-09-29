@@ -2059,6 +2059,14 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetPostSnapshotRewardCredits returns each stake credential's total of
+	// the credits recorded at slot and marked AccountRewardDelta.PostSnapshot:
+	// what a boundary at slot credited after its SNAP point.
+	GetPostSnapshotRewardCredits(
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.AccountRewardDelta, error)
+
 	// GetDelegatedPoolKeyHashes returns every pool key hash the live reward
 	// stake aggregate attributes stake to, including pools that are no longer
 	// registered. cardano-ledger's ssTotalActiveStake sums registered

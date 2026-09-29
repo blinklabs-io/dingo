@@ -300,6 +300,14 @@ INSERT INTO auth_committee_hot (
 	}
 	snapshotMgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
 	s.snapshotMgr = snapshotMgr
+	// Production reads the SNAP-point stake inside the boundary.
+	s.ls.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return snapshotMgr.ComputeEpochBoundarySnapshot(
+				context.Background(), txn, evt,
+			)
+		},
+	)
 	s.ls.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.CaptureEpochBoundarySnapshot(

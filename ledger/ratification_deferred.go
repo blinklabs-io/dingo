@@ -114,13 +114,6 @@ func (ls *LedgerState) deferBoundaryJob(
 	); err != nil {
 		return err
 	}
-	if snapshotEvt != nil {
-		h := ls.deferredBoundarySnapshotHook.Load()
-		if h == nil {
-			return errors.New("deferred boundary snapshot hook unset")
-		}
-		h.announce(epoch)
-	}
 	job := &ratificationJob{
 		record:      rec,
 		plan:        plan,
@@ -454,32 +447,50 @@ func (ls *LedgerState) resumePendingRatificationIntent() error {
 }
 
 type deferredBoundarySnapshotHookHolder struct {
-	announce func(epoch uint64)
-	prepare  func(*database.Txn, event.EpochTransitionEvent) (
+	capture func(*database.Txn, event.EpochTransitionEvent) error
+	prepare func(*database.Txn, event.EpochTransitionEvent) (
 		DeferredBoundarySnapshot, error,
 	)
 }
 
 // SetDeferredEpochBoundarySnapshotHooks installs what a boundary needs to
-// leave mark[NewEpoch] to its background job: announce runs in the boundary
-// transaction before it commits, and prepare builds the snapshot reading only
+// leave mark[NewEpoch] to its background job: capture runs in the boundary
+// transaction at the SNAP point, and prepare builds the snapshot reading only
 // the given transaction. Without them every boundary captures its snapshot
 // itself.
 func (ls *LedgerState) SetDeferredEpochBoundarySnapshotHooks(
-	announce func(epoch uint64),
+	capture func(*database.Txn, event.EpochTransitionEvent) error,
 	prepare func(*database.Txn, event.EpochTransitionEvent) (
 		DeferredBoundarySnapshot, error,
 	),
 ) {
-	if announce == nil || prepare == nil {
+	if capture == nil || prepare == nil {
 		ls.deferredBoundarySnapshotHook.Store(nil)
 		return
 	}
 	ls.deferredBoundarySnapshotHook.Store(
 		&deferredBoundarySnapshotHookHolder{
-			announce: announce, prepare: prepare,
+			capture: capture, prepare: prepare,
 		},
 	)
+}
+
+// captureDeferredBoundarySnapshot runs the capture hook at the SNAP point.
+func (ls *LedgerState) captureDeferredBoundarySnapshot(
+	txn *database.Txn,
+	prevEpoch uint64,
+	boundarySlot uint64,
+) error {
+	h := ls.deferredBoundarySnapshotHook.Load()
+	if h == nil {
+		return errors.New("deferred boundary snapshot hook unset")
+	}
+	return h.capture(txn, event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch,
+		NewEpoch:      prevEpoch + 1,
+		BoundarySlot:  boundarySlot,
+		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
+	})
 }
 
 func (ls *LedgerState) prepareDeferredBoundarySnapshot(
