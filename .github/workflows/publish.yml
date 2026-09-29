@@ -169,7 +169,8 @@ jobs:
   # always had, uninstrumented: the conformance package alone approaches the
   # per-package timeout when PostgreSQL and MySQL run alongside SQLite under
   # -race, so service-backed coverage and race coverage are separate jobs.
-  # See go-test.yml's go-test step for why that timeout is 60m.
+  # See go-test.yml's go-test and go-test-race steps for why those timeouts
+  # are 30m and 60m.
   go-test-linux:
     name: go-test (Linux)
     needs: [go-test-linux-quick]
@@ -291,7 +292,7 @@ jobs:
       - name: go-test-live-lifecycle
         run: make test-live-lifecycle
       - name: go-test
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
 
   # Stage 3. Optional service backends are deliberately unconfigured here, so
   # internal/test/conformance replays its vectors against SQLite only. Same
