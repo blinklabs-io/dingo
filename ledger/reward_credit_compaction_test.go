@@ -17,6 +17,7 @@ package ledger
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -48,6 +49,23 @@ func unfoldedCreditCount(t *testing.T, f *epochBoundaryBenchFixture) int {
 SELECT COUNT(*) FROM reward_account_output
 WHERE spendable AND NOT guarded AND NOT folded`).Scan(&n))
 	return n
+}
+
+// With no round due, compaction commits nothing: a write commit would restamp
+// the commit timestamps at every start and credited round.
+func TestRewardCreditCompactionWithoutDueRoundCommitsNothing(t *testing.T) {
+	t.Parallel()
+	f := creditedRewardRound(t)
+	before, err := f.db.Metadata().GetCommitTimestamp()
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+
+	done, err := f.ls.compactRewardCreditChunk(rewardCreditCompactionChunk)
+	require.NoError(t, err)
+	require.True(t, done)
+	after, err := f.db.Metadata().GetCommitTimestamp()
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 // TestRewardCreditCompactionFoldsDueRoundsExactly pins compaction: a due

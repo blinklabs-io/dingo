@@ -134,9 +134,16 @@ func (ls *LedgerState) compactRewardCreditChunk(limit int) (bool, error) {
 	if ls.rewardInputRollbackActive.Load() != 0 {
 		return true, nil
 	}
+	// Every write commit restamps the commit timestamps, and this job runs
+	// at start and after each credited round, so it opens a write
+	// transaction only when a round is due.
+	due, err := ls.rewardCreditRoundDue()
+	if err != nil || !due {
+		return true, err
+	}
 	done := true
 	txn := ls.db.Transaction(true)
-	err := txn.Do(func(txn *database.Txn) error {
+	err = txn.Do(func(txn *database.Txn) error {
 		meta := ls.db.Metadata()
 		metaTxn := txn.Metadata()
 		rounds, err := meta.GetPendingRewardCreditRounds(metaTxn)
@@ -167,4 +174,16 @@ func (ls *LedgerState) compactRewardCreditChunk(limit int) (bool, error) {
 		return nil
 	})
 	return done, err
+}
+
+func (ls *LedgerState) rewardCreditRoundDue() (bool, error) {
+	txn := ls.db.Transaction(false)
+	defer txn.Release()
+	rounds, err := ls.db.Metadata().GetPendingRewardCreditRounds(
+		txn.Metadata(),
+	)
+	if err != nil {
+		return false, err
+	}
+	return len(rounds) > rewardCreditRoundsKeptUnfolded, nil
 }
