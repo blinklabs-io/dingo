@@ -13278,6 +13278,30 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    described here is specifically the running-treasury subset, not the full
    formal ENACT-state transition.
 
+   RATIFY runs after the boundary commits. `ProcessEpoch` with
+   `DeferRatification` returns a `governance.RatificationPlan` (the epoch
+   input, the post-ENACT parameters and the running treasury) instead of
+   tallying; `processEpochRollover` records it under
+   `dingo:governance:ratify-pending` and, in the boundary transaction's
+   `AfterCommit`, opens a read transaction and reads from it before returning,
+   which pins a snapshot of the committed boundary before any later block
+   commits. A background job decides RATIFY and EXPIRY on that snapshot and
+   writes the marks, at the boundary slot, in its own transaction under
+   `rewardPrecomputeWriteMu`. The next boundary first writes a decision the
+   job has not, waiting for the job to decide but never for its write, so the
+   boundary holding the writer cannot wait on a transaction that needs it.
+   RATIFY stays in the boundary transaction when a major-version change runs
+   HARDFORK after it, when an era transition follows the rollover, and when no
+   in-memory SPO state was resolved, because each would make the committed
+   state differ from what RATIFY reads at its position in the tick. A rollback
+   below the pending boundary discards the decision; start-up with a pending
+   record rewinds below its boundary through the rollback intent and fails when
+   the rewind exceeds the intent's limits. Transaction validation reads the
+   proposals set, not RATIFY's marks; LSQ `GetProposals` returns the proposals
+   set; Blockfrost DRep power and the hard-fork stability check call
+   `WaitGovernanceRatification` before reading proposal deposits and active
+   proposals.
+
    The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
    stake snapshot (`in.CurrentBoundarySPOState`, falling back to

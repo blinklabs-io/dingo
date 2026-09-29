@@ -581,6 +581,16 @@ undo delivered before the record is removed. Malformed or unsupported records
 are logged and removed so one damaged notification record cannot permanently
 prevent startup.
 
+**Pending ratification.** Key `dingo:governance:ratify-pending` in
+`sync_state` holds a JSON record (`epoch`, `boundary_slot`, `id`) naming the
+latest boundary whose RATIFY decision has not been written yet. The boundary
+transaction writes it; the transaction that writes the decision's ratified and
+expired marks -- the background ratification job's, or the next boundary's --
+deletes it. A rollback below `boundary_slot` deletes it in the rollback
+transaction. Start-up with the record present rewinds below the boundary through
+a rollback intent, because the state the decision must be taken on no longer
+exists; a rewind beyond the intent's block or byte limit fails start-up.
+
 **Reward precompute chunk cursor.** Key
 `dingo:stake-reward:precompute-cursor:<snapshot epoch>` in `sync_state` holds a
 version-2 JSON record: `format_version`, `snapshot_epoch`, the `generation` the
