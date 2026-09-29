@@ -1314,6 +1314,62 @@ func (ls *LedgerState) detectConnectionSwitch(
 	return activeConnId, true
 }
 
+// allowedQueuedHeaders bounds how many headers may accumulate before
+// blockfetch: a few batches' worth, never beyond the chain's header queue
+// capacity.
+func (ls *LedgerState) allowedQueuedHeaders() int {
+	return min(
+		BlockfetchBatchSize*4,
+		ls.chain.MaxQueuedHeaders(),
+	)
+}
+
+// blockfetchMinBatchHeaders returns how many headers must be queued before a
+// blockfetch starts while the local header tip is at least
+// blockfetchMinBatchGapSlots behind peerTip. It returns 0 near the peer tip,
+// where blockfetch starts without waiting. The header handler and the
+// chain-switch handoff share it so they agree on what "far behind" means.
+func blockfetchMinBatchHeaders(
+	peerTip ochainsync.Tip,
+	localHeaderTip ochainsync.Tip,
+	allowedHeaderCount int,
+) int {
+	localSlot := localHeaderTip.Point.Slot
+	if peerTip.Point.Slot <= localSlot ||
+		peerTip.Point.Slot-localSlot < blockfetchMinBatchGapSlots {
+		return 0
+	}
+	blockGap := uint64(0)
+	if peerTip.BlockNumber > localHeaderTip.BlockNumber {
+		blockGap = peerTip.BlockNumber - localHeaderTip.BlockNumber
+	}
+	return desiredBlockfetchBatchHeaders(
+		peerTip.Point.Slot-localSlot,
+		blockGap,
+		allowedHeaderCount,
+	)
+}
+
+// switchMinBatchHeadersLocked returns the minimum header batch that applies to
+// a switch onto connId, or 0 when the peer's sync target is unknown or the
+// local header tip is near it.
+func (ls *LedgerState) switchMinBatchHeadersLocked(
+	connId ouroboros.ConnectionId,
+) int {
+	if ls.chain == nil || ls.config.GetPeerSyncTargetFunc == nil {
+		return 0
+	}
+	peerTip, ok := ls.config.GetPeerSyncTargetFunc(connId)
+	if !ok {
+		return 0
+	}
+	return blockfetchMinBatchHeaders(
+		peerTip,
+		ls.chain.HeaderTip(),
+		ls.allowedQueuedHeaders(),
+	)
+}
+
 func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 	newConnId ouroboros.ConnectionId,
 	pending *pendingPublishes,
@@ -1380,6 +1436,27 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 	if ls.chainsyncBlockfetchReadyChan == nil &&
 		!ls.blockfetchContinuationPending &&
 		headerCount > 0 {
+		// While far behind the new peer's tip, keep accumulating toward the
+		// minimum batch rather than requesting a tiny range. The selected
+		// peer's next header re-evaluates the same predicate in the header
+		// handler. An unknown peer target keeps the immediate start.
+		if minBatchHeaders := ls.switchMinBatchHeadersLocked(newConnId); headerCount < minBatchHeaders {
+			ls.config.Logger.Debug(
+				"accumulating minimum header batch after chain switch",
+				"component", "ledger",
+				"connection_id", newConnId.String(),
+				"header_count", headerCount,
+				"minimum_header_count", minBatchHeaders,
+			)
+			// No batch is in flight to own the queue, so the selected peer
+			// must; otherwise any peer's non-fitting header is processed
+			// and clears it instead of being buffered.
+			ls.headerPipelineConnId = newConnId
+			if hasBufferedHeadersForNewConn {
+				return newConnId, nil
+			}
+			return ouroboros.ConnectionId{}, nil
+		}
 		ls.config.Logger.Debug(
 			"restarting queued blockfetch on selected connection",
 			"component", "ledger",
@@ -3483,10 +3560,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	// Allow us to build up a few blockfetch batches worth of headers,
 	// but never exceed the chain's actual header queue capacity.
-	allowedHeaderCount := min(
-		BlockfetchBatchSize*4,
-		ls.chain.MaxQueuedHeaders(),
-	)
+	allowedHeaderCount := ls.allowedQueuedHeaders()
 	headerCount := ls.chain.HeaderCount()
 
 	// Add header to chain
@@ -3641,29 +3715,21 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		localChainTip = ls.chain.HeaderTip()
 	}
 	localTipSlot := localChainTip.Point.Slot
-	blockGap := uint64(0)
-	if e.Tip.BlockNumber > localChainTip.BlockNumber {
-		blockGap = e.Tip.BlockNumber - localChainTip.BlockNumber
-	}
-	if e.Tip.Point.Slot > localTipSlot &&
-		e.Tip.Point.Slot-localTipSlot >= blockfetchMinBatchGapSlots {
-		minBatchHeaders := desiredBlockfetchBatchHeaders(
-			e.Tip.Point.Slot-localTipSlot,
-			blockGap,
-			allowedHeaderCount,
+	if minBatchHeaders := blockfetchMinBatchHeaders(
+		e.Tip,
+		localChainTip,
+		allowedHeaderCount,
+	); headersReady < minBatchHeaders {
+		ls.config.Logger.Debug(
+			"accumulating minimum header batch before blockfetch",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"tip_slot", e.Tip.Point.Slot,
+			"local_tip_slot", localTipSlot,
+			"header_count", headersReady,
+			"minimum_header_count", minBatchHeaders,
 		)
-		if headersReady < minBatchHeaders {
-			ls.config.Logger.Debug(
-				"accumulating minimum header batch before blockfetch",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"tip_slot", e.Tip.Point.Slot,
-				"local_tip_slot", localTipSlot,
-				"header_count", headersReady,
-				"minimum_header_count", minBatchHeaders,
-			)
-			return nil
-		}
+		return nil
 	}
 	slotThreshold := ls.calculateStabilityWindow()
 	if e.Point.Slot < e.Tip.Point.Slot &&
