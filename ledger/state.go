@@ -7667,11 +7667,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			if !parentEnvelopeSet {
 				var parentBlockType uint
 				var parentBlockTypeLoaded bool
+				var parentBlock models.Block
 				if len(snapshotTip.Point.Hash) > 0 {
 					if storedBlock, err := database.BlockByPoint(
 						ls.db,
 						snapshotTip.Point,
 					); err == nil {
+						parentBlock = storedBlock
 						parentBlockType = storedBlock.Type
 						parentBlockTypeLoaded = true
 					} else {
@@ -7690,6 +7692,20 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					parentBlockType,
 					parentBlockTypeLoaded,
 				)
+				if parentBlockTypeLoaded {
+					positioned, err := parentEnvelope.withStoredByronPosition(
+						parentBlock,
+					)
+					if err != nil {
+						ls.config.Logger.Debug(
+							"could not position persisted Byron parent for envelope validation",
+							"component", "ledger",
+							"slot", snapshotTip.Point.Slot,
+							"error", err,
+						)
+					}
+					parentEnvelope = positioned
+				}
 				parentEnvelopeSet = true
 			}
 			// Flag to enable validation after transaction commits (set inside callback,
