@@ -146,7 +146,11 @@ func TestProposalSetKeepsExpiredActionUntilItIsDropped(t *testing.T) {
 
 	parentState, err := lv.GovActionById(parentID)
 	require.NoError(t, err)
-	require.NotNil(t, parentState, "expired parent left the proposals set a boundary early")
+	require.NotNil(
+		t,
+		parentState,
+		"expired parent left the proposals set a boundary early",
+	)
 	require.True(t, lv.GovActionExists(parentID))
 	var expiryErr conway.VotingOnExpiredGovActionError
 	require.ErrorAs(t, conway.UtxoValidateVotingOnExpiredGovAction(
@@ -162,8 +166,11 @@ func TestProposalSetKeepsExpiredActionUntilItIsDropped(t *testing.T) {
 		grandchild, slotInEleven, lv, pparams,
 	), "a child naming a member of the proposals set was rejected")
 
-	require.True(t, lv.GovActionExists(childID),
-		"descendant of an expired action left the proposals set a boundary early")
+	require.True(
+		t,
+		lv.GovActionExists(childID),
+		"descendant of an expired action left the proposals set a boundary early",
+	)
 	childVote := governanceVoteTestTx(childID, lcommon.VoterTypeDRepKeyHash)
 	require.NoError(t, conway.UtxoValidateUnknownGovActionIds(
 		childVote, slotInEleven, lv, pparams,
