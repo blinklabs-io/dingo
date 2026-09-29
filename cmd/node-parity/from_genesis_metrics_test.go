@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
 
@@ -283,4 +284,51 @@ func TestFromGenesisMetricsPreMaterializesZeroSeries(t *testing.T) {
 			m.divergenceTotal.WithLabelValues(field, ReferenceKoios),
 		), 0.001, "%s divergence must expose a zero sample too", field)
 	}
+}
+
+// TestShouldServeMetrics pins the --metrics-addr opt-in, which was unpinned
+// until review on #4771: replacing the condition with
+// `globalFlags.metricsAddr != ""` left the whole cmd/node-parity suite
+// green. The flag defaults to ":9464", so that mutation makes every
+// from-genesis run bind a wildcard port nobody asked for, and fail outright
+// when the port is taken -- on a replay that runs for days.
+//
+// The three cases are the whole contract: absent means off despite the
+// non-empty default, present means on, and an explicit empty value is the
+// documented way to say off.
+func TestShouldServeMetrics(t *testing.T) {
+	t.Parallel()
+
+	newFlags := func() *pflag.FlagSet {
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		fs.String("metrics-addr", defaultMetricsAddr, "")
+		return fs
+	}
+
+	t.Run("absent means off even though the default is non-empty", func(t *testing.T) {
+		t.Parallel()
+		fs := newFlags()
+		require.False(t, shouldServeMetrics(fs, defaultMetricsAddr),
+			"an unset --metrics-addr must not bind the default port")
+	})
+
+	t.Run("explicitly passed means on", func(t *testing.T) {
+		t.Parallel()
+		fs := newFlags()
+		require.NoError(t, fs.Parse([]string{"--metrics-addr=127.0.0.1:0"}))
+		addr, err := fs.GetString("metrics-addr")
+		require.NoError(t, err)
+		require.True(t, shouldServeMetrics(fs, addr))
+	})
+
+	t.Run("explicitly empty means off", func(t *testing.T) {
+		t.Parallel()
+		fs := newFlags()
+		require.NoError(t, fs.Parse([]string{"--metrics-addr="}))
+		addr, err := fs.GetString("metrics-addr")
+		require.NoError(t, err)
+		require.Empty(t, addr)
+		require.False(t, shouldServeMetrics(fs, addr),
+			"--metrics-addr= is the documented way to turn metrics off")
+	})
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // koiosFlags are specific to the from-genesis command -- unlike
@@ -271,6 +272,25 @@ func (c *fromGenesisCounters) recordEpoch(
 	}
 }
 
+// shouldServeMetrics decides whether a from-genesis run serves /metrics.
+// Serving is opt-in, and opt-in has to mean the operator actually passed
+// --metrics-addr: the flag defaults to defaultMetricsAddr (":9464"), so
+// testing addr against "" alone is true on every run and binds a socket
+// nobody asked for -- failing the whole run when that port is already
+// taken, which for a multi-day replay is a poor trade for metrics the
+// operator did not request. watch can lean on the default, because serving
+// metrics is part of what a long-lived watcher is for; a one-shot replay is
+// different.
+//
+// Split out of the command body so the decision is reachable from a test.
+// Left inline it was unpinned: replacing it with addr != "" left the whole
+// cmd/node-parity suite green (review on #4771).
+//
+// flags.Changed reports explicit use, so "--metrics-addr=" means off.
+func shouldServeMetrics(flags *pflag.FlagSet, addr string) bool {
+	return flags.Changed("metrics-addr") && addr != ""
+}
+
 func fromGenesisCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "from-genesis",
@@ -432,18 +452,8 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 		)
 	}
 
-	// Serving metrics is opt-in, and opt-in has to mean the operator
-	// actually passed --metrics-addr: the flag defaults to
-	// defaultMetricsAddr (":9464"), so testing it against "" would be true
-	// on every run and bind a socket nobody asked for -- failing the whole
-	// run when that port is already taken, which for a multi-day
-	// from-genesis replay is a poor trade for metrics the operator did not
-	// request. watch can lean on the default because serving metrics is
-	// part of what a long-lived watcher is for; a one-shot replay is
-	// different. Flags().Changed reports explicit use, including
-	// "--metrics-addr=" to mean off.
 	var counters fromGenesisCounters
-	if cmd.Flags().Changed("metrics-addr") && globalFlags.metricsAddr != "" {
+	if shouldServeMetrics(cmd.Flags(), globalFlags.metricsAddr) {
 		counters.metrics = newFromGenesisMetrics(network)
 		metricsServer, err := serveMetrics(globalFlags.metricsAddr, logger)
 		if err != nil {

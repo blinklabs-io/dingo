@@ -182,11 +182,35 @@ groups:
         # set; 2h leaves room for that growth and for preprod, at the cost
         # of taking that long to notice a genuine stall. A replay is a
         # multi-day job, so that trade favours not crying wolf.
+        #
+        # The process-age gate is load-bearing, not belt-and-braces. Both
+        # counters are pre-materialized at 0 so an alert on a never-yet-used
+        # label can fire at all, which means rate() over them is a genuine 0
+        # from the second scrape of a fresh process -- not absent data. The
+        # rule would therefore be true from startup and fire after "for",
+        # while its own description claims nothing happened for two hours.
+        # A first epoch slower than 15m is ordinary: measured on preview,
+        # the per-epoch gap is 10.5 min past epoch 1100 and rises with the
+        # UTxO set, and an --at-slot resume starts there rather than at the
+        # cheap early epochs. Confirmed with promtool: without this gate the
+        # alert fires at 17m on a healthy run whose first epoch lands at 20m
+        # (docs/dashboards/alerts_test.yaml).
+        #
+        # 7200 matches the [2h] window: the rule can only fire once the
+        # process has been up longer than the window it reasons over. A
+        # restart resets process_start_time_seconds and so re-arms the
+        # grace, which is what a resumed replay needs too.
         expr: |
           (
-            rate(node_parity_epochs_total{network=~".+"}[2h])
-            + sum without (field) (rate(node_parity_epoch_checks_incomplete_total{network=~".+"}[2h]))
-          ) == 0
+            (
+              rate(node_parity_epochs_total{network=~".+"}[2h])
+              + sum without (field) (rate(node_parity_epoch_checks_incomplete_total{network=~".+"}[2h]))
+            ) == 0
+          )
+          and on (instance, job)
+          (
+            (time() - process_start_time_seconds{job="node-parity"}) > 7200
+          )
         for: 15m
         labels:
           severity: warning

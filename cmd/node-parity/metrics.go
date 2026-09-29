@@ -28,10 +28,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// parityMetrics holds this process's Prometheus counters. Metric names and
-// label sets are deliberately small and closed: never a pool ID, tx hash,
-// or TxIn label, which would make cardinality unbounded by the size of the
-// chain being watched.
 // ReferenceCardanoNode and ReferenceKoios are divergenceTotal's "reference"
 // label values: which oracle Dingo's ledger state was compared against.
 // check/watch compare against a live cardano-node; from-genesis compares
@@ -42,6 +38,10 @@ const (
 	ReferenceKoios       = "koios"
 )
 
+// parityMetrics holds this process's Prometheus counters. Metric names and
+// label sets are deliberately small and closed: never a pool ID, tx hash,
+// or TxIn label, which would make cardinality unbounded by the size of the
+// chain being watched.
 type parityMetrics struct {
 	// checksTotal counts completed cycles (matched or diverged); skipped
 	// cycles are counted separately by checksSkippedTotal rather than
