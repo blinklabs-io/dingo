@@ -2225,7 +2225,9 @@ rows. Which transaction commits this `bp` blob depends on the apply path
 `LeiosApplyEndorserBlockTxs` false) it is committed in its own blob transaction,
 not in the shared block-processing transaction that covers up to a full 50-block
 chunk: every certified endorser block in a chunk would otherwise pile its full
-blob (plus one `DOFF` entry per endorser transaction and per produced output)
+blob (plus one `DOFF` entry per endorser transaction body, each ranging over
+that body's bytes: every Dijkstra sub-transaction body, then the enclosing
+body element, never the whole transaction array; and one per produced output)
 into that single transaction, and on a dense Leios backlog the accumulated
 writes exceed Badger's per-transaction budget (`ErrTxnTooBig`), wedging the
 chunk. That path applies the endorser transactions without validation and never

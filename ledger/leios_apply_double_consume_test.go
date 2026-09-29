@@ -105,26 +105,44 @@ func TestBuildEndorserBlockBlobIndexesDijkstraBatchLevels(t *testing.T) {
 	require.NoError(t, err)
 	tx, err = dijkstra.NewDijkstraTransactionFromCbor(txCbor)
 	require.NoError(t, err)
+	_, elems, err := decodeEndorserTxEnvelope(txCbor)
+	require.NoError(t, err)
 	levels := TransactionLevelsForApply(tx)
 	require.Len(t, levels, 2)
+	subBodies := tx.Body.TxSubTransactions.Items()
+	require.Len(t, subBodies, 1)
 
 	blob, offsets, err := buildEndorserBlockBlob(
 		[]lcommon.Transaction{tx},
-		[][]byte{txCbor},
+		[][]byte{[]byte(elems[0])},
 		42,
 		[32]byte(bytes.Repeat([]byte{0x42}, 32)),
 	)
 	require.NoError(t, err)
 	require.Len(t, offsets.TxOffsets, len(levels))
-	for _, level := range levels {
+	// Each stored range must be the body its key hashes, as BlockIndexer
+	// records: the sub-transaction body, then the enclosing body element
+	// rather than the whole [body, witnesses, isValid, aux] array.
+	want := [][]byte{subBodies[0].Body.Cbor(), []byte(elems[0])}
+	for idx, level := range levels {
 		var hash [32]byte
 		copy(hash[:], level.Hash().Bytes())
 		offset, ok := offsets.TxOffsets[hash]
 		require.True(t, ok)
 		end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
 		require.LessOrEqual(t, end, uint64(len(blob)))
-		require.Equal(t, level.Cbor(), blob[offset.ByteOffset:end])
+		stored := blob[offset.ByteOffset:end]
+		require.Equal(t, want[idx], stored, "level %d body range", idx)
+		require.Equal(t, level.Hash(), lcommon.Blake2b256Hash(stored))
 	}
+	var enclosing [32]byte
+	copy(enclosing[:], tx.Hash().Bytes())
+	offset := offsets.TxOffsets[enclosing]
+	body, err := dijkstra.NewDijkstraTransactionBodyFromCbor(
+		blob[offset.ByteOffset : offset.ByteOffset+offset.ByteLength],
+	)
+	require.NoError(t, err)
+	require.Equal(t, tx.Hash(), body.Id())
 }
 
 // leiosApplyTestApplyEndorserBlock applies one endorser block in its own

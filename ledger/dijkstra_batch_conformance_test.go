@@ -19,11 +19,13 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -153,9 +155,10 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 	}
 }
 
-func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
+// dijkstraBatchWithSubOutputTx builds a valid Dijkstra batch whose single
+// sub-transaction produces one output and whose enclosing body produces none.
+func dijkstraBatchWithSubOutputTx(t *testing.T) *dijkstra.DijkstraTransaction {
+	t.Helper()
 	address := append([]byte{0x60}, bytes.Repeat([]byte{0x42}, 28)...)
 	subBody, err := cbor.Encode(map[uint]any{
 		0: []any{},
@@ -179,6 +182,55 @@ func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
 	require.NoError(t, err)
 	dijkstraTx, ok := tx.(*dijkstra.DijkstraTransaction)
 	require.True(t, ok)
+	return dijkstraTx
+}
+
+// TestTxValidationSessionAppliesDijkstraBatchLevels stages a batch through the
+// validation session's applyTx, whose synthetic offsets must be keyed by each
+// level's body hash for the sub-transaction row and output to be recorded.
+func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	tx := dijkstraBatchWithSubOutputTx(t)
+	childHash := tx.Body.TxSubTransactions.Items()[0].Body.Id()
+	ls := &LedgerState{
+		db: db,
+		slotClock: NewSlotClock(
+			newMockSlotTimeProvider(time.Now(), time.Second, 100),
+			DefaultSlotClockConfig(),
+		),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.withTxValidationSession(nil, nil, true, func(
+		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo) error,
+		_ func() bool,
+		applyTx txValidationApplyFunc,
+	) error {
+		return applyTx(
+			tx,
+			0,
+			ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x63}, 32)},
+			uint(dijkstra.EraIdDijkstra),
+			1,
+		)
+	})
+	require.NoError(t, err)
+	// The session stages its writes and always rolls them back.
+	stored, err := db.Metadata().GetTransactionByHash(childHash.Bytes(), nil)
+	require.NoError(t, err)
+	require.Nil(t, stored)
+}
+
+func TestDijkstraBatchIndexesAndStoresSubtransactionOutput(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	dijkstraTx := dijkstraBatchWithSubOutputTx(t)
+	var tx common.Transaction = dijkstraTx
 	childHash := dijkstraTx.Body.TxSubTransactions.Items()[0].Body.Id()
 	parentHash := tx.Hash()
 	var childHashArray, parentHashArray [32]byte

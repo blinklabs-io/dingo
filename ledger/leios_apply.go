@@ -388,13 +388,14 @@ func buildEndorserBlockBlob(
 	}
 	for i, tx := range txs {
 		levels := TransactionLevelsForApply(tx)
-		for _, level := range levels {
+		for levelIdx, level := range levels {
+			// The last level is always the enclosing transaction, and its
+			// Cbor() is the whole [body, witnesses, isValid, aux] envelope
+			// whether or not it carries sub-transactions. Store its body
+			// element, as BlockIndexer.TxOffsets does under the same hash.
+			// Only sub-transaction levels expose their own body bytes.
 			bodyCbor := level.Cbor()
-			// A transaction without sub-transactions is returned directly by
-			// TransactionLevelsForApply, so Cbor() is its complete envelope.
-			// Store the body range, matching BlockIndexer.TxOffsets and the
-			// transaction hash, just as we do for each adapted batch level.
-			if len(levels) == 1 {
+			if levelIdx == len(levels)-1 {
 				bodyCbor = bodyCbors[i]
 			}
 			off, length, err := writeRange(bodyCbor)
