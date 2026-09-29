@@ -6305,16 +6305,6 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 //     cancellation here. Every shutdown with blocks still in flight can
 //     therefore produce a handful of these; they say the node is stopping,
 //     not that a block failed.
-//   - pipeline.ErrPendingLimitExceeded: the apply stage's out-of-order buffer
-//     grew past MaxPendingBlocks because one stage worker fell behind its
-//     siblings, stalling the sequence number the apply stage is waiting for.
-//     The item is buffered anyway ("to prevent sequence gaps", per
-//     ApplyStage.ProcessWithStatus) and is still applied in sequence, so this
-//     reports scheduling lag, not a block that failed or was dropped. The
-//     read path submits at most batchSize blocks per batch and drains each
-//     batch before starting the next, so the apply stage's backlog stays far
-//     below the pipeline default of 2160; raising batchSize past that would
-//     make this counter live.
 //
 // Anything else reaching errorsChan indicates a genuine decode/validate/apply
 // problem the pipeline itself could not report any other way
@@ -6323,7 +6313,10 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 // covers items that make it that far -- this is the only path that also
 // covers, e.g., apply-stage invariant violations such as
 // pipeline.ErrBlockNotValidated) and is logged at error level plus its own
-// counter for operator visibility.
+// counter for operator visibility. That includes
+// pipeline.ErrPendingLimitExceeded: Submit now waits for apply-stage
+// capacity, so the apply stage reports it only when that guard was bypassed,
+// and it drops the block and cancels the pipeline.
 func (ls *LedgerState) recordBlockPipelineError(err error) {
 	if err == nil {
 		return
@@ -6348,13 +6341,6 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 		ls.metrics.incBlockPipelineShutdownError()
 		ls.config.Logger.Debug(
 			"block-processing pipeline: stage worker reported its context cancellation during shutdown",
-			"error",
-			err,
-		)
-	case errors.Is(err, pipeline.ErrPendingLimitExceeded):
-		ls.metrics.incBlockPipelineApplyPendingLimitError()
-		ls.config.Logger.Debug(
-			"block-processing pipeline: apply stage buffered more out-of-order blocks than MaxPendingBlocks (backpressure only; the block is still buffered and applied in sequence)",
 			"error",
 			err,
 		)

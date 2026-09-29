@@ -5900,6 +5900,9 @@ any mempool admission.
 A peer may omit requested bodies or return them in a different order. Duplicate
 returned bodies are rejected; validated bodies are restored to request order
 before admission so reply ordering cannot reorder the mempool's dependencies.
+gouroboros applies the same ID, order, and size checks on both ends of the
+protocol, so a mismatched reply is a protocol violation that ends the session;
+Dingo's own reply check is a second line behind it.
 
 The selected pool manages pending transactions:
 
@@ -13874,15 +13877,13 @@ The pipeline's bounded `errorsChan` is continuously drained by
 `drainBlockPipelineErrors` for the lifetime of `LedgerState`; otherwise the
 workers would deadlock after enough deferred nonce-state errors. The drain
 classifies `errBlockPipelineEta0Unavailable`, `errHeaderVerificationDeferred`,
-`pipeline.ErrPendingLimitExceeded`, and a stage worker's own
-`context.Canceled`/`context.DeadlineExceeded` at debug level, each under its
-own counter, and reports other stage errors at error level.
-`pipeline.ErrPendingLimitExceeded` is apply-stage backpressure rather than a
-block failure: when one stage worker falls behind its siblings, the sequence
-number the apply stage is waiting for stalls and later items pile into its
-out-of-order buffer. Past `MaxPendingBlocks` the item is still buffered and
-still applied in sequence, so a burst of these reports scheduling lag, not a
-block that failed or was dropped. `context.Canceled`/`context.DeadlineExceeded`
+and a stage worker's own `context.Canceled`/`context.DeadlineExceeded` at
+debug level, each under its own counter, and reports other stage errors at
+error level. When one stage worker falls behind its siblings, `Submit` waits
+until the apply stage has room below `MaxPendingBlocks` rather than
+overflowing its out-of-order buffer, so `pipeline.ErrPendingLimitExceeded`
+means that guard was bypassed: the apply stage drops the block and cancels the
+pipeline, and the drain reports it as unexpected. `context.Canceled`/`context.DeadlineExceeded`
 report a stage worker's own cancellation rather than an item outcome:
 `BlockPipeline.Stop` cancels the pipeline context before it drains the
 stages, so a worker mid-item at shutdown can lose the race between sending
