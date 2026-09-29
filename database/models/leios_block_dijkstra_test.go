@@ -76,10 +76,6 @@ func TestDecodeStoredConwayBlockAcceptsLegacyDijkstraLayout(t *testing.T) {
 // TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
 // fixture swapped for a differently-shaped block fails here with a clear
 // reason rather than making the regression above pass for the wrong one.
-
-// TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
-// fixture swapped for a differently-shaped block fails here with a clear
-// reason rather than making the regression above pass for the wrong one.
 func TestMusashiFixtureHasDijkstraLayout(t *testing.T) {
 	raw := musashiDijkstraBlock(t)
 

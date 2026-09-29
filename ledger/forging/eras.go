@@ -229,7 +229,11 @@ func dijkstraBlockTransactionCbor(
 		if _, decErr := cbor.Decode(parts[2], &isValid); decErr != nil {
 			return nil, fmt.Errorf("decode Dijkstra is_valid: %w", decErr)
 		}
-		_ = isValid
+		if !isValid {
+			return nil, errors.New(
+				"dijkstra admitted transaction has is_valid=false",
+			)
+		}
 		blockTxCbor, err := cbor.Encode([]cbor.RawMessage{
 			parts[0],
 			parts[1],
@@ -244,7 +248,7 @@ func dijkstraBlockTransactionCbor(
 		return cbor.RawMessage(blockTxCbor), nil
 	default:
 		return nil, fmt.Errorf(
-			"expected 4 element mempool transaction, got %d",
+			"expected 3 or 4 element mempool transaction, got %d",
 			len(parts),
 		)
 	}
