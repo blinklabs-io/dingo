@@ -202,3 +202,35 @@ func TestHealTruncateGapBlockNonces_ByronSlotZeroTipIsNoOp(t *testing.T) {
 	ls := newTruncateGapHealTestLedgerState(t, db, 0, hash0, nil)
 	require.NoError(t, ls.healTruncateGapBlockNonces(t.Context()))
 }
+
+// Recovery of an intent at a slot-0 block that is no longer on the primary
+// chain must retire the intent without rewinding, as for any other off-chain
+// point, rather than treating the point as origin.
+func TestRecoverRollbackIntentSlotZeroBlockOffPrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
+	tipBefore := ls.currentTip
+	forked := ocommon.NewPoint(0, testHashBytes("forked-slot-zero-block"))
+	require.NoError(t, persistRollbackIntent(ls.db, forked, nil))
+	require.NoError(t, ls.recoverRollbackIntent())
+	_, _, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.Equal(t, tipBefore, ls.currentTip)
+}
+
+// Recovery of an intent at a slot-0 block on the primary chain completes the
+// rollback to that block and keeps its nonce.
+func TestRecoverRollbackIntentSlotZeroBlockOnPrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	ls, tip0, nonce0 := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
+	require.NoError(t, persistRollbackIntent(ls.db, tip0.Point, nil))
+	require.NoError(t, ls.recoverRollbackIntent())
+	_, _, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.Equal(t, tip0.Point, ls.currentTip.Point)
+	require.Equal(t, nonce0, ls.currentTipBlockNonce)
+}
