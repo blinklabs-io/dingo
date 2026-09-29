@@ -1816,23 +1816,23 @@ paths, where the point is to report before the goroutine unwinds.
   buffers for high-volume ledger chainsync and chain-update paths. The
   payload-heavy ledger blockfetch path uses an eight-entry buffer and relies
   on lossless backpressure once one chain-store commit batch is queued. That
-  backpressure no longer reaches the gouroboros blockfetch receive goroutine
-  directly (#4782): `ouroboros.blockfetchClientBlock` and
-  `blockfetchClientRangeDone` hand each event to a per-connection forward
-  queue (`ouroboros/blockfetch_forward.go`) instead of publishing inline, and
-  a dedicated per-connection goroutine drains that queue into
-  `ledger.blockfetch`, absorbing the wait this bullet describes. The shared
-  muxer's read loop, which that receive goroutine also serves, therefore
-  keeps draining incoming socket data — including unrelated keep-alive pongs
-  interleaved on the same connection — regardless of how far behind the
-  ledger's consumption falls. In-flight bytes are bounded by the existing
-  blockfetch pipeline depth (see the `nextBlockfetchRequest` discussion
-  below), not by this queue rejecting or blocking an enqueue.
-  `dingo_blockfetch_inflight_bytes`/`_inflight_blocks` gauge this aggregate
-  backlog, and `dingo_blockfetch_stage_duration_seconds{stage="enqueue"|
-  "ledger_publish"}` splits out how long the receive path spends handing an
-  event off (expected near zero) from how long the decoupled forwarder spends
-  blocked delivering it (where the ledger backpressure now lands)
+  backpressure does not reach the gouroboros blockfetch receive goroutine:
+  `ouroboros.blockfetchClientBlock` and `blockfetchClientRangeDone` append
+  each event to a per-connection forward queue
+  (`ouroboros/blockfetch_forward.go`), and one forwarder goroutine per
+  connection publishes it to `ledger.blockfetch` in FIFO order. The shared
+  muxer's read loop, which the receive goroutine serves, keeps draining the
+  socket, including keep-alive pongs, however far behind the ledger falls.
+  The forward queue is unbounded. The gouroboros in-flight byte budget does
+  not bound it, since that budget is released when a range finishes
+  arriving, and the ledger's per-connection limit of an active and a
+  pre-queued range does not either, since `blockfetchRequestRangeCleanup`
+  releases requests on timeout, rollback and fork restart while they may
+  still be streaming and a retry can redispatch on the same connection.
+  `dingo_blockfetch_inflight_bytes`/`_inflight_blocks` gauge the backlog
+  across connections, and `dingo_blockfetch_stage_duration_seconds{stage=
+  "enqueue"|"ledger_publish"}` separates the receive path's hand-off time
+  from the forwarder's time in `Publish`, which includes ledger backpressure
 - Lossless delivery with bounded producer backpressure: when a subscriber buffer
   or the async queue is full, `Publish`, `PublishBlocking`, and `PublishAsync`
   wait for capacity instead of dropping an event for a live subscriber. An
@@ -1898,14 +1898,12 @@ paths, where the point is to report before the goroutine unwinds.
   as soon as the request is sent rather than waiting for the range to
   complete, but it can still block first: `sendRequestRange` waits for the
   client's in-flight-byte budget to admit the request, and that budget is
-  released as an earlier request's blocks are delivered — by the same
-  gouroboros receive callback that hands them to `ledger.blockfetch`.
-  `blockfetchClientBlock`/`blockfetchClientRangeDone` enqueue onto a
-  per-connection forward queue and return without waiting on the ledger
-  (#4782), so this callback's own completion — and so gouroboros' budget
-  release — no longer depends on ledger consumption speed or the ledger
-  mutex at all; only the decoupled forwarder goroutine that drains the queue
-  does. `startQueuedBlockfetchLocked` reserves the
+  released as an earlier request's blocks are delivered to the gouroboros
+  receive callback. That callback only enqueues onto the per-connection
+  forward queue and returns, so the release does not depend on ledger
+  consumption or the ledger mutex; only the forwarder goroutine draining the
+  queue does.
+  `startQueuedBlockfetchLocked` reserves the
   batch and arms its timer under the mutex, releases the mutex for the primary
   and shadow requests, then reacquires it before inspecting state. If a
   callback completed or replaced the batch while the request was outside the

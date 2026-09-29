@@ -40,33 +40,29 @@ type blockfetchForwardState struct {
 }
 
 // enqueueBlockfetchEvent hands a blockfetch event (Block or BatchDone) to
-// connId's forward queue instead of publishing it to the ledger inline. This
-// is the fix for blinklabs-io/dingo#4782.
+// connId's forward queue, to be published to the ledger by that connection's
+// forwarder goroutine (runBlockfetchForwarder).
 //
-// blockfetchClientBlock and blockfetchClientRangeDone run on the gouroboros
-// blockfetch client's receive goroutine, which the shared muxer's read loop
-// depends on to keep draining incoming socket data -- including unrelated
-// keep-alive pongs interleaved on the same connection. The ledger subscribes
-// to ledger.blockfetch with SubscriberBackpressureBlock (lossless, buffer
-// blockfetchCommitBatchSize), so publishing inline there parks the calling
-// goroutine for as long as the ledger takes to drain its buffer: observed in
-// production to run 2-5s per event during heavy epochs, comfortably past the
-// 10s keep-alive timeout deliberately kept tight elsewhere (fast dead-peer
-// eviction), tearing down a merely-busy upstream as if it were dead.
+// Its callers run on the gouroboros blockfetch receive goroutine, which the
+// shared muxer's read loop depends on to keep draining the socket, including
+// keep-alive pongs for the same connection. The ledger subscribes to
+// ledger.blockfetch with lossless SubscriberBackpressureBlock, so a Publish
+// there waits for the ledger to drain its buffer; making that wait here would
+// stall the muxer and let the keep-alive timeout close a busy but live peer.
+// This function therefore never blocks on the ledger: it appends under a
+// mutex and returns. Events for one connection reach the ledger in the order
+// they were enqueued.
 //
-// enqueueBlockfetchEvent never blocks this caller: it is an append under a
-// mutex, drained by a dedicated per-connection goroutine
-// (runBlockfetchForwarder) that performs the potentially slow publish off
-// this goroutine entirely. In-flight bytes are bounded not by this queue
-// ever rejecting or blocking an enqueue, but by the blockfetch pipeline depth
-// already enforced in chainsync_blockfetch_pipeline.go: at most one request
-// is dispatched ahead of the active batch per connection
-// (startQueuedBlockfetchPrefetchLocked refuses a second), and that pre-queued
-// request is only promoted once the active batch has applied at least one
-// block (tryPromoteQueuedBlockfetchLocked). So at most two ranges' worth of
-// blocks can ever be outstanding on one connection, regardless of how far
-// behind the ledger's consumption falls -- this fix does not change that
-// bound, it only moves where the resulting wait happens.
+// The queue itself is unbounded; its length is whatever has been received on
+// the connection and not yet consumed by the ledger. The gouroboros in-flight
+// byte budget (blockfetchMaxInFlightBytes) does not bound it, because that
+// budget is released when gouroboros finishes receiving a range, which does
+// not wait for the ledger. The ledger tracks at most an active and a pre-queued range
+// per connection, but blockfetchRequestRangeCleanup releases tracked requests
+// on timeout, rollback and fork restart while they may still be streaming,
+// and a retry can redispatch on the same connection, so the backlog is not
+// limited to a fixed number of ranges. dingo_blockfetch_inflight_bytes and
+// dingo_blockfetch_inflight_blocks report it.
 func (o *Ouroboros) enqueueBlockfetchEvent(
 	connId ouroboros.ConnectionId,
 	evt event.Event,
@@ -100,25 +96,22 @@ func (o *Ouroboros) enqueueBlockfetchEvent(
 		)
 	}
 	if startWorker {
-		go o.runBlockfetchForwarder(connId)
+		if o.blockfetchForwardSpawn != nil {
+			o.blockfetchForwardSpawn(connId, o.runBlockfetchForwarder)
+		} else {
+			go o.runBlockfetchForwarder(connId)
+		}
 	}
 }
 
-// runBlockfetchForwarder drains connId's queued blockfetch events in FIFO
-// order, one at a time, publishing each to the EventBus from this dedicated
-// goroutine instead of whatever goroutine called enqueueBlockfetchEvent. It
-// returns once the queue empties and is restarted by enqueueBlockfetchEvent
-// when more work arrives, so an idle connection holds no goroutine.
+// runBlockfetchForwarder publishes connId's queued blockfetch events in FIFO
+// order, one at a time, and returns once the queue is empty, so an idle
+// connection holds no goroutine.
 //
-// At most one instance of this ever runs for a given connId at a time: the
-// running flag transition from false to true happens under
-// blockfetchForwardMu, in enqueueBlockfetchEvent, exactly once per
-// idle-to-active transition; this function clears it back to false, also
-// under the mutex, only once its own queue read observes nothing left to
-// drain, which is the same point it returns. FIFO order within a connection
-// is therefore preserved: no second goroutine can start draining the same
-// connId's queue while this one is still running, and this one processes
-// strictly in append order.
+// At most one forwarder runs per connection, which is what preserves FIFO
+// order: running is set only by the enqueue that finds it clear, and cleared
+// only here, under blockfetchForwardMu, at the same point this goroutine
+// observes an empty queue and returns.
 func (o *Ouroboros) runBlockfetchForwarder(connId ouroboros.ConnectionId) {
 	for {
 		o.blockfetchForwardMu.Lock()
@@ -138,6 +131,9 @@ func (o *Ouroboros) runBlockfetchForwarder(connId ouroboros.ConnectionId) {
 		st.queue = st.queue[1:]
 		o.blockfetchForwardMu.Unlock()
 
+		if o.blockfetchForwardBeforePublish != nil {
+			o.blockfetchForwardBeforePublish(connId, qe.evt)
+		}
 		publishStart := time.Now()
 		o.eventBus.Publish(ledger.BlockfetchEventType, qe.evt)
 		if o.blockfetchMetrics != nil {

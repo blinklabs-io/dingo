@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -30,11 +31,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// blockfetchForwardTestBound is how long blockfetchClientBlock is given to
-// return. It must return almost immediately regardless of ledger speed (the
-// #4782 fix), so this is generous for a CI host but far below anything a
-// genuine ledger-consumption wait would take (observed live at 2-5.4s per
-// event).
+// blockfetchForwardTestBound is how long a blockfetch callback is given to
+// return. The callbacks never wait on the ledger, so this is generous for a
+// CI host.
 const blockfetchForwardTestBound = 2 * time.Second
 
 // stopEventBusBounded stops bus and fails the test if Stop does not return
@@ -60,24 +59,11 @@ func stopEventBusBounded(t *testing.T, bus *event.EventBus) {
 	}
 }
 
-// TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer is the
-// regression guard for blinklabs-io/dingo#4782: blockfetchClientBlock runs on
-// the gouroboros blockfetch client's receive goroutine, which the shared
-// muxer's read loop depends on to keep draining incoming socket data
-// (including unrelated keep-alive pongs). Publishing to the ledger inline
-// there let a slow or stalled ledger.blockfetch consumer (lossless,
-// SubscriberBackpressureBlock) park that goroutine indefinitely, backing up
-// the muxer and starving keep-alive until the peer's own timeout tore the
-// connection down.
-//
-// This test puts the ledger.blockfetch subscriber into exactly that stalled
-// state -- a lossless subscriber whose one buffer slot is filled and never
-// drained -- then calls blockfetchClientBlock directly, twice. Under the
-// original inline o.eventBus.Publish, the first call alone would block
-// forever on the full buffer and the test would time out. The fix hands the
-// event to a per-connection forward queue instead (blockfetch_forward.go),
-// so both calls must return promptly even though neither the queue nor the
-// ledger ever drains during the test.
+// TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer pins that
+// blockfetchClientBlock, which runs on the gouroboros blockfetch receive
+// goroutine the muxer read loop depends on, returns while the lossless
+// ledger.blockfetch subscriber is stalled with a full buffer. Publishing
+// inline would block the first call indefinitely.
 func TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer(t *testing.T) {
 	t.Parallel()
 
@@ -181,9 +167,8 @@ func TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer(t *testing.T) {
 
 	// Drain the subscriber channel: the forwarder's blocked Publish call can
 	// now complete, and it goes on to deliver the second queued event too.
-	// In-flight bytes/blocks must converge back to zero once the ledger
-	// consumer catches up -- proving the backlog this fix introduces is
-	// bounded and self-resolving, not merely deferred forever. A continuous
+	// In-flight bytes/blocks must return to zero once the ledger consumer
+	// catches up, so the backlog drains rather than being deferred. A continuous
 	// blocking drain (not a fixed receive count) is required: the channel
 	// also still holds the priming event from the stall check above and
 	// contends with the still-parked directBlocked goroutine's own publish,
@@ -220,21 +205,27 @@ func TestBlockfetchClientBlockNeverBlocksOnStalledLedgerConsumer(t *testing.T) {
 	)
 }
 
-// TestBlockfetchForwardKeepsPerConnectionOrderUnderStall covers the
-// BatchDone half of the forward queue: blockfetchClientRangeDone must also
-// return while the ledger.blockfetch consumer is stalled, and once it drains
-// each connection's BatchDone must arrive after every Block that connection
-// queued before it, with two connections forwarding concurrently.
+// TestBlockfetchForwardKeepsPerConnectionOrderUnderStall pins the
+// single-forwarder invariant that gives each connection FIFO delivery. The
+// first publish on each connection is held inside the forwarder while the
+// rest of the range, including BatchDone, is enqueued; no enqueue may start a
+// second forwarder for a connection that already has one, and once released
+// each connection must deliver its blocks in order followed by BatchDone.
 func TestBlockfetchForwardKeepsPerConnectionOrderUnderStall(t *testing.T) {
 	t.Parallel()
 
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { stopEventBusBounded(t, bus) })
-	// Buffer 1, not drained until every callback has returned: the first
-	// forwarded event fills it and every later Publish blocks.
+	blocks, err := testfixtures.GenerateConwayChain(3)
+	require.NoError(t, err)
+	conns := []ouroboros_conn.ConnectionId{
+		testConnIdWithPort(4001),
+		testConnIdWithPort(4002),
+	}
+	total := len(conns) * (len(blocks) + 1)
 	_, ch := bus.SubscribeWithBufferPolicy(
 		ledger.BlockfetchEventType,
-		1,
+		total,
 		event.SubscriberBackpressureBlock,
 	)
 	o := newOuroboros(OuroborosConfig{
@@ -242,42 +233,89 @@ func TestBlockfetchForwardKeepsPerConnectionOrderUnderStall(t *testing.T) {
 		PromRegistry: prometheus.NewRegistry(),
 	})
 
-	blocks, err := testfixtures.GenerateConwayChain(2)
-	require.NoError(t, err)
-	conns := []ouroboros_conn.ConnectionId{
-		testConnIdWithPort(4001),
-		testConnIdWithPort(4002),
+	var mu sync.Mutex
+	spawns := make(map[string]int)
+	held := make(map[string]bool)
+	entered := make(map[string]chan struct{})
+	for _, connId := range conns {
+		entered[connId.String()] = make(chan struct{})
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAll)
+	o.blockfetchForwardSpawn = func(
+		connId ouroboros_conn.ConnectionId,
+		run func(ouroboros_conn.ConnectionId),
+	) {
+		mu.Lock()
+		spawns[connId.String()]++
+		mu.Unlock()
+		go run(connId)
+	}
+	o.blockfetchForwardBeforePublish = func(
+		connId ouroboros_conn.ConnectionId,
+		_ event.Event,
+	) {
+		key := connId.String()
+		mu.Lock()
+		first := !held[key]
+		held[key] = true
+		mu.Unlock()
+		if first {
+			close(entered[key])
+			<-release
+		}
 	}
 
-	returned := make(chan struct{})
-	go func() {
-		defer close(returned)
-		for _, block := range blocks {
-			for _, connId := range conns {
-				ctx := blockfetch.CallbackContext{
-					ConnectionId: connId,
-					RequestId:    1,
-				}
-				_ = o.blockfetchClientBlock(ctx, uint(block.Type()), block)
+	callbacks := func(connId ouroboros_conn.ConnectionId, from int, done bool) {
+		ctx := blockfetch.CallbackContext{ConnectionId: connId, RequestId: 1}
+		for _, block := range blocks[from:] {
+			require.NoError(
+				t,
+				o.blockfetchClientBlock(ctx, uint(block.Type()), block),
+			)
+			if from == 0 {
+				return
 			}
 		}
-		for _, connId := range conns {
-			ctx := blockfetch.CallbackContext{
-				ConnectionId: connId,
-				RequestId:    1,
-			}
-			_ = o.blockfetchClientRangeDone(ctx, nil)
+		if done {
+			require.NoError(t, o.blockfetchClientRangeDone(ctx, nil))
 		}
-	}()
-	testutil.RequireReceive(
-		t,
-		returned,
-		blockfetchForwardTestBound,
-		"blockfetch callbacks blocked on a stalled ledger.blockfetch consumer",
-	)
+	}
+	for _, connId := range conns {
+		callbacks(connId, 0, false)
+		testutil.RequireReceive(
+			t,
+			entered[connId.String()],
+			blockfetchForwardTestBound,
+			"forwarder did not reach its first publish",
+		)
+	}
+	for _, connId := range conns {
+		callbacks(connId, 1, true)
+	}
+	mu.Lock()
+	for _, connId := range conns {
+		require.Equal(
+			t,
+			1,
+			spawns[connId.String()],
+			"connection %s: an enqueue started a second forwarder while "+
+				"the first was still publishing",
+			connId.String(),
+		)
+	}
+	mu.Unlock()
+	releaseAll()
 
-	got := make(map[string][]bool)
-	for range len(conns) * (len(blocks) + 1) {
+	want := make([]string, 0, len(blocks)+1)
+	for _, block := range blocks {
+		want = append(want, block.Hash().String())
+	}
+	want = append(want, "BatchDone")
+	got := make(map[string][]string)
+	for range total {
 		evt := testutil.RequireReceive(
 			t,
 			ch,
@@ -287,14 +325,18 @@ func TestBlockfetchForwardKeepsPerConnectionOrderUnderStall(t *testing.T) {
 		e, ok := evt.Data.(ledger.BlockfetchEvent)
 		require.True(t, ok)
 		key := e.ConnectionId.String()
-		got[key] = append(got[key], e.BatchDone)
+		if e.BatchDone {
+			got[key] = append(got[key], "BatchDone")
+		} else {
+			got[key] = append(got[key], e.Block.Hash().String())
+		}
 	}
 	for _, connId := range conns {
 		require.Equal(
 			t,
-			[]bool{false, false, true},
+			want,
 			got[connId.String()],
-			"connection %s: BatchDone must follow its own blocks",
+			"connection %s: events must arrive in enqueue order",
 			connId.String(),
 		)
 	}

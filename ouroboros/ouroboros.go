@@ -140,14 +140,16 @@ type Ouroboros struct {
 	// one and only terminal callback has already run.
 	blockFetchDoneEarly map[blockFetchKey]struct{}
 	blockFetchMutex     sync.Mutex
-	// blockfetchForward holds, per connection, the queue of received
-	// blockfetch events not yet handed to the ledger and whether a forwarder
-	// goroutine is currently draining it. See blockfetch_forward.go for why
-	// this exists (#4782): it decouples blockfetchClientBlock and
-	// blockfetchClientRangeDone, which run on the gouroboros blockfetch
-	// receive goroutine, from the ledger's own consumption rate.
+	// blockfetchForward holds, per connection, the blockfetch events
+	// received but not yet published to the ledger; see
+	// blockfetch_forward.go.
 	blockfetchForward   map[ouroboros.ConnectionId]*blockfetchForwardState
 	blockfetchForwardMu sync.Mutex
+	// blockfetchForwardSpawn and blockfetchForwardBeforePublish are nil in
+	// production. Tests set them to observe forwarder starts and to hold a
+	// forwarder inside its publish.
+	blockfetchForwardSpawn         func(ouroboros.ConnectionId, func(ouroboros.ConnectionId))
+	blockfetchForwardBeforePublish func(ouroboros.ConnectionId, event.Event)
 	// blockfetchConnClient resolves the live request-range client for a
 	// connection. Defaults to blockfetchConnClientLive; tests override it to
 	// exercise BlockfetchClientRequestRange without a live connection.
@@ -483,16 +485,10 @@ type blockfetchMetrics struct {
 	// the header-verify/validate/apply stages that follow once a decoded
 	// block reaches the ledger.
 	//
-	// Two more stages validate the #4782 fix: "enqueue" is the time
-	// blockfetchClientBlock/blockfetchClientRangeDone spend handing an event
-	// to the per-connection forward queue (see blockfetch_forward.go) --
-	// expected to stay near zero regardless of ledger speed, since that is
-	// exactly what must no longer block the gouroboros receive goroutine.
-	// "ledger_publish" is the time the decoupled forwarder goroutine spends
-	// in the same EventBus.Publish call that used to run inline here; it
-	// carries the ledger backpressure this fix moved off the hot path, so it
-	// is expected to show the multi-second stalls the enqueue stage no
-	// longer does.
+	// "enqueue" is the time the blockfetch receive callbacks spend handing
+	// an event to the per-connection forward queue. "ledger_publish" is the
+	// time the forwarder spends in EventBus.Publish delivering it to the
+	// ledger, which includes any ledger backpressure.
 	stageDuration      *prometheus.HistogramVec
 	stageDecode        prometheus.Observer
 	stageEnqueue       prometheus.Observer
@@ -501,9 +497,7 @@ type blockfetchMetrics struct {
 	// blockfetch events received from peers but not yet handed to the
 	// ledger by the per-connection forwarder (blockfetch_forward.go).
 	// Aggregated across every connection rather than labelled by
-	// connection_id: a per-connection-id label on a gauge grows unbounded
-	// with reconnects (a prior gauge on this same subsystem reached 98
-	// series in 2h of reconnects).
+	// connection_id, whose series would grow without bound with reconnects.
 	inFlightBytes  prometheus.Gauge
 	inFlightBlocks prometheus.Gauge
 }
@@ -953,11 +947,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 
-	// Count a keep-alive pong timeout by outcome, complementing the success
-	// counter recorded in instrumentKeepaliveResponse. See #4782: this and
-	// the blockfetch in-flight/enqueue metrics together validate whether the
-	// backpressure fix keeps keep-alives completing within the timeout on a
-	// live sync.
+	// Counts keep-alive pong timeouts.
 	if classifyKeepaliveTimeoutClose(e.Error) {
 		o.recordKeepaliveTimeout()
 	}
