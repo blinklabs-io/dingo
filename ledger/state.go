@@ -8531,6 +8531,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
+	var expandedIndexOffset uint64
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -8539,6 +8540,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.expandedIndexOffset = expandedIndexOffset
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
 				if err := delta.donate(blockDonation); err != nil {
@@ -8772,6 +8774,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 			delta.Release()
 			delta = nil // reset
+			levels := TransactionLevelsForApply(tx)
+			if len(levels) > 1 {
+				expandedIndexOffset += uint64(len(levels)) - 1
+			}
 
 			// Add this transaction's outputs to intra-block map for subsequent TX lookups
 			// Use tx.Produced() instead of tx.Outputs() to handle failed transactions
@@ -12759,20 +12765,23 @@ func (ls *LedgerState) withTxValidationSession(
 			delta := NewLedgerDelta(point, eraID, blockNumber)
 			delta.addTransaction(tx, index)
 			defer delta.Release()
-			txHash := tx.Hash().Bytes()
-			var txHashArray [32]byte
-			copy(txHashArray[:], txHash)
 			offset := database.CborOffset{BlockSlot: point.Slot}
 			copy(offset.BlockHash[:], point.Hash)
 			utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
-			for _, utxo := range tx.Produced() {
-				utxoOffsets[database.UtxoRef{
-					TxId:      txHashArray,
-					OutputIdx: utxo.Id.Index(),
-				}] = offset
+			txOffsets := make(map[[32]byte]database.CborOffset)
+			for _, level := range TransactionLevelsForApply(tx) {
+				var levelHash [32]byte
+				copy(levelHash[:], level.Hash().Bytes())
+				txOffsets[levelHash] = offset
+				for _, utxo := range level.Produced() {
+					utxoOffsets[database.UtxoRef{
+						TxId:      levelHash,
+						OutputIdx: utxo.Id.Index(),
+					}] = offset
+				}
 			}
 			delta.Offsets = &database.BlockIngestionResult{
-				TxOffsets:   map[[32]byte]database.CborOffset{txHashArray: offset},
+				TxOffsets:   txOffsets,
 				UtxoOffsets: utxoOffsets,
 			}
 			return delta.applyWithoutRecordingDonations(ls, txn)
