@@ -37,8 +37,9 @@ func TestDeferredRatificationMatchesBoundaryRatification(t *testing.T) {
 	want := atBoundary.run(t, boundaries, func(*LedgerState) {})
 
 	deferred := newGovDiffScenario(t)
+	wireDeferredBoundarySnapshot(deferred.ls, deferred.snapshotMgr)
 	got := deferred.run(t, boundaries, func(ls *LedgerState) {
-		require.NoError(t, ls.WaitGovernanceRatification(t.Context()))
+		require.NoError(t, ls.WaitEpochBoundaryJob(t.Context()))
 	})
 	require.Equal(t, want, got)
 	if out := os.Getenv("DINGO_GOV_DIFF_OUT"); out != "" {

@@ -13299,8 +13299,28 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    the rewind exceeds the intent's limits. Transaction validation reads the
    proposals set, not RATIFY's marks; LSQ `GetProposals` returns the proposals
    set; Blockfrost DRep power and the hard-fork stability check call
-   `WaitGovernanceRatification` before reading proposal deposits and active
+   `WaitEpochBoundaryJob` before reading proposal deposits and active
    proposals.
+
+   A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
+   leaves its mark snapshot to the same job. The boundary skips the SNAP-point
+   stake read, the same-boundary SPO state and the snapshot write; the job
+   builds mark[new epoch] on the pinned snapshot with the epoch-boundary
+   reconstruction (`snapshot.Manager.PrepareEpochBoundarySnapshot`):
+   delegations as of the snapshot slot, which keeps the ones POOLREAP cleared,
+   and boundary credits other than those marked
+   `AccountRewardDelta.PostSnapshot`, which excludes POOLREAP deposit refunds,
+   enacted treasury withdrawals and proposal-deposit refunds. Its persist-time
+   reads (reward inputs, Leios keys, reward-account auto-votes) see the whole
+   committed boundary, as the in-boundary write does. RATIFY takes its SPO
+   state from those rows, and one transaction writes the snapshot and the
+   RATIFY marks. The boundary keeps the capture when HARDFORK or an era
+   transition follows it and when CIP-0163 inactivity is on, and the snapshot
+   manager skips its epoch-transition fallback capture for an epoch the ledger
+   announced (`DeferEpochBoundaryCapture`). LSQ queries and
+   `PoolStakeDistribution` wait for the job; consensus reads of mark[epoch]
+   first happen after the next boundary, which writes the job's work before
+   anything else.
 
    The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool

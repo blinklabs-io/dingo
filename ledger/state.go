@@ -1508,10 +1508,13 @@ type LedgerState struct {
 	rewardCreditCompactAgain bool
 	// ratificationJob is the latest boundary's deferred RATIFY, guarded by
 	// ratificationMu; ratificationWG tracks its goroutine.
-	ratificationMu  sync.Mutex
-	ratificationJob *ratificationJob
-	ratificationWG  sync.WaitGroup
-	ratificationSeq atomic.Uint64
+	// deferredBoundarySnapshotHook builds a boundary's mark snapshot after
+	// the boundary commits; nil keeps the capture in the boundary.
+	deferredBoundarySnapshotHook atomic.Pointer[deferredBoundarySnapshotHookHolder]
+	ratificationMu               sync.Mutex
+	ratificationJob              *ratificationJob
+	ratificationWG               sync.WaitGroup
+	ratificationSeq              atomic.Uint64
 	// ratificationApplyHook is a test seam, nil in production. It runs in
 	// the ratification job after it decides and before it writes.
 	ratificationApplyHook func(epoch uint64)
@@ -9395,7 +9398,7 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 		defer ls.hfiStabilityEvalInFlight.Store(false)
 		// The scan reads active proposals, which the latest boundary's
 		// RATIFY decision filters by its expiry marks.
-		if err := ls.WaitGovernanceRatification(ls.closeCtx()); err != nil {
+		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
 			logger.Warn(
 				"hardfork-initiation stability check skipped",
 				"error", err,

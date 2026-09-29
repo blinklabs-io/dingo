@@ -17,9 +17,11 @@ package ledger
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
+	"sort"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -61,6 +63,9 @@ type govDiffEpochDump struct {
 	Committee    map[string]uint64     `json:"committee"`
 	PParams      string                `json:"pparams"`
 	Mark         map[string]uint64     `json:"mark"`
+	MarkRows     []string              `json:"mark_rows"`
+	Summary      string                `json:"summary"`
+	StakeInputs  []string              `json:"stake_inputs"`
 	DRepPower    uint64                `json:"drep_power"`
 	DepositPower map[string]uint64     `json:"deposit_power"`
 }
@@ -73,6 +78,7 @@ type govDiffScenario struct {
 	proposals   []*models.GovernanceProposal
 	credentials [][]byte
 	drep        []byte
+	snapshotMgr *snapshot.Manager
 }
 
 const govDiffEpochLength = 100
@@ -112,11 +118,25 @@ func newGovDiffScenario(t *testing.T) *govDiffScenario {
 	seedLiveDelegatedStake(t, db, hfrLiveSilentPool, 3_717)
 
 	s := &govDiffScenario{db: db, epoch: epoch, pparams: pparams}
-	account := func(marker byte, drep []byte, utxo uint64) []byte {
+	s.seedRetiringPool(t, startEpoch+1)
+	require.NoError(t, db.Metadata().AddNetworkDonation(
+		epoch.StartSlot+5, startEpoch, 5_000, nil,
+	))
+	account := func(
+		marker byte,
+		drep []byte,
+		pool string,
+		utxo uint64,
+	) []byte {
 		cred := repeatByte(28, marker)
+		var poolKey []byte
+		if pool != "" {
+			poolKey = []byte(pool)
+		}
 		require.NoError(t, db.CreateAccount(nil, &models.Account{
 			StakingKey: cred,
 			Drep:       drep,
+			Pool:       poolKey,
 			AddedSlot:  epoch.StartSlot,
 			Active:     true,
 			Reward:     types.Uint64(0),
@@ -151,10 +171,13 @@ func newGovDiffScenario(t *testing.T) *govDiffScenario {
 		ExpiryEpoch: startEpoch + 100,
 		Active:      true,
 	}))
-	account(0xe2, s.drep, 50_000)
-	returnCred := account(0xe3, s.drep, 0)
+	// Every post-SNAP credit below lands on an account delegated to a pool,
+	// so a mark snapshot read after the boundary without excluding them
+	// differs from the SNAP point.
+	account(0xe2, s.drep, "", 50_000)
+	returnCred := account(0xe3, s.drep, hfrLiveYesPool, 0)
 	_, returnAddr := rewardAddress(returnCred)
-	payee := account(0xe4, nil, 0)
+	payee := account(0xe4, nil, hfrLiveSilentPool, 0)
 	payeeAddr, _ := rewardAddress(payee)
 
 	coldCredential := repeatByte(28, 0xd1)
@@ -276,6 +299,7 @@ INSERT INTO auth_committee_hot (
 		},
 	}
 	snapshotMgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
+	s.snapshotMgr = snapshotMgr
 	s.ls.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.CaptureEpochBoundarySnapshot(
@@ -392,6 +416,26 @@ func (s *govDiffScenario) dump(
 	for _, row := range rows {
 		d.Mark[hex.EncodeToString(row.PoolKeyHash)] = uint64(row.TotalStake)
 	}
+	for _, row := range rows {
+		d.MarkRows = append(d.MarkRows, fmt.Sprintf(
+			"%x stake=%d delegators=%d slot=%d autovote=%d/%t version=%d",
+			row.PoolKeyHash, row.TotalStake, row.DelegatorCount,
+			row.CapturedSlot, row.RewardAccountAutoVote,
+			row.RewardAccountAutoVoteResolved, row.CalculationVersion,
+		))
+	}
+	sort.Strings(d.MarkRows)
+	summary, err := s.db.Metadata().GetEpochSummary(epoch, nil)
+	require.NoError(t, err)
+	if summary != nil {
+		d.Summary = fmt.Sprintf(
+			"active=%d pools=%d delegators=%d boundary=%d nonce=%x ready=%t",
+			summary.TotalActiveStake, summary.TotalPoolCount,
+			summary.TotalDelegators, summary.BoundarySlot, summary.EpochNonce,
+			summary.SnapshotReady,
+		)
+	}
+	d.StakeInputs = s.stakeInputRows(t, epoch)
 	d.DRepPower, err = s.db.GetDRepVotingPower(0, s.drep, 0, nil)
 	require.NoError(t, err)
 	deposits, _, err := governance.ActiveProposalDepositDRepPower(
@@ -400,4 +444,106 @@ func (s *govDiffScenario) dump(
 	require.NoError(t, err)
 	d.DepositPower = deposits
 	return d
+}
+
+// seedRetiringPool registers a pool whose retirement takes effect at
+// retireEpoch, with one delegator and a deposit refundable to a registered
+// reward account.
+func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
+	t.Helper()
+	pool := repeatByte(28, 0xb1)
+	owner := repeatByte(28, 0xb2)
+	delegator := repeatByte(28, 0xb3)
+	require.NoError(t, s.db.ImportPool(nil, &models.Pool{
+		PoolKeyHash:   pool,
+		VrfKeyHash:    make([]byte, 32),
+		Pledge:        1_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		RewardAccount: owner,
+	}, &models.PoolRegistration{
+		PoolKeyHash:   pool,
+		AddedSlot:     s.epoch.StartSlot,
+		Pledge:        1_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		VrfKeyHash:    make([]byte, 32),
+		RewardAccount: owner,
+		DepositAmount: types.Uint64(500),
+	}))
+	for _, account := range []*models.Account{
+		{StakingKey: owner, Pool: []byte(hfrLiveYesPool)},
+		{StakingKey: delegator, Pool: pool},
+	} {
+		account.AddedSlot = s.epoch.StartSlot
+		account.Active = true
+		require.NoError(t, s.db.CreateAccount(nil, account))
+		s.credentials = append(s.credentials, account.StakingKey)
+	}
+	require.NoError(t, s.db.CreateUtxo(nil, &models.Utxo{
+		TxId:       repeatByte(32, 0xb4),
+		OutputIdx:  0,
+		StakingKey: delegator,
+		Amount:     types.Uint64(2_222),
+		AddedSlot:  s.epoch.StartSlot,
+	}))
+	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
+	require.NoError(t, err)
+	var poolID int64
+	require.NoError(t, raw.QueryRow(
+		`SELECT id FROM pool WHERE pool_key_hash = ?`, pool,
+	).Scan(&poolID))
+	res, err := raw.Exec(
+		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
+		repeatByte(32, 0xb5), s.epoch.StartSlot+1, 0,
+	)
+	require.NoError(t, err)
+	txID, err := res.LastInsertId()
+	require.NoError(t, err)
+	res, err = raw.Exec(
+		`INSERT INTO certs (transaction_id, slot, cert_index) VALUES (?, ?, ?)`,
+		txID, s.epoch.StartSlot+1, 0,
+	)
+	require.NoError(t, err)
+	certID, err := res.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO pool_retirement (
+    pool_id, pool_key_hash, certificate_id, epoch, added_slot
+) VALUES (?, ?, ?, ?, ?)`,
+		poolID, pool, certID, retireEpoch, s.epoch.StartSlot+1,
+	)
+	require.NoError(t, err)
+}
+
+func (s *govDiffScenario) stakeInputRows(
+	t *testing.T,
+	epoch uint64,
+) []string {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
+	require.NoError(t, err)
+	rows, err := raw.Query(`
+SELECT hex(pool_key_hash), credential_tag, hex(staking_key), stake, owner,
+    registered, captured_slot, boundary_slot
+FROM reward_stake_input WHERE epoch = ?
+ORDER BY pool_key_hash, credential_tag, staking_key`, epoch)
+	require.NoError(t, err)
+	defer rows.Close()
+	var ret []string
+	for rows.Next() {
+		var pool, key, stake string
+		var tag, captured, boundary int64
+		var owner, registered bool
+		require.NoError(t, rows.Scan(
+			&pool, &tag, &key, &stake, &owner, &registered, &captured,
+			&boundary,
+		))
+		ret = append(ret, fmt.Sprintf(
+			"%s/%d/%s=%s owner=%t registered=%t captured=%d boundary=%d",
+			pool, tag, key, stake, owner, registered, captured, boundary,
+		))
+	}
+	require.NoError(t, rows.Err())
+	return ret
 }

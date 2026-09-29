@@ -24,30 +24,42 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// pendingRatificationSyncKey records a boundary whose RATIFY decision has not
-// been written yet. The boundary transaction writes it; whichever of the
-// background job or the next boundary writes the decision deletes it in the
-// same transaction.
+// pendingRatificationSyncKey records a boundary whose RATIFY decision or mark
+// snapshot has not been written yet. The boundary transaction writes it;
+// whichever of the background job or the next boundary writes them deletes it
+// in the same transaction.
 const pendingRatificationSyncKey = "dingo:governance:ratify-pending"
 
 type pendingRatificationRecord struct {
 	Epoch        uint64 `json:"epoch"`
 	BoundarySlot uint64 `json:"boundary_slot"`
 	ID           uint64 `json:"id"`
+	// Snapshot is set when the boundary left mark[Epoch] to the job.
+	Snapshot bool `json:"snapshot,omitempty"`
 }
 
-// ratificationJob decides one boundary's RATIFY on a read transaction pinned
-// at that boundary's commit.
+// DeferredBoundarySnapshot is a boundary's mark snapshot prepared on a read
+// transaction pinned at the boundary's commit, written through another.
+type DeferredBoundarySnapshot interface {
+	SPOStakeRows() []*models.PoolStakeSnapshot
+	Write(txn *database.Txn) error
+}
+
+// ratificationJob builds one boundary's deferred mark snapshot and decides its
+// RATIFY on a read transaction pinned at that boundary's commit.
 type ratificationJob struct {
-	record   pendingRatificationRecord
-	plan     *governance.RatificationPlan
-	decided  chan struct{}
-	decision *governance.RatificationDecision
-	err      error
+	record      pendingRatificationRecord
+	plan        *governance.RatificationPlan
+	snapshotEvt *event.EpochTransitionEvent
+	decided     chan struct{}
+	decision    *governance.RatificationDecision
+	snapshot    DeferredBoundarySnapshot
+	err         error
 	// settled closes once the decision is durable or the pending boundary was
 	// rolled back.
 	settled     chan struct{}
@@ -77,17 +89,21 @@ func loadPendingRatification(
 	return &rec, nil
 }
 
-// deferRatification records plan as pending in the boundary transaction and,
-// once it commits, pins a read transaction and decides plan on it in the
-// background.
-func (ls *LedgerState) deferRatification(
+// deferBoundaryJob records the boundary's pending work in its transaction
+// and, once it commits, pins a read transaction and runs the work on it in the
+// background: mark[epoch] when snapshotEvt is set, then plan's RATIFY.
+func (ls *LedgerState) deferBoundaryJob(
 	txn *database.Txn,
+	epoch uint64,
+	boundarySlot uint64,
 	plan *governance.RatificationPlan,
+	snapshotEvt *event.EpochTransitionEvent,
 ) error {
 	rec := pendingRatificationRecord{
-		Epoch:        plan.Epoch(),
-		BoundarySlot: plan.BoundarySlot(),
+		Epoch:        epoch,
+		BoundarySlot: boundarySlot,
 		ID:           ls.ratificationSeq.Add(1),
+		Snapshot:     snapshotEvt != nil,
 	}
 	raw, err := json.Marshal(rec)
 	if err != nil {
@@ -98,11 +114,19 @@ func (ls *LedgerState) deferRatification(
 	); err != nil {
 		return err
 	}
+	if snapshotEvt != nil {
+		h := ls.deferredBoundarySnapshotHook.Load()
+		if h == nil {
+			return errors.New("deferred boundary snapshot hook unset")
+		}
+		h.announce(epoch)
+	}
 	job := &ratificationJob{
-		record:  rec,
-		plan:    plan,
-		decided: make(chan struct{}),
-		settled: make(chan struct{}),
+		record:      rec,
+		plan:        plan,
+		snapshotEvt: snapshotEvt,
+		decided:     make(chan struct{}),
+		settled:     make(chan struct{}),
 	}
 	// The callback runs in the committing goroutine before it returns, so no
 	// later block has committed yet; the first read below fixes the snapshot.
@@ -139,14 +163,26 @@ func (ls *LedgerState) runRatificationJob(
 	snapshot *database.Txn,
 	pinErr error,
 ) {
-	var decision *governance.RatificationDecision
+	var (
+		decision *governance.RatificationDecision
+		prepared DeferredBoundarySnapshot
+	)
 	err := pinErr
-	if err == nil {
+	if err == nil && job.snapshotEvt != nil {
+		prepared, err = ls.prepareDeferredBoundarySnapshot(
+			snapshot, *job.snapshotEvt,
+		)
+		if err == nil && job.plan != nil {
+			job.plan.SetBoundarySPOState(spoVotingState(prepared.SPOStakeRows()))
+		}
+	}
+	if err == nil && job.plan != nil {
 		decision, err = job.plan.Decide(snapshot)
 	}
 	snapshot.Release()
 	ls.ratificationMu.Lock()
 	job.decision = decision
+	job.snapshot = prepared
 	job.err = err
 	close(job.decided)
 	ls.ratificationMu.Unlock()
@@ -216,10 +252,24 @@ func (ls *LedgerState) writeRatificationDecision(
 	if rec == nil || *rec != job.record {
 		return nil
 	}
-	if _, err := job.plan.Apply(job.decision, txn); err != nil {
-		return fmt.Errorf(
-			"apply ratification for epoch %d: %w", rec.Epoch, err,
-		)
+	if job.snapshot != nil {
+		if err := job.snapshot.Write(txn); err != nil {
+			return fmt.Errorf(
+				"write mark snapshot for epoch %d: %w", rec.Epoch, err,
+			)
+		}
+		if err := ls.takeDeferredRewardStakeInputs(txn); err != nil {
+			return fmt.Errorf(
+				"stage reward stake inputs for epoch %d: %w", rec.Epoch, err,
+			)
+		}
+	}
+	if job.plan != nil {
+		if _, err := job.plan.Apply(job.decision, txn); err != nil {
+			return fmt.Errorf(
+				"apply ratification for epoch %d: %w", rec.Epoch, err,
+			)
+		}
 	}
 	if err := ls.db.DeleteSyncState(pendingRatificationSyncKey, txn); err != nil {
 		return err
@@ -274,10 +324,11 @@ func (ls *LedgerState) closeCtx() context.Context {
 	return ls.publishCtx
 }
 
-// WaitGovernanceRatification blocks until the most recent boundary's RATIFY
-// decision is durable, so a reader of ratified or expired marks sees what
-// that boundary decided.
-func (ls *LedgerState) WaitGovernanceRatification(ctx context.Context) error {
+// WaitEpochBoundaryJob blocks until the most recent boundary's deferred work
+// is durable: its RATIFY decision and, when the boundary left it, its mark
+// snapshot. A reader of ratified or expired marks, or of that epoch's mark
+// snapshot, sees what the boundary decided.
+func (ls *LedgerState) WaitEpochBoundaryJob(ctx context.Context) error {
 	ls.ratificationMu.Lock()
 	job := ls.ratificationJob
 	ls.ratificationMu.Unlock()
@@ -400,4 +451,58 @@ func (ls *LedgerState) resumePendingRatificationIntent() error {
 		)
 	}
 	return nil
+}
+
+type deferredBoundarySnapshotHookHolder struct {
+	announce func(epoch uint64)
+	prepare  func(*database.Txn, event.EpochTransitionEvent) (
+		DeferredBoundarySnapshot, error,
+	)
+}
+
+// SetDeferredEpochBoundarySnapshotHooks installs what a boundary needs to
+// leave mark[NewEpoch] to its background job: announce runs in the boundary
+// transaction before it commits, and prepare builds the snapshot reading only
+// the given transaction. Without them every boundary captures its snapshot
+// itself.
+func (ls *LedgerState) SetDeferredEpochBoundarySnapshotHooks(
+	announce func(epoch uint64),
+	prepare func(*database.Txn, event.EpochTransitionEvent) (
+		DeferredBoundarySnapshot, error,
+	),
+) {
+	if announce == nil || prepare == nil {
+		ls.deferredBoundarySnapshotHook.Store(nil)
+		return
+	}
+	ls.deferredBoundarySnapshotHook.Store(
+		&deferredBoundarySnapshotHookHolder{
+			announce: announce, prepare: prepare,
+		},
+	)
+}
+
+func (ls *LedgerState) prepareDeferredBoundarySnapshot(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) (DeferredBoundarySnapshot, error) {
+	h := ls.deferredBoundarySnapshotHook.Load()
+	if h == nil {
+		return nil, errors.New("deferred boundary snapshot hook unset")
+	}
+	prepared, err := h.prepare(txn, evt)
+	if err != nil {
+		return nil, fmt.Errorf("prepare mark snapshot: %w", err)
+	}
+	return prepared, nil
+}
+
+func spoVotingState(
+	rows []*models.PoolStakeSnapshot,
+) *governance.SPOVotingState {
+	var total uint64
+	for _, r := range rows {
+		total += uint64(r.TotalStake)
+	}
+	return &governance.SPOVotingState{Dist: rows, TotalStake: total}
 }

@@ -220,7 +220,7 @@ func (f *hardForkRatifyFixture) rollover(
 	require.NotNil(t, result)
 	// RATIFY runs after the boundary commits; its marks are durable once
 	// the decision settles.
-	require.NoError(t, f.ls.WaitGovernanceRatification(t.Context()))
+	require.NoError(t, f.ls.WaitEpochBoundaryJob(t.Context()))
 	return result
 }
 

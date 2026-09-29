@@ -89,7 +89,7 @@ func TestNextBoundaryWritesUndeliveredRatification(t *testing.T) {
 	require.Equal(t, uint64(74_200), *update.RatifiedSlot)
 
 	release()
-	require.NoError(t, s.ls.WaitGovernanceRatification(t.Context()))
+	require.NoError(t, s.ls.WaitEpochBoundaryJob(t.Context()))
 	rec, err := loadPendingRatification(s.db, nil)
 	require.NoError(t, err)
 	require.Nil(t, rec)
@@ -97,7 +97,7 @@ func TestNextBoundaryWritesUndeliveredRatification(t *testing.T) {
 }
 
 // Readers of the boundary's marks wait for them to be durable.
-func TestWaitGovernanceRatificationBlocksUntilDurable(t *testing.T) {
+func TestWaitEpochBoundaryJobBlocksUntilDurable(t *testing.T) {
 	t.Parallel()
 
 	s := newGovDiffScenario(t)
@@ -108,12 +108,12 @@ func TestWaitGovernanceRatificationBlocksUntilDurable(t *testing.T) {
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 	require.ErrorIs(
-		t, s.ls.WaitGovernanceRatification(cancelled), context.Canceled,
+		t, s.ls.WaitEpochBoundaryJob(cancelled), context.Canceled,
 		"a reader went ahead before the decision was written",
 	)
 
 	release()
-	require.NoError(t, s.ls.WaitGovernanceRatification(t.Context()))
+	require.NoError(t, s.ls.WaitEpochBoundaryJob(t.Context()))
 	require.NotNil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch)
 }
 
@@ -140,7 +140,7 @@ func TestGetProposalsReturnsTheProposalsSet(t *testing.T) {
 
 	s := newGovDiffScenario(t)
 	s.run(t, 1, func(ls *LedgerState) {
-		require.NoError(t, ls.WaitGovernanceRatification(t.Context()))
+		require.NoError(t, ls.WaitEpochBoundaryJob(t.Context()))
 	})
 	require.NotNil(t, s.proposalByMarker(t, 0x77).ExpiredEpoch)
 
@@ -148,7 +148,7 @@ func TestGetProposalsReturnsTheProposalsSet(t *testing.T) {
 	require.Len(t, proposals, 5, "expired members missing from GetProposals")
 
 	s.run(t, 1, func(ls *LedgerState) {
-		require.NoError(t, ls.WaitGovernanceRatification(t.Context()))
+		require.NoError(t, ls.WaitEpochBoundaryJob(t.Context()))
 	})
 	proposals = queryProposals(t, s.ls)
 	// The committee update was enacted; the lapsed action and its child
@@ -185,12 +185,12 @@ func TestRollbackDiscardsRatificationOfRemovedBoundary(t *testing.T) {
 			release()
 			if tc.keeps {
 				require.NoError(
-					t, s.ls.WaitGovernanceRatification(t.Context()),
+					t, s.ls.WaitEpochBoundaryJob(t.Context()),
 				)
 				require.NotNil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch)
 				return
 			}
-			require.NoError(t, s.ls.WaitGovernanceRatification(t.Context()))
+			require.NoError(t, s.ls.WaitEpochBoundaryJob(t.Context()))
 			// The job's own write runs after release; let it finish.
 			s.ls.ratificationWG.Wait()
 			rec, err := loadPendingRatification(s.db, nil)

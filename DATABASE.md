@@ -582,8 +582,10 @@ are logged and removed so one damaged notification record cannot permanently
 prevent startup.
 
 **Pending ratification.** Key `dingo:governance:ratify-pending` in
-`sync_state` holds a JSON record (`epoch`, `boundary_slot`, `id`) naming the
-latest boundary whose RATIFY decision has not been written yet. The boundary
+`sync_state` holds a JSON record (`epoch`, `boundary_slot`, `id`, and
+`snapshot` when the boundary left that epoch's `pool_stake_snapshot`,
+`epoch_summary` and reward-input rows to the same job) naming the latest
+boundary whose RATIFY decision or mark snapshot has not been written yet. The boundary
 transaction writes it; the transaction that writes the decision's ratified and
 expired marks -- the background ratification job's, or the next boundary's --
 deletes it. A rollback below `boundary_slot` deletes it in the rollback

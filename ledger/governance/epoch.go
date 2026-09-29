@@ -122,6 +122,11 @@ type EpochInput struct {
 	// fallback reads mark[NewEpoch], which the boundary writes later in the
 	// same transaction, so a later read would see rows RATIFY must not.
 	DeferRatification bool
+	// BoundarySPOStateDeferred lets DeferRatification defer without
+	// CurrentBoundarySPOState: the caller computes mark[NewEpoch] after the
+	// boundary and sets it with RatificationPlan.SetBoundarySPOState before
+	// Decide.
+	BoundarySPOStateDeferred bool
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -447,7 +452,8 @@ func ProcessEpoch(
 		treasuryRemaining: enactCtx.TreasuryWithdrawalRemaining,
 	}
 	plan.in.Txn = nil
-	if in.DeferRatification && in.CurrentBoundarySPOState != nil {
+	if in.DeferRatification &&
+		(in.CurrentBoundarySPOState != nil || in.BoundarySPOStateDeferred) {
 		out.Ratification = plan
 		return out, nil
 	}
@@ -483,6 +489,11 @@ type RatificationPlan struct {
 // Epoch returns the epoch whose opening boundary the plan ratifies at.
 func (p *RatificationPlan) Epoch() uint64 { return p.in.NewEpoch }
 
+// SetBoundarySPOState supplies mark[Epoch()] when the boundary deferred it.
+func (p *RatificationPlan) SetBoundarySPOState(state *SPOVotingState) {
+	p.in.CurrentBoundarySPOState = state
+}
+
 // BoundarySlot returns the slot of the boundary the plan ratifies at.
 func (p *RatificationPlan) BoundarySlot() uint64 { return p.in.BoundarySlot }
 
@@ -494,6 +505,9 @@ func (p *RatificationPlan) Decide(
 	txn *database.Txn,
 ) (*RatificationDecision, error) {
 	in := p.in
+	if in.BoundarySPOStateDeferred && in.CurrentBoundarySPOState == nil {
+		return nil, errors.New("ratification plan has no boundary SPO state")
+	}
 	in.Txn = txn
 	out := p.out
 	return decideRatification(&in, &out, p.conwayPParams, p.treasuryRemaining)

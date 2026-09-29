@@ -66,7 +66,10 @@ type Manager struct {
 	// boundary commits, instead of writing them inside the boundary
 	// transaction; see TakeDeferredRewardStakeInputs.
 	deferRewardStakeInputs bool
-	deferredStakeInputs    *DeferredRewardStakeInputs
+	// deferredCaptures are the epochs whose mark snapshot the ledger captures
+	// after the boundary commits, guarded by mu.
+	deferredCaptures    map[uint64]struct{}
+	deferredStakeInputs *DeferredRewardStakeInputs
 
 	mu             sync.RWMutex
 	running        bool
@@ -619,6 +622,23 @@ func (m *Manager) handleEpochTransition(
 	// reserved for the complete read and avoids competing with other cold
 	// query preparations while the read pool is busy. The transaction still
 	// sees a fresh WAL snapshot when it begins.
+	m.mu.Lock()
+	_, deferred := m.deferredCaptures[evt.NewEpoch]
+	delete(m.deferredCaptures, evt.NewEpoch)
+	m.mu.Unlock()
+	if deferred {
+		m.logger.Debug(
+			"mark snapshot captured by the ledger after the boundary",
+			"component", "snapshot",
+			"epoch", evt.NewEpoch,
+		)
+		m.rotateSnapshots(ctx, evt.NewEpoch)
+		if err := m.cleanupOldSnapshots(ctx, evt.NewEpoch); err != nil {
+			return fmt.Errorf("cleanup old snapshots: %w", err)
+		}
+		return nil
+	}
+
 	preCheckTxn := m.db.Transaction(false)
 	exists, err := m.authoritativeMarkRewardSnapshotExists(
 		evt,
@@ -930,6 +950,85 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 // one cardano-ledger's RATIFY consumes, which is why this is called where it
 // is; ledger's TestProcessEpochRollover_SnapStakeReadOrdering locks that
 // position.
+// DeferredEpochBoundarySnapshot is a boundary's mark snapshot prepared on a
+// read transaction, to be written through another.
+type DeferredEpochBoundarySnapshot struct {
+	m        *Manager
+	prepared *preparedSnapshot
+}
+
+// DeferEpochBoundaryCapture records that the ledger captures epoch's mark
+// snapshot after its boundary commits, so the epoch-transition handler must not
+// capture a fallback one from later state.
+func (m *Manager) DeferEpochBoundaryCapture(epoch uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.deferredCaptures == nil {
+		m.deferredCaptures = make(map[uint64]struct{})
+	}
+	m.deferredCaptures[epoch] = struct{}{}
+}
+
+// PrepareEpochBoundarySnapshot builds mark[evt.NewEpoch] from txn, which must
+// observe the committed boundary and nothing later. The SNAP point precedes
+// the boundary's POOLREAP and governance credits, so the stake is the
+// epoch-boundary reconstruction: delegations as of the snapshot slot, and
+// boundary credits other than those marked PostSnapshot. The persist-time
+// reads (reward inputs, Leios keys, reward-account auto-votes) see the whole
+// committed boundary, as they do when the boundary persists its own snapshot.
+func (m *Manager) PrepareEpochBoundarySnapshot(
+	ctx context.Context,
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) (*DeferredEpochBoundarySnapshot, error) {
+	m.lockConfiguration()
+	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
+	calculator := NewCalculator(m.db)
+	distribution, err := calculator.calculateHistoricalBoundaryStakeDistributionInTxn(
+		ctx,
+		txn,
+		evt.SnapshotSlot,
+		evt.BoundarySlot,
+		expiryEpoch,
+		m.inactivityPeriod(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("calculate stake distribution: %w", err)
+	}
+	prepared, err := m.prepareSnapshot(
+		evt.NewEpoch, "mark", distribution, evt, true, true, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("prepare mark snapshot: %w", err)
+	}
+	return &DeferredEpochBoundarySnapshot{m: m, prepared: prepared}, nil
+}
+
+// SPOStakeRows returns the prepared mark rows, with reward-account auto-votes
+// resolved, as CurrentBoundarySPOStakeRows returns them.
+func (d *DeferredEpochBoundarySnapshot) SPOStakeRows() []*models.PoolStakeSnapshot {
+	rows := make([]*models.PoolStakeSnapshot, 0, len(d.prepared.snapshots))
+	for _, row := range d.prepared.snapshots {
+		clone := *row
+		rows = append(rows, &clone)
+	}
+	return rows
+}
+
+// Write writes the prepared snapshot through txn, staging deferred reward
+// stake inputs for txn as CaptureEpochBoundarySnapshot does.
+func (d *DeferredEpochBoundarySnapshot) Write(txn *database.Txn) error {
+	d.m.mu.RLock()
+	deferStakeInputs := d.m.deferRewardStakeInputs
+	d.m.mu.RUnlock()
+	if err := d.m.writePreparedSnapshot(
+		d.prepared, false, deferStakeInputs, txn,
+	); err != nil {
+		return fmt.Errorf("save mark snapshot: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) CurrentBoundarySPOStakeRows(
 	ctx context.Context,
 	txn *database.Txn,

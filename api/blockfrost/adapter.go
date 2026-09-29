@@ -1252,12 +1252,12 @@ func paginateAssetHolders(
 // deposits count toward DRep power.
 const drepRatificationWait = 2 * time.Minute
 
-func (a *NodeAdapter) waitGovernanceRatification() error {
+func (a *NodeAdapter) waitEpochBoundaryJob() error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(), drepRatificationWait,
 	)
 	defer cancel()
-	if err := a.ledgerState.WaitGovernanceRatification(ctx); err != nil {
+	if err := a.ledgerState.WaitEpochBoundaryJob(ctx); err != nil {
 		return fmt.Errorf("wait for governance ratification: %w", err)
 	}
 	return nil
@@ -1268,7 +1268,7 @@ func (a *NodeAdapter) waitGovernanceRatification() error {
 func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
-	if err := a.waitGovernanceRatification(); err != nil {
+	if err := a.waitEpochBoundaryJob(); err != nil {
 		return DRepInfo{}, err
 	}
 	if credential.Predefined != nil {
@@ -1520,7 +1520,7 @@ func cip129DRepHeader(hasScript bool) byte {
 func (a *NodeAdapter) DReps(
 	params DRepListParams,
 ) ([]DRepListItemInfo, int, error) {
-	if err := a.waitGovernanceRatification(); err != nil {
+	if err := a.waitEpochBoundaryJob(); err != nil {
 		return nil, 0, err
 	}
 	db := a.ledgerState.Database()
