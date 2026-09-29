@@ -101,6 +101,50 @@ func newSignedByronPBFTBlock(
 	delegationPayload []any,
 ) *byron.ByronMainBlock {
 	t.Helper()
+	return newSignedByronPBFTBlockWithBody(
+		t,
+		template,
+		protocolMagic,
+		epoch,
+		slot,
+		difficulty,
+		previousHash,
+		issuer,
+		delegate,
+		proxyCertificate,
+		delegationPayload,
+		nil,
+	)
+}
+
+// byronPBFTBodyOverride replaces parts of the template block's body. The
+// header's body proof is recomputed over the replacement before the header is
+// signed, so the block is internally consistent.
+type byronPBFTBodyOverride struct {
+	// emptyTransactions drops the template's transactions.
+	emptyTransactions bool
+	// updatePayload is the raw CBOR of the block's update payload.
+	updatePayload []byte
+	// blockVersion replaces the version the header declares, which is the
+	// protocol version its issuer endorses.
+	blockVersion *byron.ByronBlockVersion
+}
+
+func newSignedByronPBFTBlockWithBody(
+	t *testing.T,
+	template models.Block,
+	protocolMagic uint32,
+	epoch uint64,
+	slot uint64,
+	difficulty uint64,
+	previousHash lcommon.Blake2b256,
+	issuer byronPBFTTestKey,
+	delegate byronPBFTTestKey,
+	proxyCertificate []any,
+	delegationPayload []any,
+	override *byronPBFTBodyOverride,
+) *byron.ByronMainBlock {
+	t.Helper()
 	decoded, err := template.Decode()
 	require.NoError(t, err)
 	block, ok := decoded.(*byron.ByronMainBlock)
@@ -115,6 +159,9 @@ func newSignedByronPBFTBlock(
 		issuer.verificationKey...,
 	)
 	header.ConsensusData.Difficulty.Value = difficulty
+	if override != nil && override.blockVersion != nil {
+		header.ExtraData.BlockVersion = *override.blockVersion
+	}
 	header.ConsensusData.BlockSig = []any{
 		uint64(2),
 		[]any{proxyCertificate, make([]byte, ed25519.SignatureSize)},
@@ -131,6 +178,17 @@ func newSignedByronPBFTBlock(
 	require.Len(t, bodyProof, 4)
 	bodyProof = append([]any(nil), bodyProof...)
 	bodyProof[2] = lcommon.Blake2b256Hash(delegationPayloadCbor).Bytes()
+	emptyTransactionsCbor := []byte{0x9f, 0xff}
+	if override != nil && override.emptyTransactions {
+		bodyProof[0] = []any{
+			uint64(0),
+			byron.MerkleRoot(nil).Bytes(),
+			lcommon.Blake2b256Hash(emptyTransactionsCbor).Bytes(),
+		}
+	}
+	if override != nil && override.updatePayload != nil {
+		bodyProof[3] = lcommon.Blake2b256Hash(override.updatePayload).Bytes()
+	}
 	header.BodyProof = bodyProof
 
 	epochSlot := struct {
@@ -198,6 +256,12 @@ func newSignedByronPBFTBlock(
 	require.Len(t, bodyParts, 4)
 	blockParts[0] = cbor.RawMessage(headerCbor)
 	bodyParts[2] = cbor.RawMessage(delegationPayloadCbor)
+	if override != nil && override.emptyTransactions {
+		bodyParts[0] = cbor.RawMessage(emptyTransactionsCbor)
+	}
+	if override != nil && override.updatePayload != nil {
+		bodyParts[3] = cbor.RawMessage(override.updatePayload)
+	}
 	bodyCbor, err := cbor.Encode(bodyParts)
 	require.NoError(t, err)
 	blockParts[1] = cbor.RawMessage(bodyCbor)
