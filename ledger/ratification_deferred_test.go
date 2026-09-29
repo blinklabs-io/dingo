@@ -268,3 +268,57 @@ func TestResumePendingRatificationRewindsOrFails(t *testing.T) {
 		})
 	}
 }
+
+// The ledger rollback transaction discards a pending ratification whose
+// boundary it removes, and keeps one it does not.
+func TestLedgerRollbackDiscardsPendingRatification(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		above uint64
+		keeps bool
+	}{
+		{"boundary above the rollback point", 1, false},
+		{"boundary at the rollback point", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			ls := fixture.ls
+			rec := pendingRatificationRecord{
+				Epoch:        1,
+				BoundarySlot: fixture.ancestorTip.Point.Slot + tc.above,
+				ID:           7,
+			}
+			raw, err := json.Marshal(rec)
+			require.NoError(t, err)
+			require.NoError(t, ls.db.SetSyncState(
+				pendingRatificationSyncKey, string(raw), nil,
+			))
+			job := &ratificationJob{
+				record:  rec,
+				decided: make(chan struct{}),
+				settled: make(chan struct{}),
+			}
+			ls.ratificationMu.Lock()
+			ls.ratificationJob = job
+			ls.ratificationMu.Unlock()
+
+			require.NoError(t, ls.rollback(fixture.ancestorTip.Point))
+
+			stored, err := loadPendingRatification(ls.db, nil)
+			require.NoError(t, err)
+			if tc.keeps {
+				require.Equal(t, &rec, stored)
+				return
+			}
+			require.Nil(t, stored, "rollback kept a removed boundary's record")
+			select {
+			case <-job.settled:
+			default:
+				t.Fatal("rollback left readers waiting on a discarded decision")
+			}
+		})
+	}
+}
