@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Koios-parity toggle wrapper for the koios-parity-compose example.
+# Koios-parity toggle wrapper for the Koios parity test stack.
 #
 # This does not replace or modify the image's own /bin/entrypoint.sh (which
 # still handles Mithril bootstrap detection and signal forwarding); it only

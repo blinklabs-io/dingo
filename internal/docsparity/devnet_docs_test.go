@@ -249,14 +249,16 @@ func usesReferenceNode(services map[string]composeService) bool {
 }
 
 // TestDevNetDefaultProfileIsAllDingo checks the shipped default really is the
-// all-Dingo network and that the reference implementation is reached only
-// through the other profile.
+// all-Dingo network and that only the conformance profile uses the reference
+// implementation.
 func TestDevNetDefaultProfileIsAllDingo(t *testing.T) {
 	root := repoRoot(t)
 	compose := loadCompose(t, root)
 	profiles := profileNames(compose)
-	if len(profiles) != 2 {
-		t.Fatalf("expected two DevNet profiles, found %v", profiles)
+	for _, profile := range []string{"dingo", "conformance", "koios-parity"} {
+		if !slices.Contains(profiles, profile) {
+			t.Fatalf("expected DevNet profile %q, found %v", profile, profiles)
+		}
 	}
 
 	def := defaultProfile(t, root)
@@ -271,20 +273,17 @@ func TestDevNetDefaultProfileIsAllDingo(t *testing.T) {
 			referenceNodeImage,
 		)
 	}
-	for _, profile := range profiles {
-		if profile == def {
-			continue
-		}
-		if !usesReferenceNode(servicesInProfile(compose, profile)) {
-			t.Errorf(
-				"opt-in profile %q does not run %s; docs describe %s as the "+
-					"Dingo/%s topology",
-				profile,
-				referenceNodeImage,
-				conformanceFlag,
-				referenceNodeImage,
-			)
-		}
+	if !usesReferenceNode(servicesInProfile(compose, "conformance")) {
+		t.Errorf(
+			"conformance profile does not run %s; docs describe %s as the "+
+				"Dingo/%s topology",
+			referenceNodeImage,
+			conformanceFlag,
+			referenceNodeImage,
+		)
+	}
+	if usesReferenceNode(servicesInProfile(compose, "koios-parity")) {
+		t.Error("koios-parity profile must use the local Dingo image")
 	}
 }
 
