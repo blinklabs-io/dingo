@@ -1017,7 +1017,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 }
 
 // guardedExpiredRewardCredentials returns the set of credited reward-account
-// credentials that are expired as of the reward snapshot, keyed by
+// credentials, including those owed a negative leader reward, that are expired as of the reward snapshot, keyed by
 // StakeCredentialRef.MapKey(). Expiry is reconstructed from witness history at
 // the snapshot's captured slot, rather than read from the mutable account row:
 // a later witness may already have renewed that row by application time. This
@@ -1029,12 +1029,13 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 	txn *database.Txn,
 	app *stakeRewardApplication,
 ) (map[string]struct{}, error) {
-	if app == nil || len(app.accountOutputs) == 0 {
+	if app == nil ||
+		(len(app.accountOutputs) == 0 && len(app.negativeLeaderRewards) == 0) {
 		return nil, nil
 	}
 	refsByKey := make(
 		map[string]models.StakeCredentialRef,
-		len(app.accountOutputs),
+		len(app.accountOutputs)+len(app.negativeLeaderRewards),
 	)
 	for _, output := range app.accountOutputs {
 		if output == nil ||
@@ -1044,6 +1045,16 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 		ref := models.NewStakeCredentialRef(
 			output.CredentialTag,
 			output.StakingKey,
+		)
+		refsByKey[ref.MapKey()] = ref
+	}
+	// A negative leader reward has no account output, so its reward account
+	// is judged here too; otherwise an expired one would halt the boundary
+	// that a positive reward to the same account would merely skip.
+	for _, reward := range app.negativeLeaderRewards {
+		ref := models.NewStakeCredentialRef(
+			reward.Credential.Tag,
+			reward.Credential.Hash[:],
 		)
 		refsByKey[ref.MapKey()] = ref
 	}
@@ -3832,7 +3843,7 @@ func (ls *LedgerState) rewardParameters(
 			performanceEpochRow.EraId, performanceEpoch,
 		)
 	}
-	performancePParams, err := ls.loadPersistedProtocolParameters(
+	performancePParams, err := ls.loadPersistedRewardProtocolParameters(
 		performanceEpoch,
 		*performanceEraDesc,
 		txn,
@@ -3911,7 +3922,7 @@ func (ls *LedgerState) rewardParameters(
 	}
 	if calculationEraDesc.Id == eras.DijkstraEraDesc.Id &&
 		performanceEraDesc.Id != eras.DijkstraEraDesc.Id {
-		pledgeLeveragePParams, err = ls.loadPersistedRewardDijkstraParameters(
+		pledgeLeveragePParams, err = ls.loadPersistedRewardProtocolParameters(
 			calculationEpoch, *calculationEraDesc, txn,
 		)
 		if err != nil {
@@ -4886,66 +4897,75 @@ func applyPledgeLeveragePParams(
 	}
 }
 
-// loadPersistedRewardDijkstraParameters keeps the reward path aligned with
-// cardano-ledger's non-negative CIP-50 domain even when the currently pinned
-// gouroboros decoder applies the narrower governance-update bounds to stored
-// protocol parameters.
-func (ls *LedgerState) loadPersistedRewardDijkstraParameters(
+// loadPersistedRewardProtocolParameters loads a reward round's protocol
+// parameters. cardano-ledger types Dijkstra's maxPledgeLeverage as a
+// NonNegativeInterval, so an enacted value outside the governance-update range
+// [1, 10000] that the pinned gouroboros decoder enforces on stored rows is
+// still the value the reward calculation must use.
+func (ls *LedgerState) loadPersistedRewardProtocolParameters(
 	epoch uint64,
 	era eras.EraDesc,
 	txn *database.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	var metadataTxn types.Txn
-	if txn != nil {
-		metadataTxn = txn.Metadata()
-	}
-	stored, err := ls.db.Metadata().GetPParams(epoch, era.Id, metadataTxn)
-	if err != nil || len(stored) == 0 {
-		return nil, err
-	}
 	decode := era.DecodePParamsFunc
-	if decode == nil {
-		return nil, nil
+	if decode != nil && era.Id == eras.DijkstraEraDesc.Id {
+		decode = rewardDijkstraPParamsDecoder(decode)
 	}
-	params, err := decode(stored[0].Cbor)
-	if err == nil || !strings.Contains(
-		err.Error(), "maxPledgeLeverage must be in [1, 10000]",
-	) {
-		return params, err
-	}
+	return ls.loadPersistedProtocolParametersWith(epoch, era, decode, txn)
+}
 
-	var fields []cbor.RawMessage
-	if _, err := cbor.Decode(stored[0].Cbor, &fields); err != nil {
-		return nil, fmt.Errorf("decode Dijkstra reward parameters: %w", err)
+func rewardDijkstraPParamsDecoder(
+	decode func([]byte) (lcommon.ProtocolParameters, error),
+) func([]byte) (lcommon.ProtocolParameters, error) {
+	return func(data []byte) (lcommon.ProtocolParameters, error) {
+		params, decodeErr := decode(data)
+		if decodeErr == nil || !strings.Contains(
+			decodeErr.Error(), "maxPledgeLeverage must be in [1, 10000]",
+		) {
+			return params, decodeErr
+		}
+		var fields []cbor.RawMessage
+		if _, err := cbor.Decode(data, &fields); err != nil {
+			return nil, fmt.Errorf("decode Dijkstra reward parameters: %w", err)
+		}
+		const maxPledgeLeverageField = 35
+		if len(fields) != 46 {
+			return nil, decodeErr
+		}
+		var maxPledgeLeverage *cbor.Rat
+		if _, err := cbor.Decode(
+			fields[maxPledgeLeverageField], &maxPledgeLeverage,
+		); err != nil {
+			return nil, fmt.Errorf("decode Dijkstra maxPledgeLeverage: %w", err)
+		}
+		if maxPledgeLeverage == nil || maxPledgeLeverage.Rat == nil ||
+			maxPledgeLeverage.Sign() < 0 {
+			return nil, decodeErr
+		}
+		normalized, err := cbor.Encode(&cbor.Rat{Rat: big.NewRat(1, 1)})
+		if err != nil {
+			return nil, fmt.Errorf(
+				"normalize Dijkstra maxPledgeLeverage: %w", err,
+			)
+		}
+		fields[maxPledgeLeverageField] = normalized
+		validatedCbor, err := cbor.Encode(fields)
+		if err != nil {
+			return nil, fmt.Errorf("encode Dijkstra reward parameters: %w", err)
+		}
+		params, err = decode(validatedCbor)
+		if err != nil {
+			return nil, err
+		}
+		dijkstraParams, ok := params.(*dijkstra.DijkstraProtocolParameters)
+		if !ok || dijkstraParams == nil {
+			return nil, fmt.Errorf(
+				"decoded Dijkstra reward parameters as %T", params,
+			)
+		}
+		dijkstraParams.MaxPledgeLeverage = maxPledgeLeverage
+		return dijkstraParams, nil
 	}
-	const maxPledgeLeverageField = 35
-	if len(fields) != 46 {
-		return nil, err
-	}
-	var maxPledgeLeverage *cbor.Rat
-	if _, err := cbor.Decode(fields[maxPledgeLeverageField], &maxPledgeLeverage); err != nil {
-		return nil, fmt.Errorf("decode Dijkstra maxPledgeLeverage: %w", err)
-	}
-	fields[maxPledgeLeverageField], err = cbor.Encode(&cbor.Rat{
-		Rat: big.NewRat(1, 1),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("normalize Dijkstra maxPledgeLeverage: %w", err)
-	}
-	validatedCbor, err := cbor.Encode(fields)
-	if err != nil {
-		return nil, fmt.Errorf("encode Dijkstra reward parameters: %w", err)
-	}
-	params, err = decode(validatedCbor)
-	if err != nil {
-		return nil, err
-	}
-	dijkstraParams, ok := params.(*dijkstra.DijkstraProtocolParameters)
-	if !ok || dijkstraParams == nil {
-		return nil, fmt.Errorf("decoded Dijkstra reward parameters as %T", params)
-	}
-	dijkstraParams.MaxPledgeLeverage = maxPledgeLeverage
-	return dijkstraParams, nil
 }
 
 func rewardParametersFromPParams(

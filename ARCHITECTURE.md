@@ -13430,12 +13430,22 @@ Owed to a registered one, the update cannot be applied, because
 cardano-ledger's `compactCoinOrError` fails that boundary: `applyStakeRewards`
 returns an `errHaltLedgerPipeline` error wrapping
 `rewards.ErrNegativeLeaderReward`, before writing anything, and calls
-`FatalErrorFunc`. The CIP-0163 account-inactivity guard suppresses that halt
-when it also suppresses crediting the expired reward account. Per-pool history
-stores the negative magnitude in `reward_pool_output.leader_reward_deficit`,
-while the unsigned reward fields remain zero. The asynchronous precompute
-skips such a round and reuse of persisted outputs rejects it; the boundary
-always calculates it fresh.
+`FatalErrorFunc`. The CIP-0163 account-inactivity guard judges every reward
+account owed a negative leader reward, which has no account output, alongside
+the credited ones, and suppresses the halt for an expired one exactly as it
+suppresses crediting it. Per-pool history stores the negative magnitude in
+`reward_pool_output.leader_reward_deficit`, while the unsigned reward fields
+remain zero. The per-pool precompute declines such a round, as does the
+single-pass precompute, and reuse of persisted outputs rejects it; the
+boundary always calculates it fresh with the single-pass calculation.
+
+The pinned gouroboros decoder rejects a stored Dijkstra `maxPledgeLeverage`
+outside the governance-update range [1, 10000], while cardano-ledger types it
+as a `NonNegativeInterval`. The reward path therefore loads both its
+performance-epoch and calculation-epoch Dijkstra parameters through
+`loadPersistedRewardProtocolParameters`, which decodes such a row with the
+field normalized and then restores the enacted non-negative value. Every
+other reader keeps the decoder's bounds.
 
 After an epoch-transition event, ledger precomputes the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. The calculation

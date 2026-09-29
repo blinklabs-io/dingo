@@ -301,3 +301,110 @@ func TestSuppressBootstrapStakeRewardsClearsNegativeLeaderRewards(t *testing.T) 
 	require.Zero(t, result.UnspendableDeficit)
 	require.Equal(t, uint64(1_000), result.Undistributed)
 }
+
+// The per-pool precompute has no row that can carry a negative leader reward,
+// so it declines the round and leaves it to the single-pass calculation.
+func TestChunkedRewardPrecomputeDeclinesNegativeLeaderReward(t *testing.T) {
+	t.Parallel()
+
+	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
+	handled, err := ls.runChunkedStakeRewardPrecomputeRound(
+		negativeLeaderNewEpoch, 300, negativeLeaderBoundarySlot,
+	)
+	require.NoError(t, err)
+	require.False(t, handled)
+	outputs, err := db.Metadata().GetRewardPoolOutputs(
+		negativeLeaderSnapshot,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, outputs)
+}
+
+// A registered reward account that CIP-0163 has expired is not credited, so a
+// negative leader reward owed to it is guarded like a positive one rather than
+// halting the boundary. The account has no output row: only the negative
+// leader reward names it.
+func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
+	t.Parallel()
+
+	ls, db, rewardAccount := seedNegativeLeaderRewardRound(t, true)
+	var app *stakeRewardApplication
+	calcTxn := db.Transaction(false)
+	require.NoError(t, calcTxn.Do(func(txn *database.Txn) error {
+		var (
+			ok  bool
+			err error
+		)
+		app, ok, err = ls.calculateStakeRewardApplication(
+			txn,
+			negativeLeaderNewEpoch,
+			negativeLeaderBoundarySlot,
+			negativeLeaderBoundarySlot,
+			true,
+		)
+		require.True(t, ok)
+		return err
+	}))
+	require.NotNil(t, app)
+	require.Len(t, app.negativeLeaderRewards, 1)
+	require.True(t, app.negativeLeaderRewards[0].Spendable)
+	for _, output := range app.accountOutputs {
+		require.NotEqual(t, rewardAccount, output.StakingKey)
+	}
+
+	// Expiry 1 judged at snapshot epoch 2 is expired. The seeded
+	// registration at slot 250 is after the captured slot, so the account
+	// row's expiry decides.
+	ls.config.DelegatorInactivityEnabled = true
+	ls.config.DelegatorInactivity = 1
+	require.NoError(t, db.RenewAccountExpirations(
+		[]models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, rewardAccount),
+		},
+		1,
+		nil,
+	))
+	app.epochs.snapshot = 2
+
+	guardTxn := db.Transaction(false)
+	require.NoError(t, guardTxn.Do(func(txn *database.Txn) error {
+		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+		if err != nil {
+			return err
+		}
+		require.Contains(
+			t,
+			guarded,
+			models.NewStakeCredentialRef(0, rewardAccount).MapKey(),
+		)
+		require.NoError(t, negativeLeaderRewardApplicationError(
+			app.negativeLeaderRewards, guarded,
+		))
+		return nil
+	}))
+}
+
+// The boundary that applies a negative leader reward records its magnitude in
+// the pool's reward history, where the unsigned reward fields stay zero.
+func TestApplyStakeRewardsPersistsNegativeLeaderRewardDeficit(t *testing.T) {
+	t.Parallel()
+
+	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
+		)
+	}))
+	outputs, err := db.Metadata().GetRewardPoolOutputs(
+		negativeLeaderSnapshot,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
+	require.Equal(t, types.Uint64(8_334), outputs[0].LeaderRewardDeficit)
+	require.Zero(t, uint64(outputs[0].LeaderReward))
+	require.Zero(t, uint64(outputs[0].TotalReward))
+	require.Zero(t, uint64(outputs[0].OptimalReward))
+}
