@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // koiosFlags are specific to the from-genesis command -- unlike
@@ -103,6 +105,40 @@ type fromGenesisCounters struct {
 	// outright if these ever total zero across a run that reached at
 	// least one epoch boundary.
 	ppVerified, stakeVerified, utxoVerified int
+
+	// metrics is nil unless --metrics-addr is set. from-genesis previously
+	// reported only through this struct's counters, the log, and the exit
+	// code, so a divergence moved no Prometheus series at all and the
+	// alert rules in docs/dashboards/alerts.yaml -- which fire on
+	// node_parity_divergence_total -- could never see a from-genesis run.
+	// Recording here rather than at the call site keeps the counter and
+	// the metric incrementing from the same branch, so they cannot drift.
+	metrics *fromGenesisMetrics
+}
+
+// recordDivergence increments the same divergenceTotal{field} series a
+// check/watch cycle uses, tagged reference=koios so a responder reading
+// NodeParityDivergence knows which oracle disagreed. A cardano-node
+// divergence is a consensus question; a Koios one can equally be that
+// oracle's own data, so sending someone to the wrong side wastes the first
+// and most valuable minutes of an incident.
+func (c *fromGenesisCounters) recordDivergence(field string) {
+	if c.metrics != nil {
+		c.metrics.divergenceTotal.
+			WithLabelValues(field, ReferenceKoios).Inc()
+	}
+}
+
+// recordIncomplete increments epochChecksIncompleteTotal{field} for a check
+// that could not be trusted. Kept distinct from a divergence: "Koios was
+// unreachable" and "Dingo answered the wrong value" are very different
+// things to page someone about. It is also deliberately not check/watch's
+// checks_skipped_total, whose "reason" means a discarded cycle -- see
+// fromGenesisMetrics' doc comment.
+func (c *fromGenesisCounters) recordIncomplete(field string) {
+	if c.metrics != nil {
+		c.metrics.epochChecksIncompleteTotal.WithLabelValues(field).Inc()
+	}
 }
 
 // recordEpoch is documented on fromGenesisCounters.
@@ -111,6 +147,10 @@ func (c *fromGenesisCounters) recordEpoch(
 	logger *slog.Logger,
 ) {
 	c.epochsChecked++
+	// Snapshot the verified counters so the completed-cycle decision at
+	// the end of this function reads "did any check reach a trustworthy
+	// verdict in THIS epoch", not "has one ever".
+	verifiedBefore := c.ppVerified + c.stakeVerified + c.utxoVerified
 
 	logger.Debug("epoch timing",
 		"epoch", r.Epoch,
@@ -131,6 +171,7 @@ func (c *fromGenesisCounters) recordEpoch(
 	// which are very different things to page someone about.
 	if r.ProtocolParamsErr != nil {
 		c.ppIncomplete++
+		c.recordIncomplete("protocol_params")
 		logger.Warn("protocol params check did not run",
 			"epoch", r.Epoch, "error", r.ProtocolParamsErr)
 	} else {
@@ -138,6 +179,7 @@ func (c *fromGenesisCounters) recordEpoch(
 		case koiosparity.StatusFail:
 			c.ppMismatches++
 			c.ppVerified++
+			c.recordDivergence("protocol_params")
 			for _, m := range r.ProtocolParamsMismatches {
 				logger.Warn("protocol params mismatch",
 					"epoch", r.Epoch, "field", m.Field,
@@ -146,6 +188,7 @@ func (c *fromGenesisCounters) recordEpoch(
 			}
 		case koiosparity.StatusError:
 			c.ppIncomplete++
+			c.recordIncomplete("protocol_params")
 			for _, m := range r.ProtocolParamsMismatches {
 				logger.Warn("protocol params check incomplete",
 					"epoch", r.Epoch, "field", m.Field,
@@ -159,12 +202,14 @@ func (c *fromGenesisCounters) recordEpoch(
 
 	if r.StakeErr != nil {
 		c.stakeIncomplete++
+		c.recordIncomplete("stake_distribution")
 		logger.Warn("stake distribution check did not run",
 			"epoch", r.Epoch, "error", r.StakeErr)
 	} else {
 		realMismatches, faults := splitStakeMismatches(r.StakeMismatches)
 		if len(faults) > 0 {
 			c.stakeIncomplete++
+			c.recordIncomplete("stake_distribution")
 		} else {
 			c.stakeVerified++
 		}
@@ -176,6 +221,7 @@ func (c *fromGenesisCounters) recordEpoch(
 		}
 		if len(realMismatches) > 0 {
 			c.stakeMismatches++
+			c.recordDivergence("stake_distribution")
 			for _, m := range realMismatches {
 				logger.Warn("stake distribution mismatch",
 					"epoch", r.Epoch, "pool", m.PoolIDBech32,
@@ -189,14 +235,17 @@ func (c *fromGenesisCounters) recordEpoch(
 
 	if !r.UTxOAttempted {
 		c.utxoIncomplete++
+		c.recordIncomplete("utxo")
 		logger.Debug("utxo check skipped (no genesis baseline)", "epoch", r.Epoch)
 	} else if r.UTxOErr != nil {
 		c.utxoIncomplete++
+		c.recordIncomplete("utxo")
 		logger.Warn("utxo check did not run",
 			"epoch", r.Epoch, "error", r.UTxOErr)
 	} else if len(r.UTxOMissing) > 0 || len(r.UTxOExtra) > 0 || len(r.UTxODiffers) > 0 {
 		c.utxoMismatches++
 		c.utxoVerified++
+		c.recordDivergence("utxo")
 		logger.Warn("utxo set mismatch",
 			"epoch", r.Epoch, "missing", len(r.UTxOMissing),
 			"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
@@ -209,6 +258,37 @@ func (c *fromGenesisCounters) recordEpoch(
 		logger.Info("utxo set match",
 			"epoch", r.Epoch, "ref_count", r.UTxORefCount)
 	}
+
+	// An epoch whose every check was untrusted verified nothing, so
+	// incrementing unconditionally would fold a wholly-degraded epoch in
+	// as a real one and inflate the count an operator reads as "epochs
+	// actually validated" -- while epochChecksIncompleteTotal, which did
+	// move, is the series that says what went wrong. Counting only when at
+	// least one check reached a trustworthy verdict keeps both honest, and
+	// still counts an epoch where some checks ran and others did not.
+	verdictReached := c.ppVerified+c.stakeVerified+c.utxoVerified > verifiedBefore
+	if verdictReached && c.metrics != nil {
+		c.metrics.epochsTotal.Inc()
+	}
+}
+
+// shouldServeMetrics decides whether a from-genesis run serves /metrics.
+// Serving is opt-in, and opt-in has to mean the operator actually passed
+// --metrics-addr: the flag defaults to defaultMetricsAddr (":9464"), so
+// testing addr against "" alone is true on every run and binds a socket
+// nobody asked for -- failing the whole run when that port is already
+// taken, which for a multi-day replay is a poor trade for metrics the
+// operator did not request. watch can lean on the default, because serving
+// metrics is part of what a long-lived watcher is for; a one-shot replay is
+// different.
+//
+// Split out of the command body so the decision is reachable from a test.
+// Left inline it was unpinned: replacing it with addr != "" left the whole
+// cmd/node-parity suite green (review on #4771).
+//
+// flags.Changed reports explicit use, so "--metrics-addr=" means off.
+func shouldServeMetrics(flags *pflag.FlagSet, addr string) bool {
+	return flags.Changed("metrics-addr") && addr != ""
 }
 
 func fromGenesisCommand() *cobra.Command {
@@ -373,6 +453,20 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	var counters fromGenesisCounters
+	if shouldServeMetrics(cmd.Flags(), globalFlags.metricsAddr) {
+		counters.metrics = newFromGenesisMetrics(network)
+		metricsServer, err := serveMetrics(globalFlags.metricsAddr, logger)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(
+				context.Background(), 5*time.Second,
+			)
+			defer cancel()
+			_ = metricsServer.Shutdown(shutdownCtx) //nolint:errcheck
+		}()
+	}
 	report := func(r nodeparity.EpochResult) {
 		counters.recordEpoch(r, logger)
 	}
