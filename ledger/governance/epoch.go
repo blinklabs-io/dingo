@@ -432,6 +432,39 @@ func ProcessEpoch(
 	}
 	out.OrphanedCount = orphanCount
 
+	decision, err := decideRatification(
+		in, out, conwayPParams, enactCtx.TreasuryWithdrawalRemaining,
+	)
+	if err != nil {
+		return nil, err
+	}
+	expiredOrphanCount, err := applyRatification(in, decision)
+	if err != nil {
+		return nil, err
+	}
+	out.RatifiedCount = len(decision.Ratified)
+	out.ExpiredCount = len(decision.Expired)
+	out.OrphanedCount += expiredOrphanCount
+	return out, nil
+}
+
+// ratificationDecision is one boundary's RATIFY and EXPIRY verdicts: which
+// pending actions are accepted and which are classified expired.
+type ratificationDecision struct {
+	Ratified []*models.GovernanceProposal
+	Expired  []*models.GovernanceProposal
+}
+
+// decideRatification computes the RATIFY and EXPIRY verdicts for the boundary
+// into in.NewEpoch without writing: every read goes through in.Txn, so the
+// decision depends only on the state that transaction observes.
+func decideRatification(
+	in *EpochInput,
+	out *EpochOutput,
+	conwayPParams *conway.ConwayProtocolParameters,
+	treasuryRemaining uint64,
+) (*ratificationDecision, error) {
+	verdicts := &ratificationDecision{}
 	// RATIFY uses the preceding epoch's pulser state, which includes actions
 	// expiring at this boundary. Querying at PrevEpoch preserves the database's
 	// canonical proposal order for both current and final-boundary candidates.
@@ -619,7 +652,7 @@ func ProcessEpoch(
 	// withdrawals consume this budget immediately, even though they are not
 	// enacted until a later boundary and even when an unregistered destination
 	// would leave the corresponding lovelace in Dingo's physical treasury pot.
-	ratificationTreasuryRemaining := enactCtx.TreasuryWithdrawalRemaining
+	ratificationTreasuryRemaining := treasuryRemaining
 
 	sort.SliceStable(stillActive, func(i, j int) bool {
 		return govActionPriority(stillActive[i]) <
@@ -792,16 +825,11 @@ func ProcessEpoch(
 		ratifiedSlot := in.BoundarySlot
 		proposal.RatifiedEpoch = &ratifiedEpoch
 		proposal.RatifiedSlot = &ratifiedSlot
-		if err := in.DB.SetGovernanceProposal(
-			proposal, in.Txn,
-		); err != nil {
-			return nil, fmt.Errorf("mark ratified: %w", err)
-		}
+		verdicts.Ratified = append(verdicts.Ratified, proposal)
 		if purpose != purposeNone {
 			ratifiedThisTickByPurpose[purpose] = true
 		}
 		ratificationTreasuryRemaining = nextTreasuryRemaining
-		out.RatifiedCount++
 		if isDelayingActionPurpose(purpose) {
 			break
 		}
@@ -811,52 +839,23 @@ func ProcessEpoch(
 	// RATIFY has now had its final chance to accept each expiring action.
 	// Mark only proposals that remain unratified; accepted actions move to
 	// ENACT on the next boundary.
-	expired, err := in.DB.GetExpiringGovernanceProposals(
+	expiring, err := in.DB.GetExpiringGovernanceProposals(
 		in.NewEpoch, in.Txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get expiring proposals: %w", err)
 	}
-	for _, p := range expired {
-		expiredEpoch := in.NewEpoch
-		expiredSlot := in.BoundarySlot
-		p.ExpiredEpoch = &expiredEpoch
-		p.ExpiredSlot = &expiredSlot
-		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
-			return nil, fmt.Errorf("mark expired: %w", err)
+	// The query predates this tick's ratified marks, which apply writes.
+	ratifiedNow := make(map[string]struct{}, len(verdicts.Ratified))
+	for _, p := range verdicts.Ratified {
+		ratifiedNow[proposalIdentityKey(p)] = struct{}{}
+	}
+	for _, p := range expiring {
+		if _, ok := ratifiedNow[proposalIdentityKey(p)]; ok {
+			continue
 		}
-		out.ExpiredCount++
+		verdicts.Expired = append(verdicts.Expired, p)
 	}
-	// Remove descendants only for actions that failed RATIFY. Accepted
-	// actions remain pending enactment and retain their successor tree.
-	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
-		in.NewEpoch,
-		in.BoundarySlot,
-		in.Txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get boundary-expired proposals: %w", err)
-	}
-	expiredSeeds := append(
-		append(make([]*models.GovernanceProposal, 0,
-			len(replayedExpired)+len(expired)), replayedExpired...),
-		expired...,
-	)
-	expiredOrphanCount, err := removeOrphanedProposals(
-		in.DB,
-		in.Txn,
-		nil,
-		expiredSeeds,
-		nil,
-		in.NewEpoch,
-		in.NewEpoch,
-		in.BoundarySlot,
-		in.Logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("remove expired proposal descendants: %w", err)
-	}
-	out.OrphanedCount += expiredOrphanCount
 
 	if in.Logger != nil && len(stillActive) > 0 {
 		elapsed := time.Since(tallyStart)
@@ -880,7 +879,61 @@ func ProcessEpoch(
 		}
 	}
 
-	return out, nil
+	return verdicts, nil
+}
+
+// applyRatification writes a decision's ratified and expired marks at the
+// boundary slot and marks the expired actions' descendants.
+func applyRatification(
+	in *EpochInput,
+	decision *ratificationDecision,
+) (int, error) {
+	for _, proposal := range decision.Ratified {
+		if err := in.DB.SetGovernanceProposal(
+			proposal, in.Txn,
+		); err != nil {
+			return 0, fmt.Errorf("mark ratified: %w", err)
+		}
+	}
+	for _, p := range decision.Expired {
+		expiredEpoch := in.NewEpoch
+		expiredSlot := in.BoundarySlot
+		p.ExpiredEpoch = &expiredEpoch
+		p.ExpiredSlot = &expiredSlot
+		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
+			return 0, fmt.Errorf("mark expired: %w", err)
+		}
+	}
+	// Remove descendants only for actions that failed RATIFY. Accepted
+	// actions remain pending enactment and retain their successor tree.
+	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("get boundary-expired proposals: %w", err)
+	}
+	expiredSeeds := append(
+		append(make([]*models.GovernanceProposal, 0,
+			len(replayedExpired)+len(decision.Expired)), replayedExpired...),
+		decision.Expired...,
+	)
+	expiredOrphanCount, err := removeOrphanedProposals(
+		in.DB,
+		in.Txn,
+		nil,
+		expiredSeeds,
+		nil,
+		in.NewEpoch,
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Logger,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
+	}
+	return expiredOrphanCount, nil
 }
 
 func cloneGovernanceProtocolParameters(
