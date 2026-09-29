@@ -5128,11 +5128,16 @@ always (and bootstrap peers while bootstrap promotion is still allowed),
 gossip/ledger peers under a shared per-cycle budget triggered by either of two
 conditions: the node has no chain-selection-eligible upstream connection left,
 or the hot set sits below `MinHotPeers` and the warm pool does not hold enough
-promotable gossip/ledger peers (an active connection and a score at or above
-`MinScoreThreshold`) to close that gap on its own. This guarantees the node
-converges back to connected, and back toward `MinHotPeers`, even when a close
-event cannot be attributed to its peer, a dial loop exited early, or the warm
-pool has run dry.
+promotable gossip/ledger peers (a client connection, not a responder-only
+inbound, and a score at or above `MinScoreThreshold`) to close that gap on its
+own. The budget goes to the highest-scoring cold peers first, never-observed
+peers after observed ones and observed below-threshold peers last; under the
+`MinHotPeers` trigger an observed below-threshold peer is not redialed at all
+until score aging lifts it back over the threshold, so a peer churn just
+dropped cannot cycle straight back to hot. This guarantees the node converges
+back to connected, and back toward `MinHotPeers`, even when a close event
+cannot be attributed to its peer, a dial loop exited early, or the warm pool
+has run dry.
 
 Gossip churn never demotes the peer holding the last eligible upstream
 connection, so routine churn cannot leave the node without a chainsync source.

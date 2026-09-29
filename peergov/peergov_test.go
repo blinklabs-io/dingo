@@ -3510,21 +3510,21 @@ func TestPeerGovernor_GossipChurn_PromotesWarmPeers(t *testing.T) {
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 		{
 			Address:          "gossip2:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.8,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // High score, should promote
 		{
 			Address:          "gossip3:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.2,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Low score, should not promote
 	}
 
@@ -4012,21 +4012,21 @@ func TestPeerGovernor_PromoteWarmNonRootPeers_RespectsScoreThreshold(
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.8,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Above threshold
 		{
 			Address:          "gossip2:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.3,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Below threshold
 		{
 			Address:          "gossip3:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.4,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Below threshold
 	}
 
@@ -4112,14 +4112,14 @@ func TestPeerGovernor_GossipChurn_Metrics(t *testing.T) {
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 		{
 			Address:          "gossip2:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.8,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 	}
 

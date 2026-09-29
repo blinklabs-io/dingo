@@ -355,14 +355,16 @@ func (p *PeerGovernor) publicRootChurn() {
 
 // isPromotableWarmNonRootPeerLocked reports whether peer is a warm
 // gossip/ledger peer that promoteWarmNonRootPeersLocked may promote: it
-// has an active connection and a score at or above MinScoreThreshold.
-// Must be called with p.mu held.
+// has a client connection and a score at or above MinScoreThreshold. A
+// responder-only inbound connection does not qualify: reconcile's refill
+// never promotes it, and a hot peer without a client connection is
+// demoted by reconcile's inactivity check. Must be called with p.mu held.
 func (p *PeerGovernor) isPromotableWarmNonRootPeerLocked(peer *Peer) bool {
 	return peer != nil &&
 		peer.State == PeerStateWarm &&
 		(peer.Source == PeerSourceP2PGossip ||
 			peer.Source == PeerSourceP2PLedger) &&
-		peer.Connection != nil &&
+		peer.hasClientConnection() &&
 		peer.PerformanceScore >= p.config.MinScoreThreshold
 }
 
