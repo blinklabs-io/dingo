@@ -16,6 +16,8 @@ package models
 
 import (
 	"bytes"
+	"maps"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -47,14 +49,12 @@ func shapeBodyMap(extra map[uint]any) map[uint]any {
 		1: []any{[]any{append([]byte{0x61}, shapeHash(28, 0x22)...), uint64(1_000_000)}},
 		2: uint64(200_000),
 	}
-	for k, v := range extra {
-		body[k] = v
-	}
+	maps.Copy(body, extra)
 	return body
 }
 
 // buildShapeBlock wraps one transaction body in an otherwise valid Conway
-// block. Block body-hash is not recomputed: DecodeBlockCbor does not verify it.
+// block, recomputing the header body hash that DecodeBlockCbor verifies.
 func buildShapeBlock(t *testing.T, body map[uint]any, isValid bool) []byte {
 	t.Helper()
 	base := testutil.BuildDecodableConwayBlockBytes(t, 100, 7)
@@ -249,7 +249,7 @@ func TestConwayBlockDecodePoolOwnerDuplicates(t *testing.T) {
 	}
 	many := func(n int, tail []byte) []any {
 		out := make([]any, 0, n+1)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out = append(out, owner(byte(i), 0))
 		}
 		return append(out, tail)
@@ -294,6 +294,7 @@ func TestBabbageBlockDecodeAcceptsDuplicatePoolOwners(t *testing.T) {
 	require.NoError(t, err)
 	err = decodeShapeBlock(raw)
 	require.Error(t, err, "control: the same bytes are rejected as Conway")
+	require.Contains(t, err.Error(), "duplicate owner")
 }
 
 func regDRepCert(url string) []any {
@@ -335,12 +336,12 @@ func TestConwayBlockDecodeGovActionIndexRange(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		index   uint64
-		wantErr bool
+		wantErr string
 	}{
-		{"255", 255, false},
-		{"256", 256, false},
-		{"65535", 65535, false},
-		{"65536", 65536, true},
+		{"255", 255, ""},
+		{"256", 256, ""},
+		{"65535", 65535, ""},
+		{"65536", 65536, "exceeds the maximum of 65535"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -361,8 +362,9 @@ func TestConwayBlockDecodeGovActionIndexRange(t *testing.T) {
 			body := shapeBodyMap(map[uint]any{19: cbor.RawMessage(votes)})
 			for _, isValid := range []bool{true, false} {
 				err := decodeShapeBlock(buildShapeBlock(t, body, isValid))
-				if tc.wantErr {
+				if tc.wantErr != "" {
 					require.Error(t, err)
+					require.Contains(t, err.Error(), tc.wantErr)
 					continue
 				}
 				require.NoError(t, err)
@@ -373,7 +375,7 @@ func TestConwayBlockDecodeGovActionIndexRange(t *testing.T) {
 
 func TestGovActionIdStringDoesNotPanicAboveCip0129Range(t *testing.T) {
 	t.Parallel()
-	for _, index := range []uint32{255, 256, 65535} {
+	for _, index := range []uint32{255, 256, 65535, math.MaxUint32} {
 		id := lcommon.GovActionId{
 			TransactionId: [32]byte{0xc1},
 			GovActionIdx:  index,
@@ -453,15 +455,15 @@ func TestConwayBlockDecodeUpdateCommitteeQuorum(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		quorum  any
-		wantErr bool
+		wantErr string
 	}{
-		{"zero", rat(0, 1), false},
-		{"one", rat(1, 1), false},
-		{"one half", rat(1, 2), false},
-		{"negative", rat(-1, 2), true},
-		{"above one", rat(3, 2), true},
-		{"zero denominator", rat(1, 0), true},
-		{"missing", nil, true},
+		{"zero", rat(0, 1), ""},
+		{"one", rat(1, 1), ""},
+		{"one half", rat(1, 2), ""},
+		{"negative", rat(-1, 2), "outside [0,1]"},
+		{"above one", rat(3, 2), "outside [0,1]"},
+		{"zero denominator", rat(1, 0), "denominator"},
+		{"missing", nil, "invalid cbor.Rat"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -470,8 +472,9 @@ func TestConwayBlockDecodeUpdateCommitteeQuorum(t *testing.T) {
 			})
 			for _, isValid := range []bool{true, false} {
 				err := decodeShapeBlock(buildShapeBlock(t, body, isValid))
-				if tc.wantErr {
+				if tc.wantErr != "" {
 					require.Error(t, err)
+					require.Contains(t, err.Error(), tc.wantErr)
 					continue
 				}
 				require.NoError(t, err)
@@ -486,8 +489,25 @@ func TestNewUpdateCommitteeGovActionQuorum(t *testing.T) {
 		nil, nil, nil, cbor.Rat{},
 	)
 	require.Error(t, err)
-	_, err = lcommon.NewUpdateCommitteeGovAction(
-		nil, nil, nil, cbor.Rat{Rat: big.NewRat(0, 1)},
-	)
-	require.NoError(t, err)
+	for _, tc := range []struct {
+		name    string
+		quorum  *big.Rat
+		wantErr bool
+	}{
+		{"zero", big.NewRat(0, 1), false},
+		{"one half", big.NewRat(1, 2), false},
+		{"one", big.NewRat(1, 1), false},
+		{"negative", big.NewRat(-1, 2), true},
+		{"above one", big.NewRat(3, 2), true},
+	} {
+		_, err = lcommon.NewUpdateCommitteeGovAction(
+			nil, nil, nil, cbor.Rat{Rat: tc.quorum},
+		)
+		if tc.wantErr {
+			require.Error(t, err, tc.name)
+			require.Contains(t, err.Error(), "outside [0,1]", tc.name)
+			continue
+		}
+		require.NoError(t, err, tc.name)
+	}
 }
