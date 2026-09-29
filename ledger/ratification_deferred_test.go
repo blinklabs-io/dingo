@@ -257,6 +257,7 @@ func TestResumePendingRatificationRewindsOrFails(t *testing.T) {
 			err = ls.resumePendingRatificationIntent()
 			if tc.fails {
 				require.ErrorIs(t, err, errRollbackIntentTooLarge)
+				require.ErrorContains(t, err, "resync required")
 				return
 			}
 			require.NoError(t, err)

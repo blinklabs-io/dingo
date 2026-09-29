@@ -3953,6 +3953,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			if queueStartup {
 				ls.queueStartupRewardPrecompute()
 			}
+			ls.queueRewardCreditCompaction()
 			return
 		}
 		// Close discards queued work and waits for the worker; restoring
@@ -3991,6 +3992,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			ls.RUnlock()
 			ls.maybeQueueStakeRewardPrecomputeRetry(capturedSlot)
 		}
+		ls.queueRewardCreditCompaction()
 	}()
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip

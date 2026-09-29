@@ -438,6 +438,12 @@ func (ls *LedgerState) resumePendingRatificationIntent() error {
 		"blocks", len(blocks),
 	)
 	if err := persistRollbackIntent(ls.db, point, blocks); err != nil {
+		if errors.Is(err, errRollbackIntentTooLarge) {
+			return fmt.Errorf(
+				"pending ratification recovery for epoch %d exceeds the automatic rewind limit; resync required: %w",
+				rec.Epoch, err,
+			)
+		}
 		return fmt.Errorf(
 			"rewind below pending ratification for epoch %d: %w",
 			rec.Epoch, err,

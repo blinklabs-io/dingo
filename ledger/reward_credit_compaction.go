@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 )
@@ -31,6 +32,11 @@ const rewardCreditRoundsKeptUnfolded = 2
 // rewardCreditCompactionChunk bounds the credits each compaction transaction
 // writes, and with it how long the job holds the metadata write lock.
 const rewardCreditCompactionChunk = 1_000
+
+const (
+	rewardCreditCompactionRetryInitial = time.Second
+	rewardCreditCompactionRetryMax     = time.Minute
+)
 
 // queueRewardCreditCompaction folds credited rounds older than the newest
 // rewardCreditRoundsKeptUnfolded into account rows in the background, which
@@ -50,14 +56,46 @@ func (ls *LedgerState) queueRewardCreditCompaction() {
 	ls.rewardCreditCompactionWG.Add(1)
 	go func() {
 		defer ls.rewardCreditCompactionWG.Done()
+		retryDelay := rewardCreditCompactionRetryInitial
 		for {
-			if err := ls.compactRewardCreditRounds(); err != nil {
+			err := ls.compactRewardCreditRounds()
+			if err != nil {
 				ls.config.Logger.Warn(
 					"failed to compact credited reward rounds",
 					"component", "ledger",
 					"error", err,
 				)
+				timer := time.NewTimer(retryDelay)
+				select {
+				case <-timer.C:
+				case <-ls.closeCh():
+					timer.Stop()
+					ls.rewardPrecomputeMu.Lock()
+					ls.rewardCreditCompactAgain = false
+					ls.rewardCreditCompacting = false
+					ls.rewardPrecomputeMu.Unlock()
+					return
+				}
+				if retryDelay < rewardCreditCompactionRetryMax {
+					retryDelay *= 2
+					if retryDelay > rewardCreditCompactionRetryMax {
+						retryDelay = rewardCreditCompactionRetryMax
+					}
+				}
+				if ls.closed.Load() {
+					ls.rewardPrecomputeMu.Lock()
+					ls.rewardCreditCompactAgain = false
+					ls.rewardCreditCompacting = false
+					ls.rewardPrecomputeMu.Unlock()
+					return
+				}
+				// The retry covers requests coalesced while the failed pass ran.
+				ls.rewardPrecomputeMu.Lock()
+				ls.rewardCreditCompactAgain = false
+				ls.rewardPrecomputeMu.Unlock()
+				continue
 			}
+			retryDelay = rewardCreditCompactionRetryInitial
 			ls.rewardPrecomputeMu.Lock()
 			again := ls.rewardCreditCompactAgain && !ls.closed.Load()
 			ls.rewardCreditCompactAgain = false

@@ -60,6 +60,7 @@ func (ls *LedgerState) waitEpochBoundaryBenchBackground() {
 	_ = ls.WaitEpochBoundaryJob(context.Background())
 	ls.ratificationWG.Wait()
 	ls.deferredStakeInputsWG.Wait()
+	ls.rewardCreditCompactionWG.Wait()
 }
 
 // wireDeferredBoundarySnapshot mirrors node.go's deferred mark snapshot
