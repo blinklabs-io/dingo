@@ -325,8 +325,8 @@ func TestExtractRawCostModels_CoversDijkstra(t *testing.T) {
 	assert.Equal(t, map[uint][]int64{0: {1}, 1: {2}}, got)
 }
 
-// TestExtractRawCostModels_NilPointerDoesNotPanic covers blinklabs-io/dingo#3825's
-// PR review (Cubic): a concrete-typed nil pointer (lcommon.ProtocolParameters
+// TestExtractRawCostModels_NilPointerDoesNotPanic verifies that a concrete-typed
+// nil pointer (lcommon.ProtocolParameters
 // holding e.g. a nil *dijkstra.DijkstraProtocolParameters) still matches its
 // type's case in the switch, so every case must guard against nil before
 // dereferencing rather than panicking -- mirroring the guard
@@ -602,8 +602,8 @@ func TestResolveSyntheticV2CostModel_ExplicitValueWins(t *testing.T) {
 }
 
 // TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpdates
-// covers blinklabs-io/dingo#3825's PR review (Cubic): a chain that enacts
-// more than one real PlutusV2 cost-model update over its life must not have
+// verifies that a chain that enacts more than one real PlutusV2 cost-model
+// update over its life does not have
 // its cleared-epoch marker overwritten by the later update -- doing so would
 // make RecomputeSyntheticV2CostModelMarkerAfterTruncate incorrectly reset
 // the marker to synthetic on a rollback that crosses back past only the
@@ -716,8 +716,7 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 }
 
 // TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams
-// covers blinklabs-io/dingo#3825's PR review (CodeRabbit round): the
-// synthetic-cost-model marker must be written in the SAME database
+// verifies that the synthetic-cost-model marker is written in the same database
 // transaction as the pparams update it describes, not committed
 // separately afterward. If they were in different transactions, a crash
 // between the two commits could leave a stale marker on restart. This is

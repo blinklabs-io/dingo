@@ -122,7 +122,9 @@ func newSignedByronPBFTBlock(
 	if delegationPayload == nil {
 		delegationPayload = []any{}
 	}
-	delegationPayloadCbor, err := cbor.Encode(cbor.IndefLengthList(delegationPayload))
+	delegationPayloadCbor, err := cbor.Encode(
+		cbor.IndefLengthList(delegationPayload),
+	)
 	require.NoError(t, err)
 	bodyProof, ok := header.BodyProof.([]any)
 	require.True(t, ok)
@@ -382,7 +384,7 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	state, err = ls.advanceByronPBFTState(state, block, true)
@@ -494,7 +496,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -694,7 +696,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -1175,9 +1177,9 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "genesis hash")
 }
 
-// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
-// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
-// (derived from ConsensusData.Epoch) are independent fields.
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin verifies that an
+// EBB's block number (Difficulty.Value) and slot (derived from
+// ConsensusData.Epoch) are independent fields.
 // chain.firstBlockNumberValid only constrains the former, and
 // validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
 // Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to
