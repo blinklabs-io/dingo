@@ -508,7 +508,8 @@ services:
     profiles: ["koios-parity"]
     restart: unless-stopped
     depends_on:
-      - dingo-preview
+      dingo-preview:
+        condition: service_started
     volumes:
       - ./koios-parity/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - koios-parity-prometheus-data:/prometheus
@@ -520,7 +521,8 @@ services:
     profiles: ["koios-parity"]
     restart: unless-stopped
     depends_on:
-      - koios-parity-prometheus
+      koios-parity-prometheus:
+        condition: service_started
     environment:
       GF_SECURITY_ADMIN_USER: "${DEVNET_GRAFANA_ADMIN_USER:-admin}"
       GF_SECURITY_ADMIN_PASSWORD: "${DEVNET_GRAFANA_ADMIN_PASSWORD:-admin}"
