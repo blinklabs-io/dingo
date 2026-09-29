@@ -19,6 +19,8 @@ import (
 	"embed"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"os"
 	"path"
 	"path/filepath"
@@ -59,6 +61,9 @@ type CardanoNodeConfig struct {
 	ShelleyGenesisHash                         string `yaml:"ShelleyGenesisHash"`
 	CheckpointsFile                            string `yaml:"CheckpointsFile"`
 	CheckpointsFileHash                        string `yaml:"CheckpointsFileHash"`
+	// PBftSignatureThreshold is the optional Byron PBFT signature threshold,
+	// the maximum share of the last k blocks one genesis key may sign.
+	PBftSignatureThreshold *CardanoNodeDouble `yaml:"PBftSignatureThreshold"`
 
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
@@ -90,6 +95,27 @@ type CardanoNodeConfig struct {
 	PeerSharing *bool `yaml:"PeerSharing"`
 }
 
+// CardanoNodeDouble is a numeric node-config value that cardano-node reads as
+// a Double.
+type CardanoNodeDouble float64
+
+// UnmarshalYAML accepts finite numeric scalars only.
+func (d *CardanoNodeDouble) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode ||
+		(node.Tag != "!!float" && node.Tag != "!!int") {
+		return fmt.Errorf("expected a numeric scalar, got %s", node.Tag)
+	}
+	var value float64
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("expected a finite number, got %s", node.Value)
+	}
+	*d = CardanoNodeDouble(value)
+	return nil
+}
+
 const (
 	defaultMithrilGenesisVerificationKeyFile          = "genesis.vkey"
 	defaultMithrilGenesisAncillaryVerificationKeyFile = "ancillary.vkey"
@@ -102,6 +128,31 @@ func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
 		return nil, err
 	}
 	return &ret, nil
+}
+
+// PBFTSignatureLimit returns the most blocks one genesis key may sign in a
+// window of the last securityParam Byron blocks. ouroboros-consensus computes
+// floor(threshold * k) in Double arithmetic and stores it as a Word64, so a
+// product just below an integer rounds down and a negative product wraps.
+// configured is false when PBftSignatureThreshold is absent, in which case
+// cardano-node's default of 0.22 applies.
+func (c *CardanoNodeConfig) PBFTSignatureLimit(
+	securityParam uint64,
+) (limit uint64, configured bool, err error) {
+	if c == nil || c.PBftSignatureThreshold == nil {
+		return 0, false, nil
+	}
+	product := float64(*c.PBftSignatureThreshold) * float64(securityParam)
+	if math.IsNaN(product) || math.IsInf(product, 0) {
+		return 0, true, fmt.Errorf(
+			"PBftSignatureThreshold %v times k %d is not finite",
+			float64(*c.PBftSignatureThreshold),
+			securityParam,
+		)
+	}
+	floor, _ := big.NewFloat(math.Floor(product)).Int(nil)
+	modulus := new(big.Int).Lsh(big.NewInt(1), 64)
+	return floor.Mod(floor, modulus).Uint64(), true, nil
 }
 
 func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {

@@ -103,10 +103,12 @@ func validateInboundBlockEnvelope(
 		return err
 	}
 	if block.Era().Id == byron.EraIdByron {
-		// Byron does not carry the Shelley-style body-size field, but its
-		// header carries a separate proof over every body payload. Verify it
-		// before admitting the block so a genuine header cannot be paired with
-		// a substituted body.
+		// Byron does not carry the Shelley-style body-size field, but a main
+		// block's header carries a separate proof over every body payload.
+		// Verify it before admitting the block so a genuine header cannot be
+		// paired with a substituted body. The reference decodes an EBB's
+		// body proof as a byte string and discards it, so an EBB body is not
+		// bound to its header.
 		// Decoded inbound blocks preserve their complete CBOR. Synthetic
 		// blocks used by callers that do not carry wire bytes cannot provide a
 		// body proof to verify and are handled by the normal structural path.
@@ -122,6 +124,7 @@ func validateInboundBlockEnvelope(
 			if err := byronBlock.ValidateBodyProof(); err != nil {
 				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
 			}
+			return validateByronEbbSize(byronBlock)
 		default:
 			return nil
 		}
@@ -287,6 +290,22 @@ func validateByronEbbPlacement(block gledger.Block) error {
 			slot,
 			ebb.BlockHeader.ConsensusData.Epoch,
 			expectedSlot,
+		)
+	}
+	return nil
+}
+
+// byronMaxEbbSize is the reference updateChainBoundary bound on an epoch
+// boundary block's whole encoding. It replaces maxBlockSize and
+// maxHeaderSize for EBBs rather than adding to them.
+const byronMaxEbbSize = 2_000_000
+
+func validateByronEbbSize(block *byron.ByronEpochBoundaryBlock) error {
+	if size := len(block.Cbor()); size > byronMaxEbbSize {
+		return fmt.Errorf(
+			"byron epoch boundary block size %d exceeds fixed limit %d",
+			size,
+			byronMaxEbbSize,
 		)
 	}
 	return nil

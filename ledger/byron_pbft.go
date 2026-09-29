@@ -96,6 +96,21 @@ func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 			err,
 		)
 	}
+	limit, configured, err := lsConfig.CardanoNodeConfig.PBFTSignatureLimit(
+		config.SecurityParam,
+	)
+	if err != nil {
+		return byronPBFTCache{}, fmt.Errorf(
+			"read Byron PBFT signature threshold: %w",
+			err,
+		)
+	}
+	if configured {
+		// gouroboros charges floor(k * numerator / denominator), so limit/k
+		// reproduces the reference's Double-computed limit exactly.
+		config.PBFTSignatureThresholdNumerator = limit
+		config.PBFTSignatureThresholdDenominator = config.SecurityParam
+	}
 	return byronPBFTCache{config: &config}, nil
 }
 
@@ -544,10 +559,7 @@ func newByronPBFTState(
 	config byronconsensus.ByronConfig,
 	genesisParams *eras.ByronProtocolParameters,
 ) (byronPBFTState, error) {
-	issuerState, err := byronconsensus.NewPBFTState(
-		nil,
-		config.SecurityParam,
-	)
+	issuerState, err := byronconsensus.NewPBFTStateFromConfig(nil, config)
 	if err != nil {
 		return byronPBFTState{}, err
 	}
