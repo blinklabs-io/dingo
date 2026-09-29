@@ -409,17 +409,19 @@ func ProcessEpoch(
 			return nil, err
 		}
 	}
-	// --- ENACTMENT-DRIVEN SUBTREE REMOVAL ---------------------------------
+	// --- ENACTMENT- AND DROP-DRIVEN SUBTREE REMOVAL -----------------------
 	// Enactment advances a purpose chain: descendants of the enacted action
 	// remain valid, while competing siblings and their descendants are
-	// removed before RATIFY considers the remaining proposals. Expiry-driven
-	// removal is deferred until the proposal's deposit is returned one epoch
-	// later.
+	// removed before RATIFY considers the remaining proposals. A dropped
+	// action leaves the proposals set with its whole subtree (Conway
+	// Rules/Epoch.hs proposalsApplyEnactment), including children proposed
+	// while it was expired but still a member, and every one is refunded now.
 	orphanCount, err := removeOrphanedProposals(
 		in.DB,
 		in.Txn,
 		successfullyEnacted,
 		nil,
+		droppable,
 		in.PrevEpoch,
 		in.NewEpoch,
 		in.BoundarySlot,
@@ -845,6 +847,7 @@ func ProcessEpoch(
 		in.Txn,
 		nil,
 		expiredSeeds,
+		nil,
 		in.NewEpoch,
 		in.NewEpoch,
 		in.BoundarySlot,
@@ -1220,6 +1223,7 @@ func removeOrphanedProposals(
 	txn *database.Txn,
 	enacted []*models.GovernanceProposal,
 	expired []*models.GovernanceProposal,
+	dropped []*models.GovernanceProposal,
 	activeEpoch uint64,
 	epoch uint64,
 	slot uint64,
@@ -1256,6 +1260,12 @@ func removeOrphanedProposals(
 	for _, proposal := range expired {
 		expirySeeds = append(
 			expirySeeds, children[proposalIdentityKey(proposal)]...,
+		)
+	}
+	dropSeeds := make([]*models.GovernanceProposal, 0)
+	for _, proposal := range dropped {
+		dropSeeds = append(
+			dropSeeds, children[proposalIdentityKey(proposal)]...,
 		)
 	}
 
@@ -1334,6 +1344,9 @@ func removeOrphanedProposals(
 		return count, err
 	}
 	if err := sweep(expirySeeds, false); err != nil {
+		return count, err
+	}
+	if err := sweep(dropSeeds, true); err != nil {
 		return count, err
 	}
 	return count, nil

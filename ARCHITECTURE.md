@@ -3777,9 +3777,12 @@ The `LedgerView` interface provides query access to ledger state:
 - Conway governance validation exposes the authoritative enacted root for each
   CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
   means those roots are known to be absent; lookup failures are propagated
-  instead of weakening ancestry checks. `GovActionById` exposes pending
-  actions and the current enacted roots, while excluding expired and superseded
-  enacted actions. It rehydrates their era-specific action CBOR and reports the
+  instead of weakening ancestry checks. `GovActionById` exposes members of the
+  Conway proposals set and the current enacted roots, while excluding dropped
+  and superseded enacted actions. An action RATIFY classified expired stays a
+  member until the next boundary drops it, so a child may still name it and a
+  vote on it is refused by its expiry epoch, not as unknown; validation during
+  an epoch therefore never reads that epoch's own RATIFY marks. It rehydrates their era-specific action CBOR and reports the
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
@@ -13236,7 +13239,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    `GetExpiredAwaitingDropGovernanceProposals` finds proposals whose
    `expired_epoch` is strictly below the current epoch and whose deposit has
    not yet been returned, refunds each (`refundProposalDeposit`), and stamps
-   `governance_proposal_drop` (`dropped_epoch`/`dropped_slot`). That epoch
+   `governance_proposal_drop` (`dropped_epoch`/`dropped_slot`). The dropped
+   actions' remaining subtrees, including children proposed while they were
+   expired but still members, are removed and refunded in the same tick. That epoch
    bound, rather than this step's position ahead of the expiry step, is what
    enforces the delay: a boundary reprocessed after a commit crash reruns
    against expiries the first pass already wrote. The drop state lives in a

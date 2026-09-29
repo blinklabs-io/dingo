@@ -1366,13 +1366,12 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 func (lv *LedgerView) proposedCommitteeMember(
 	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
-	epoch, pparams := lv.committeeSnapshot()
-	proposals, err := lv.ls.db.GetActiveGovernanceProposals(
-		epoch,
-		lv.txn,
-	)
+	_, pparams := lv.committeeSnapshot()
+	// GOVCERT's isPotentialFutureMember reads the whole proposals set, which
+	// keeps an expired UpdateCommittee until the boundary that drops it.
+	proposals, err := lv.ls.db.GetGovernanceProposalSet(lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get active governance proposals: %w", err)
+		return nil, fmt.Errorf("get governance proposal set: %w", err)
 	}
 	// NoConfidence and UpdateCommittee chain off the same committee root, so
 	// the root must be the latest enacted member of the pair. Querying only
@@ -2118,8 +2117,12 @@ func (lv *LedgerView) GovActionById(
 		}
 		return nil, fmt.Errorf("get governance proposal: %w", err)
 	}
-	// Expired proposals are no longer members of their purpose tree.
-	if proposal.ExpiredEpoch != nil {
+	// The Conway GOV rule resolves votes and parents against the proposals
+	// set, which loses an expired action only when EPOCH removes it one
+	// boundary after RATIFY classified it (DroppedEpoch). The expiry mark
+	// itself must not hide it: a vote is refused by gasExpiresAfter
+	// arithmetic on ExpirySlot, and a child may still name it as parent.
+	if proposal.DroppedEpoch != nil {
 		return nil, nil
 	}
 	// The current enacted root must remain resolvable because content-aware
@@ -2356,10 +2359,11 @@ func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 		}
 		return false
 	}
-	// Voting procedures may target only pending actions. GovActionById also
-	// resolves the current enacted purpose root for content-aware predecessor
-	// rules, so it cannot be used as the existence predicate here.
-	return proposal.EnactedEpoch == nil && proposal.ExpiredEpoch == nil
+	// Voting procedures may target only members of the proposals set.
+	// GovActionById also resolves the current enacted purpose root for
+	// content-aware predecessor rules, so it cannot be used as the existence
+	// predicate here.
+	return proposal.EnactedEpoch == nil && proposal.DroppedEpoch == nil
 }
 
 // StakeDistribution represents the stake distribution at an epoch boundary.
