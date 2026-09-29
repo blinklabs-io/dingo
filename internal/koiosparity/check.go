@@ -303,6 +303,20 @@ func CheckEpoch(
 // instead.
 const preStakingThroughEpoch = 1
 
+// IsPreStakingEpoch reports whether Koios legitimately has no active_stake
+// for epoch, because no valid "go" stake snapshot exists for it yet. Koios
+// returns active_stake=null there permanently, so a caller must treat that
+// null as "not comparable" rather than as a fault; above this boundary the
+// same null means Koios has not finished processing a just-closed epoch, or
+// something is genuinely wrong upstream, and is a real error.
+//
+// Exported so internal/nodeparity draws the boundary from the same constant
+// the fetch and check phases already use, rather than hardcoding an epoch
+// number that would silently diverge if the derivation ever changed.
+func IsPreStakingEpoch(epoch uint64) bool {
+	return epoch <= preStakingThroughEpoch
+}
+
 // koiosStakeEpoch returns the Dingo epoch whose reward_pool_input/
 // reward_pool_output rows and epoch_summary/mark stake distribution actually
 // correspond to Koios reporting epoch koiosEpoch's active stake and reward

@@ -4841,9 +4841,9 @@ func TestConwayCommitteeCertificateRuleResignationTracksTaggedIdentity(
 }
 
 // TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable
-// covers a CodeRabbit finding on this PR: when CommitteeStateAvailable
-// reports false (e.g. a genesis committee member Dingo does not persist,
-// blinklabs-io/dingo#3785), every certificate for that credential takes the
+// verifies that when CommitteeStateAvailable reports false (for example, a
+// genesis committee member is not persisted), every certificate for that
+// credential takes the
 // non-authoritative continue branch. That branch must still consult and
 // update resignedInTx, or a resign-then-resign or resign-then-authorize
 // sequence in one transaction passes uninspected because neither
