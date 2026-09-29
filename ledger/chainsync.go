@@ -6947,11 +6947,13 @@ func (ls *LedgerState) processEpochRollover(
 	// rollover where the new epoch record and the post-enactment protocol
 	// version exist.
 	// A Conway boundary with the deferred-snapshot hooks leaves mark[new
-	// epoch] to its background job, which reconstructs the SNAP point from
-	// the committed boundary. HARDFORK and era transitions rewrite state the
+	// epoch] to its background job, which repeats the live SNAP-point read on
+	// the committed boundary and corrects it for what followed SNAP; without
+	// the live read's hook the boundary keeps its own capture. HARDFORK and era transitions rewrite state the
 	// reconstruction reads, and CIP-0163 activation restamps expiries after
 	// SNAP, so those boundaries capture it here.
 	snapDeferred := ls.deferredBoundarySnapshotHook.Load() != nil &&
+		ls.epochBoundarySnapshotStakeHook() != nil &&
 		ls.epochBoundarySnapshotHook() != nil &&
 		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
