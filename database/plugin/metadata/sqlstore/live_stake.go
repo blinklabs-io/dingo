@@ -1353,7 +1353,10 @@ ORDER BY credential_tag, staking_key, id`, slotValue)
 		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
 	}
 	defer rows.Close()
-	var ret []*models.AccountRewardDelta
+	var (
+		ret  []*models.AccountRewardDelta
+		last *models.AccountRewardDelta
+	)
 	for rows.Next() {
 		var tag uint8
 		var key []byte
@@ -1368,24 +1371,25 @@ ORDER BY credential_tag, staking_key, id`, slotValue)
 		if err != nil {
 			return nil, err
 		}
-		if n := len(ret); n > 0 && ret[n-1].CredentialTag == tag &&
-			bytes.Equal(ret[n-1].StakingKey, key) {
-			total := uint64(ret[n-1].Amount)
+		if last != nil && last.CredentialTag == tag &&
+			bytes.Equal(last.StakingKey, key) {
+			total := uint64(last.Amount)
 			if ^uint64(0)-total < amount {
 				return nil, errors.New(
 					"GetPostSnapshotRewardCredits: credit total overflows",
 				)
 			}
-			ret[n-1].Amount = types.Uint64(total + amount)
+			last.Amount = types.Uint64(total + amount)
 			continue
 		}
-		ret = append(ret, &models.AccountRewardDelta{
+		last = &models.AccountRewardDelta{
 			CredentialTag: tag,
 			StakingKey:    key,
 			Amount:        types.Uint64(amount),
 			AddedSlot:     slot,
 			PostSnapshot:  true,
-		})
+		}
+		ret = append(ret, last)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
