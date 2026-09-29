@@ -290,7 +290,14 @@ endpoint on `127.0.0.1:13798`. Override these ports with
 `DEVNET_KOIOS_PARITY_PROMETHEUS_PORT`,
 `DEVNET_KOIOS_PARITY_METRICS_PORT`, and
 `DEVNET_KOIOS_PARITY_RELAY_PORT` when they are already in use. The Grafana
-dashboards show Preview sync progress and Koios parity results.
+dashboards show Preview sync progress and Koios parity results. Grafana's
+default login is `admin` / `admin`; set `DEVNET_GRAFANA_ADMIN_USER` and
+`DEVNET_GRAFANA_ADMIN_PASSWORD` before startup, and change them before exposing
+Grafana beyond localhost.
+
+Reward parity is checked only at closed-epoch boundaries. Preview epochs last
+about five days, so a short sync can show the observer enabled without reaching
+its first parity check.
 
 ## Running the integration tests
 
