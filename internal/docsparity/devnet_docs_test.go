@@ -15,7 +15,6 @@
 package docsparity_test
 
 import (
-	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -250,14 +249,16 @@ func usesReferenceNode(services map[string]composeService) bool {
 }
 
 // TestDevNetDefaultProfileIsAllDingo checks the shipped default really is the
-// all-Dingo network and that the reference implementation is reached only
-// through the other profile.
+// all-Dingo network and that only the conformance profile uses the reference
+// implementation.
 func TestDevNetDefaultProfileIsAllDingo(t *testing.T) {
 	root := repoRoot(t)
 	compose := loadCompose(t, root)
 	profiles := profileNames(compose)
-	if len(profiles) != 2 {
-		t.Fatalf("expected two DevNet profiles, found %v", profiles)
+	for _, profile := range []string{"dingo", "conformance", "koios-parity"} {
+		if !slices.Contains(profiles, profile) {
+			t.Fatalf("expected DevNet profile %q, found %v", profile, profiles)
+		}
 	}
 
 	def := defaultProfile(t, root)
@@ -272,83 +273,27 @@ func TestDevNetDefaultProfileIsAllDingo(t *testing.T) {
 			referenceNodeImage,
 		)
 	}
-	for _, profile := range profiles {
-		if profile == def {
-			continue
-		}
-		if !usesReferenceNode(servicesInProfile(compose, profile)) {
-			t.Errorf(
-				"opt-in profile %q does not run %s; docs describe %s as the "+
-					"Dingo/%s topology",
-				profile,
-				referenceNodeImage,
-				conformanceFlag,
-				referenceNodeImage,
-			)
-		}
+	if !usesReferenceNode(servicesInProfile(compose, "conformance")) {
+		t.Errorf(
+			"conformance profile does not run %s; docs describe %s as the "+
+				"Dingo/%s topology",
+			referenceNodeImage,
+			conformanceFlag,
+			referenceNodeImage,
+		)
+	}
+	if usesReferenceNode(servicesInProfile(compose, "koios-parity")) {
+		t.Error("koios-parity profile must use the local Dingo image")
 	}
 }
 
-// TestReadmeDevNetTableMatchesCompose checks the README's DevNet service
-// table lists the default profile's nodes with the roles and host ports
-// compose actually gives them.
-func TestReadmeDevNetTableMatchesCompose(t *testing.T) {
+// TestReadmeLinksDevNetDocs checks the README points contributors to the
+// detailed DevNet instructions.
+func TestReadmeLinksDevNetDocs(t *testing.T) {
 	root := repoRoot(t)
-	compose := loadCompose(t, root)
-	def := defaultProfile(t, root)
-	services := servicesInProfile(compose, def)
-
 	readme := readRepoFile(t, root, "README.md")
-	rows := map[string]markdownTableRow{}
-	for _, row := range markdownTableRows(readme) {
-		if len(row.cells) == 0 {
-			continue
-		}
-		name := unquote(row.cells[0])
-		if _, ok := services[name]; ok {
-			rows[name] = row
-		}
-	}
-
-	names := make([]string, 0, len(services))
-	for name := range services {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		service := services[name]
-		hostPorts := service.hostPorts()
-		if len(hostPorts) == 0 {
-			continue
-		}
-		row, ok := rows[name]
-		if !ok {
-			t.Errorf(
-				"README.md has no DevNet table row for %q, a node in the "+
-					"default %q profile",
-				name,
-				def,
-			)
-			continue
-		}
-		// The service name itself is skipped: "dingo-relay" would satisfy a
-		// search for "relay" no matter what the row went on to claim.
-		text := strings.ToLower(strings.Join(row.cells[1:], " "))
-		wantRole := "relay"
-		if service.isBlockProducer() {
-			wantRole = "producer"
-		}
-		if !strings.Contains(text, wantRole) {
-			t.Errorf(
-				"%s describes %q without calling it a %s; compose sets "+
-					"CARDANO_BLOCK_PRODUCER=%q",
-				docLocation("README.md", row.line),
-				name,
-				wantRole,
-				service.Environment["CARDANO_BLOCK_PRODUCER"],
-			)
-		}
+	if !regexp.MustCompile(`\[[^]]+\]\(docs/devnet\.md\)`).MatchString(readme) {
+		t.Error("README.md does not link to docs/devnet.md")
 	}
 }
 
@@ -516,87 +461,6 @@ func mentionsReferenceNode(lower string) bool {
 	}
 }
 
-// TestReadmeIdentifiesConformanceTopology checks the README says somewhere,
-// in one breath, that the conformance flag is what brings up the reference
-// node, and that its default DevNet counts match compose.
-func TestReadmeIdentifiesConformanceTopology(t *testing.T) {
-	root := repoRoot(t)
-	compose := loadCompose(t, root)
-	def := defaultProfile(t, root)
-	services := servicesInProfile(compose, def)
-
-	readme := readRepoFile(t, root, "README.md")
-	section := markdownSection(readme, "## DevNet")
-	if section == "" {
-		t.Fatal("README.md has no `## DevNet` section")
-	}
-
-	found := false
-	for _, block := range markdownBlocks(section) {
-		lower := strings.ToLower(block.text)
-		if strings.Contains(lower, conformanceFlag) &&
-			strings.Contains(lower, referenceNodeImage) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf(
-			"README.md `## DevNet` never says %s brings up %s",
-			conformanceFlag,
-			referenceNodeImage,
-		)
-	}
-
-	var producers, relays int
-	for _, service := range services {
-		if len(service.hostPorts()) == 0 {
-			continue
-		}
-		if service.isBlockProducer() {
-			producers++
-			continue
-		}
-		relays++
-	}
-	assertCountedRole(t, section, producers, "producer")
-	assertCountedRole(t, section, relays, "relay")
-}
-
-// numberWords spell the small counts a topology description uses.
-var numberWords = map[int]string{
-	1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
-	6: "six", 7: "seven", 8: "eight", 9: "nine",
-}
-
-// assertCountedRole checks the README states how many nodes of a role the
-// default DevNet has, in figures or in words.
-func assertCountedRole(t *testing.T, section string, count int, role string) {
-	t.Helper()
-
-	if count == 0 {
-		return
-	}
-	word, ok := numberWords[count]
-	if !ok {
-		word = fmt.Sprintf("%d", count)
-	}
-	pattern := fmt.Sprintf(
-		`(?is)\b(%s|%d)\b[^.]{0,80}?%s`,
-		regexp.QuoteMeta(word),
-		count,
-		regexp.QuoteMeta(role),
-	)
-	if !regexp.MustCompile(pattern).MatchString(section) {
-		t.Errorf(
-			"README.md `## DevNet` does not state that the default network "+
-				"has %d %s node(s); compose defines that many",
-			count,
-			role,
-		)
-	}
-}
-
 // TestDocumentedDevNetFlagsExist checks every DevNet script flag in the docs
 // is one the script handles.
 func TestDocumentedDevNetFlagsExist(t *testing.T) {
@@ -707,32 +571,4 @@ func TestDevNetCommandExamplesUseProfileServices(t *testing.T) {
 	if checked == 0 {
 		t.Error("no DevNet service named in any documented command")
 	}
-}
-
-// markdownSection returns the text of a document from a heading up to the
-// next heading of the same or a higher level.
-func markdownSection(doc, heading string) string {
-	level := len(heading) - len(strings.TrimLeft(heading, "#"))
-	lines := strings.Split(doc, "\n")
-	start := -1
-	for i, line := range lines {
-		if strings.TrimSpace(line) == heading {
-			start = i
-			break
-		}
-	}
-	if start < 0 {
-		return ""
-	}
-	for i := start + 1; i < len(lines); i++ {
-		trimmed := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		found := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
-		if found <= level {
-			return strings.Join(lines[start:i], "\n")
-		}
-	}
-	return strings.Join(lines[start:], "\n")
 }

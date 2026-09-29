@@ -167,6 +167,10 @@ func TestInboundEnvelopeRejectsEraRegression(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		validateBlockOrder(shelley, envelopeParentFromBlock(lastByron)),
+		validateBlockOrder(
+			shelley,
+			envelopeParentFromBlock(lastByron),
+			byron.ByronSlotsPerEpoch,
+		),
 	)
 }

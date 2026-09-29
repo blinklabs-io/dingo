@@ -62,9 +62,9 @@ func writeLegacyLeiosEB(
 	require.NoError(t, txn.Commit())
 }
 
-// TestGetLeiosEBManifestFallsBackToLegacyKey is the cubic regression: a node
-// upgrading from before the blob key format changed to (slot, hash) must
-// still be able to read manifests it persisted under the old hash-only key,
+// TestGetLeiosEBManifestFallsBackToLegacyKey verifies that a node upgrading
+// from before the blob key format changed to (slot, hash) can still read
+// manifests it persisted under the old hash-only key,
 // rather than that data becoming silently unreachable.
 func TestGetLeiosEBManifestFallsBackToLegacyKey(t *testing.T) {
 	t.Parallel()
@@ -111,8 +111,8 @@ func TestGetLeiosEBTxsFallsBackToLegacyKey(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestGetLeiosEBManifestPropagatesRealLegacyReadError is the cubic
-// regression: a genuine failure reading the legacy fallback key (storage,
+// TestGetLeiosEBManifestPropagatesRealLegacyReadError verifies that a genuine
+// failure reading the legacy fallback key (storage,
 // network, auth) must surface as-is, not collapse into the exact-key's
 // ordinary ErrBlobKeyNotFound and look like the manifest was simply never
 // persisted.

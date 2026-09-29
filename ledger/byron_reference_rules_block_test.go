@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -182,6 +181,12 @@ func processByronReferenceRuleBlock(
 			OutputIdx: utxo.Id.Index(),
 		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
 	}
+	pparams, err := eras.NewByronProtocolParametersFromGenesis(
+		nodeConfig.ByronGenesis(),
+	)
+	if err != nil {
+		return err
+	}
 	return db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
 			txn,
@@ -194,7 +199,7 @@ func processByronReferenceRuleBlock(
 			envelopeParent{origin: true},
 			offsets,
 			eras.ByronEraDesc,
-			&shelley.ShelleyProtocolParameters{},
+			pparams,
 			nil,
 			0,
 			0,

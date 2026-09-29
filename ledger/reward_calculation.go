@@ -3777,6 +3777,22 @@ func (ls *LedgerState) rewardParameters(
 	if err != nil {
 		return nil, rewards.Parameters{}, nil, err
 	}
+	// Babbage and later have no d field: BabbagePParams defines
+	// `ppDG = to (const minBound)`, and translating the prior epoch's
+	// parameters into Babbage (Translation.hs upgradePParams) drops d. The
+	// round computed during the first Babbage epoch therefore reads
+	// prevPParams' d as 0 even when the Alonzo performance epoch held a
+	// non-zero one. Keeping the Alonzo d shrinks expectedBlocks by (1 - d) and
+	// inflates eta by the inverse: Prime Mainnet moves from d = 7/10 to
+	// Babbage at epoch 40, and the epoch-39 round overpaid 3.3x.
+	//
+	// Block counting keeps the performance epoch's d: BBODY accumulated that
+	// epoch's BlocksMade under its curPParams, so incrBlocks already skipped
+	// the Alonzo overlay slots.
+	blockCountDecentralization := params.Decentralization
+	if calculationEpochRow.EraId >= eras.BabbageEraDesc.Id {
+		params.Decentralization = new(big.Rat)
+	}
 	// CIP-23: overlay the operator-configured minimum pool margin, gated to
 	// Dijkstra and later. Single chokepoint feeding both the boundary apply and
 	// the async precompute, so both agree.
@@ -3796,7 +3812,7 @@ func (ls *LedgerState) rewardParameters(
 			params.MaxLovelaceSupply,
 		)
 	}
-	return performancePParams, params, params.Decentralization, nil
+	return performancePParams, params, blockCountDecentralization, nil
 }
 
 // applyFullPotConfig copies the CIP-0163 full-pot feature gate from the ledger

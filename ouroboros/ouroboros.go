@@ -163,6 +163,10 @@ type Ouroboros struct {
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
 	localstatequeryAcquireMutex   sync.Mutex
 	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	// blockfetchRangeBytes returns the expected wire size of a block range
+	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
+	// ledger's queued-header estimate; tests override it.
+	blockfetchRangeBytes func(start, end ocommon.Point) uint64
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
@@ -592,7 +596,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	o.blockfetchConnClient = o.blockfetchConnClientLive
+	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
+		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto

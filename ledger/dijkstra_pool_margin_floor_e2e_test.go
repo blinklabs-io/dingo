@@ -22,6 +22,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,6 +88,24 @@ func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(
 	err := eras.ValidateTxDijkstra(tx, 0, lv, dijkstraTestProtocolParameters())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "below minimum pool margin")
+}
+
+func TestValidateTxDijkstraSkipsPoolMarginFloorForInvalidTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newRewardCalculationTestLedger(t)
+	ls.config.MinPoolMargin = 150
+	lv := &LedgerView{ls: ls}
+	tx := dijkstraPoolCertTx(1, 1000)
+	tx.TxIsValid = false
+
+	err := eras.ValidateTxDijkstra(tx, 0, lv, dijkstraTestProtocolParameters())
+	require.Error(t, err)
+	var inputSetEmptyErr shelley.InputSetEmptyUtxoError
+	require.ErrorAs(t, err, &inputSetEmptyErr)
+	require.NotContains(t, err.Error(), "below minimum pool margin")
 }
 
 // TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView is

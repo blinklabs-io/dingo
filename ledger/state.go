@@ -5198,9 +5198,8 @@ func resolveSyntheticV2CostModel(
 // (already-superseded) pparams -- the tracked flag describes the CURRENT
 // era's object, not necessarily this different one, so this re-derives
 // directly from pp's own value instead (the same bootstrap heuristic
-// resolveSyntheticV2CostModel's empty-marker branch uses). See
-// blinklabs-io/dingo#3962's PR review (Cubic): this pairs with pinning
-// (LedgerView.pinSyntheticV2CostModel) to keep the answer for a single
+// resolveSyntheticV2CostModel's empty-marker branch uses). Pinning the value
+// in LedgerView keeps the answer for a single
 // validation operation consistent with the exact pp it's evaluating
 // against, rather than either a live re-read that can race a concurrent
 // writer or a flag that describes a different pparams object than pp.
@@ -5286,7 +5285,7 @@ func (ls *LedgerState) persistSyntheticV2CostModel(
 // database.RecomputeSyntheticV2CostModelMarkerAfterTruncate tell whether a
 // later rollback crosses back before this confirmation and so must undo it.
 // Both writes share the caller's txn so they commit together with the
-// pparams write they describe. See blinklabs-io/dingo#3825's PR review.
+// pparams write they describe.
 func (ls *LedgerState) markRealV2CostModelObserved(
 	epoch uint64,
 	txn *database.Txn,
@@ -5304,7 +5303,7 @@ func (ls *LedgerState) markRealV2CostModelObserved(
 	// as synthetic. Keeping the earliest confirmed epoch is correct for
 	// every subsequent comparison: "some real data was confirmed at or
 	// before this epoch" only gets stronger as more updates land, never
-	// weaker. See blinklabs-io/dingo#3825's PR review (Cubic).
+	// weaker.
 	_, alreadyCleared, err := database.SyntheticV2CostModelClearedEpoch(
 		ls.db, txn,
 	)
@@ -5846,9 +5845,8 @@ func (ls *LedgerState) ledgerReadChain(
 					// Mithril trust boundary: the same rejection
 					// reconcilePrimaryChainTipWithLedgerTip's own
 					// pre-check now declines before ever emitting an
-					// undo (Cubic review, PR #3611), and the same
-					// boundary a peer-driven rollback is refused for in
-					// handleEventChainsyncRollback. Surface it through
+					// undo. Peer-driven rollbacks are subject to the same
+					// boundary in handleEventChainsyncRollback. Surface it through
 					// the matching ChainsyncResyncReasonRollbackExceedsMithril
 					// reason rather than only a generic error log, so
 					// connection management gets the same signal to
@@ -6307,16 +6305,6 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 //     cancellation here. Every shutdown with blocks still in flight can
 //     therefore produce a handful of these; they say the node is stopping,
 //     not that a block failed.
-//   - pipeline.ErrPendingLimitExceeded: the apply stage's out-of-order buffer
-//     grew past MaxPendingBlocks because one stage worker fell behind its
-//     siblings, stalling the sequence number the apply stage is waiting for.
-//     The item is buffered anyway ("to prevent sequence gaps", per
-//     ApplyStage.ProcessWithStatus) and is still applied in sequence, so this
-//     reports scheduling lag, not a block that failed or was dropped. The
-//     read path submits at most batchSize blocks per batch and drains each
-//     batch before starting the next, so the apply stage's backlog stays far
-//     below the pipeline default of 2160; raising batchSize past that would
-//     make this counter live.
 //
 // Anything else reaching errorsChan indicates a genuine decode/validate/apply
 // problem the pipeline itself could not report any other way
@@ -6325,7 +6313,10 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 // covers items that make it that far -- this is the only path that also
 // covers, e.g., apply-stage invariant violations such as
 // pipeline.ErrBlockNotValidated) and is logged at error level plus its own
-// counter for operator visibility.
+// counter for operator visibility. That includes
+// pipeline.ErrPendingLimitExceeded: Submit now waits for apply-stage
+// capacity, so the apply stage reports it only when that guard was bypassed,
+// and it drops the block and cancels the pipeline.
 func (ls *LedgerState) recordBlockPipelineError(err error) {
 	if err == nil {
 		return
@@ -6350,13 +6341,6 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 		ls.metrics.incBlockPipelineShutdownError()
 		ls.config.Logger.Debug(
 			"block-processing pipeline: stage worker reported its context cancellation during shutdown",
-			"error",
-			err,
-		)
-	case errors.Is(err, pipeline.ErrPendingLimitExceeded):
-		ls.metrics.incBlockPipelineApplyPendingLimitError()
-		ls.config.Logger.Debug(
-			"block-processing pipeline: apply stage buffered more out-of-order blocks than MaxPendingBlocks (backpressure only; the block is still buffered and applied in sequence)",
 			"error",
 			err,
 		)
@@ -7041,6 +7025,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	// Process blocks
 	var nextEpochEraId uint
 	var allowTwoEraBoundaryTransition bool
+	// boundaryShouldValidate is whether the block that opens the next epoch
+	// is validated, which decides whether the Byron-to-Shelley gate runs.
+	var boundaryShouldValidate bool
 	var needsEpochRollover bool
 	var end, i int
 	var err error
@@ -7072,6 +7059,43 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 
 			var rolloverResult *EpochRolloverResult
 			var eraTransitions []*EraTransitionResult
+
+			if snapshotEra.Id == byron.EraIdByron && boundaryShouldValidate {
+				if err := ls.validateByronShelleyTransition(
+					ctx,
+					snapshotEpoch.EpochId+1,
+					nextEpochEraId,
+				); err != nil {
+					// The boundary block waits in cachedNextBatch, so the
+					// reader is still blocked on this read result.
+					if len(cachedNextBatch) == 0 {
+						completeReadResult()
+						return fmt.Errorf("byron transition: %w", err)
+					}
+					// The verdict is deterministic and the block is already
+					// on the primary chain, so a plain restart would re-read
+					// it and fail again. Rewind past it as a rejected header.
+					boundary := cachedNextBatch[0]
+					err = &headerValidationError{
+						BlockPoint: ocommon.Point{
+							Slot: boundary.SlotNumber(),
+							Hash: boundary.Hash().Bytes(),
+						},
+						Cause: err,
+					}
+					recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+						err,
+					)
+					completeReadResult()
+					if recoverErr != nil {
+						return fmt.Errorf("byron transition: %w", recoverErr)
+					}
+					if recovered {
+						return errRestartLedgerPipeline
+					}
+					return fmt.Errorf("byron transition: %w", err)
+				}
+			}
 
 			// Block application is blocked for this whole transaction,
 			// including reward application and the governance tally, so
@@ -7643,11 +7667,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			if !parentEnvelopeSet {
 				var parentBlockType uint
 				var parentBlockTypeLoaded bool
+				var parentBlock models.Block
 				if len(snapshotTip.Point.Hash) > 0 {
 					if storedBlock, err := database.BlockByPoint(
 						ls.db,
 						snapshotTip.Point,
 					); err == nil {
+						parentBlock = storedBlock
 						parentBlockType = storedBlock.Type
 						parentBlockTypeLoaded = true
 					} else {
@@ -7666,6 +7692,20 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					parentBlockType,
 					parentBlockTypeLoaded,
 				)
+				if parentBlockTypeLoaded {
+					positioned, err := parentEnvelope.withStoredByronPosition(
+						parentBlock,
+					)
+					if err != nil {
+						ls.config.Logger.Debug(
+							"could not position persisted Byron parent for envelope validation",
+							"component", "ledger",
+							"slot", snapshotTip.Point.Slot,
+							"error", err,
+						)
+					}
+					parentEnvelope = positioned
+				}
 				parentEnvelopeSet = true
 			}
 			// Flag to enable validation after transaction commits (set inside callback,
@@ -7696,6 +7736,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
 							snapshotEpoch.SlotLength == 0 {
 							needsEpochRollover = true
+							boundaryShouldValidate, _ = historicalBlockValidationDecision(
+								snapshotValidationEnabled,
+								ls.config.TrustedReplay,
+								snapshotChainsyncState,
+								next.SlotNumber(),
+								cutoffSlot,
+								snapshotMithrilSlot,
+							)
 							headerMajor, headerMajorKnown := HeaderProtocolMajor(
 								next.Header(),
 							)
@@ -7833,6 +7881,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// production; see LedgerView's field doc comment for
 						// why that plumbing is retained rather than deleted.
 						const skipPhase2Validation = false
+						blockPParams := snapshotPParams
+						if trackByronPBFT {
+							blockPParams = byronBlockPParams(
+								next,
+								runningByronPBFTState,
+								snapshotPParams,
+							)
+						}
 						delta, err = ls.ledgerProcessBlock(
 							txn,
 							tmpPoint,
@@ -7847,7 +7903,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							parentEnvelope,
 							blockOffsets,
 							snapshotEra,
-							snapshotPParams,
+							blockPParams,
 							snapshotPrevEraPParams,
 							snapshotEpoch.EpochId,
 							snapshotEpoch.StartSlot,
@@ -8491,6 +8547,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
+	var expandedIndexOffset uint64
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -8499,6 +8556,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.expandedIndexOffset = expandedIndexOffset
 			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
 				if err := delta.donate(blockDonation); err != nil {
@@ -8570,8 +8628,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 					// snaps up to an epoch boundary, so trailing by even one
 					// block can cost an entire epoch of horizon and reject a
 					// canonical Plutus transaction (issue #3844).
-					horizonAnchorSlot: parent.slot,
-					epochStartSlot:    epochStartSlot,
+					horizonAnchorSlot:    parent.slot,
+					epochStartSlot:       epochStartSlot,
+					byronParamsFromBlock: true,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
 				validateStart := time.Now()
@@ -8731,6 +8790,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 			delta.Release()
 			delta = nil // reset
+			levels := TransactionLevelsForApply(tx)
+			if len(levels) > 1 {
+				expandedIndexOffset += uint64(len(levels)) - 1
+			}
 
 			// Add this transaction's outputs to intra-block map for subsequent TX lookups
 			// Use tx.Produced() instead of tx.Outputs() to handle failed transactions
@@ -12240,37 +12303,32 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	return uint32(protocolMagic), nil
 }
 
-// ByronFeePolicy returns the fee policy from the active Byron genesis.
-func (ls *LedgerState) ByronFeePolicy() (int64, int64, error) {
-	if ls == nil || ls.config.CardanoNodeConfig == nil {
-		return 0, 0, errors.New("byron genesis configuration is unavailable")
+// ByronProtocolParameters returns the Byron protocol parameters adopted as of
+// the ledger tip, or the Byron genesis parameters before the update state has
+// been built. Block application validates against the parameters adopted for
+// each block's own epoch instead, passed as its pparams.
+func (ls *LedgerState) ByronProtocolParameters() (
+	*eras.ByronProtocolParameters,
+	error,
+) {
+	if ls == nil {
+		return nil, errors.New("byron genesis configuration is unavailable")
 	}
-	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
-	if genesis == nil {
-		return 0, 0, errors.New("byron genesis configuration is unavailable")
+	ls.RLock()
+	state := ls.byronPBFT.state
+	initialized := ls.byronPBFT.initialized
+	ls.RUnlock()
+	if initialized && state.update.Initialized() {
+		return state.update.AdoptedParams(), nil
 	}
-	policy := genesis.BlockVersionData.TxFeePolicy
-	return policy.Summand, policy.Multiplier, nil
-}
-
-// ByronMaxTxSize returns ppMaxTxSize from the Byron genesis protocol
-// parameters.
-func (ls *LedgerState) ByronMaxTxSize() (uint64, error) {
-	if ls == nil || ls.config.CardanoNodeConfig == nil {
-		return 0, errors.New("byron genesis configuration is unavailable")
+	params, err := ls.byronGenesisProtocolParameters()
+	if err != nil {
+		return nil, err
 	}
-	genesis := ls.config.CardanoNodeConfig.ByronGenesis()
-	if genesis == nil {
-		return 0, errors.New("byron genesis configuration is unavailable")
+	if params == nil {
+		return nil, errors.New("byron genesis configuration is unavailable")
 	}
-	maxTxSize := genesis.BlockVersionData.MaxTxSize
-	if maxTxSize <= 0 {
-		return 0, fmt.Errorf(
-			"byron genesis maxTxSize must be positive, got %d",
-			maxTxSize,
-		)
-	}
-	return uint64(maxTxSize), nil
+	return params, nil
 }
 
 // UtxoByRef returns a single UTxO by reference
@@ -12723,20 +12781,23 @@ func (ls *LedgerState) withTxValidationSession(
 			delta := NewLedgerDelta(point, eraID, blockNumber)
 			delta.addTransaction(tx, index)
 			defer delta.Release()
-			txHash := tx.Hash().Bytes()
-			var txHashArray [32]byte
-			copy(txHashArray[:], txHash)
 			offset := database.CborOffset{BlockSlot: point.Slot}
 			copy(offset.BlockHash[:], point.Hash)
 			utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
-			for _, utxo := range tx.Produced() {
-				utxoOffsets[database.UtxoRef{
-					TxId:      txHashArray,
-					OutputIdx: utxo.Id.Index(),
-				}] = offset
+			txOffsets := make(map[[32]byte]database.CborOffset)
+			for _, level := range TransactionLevelsForApply(tx) {
+				var levelHash [32]byte
+				copy(levelHash[:], level.Hash().Bytes())
+				txOffsets[levelHash] = offset
+				for _, utxo := range level.Produced() {
+					utxoOffsets[database.UtxoRef{
+						TxId:      levelHash,
+						OutputIdx: utxo.Id.Index(),
+					}] = offset
+				}
 			}
 			delta.Offsets = &database.BlockIngestionResult{
-				TxOffsets:   map[[32]byte]database.CborOffset{txHashArray: offset},
+				TxOffsets:   txOffsets,
 				UtxoOffsets: utxoOffsets,
 			}
 			return delta.applyWithoutRecordingDonations(ls, txn)
@@ -13566,4 +13627,25 @@ func (ls *LedgerState) forgeBlock() {
 		"total_steps", totalExUnits.Steps,
 		"forging_latency_ms", forgingLatency.Milliseconds(),
 	)
+}
+
+// BlockfetchRangeExpectedBytes returns the estimated wire size of the blocks
+// start through end, summed from the queued headers, for use as a block-fetch
+// request's expected size. It returns 0, meaning no estimate, when the range
+// holds a header whose size is unknown (Byron) or one that is no longer queued
+// (after a rollback or eviction); a partial sum would understate the request.
+//
+// It takes only the chain's read lock, so it is safe to call without
+// chainsyncBlockfetchMutex, as the external request dispatch does.
+func (ls *LedgerState) BlockfetchRangeExpectedBytes(
+	start, end ocommon.Point,
+) uint64 {
+	if ls == nil || ls.chain == nil {
+		return 0
+	}
+	size, ok := ls.chain.QueuedRangeWireBytes(start, end)
+	if !ok {
+		return 0
+	}
+	return size
 }

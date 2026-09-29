@@ -2710,3 +2710,166 @@ func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
 		assert.Equal(t, advertised, got)
 	})
 }
+
+// switchHandoffRequestCount queues headerCount headers and reports the
+// number of RequestRange calls made by a handoff onto a new connection whose
+// sync target is peerTip.
+func switchHandoffRequestCount(
+	t *testing.T,
+	headerCount int,
+	peerTip ochainsync.Tip,
+	peerTipKnown bool,
+) int {
+	t.Helper()
+	testChain, _ := buildDeepCatchupChain(t, headerCount)
+	newConn := testChainsyncConnId(6410, 3002)
+	requestCount := 0
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerSyncTargetFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				if !sameConnectionId(connId, newConn) {
+					return ochainsync.Tip{}, false
+				}
+				return peerTip, peerTipKnown
+			},
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				requestCount++
+				return 1, nil
+			},
+		},
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	_, err := ls.handoffPipelineOnSwitchLocked(newConn, nil)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+	assert.Equal(t, newConn, ls.selectedBlockfetchConnId)
+	ls.blockfetchRequestRangeCleanup()
+	return requestCount
+}
+
+func TestHandoffPipelineOnSwitchAccumulatesMinimumBatchWhenFarBehind(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	farTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1_000_000, Hash: []byte("far")},
+		BlockNumber: 50_000,
+	}
+	assert.Equal(
+		t,
+		0,
+		switchHandoffRequestCount(t, 2, farTip, true),
+		"2 queued headers is below the 256 minimum while far behind",
+	)
+}
+
+func TestHandoffPipelineOnSwitchStartsOnceMinimumBatchQueuedWhenFarBehind(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// A 100-block gap needs 32 headers.
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 10_000, Hash: []byte("far")},
+		BlockNumber: 140,
+	}
+	assert.Equal(t, 0, switchHandoffRequestCount(t, 31, tip, true))
+	assert.Equal(t, 1, switchHandoffRequestCount(t, 32, tip, true))
+}
+
+func TestHandoffPipelineOnSwitchStartsImmediatelyNearTip(t *testing.T) {
+	t.Parallel()
+
+	nearTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 10, Hash: []byte("near")},
+		BlockNumber: 10,
+	}
+	assert.Equal(
+		t,
+		1,
+		switchHandoffRequestCount(t, 2, nearTip, true),
+		"a switch within the gap threshold of the peer tip must not wait",
+	)
+}
+
+func TestHandoffPipelineOnSwitchStartsImmediatelyWithoutPeerTarget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	assert.Equal(
+		t,
+		1,
+		switchHandoffRequestCount(t, 2, ochainsync.Tip{}, false),
+		"an unknown peer target keeps the immediate start",
+	)
+}
+
+// A switch that defers blockfetch leaves queued headers with no in-flight
+// batch, so the header pipeline owner is the only thing keeping another
+// peer's non-fitting header from clearing the queue.
+func TestHandoffPipelineOnSwitchAccumulatingKeepsQueueOwned(t *testing.T) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, 2)
+	oldConn := testChainsyncConnId(6410, 3001)
+	newConn := testChainsyncConnId(6410, 3002)
+	otherConn := testChainsyncConnId(6410, 3003)
+	farTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1_000_000, Hash: []byte("far")},
+		BlockNumber: 50_000,
+	}
+	ls := &LedgerState{
+		chain:                testChain,
+		headerPipelineConnId: oldConn,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerSyncTargetFunc: func(
+				ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return farTip, true
+			},
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				t.Error("blockfetch must not start below the minimum batch")
+				return 1, nil
+			},
+		},
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	_, err := ls.handoffPipelineOnSwitchLocked(newConn, nil)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+
+	forkHash := lcommon.NewBlake2b256([]byte("other-fork-hdr"))
+	buffered := ls.shouldBufferHeaderEvent(ChainsyncEvent{
+		ConnectionId: otherConn,
+		BlockHeader: mockHeader{
+			hash:        forkHash,
+			prevHash:    lcommon.NewBlake2b256([]byte("other-fork-parent")),
+			blockNumber: 3,
+			slot:        3,
+		},
+		Point: ocommon.NewPoint(3, forkHash.Bytes()),
+		Tip:   farTip,
+	})
+	assert.True(
+		t,
+		buffered,
+		"a non-fitting header from another peer must be buffered, not processed against the queue",
+	)
+	assert.Equal(t, newConn, ls.headerPipelineConnId)
+	assert.Equal(t, 2, ls.chain.HeaderCount())
+}
