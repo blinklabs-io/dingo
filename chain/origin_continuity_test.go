@@ -540,3 +540,87 @@ func firstBlockNumberOnChain(t *testing.T, c *chain.Chain) uint64 {
 	}
 	return next.Block.Number
 }
+
+// TestIsFirstOnHeaderChain pins the anchor Byron header validation uses to
+// decide "first block of a from-genesis chain": only the head of the queue at
+// an origin primary tip is first, and an applied block or a rollback to origin
+// changes the answer.
+func TestIsFirstOnHeaderChain(t *testing.T) {
+	t.Parallel()
+
+	first := &MockBlock{
+		MockBlockNumber: 0,
+		MockSlot:        0,
+		MockHash:        testHashPrefix + "0f01",
+		MockPrevHash:    "",
+	}
+	second := &MockBlock{
+		MockBlockNumber: 1,
+		MockSlot:        0,
+		MockHash:        testHashPrefix + "0f02",
+		MockPrevHash:    first.MockHash,
+	}
+	firstHash := first.Hash().Bytes()
+	secondHash := second.Hash().Bytes()
+
+	var nilChain *chain.Chain
+	if nilChain.IsFirstOnHeaderChain(firstHash) {
+		t.Fatal("nil chain must not report a first header")
+	}
+
+	t.Run("empty queue at origin", func(t *testing.T) {
+		t.Parallel()
+		c := chainEmptiedToOrigin(t)
+		if !c.IsFirstOnHeaderChain(firstHash) {
+			t.Fatal("any header is first when nothing is queued at origin")
+		}
+	})
+
+	t.Run("queued header stays first, successor is not", func(t *testing.T) {
+		t.Parallel()
+		c := chainEmptiedToOrigin(t)
+		if err := c.AddBlockHeader(first); err != nil {
+			t.Fatalf("add first header: %s", err)
+		}
+		if err := c.AddBlockHeader(second); err != nil {
+			t.Fatalf("add second header: %s", err)
+		}
+		if !c.IsFirstOnHeaderChain(firstHash) {
+			t.Fatal("queued head header must still be first")
+		}
+		if c.IsFirstOnHeaderChain(secondHash) {
+			t.Fatal("successor of a queued header must not be first")
+		}
+	})
+
+	t.Run("rollback to origin drops the queue", func(t *testing.T) {
+		t.Parallel()
+		c := chainEmptiedToOrigin(t)
+		if err := c.AddBlockHeader(first); err != nil {
+			t.Fatalf("add first header: %s", err)
+		}
+		if err := c.Rollback(ocommon.NewPointOrigin()); err != nil {
+			t.Fatalf("rollback to origin: %s", err)
+		}
+		if !c.IsFirstOnHeaderChain(secondHash) {
+			t.Fatal("queue must be empty again after rollback to origin")
+		}
+	})
+
+	t.Run("applied block is never first", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		cm, err := chain.NewManager(db, nil)
+		if err != nil {
+			t.Fatalf("chain manager: %s", err)
+		}
+		mustSetLedger(t, cm, 10)
+		c := cm.PrimaryChain()
+		if err := c.AddBlock(testBlocks[0], nil); err != nil {
+			t.Fatalf("add block: %s", err)
+		}
+		if c.IsFirstOnHeaderChain(firstHash) {
+			t.Fatal("no header is first once the primary tip has a block")
+		}
+	})
+}
