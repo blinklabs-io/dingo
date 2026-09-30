@@ -1790,3 +1790,102 @@ func TestDownloadDigestsArchiveDiscardsCorruptCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, entries)
 }
+
+// cancelOnDownloadComplete cancels a context when the downloader reports a
+// finished transfer of a file whose path ends in suffix, so a test can land
+// cancellation between a complete download and its extraction.
+type cancelOnDownloadComplete struct {
+	suffix string
+	cancel context.CancelFunc
+}
+
+func (h *cancelOnDownloadComplete) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *cancelOnDownloadComplete) Handle(
+	_ context.Context,
+	r slog.Record,
+) error {
+	if r.Message != "download complete" {
+		return nil
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "path" && strings.HasSuffix(a.Value.String(), h.suffix) {
+			h.cancel()
+			return false
+		}
+		return true
+	})
+	return nil
+}
+
+func (h *cancelOnDownloadComplete) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *cancelOnDownloadComplete) WithGroup(string) slog.Handler {
+	return h
+}
+
+// Cancellation says nothing about the archive: a complete ancillary download
+// interrupted before extraction must stay cached for the next run.
+func TestBootstrapV2KeepsAncillaryArchiveOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	downloadDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := fixture.bootstrapConfig(downloadDir)
+	cfg.Logger = slog.New(&cancelOnDownloadComplete{
+		suffix: "-ancillary.tar.zst",
+		cancel: cancel,
+	})
+
+	_, err := Bootstrap(ctx, cfg)
+	require.ErrorIs(t, err, context.Canceled)
+
+	matches, err := filepath.Glob(
+		filepath.Join(downloadDir, "*-ancillary.tar.zst"),
+	)
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	data, err := os.ReadFile(matches[0])
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancillaryArchive, data)
+}
+
+func TestDownloadDigestsArchiveKeepsCacheOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.ServeContent(
+				w, r, "digests.tar.zst", time.Time{},
+				bytes.NewReader(fixture.digestArchive),
+			)
+		},
+	))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := BootstrapConfig{
+		AllowInsecureHTTP: true,
+		Logger: slog.New(&cancelOnDownloadComplete{
+			suffix: ".tar.zst",
+			cancel: cancel,
+		}),
+	}
+	_, err := downloadDigestsArchive(ctx, cfg, srv.URL, fixture.artifact, dir)
+	require.ErrorIs(t, err, context.Canceled)
+
+	data, err := os.ReadFile(filepath.Join(dir, filepath.Base(fmt.Sprintf(
+		"digests-%s.tar.zst", truncateDigest(fixture.artifact.Hash),
+	))))
+	require.NoError(t, err)
+	assert.Equal(t, fixture.digestArchive, data)
+}

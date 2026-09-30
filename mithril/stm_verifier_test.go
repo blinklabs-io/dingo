@@ -256,7 +256,7 @@ func TestParseSTMAggregateVerificationKeyRejectsZeroLeaves(t *testing.T) {
 	require.Contains(t, err.Error(), "nrLeaves must be positive")
 }
 
-// A payload of totalSigs entries needs at least stmMinAggregateEntrySize
+// A payload of totalSigs entries needs at least minSigSize
 // bytes per entry, so a count that fits the old 8-byte bound but not the
 // real layout must be rejected before any allocation.
 func TestParseSTMAggregateSignatureBytesRejectsOversizedCount(t *testing.T) {
@@ -348,4 +348,37 @@ func TestVerifySTMLeavesMembershipFromBatchPath(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "ran out of sibling values")
 	})
+}
+
+// The smallest entry the parsers accept (a party entry and a signature with
+// no lottery indexes) is exactly minSigSize bytes, so the pre-allocation
+// bound must admit a payload of such entries.
+func TestParseSTMAggregateSignatureBytesAcceptsMinimalEntries(t *testing.T) {
+	t.Parallel()
+
+	const totalSigs = 3
+	raw := []byte{0}
+	raw = binary.BigEndian.AppendUint64(raw, totalSigs)
+	for i := range totalSigs {
+		entryStart := len(raw)
+		raw = binary.BigEndian.AppendUint64(raw, 0) // patched below
+		raw = binary.BigEndian.AppendUint64(raw, 104)
+		raw = append(raw, bytes.Repeat([]byte{byte(i + 1)}, 96)...)
+		raw = binary.BigEndian.AppendUint64(raw, uint64(10*(i+1)))
+		raw = binary.BigEndian.AppendUint64(raw, 64)
+		raw = binary.BigEndian.AppendUint64(raw, 0)
+		raw = append(raw, bytes.Repeat([]byte{0xAA}, 48)...)
+		raw = binary.BigEndian.AppendUint64(raw, uint64(i))
+		entryLen := len(raw) - entryStart
+		require.Equal(t, minSigSize, entryLen)
+		binary.BigEndian.PutUint64(raw[entryStart:], uint64(entryLen-8))
+	}
+	raw = binary.BigEndian.AppendUint64(raw, 0)
+	raw = binary.BigEndian.AppendUint64(raw, 0)
+
+	sig, err := parseSTMAggregateSignatureBytes(raw)
+	require.NoError(t, err)
+	require.Len(t, sig.Signatures, totalSigs)
+	require.Equal(t, uint64(30), sig.Signatures[2].RegParty.Stake)
+	require.Empty(t, sig.Signatures[2].Sig.Indexes)
 }

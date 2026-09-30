@@ -344,9 +344,12 @@ func bootstrapV2(
 				// returned for Cleanup to act on. Left in place, the next
 				// run's resume request is answered 416 with a matching
 				// total and the same bad archive is accepted again. A
-				// failed download keeps its partial file so it can resume.
+				// failed download keeps its partial file so it can resume,
+				// and a cancelled run keeps its archive: an interrupted
+				// extraction says nothing about the bytes.
 				var dlErr *ancillaryDownloadError
-				if archPath != "" && !errors.As(ancErr, &dlErr) {
+				if archPath != "" && ancCtx.Err() == nil &&
+					!errors.As(ancErr, &dlErr) {
 					if err := os.Remove(archPath); err != nil &&
 						!errors.Is(err, os.ErrNotExist) {
 						cfg.Logger.Warn(
@@ -756,9 +759,9 @@ func downloadDigestsArchive(
 	}
 	// Once the archive is fully downloaded, any failure to use it discards
 	// it: a cached file of the right size is otherwise accepted again by the
-	// resume request's 416 answer.
+	// resume request's 416 answer. Cancellation is not such a failure.
 	defer func() {
-		if retErr != nil {
+		if retErr != nil && ctx.Err() == nil {
 			removeDigestsCache(artifact, downloadDir)
 		}
 	}()
