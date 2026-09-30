@@ -1,6 +1,4 @@
 //go:build dingo_extra_plugins
-//go:build dingo_extra_plugins
-//go:build dingo_extra_plugins
 
 // Copyright 2026 Blink Labs Software
 //
@@ -30,8 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/aws"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
+	aws "github.com/blinklabs-io/dingo/database/plugin/blob/aws"
+	gcs "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"

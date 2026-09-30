@@ -1,5 +1,4 @@
 //go:build archive_demo
-//go:build archive_demo
 
 // Copyright 2026 Blink Labs Software
 //

@@ -150,7 +150,7 @@ for a pooled connection aborts the wait rather than stalling for whoever
 holds the connection; canceling it mid-transaction triggers `database/sql`'s
 documented auto-rollback of the underlying `*sql.Tx`, which is asynchronous
 to the `cancel()` call and (for `database/sql`'s pooling) discards rather
-than idles the aborted connection. `cancellation_test.go` covers both.
+than idles the aborted connection. `tests_86b4eb8f_test.go` covers both.
 
 Two gaps in that propagation are deliberate:
 - The nil-`txn` "autocommit" path (`dbFromTxn(nil)`/`readDBFromTxn(nil)`, used
@@ -1882,7 +1882,7 @@ paths, where the point is to report before the goroutine unwinds.
   a parent still holds either mutex. The invariant is checked by
   `TestNoEventBusPublishWhileHoldingChainsyncMutex` and
   `TestChainsyncResyncPublishPathsUnderLock` in
-  `ledger/publish_under_lock_test.go`. The first test also treats a call to an
+  `ledger/tests_61443820_test.go`. The first test also treats a call to an
   inline-publishing `chain.Chain` method as a publish
   (`inlinePublishingChainMethods`: `AddBlock`, `AddLocalBlock`,
   `AddBlockWithPoint` and siblings, plus `Rollback`), because those publish
@@ -5031,7 +5031,7 @@ two peers), `TestSwitchBackCooldownBoundsStallEscapeOscillation`
 (progress-stall escape, two peers plus a delayed third), and
 `TestSwitchBackRateLimitBoundsThreeWayRotation` (three peers rotating under
 realistic jitter, the live incident's actual shape) in
-`chainselection/switch_cooldown_test.go`.
+`chainselection/tests_4e69161c_test.go`.
 `TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger` now pins the
 corrected contract: a new challenger arriving inside the global cooldown
 window is rate-limited like any other, and adopted once that window elapses.
@@ -7202,7 +7202,7 @@ Experimental Dijkstra top-N committee voting, active only under the Dijkstra/Lei
 - **Stake quorum and certificates**: per endorser block and signing context, the manager tracks observed stake (all membership-valid votes) and verified stake (signature-verified votes). When verified stake reaches `LeiosQuorumStakeThreshold` (tau) of *total active stake* (exact rational arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers bitfield over the committee plus one aggregated BLS12-381 MinSig signature — from verified votes only, and publishes `leios.eb_quorum` with the announcing ranking-block hash that every prototype vote signed. Certificate validation reports `sigChecked bool`; false means quorum passed but one or more signer keys were unavailable, so production callers must reject that result. The pipeline preserves signing context, and the forge loop only adapts the certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when its announcing RB is the actual parent CertRB.
 - **Vote emission**: after an acquired EB is announced by a selected ranking block and its endorser-block transactions have a `Valid` semantic result, a block producer signs that announcing ranking-block hash once with the prototype BLS POP domain and publishes `leios.vote_emitted`. `ouroboros` calls `LeiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions` before `HandleEndorserBlock` and `ObserveEndorserBlock`; validation uses the announcing header's parent snapshot, with at most two concurrent validations. `Unknown` results are retried on chain updates and epoch transitions. The signed preimage is the hash's CBOR byte-string encoding (34 bytes: `0x58 0x20` then the 32 hash bytes), matching the reference's `SignableRepresentation` for `RbHash`; signing the bare 32 bytes hashes a different preimage to the curve and every pairing check fails (issue #3034). Before committing either a local or resolved peer vote, the manager revalidates the exact announcement under its state lock; local commit and publication are additionally serialized with rollback, so an in-flight signature cannot resurrect a rolled-back announcement. Local signing also snapshots the active configuration's generation, pool, and key, then revalidates all three under the state lock before inserting or publishing the result; a signature completed after reconfiguration is discarded without changing vote state or emitting an event. Node composition enqueues the three-field vote on LeiosNotify. When `leiosVoteSigningKeyFile` is configured, Dingo loads the Cardano text-envelope BLS12-381 signing key and uses it for vote signatures; legacy raw hex scalar files remain accepted. A node whose local historical snapshot has not reached the key's on-chain registration starts with voting disabled and retries the deferred configuration after epoch transitions. The initial provider lookup distinguishes absence from failure: an absent usable registration creates deferred configuration, while a provider error is fatal to startup and clears that configuration; an already-visible mismatch is likewise a hard configuration error. Every initial or retry lookup takes a monotonically increasing configuration generation before reading the provider; only the newest generation may activate voting, clear deferred state, or report a fatal startup result. Every completion also revalidates that generation together with the requested pool and key before interpreting Enabled, AwaitingKey, or RetryPending as its own result; a stale request returns Superseded, which node startup reports as a distinct nonfatal diagnostic. Starting a newer retry also disables an older activation that has not finalized, so a blocked lookup cannot replace the enabled, deferred, or diagnostic outcome established by a newer attempt. Once configuration has been deferred, a provider error during an epoch-transition retry is nonfatal: voting stays disabled and the pool and signing key remain retained for the next retry. Invalid proofs and mismatches during deferred retries have the same disabled-and-retained behavior. A PoP-verified matching snapshot key enters a single serialized activation flow: if ready current-epoch announcements exist, committee, parameter, and provider resolution must succeed before the signing key is exposed; the flow then replays them in deterministic slot and ranking-block-hash order and clears deferred state only after replay processing. A transient replay-preparation failure therefore leaves voting disabled and the configuration retryable. **A pool started without a signing key runs as a non-voting relay** (issue #3148): the insecure pool cold-key-hash derivation that previously stood in for a real key (matching the reference's `rawDeserialiseSignKeyDSIGN`) was removed upstream in `prototype-2026w32`, and dingo removed its own copy in the same change — there is no fallback that lets a pool vote without a real registered key. The strict `ParseVoteSigningKey` path used for operator-supplied key files rejects out-of-range scalars.
 - **Vote relay**: a prototype vote accepted from a peer (via `HandlePrototypeVote`, either immediately or once its queued announcement resolves) publishes `leios.vote_received` exactly once with the connection key that delivered it, gated by the same `insertVote` dedup/equivocation check that gates `leios.vote_emitted` for a local vote — a resubmission or an equivocating vote is not re-published. Node composition enqueues it on LeiosNotify for every peer except that origin connection; locally emitted votes still go to every peer. The shared append log advances the excluded origin cursor without creating a delivery reservation or retry, including while the origin is caught up and idle, so exclusion does not pin pruning. Without peer re-diffusion, a relay tallied a vote for its own view but never forwarded it, so a block producer whose only path to the network is that relay never observed quorum and built no certificates (issue #3288).
-- **On-chain key registration and persistence**: a pool's optional `leios_key` pool-cert field (96-byte BLS public key + 48-byte proof of possession) is persisted verbatim in the `pool`/`pool_registration` tables' `leios_key_public`/`leios_key_possession_proof` columns (`database/plugin/metadata/sqlstore/transaction_certificates.go`'s `applyPoolRegistrationCertificate`, mirroring how `vrf_key_hash` is stored), with no proof check at write time — `database` may not depend on `ledger/leios`'s BLS code (`internal/architecture/import_boundary_test.go`). At SNAP, the registration effective during the ended epoch is copied into the Mark `pool_stake_snapshot` row (`leios_key_public`/`leios_key_possession_proof`, migration `v5`) with its registration-effective epoch (`leios_key_registration_epoch`, migration `v26`) when retained epoch history establishes the age. If the registration is authoritative for the snapshot but its age cannot be established, SNAP preserves the key bytes with a NULL age; it never reconstructs age or key material from mutable pool state. `ledger.LedgerView.GetLeiosKeys` reads the requested epoch's Mark rows for `node_leios.go`'s `leiosKeyProviderAdapter`, which `VoteManager` calls once per epoch and caches in `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old, then verifies proof of possession; an invalid, missing, unknown-age, or expired key leaves the seat and its stake intact but cannot sign or validate a certificate.
+- **On-chain key registration and persistence**: a pool's optional `leios_key` pool-cert field (96-byte BLS public key + 48-byte proof of possession) is persisted verbatim in the `pool`/`pool_registration` tables' `leios_key_public`/`leios_key_possession_proof` columns (`database/plugin/metadata/sqlstore/transaction_certificates.go`'s `applyPoolRegistrationCertificate`, mirroring how `vrf_key_hash` is stored), with no proof check at write time — `database` may not depend on `ledger/leios`'s BLS code (`internal/architecture/tests_test.go`). At SNAP, the registration effective during the ended epoch is copied into the Mark `pool_stake_snapshot` row (`leios_key_public`/`leios_key_possession_proof`, migration `v5`) with its registration-effective epoch (`leios_key_registration_epoch`, migration `v26`) when retained epoch history establishes the age. If the registration is authoritative for the snapshot but its age cannot be established, SNAP preserves the key bytes with a NULL age; it never reconstructs age or key material from mutable pool state. `ledger.LedgerView.GetLeiosKeys` reads the requested epoch's Mark rows for `node_leios.go`'s `leiosKeyProviderAdapter`, which `VoteManager` calls once per epoch and caches in `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old, then verifies proof of possession; an invalid, missing, unknown-age, or expired key leaves the seat and its stake intact but cannot sign or validate a certificate.
 - **Certificate admission**: before asynchronous certified endorser-block fetches or apply-time fetch and transaction application, ledger admission checks that the Dijkstra header certification flag agrees with body certificate presence, resolves the certified announcement from the CertRB's parent, loads the same historical committee and threshold used for voting, then rejects malformed signers, a keyless signer, insufficient signer stake, or an invalid aggregate signature. Replay and backfill use this same gate, so an unverified certificate cannot authorize endorser-block effects.
 - **State lifecycle**: all state is in-memory, split across two stores. Raw votes live in a TTL- and size-bounded *serving store* (10 minutes, 8192 entries, oldest evicted) used only for relaying to peers. Dedup and tally accounting live in a separate *record ledger* (one record per accepted `(slot, voter_id)`, including the vote's signing-context reference, admission-capped at 4x the serving store with reject-new semantics — the cap gates only unverified peer votes; verified and locally emitted votes bypass it, being unforgeable and dedup-bounded to one record per slot and registered voter) that is never size-evicted: records are pruned only in lockstep with their endorser-block/signing-context tally, so a vote whose tally is still accumulating can never be re-counted after its serving entry is evicted, and first-wins equivocation detection stays durable. The record cap also transitively bounds the tally map. Acquired EBs retain their slot and epoch, and epoch transitions or chain rollbacks prune stale acquisitions, announcements, corresponding pending candidates, and their exact global/per-connection counts together; rollbacks also drop votes, tallies, and records past the rollback point and clear the committee memo.
 
@@ -10622,7 +10622,7 @@ identified). The connection-reuse redesign above is still worth keeping
 reason it was originally built.
 
 **A related, separate bug found and fixed while building this section's own
-test coverage:** `internal/nodeparity/incremental_harness_test.go`'s fake
+test coverage:** `internal/nodeparity/incremental_test.go`'s fake
 LocalStateQuery server, answering with no artificial network latency,
 reliably tripped a genuine data race in gouroboros itself
 (`protocol/localstatequery/client.go`'s `handleAcquired`, which signaled
@@ -10850,10 +10850,10 @@ pipeline reporting a fully clean match end-to-end.
 Those two, plus the epoch-transition trigger and a genuine rollback (both
 needing an event no live testing window has produced -- a real epoch
 boundary, or a real reorg), are covered instead by
-`internal/nodeparity/incremental_harness_test.go`: a real gouroboros
+`internal/nodeparity/incremental_test.go`: a real gouroboros
 ChainSync + LocalStateQuery server (not a new local protocol mock -- the
 same "stand up a real server, script its replies" approach
-`watch_chainsync_test.go` already uses, extended to also answer
+`watch_test.go` already uses, extended to also answer
 `GetCurrentProtocolParams`/`GetStakeDistribution`/`GetUTxOByTxIn`/`GetEpochNo`
 in the exact wire shapes dingo's own real handlers produce) drives
 `RunIncremental` end to end against synthetic, test-controlled state. A
@@ -11511,7 +11511,7 @@ Package isolation is enforced by direction, ownership, and composition:
 ### Import Boundary Check
 
 Reviewed critical package boundaries are enforced by
-`internal/architecture/import_boundary_test.go`. Run the focused check with:
+`internal/architecture/tests_test.go`. Run the focused check with:
 
 ```shell
 make import-boundaries
@@ -11520,7 +11520,7 @@ make import-boundaries
 `make lint` also runs the boundary check before the standard linters, so local
 pre-commit and CI quality paths catch forbidden local imports automatically.
 When an architecture review approves a new dependency, update the rule list in
-`internal/architecture/import_boundary_test.go` and this document in the same
+`internal/architecture/tests_test.go` and this document in the same
 change. Keep each rule's `reason` field explicit so future failures explain the
 ownership boundary being protected.
 
@@ -11963,7 +11963,7 @@ phase-two-invalid transaction so phase-one rules run. The validator itself
 owns the protocol-defined `isValid=false` boundary and skips Plutus phase-two
 script evaluation; Dingo does not replace its production rule set or emulate
 that decision. The block-application regression in
-`ledger/phase2_invalid_phase1_test.go` therefore checks the public path's
+`ledger/tests_61443820_test.go` therefore checks the public path's
 phase-one result, not script non-evaluation.
 
 The flag also scopes acceptance through
@@ -14129,7 +14129,7 @@ prevent — merely logging and returning does not. Regression tests:
 `TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow`,
 `TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch`, and
 `TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails`
-(`ledger/chainsync_fork_queue_full_test.go`).
+(`ledger/chainsync_test.go`).
 
 **The success path's own blockfetch restart had the same gap.** The "ancestor
 is the local tip, extend without rollback" branch of `tryResolveFork` queues
@@ -14157,7 +14157,7 @@ recovery — `clearQueuedHeaders` plus a chainsync re-sync
 on reconnect instead of idling forever. Regression tests:
 `TestRecoverBlockfetchRestartFailureRetriesLiveActiveConnection` and
 `TestRecoverBlockfetchRestartFailureFallsBackToResyncWithoutLiveConnection`
-(`ledger/chainsync_fork_extension_restart_test.go`).
+(`ledger/chainsync_test.go`).
 
 **The same success path also bypassed #1922's in-flight-batch protection
 through a side channel.** `handoffPipelineOnSwitchLocked`
@@ -14195,11 +14195,11 @@ current batch finishes rather than by discarding it. A restart requested for
 the *same* connection that is already fetching still tears down and restarts
 unconditionally: there is no other peer being preempted in that case, and
 `TestStartQueuedBlockfetchAfterForkRestartClearsShadowState`
-(`ledger/chainsync_shadow_test.go`) depends on that path resetting per-batch
+(`ledger/chainsync_test.go`) depends on that path resetting per-batch
 shadow state. Regression tests:
 `TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnection`
 and `TestRestartQueuedBlockfetchAfterForkStillRestartsSameConnection`
-(`ledger/chainsync_fork_extension_inflight_test.go`).
+(`ledger/chainsync_test.go`).
 
 **Metrics** (`ledger/metrics.go`): `decodeReadChainBatch` refreshes a set of
 gauges — `dingo_ledger_block_pipeline_blocks_decoded`,
@@ -14442,7 +14442,7 @@ attaching an idle, started `blockPipeline` does not change
 `processChainIteratorRollback`'s rollback decision or resulting state
 versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`; and
 `TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather`
-(`ledger/block_pipeline_gather_mutex_test.go`), which proves
+(`ledger/tests_61443820_test.go`), which proves
 `blockPipelineGatherMutex`'s write lock cannot be obtained while the reader
 is mid-gather with a raw block already collected, and can be obtained again
 once the batch is delivered.

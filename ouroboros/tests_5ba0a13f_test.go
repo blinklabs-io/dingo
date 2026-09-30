@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/gouroboros"
+	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
 )
 

@@ -25,7 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
-	"github.com/blinklabs-io/gouroboros"
+	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	oblockfetch "github.com/blinklabs-io/gouroboros/protocol/blockfetch"

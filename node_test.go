@@ -2605,10 +2605,7 @@ func TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail(
 		"absent-vote.skey",
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	// Deferred, not called during the assertions: cancelling would also stop
-	// the forge loop and would make the test pass without the registration.
-	defer cancel()
+	ctx := t.Context()
 
 	started, err := n.startBlockProducer(ctx, nil)
 	require.ErrorContains(t, err, "failed to enable leios voting")
@@ -2645,8 +2642,7 @@ func TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail(
 func TestStartBlockProducerStopJoinsBothComponentsOnSuccess(t *testing.T) {
 	n := newStartupCleanupProducerNode(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	started, err := n.startBlockProducer(ctx, nil)
 	require.NoError(t, err)

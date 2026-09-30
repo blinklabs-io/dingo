@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Copyright 2026 Blink Labs Software
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
 package ledger
 
 import (
@@ -35,6 +32,7 @@ import (
 	"go/token"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"math/big"
 	"net"
@@ -425,7 +423,7 @@ func fixtureEraTransitionPoints(
 	defer func() { _ = iterator.Close() }()
 	points := make([]ocommon.Point, 0, 8)
 	seenEras := make(map[uint]struct{})
-	for scanned := 0; scanned < 100_000; scanned++ {
+	for range 100_000 {
 		block, err := iterator.Next()
 		if err != nil {
 			b.Fatalf("read era-transition fixture: %v", err)
@@ -4107,9 +4105,7 @@ func completeTestByronGenesisJSON(t testing.TB, input string) string {
 			var fields map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(base[key], &defaults))
 			require.NoError(t, json.Unmarshal(value, &fields))
-			for field, fieldValue := range fields {
-				defaults[field] = fieldValue
-			}
+			maps.Copy(defaults, fields)
 			merged, err := json.Marshal(defaults)
 			require.NoError(t, err)
 			base[key] = merged

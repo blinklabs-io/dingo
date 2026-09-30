@@ -1,8 +1,4 @@
 //go:build dingo_extra_plugins
-//go:build dingo_extra_plugins
-//go:build dingo_extra_plugins
-//go:build dingo_extra_plugins
-//go:build dingo_extra_plugins
 
 // Copyright 2026 Blink Labs Software
 //

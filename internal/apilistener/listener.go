@@ -12,44 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Copyright 2026 Blink Labs Software
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
-
-// Package apilistener owns the start/stop protocol shared by Dingo's HTTP API
-// servers (api/blockfrost, api/mesh, api/utxorpc).
-//
-// The protocol exists because http.Server.Shutdown only closes listeners that
-// Serve has already registered, and each server binds its socket before
-// handing it to Serve in a goroutine it does not wait for. A Stop landing in
-// that window returns with the port still bound, which the capability restart
-// in node_lifecycle.go -- reached by any live database restore or truncate --
-// then fails to rebind with EADDRINUSE.
-//
-// Releasing the port is therefore something Stop has to do itself, and doing
-// it safely needs four pieces that only make sense together: a start is not
-// invisible to a concurrent Stop (BeginStart), exactly one caller may detach
-// and tear down a server (take), a Stop must not outrun a bind still in
-// flight (bindDone), and the caller that loses the detach must not report the
-// server down before the winner has finished (teardown).
-//
-// It lives here rather than in each API package because those pieces are
-// subtle in the same way in all of them -- see awaitSignal's doc comment for
-// the recheck that a second copy would be most likely to lose. Each server
-// keeps only what genuinely differs: the http.Server it builds, and its
-// ShutdownFunc. Everything else a server can get wrong about the lifecycle is
-// behind Start's four calls and Stop's one, so there is nowhere for a server
-// to grow a second mechanism of its own.
 package apilistener
 
 import (

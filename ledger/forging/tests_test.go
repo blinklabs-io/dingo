@@ -5049,7 +5049,8 @@ func TestNewBlockForgerHonoursExplicitZeroEBCaps(t *testing.T) {
 	require.Zero(t, forger.forgeEBMaxBytes)
 }
 
-func capPtr(v uint64) *uint64 { return &v }
+//go:fix inline
+func capPtr(v uint64) *uint64 { return new(v) }
 
 func newCapDefaultsForger(
 	t *testing.T,

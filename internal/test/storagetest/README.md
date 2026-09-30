@@ -65,7 +65,7 @@ func TestBlobStoreConformance(t *testing.T) {
 so construction against a real bucket or database stays cheap. A
 cloud- or database-backed plugin should skip cleanly (never fail
 `go test ./...`) when its backend is not configured — see the credential
-checks already in `database/plugin/blob/aws/conformance_test.go` etc. for
+checks already in `database/plugin/blob/aws/tests_test.go` etc. for
 the pattern, and the table below for which environment variables each
 backend reads.
 

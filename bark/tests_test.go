@@ -28,7 +28,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
-	"math/rand/v2"
+	randv2 "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -170,7 +170,7 @@ func TestBarkConnectLimitRejectsOversizedCompressedWireMessage(t *testing.T) {
 	// decoded protobuf message remains within the limit while the compressed
 	// wire message exceeds it, isolating the pre-decompression wire bound.
 	payload := make([]byte, DefaultMaxRequestBody-5)
-	_, err = rand.NewChaCha8([32]byte{1}).Read(payload)
+	_, err = randv2.NewChaCha8([32]byte{1}).Read(payload)
 	require.NoError(t, err)
 	body := protowire.AppendTag(nil, 100, protowire.BytesType)
 	body = protowire.AppendBytes(body, payload)

@@ -2621,7 +2621,7 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 	message := []byte("certificate message")
 	signers := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
 	signatures := make([][]byte, 0, 10)
-	for voterID := uint64(0); voterID < 10; voterID++ {
+	for voterID := range uint64(10) {
 		key := fixture.keys[voterID]
 		signature, err := SignVote(key, message)
 		require.NoError(t, err)
@@ -2700,7 +2700,7 @@ func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
 	message := []byte("certificate message")
 	signers := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
 	signatures := make([][]byte, 0, 10)
-	for voterID := uint64(0); voterID < 10; voterID++ {
+	for voterID := range uint64(10) {
 		key := fixture.keys[voterID]
 		signature, err := SignVote(key, message)
 		require.NoError(t, err)
