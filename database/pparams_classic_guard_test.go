@@ -223,6 +223,24 @@ func TestClassicPParamEnactmentRefusesOutOfDomainUpdate(t *testing.T) {
 	})
 }
 
+// A carried-over proposal outside the reference domain must not halt the
+// boundary either: it proposes no version that could fail to follow, and its
+// vote cannot enact, so the current proposals are still counted.
+func TestClassicPParamCarriedOverOutOfDomainProposal(t *testing.T) {
+	t.Parallel()
+	outOfDomain := classicProposal(t, 1, 250, map[uint64]any{
+		10: cbor.RawMessage{0xd8, 0x1e, 0x82, 0x03, 0x02},
+	})
+	fee := map[uint64]any{0: 200}
+	got := runClassicEnactment(t, []classicTestProposal{
+		outOfDomain,
+		classicProposal(t, 2, 310, fee),
+		classicProposal(t, 3, 311, fee),
+	}, 2, classicTestPParams(2, 0))
+	require.Equal(t, uint(200), got.MinFeeA)
+	require.Nil(t, got.Rho)
+}
+
 func cost(n int, v int64) []int64 {
 	m := make([]int64, n)
 	for i := range m {

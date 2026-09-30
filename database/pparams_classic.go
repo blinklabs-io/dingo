@@ -210,6 +210,12 @@ func classicCarriedOverProposalsFollow(
 		seen[genesis] = struct{}{}
 		update, err := decodeFunc(newestFirst[i].Cbor)
 		if err != nil {
+			// An out-of-domain row proposes no version to check, and its
+			// vote is refused at enactment.
+			var domainErr lcommon.ProtocolParameterUpdateDomainError
+			if errors.As(err, &domainErr) {
+				continue
+			}
 			return false, fmt.Errorf(
 				"decode carried-over pparam update: %w",
 				err,
