@@ -54,8 +54,8 @@ type refPool struct {
 //	                            --all-stake-pools --output-json`
 //	DINGO_REF_EPOCH            the epoch the node was in when that query ran
 //
-// Running this against preview rather than DevNet is what would settle issue
-// #3165, because DevNet has two pools and preview has several hundred. The
+// Running this against preview rather than DevNet is what would settle the
+// question, because DevNet has two pools and preview has several hundred. The
 // artifacts can be had without a full bootstrap:
 //
 //  1. The ledger state lives in the Mithril *ancillary* files, which are not

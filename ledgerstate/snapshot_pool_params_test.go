@@ -23,7 +23,7 @@ import (
 )
 
 // The snapshots carry each epoch's pool parameters in full, and reading them
-// is what closes issue #3165.
+// is what closes the gap.
 //
 // The seeding's remaining gap was a pool that held stake in the go or set
 // snapshot and retired before the snapshot's own epoch: gone from cert state
@@ -226,7 +226,7 @@ func requireOwnersConsistent(
 	}
 }
 
-// The resolution of issue #3165, stated as the property that was failing.
+// The resolution, stated as the property that was failing.
 //
 // A pool that held stake in one of the three snapshots and retired before the
 // snapshot's own epoch is absent from cert state and from the current pool

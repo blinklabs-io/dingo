@@ -86,7 +86,7 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 		Go: scopedRewardTestSnapshot(0x33, 3_000, poolA, compactA),
 	}
 	// poolB and poolC model the synthesized registrations: they identify the
-	// exact two pools reported in issue #3313 but have none of the economics
+	// exact two pools reported in the field but have none of the economics
 	// needed for rewards. They are valid fallback inputs to consider for set,
 	// and must not contaminate mark or go.
 	registered := map[string]*ParsedPool{

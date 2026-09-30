@@ -141,8 +141,8 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 
 // A snapshot describes its own epoch's pool parameters, so a nil resolver is
 // enough on its own: no registration lookup is needed for a pool the snapshot
-// already carries. This is the case issue #3165 turned on -- it is also how a
-// pool that has since retired gets described at all.
+// already carries. This is the case the reward-input fix turned on -- it is
+// also how a pool that has since retired gets described at all.
 func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
 	t.Parallel()
 
