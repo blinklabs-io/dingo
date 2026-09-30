@@ -88,6 +88,15 @@ type LedgerView struct {
 	// the cached Output and must not mutate it. Lazily allocated; never
 	// shared across views.
 	utxoMemo map[utxoref.Key]lcommon.Utxo
+	// prefetchedUtxos holds the live UTxOs a block's transactions reference,
+	// resolved with one batch query before the first transaction is
+	// validated (see prefetchBlockUtxos). It is owned by block application,
+	// shared read-only by that block's per-transaction views, and consulted
+	// only after the overlays and the memo. Block application deletes a
+	// transaction's inputs from it once that transaction is applied, so a
+	// later transaction cannot be answered with an output that is already
+	// spent. A miss falls through to the database read.
+	prefetchedUtxos map[utxoref.Key]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	// Currently unreachable from production: ledgerProcessBlock's sole
@@ -429,6 +438,10 @@ func (lv *LedgerView) UtxoById(
 		}
 	}
 	lv.utxoMemoMu.Unlock()
+
+	if utxo, ok := lv.prefetchedUtxos[key]; ok {
+		return utxo, nil
+	}
 
 	lv.ls.utxoByRefReads.Add(1)
 	utxo, err := lv.ls.db.UtxoByRef(
