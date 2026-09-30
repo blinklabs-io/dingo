@@ -1010,10 +1010,15 @@ type LedgerState struct {
 	hfiStabilityEvalInFlight  atomic.Bool             // guard against overlapping async HFI tallies
 	rewardInputGeneration     atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
 	rewardInputRollbackActive atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
-	// utxoByRefReads counts database.UtxoByRef reads made by
-	// LedgerView.UtxoById across every view of this LedgerState. Tests use
-	// it to assert the per-view UTxO memo; production code does not read it.
-	utxoByRefReads              atomic.Uint64
+	// utxoByRefReads counts UTxO rows read from the database for
+	// LedgerView.UtxoById across every view of this LedgerState: each
+	// database.UtxoByRef point read, plus each row returned by a block's
+	// prefetch batch. Tests use it to assert the per-view UTxO memo;
+	// production code does not read it.
+	utxoByRefReads atomic.Uint64
+	// utxoBatchLookups counts per-block UtxosByRefs prefetch queries made by
+	// ledgerProcessBlock. Tests only.
+	utxoBatchLookups            atomic.Uint64
 	mempool                     MempoolProvider
 	timerCleanupConsumedUtxos   *time.Timer
 	cleanupConsumedUtxosRunning atomic.Bool
@@ -8550,6 +8555,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
+	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	if shouldValidate {
+		prefetchedUtxos = ls.prefetchBlockUtxos(txn, block.Transactions())
+	}
 	var expandedIndexOffset uint64
 	for i, tx := range block.Transactions() {
 		if delta == nil {
@@ -8623,6 +8632,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					txn:                  txn,
 					ls:                   ls,
 					intraBlockUtxos:      intraBlockUtxos,
+					prefetchedUtxos:      prefetchedUtxos,
 					skipPhase2Validation: skipPhase2Validation,
 					// The reference implementation ticks from the block's
 					// immediate predecessor, so that is where the era forecast
@@ -8793,6 +8803,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 			delta.Release()
 			delta = nil // reset
+			forgetSpentPrefetchedUtxos(prefetchedUtxos, tx)
 			levels := TransactionLevelsForApply(tx)
 			if len(levels) > 1 {
 				expandedIndexOffset += uint64(len(levels)) - 1
