@@ -48,7 +48,7 @@ func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
 			},
 			"subscribeChainSelectorEvents": {
 				required:   8,
-				detachable: 1,
+				detachable: 2,
 			},
 		},
 		"node_lifecycle.go": {
