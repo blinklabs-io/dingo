@@ -158,6 +158,34 @@ func TestInvalidPlutusTxInfoUsesBodyOutputs(t *testing.T) {
 			{name: "PlutusV2", version: lang.LanguageVersionV2},
 			{name: "PlutusV3", version: lang.LanguageVersionV3},
 		} {
+			if tc.version != lang.LanguageVersionV3 {
+				t.Run("Babbage/"+tc.name, func(t *testing.T) {
+					tx, input := newContextMintTx(
+						t,
+						txInfoOutputCountScript(t, tc.version, 1, false),
+						false,
+						[]lcommon.TransactionOutput{newTestOutput(1_000_000)},
+						nil,
+						nil,
+					)
+					ls := newMockLedgerState()
+					ls.addUtxo(input, newTestOutput(10_000_000))
+					pp := &babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+						CostModels: map[uint][]int64{
+							0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+							1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+						},
+						MaxTxExUnits: lcommon.ExUnits{Memory: 10_000_000, Steps: 100_000_000},
+					}
+					require.ErrorContains(
+						t,
+						ValidateTxBabbage(tx, 0, ls, pp),
+						"transaction declared invalid but Plutus scripts succeeded",
+					)
+				})
+			}
+
 			t.Run("Conway/"+tc.name, func(t *testing.T) {
 				tx, input := newContextMintTx(
 					t,
@@ -275,19 +303,26 @@ func newContextMintTx(
 	proposals []lcommon.ProposalProcedure,
 ) (*mockProducedValidityTx, testInput) {
 	t.Helper()
+	redeemerValue := lcommon.RedeemerValue{
+		Data:    lcommon.Datum{Data: data.NewConstr(0)},
+		ExUnits: lcommon.ExUnits{Memory: 5_000_000, Steps: 50_000_000},
+	}
 	witnesses := &mockWitnessSet{
-		redeemers: &mockRedeemers{entries: []struct {
-			key lcommon.RedeemerKey
-			val lcommon.RedeemerValue
-		}{
-			{
-				key: lcommon.RedeemerKey{Tag: lcommon.RedeemerTagMint, Index: 0},
-				val: lcommon.RedeemerValue{
-					Data:    lcommon.Datum{Data: data.NewConstr(0)},
-					ExUnits: lcommon.ExUnits{Memory: 5_000_000, Steps: 50_000_000},
+		// valueOverride makes Value agree with the iterated entry: the
+		// Babbage phase-2 path reads the declared budget through the TxInfo
+		// redeemers, which look the value up by key.
+		redeemers: &mockRedeemers{
+			entries: []struct {
+				key lcommon.RedeemerKey
+				val lcommon.RedeemerValue
+			}{
+				{
+					key: lcommon.RedeemerKey{Tag: lcommon.RedeemerTagMint, Index: 0},
+					val: redeemerValue,
 				},
 			},
-		}},
+			valueOverride: &redeemerValue,
+		},
 	}
 	switch tmpScript := plutusScript.(type) {
 	case lcommon.PlutusV1Script:
