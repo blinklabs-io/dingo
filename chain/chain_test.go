@@ -1605,7 +1605,10 @@ func TestChainQueuedVerifiedHeaderMatchesPointFindsNonHeadHeader(
 		t.Fatal("point with matching hash but different slot must not match")
 	}
 	if c.QueuedVerifiedHeaderMatchesPoint(
-		ocommon.NewPoint(testBlocks[3].SlotNumber(), testBlocks[3].Hash().Bytes()),
+		ocommon.NewPoint(
+			testBlocks[3].SlotNumber(),
+			testBlocks[3].Hash().Bytes(),
+		),
 	) {
 		t.Fatal("header that is not queued must not match")
 	}

@@ -4530,11 +4530,12 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 	// this entire group of checks (issue #3528).
 	if !ls.slotCoveredByMithril(e.Point.Slot) {
 		var verifyErr error
-		// Chainsync may already have verified the queued header before
-		// blockfetch started. When the fetched block matches that first
-		// verified queued header by point, a second verification is
-		// redundant. Chain insertion still checks that the block matches the
-		// queued header hash before accepting it.
+		// Chainsync may already have verified this block's queued header.
+		// Fetched blocks wait in pendingBlockfetchEvents before insertion, so
+		// that header is usually behind the queue head; match it by point
+		// anywhere in the queue. The block hash is the hash of the header
+		// bytes, so a match means the same header, and chain insertion still
+		// checks the block against the queue head before accepting it.
 		headerAlreadyVerified := ls.chain.QueuedVerifiedHeaderMatchesPoint(
 			e.Point,
 		)
