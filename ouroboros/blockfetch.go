@@ -371,7 +371,9 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		return nil
 	}
 	endIter.Cancel()
-	maxBlocks := maxBlockFetchBlocksForSecurityParam(o.ledgerState.SecurityParam())
+	maxBlocks := maxBlockFetchBlocksForSecurityParam(
+		o.ledgerState.SecurityParam(),
+	)
 	// maxBlockFetchBlocksForSecurityParam never returns negative.
 	maxBlocksU64 := uint64(maxBlocks) // #nosec G115
 	// Validate that the range does not exceed the block-count bound (#4354).
@@ -391,11 +393,16 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			if blockCount > maxBlocksU64 {
 				o.config.Logger.Debug(
 					"blockfetch: range exceeds maximum block count, sending NoBlocks",
-					"connection_id", ctx.ConnectionId.String(),
-					"start_slot", start.Slot,
-					"end_slot", end.Slot,
-					"block_count", blockCount,
-					"max_blocks", maxBlocks,
+					"connection_id",
+					ctx.ConnectionId.String(),
+					"start_slot",
+					start.Slot,
+					"end_slot",
+					end.Slot,
+					"block_count",
+					blockCount,
+					"max_blocks",
+					maxBlocks,
 				)
 				chainIter.Cancel()
 				if err := ctx.Server.NoBlocks(); err != nil {
@@ -861,6 +868,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 				block.BlockNumber(),
 				block.Hash(),
 				delaySeconds,
+				fetchDuration.Seconds(),
 			)
 			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
