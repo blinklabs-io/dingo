@@ -1889,3 +1889,26 @@ func TestDownloadDigestsArchiveKeepsCacheOnCancellation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fixture.digestArchive, data)
 }
+
+// A bad ancillary archive that cannot be removed stays recorded, so the
+// result's Cleanup of an unverified bootstrap, which continues without
+// ancillary data, still owns it.
+func TestRemoveBadAncillaryArchiveKeepsPathWhenRemovalFails(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir := t.TempDir()
+
+	file := filepath.Join(dir, "preprod-abc-ancillary.tar.zst")
+	require.NoError(t, os.WriteFile(file, []byte("bad"), 0o600))
+	assert.Empty(t, removeBadAncillaryArchive(logger, file))
+	assert.NoFileExists(t, file)
+
+	assert.Empty(t, removeBadAncillaryArchive(logger, file),
+		"an archive already gone needs no cleanup")
+
+	// A non-empty directory makes os.Remove fail on every platform.
+	stuck := filepath.Join(dir, "stuck-ancillary.tar.zst")
+	require.NoError(t, os.MkdirAll(filepath.Join(stuck, "child"), 0o700))
+	assert.Equal(t, stuck, removeBadAncillaryArchive(logger, stuck))
+}

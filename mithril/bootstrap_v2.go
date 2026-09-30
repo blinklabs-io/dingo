@@ -350,16 +350,9 @@ func bootstrapV2(
 				var dlErr *ancillaryDownloadError
 				if archPath != "" && ancCtx.Err() == nil &&
 					!errors.As(ancErr, &dlErr) {
-					if err := os.Remove(archPath); err != nil &&
-						!errors.Is(err, os.ErrNotExist) {
-						cfg.Logger.Warn(
-							"failed to remove bad ancillary archive",
-							"component", "mithril",
-							"path", archPath,
-							"error", err,
-						)
-					}
-					ancillaryArchivePath = ""
+					ancillaryArchivePath = removeBadAncillaryArchive(
+						cfg.Logger, archPath,
+					)
 				}
 				return
 			}
@@ -1425,6 +1418,23 @@ func sha256Reader(r io.Reader, name string) (string, int64, error) {
 		return "", 0, fmt.Errorf("hashing %s: %w", name, err)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
+}
+
+// removeBadAncillaryArchive deletes an ancillary archive that failed
+// extraction or verification and returns the path still left for Cleanup
+// to remove: empty once the file is gone.
+func removeBadAncillaryArchive(logger *slog.Logger, path string) string {
+	if err := os.Remove(path); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		logger.Warn(
+			"failed to remove bad ancillary archive",
+			"component", "mithril",
+			"path", path,
+			"error", err,
+		)
+		return path
+	}
+	return ""
 }
 
 // ancillaryDownloadError marks a failure to fetch the ancillary archive, as
