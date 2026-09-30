@@ -5512,3 +5512,51 @@ func TestChainSelectorForkSwitchReportsRollbackPoint(t *testing.T) {
 	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
 	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
 }
+
+func TestChainSelectorForkSwitchWithoutSharedPointHasNoRollbackPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	tipAt := func(slot uint64, hash string) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+			BlockNumber: slot,
+		}
+	}
+
+	// The fragments share no (slot, hash) point, so the selector cannot
+	// establish an intersection and must not report one.
+	for _, tip := range []ochainsync.Tip{
+		tipAt(1, "a1"), tipAt(2, "a2"), tipAt(3, "a3"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	for _, tip := range []ochainsync.Tip{
+		tipAt(1, "b1"), tipAt(2, "b2"), tipAt(3, "b3"), tipAt(4, "b4"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "fork switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.Equal(t, connA, switchEvt.PreviousConnectionId)
+	assert.Nil(t, switchEvt.RollbackPoint)
+}
