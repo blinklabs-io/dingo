@@ -22,8 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestProcessEpochRolloverRatifiesWithdrawalAgainstDonatedTreasury is the
-// dingo#4467 regression through the real rollover. The treasury holds
+// TestProcessEpochRolloverRatifiesWithdrawalAgainstDonatedTreasury covers the
+// donation-inclusive RATIFY seed through the real rollover. The treasury holds
 // 100 ADA and the ending epoch received a 50 ADA donation. Conway's EPOCH
 // rule adds the donation before it seeds RATIFY, so a 120 ADA withdrawal is
 // accepted at this boundary and paid at the next one:

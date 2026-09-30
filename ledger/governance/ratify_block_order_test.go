@@ -64,10 +64,10 @@ func sameBlockPair(
 	return earlier, later
 }
 
-// TestProcessEpochOrdersSameBlockWithdrawalsByTransactionPosition is the
-// dingo#4465 case: two TreasuryWithdrawals in one block each fit the running
-// treasury budget alone but not together, and the one appearing later in the
-// block has the lower transaction hash. Conway RATIFY evaluates them in
+// TestProcessEpochOrdersSameBlockWithdrawalsByTransactionPosition covers two
+// TreasuryWithdrawals in one block that each fit the running treasury budget
+// alone but not together, where the one appearing later in the block has the
+// lower transaction hash. Conway RATIFY evaluates them in
 // submission order, so the earlier transaction's withdrawal is accepted and
 // the later one no longer fits.
 func TestProcessEpochOrdersSameBlockWithdrawalsByTransactionPosition(

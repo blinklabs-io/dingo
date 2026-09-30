@@ -83,10 +83,11 @@ func seedTestRatified(proposal *models.GovernanceProposal) {
 	proposal.RatifiedSlot = &ratifiedSlot
 }
 
-// TestProcessEpochRatifyTreasuryIncludesBoundaryDonations is the dingo#4467
-// case: 100 ADA of treasury plus a 50 ADA donation from the ended epoch lets
-// a 120 ADA withdrawal ratify, and the donation does not move the treasury
-// inside ProcessEpoch (the caller credits it afterwards).
+// TestProcessEpochRatifyTreasuryIncludesBoundaryDonations covers boundary
+// donations in the RATIFY seed: 100 ADA of treasury plus a 50 ADA donation
+// from the ended epoch lets a 120 ADA withdrawal ratify, and the donation does
+// not move the treasury inside ProcessEpoch (the caller credits it
+// afterwards).
 func TestProcessEpochRatifyTreasuryIncludesBoundaryDonations(t *testing.T) {
 	t.Parallel()
 

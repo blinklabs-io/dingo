@@ -72,7 +72,12 @@ func exerciseGovernanceProposalOrderUpgrade(
 			break
 		}
 	}
-	require.Greater(t, migrationIndex, 0, "governance proposal order migration must exist")
+	require.Greater(
+		t,
+		migrationIndex,
+		0,
+		"governance proposal order migration must exist",
+	)
 	runTo := func(versions []migrations.Migration) {
 		t.Helper()
 		runner := migrations.Runner{

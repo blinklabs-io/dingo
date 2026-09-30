@@ -13508,11 +13508,19 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    state. Only a successful actual ENACT advances `UpdatedPParams`; RATIFY's
    staged value is not published as active ledger parameters. This behavior is
    specifically the running-treasury and staged-parameter subset, not the full
-   formal ENACT-state transition.
+   formal ENACT-state transition. An accepted delaying action (NoConfidence,
+   UpdateCommittee, NewConstitution, HardForkInitiation) ends the pass, so no
+   later action in it can observe that action's committee, constitution or
+   version state, and RATIFY does not stage it; the action's successor
+   ratifies at a later boundary, once ENACT has made it the purpose root.
+   RATIFY decides the whole pass before writing any mark, so an error part-way
+   through leaves no verdict behind.
 
    RATIFY runs after the boundary commits. `ProcessEpoch` with
    `DeferRatification` returns a `governance.RatificationPlan` (the epoch
-   input, the post-ENACT parameters and the running treasury) instead of
+   input, the post-ENACT parameters and the RATIFY treasury seed, read in the
+   boundary transaction because the pinned snapshot also holds the boundary's
+   later pot writes) instead of
    tallying; `processEpochRollover` records it under
    `dingo:governance:ratify-pending` and, in the boundary transaction's
    `AfterCommit`, opens a read transaction and reads from it before returning,
