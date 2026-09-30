@@ -390,7 +390,7 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 // "...RejectsSlotMismatchBeforeVote" test: a peer-offered store for the same
 // hash at a different, unannounced slot is no longer rejected -- the
 // manifest is content-addressed, so that occurrence can be independently
-// legitimate (issue #3513 review) -- but it must stay unverified and must
+// legitimate -- but it must stay unverified and must
 // not trigger a second vote for a slot nothing has corroborated.
 func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote(
 	t *testing.T,

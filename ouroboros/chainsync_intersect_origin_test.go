@@ -245,8 +245,8 @@ func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
 }
 
 // TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor is the regression
-// test for the review finding that the origin-only rescue re-introduced the
-// #2309 violation one layer up.
+// test that the origin-only rescue re-introduced the
+// primary-chain ancestor-check violation one layer up.
 //
 // When the point list is empty because the primary chain is AHEAD on a fork
 // that does not contain the applied ledger tip, the ledger deliberately reports
@@ -278,16 +278,16 @@ func TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor(t *testing.T) {
 // the state a chain rewind leaves behind.
 //
 // This distinction is load-bearing: swapping this for the real block hash
-// converts the #2309 test below into the ordinary chain-ahead test beside it,
-// which asserts the opposite outcome.
+// converts the ahead-of-fork test below into the ordinary chain-ahead test
+// beside it, which asserts the opposite outcome.
 var ledgerTipHashAbsentFromChain = bytes.Repeat([]byte{0xe8}, 32)
 
 // TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly is the
-// #2309 case: the primary chain is AHEAD of the ledger tip, and the ledger
-// tip's own block row is missing (so the tip is not an ancestor on the primary
-// chain either). primaryChainTipAtOrAheadOfLedgerTip's ancestor check fails,
-// the authoritative path finds no tip row, and the ahead-gate refuses to anchor
-// on unapplied forward work.
+// ancestor-check case: the primary chain is AHEAD of the ledger tip, and the
+// ledger tip's own block row is missing (so the tip is not an ancestor on the
+// primary chain either). primaryChainTipAtOrAheadOfLedgerTip's ancestor check
+// fails, the authoritative path finds no tip row, and the ahead-gate refuses to
+// anchor on unapplied forward work.
 //
 // Nothing may be advertised: the list must stay origin-only, matching upstream
 // TestIntersectPointsDoesNotUsePrimaryChainWhenLedgerTipMissing.
@@ -342,11 +342,11 @@ func TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly(
 
 // TestIntersectPointsChainAheadWithLedgerTipRowPresentAdvertisesChainPoints is
 // the complementary case, and the one that must NOT be conflated with the
-// #2309 test above: the primary chain is ahead of the ledger tip, but the
-// ledger tip is a real block on that chain. The chain is then a valid forward
-// extension, primaryChainTipAtOrAheadOfLedgerTip's ancestor check passes, and
-// the chain's real points are advertised with origin appended as the usual
-// last resort.
+// ancestor-check test above: the primary chain is ahead of the ledger tip, but
+// the ledger tip is a real block on that chain. The chain is then a valid
+// forward extension, primaryChainTipAtOrAheadOfLedgerTip's ancestor check
+// passes, and the chain's real points are advertised with origin appended as
+// the usual last resort.
 //
 // No rescue is involved here: the ledger already returned real points, so the
 // rollback anchor is absent and must stay absent.
@@ -484,9 +484,9 @@ func TestBuildDefaultChainsyncIntersectPointsOffersRollbackPointInWindow(
 }
 
 // TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork drives the
-// #2309 shape through the real call site: the primary chain is ahead of the
-// ledger tip on a fork that does not contain it, and the ledger tip row is
-// missing. Nothing may be advertised, so the wire request is origin-only.
+// ancestor-check shape through the real call site: the primary chain is ahead
+// of the ledger tip on a fork that does not contain it, and the ledger tip row
+// is missing. Nothing may be advertised, so the wire request is origin-only.
 func TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork(
 	t *testing.T,
 ) {

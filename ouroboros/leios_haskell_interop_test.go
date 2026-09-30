@@ -210,7 +210,7 @@ func (p *haskellBlockTxsPeer) BlockTxsRequest(
 }
 
 // TestLeiosFetchHaskellEncodedBlockTxsIsConsumed is an interoperability
-// regression for the Haskell reference node's leios-fetch encoding (#3623).
+// regression for the Haskell reference node's leios-fetch encoding.
 // The endorser block has 70 transactions, so the fetch spans two 64-tx bitmap
 // windows. Its manifest, point hash and MsgLeiosBlockTxs response are encoded
 // the way the reference node encodes them. Dingo must send a request the

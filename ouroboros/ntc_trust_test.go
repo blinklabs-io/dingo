@@ -32,7 +32,7 @@ func (l *listenerWithAddress) Close() error { return nil }
 
 func (l *listenerWithAddress) Addr() net.Addr { return l.addr }
 
-// TestIsTrustedNtCListener is the blinklabs-io/dingo#4183 review regression:
+// TestIsTrustedNtCListener is a regression test:
 // ConfigureListeners used to grant every UseNtC listener gouroboros' relaxed
 // mux/query timeouts and 2GiB reassembly buffer unconditionally, on the
 // premise that "NtC is a trusted local channel" -- true for a Unix socket,
@@ -221,7 +221,7 @@ func TestConfigureListenersClassifiesSuppliedListenerByBoundAddress(t *testing.T
 }
 
 // TestConfigureListeners_NormalizesTCPListenAddressToNumeric is the
-// blinklabs-io/dingo#4183 review regression for a TOCTOU in
+// regression test for a TOCTOU in
 // isTrustedNtCListener: it resolved l.ListenAddress to classify the
 // listener, but connmanager's startListener later binds the same
 // listener's ListenAddress by calling net.Listen on the original,

@@ -219,7 +219,7 @@ const (
 // delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so EvaluateAndSwitch
+// EventBus.PublishOrdered, so EvaluateAndSwitch
 // returns before the lane worker has handed them to subscribers. A lane is a
 // FIFO drained by exactly one worker, so a sentinel enqueued after those
 // switches is delivered after them: receiving it back is proof that every

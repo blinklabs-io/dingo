@@ -139,14 +139,14 @@ func testEbHash(point ocommon.Point) lcommon.Blake2b256 {
 }
 
 // TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive
-// is the wolf31o2 regression: the manifest is content-addressed, so the same
+// is a regression test: the manifest is content-addressed, so the same
 // hash can be a live, independently required occurrence at more than one
 // slot at once (two elections producing an identical transaction-reference
 // set), and both must be independently storable and verifiable through
 // their own announcements. Rejecting the second occurrence just because a
 // live announcement already exists for the hash at a different slot would
 // drop that occurrence's offer/fetch and endorser data for whichever ranking
-// block referenced it (wolf31o2 review; issue #3513).
+// block referenced it.
 func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 	t *testing.T,
 ) {
@@ -214,7 +214,7 @@ func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 
 	// Both occurrences must be independently available to the ledger
 	// provider at once -- the concrete "offer/fetch and endorser data become
-	// available" property wolf31o2's review asked for.
+	// available" property.
 	_, ok = o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok, "the first occurrence must reach the ledger")
 	_, ok = o.EndorserBlockTxsByHash(second.Hash, second.Slot)
@@ -462,7 +462,7 @@ func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 }
 
 // TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified is the
-// core issue #3513 attack in its store-first ordering: a peer offers an
+// core attack in its store-first ordering: a peer offers an
 // authentic, correctly-hashed manifest under a slot of its choosing before
 // the genuine announcement arrives. The fabricated slot must never be voted
 // on or reach the ledger. Unlike the pre-composite-key design, the genuine
@@ -777,8 +777,8 @@ func TestLeiosAnnouncementBindsSlotIgnoresExpiredBinding(t *testing.T) {
 	require.False(t, data.slotVerified)
 }
 
-// TestFetchEndorserBlockByPointRejectsStaleReloadedSlot is the P1 regression
-// from the second review round: a hash persisted (and so already verified)
+// TestFetchEndorserBlockByPointRejectsStaleReloadedSlot is a regression test:
+// a hash persisted (and so already verified)
 // under one slot must not be silently accepted as satisfying a later,
 // authoritative request for the same hash at a different slot. The manifest
 // is content-addressed, so the same hash can legitimately recur at a
@@ -855,8 +855,7 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 // occurrences (the manifest is content-addressed) and neither blocks the
 // other. A peer-offered store matching its own live announcement must
 // succeed and coexist with the authoritative entry, not be rejected as if
-// the authoritative source's slot were the hash's only valid one (issue
-// #3513 review; wolf31o2 review).
+// the authoritative source's slot were the hash's only valid one.
 func TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist(
 	t *testing.T,
 ) {
@@ -945,13 +944,13 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 }
 
 // TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry is the closure-wait
-// half of the second review round's comment 2: a closure that is complete but
+// half of the slot-verification contract: a closure that is complete but
 // not yet slot-verified must not report ready via
 // leiosClosureCompleteLocked/waitForLeiosEndorserClosure, and a waiter
 // registered on it must stay parked until bindLeiosEndorserBlockSlot
 // corroborates the slot -- otherwise the node-to-client merge path (which
 // waits on this same closure) could consume an unverified slot the same way
-// EndorserBlockTxsByHash could before issue #3513.
+// EndorserBlockTxsByHash could before the announced-point binding.
 func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 	t.Parallel()
 

@@ -355,7 +355,7 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 // prefix, in the order the ids were offered, and preserves the bodies of ids
 // the peer has not yet acknowledged so they remain available to retry.
 // Regression test for
-// https://github.com/blinklabs-io/dingo/issues/3424, where any nonzero ack
+// the case where any nonzero ack
 // cleared the entire offered cache and silently dropped unacknowledged
 // bodies.
 func TestTxSubmissionClientRequestTxIdsPartialAck(t *testing.T) {

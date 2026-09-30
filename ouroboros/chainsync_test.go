@@ -2139,7 +2139,7 @@ func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
 }
 
 // TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly
-// verifies the fix preserves the protection added in #1699: when peergov
+// verifies the fix preserves the protection against inbound peers: when peergov
 // reports the peer as ineligible (e.g. a random downstream client pulling
 // data from us), its headers must not feed the ledger even though chainsync
 // is running against it.
@@ -2207,8 +2207,7 @@ func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
 // verifies that when no ChainsyncIngressEligible policy is wired, an inbound
 // full-duplex chainsync client is not treated as ingress-eligible. Outbound
 // chainsync retains its legacy default of eligible so the fix does not
-// regress existing callers that don't pass a policy. Regression guard for
-// the review feedback on issue #1982.
+// regress existing callers that don't pass a policy. Regression guard.
 func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
 	t *testing.T,
 ) {

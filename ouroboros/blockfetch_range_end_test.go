@@ -105,7 +105,7 @@ func newBlockfetchRangeFixture(t *testing.T) *blockfetchRangeFixture {
 // newBlockfetchRangeFixtureWithSlots is newBlockfetchRangeFixture generalized
 // to caller-chosen slots, so a test can reproduce a sparse or
 // low-active-slot-coefficient custom network where consecutive real blocks
-// span far more slots than mainnet's stability window (#4354).
+// span far more slots than mainnet's stability window.
 func newBlockfetchRangeFixtureWithSlots(
 	t *testing.T,
 	slots []uint64,
@@ -298,11 +298,11 @@ func TestBlockfetchServerRequestRange_InChainRangeStillServedInFull(
 	)
 }
 
-// TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire is issue
-// #4354, end to end: a real MsgRequestRange whose endpoint slots differ by
-// more than 129600 (the old, now-removed MaxBlockFetchRange) must still be
-// served in full when every requested block is a real point on the chain --
-// this is what a sparse or low-active-slot-coefficient custom network
+// TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire covers
+// sparse-network ranges end to end: a real MsgRequestRange whose endpoint slots
+// differ by more than 129600 (the old, now-removed MaxBlockFetchRange) must
+// still be served in full when every requested block is a real point on the
+// chain -- this is what a sparse or low-active-slot-coefficient custom network
 // produces when a client batches consecutive blocks for BlockFetch. Both
 // endpoints are validated against the chain by blockfetchServerRequestRange
 // before this ever reaches the block-count bound in blockfetchServerSendBatch,
@@ -366,7 +366,7 @@ func smallSecurityParamCardanoConfig(
 }
 
 // TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks is
-// review comment feedback on #4354's original fix: enforcing the block-count
+// the case where enforcing the block-count
 // bound only in blockfetchServerSendBatch, after StartBatch, made an
 // over-cap range unrecoverable for an honest peer -- the transport drops
 // with no protocol-level signal, and retrying the identical range repeats

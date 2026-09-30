@@ -47,7 +47,7 @@ func txsubmissionPanicReply(
 }
 
 // TestValidateTxsubmissionReplyContainsDecoderPanic covers the transaction-body
-// half of blinklabs-io/gouroboros#2075: a peer
+// half of decoder-panic containment: a peer
 // body whose bytes panic the ledger decoder must be rejected as a decode
 // failure, not unwound into the per-peer txsubmission goroutine, which has no
 // recover above it and would take the node process down. Drop the containment

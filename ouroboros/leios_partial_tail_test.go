@@ -71,7 +71,7 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 // A fetch that runs out of diffused transactions must retain what it already
 // holds against the cached endorser block instead of discarding it. Before
 // this, the partial prefix was dropped on the floor and the next offer
-// re-fetched the whole block from scratch (issue #2629).
+// re-fetched the whole block from scratch.
 func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	t.Parallel()
 
