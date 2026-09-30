@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
@@ -58,8 +59,24 @@ type PraosTiebreakerConfig struct {
 	MaxSlotDistance uint64
 }
 
+// ByronBlockKind distinguishes a Byron header's block kind for the
+// era-aware EBB tiebreak in ComparePraosTips. It is always
+// ByronBlockKindNone for a Shelley-family header, so the tiebreak never
+// fires outside Byron.
+type ByronBlockKind uint8
+
+const (
+	// ByronBlockKindNone means the header is not a Byron header (or is
+	// absent): the Byron EBB tiebreak does not apply.
+	ByronBlockKindNone ByronBlockKind = iota
+	ByronBlockKindMain
+	ByronBlockKindEBB
+)
+
 // PraosTiebreakerView mirrors ouroboros-consensus' PraosTiebreakerView for
-// equal-length chain selection.
+// equal-length chain selection. Byron carries no Praos view data, so a Byron
+// header instead populates only Byron, on the same struct so the era-aware
+// tiebreak rides the existing Praos-view plumbing into peer-tip state.
 type PraosTiebreakerView struct {
 	Slot              uint64
 	Issuer            []byte
@@ -67,6 +84,7 @@ type PraosTiebreakerView struct {
 	TieBreakVRF       []byte
 	TiebreakerConfig  PraosTiebreakerConfig
 	hasIssuerAndIssue bool
+	Byron             ByronBlockKind
 }
 
 // PraosTiebreakerConfigBeforeConway returns the unrestricted VRF tiebreaker
@@ -136,12 +154,20 @@ func NewPraosTiebreakerViewFull(
 }
 
 // GetPraosTiebreakerView extracts the Praos select-view fields from a
-// Shelley-family header.
+// Shelley-family header. A Byron header has no Praos view (ok is false),
+// but the returned view still carries its Byron block kind so the
+// era-aware EBB tiebreak in ComparePraosTips can apply.
 func GetPraosTiebreakerView(
 	header ledger.BlockHeader,
 ) (PraosTiebreakerView, bool) {
 	if header == nil {
 		return PraosTiebreakerView{}, false
+	}
+	if kind := byronBlockKind(header); kind != ByronBlockKindNone {
+		return PraosTiebreakerView{
+			Slot:  header.SlotNumber(),
+			Byron: kind,
+		}, false
 	}
 	issueNo, ok := headerIssueNo(header)
 	if !ok {
@@ -156,6 +182,20 @@ func GetPraosTiebreakerView(
 		TiebreakerConfig:  praosTiebreakerConfigForHeader(header),
 		hasIssuerAndIssue: true,
 	}, true
+}
+
+// byronBlockKind classifies a Byron header by its concrete Go type; Byron
+// headers carry no common Type() method to switch on instead
+// (blinklabs-io/dingo#4413).
+func byronBlockKind(header ledger.BlockHeader) ByronBlockKind {
+	switch header.(type) {
+	case *byron.ByronEpochBoundaryBlockHeader:
+		return ByronBlockKindEBB
+	case *byron.ByronMainBlockHeader:
+		return ByronBlockKindMain
+	default:
+		return ByronBlockKindNone
+	}
 }
 
 func headerIssueNo(header ledger.BlockHeader) (uint64, bool) {

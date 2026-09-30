@@ -1743,7 +1743,7 @@ func (c *Chain) rollbackPointBlock(
 		occupantHash = occupant.Hash
 	}
 	c.manager.recordRollbackPointNotOnChain()
-	slog.Default().Error(
+	slog.Default().Warn(
 		"cross-fork splice prevented: rejecting rollback to a point this chain no longer holds",
 		"component", "chain",
 		"chain_id", c.id,
@@ -2652,6 +2652,22 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 		return models.Block{}, models.ErrBlockNotFound
 	}
 	return result, nil
+}
+
+// HoldsPoint reports whether point is currently part of this chain. A block
+// that remains resolvable only through the manager's retained-block cache
+// after a rollback, or that lives on a fork, is not held.
+func (c *Chain) HoldsPoint(point ocommon.Point) bool {
+	if c == nil || c.manager == nil {
+		return false
+	}
+	blk, err := c.BlockByPoint(point, nil)
+	if err != nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.holdsBlockAtIndex(blk.ID, point.Hash)
 }
 
 // holdsBlockAtIndex reports whether this chain currently has the block with

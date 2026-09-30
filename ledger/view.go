@@ -135,6 +135,12 @@ type LedgerView struct {
 	// -- the exact protocol parameters this operation is actually
 	// evaluating against. See blinklabs-io/dingo#3962's PR review.
 	syntheticV2CostModel bool
+	// byronParamsFromBlock is set for block application, where a Byron
+	// block's rules must read the parameters its update state adopted for
+	// the block's own epoch, passed as pparams. ByronProtocolParameters then
+	// refuses rather than answer with the parameters adopted as of the tip,
+	// which belong to an earlier epoch once a block crosses a boundary.
+	byronParamsFromBlock bool
 	// storageErr is the first non-not-found storage error observed by one of
 	// this view's boolean LedgerState predicates. It is sticky: only the
 	// first recorded error is kept, matching the single LedgerView built per
@@ -342,13 +348,11 @@ var (
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
-// Byron minimum-fee validation requires the fee policy from Byron genesis.
-// Pin the optional capability to the concrete validation view so interface
-// drift fails at build time instead of disabling the rule.
-var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
-
-// The same holds for the Byron ppMaxTxSize rule.
-var _ eras.ByronMaxTxSizeProvider = (*LedgerView)(nil)
+// Byron minimum-fee and maximum-size validation read the adopted Byron
+// protocol parameters through this capability. Pin it to the concrete
+// validation view so interface drift fails at build time instead of disabling
+// the rules.
+var _ eras.ByronProtocolParametersProvider = (*LedgerView)(nil)
 
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
@@ -377,13 +381,21 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 	return lv.ls.ByronProtocolMagic()
 }
 
-func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
-	return lv.ls.ByronFeePolicy()
+func (lv *LedgerView) ByronProtocolParameters() (
+	*eras.ByronProtocolParameters,
+	error,
+) {
+	if lv.byronParamsFromBlock {
+		return nil, errByronBlockParamsNotPassed
+	}
+	return lv.ls.ByronProtocolParameters()
 }
 
-func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
-	return lv.ls.ByronMaxTxSize()
-}
+// errByronBlockParamsNotPassed reports a Byron block applied without its
+// adopted protocol parameters.
+var errByronBlockParamsNotPassed = errors.New(
+	"byron block application must pass the block's adopted protocol parameters",
+)
 
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
@@ -923,7 +935,16 @@ func (lv *LedgerView) RewardAccountBalance(
 	if account == nil {
 		return nil, nil
 	}
-	balance := uint64(account.Reward)
+	pending, err := lv.ls.pendingRewardCredit(
+		lv.txn, credentialTag, cred.Credential[:],
+	)
+	if err != nil {
+		return nil, err
+	}
+	balance, overflow := addRewardUint64(uint64(account.Reward), pending)
+	if overflow {
+		return nil, errors.New("reward account balance overflow")
+	}
 	return &balance, nil
 }
 

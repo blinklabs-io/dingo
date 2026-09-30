@@ -269,6 +269,14 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 	)
 }
 
+func TestDijkstraBlockTransactionRejectsInvalidMempoolTx(t *testing.T) {
+	// Mempool order is [body, witnesses, is_valid, auxiliary_data].
+	_, err := dijkstraBlockTransactionCbor(
+		[]byte{0x84, 0x80, 0xa0, 0xf4, 0xf6},
+	)
+	require.ErrorContains(t, err, "is_valid=false")
+}
+
 func TestBuildBlockDijkstraAnnouncesLeiosEndorserBlock(t *testing.T) {
 	creds := setupTestCredentials(t)
 	pparams := &dijkstra.DijkstraProtocolParameters{

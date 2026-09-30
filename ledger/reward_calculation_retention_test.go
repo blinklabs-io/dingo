@@ -681,6 +681,7 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 		)
 	}), "a retention-pruned epoch with real underlying data must "+
 		"reconstruct and apply, not skip")
+	settleRewardCredits(t, ls)
 
 	afterOwner, err := db.GetAccountByCredential(0, ownerKey, false, nil)
 	require.NoError(t, err)

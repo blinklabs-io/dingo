@@ -231,6 +231,17 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
+	// compareTotalActiveStake (dingo#4321) also reads epoch_info, so seed it
+	// too: this test's contract is that a cached POOL row causes no
+	// pool_history call, not that the stake check has only one cache
+	// dependency. Left unseeded it would fetch epoch_info live and the
+	// request count below would no longer be measuring what it claims.
+	require.NoError(t, cache.UpsertEpochInfo(koiosparity.KoiosEpochInfo{
+		Network:     "preview",
+		Epoch:       epoch,
+		ActiveStake: "1000000",
+		FetchedAt:   time.Now().UTC(),
+	}))
 	require.NoError(t, cache.UpsertPoolEpoch(koiosparity.KoiosPoolEpoch{
 		Network:     "preview",
 		Epoch:       epoch,
@@ -291,6 +302,17 @@ func TestCheckStakeDistribution_CacheMissFetchesOnceAndPersists(t *testing.T) {
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
+	// Seed epoch_info: compareTotalActiveStake (dingo#4321) reads it too,
+	// and this test measures pool_history caching specifically. Without it
+	// the fake server 404s the epoch_info fetch, which correctly is not
+	// cached and so retries, and the request count stops measuring what
+	// this test claims.
+	require.NoError(t, cache.UpsertEpochInfo(koiosparity.KoiosEpochInfo{
+		Network:     "preview",
+		Epoch:       epoch,
+		ActiveStake: "2000000",
+		FetchedAt:   time.Now().UTC(),
+	}))
 
 	client1 := dialWiringClient(t, ctx, listener.Addr().String(), magic)
 	mismatches, err := CheckStakeDistribution(ctx, client1, koios, cache, "preview", epoch)
@@ -512,4 +534,166 @@ func TestFetchTxInfosCached_LiveFetchErrorIsNotSwallowed(t *testing.T) {
 	)
 	require.Error(t, err,
 		"a live failure for the uncached part of a chunk must fail the whole call")
+}
+
+// TestCheckStakeDistributionReportsATotalShortfall pins the call site, not
+// just the helper: compareTotalActiveStake is only useful if
+// CheckStakeDistribution actually calls it, and a helper-only test stays
+// green when the call is deleted -- the same unpinned-call-site gap raised
+// on #4319.
+//
+// Dingo reports one pool; the cached Koios epoch total covers two. That is
+// dingo#4321's failure mode: the per-pool loop finds nothing wrong, because
+// it never asks about a pool Dingo did not report.
+func TestCheckStakeDistributionReportsATotalShortfall(t *testing.T) {
+	const magic = 764824073
+	const epoch = uint64(502)
+	const dingoStake = uint64(1_000_000)
+
+	var poolID ledger.PoolId
+	poolID[0] = 0xCD
+	bech32 := poolID.String()
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setPoolDistr(&localstatequery.PoolDistr2Result{
+		Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{
+			poolID: {
+				StakeFraction:  &cbor.Rat{Rat: big.NewRat(1, 1)},
+				TotalPoolStake: dingoStake,
+			},
+		},
+		TotalActiveStake: dingoStake,
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+	koiosURL, _ := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	// The pool Dingo reported agrees exactly, so the per-pool loop is silent.
+	require.NoError(t, cache.UpsertPoolEpoch(koiosparity.KoiosPoolEpoch{
+		Network:     "preview",
+		Epoch:       epoch,
+		PoolBech32:  bech32,
+		ActiveStake: "1000000",
+		FetchedAt:   time.Now().UTC(),
+	}))
+	// Koios's epoch-wide total is twice that: a second pool exists that
+	// Dingo never reported.
+	require.NoError(t, cache.UpsertEpochInfo(koiosparity.KoiosEpochInfo{
+		Network:     "preview",
+		Epoch:       epoch,
+		ActiveStake: "2000000",
+		FetchedAt:   time.Now().UTC(),
+	}))
+
+	mismatches, err := CheckStakeDistribution(ctx, client, koios, cache, "preview", epoch)
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1,
+		"the missing pool must be reported via the epoch total")
+	require.Equal(t, ReasonTotalActiveStakeMismatch, mismatches[0].Reason)
+	require.Equal(t, int64(-1_000_000), mismatches[0].DiffLovelace,
+		"the shortfall equals the unreported pool's stake")
+	require.False(t, mismatches[0].KoiosFault,
+		"a shortfall is a real divergence, not a Koios-side fault")
+}
+
+// TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails is the
+// blocker raised in review on #4781, and the reason the epoch_info failure
+// is a KoiosFault mismatch rather than an error return.
+//
+// An error return discards every per-pool mismatch CheckStakeDistribution
+// has already collected. from-genesis's recordEpoch then logs only "stake
+// distribution check did not run" and never inspects StakeMismatches, so a
+// divergence the base branch reports plainly would be hidden by an outage
+// of the endpoint this branch added. The check meant to close a blind spot
+// would have opened a worse one.
+//
+// Dingo reports 1,000,000 for a pool Koios has cached at 900,000, so the
+// per-pool half finds a real divergence with no network call; /epoch_info
+// then fails. Both must survive: the pool mismatch as a real finding, the
+// fetch failure as a fault that leaves the epoch unverified.
+func TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails(t *testing.T) {
+	const magic = 764824073
+	const epoch = uint64(504)
+	const dingoStake = uint64(1_000_000)
+
+	var poolID ledger.PoolId
+	poolID[0] = 0x5A
+	bech32 := poolID.String()
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setPoolDistr(&localstatequery.PoolDistr2Result{
+		Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{
+			poolID: {
+				StakeFraction:  &cbor.Rat{Rat: big.NewRat(1, 1)},
+				TotalPoolStake: dingoStake,
+			},
+		},
+		TotalActiveStake: dingoStake,
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+	koiosURL, _ := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	// Cached and disagreeing: the per-pool half finds this without a request.
+	require.NoError(t, cache.UpsertPoolEpoch(koiosparity.KoiosPoolEpoch{
+		Network:     "preview",
+		Epoch:       epoch,
+		PoolBech32:  bech32,
+		ActiveStake: "900000",
+		FetchedAt:   time.Now().UTC(),
+	}))
+	// No epoch_info row, so the total check goes to the failing Koios above.
+
+	mismatches, err := CheckStakeDistribution(
+		ctx, client, koios, cache, "preview", epoch,
+	)
+	require.NoError(t, err,
+		"an epoch_info outage must not fail the whole check and throw away "+
+			"the per-pool findings")
+
+	var pool, fault *StakeMismatch
+	for i := range mismatches {
+		if mismatches[i].KoiosFault {
+			fault = &mismatches[i]
+		} else {
+			pool = &mismatches[i]
+		}
+	}
+
+	require.NotNil(t, pool,
+		"the real per-pool divergence must survive the epoch_info failure")
+	require.Equal(t, bech32, pool.PoolIDBech32)
+	require.Equal(t, int64(100_000), pool.DiffLovelace)
+
+	require.NotNil(t, fault,
+		"the epoch_info failure must still be reported, or the epoch reads "+
+			"as fully verified when the total check never ran")
+	require.Empty(t, fault.PoolIDBech32)
+	require.Contains(t, fault.Reason, ReasonKoiosEpochInfoUnavailable)
 }

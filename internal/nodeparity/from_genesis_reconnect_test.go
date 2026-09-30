@@ -129,6 +129,15 @@ func TestRunProtocolParamsAndStake_RecoversFromMidSequenceConnDeath(t *testing.T
 					w, `[{"epoch_no":%d,"active_stake":"%s"}]`,
 					epoch, koiosStake,
 				)
+			case "/epoch_info":
+				// Agrees with the single pool above, so
+				// compareTotalActiveStake reports nothing and the empty
+				// mismatch list asserted below stays about the reconnect.
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w, `[{"epoch_no":%d,"active_stake":"%s"}]`,
+					epoch, koiosStake,
+				)
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
