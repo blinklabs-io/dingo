@@ -1,7 +1,11 @@
 # Badger value-log GC
 
 Dingo's Badger blob store runs value-log GC every five minutes with a discard
-ratio of `0.5`. This is separate from Badger's automatic LSM compaction. The
+ratio of `0.5`. Both values are configurable through the Badger provider
+options `gcInterval` (a duration such as `10m`; zero keeps the default) and
+`gcDiscardRatio` (greater than 0 and less than 1). Invalid values are rejected
+at startup. Keep the defaults unless measurements on your workload show a
+better tradeoff. This is separate from Badger's automatic LSM compaction. The
 default remains this conservative policy until production measurements show a
 better tradeoff; disabling LSM compaction is not part of the policy options.
 
@@ -14,6 +18,12 @@ GOWORK=off GOCACHE=/tmp/dingo-gc-cache \\
   go test ./database/plugin/blob/badger \\
   -run '^$' -bench '^BenchmarkValueLogGC$' -benchmem -count=5
 ```
+
+`BenchmarkValueLogGCPolicy` runs the production GC worker, so the configured
+interval and discard ratio are the ones measured, over the same fixture. It
+reports `rewrites`, `bytes_reclaimed`, and `drain_ms` (time from enabling the
+worker until it reports no further rewrite) for each interval and ratio pair;
+its `ns/op` includes fixture load and should be ignored.
 
 The benchmark compares discard ratios `0.25`, `0.50`, and `0.75` with the
 background ticker disabled. Record `ns/op`, allocations, and the GC metrics
@@ -30,8 +40,8 @@ Compare these policies:
 | --- | --- |
 | `5m / 0.50` | Current default baseline |
 | GC disabled during load, enabled afterward | Bulk-load control |
-| Longer interval | Lower steady-state GC interference |
-| `0.25` or `0.75` discard ratio | Reclaim-efficiency sensitivity |
+| Longer interval (`gcInterval`) | Lower steady-state GC interference |
+| `0.25` or `0.75` discard ratio (`gcDiscardRatio`) | Reclaim-efficiency sensitivity |
 | Adaptive interval/ratio | Candidate only if measurements justify its complexity |
 
 The default decision is to retain `5m / 0.50` until every workload has a

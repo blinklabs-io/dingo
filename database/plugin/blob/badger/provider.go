@@ -17,6 +17,7 @@ package badger
 import (
 	"context"
 	"math"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
@@ -35,8 +36,14 @@ type Config struct {
 	MemTableSize     uint64  `yaml:"memTableSize"`
 	ValueThreshold   uint64  `yaml:"valueThreshold"`
 	GC               *bool   `yaml:"gc"`
-	Compression      *bool   `yaml:"compression"`
-	CompressionLevel uint64  `yaml:"compressionLevel"`
+	// GCInterval is how often value-log GC runs, such as "5m". Zero uses
+	// DefaultGCInterval.
+	GCInterval time.Duration `yaml:"gcInterval"`
+	// GCDiscardRatio is the discard ratio for each GC pass, in (0, 1). Nil
+	// uses DefaultGCDiscardRatio.
+	GCDiscardRatio   *float64 `yaml:"gcDiscardRatio"`
+	Compression      *bool    `yaml:"compression"`
+	CompressionLevel uint64   `yaml:"compressionLevel"`
 }
 
 func defaultConfig() Config {
@@ -84,6 +91,10 @@ func RegisterProvider(host *hostplugin.Host) error {
 			if cfg.GC != nil {
 				gcEnabled = *cfg.GC
 			}
+			gcDiscardRatio := DefaultGCDiscardRatio
+			if cfg.GCDiscardRatio != nil {
+				gcDiscardRatio = *cfg.GCDiscardRatio
+			}
 			store, err := New(
 				WithDataDir(dataDir),
 				WithLogger(deps.Logger),
@@ -106,6 +117,8 @@ func RegisterProvider(host *hostplugin.Host) error {
 					useCompactBlockMetadata(deps.RunMode, deps.StorageMode),
 				),
 				WithGc(gcEnabled),
+				WithGcInterval(cfg.GCInterval),
+				WithGcDiscardRatio(gcDiscardRatio),
 				WithCompressionEnabled(compression),
 				// #nosec G115 -- value is capped to the destination maximum.
 				WithCompressionLevel(
