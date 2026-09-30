@@ -151,7 +151,8 @@ func TestShrunkActiveStakeUnderCreditsEveryReward(t *testing.T) {
 	require.Equal(t, uint64(46_424), full.AccountRewards[1].Amount)
 }
 
-// TestValidateSnapshotTrackedExcludedActiveStake covers dingo #4025:
+// TestValidateSnapshotTrackedExcludedActiveStake pins the exact bound with
+// tracked excluded stake:
 // TestCalculateAcceptsActiveStakeAboveThePoolSet's non-exceeding bound
 // (sum(Pools) <= TotalActiveStake) tolerates one legitimately excluded pool's
 // stake going missing, but tolerates just as well a Pools set proportionally

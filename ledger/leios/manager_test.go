@@ -1479,7 +1479,7 @@ func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
 	assert.Equal(t, vote.VoteSignature, resolved.VoteSignature)
 }
 
-// TestVoteManagerPeerPrototypeVoteRequeuedForRelay guards issue #3288: a
+// TestVoteManagerPeerPrototypeVoteRequeuedForRelay guards relay re-diffusion: a
 // relay stored a peer's vote for its own tally but never queued it back up
 // for its other peers, so a block producer behind that relay never observed
 // quorum. A newly accepted peer vote must publish VoteReceivedEventType
