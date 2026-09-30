@@ -141,8 +141,7 @@ func mainnetFixtureInputTxs(t *testing.T) []*conway.ConwayTransaction {
 // datum hash, which that decoder resolves to *alonzo.AlonzoTransactionOutput.
 // A rendering of that type that drops the datum hash puts NoOutputDatum in the
 // PlutusV3 script context, and the transaction's withdrawal validator calls
-// Plutus `error` on it, rejecting a block the network accepted. See
-// blinklabs-io/dingo#3860 and blinklabs-io/gouroboros#2213.
+// Plutus `error` on it, rejecting a block the network accepted.
 func TestValidateTxPlutusConwayMainnetStorageDecodedUtxos(t *testing.T) {
 	pp := mainnetFixtureProtocolParams(t)
 	tx, err := conway.NewConwayTransactionFromCbor(

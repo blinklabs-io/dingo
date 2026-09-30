@@ -298,13 +298,12 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 }
 
 // TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap is the
-// regression test for blinklabs-io/dingo#4151: after a Mithril bootstrap,
-// createGenesisBlock unconditionally recreated every Byron/Shelley genesis
-// UTxO as a live row, without checking whether the imported ledger snapshot
-// already reflects that output as spent. Found via cmd/node-parity against
-// a real cardano-node: genesis-declared funds that the real chain spent long
-// ago reappeared as live in dingo's answer, byte-for-byte matching the raw
-// genesis declaration.
+// regression test: after a Mithril bootstrap, createGenesisBlock
+// unconditionally recreated every Byron/Shelley genesis UTxO as a live row,
+// without checking whether the imported ledger snapshot already reflects that
+// output as spent. Found via cmd/node-parity against a real cardano-node:
+// genesis-declared funds that the real chain spent long ago reappeared as live
+// in dingo's answer, byte-for-byte matching the raw genesis declaration.
 //
 // Simulates the bootstrap shape the same way
 // TestCreateGenesisBlockBackfillsMissingNetworkState does: a currentTip past

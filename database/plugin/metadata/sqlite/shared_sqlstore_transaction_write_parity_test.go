@@ -142,7 +142,7 @@ WHERE tx.hash = ? AND l.label = ?`, txHash.Bytes(), "721").Scan(&jsonValue, &cbo
 	require.Equal(t, "a20167696e746567657261316474657874", hex.EncodeToString(cborValue))
 }
 
-// TestSharedSQLStoreWithdrawalWitnessGate covers issue #2919: the
+// TestSharedSQLStoreWithdrawalWitnessGate covers the gate: the
 // account_withdrawal_witness insert must be elided when the caller reports
 // the delegator-inactivity gate off (skipWithdrawalWitness=true), and written
 // when the gate is on -- in both cases the unrelated reward-delta bookkeeping
@@ -274,8 +274,8 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	require.Equal(t, 1, deltas)
 }
 
-// TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount covers issue
-// #3788: a canonical withdrawal replayed during API-mode Mithril historical
+// TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount covers the case
+// where a canonical withdrawal replayed during API-mode Mithril historical
 // backfill can find an inactive account after deregistration. That row is
 // still the historical account and its reward must be preserved. A credential
 // with no account row is an invariant failure and must abort the backfill.

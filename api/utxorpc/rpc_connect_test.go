@@ -680,7 +680,7 @@ func TestConnect_ReadUtxos(t *testing.T) {
 }
 
 // TestConnect_ReadUtxos_MultipleKeys proves ReadUtxos resolves several keys
-// in a single request via the batched UTxO lookup (#392), returning exactly
+// in a single request via the batched UTxO lookup, returning exactly
 // one item per requested key.
 func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})

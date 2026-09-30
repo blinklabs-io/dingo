@@ -230,7 +230,7 @@ func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 	return live
 }
 
-// TestRollbackSameSlotCompetitorRestoresConsumedUtxo covers issue #3678.
+// TestRollbackSameSlotCompetitorRestoresConsumedUtxo pins the behavior below.
 //
 // A rollback target that shares the applied tip's slot but carries a different
 // hash used to fall through to database.TruncateAfterSlot's slot-only UTxO
@@ -290,10 +290,10 @@ func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
 }
 
 // TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly covers the other
-// half of issue #3678's acceptance criteria: when the contested slot cannot be
-// truncated because no applied ancestor below it can be found, the rollback
-// must fail with a persistent diagnostic instead of reporting a repair that
-// left the UTxO set diverged.
+// half of the contract: when the contested slot cannot be truncated because no
+// applied ancestor below it can be found, the rollback must fail with a
+// persistent diagnostic instead of reporting a repair that left the UTxO set
+// diverged.
 func TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly(t *testing.T) {
 	t.Parallel()
 

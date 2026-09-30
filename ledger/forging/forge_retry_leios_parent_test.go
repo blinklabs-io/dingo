@@ -561,16 +561,15 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 }
 
 // TestForgeMarksTheReResolvedEndorserBlockSlot pins the pairing of the two
-// values that identify an embedded endorser block. Since #4123 the
-// occurrence is (hash, slot), not hash alone: the same endorser-block hash
-// can be a distinct occurrence at another slot, so marking a re-resolved
-// hash against the slot of the endorser block it replaced would retire the
-// wrong occurrence.
+// values that identify an embedded endorser block. The occurrence is (hash,
+// slot), not hash alone: the same endorser-block hash can be a distinct
+// occurrence at another slot, so marking a re-resolved hash against the slot of
+// the endorser block it replaced would retire the wrong occurrence.
 //
 // A retry re-resolves the whole payload against the new parent, so both
 // halves move together. Carrying only the hash back out of the retry leaves
 // the slot at the value the first attempt resolved, which is exactly the
-// mismatch #4123 exists to prevent.
+// mismatch the (hash, slot) identity exists to prevent.
 func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 	oldParentRb := leiosHash(0xC1)
 	oldEb := leiosHash(0xD1)

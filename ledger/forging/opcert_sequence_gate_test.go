@@ -352,7 +352,7 @@ func TestCheckAndForgeProductionEraScopedOpCertCounterRule(t *testing.T) {
 // TestCheckAndForgeProductionSkipsOpCertSequenceCheckWhenLedgerViewNil
 // confirms the pre-flight counter gate is opt-in: embedders and dev-mode
 // wiring that leave OpCertLedgerView nil (every other forger test in this
-// package) are unaffected by this change.
+// package) are unaffected by the gate.
 func TestCheckAndForgeProductionSkipsOpCertSequenceCheckWhenLedgerViewNil(
 	t *testing.T,
 ) {

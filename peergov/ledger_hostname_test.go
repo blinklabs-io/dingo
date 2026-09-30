@@ -30,7 +30,7 @@ func TestIsResolvableHost(t *testing.T) {
 		want bool
 		why  string
 	}{
-		// The address observed on a preview block producer (issue #2018).
+		// The address observed on a preview block producer.
 		{"--pool-relay-port", false, "leading hyphen label"},
 		{"", false, "empty"},
 		{".", false, "root only"},

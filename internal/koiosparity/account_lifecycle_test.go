@@ -29,9 +29,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// TestAccountLifecycleMismatchesReportsZeroReward proves dingo #3099's
+// TestAccountLifecycleMismatchesReportsZeroReward proves the
 // zero-reward-confirmed reporting: an address Koios answered for with no
-// reward rows is reported via CategoryAcctZeroReward — a dimension #3097's
+// reward rows is reported via CategoryAcctZeroReward — a dimension the
 // merged CompareAccountEpoch structurally cannot see (it only ever compares
 // keys present in at least one side's row map). Reported as one aggregate
 // row (count + a capped sample), not one row per address — see
@@ -479,7 +479,7 @@ func TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError(t *testing.T) {
 }
 
 // TestDetermineStatusAccountLifecycleCategoriesAreInformational proves the
-// three dingo #3099 categories never affect Status: alone they must PASS,
+// three account-lifecycle categories never affect Status: alone they must PASS,
 // and alongside a genuine FAIL-triggering mismatch they must not mask or
 // alter that FAIL.
 func TestDetermineStatusAccountLifecycleCategoriesAreInformational(

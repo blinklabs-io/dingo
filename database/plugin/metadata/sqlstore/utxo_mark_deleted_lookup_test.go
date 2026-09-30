@@ -159,7 +159,7 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 // The lookup fix alone left the update carrying "deleted_slot = 0", and with
 // no sqlite_stat1 SQLite drives that form from
 // idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards,
-// evaluating "id IN (...)" against every live row. That is issue #4067's
+// evaluating "id IN (...)" against every live row. That is the
 // whole-table pass moved from the first statement to the second. Statistics
 // hide it, so this test must not run ANALYZE.
 func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {

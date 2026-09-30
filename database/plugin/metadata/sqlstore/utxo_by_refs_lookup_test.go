@@ -25,7 +25,7 @@ import (
 
 // legacyGetUtxosByRefsQuery rebuilds GetUtxosByRefs' pre-fix predicate: an OR
 // of (tx_id = ? AND output_idx = ?) equalities gated by "deleted_slot = 0",
-// the same shape issue #4067 named for queryUtxoStakeRefs.
+// the same shape queryUtxoStakeRefs once had.
 func legacyGetUtxosByRefsQuery(refs []models.UtxoId) (string, []any) {
 	predicate, args := utxoIDPredicate(refs)
 	return "deleted_slot = 0 AND (" + predicate + ")", args
@@ -45,7 +45,7 @@ func legacyGetUtxosByRefsAsOfQuery(
 
 // TestGetUtxosByRefsUsesTxIDIndex pins the query plan of the predicate
 // GetUtxosByRefs and GetUtxosByRefsAsOf run, the same planner-fallback shape
-// issue #4067 documents for queryUtxoStakeRefs: the legacy OR-predicate form
+// queryUtxoStakeRefs once had: the legacy OR-predicate form
 // abandons tx_id_output_idx for idx_utxo_deleted_payment_script/
 // idx_utxo_deleted_staking_amount past a handful of terms, and the tx_id-IN
 // form this test also exercises does not.

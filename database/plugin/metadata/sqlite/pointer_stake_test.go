@@ -254,9 +254,9 @@ func (f *pointerStakeFixture) stakeAt(t *testing.T, slot uint64) uint64 {
 	return stakes[string(f.pool)]
 }
 
-// TestPointerAddressStakeReachesItsCredential is the dingo #3854 regression,
-// driven end to end through Store.SetTransaction and the historical stake
-// query rather than against the resolver in isolation.
+// TestPointerAddressStakeReachesItsCredential is the pointer-address stake
+// attribution regression, driven end to end through Store.SetTransaction and
+// the historical stake query rather than against the resolver in isolation.
 //
 // A pointer address carries the position of a stake registration certificate
 // instead of a credential, so the produced utxo row has no staking_key and the
@@ -648,12 +648,11 @@ func TestPointerAddressStakeResolvesTheWedgeAddress(t *testing.T) {
 	require.Equal(t, uint64(35_553_515_656), f.stakeAt(t, wedgePointerSlot+10))
 }
 
-// TestPointerAddressStakeResolvesAnInGapRegistration covers the case both
-// review bots raised against resolving at ingest: a pointer whose registration
-// certificate lands inside a Mithril gap block. Gap ingestion supplies no
-// deposits and no input state, and until recently wrote no certificate rows at
-// all, so nothing was available to resolve against at the moment the output was
-// applied.
+// TestPointerAddressStakeResolvesAnInGapRegistration covers the case of
+// resolving at ingest: a pointer whose registration certificate lands inside a
+// Mithril gap block. Gap ingestion supplies no deposits and no input state, and
+// until recently wrote no certificate rows at all, so nothing was available to
+// resolve against at the moment the output was applied.
 //
 // Resolving at the slot being evaluated removes the ordering requirement
 // entirely -- the registration only has to be in the database by the time
@@ -685,9 +684,10 @@ func TestPointerAddressStakeResolvesAnInGapRegistration(t *testing.T) {
 // int64. The columns holding it are signed, so the value cannot be stored.
 //
 // The block still has to apply. Failing the write would stall ingestion of a
-// block the network accepted -- the same class of failure #3854 exists to
-// avoid -- and the position names no certificate in any case, so the output is
-// simply left unattributed, as a pointer to an unoccupied position is.
+// block the network accepted -- the same class of failure pointer-address
+// attribution must avoid -- and the position names no certificate in any case,
+// so the output is simply left unattributed, as a pointer to an unoccupied
+// position is.
 func TestPointerAddressStakeToleratesAnUnrepresentablePosition(t *testing.T) {
 	t.Parallel()
 	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)

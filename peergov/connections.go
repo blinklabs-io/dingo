@@ -1003,7 +1003,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					// out for minutes and collapsing to a single stalled
 					// upstream. On a network of few flaky relays every session
 					// is short-lived, so the escalating backoff would otherwise
-					// erode the pool to one. See issue #2765.
+					// erode the pool to one. See criticalHotPeerThreshold.
 					if peer.ReconnectDelay > emergencyReconnectDelay &&
 						p.countHotPeersLocked() <= criticalHotPeerThreshold {
 						peer.ReconnectDelay = emergencyReconnectDelay

@@ -75,7 +75,7 @@ func TestIsRetryableDingoConnErr(t *testing.T) {
 // against a real gouroboros LocalStateQuery server that kills the connection
 // the moment CheckStakeDistribution's GetPoolDistr2 call arrives -- exactly
 // the failure shape confirmed live on preview's from-genesis run starting at
-// epoch 4 (dingo#1900): the connection shared between CheckProtocolParams
+// epoch 4: the connection shared between CheckProtocolParams
 // and CheckStakeDistribution dies in the gap between the two calls.
 //
 // Reverting runProtocolParamsAndStake back to a single attempt (no retry --
@@ -177,7 +177,7 @@ func TestRunProtocolParamsAndStake_RecoversFromMidSequenceConnDeath(t *testing.T
 // return path collapsed both ppErr and stakeErr into one conflated
 // "lastErr" value, so a successful protocol-params result was silently
 // replaced with the stake check's own error once retries ran out. Confirmed
-// live on the from-genesis run this fix targets (dingo#1900): epochs 4
+// live on the from-genesis run this fix targets: epochs 4
 // onward logged "protocol params check did not run" with the *stake*
 // check's exact error text ("dingo stake distribution query: protocol is
 // shutting down"), even though protocol params was never actually failing.

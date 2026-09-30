@@ -248,11 +248,10 @@ func TestEmptyGenesisCommitteeReferenceResignation(t *testing.T) {
 
 // TestCreateGenesisBlockSeedsCommittee proves a node initialized from Conway
 // genesis recognizes every genesis Constitutional Committee member for
-// hot-key authorization. Without the seed (blinklabs-io/dingo#3785) a
-// genesis member never touched by an UpdateCommittee action has no row at
-// all, and AuthCommitteeHot/ResignCommitteeCold validation rejects it as
-// "not a CC member" even though the real chain has recognized it since the
-// hard fork.
+// hot-key authorization. Without the seed a genesis member never touched by an
+// UpdateCommittee action has no row at all, and
+// AuthCommitteeHot/ResignCommitteeCold validation rejects it as "not a CC
+// member" even though the real chain has recognized it since the hard fork.
 func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
 	t.Parallel()
 

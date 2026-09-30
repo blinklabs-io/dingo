@@ -128,7 +128,7 @@ WHERE credential_tag = ? AND staking_key = ? AND amount = ? AND deleted_slot = 0
 // TestRefreshRewardLiveStakeAggregateDeltaGain proves a single UTxO gain
 // applied through the incremental path produces the same stored total a
 // fresh authoritative sumCredentialUtxoStake scan would, and that it does so
-// without falling back to that scan (the whole point of dingo #4421).
+// without falling back to that scan (the whole point of the incremental path).
 func TestRefreshRewardLiveStakeAggregateDeltaGain(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -518,8 +518,8 @@ func utxoTxIDForGroup(group, index int) []byte {
 }
 
 // TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal is the
-// load-bearing test for the whole design (dingo #4421): the incremental
-// running total this change introduces trades away sumCredentialUtxoStake's
+// load-bearing test for the whole design: the incremental
+// running total trades away sumCredentialUtxoStake's
 // self-healing full-scan property, so it depends entirely on
 // RewardLiveStakeNeedsBackfill (run at every node startup, before block
 // application resumes -- see Node.backfillRewardLiveStake) actually
@@ -602,7 +602,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 }
 
 // BenchmarkRefreshRewardLiveStakeAggregateDeltaAtScale is the direct
-// before/after comparison for dingo #4421: refreshRewardLiveStakeAggregate's
+// before/after comparison: refreshRewardLiveStakeAggregate's
 // full sumCredentialUtxoStake rescan against
 // refreshRewardLiveStakeAggregateDelta's O(1) running-total update, for a
 // credential holding as many live UTxOs as the 20,003-UTxO case the issue

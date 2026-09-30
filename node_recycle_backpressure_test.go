@@ -37,7 +37,7 @@ import (
 // connection and then keeps its own "already asked" flag set -- the leios-fetch
 // backfill's markProtocolDead is the clearest case, where a dropped request
 // leaves a connection whose leios-fetch protocol can never answer again in the
-// pool for the rest of its life (dingo #3552). Detaching either subscriber
+// pool for the rest of its life. Detaching either subscriber
 // under backpressure would silently strip requests out of the stream, so both
 // stay attached until they drain.
 func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {

@@ -31,9 +31,9 @@ import (
 )
 
 // TestLedgerProcessBlockRejectsLateMIRCertificate is the block-application
-// half of #4362: a block carrying a MIR certificate inside the final
-// stability window fails validation, so the certificate is never stored for
-// applyMIRCerts to credit at the boundary.
+// half of the final-stability-window MIR rule: a block carrying a MIR
+// certificate inside the final stability window fails validation, so the
+// certificate is never stored for applyMIRCerts to credit at the boundary.
 func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
 	t.Parallel()
 

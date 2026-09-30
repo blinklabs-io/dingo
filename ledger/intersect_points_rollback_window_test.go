@@ -210,7 +210,7 @@ func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
 // or ahead of the ledger tip is unapplied forward work -- possibly a fork that
 // does not descend from the ledger tip at all -- and must NOT be offered as an
 // intersect point, which is the invariant the primary-chain ancestor check
-// (#2309) exists to protect. Only a chain tip strictly below the ledger tip,
+// exists to protect. Only a chain tip strictly below the ledger tip,
 // the signature of an in-flight rewind, qualifies.
 func TestAuthoritativeRecentChainPointsIgnoresChainTipAheadOfLedgerTip(
 	t *testing.T,

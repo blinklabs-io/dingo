@@ -25,7 +25,7 @@ import (
 
 // sqliteFileIdentity returns the metadata database's file identity, which
 // distinguishes "emptied in place" from "deleted and recreated". The
-// close-and-reopen path this change replaces removed the whole data directory
+// close-and-reopen path the old Reset used removed the whole data directory
 // on every Reset, so it produced a different file each time.
 //
 // os.SameFile rather than a syscall.Stat_t inode: Stat_t does not exist on

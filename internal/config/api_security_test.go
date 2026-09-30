@@ -108,13 +108,13 @@ func TestApplyFlags_APITLSCLIOverridesEnvironment(t *testing.T) {
 	assert.Equal(t, "server", *cfg.API.TLS.Mode, "CLI overrides environment")
 }
 
-// TestLoad_APIProviderConfigPerFieldOverride is the end-to-end shape from
-// dingo#2998's issue body: a shared top-level api.tls default plus a
-// provider-level override of only one nested field. It exercises the real
-// LoadConfig YAML path together with apiconfig.MergeProviderConfig (the
-// same merge node.go's apiProviderConfig performs at composition), rather
-// than re-deriving the same fields by hand, so a regression in either
-// layer's field names would be caught here.
+// TestLoad_APIProviderConfigPerFieldOverride is the end-to-end per-field merge
+// case: a shared top-level api.tls default plus a provider-level override of
+// only one nested field. It exercises the real LoadConfig YAML path together
+// with apiconfig.MergeProviderConfig (the same merge node.go's
+// apiProviderConfig performs at composition), rather than re-deriving the same
+// fields by hand, so a regression in either layer's field names would be caught
+// here.
 func TestLoad_APIProviderConfigPerFieldOverride(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

@@ -301,7 +301,7 @@ func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
 // TestChainBlockBeforeSlotBinarySearchBoundaries exercises the binary-search
 // boundary logic across a multi-block chain (testBlocks have slots 0, 20, 40,
 // 60, 80, 100): below all, at a block slot, between blocks, and above the tip.
-// It guards the #2771 change from the linear backward walk to a binary search.
+// It guards the change from the linear backward walk to a binary search.
 func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 	t.Parallel()
 
@@ -1126,7 +1126,7 @@ func TestChainHeaderRange(t *testing.T) {
 
 // TestChainHeaderRangeNonPositiveCount ensures HeaderRange returns zero-value
 // points instead of panicking on an out-of-range slice index when count is
-// zero or negative (issue #3531).
+// zero or negative.
 func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
 	t.Parallel()
 
@@ -1167,8 +1167,7 @@ func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
 // TestChainRollbackInvalidHeaderTargetPreservesQueue rolls back to a point
 // that falls between two queued headers and matches neither. The rollback
 // must fail without deleting any of the queued headers that a naive scan
-// would have already pruned by the time it discovers the target is invalid
-// (issue #3531).
+// would have already pruned by the time it discovers the target is invalid.
 func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
 	t.Parallel()
 
@@ -1215,7 +1214,7 @@ func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
 // TestChainRollbackToQueuedHeaderSucceeds rolls back to a point that exactly
 // matches a queued header. Only the headers after the matched one should be
 // discarded; the matched header itself stays queued and the chain tip moves
-// to it (issue #3531).
+// to it.
 func TestChainRollbackToQueuedHeaderSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -2244,7 +2243,7 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 	}
 }
 
-// TestRewindPrimaryChainToPointRejectsOverLimitRewind covers issue #3516's
+// TestRewindPrimaryChainToPointRejectsOverLimitRewind covers the
 // rollback-depth bound: RewindPrimaryChainToPoint must reject a rewind whose
 // depth exceeds the configured security parameter K, and must leave the
 // chain and every block it holds untouched when it does, so NtC clients stay
@@ -2302,7 +2301,7 @@ func TestRewindPrimaryChainToPointRejectsOverLimitRewind(t *testing.T) {
 }
 
 // TestRewindPrimaryChainToPointSignalsRollback covers the other half of
-// issue #3516: a rewind within the security parameter must publish
+// the contract: a rewind within the security parameter must publish
 // ChainRollbackEvent exactly once and wake/mark any chain iterator with the
 // rollback, the same signal downstream NtC consumers rely on for a live
 // Chain.Rollback.
@@ -2397,8 +2396,8 @@ func TestRewindPrimaryChainToPointSignalsRollback(t *testing.T) {
 // callers rewinding the same persistent primary chain to the same point.
 // Racing to different points is expected to leave the loser observing that
 // its target is no longer on the chain (the earlier caller already pruned
-// it) — that is the existing not-on-chain contract, not a #3516 concern.
-// What #3516 requires here is that every concurrent caller targeting the
+// it) — that is the existing not-on-chain contract, not a rollback-depth
+// concern. What is required here is that every concurrent caller targeting the
 // same still-resolvable point gets the same outcome (an idempotent success)
 // with no corruption or deadlock; run with -race to catch any lock-ordering
 // regression reintroduced around the shared rollback path.
@@ -2499,8 +2498,8 @@ func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
 	}
 }
 
-// TestChainRollbackUnboundedSkipsSecurityParamCheck covers issue #3516's
-// review: RewindPrimaryChainAtStartup (backed by Chain.RollbackUnbounded)
+// TestChainRollbackUnboundedSkipsSecurityParamCheck covers that
+// RewindPrimaryChainAtStartup (backed by Chain.RollbackUnbounded)
 // must succeed with no security parameter configured at all, since
 // NewLedgerState reconciles the primary chain against the ledger's own
 // applied tip before node.go's ChainManager.SetLedger has run. Routing that

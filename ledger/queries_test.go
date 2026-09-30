@@ -267,7 +267,7 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 
 // TestQueryShelleyUtxoByAddress_MultipleAddresses proves the local-state-query
 // handler resolves UTxOs for every address in the request, not just the
-// first (#391) -- the wire query already carries the full set via q.Addrs.
+// first -- the wire query already carries the full set via q.Addrs.
 func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 	t.Parallel()
 
@@ -348,7 +348,7 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoByTxIn_MultipleInputs proves the GetUTxOByTxIn query
-// resolves every requested TxIn in one call (#392), not just the first, and
+// resolves every requested TxIn in one call, not just the first, and
 // silently omits a requested TxIn that has no matching live UTxO instead of
 // failing the whole query.
 //

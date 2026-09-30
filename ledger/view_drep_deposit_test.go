@@ -34,8 +34,8 @@ import (
 // which currently has no wired caller but is exported for a future
 // GetDRepState handler) reports the same CIP-1694 deposit-inclusive voting
 // power ledger/governance.LoadDRepVotingState uses for real ratification and
-// the Blockfrost adapter's DRep reads (blinklabs-io/dingo#4355), not the
-// plain UTxO+reward figure GetDRepVotingPower alone returns.
+// the Blockfrost adapter's DRep reads, not the plain UTxO+reward figure
+// GetDRepVotingPower alone returns.
 func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T) {
 	t.Parallel()
 

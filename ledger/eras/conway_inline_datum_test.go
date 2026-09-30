@@ -39,7 +39,8 @@ import (
 //   - only a *needed* PlutusV1 script constrains the transaction, so a V1
 //     script that is merely reachable is ignored.
 //
-// The needed-not-available distinction is the fix from gouroboros #1980.
+// The needed-not-available distinction is the fix from gouroboros's Conway
+// inline-datum rule.
 
 // newBabbageInlineDatumOutput builds a Babbage output carrying an inline datum
 // at the given address, by round-tripping CBOR rather than asserting a concrete
@@ -291,14 +292,14 @@ func applyProposalPurpose(
 }
 
 // TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript is the case
-// gouroboros #1980 fixed. An unrelated PlutusV1 reference script sits on a
+// the upstream rule fixed. An unrelated PlutusV1 reference script sits on a
 // spent UTxO and another spent UTxO carries an inline datum, but no script
 // purpose needs the V1 script, so the transaction is valid.
 //
-// Before #1980 the rule gated on *available* scripts and rejected this shape,
+// Previously the rule gated on *available* scripts and rejected this shape,
 // which turned an ordinary transaction into a permanent validation failure.
-// dingo #3240 asserted that rejection against the then-current pin; the
-// assertion is inverted here because the upstream rule now gates on needed
+// An earlier test here asserted that rejection against the then-current pin;
+// the assertion is inverted here because the upstream rule now gates on needed
 // scripts.
 func TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript(
 	t *testing.T,

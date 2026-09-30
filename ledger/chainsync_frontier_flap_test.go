@@ -43,14 +43,13 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // not been delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so
-// HandlePeerTipUpdateEvent returns before the lane worker has handed the event
-// to any subscriber. A lane is a FIFO drained by exactly one worker, so a
-// sentinel enqueued after those switches is delivered after them: receiving it
-// back is proof that every switch published earlier on this goroutine has
-// already reached the subscription. Its Data type is not ChainSwitchEvent, so
-// it is skipped rather than counted as a decision. Same construction as
-// switchBarrier in ouroboros/consensus_conformance_test.go.
+// EventBus.PublishOrdered, so HandlePeerTipUpdateEvent returns before the lane
+// worker has handed the event to any subscriber. A lane is a FIFO drained by
+// exactly one worker, so a sentinel enqueued after those switches is delivered
+// after them: receiving it back is proof that every switch published earlier on
+// this goroutine has already reached the subscription. Its Data type is not
+// ChainSwitchEvent, so it is skipped rather than counted as a decision. Same
+// construction as switchBarrier in ouroboros/consensus_conformance_test.go.
 type chainSwitchBarrier struct{}
 
 // TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip closes the loop

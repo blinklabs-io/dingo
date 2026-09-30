@@ -158,7 +158,7 @@ func TestGetPoolKeyHashesRetiredByEpoch(t *testing.T) {
 
 	for _, f := range []retiredPoolFixture{
 		// Retired effective epoch 5, still departed at epoch 7 — the
-		// observed dingo #3925 case, where the pool retired at 243 was
+		// observed case, where the pool retired at 243 was
 		// still misclassified at param epochs 244 and 245.
 		{
 			keyHash: poolRetiredEarlier,

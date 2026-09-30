@@ -253,7 +253,7 @@ func TestValidateHeaderProtocolVersion_TestnetTooHighPreDijkstra(t *testing.T) {
 
 	// On testnets, while pre-Dijkstra (current major < 12), a header
 	// with arbitrarily high pvMajor is accepted. This is the relaxation
-	// from cardano-ledger PR 5785.
+	// cardano-ledger made for testnets.
 	err := ValidateHeaderProtocolVersion(
 		babbageHeaderWithMajor(t, 99),
 		10,
@@ -515,15 +515,14 @@ func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(
 	assert.True(t, got)
 }
 
-// TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet pins a
-// reviewer-caught overclaim in the original fix: the override must be
-// restricted to a network gouroboros itself registers as sharing mainnet's
-// magic (currently only prime-mainnet), not any registered name that simply
-// isn't "mainnet". A node started with Network="preview" against a genesis
-// that (incorrectly, e.g. from a misconfiguration) declares Mainnet must
-// still enforce mainnet's BBODY strictness rather than have it silently
-// relaxed just because "preview" isn't literally "mainnet" — preview's own
-// magic doesn't match real mainnet's, so this is a configuration mismatch,
+// TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet pins that
+// the override must be restricted to a network gouroboros itself registers as
+// sharing mainnet's magic (currently only prime-mainnet), not any registered
+// name that simply isn't "mainnet". A node started with Network="preview"
+// against a genesis that (incorrectly, e.g. from a misconfiguration) declares
+// Mainnet must still enforce mainnet's BBODY strictness rather than have it
+// silently relaxed just because "preview" isn't literally "mainnet" — preview's
+// own magic doesn't match real mainnet's, so this is a configuration mismatch,
 // not the known prime-mainnet identity-reuse case.
 func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(
 	t *testing.T,
@@ -539,12 +538,12 @@ func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(
 }
 
 // TestLedgerStateIsMainnet_PrimeMainnetNameWithMismatchedGenesisMagicStaysMainnet
-// pins a second reviewer-caught gap: the override checked only the
-// registry's canonical magic for the configured name, never the magic
-// actually present in the loaded genesis. Network="prime-mainnet" paired
-// with a genesis whose own magic matches neither real mainnet's nor
-// prime-mainnet's (a corrupted or misconfigured genesis file) must not
-// disable the BBODY check — that combination isn't the known
+// pins that
+// the override must not check only the registry's canonical magic for the
+// configured name, never the magic actually present in the loaded genesis.
+// Network="prime-mainnet" paired with a genesis whose own magic matches neither
+// real mainnet's nor prime-mainnet's (a corrupted or misconfigured genesis
+// file) must not disable the BBODY check — that combination isn't the known
 // identity-reuse case, just a broken config, and must stay mainnet-strict.
 func TestLedgerStateIsMainnet_PrimeMainnetNameWithMismatchedGenesisMagicStaysMainnet(
 	t *testing.T,

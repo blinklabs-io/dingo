@@ -208,7 +208,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 // CBOR (not the Cardano tx-id / body hash). This is exactly the check the
 // fetch-side validator (ouroboros.validateLeiosEndorserBlockTxs) performs —
 // Blake2b256(txCbor) == ref.TransactionHash — so a peer fetching a locally
-// forged EB validates every tx instead of rejecting it (blinklabs-io/dingo#3641).
+// forged EB validates every tx instead of rejecting it.
 func TestBuildLeiosEBReferencesUseFullTransactionHash(t *testing.T) {
 	txs := []MempoolTransaction{
 		{Hash: strings.Repeat("11", 32), Cbor: []byte{0x01, 0x02, 0x03}},

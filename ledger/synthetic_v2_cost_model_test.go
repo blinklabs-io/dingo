@@ -45,16 +45,15 @@ func protocolParamsQuery() *olocalstatequery.BlockQuery {
 }
 
 // conwayPParamsWithCostModels builds a Conway pparams value with every
-// cbor.Rat-bearing field populated, not just CostModels -- blinklabs-io/dingo#3825's
-// PR review (wolf31o2): a fixture that only sets CostModels type-asserts fine
-// but is not actually encodable, since cbor.Rat.MarshalCBOR panics on the nil
-// *big.Rat a zero-value cbor.Rat (or a nil *cbor.Rat pointer field) carries,
-// and PoolVotingThresholds/DRepVotingThresholds's value-typed cbor.Rat fields
-// are always encoded (never skippable as CBOR null the way a nil *cbor.Rat
-// pointer field is). This is what real cardano-node protocol-parameter data
-// always has populated, so an end-to-end wire test should encode a value
-// shaped like the real thing, not a partial struct that happens to satisfy a
-// type assertion.
+// cbor.Rat-bearing field populated, not just CostModels -- a fixture that only
+// sets CostModels type-asserts fine but is not actually encodable, since
+// cbor.Rat.MarshalCBOR panics on the nil *big.Rat a zero-value cbor.Rat (or a
+// nil *cbor.Rat pointer field) carries, and
+// PoolVotingThresholds/DRepVotingThresholds's value-typed cbor.Rat fields are
+// always encoded (never skippable as CBOR null the way a nil *cbor.Rat pointer
+// field is). This is what real cardano-node protocol-parameter data always has
+// populated, so an end-to-end wire test should encode a value shaped like the
+// real thing, not a partial struct that happens to satisfy a type assertion.
 func conwayPParamsWithCostModels(
 	costModels map[uint][]int64,
 ) *conway.ConwayProtocolParameters {
@@ -93,7 +92,8 @@ func conwayPParamsWithCostModels(
 }
 
 // TestInjectedSyntheticV2CostModel_DetectsHardForkBabbagesDefault covers the
-// actual code path this session found responsible for blinklabs-io/dingo#3825:
+// actual code path this session found responsible for the extra plutusV1 cost
+// model:
 // HardForkBabbage fabricates a PlutusV2 cost model whenever the previous
 // era's params don't have one -- real for any Alonzo genesis, since the
 // AlonzoGenesisCostModels format predates PlutusV2 entirely and never has a
@@ -179,11 +179,11 @@ func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(
 	assert.Equal(t, []int64{2, 2, 2}, original.CostModels[1])
 }
 
-// TestWithoutSyntheticV2CostModel_CoversEveryEraType covers
-// blinklabs-io/dingo#3825's PR review: the filter's type switch must handle
-// every era type ShelleyCurrentProtocolParamsQuery can actually return
-// (Alonzo, Babbage, Conway, Dijkstra), not just Conway -- a regression in
-// any branch would otherwise pass the suite silently.
+// TestWithoutSyntheticV2CostModel_CoversEveryEraType pins:
+// the filter's type switch must handle every era type
+// ShelleyCurrentProtocolParamsQuery can actually return (Alonzo, Babbage,
+// Conway, Dijkstra), not just Conway -- a regression in any branch would
+// otherwise pass the suite silently.
 func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
 	t.Parallel()
 
@@ -237,11 +237,11 @@ func cloneMap(m map[uint][]int64) map[uint][]int64 {
 	return out
 }
 
-// TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic covers
-// blinklabs-io/dingo#3825's PR review: a concrete-typed nil pointer
-// (lcommon.ProtocolParameters holding e.g. a nil *conway.ConwayProtocolParameters)
-// still matches its type's case in the switch, so each case must guard
-// against nil before dereferencing rather than panicking.
+// TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic pins:
+// a concrete-typed nil pointer (lcommon.ProtocolParameters holding e.g. a nil
+// *conway.ConwayProtocolParameters) still matches its type's case in the
+// switch, so each case must guard against nil before dereferencing rather than
+// panicking.
 func TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
@@ -278,12 +278,12 @@ type unknownProtocolParameters struct {
 	lcommon.ProtocolParameters
 }
 
-// TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): a protocol-parameters type
-// the switch doesn't recognize falls to the default branch, which -- unlike
-// every other branch -- returns pp unfiltered even though synthetic is true.
-// That silently reintroduces #3825 for whatever type this is; the least this
-// path can do is log so the gap is observable instead of invisible.
+// TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered pins:
+// a protocol-parameters type the switch doesn't recognize falls to the default
+// branch, which -- unlike every other branch -- returns pp unfiltered even
+// though synthetic is true. That silently reintroduces the extra plutusV1 cost
+// model reply for whatever type this is; the least this path can do is log so
+// the gap is observable instead of invisible.
 func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
 	t *testing.T,
 ) {
@@ -304,8 +304,8 @@ func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
 	)
 }
 
-// TestExtractRawCostModels_CoversDijkstra covers blinklabs-io/dingo#3825's PR
-// review (wolf31o2): extractRawCostModels' type switch lacked a Dijkstra
+// TestExtractRawCostModels_CoversDijkstra pins that
+// extractRawCostModels' type switch lacked a Dijkstra
 // case (falling to its own default: return nil), asymmetric with
 // withoutSyntheticV2CostModel, which does handle Dijkstra -- meaning
 // injectedSyntheticV2CostModel (built on extractRawCostModels) could never
@@ -354,7 +354,7 @@ func TestExtractRawCostModels_NilPointerDoesNotPanic(t *testing.T) {
 }
 
 // TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel is the
-// end-to-end regression test for blinklabs-io/dingo#3825: confirmed against
+// end-to-end regression test: confirmed against
 // a real cardano-node's raw wire bytes (captured via a temporary diagnostic,
 // decoded with the real client-side type, independent of any display-layer
 // bug) that on a chain which has never received a real PlutusV2
@@ -461,15 +461,15 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 	)
 }
 
-// TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): withoutSyntheticV2CostModel
+// TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel pins that
+// withoutSyntheticV2CostModel
 // originally had a single call site (queries.go's LocalStateQuery handler),
-// while every other interface reporting current parameters --
-// api/blockfrost, api/utxorpc, api/mesh -- read GetCurrentPParams()
-// unfiltered and would still report a synthetic PlutusV2 entry a real
-// cardano-node never has. GetCurrentPParamsForReporting is the shared
-// accessor all of those now use; this proves its filtering behavior
-// directly, independent of which specific API surface calls it.
+// while every other interface reporting current parameters -- api/blockfrost,
+// api/utxorpc, api/mesh -- read GetCurrentPParams() unfiltered and would still
+// report a synthetic PlutusV2 entry a real cardano-node never has.
+// GetCurrentPParamsForReporting is the shared accessor all of those now use;
+// this proves its filtering behavior directly, independent of which specific
+// API surface calls it.
 func TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel(t *testing.T) {
 	t.Parallel()
 
@@ -522,8 +522,8 @@ func TestGetCurrentPParamsForReporting_IncludesRealV2CostModel(t *testing.T) {
 	assert.Equal(t, eras.DefaultPlutusV2CostModel, pp.CostModels[1])
 }
 
-// TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart covers
-// blinklabs-io/dingo#3825's PR review: LedgerState.syntheticV2CostModel must
+// TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart pins that
+// LedgerState.syntheticV2CostModel must
 // survive a restart via persistSyntheticV2CostModel/loadSyntheticV2CostModel,
 // not silently reconstruct as false (the zero value) regardless of the
 // chain's real history.
@@ -552,12 +552,12 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 		"a later persisted false must also survive the simulated restart")
 }
 
-// TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): a database that predates
+// TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent pins that
+// a database that predates
 // this marker (or one that was reset by
-// database.RecomputeSyntheticV2CostModelMarkerAfterTruncate) must not
-// silently behave as "not synthetic" -- it must compare the current PlutusV2
-// cost model directly against the known synthetic default instead.
+// database.RecomputeSyntheticV2CostModelMarkerAfterTruncate) must not silently
+// behave as "not synthetic" -- it must compare the current PlutusV2 cost model
+// directly against the known synthetic default instead.
 func TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent(
 	t *testing.T,
 ) {
@@ -658,7 +658,8 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 }
 
 // TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthetic
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): on a database that
+// pins that
+// on a database that
 // predates these markers entirely, a real PlutusV2 cost model already in
 // force (differing from the known synthetic default) can still pick up a
 // clearedEpoch marker from the first update tracked AFTER these markers

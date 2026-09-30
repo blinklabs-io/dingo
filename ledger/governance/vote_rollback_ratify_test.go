@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes covers dingo#4463 at
+// TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes covers vote restoration at
 // the RATIFY layer rather than only the database layer: a DRep, an SPO, and
 // a committee member each cast Yes, flip to No after the cast slot, and a
 // rollback to a slot between the cast and the flip must restore Yes for all
@@ -121,8 +121,8 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 	)
 
 	// Every voter replaces their vote with No after the cast slot. Forward
-	// replacement must flip the outcome (dingo#4463's "preserve normal
-	// forward replacement behavior" criterion).
+	// replacement must flip the outcome (normal forward replacement
+	// behavior must be preserved).
 	cast(models.VoterTypeDRep, drepCred, models.VoteNo, replacedSlot)
 	cast(models.VoterTypeSPO, poolKeyHash, models.VoteNo, replacedSlot)
 	cast(models.VoterTypeCC, hotCred, models.VoteNo, replacedSlot)

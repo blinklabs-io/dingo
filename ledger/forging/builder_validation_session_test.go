@@ -34,7 +34,7 @@ import (
 // real LedgerState. It lets tests observe how many sessions were opened for
 // one BuildBlock call, and lets a hook run synchronously inside a validate
 // call to simulate a concurrent ledger or chain-tip mutation landing
-// mid-selection (issue #3506).
+// mid-selection.
 type sessionMockTxValidator struct {
 	sessions      int
 	validateCalls int
@@ -193,7 +193,7 @@ func newSelectionTestBuilder(
 // repeatable-read database transaction for it), rather than opening a fresh
 // session per transaction. Before this, each transaction's
 // ValidateTxWithOverlay call could observe a different ledger generation
-// mid-selection (issue #3506).
+// mid-selection.
 func TestBuildBlockPinsOneValidationSessionPerBlock(t *testing.T) {
 	validator := &sessionMockTxValidator{}
 	builder := newSelectionTestBuilder(
@@ -293,7 +293,7 @@ func TestBuildBlockRejectsWhenSnapshotGoesStaleOnTheFinalCandidate(
 // still selecting mempool transactions against the previously-current
 // parent. The builder must reject the stale candidate itself rather than
 // binding VRF/KES signing to a parent that chain adoption will refuse
-// anyway once the tip has moved (issue #3506).
+// anyway once the tip has moved.
 func TestBuildBlockRejectsWhenParentChangesDuringSelection(t *testing.T) {
 	chainTip := selectionTestChainTip()
 	validator := &sessionMockTxValidator{}

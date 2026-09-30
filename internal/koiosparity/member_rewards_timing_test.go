@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestComparePoolEpochMemberRewardsBeforeApplication is the dingo #3852
+// TestComparePoolEpochMemberRewardsBeforeApplication is the pending-forfeiture
 // regression, built from the divergence a Preview replay reported at epoch 96.
 //
 // Dingo computed 4006269 in member rewards for the pool and Koios reported
@@ -86,7 +86,7 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 	})
 }
 
-// TestComparePoolEpochMissingRewardsBeforeApplication is the dingo #3857
+// TestComparePoolEpochMissingRewardsBeforeApplication is the missing-row-grace
 // regression.
 //
 // A reward_pool_output row for a stake epoch is not written until well after
@@ -157,7 +157,7 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 }
 
 // TestCompareAccountEpochPendingRewardsAreALag is the account-granularity half
-// of dingo #3857.
+// of the missing-row grace window.
 //
 // When Dingo has not computed an epoch's rewards yet, every account Koios
 // reports a reward for is absent on the Dingo side. That is timing, not
@@ -165,8 +165,8 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 // produced 15879 acct_only_koios entries, and the epochs carrying them were
 // exactly the epochs with no reward row.
 //
-// The Dingo-only direction is the same statement read the other way (dingo
-// #4130): before the boundary a reward computed for a credential that
+// The Dingo-only direction is the same statement read the other way:
+// before the boundary a reward computed for a credential that
 // deregisters in the meantime is still marked spendable, so Dingo holds a row
 // Koios will never publish. That is timing too, and the branch claimed to be
 // symmetric with the Koios-only one while omitting the guard.

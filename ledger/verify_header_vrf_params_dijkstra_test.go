@@ -26,19 +26,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The fixture below is the ledger state of the node reported in
-// blinklabs-io/dingo#4326, read out of its own metadata.sqlite: 21600-slot
-// epochs from slot 0, a pool registered four times on one VRF key and
-// re-registered on another at slot 639855 (inside epoch 29), the mark
-// snapshot that elects epoch 31 captured at 647999, and the block that
-// wedged the node at slot 678720 (epoch 31) carrying the rotated key.
+// The fixture below is the ledger state of the node that wedged, read out of
+// its own metadata.sqlite: 21600-slot epochs from slot 0, a pool registered
+// four times on one VRF key and re-registered on another at slot 639855 (inside
+// epoch 29), the mark snapshot that elects epoch 31 captured at 647999, and the
+// block that wedged the node at slot 678720 (epoch 31) carrying the rotated
+// key.
 const (
 	musashiEpochLength   = 21_600
 	musashiRotationSlot  = 639_855 // epoch 29
 	musashiMark30Capture = 647_999 // last slot of epoch 29
 	musashiFailingSlot   = 678_720 // epoch 31
 	musashiFailingEpoch  = 31
-	// The cutoff the pre-#4326 code derives: the last slot of epoch 28.
+	// The cutoff the lagging (pre-fix) code derives: the last slot of epoch 28.
 	musashiLaggedCutoff = 626_399
 )
 
@@ -59,7 +59,7 @@ func musashiEpochs(from, to uint64, eraId uint, nonce []byte) []models.Epoch {
 	return epochs
 }
 
-// seedMusashiRotation writes the #4326 registration history: four
+// seedMusashiRotation writes the Musashi registration history: four
 // registrations on oldKey, then the rotation to newKey inside the epoch the
 // electing snapshot is captured in.
 func seedMusashiRotation(
@@ -78,8 +78,8 @@ func seedMusashiRotation(
 		musashiMark30Capture)
 }
 
-// TestElectingVrfKeyHashUsesTheCaptureSlotInDijkstra is the dingo #4326
-// regression.
+// TestElectingVrfKeyHashUsesTheCaptureSlotInDijkstra is the regression for the
+// electing-key cutoff in Dijkstra.
 //
 // Dijkstra's EPOCH rule runs POOLREAP -- which merges psFutureStakePoolParams
 // into psStakePools -- before SNAP freezes the stake snapshot, the reverse of
@@ -173,10 +173,10 @@ func TestVerifyRegisteredVrfKeyAcceptsARotationInsideTheCapturedEpochInDijkstra(
 }
 
 // TestElectingVrfKeyHashStillLagsPoolParamsBeforeDijkstra pins the half of the
-// rule the #4326 fix must not erase. On the identical fixture, with the
+// rule the Dijkstra fix must not erase. On the identical fixture, with the
 // captured epoch in Conway, SNAP runs before POOLREAP, so the snapshot does
 // not carry a re-registration from its own epoch and the cutoff still lags by
-// one epoch. Resolving at the capture slot here is the #3842 wedge.
+// one epoch. Resolving at the capture slot here is the pre-rotation-key wedge.
 func TestElectingVrfKeyHashStillLagsPoolParamsBeforeDijkstra(t *testing.T) {
 	t.Parallel()
 

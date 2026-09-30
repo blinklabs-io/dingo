@@ -411,11 +411,11 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 }
 
 // TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce covers
-// the snapshot-capture half of the ordering blinklabs-io/dingo#4411 depends
+// the snapshot-capture half of the ordering the early-refund fix depends
 // on: a post-snapshot boundary credit (POOLREAP refund, enacted treasury
 // withdrawal, or governance proposal-deposit refund) applied at epoch N's
 // boundary must be reflected exactly once in epoch N+1's mark snapshot, not
-// zero or twice. This passes both before and after the #4411 fix -- the SNAP
+// zero or twice. This passes both before and after the boundary fix -- the SNAP
 // read/write split it exercises was already correct; the defect was in when
 // ledger/governance/epoch.go applied a proposal-deposit refund credit in the
 // first place (one epoch too early), which
@@ -443,7 +443,7 @@ func TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce(t *test
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 
 	// Epoch 0 -> 1 boundary: SNAP, then a post-SNAP boundary credit (e.g. a
-	// governance proposal-deposit refund), matching dingo#4411's proposal
+	// governance proposal-deposit refund), matching the proposal
 	// refund at the epoch677 boundary.
 	evt1 := event.EpochTransitionEvent{
 		PreviousEpoch:   0,

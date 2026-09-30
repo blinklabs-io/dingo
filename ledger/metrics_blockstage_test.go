@@ -170,7 +170,7 @@ func TestObserveBlockStageNoopWhenMetricsDisabled(t *testing.T) {
 
 // TestBlockStageDurationBucketsCoverTailStalls pins the histogram's upper
 // range to the epoch-boundary stalls it has to resolve.
-// blinklabs-io/dingo#4364 measured block application blocked for 25s to 318s
+// Epoch-boundary stalls measured block application blocked for 25s to 318s
 // across preview boundaries; with the old ExponentialBuckets(0.0001, 2, 16)
 // ceiling of ~3.3s every one of those landed in +Inf, indistinguishable from
 // each other.

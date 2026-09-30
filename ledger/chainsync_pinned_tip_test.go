@@ -26,7 +26,7 @@ import (
 )
 
 // TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback
-// captures the wedge described in issue #2177. After the
+// captures the wedge where the local tip stays pinned. After the
 // "fork extends from current tip" branch queues headers, the chain's
 // header tip sits ahead of the block tip. If the peer then sends a
 // RollBackward to the block tip, the no-op shortcut in

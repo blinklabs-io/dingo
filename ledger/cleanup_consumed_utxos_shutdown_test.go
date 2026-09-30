@@ -66,13 +66,13 @@ func drainCleanupTimerFires(fires <-chan struct{}) {
 	}
 }
 
-// TestCleanupConsumedUtxos_TimerStopsOnClose covers the first half of issue
-// #3439: the cleanup timer callback re-arms itself via
+// TestCleanupConsumedUtxos_TimerStopsOnClose covers the first half of shutdown
+// safety: the cleanup timer callback re-arms itself via
 // scheduleCleanupConsumedUtxos, so a Close that does not stop it leaves a
 // self-perpetuating timer running against a database its owner closes
-// immediately after Close returns (LedgerState does not own the database --
-// see the note at the end of Close).
-// Not t.Parallel: shrinkCleanupConsumedUtxosInterval swaps the package-level
+// immediately after Close returns (LedgerState does not own the database -- see
+// the note at the end of Close). Not t.Parallel:
+// shrinkCleanupConsumedUtxosInterval swaps the package-level
 // cleanupConsumedUtxosInterval, which every concurrent LedgerState in this
 // package would observe.
 func TestCleanupConsumedUtxos_TimerStopsOnClose(t *testing.T) {

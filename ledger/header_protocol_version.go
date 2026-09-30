@@ -113,9 +113,8 @@ func HeaderProtocolMajor(header lcommon.BlockHeader) (uint, bool) {
 //
 // The check is skipped on testnets (isMainnet == false) while the
 // current pparams major version is below Dijkstra (12). This mirrors
-// the relaxation introduced in cardano-ledger PR 5785 to support
-// ephemeral testnets that enable experimental hard forks or rebuild
-// chains in much older eras.
+// the relaxation that cardano-ledger allows to support ephemeral testnets that
+// enable experimental hard forks or rebuild chains in much older eras.
 //
 // Byron-era headers are also skipped, as they have no ProtVer field.
 func ValidateHeaderProtocolVersion(

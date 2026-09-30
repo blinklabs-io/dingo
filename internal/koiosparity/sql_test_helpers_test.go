@@ -40,7 +40,7 @@ func (d *testDB) Create(value any) testResult {
 	case *models.RewardSnapshot:
 		query = `INSERT INTO reward_snapshot (epoch,snapshot_type,total_active_stake,total_pool_count,total_delegators,captured_slot,boundary_slot,epoch_nonce,protocol_version,authoritative,calculation_version,excluded_active_stake) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
 		// ExcludedActiveStake is *types.Uint64: nil means "unknown" (a
-		// snapshot captured before dingo #4025 added the tracking), and its
+		// snapshot captured before the tracking existed), and its
 		// Value() has a value receiver, so passing a nil pointer straight
 		// through would panic dereferencing it. Convert nil to a real SQL
 		// NULL instead of a driver.Valuer that can't be called.
@@ -114,7 +114,7 @@ func testSchema(includePools bool) []string {
 		`CREATE UNIQUE INDEX idx_epoch_epoch_id ON epoch(epoch_id)`,
 		`CREATE TABLE pparams (cbor BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, added_slot INTEGER, epoch INTEGER, era_id INTEGER)`,
 		// sync_state backs DingoDB.GetEarliestAvailableEpoch's read of the
-		// mithril_ledger_slot boundary (dingo #4172) -- created
+		// mithril_ledger_slot boundary -- created
 		// unconditionally like epoch/pparams above, since a check run reads
 		// it regardless of whether the test seeds a boundary row.
 		`CREATE TABLE sync_state (sync_key TEXT PRIMARY KEY, value TEXT NOT NULL)`,

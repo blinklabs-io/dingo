@@ -278,7 +278,7 @@ func blockNumberContiguous(eraId uint8, blockNumber, parentNumber uint64) bool {
 // from its second block onwards: 2 follows 1, 3 follows 2, and the missing
 // block 0 is never noticed. Tolerating anything above 0 here does not defer the
 // check to the second block, it permanently shortens the chain by exactly the
-// prefix it tolerated -- the same truncated prefix issue #4202 reports.
+// prefix it tolerated -- the truncated-prefix failure.
 const firstBlockNumber uint64 = 0
 
 // originTipHash stands in for the tip hash when a block or header is rejected
@@ -296,7 +296,7 @@ const originTipHash = "origin"
 // then delivers block N rather than the network's first block, and it is
 // accepted as the chain's first block: the chain grows with a silently missing
 // prefix, and the epoch nonce folded over it is wrong, so every header in the
-// next epoch fails VRF verification (issue #4202).
+// next epoch fails VRF verification.
 //
 // The predicate deliberately ignores the header queue. A queued header does
 // not anchor an incoming raw block: addRawBlockLocked only checks that the
@@ -325,7 +325,7 @@ func (c *Chain) atOriginAfterMutation() bool {
 // The chain package has no knowledge of the network's genesis hash, so the
 // prev-hash half of the continuity check cannot be applied at origin. The block
 // number is the whole of the anchor available here: it closes the truncated
-// prefix of issue #4202, but a candidate that carries block number 0 is still
+// prefix, but a candidate that carries block number 0 is still
 // accepted whatever its hash and prev hash say. Binding the first block's hash
 // as well needs the genesis hash, which belongs to the ledger, not here.
 func firstBlockNumberValid(blockNumber uint64) bool {
@@ -1621,7 +1621,7 @@ func (c *Chain) RollbackDeferred(
 // sits between the tip and a point ahead of it, so the fork depth is zero.
 // Subtracting directly would wrap around uint64 and make any such rollback look
 // deeper than the security parameter K, which rejected and denied every peer
-// permanently (issue #3035).
+// permanently.
 //
 // rollbackPointBlock now refuses a point above the tip before either rollback
 // entry point reaches this function, so the saturating branch is not exercised
@@ -1664,18 +1664,18 @@ func (c *Chain) rollbackForkDepth(
 // then spliced onto a parent that is absent from the chain, so a spender can
 // reach the ledger whose producing block was never applied and cannot be found
 // by UtxoByRef, by transaction metadata, or by the backward chain scan. That is
-// the non-converging tip-band wedge in issue #3005.
+// the non-converging tip-band wedge.
 //
 // A target whose retained index sits ahead of the tip is refused here too. That
-// is the issue #3035/#3040 shape: no chain block occupies the index, so obeying
-// it raised tipBlockIndex above the last block the chain actually stores and
-// left currentTip naming an absent block, punching a hole that chain iteration
-// stops at. It must be refused as not-on-chain rather than as an over-K
-// rollback: #3035 was a node permanently denying every peer because that case
-// was misclassified as exceeding the security parameter, whereas a not-found
-// rollback makes callers re-intersect and recover. rollbackForkDepth keeps its
-// saturating arithmetic so no future caller can reintroduce the uint64
-// underflow that caused the misclassification.
+// is the fork-depth underflow shape: no chain block occupies the index, so
+// obeying it raised tipBlockIndex above the last block the chain actually
+// stores and left currentTip naming an absent block, punching a hole that chain
+// iteration stops at. It must be refused as not-on-chain rather than as an
+// over-K rollback: misclassifying it as exceeding the security parameter made
+// a node permanently deny every peer, whereas a not-found rollback makes
+// callers re-intersect and recover.
+// rollbackForkDepth keeps its saturating arithmetic so no future caller can
+// reintroduce the uint64 underflow that caused the misclassification.
 //
 // Callers must hold c.mutex and c.manager.mutex.
 // checkEphemeralBufferSpan verifies that a fork's in-memory buffer holds an
@@ -1930,7 +1930,6 @@ func (c *Chain) rollbackLocked(
 	// Check headers for rollback point. The scan itself does not mutate
 	// c.headers, so a not-found error leaves the queue untouched; headers
 	// are only deleted once we know the rollback will actually apply
-	// (issue #3516 review; issue #3809).
 	if len(c.headers) > 0 {
 		idx, err := c.findQueuedHeader(point)
 		if err != nil {
@@ -2600,7 +2599,7 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	// cost O(tip - boundary) block reads; during catch-up the header chain runs
 	// far ahead of the ledger tip, so a boundary near the ledger tip made every
 	// lookup scan the entire header-ahead gap (the epoch-lab-nonce heal ran this
-	// per recent epoch, wedging large-DB startup for minutes — #2771). The
+	// per recent epoch, wedging large-DB startup for minutes). The
 	// search still resolves each candidate via blockByIndex (the active chain),
 	// so retained fork or synthetic blobs are never returned.
 	lo, hi := initialBlockIndex, c.tipBlockIndex

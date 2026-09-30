@@ -58,7 +58,7 @@ var coeffTestPoolID = func() lcommon.PoolKeyHash {
 // A strictly larger f produces a strictly larger leadership threshold, whose
 // acceptance region strictly CONTAINS the exact-genesis one: such a node can
 // only ever claim MORE leader slots than the reference, never fewer. That is
-// the same one-sided signature reported in dingo #2798, so the direction is
+// the same one-sided signature seen in the field, so the direction is
 // worth pinning even though the magnitude here (~5.6e-17 relative) is far too
 // small to account for the three phantom slots per epoch reported there.
 func TestFloat64ActiveSlotCoeffRoundTripOverstatesGenesisThreshold(

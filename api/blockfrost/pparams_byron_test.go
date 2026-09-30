@@ -329,8 +329,7 @@ VALUES (?, ?, ?, ?)`,
 //
 // Unlike CurrentProtocolParams, this path stays reachable forever: GET
 // /api/v0/epochs/0/parameters on a fully synced mainnet node still resolves
-// the Byron epoch row and finds no parameter row. Raised by @wolf31o2 in
-// review.
+// the Byron epoch row and finds no parameter row.
 
 // insertByronEpoch records a Byron epoch row with no accompanying parameter
 // row, which is how a synced node genuinely stores the Byron prefix.

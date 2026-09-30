@@ -24,8 +24,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConfigValidateRejectsByronNetworkMagicMismatch is a regression test for
-// issue #3528: a loaded genesis network magic must be cross-checked against
+// TestConfigValidateRejectsByronNetworkMagicMismatch is a regression test that
+// a loaded genesis network magic must be cross-checked against
 // the requested network. configValidate already cross-checks the Shelley
 // genesis's NetworkMagic against the configured/requested network magic;
 // this proves the same cross-check applies to the Byron genesis's own

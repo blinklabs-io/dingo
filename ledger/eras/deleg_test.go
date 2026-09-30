@@ -115,7 +115,7 @@ func validateCerts(
 	)
 }
 
-// TestValidateShelleyDelegCerts_Deregistration covers #4372: a deregistration
+// TestValidateShelleyDelegCerts_Deregistration pins: a deregistration
 // must name a credential registered at that point of the transaction, so no
 // key deposit refund is counted for an account that does not exist.
 func TestValidateShelleyDelegCerts_Deregistration(t *testing.T) {
@@ -172,7 +172,7 @@ func TestValidateShelleyDelegCerts_Deregistration(t *testing.T) {
 	}
 }
 
-// TestValidateShelleyDelegCerts_NonZeroBalance covers #4373: a deregistration
+// TestValidateShelleyDelegCerts_NonZeroBalance pins: a deregistration
 // must leave no rewards behind once the transaction's withdrawals are drained.
 func TestValidateShelleyDelegCerts_NonZeroBalance(t *testing.T) {
 	t.Parallel()
@@ -202,7 +202,7 @@ func TestValidateShelleyDelegCerts_NonZeroBalance(t *testing.T) {
 	}
 }
 
-// TestValidateShelleyDelegCerts_Registration covers #4375: a registration must
+// TestValidateShelleyDelegCerts_Registration pins: a registration must
 // name a credential that is unregistered at that point of the transaction.
 func TestValidateShelleyDelegCerts_Registration(t *testing.T) {
 	t.Parallel()
@@ -250,8 +250,8 @@ func TestValidateShelleyDelegCerts_Registration(t *testing.T) {
 	}
 }
 
-// TestValidateShelleyDelegCerts_MIRCutoff covers #4362 against the issue's
-// worked example: a boundary at 1,000,000 and a 129,600-slot window.
+// TestValidateShelleyDelegCerts_MIRCutoff pins the MIR cutoff against a worked
+// example: a boundary at 1,000,000 and a 129,600-slot window.
 func TestValidateShelleyDelegCerts_MIRCutoff(t *testing.T) {
 	t.Parallel()
 	const cutoff = 870_400
@@ -287,7 +287,7 @@ func TestValidateShelleyDelegCerts_MIRCutoff(t *testing.T) {
 	}
 }
 
-// TestValidateShelleyDelegCerts_MIRTransferVersion covers #4363.
+// TestValidateShelleyDelegCerts_MIRTransferVersion pins the behavior below.
 func TestValidateShelleyDelegCerts_MIRTransferVersion(t *testing.T) {
 	t.Parallel()
 	for _, era := range shelleyFamilyMajors {
@@ -317,7 +317,7 @@ func TestValidateShelleyDelegCerts_MIRTransferVersion(t *testing.T) {
 	))
 }
 
-// TestValidateShelleyDelegCerts_MIRCapacity covers #4371: every distribution
+// TestValidateShelleyDelegCerts_MIRCapacity pins: every distribution
 // and transfer is checked in order against what its pot has left.
 func TestValidateShelleyDelegCerts_MIRCapacity(t *testing.T) {
 	t.Parallel()
@@ -450,7 +450,7 @@ func TestValidateShelleyDelegCerts_Phase2Invalid(t *testing.T) {
 
 // TestValidateTxShelleyFamily_RejectsUnregisteredDeregistration proves every
 // Shelley-through-Babbage ValidateTx entry point runs the certificate walk,
-// with the #4372 inflation shape: outputs plus fee exceed the only input by
+// with the inflation shape: outputs plus fee exceed the only input by
 // exactly the key deposit a nonexistent account would refund.
 func TestValidateTxShelleyFamily_RejectsUnregisteredDeregistration(
 	t *testing.T,

@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// oldVotingPowerByTypeSQL is the pre-fix (blinklabs-io/dingo#4364) shape of
+// oldVotingPowerByTypeSQL is the pre-fix shape of
 // drepquery.VotingPowerByTypeSQL for sqlite: it scans every live utxo row and
 // runs a correlated EXISTS subquery against account per row, instead of
 // starting from the small set of drep-delegated accounts and joining outward
@@ -327,7 +327,7 @@ func TestDRepVotingPowerByTypeExpiryBoundary(t *testing.T) {
 }
 
 // TestDRepVotingPowerByTypeQueryPlanDrivesFromAccountNotUtxo is the
-// performance regression check for blinklabs-io/dingo#4364. At this test's
+// performance regression check for the live-node scan cost. At this test's
 // row counts sqlite flattens the pre-fix query's EXISTS into an indexed
 // semi-join rather than literally naming it a "CORRELATED SCALAR SUBQUERY"
 // in EXPLAIN QUERY PLAN output (that wording is what the issue's comment
@@ -336,7 +336,7 @@ func TestDRepVotingPowerByTypeExpiryBoundary(t *testing.T) {
 // is forced to scan every live utxo row regardless of scale, then probe
 // account per row. The fixed query's FROM clause is `account`, so its
 // driving loop scans only the requested drep_type's accounts and probes
-// utxo per row -- the account-first shape from #4364. That FROM-clause
+// utxo per row -- the account-first shape. That FROM-clause
 // difference, not a cardinality estimate, is what fixes the driving table,
 // so this assertion holds at any data size. Reverting the production fix
 // makes this test fail: drepquery.VotingPowerByTypeSQL would then also plan

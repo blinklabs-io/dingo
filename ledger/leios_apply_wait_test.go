@@ -585,7 +585,7 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	)
 }
 
-// TestLeiosEbWaitCancellationIsNotCountedAsTimeout covers the review finding:
+// TestLeiosEbWaitCancellationIsNotCountedAsTimeout covers the case where
 // the wait's context is a timeout CHILD of the block-processing context, so its
 // Done also closes when the parent is cancelled -- node shutdown, or the pass
 // being aborted and restarted. That is not a diffusion-window expiry, and
@@ -737,12 +737,11 @@ func leiosWaitTestPolledFromGrace() bool {
 }
 
 // TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath covers the
-// regression the review found in the CIP-conformant path. Application there
-// reads each ranking block's own announcement and nothing re-applies an
-// endorser block that lands afterwards, so if the by-point fetch is still in
-// flight when the diffusion window elapses, the ranking block is applied
-// without the endorser-resident outputs and its spends fall through to the
-// interim trust path permanently.
+// regression in the CIP-conformant path. Application there reads each ranking
+// block's own announcement and nothing re-applies an endorser block that lands
+// afterwards, so if the by-point fetch is still in flight when the diffusion
+// window elapses, the ranking block is applied without the endorser-resident
+// outputs and its spends fall through to the interim trust path permanently.
 //
 // The previous code got this right by accident: it issued a SYNCHRONOUS
 // by-point fetch after the window, so however slow the fetch was it still
@@ -854,7 +853,7 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 // blocking set is non-empty and the guard is what decides. On this path a
 // missing closure is already retried by the bounded fetch that follows, so
 // paying a second diffusion window here would add head-of-line blocking on the
-// pipeline for nothing -- exactly what this PR removes.
+// pipeline for nothing -- exactly what the grace-skip removes.
 func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
 	t *testing.T,
 ) {
@@ -903,10 +902,10 @@ func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
 // -- no connected peer holds the endorser block -- application proceeds without
 // it rather than failing the chunk.
 //
-// This is deliberate and is NOT a behaviour this change introduces: it is the
-// long-standing semantics of the CIP path. Failing the chunk instead would turn
-// an unfetchable endorser block into an unbounded pipeline retry, which is a
-// wedge this codebase has hit before. The wait exists to stop us abandoning a
+// This is deliberate and is NOT a behaviour the grace-skip introduces: it is
+// the long-standing semantics of the CIP path. Failing the chunk instead would
+// turn an unfetchable endorser block into an unbounded pipeline retry, which is
+// a wedge this codebase has hit before. The wait exists to stop us abandoning a
 // fetch that was about to succeed, not to convert a genuine absence into a
 // stall.
 func TestEnsureReferencedEndorserBlocksProceedsWhenCIPFetchFindsNothing(

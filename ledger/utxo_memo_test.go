@@ -56,8 +56,8 @@ func distinctUtxoRefs(tx lcommon.Transaction) int {
 	return len(seen)
 }
 
-// TestUtxoByIdMemoReducesDbReads_ValidateTx checks issue #4226: validating
-// the Preprod fixture transaction through (*LedgerState).ValidateTx does one
+// TestUtxoByIdMemoReducesDbReads_ValidateTx pins: validating the Preprod
+// fixture transaction through (*LedgerState).ValidateTx does one
 // database.UtxoByRef read per distinct input ref, not one per UtxoById call.
 // Without the memo in LedgerView.UtxoById it reads 60 times for 4 refs.
 func TestUtxoByIdMemoReducesDbReads_ValidateTx(t *testing.T) {

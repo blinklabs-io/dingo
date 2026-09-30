@@ -25,7 +25,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestRewardAdaPotsImportedEpochFeesColumnIsAdditive covers dingo#3975's v24
+// TestRewardAdaPotsImportedEpochFeesColumnIsAdditive covers the v24
 // migration: a row written before the column existed must read back as NULL,
 // not fail the migration or silently coerce to zero (zero is a legitimate
 // "imported nothing before the anchor" value and must stay distinguishable

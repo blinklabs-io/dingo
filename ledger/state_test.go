@@ -5012,12 +5012,12 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 	assert.Nil(t, stored, "rejected Dijkstra transaction must not be committed")
 }
 
-// TestStrictConsumedInputsEnabled pins the #3005 guard condition, including the
-// P1 transition-batch case: the first batch whose blocks cross the tip cutoff is
-// processed while reachedTip is still false (it is stored true only after that
-// batch commits), so the per-block reachesTip signal must enable the guard on
-// its own. Without it that transition batch could still recover an unapplied
-// producer from the blob store.
+// TestStrictConsumedInputsEnabled pins the strict-consumed-inputs guard
+// condition, including the P1 transition-batch case: the first batch whose
+// blocks cross the tip cutoff is processed while reachedTip is still false (it
+// is stored true only after that batch commits), so the per-block reachesTip
+// signal must enable the guard on its own. Without it that transition batch
+// could still recover an unapplied producer from the blob store.
 func TestStrictConsumedInputsEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -5578,7 +5578,7 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 //
 // (0, true) is now doubly worth pinning. It used to be unreachable at the
 // staleness gate as well, because the sync gate refused every slot on
-// upstreamActive && upstreamTip == 0; #4013 replaced that blanket refusal with
+// upstreamActive && upstreamTip == 0; that blanket refusal was replaced with
 // a bound on the local tip's lag, so a node at tip passes it and the staleness
 // gate does see this pair. What keeps the bound quiet there is its own
 // upstreamTarget > newestKnown term -- see

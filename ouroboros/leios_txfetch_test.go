@@ -212,7 +212,7 @@ func TestLeiosWindowNeededMask(t *testing.T) {
 // is the most-significant bit (bit 63). Encoding it LSB-first round-tripped
 // fine against a dingo peer but made the relay serve only the high-index
 // transactions of a partial window -- and nothing at all for a final window of
-// <=32 txs -- so from-genesis catch-up stalled mid-epoch (issue #2656). This
+// <=32 txs -- so from-genesis catch-up stalled mid-epoch. This
 // guards the request encode, the decode, and the server serve/validate paths
 // against silently reverting to LSB (which a self-consistent mock would miss).
 func TestLeiosBitmapMSBFirstWireConvention(t *testing.T) {
@@ -326,8 +326,7 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 // oversizedBitmapRequester serves a legitimate-looking response for a small
 // endorser block but echoes a response bitmap that also references a window
 // far beyond txCount, simulating a relay (malicious or buggy) that declares a
-// tiny transaction count yet returns a disproportionately large bitmap
-// (issue #3523).
+// tiny transaction count yet returns a disproportionately large bitmap.
 type oversizedBitmapRequester struct {
 	// extraWindow, when non-zero, is set to extraMask in the response bitmap
 	// in addition to the legitimately served windows. extraMask has no effect
@@ -357,7 +356,7 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 // window (1000, all 64 bits). A response bitmap that claims transactions the
 // block cannot possibly have must be rejected outright (with an error
 // mentioning "leios-fetch response bitmap"), not silently expanded into a
-// huge index list (issue #3523).
+// huge index list.
 func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
 	t.Parallel()
 

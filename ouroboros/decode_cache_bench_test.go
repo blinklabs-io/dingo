@@ -52,7 +52,7 @@ func benchConwayHeaderFixture(b *testing.B) (headerType uint, raw []byte) {
 
 // --- Blocks -----------------------------------------------------------
 
-// BenchmarkBlockDecodeDirect is the pre-#489 baseline: decode every delivery
+// BenchmarkBlockDecodeDirect is the no-cache baseline: decode every delivery
 // directly, no cache, no hashing, no locking. Every other block benchmark
 // below should be read relative to this number.
 func BenchmarkBlockDecodeDirect(b *testing.B) {
@@ -120,7 +120,7 @@ func BenchmarkBlockDecodeCacheAllUnique(b *testing.B) {
 	}
 }
 
-// BenchmarkBlockDecodeConcurrentDirect is the concurrent pre-#489 baseline:
+// BenchmarkBlockDecodeConcurrentDirect is the concurrent no-cache baseline:
 // many simulated peer connections decoding in parallel with no shared state
 // at all, so it should scale cleanly with GOMAXPROCS.
 func BenchmarkBlockDecodeConcurrentDirect(b *testing.B) {

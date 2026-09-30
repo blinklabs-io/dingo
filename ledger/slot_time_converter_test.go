@@ -331,7 +331,7 @@ func TestSlotTimeConverter_TimeToSlotNearNowUsesInjectedClock(t *testing.T) {
 			"not the real wall clock")
 }
 
-// The Preview chain state around the block that wedged issue #3844, taken from
+// The Preview chain state around the block that wedged the node, taken from
 // the chain itself (Koios preview, blocks 168143-168145) and from Preview's
 // genesis parameters (securityParam 432, activeSlotsCoeff 0.05, 86400-slot
 // epochs at 1s per slot, so the safe zone is 3k/f = 25920 slots):
@@ -403,8 +403,8 @@ func previewSlotTime(systemStart time.Time, slot uint64) time.Time {
 	)
 }
 
-// TestSlotTimeConverter_SlotToTimeWithHorizonFromAnchorsAtParent is the dingo
-// #3844 regression, and it is deliberately two-sided.
+// TestSlotTimeConverter_SlotToTimeWithHorizonFromAnchorsAtParent is the
+// horizon-anchor regression, and it is deliberately two-sided.
 //
 // The accept half: the canonical Preview block at slot 3516512 carries a Plutus
 // transaction whose validity upper bound is 3593399. Its script context has to

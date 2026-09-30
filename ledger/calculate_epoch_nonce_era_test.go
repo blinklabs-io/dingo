@@ -69,7 +69,7 @@ import (
 // epoch's era) instead, matching what verify_header.go already does and
 // what the function's own comment claims it does.
 //
-// This is the smaller of the two distinct VRF wedges in #2125: the bug
+// This is the smaller of the two distinct VRF wedges at era boundaries: the bug
 // only fires at TPraos→Praos boundaries (Alonzo→Babbage) because that's
 // the only transition where the two stability-window formulas disagree.
 // All other era boundaries within TPraos (Shelley→Allegra, Allegra→Mary,

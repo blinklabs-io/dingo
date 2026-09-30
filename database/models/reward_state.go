@@ -65,7 +65,7 @@ type RewardSnapshot struct {
 	// verify reward_pool_input's stake sum against TotalActiveStake exactly
 	// instead of only checking it does not exceed the total, closing a gap
 	// where a proportionally reduced (rather than merely incomplete) input
-	// set passed the same bound silently (dingo #4025). Nil means the
+	// set passed the same bound silently. Nil means the
 	// snapshot predates this tracking: the exclusion, if any, is unknown, so
 	// only the non-exceeding bound can still be checked.
 	ExcludedActiveStake *types.Uint64

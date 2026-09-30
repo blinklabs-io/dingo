@@ -666,7 +666,7 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 }
 
 // TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
-// dingo#4599 regression coverage: it proves that a Config built through the
+// pipeline-flag regression coverage: it proves that a Config built through the
 // public NewConfig/With... option API -- not a hand-built struct literal --
 // carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
 // into the ledger.LedgerStateConfig that ledgerStateConfig() hands to

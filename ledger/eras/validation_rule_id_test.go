@@ -50,7 +50,7 @@ func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 }
 
 // TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule is the
-// regression guard for blinklabs-io/dingo#3821: it fails if
+// regression guard for rule resolution: it fails if
 // resolveUtxoValidationSkipIndex ever goes back to matching upstream rules by
 // validation function identity or runtime name.
 //
@@ -113,7 +113,8 @@ func TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule(t *testing.T) {
 
 // TestConwayUpstreamGatedRulesAreWrapped proves the wrapping the guard above
 // simulates is what the pinned gouroboros release actually does, so the
-// package-init panic #3821 reported cannot silently stop being reachable.
+// package-init panic (rule resolver keyed on function name) cannot silently
+// stop being reachable.
 func TestConwayUpstreamGatedRulesAreWrapped(t *testing.T) {
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	require.Len(t, conway.UtxoValidationRules, len(descriptors))
@@ -470,7 +471,7 @@ func shortUtxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 }
 
 // treasuryUnavailableLedgerState mirrors *ledger.LedgerView while
-// blinklabs-io/dingo#3687 is open: TreasuryValue is a mandatory
+// TreasuryValue support is missing: TreasuryValue is a mandatory
 // common.LedgerState method that Dingo does not implement yet.
 type treasuryUnavailableLedgerState struct {
 	*mockLedgerState
@@ -515,7 +516,7 @@ func newConwayTreasuryTx(
 // LedgerState.TreasuryValue only for a transaction that declares
 // currentTreasuryValue (transaction body key 21). Dingo's provider still
 // returns an error, so this rule must stay unreachable for ordinary traffic
-// until blinklabs-io/dingo#3687 lands. If upstream drops the guard, or stops
+// until Dingo implements TreasuryValue. If upstream drops the guard, or stops
 // distinguishing an absent key 21 from a declared zero, this test fails
 // instead of the node rejecting ordinary transactions.
 func TestCurrentTreasuryValueRuleGuardsOnDeclaredValue(t *testing.T) {

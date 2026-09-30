@@ -26,7 +26,7 @@ import (
 )
 
 // TestAssetNameHexColumnDropRemovesColumnAndIndex proves migration v19
-// (asset-name-hex-column-drop, dingo#4464) drops both asset.name_hex and
+// (asset-name-hex-column-drop) drops both asset.name_hex and
 // idx_asset_name_hex from a database migrated all the way through. Before
 // this migration existed, a fully migrated (through v18) database still
 // carried both: name_hex was a write-only column nothing filtered on.

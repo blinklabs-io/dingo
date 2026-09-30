@@ -127,7 +127,7 @@ const (
 	// of few, flaky relays (e.g. the Leios prototype) every connection is
 	// short-lived, so escalating backoff locks every known peer out for minutes
 	// and the pool collapses to one stalled upstream. Below this threshold we
-	// prioritize replenishment over port conservation. See issue #2765.
+	// prioritize replenishment over port conservation.
 	criticalHotPeerThreshold = 2
 	// emergencyReconnectDelay is the capped reconnect delay used when hot peers
 	// are at or below criticalHotPeerThreshold: frequent enough to replenish the

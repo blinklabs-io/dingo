@@ -11,10 +11,10 @@ import (
 // TestNewTransactionOnClosedStoreFailsFast pins that a closed store hands back
 // an unusable transaction instead of calling into a closed Badger.
 //
-// Regression test for #3609. badger.DB.NewTransaction takes a read timestamp
-// via oracle.readTs, which waits on the commit watermark with
-// context.Background(). Closing the DB stops the watermark's process
-// goroutine, and a Done mark still queued in markCh at that moment is dropped
+// Regression test for a hang on a closed store. badger.DB.NewTransaction takes
+// a read timestamp via oracle.readTs, which waits on the commit watermark with
+// context.Background(). Closing the DB stops the watermark's process goroutine,
+// and a Done mark still queued in markCh at that moment is dropped
 // (y/watermark.go selects randomly between the close signal and the mark), so
 // doneUntil can stay behind nextTxnTs-1 permanently. A read transaction taken
 // afterwards then blocks forever with no context to cancel it.

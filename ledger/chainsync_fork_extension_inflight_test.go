@@ -32,16 +32,16 @@ import (
 // active-connection switch (the newly active connection's next header
 // almost never fits a header queue built by the connection it replaced),
 // and that function previously tore down ANY in-flight batch unconditionally
-// -- bypassing handoffPipelineOnSwitchLocked's #1922 "preserve in-flight
-// blockfetch batch across chain switch" protection through this side
-// channel. handleEventBlockfetchBlockDeferred only accepts blocks whose
-// connection matches the CURRENT activeBlockfetchConnId, so every block
-// already in flight from the torn-down batch was silently discarded on
-// arrival, and if the active connection changed faster than one batch's
-// round-trip -- true even at a bounded switch rate, confirmed live via
-// dingo_ledger_block_stage_duration_seconds{stage="apply"} staying at a
-// zero count while blockfetch protocol messages kept arriving -- no block
-// ever survived to be applied.
+// -- bypassing handoffPipelineOnSwitchLocked's in-flight blockfetch batch
+// preservation across chain switch through this side channel.
+// handleEventBlockfetchBlockDeferred only accepts blocks whose connection
+// matches the CURRENT activeBlockfetchConnId, so every block already in flight
+// from the torn-down batch was silently discarded on arrival, and if the active
+// connection changed faster than one batch's round-trip -- true even at a
+// bounded switch rate, confirmed live via
+// dingo_ledger_block_stage_duration_seconds{stage="apply"} staying at a zero
+// count while blockfetch protocol messages kept arriving -- no block ever
+// survived to be applied.
 func TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnection(
 	t *testing.T,
 ) {

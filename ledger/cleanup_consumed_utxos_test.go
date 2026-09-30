@@ -134,8 +134,8 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 // actually prunes must durably record the floor it used, so a later pin
 // check can reject against it even if the tip subsequently moves in a way
 // that would otherwise make a freshly-computed floor look more lenient
-// (blinklabs-io/dingo#382 review -- see persistConsumedUtxoPruneFloor's doc
-// comment for the rollback and era-transition cases this closes).
+// (see persistConsumedUtxoPruneFloor's doc comment for the rollback and
+// era-transition cases this closes).
 func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
 	t.Parallel()
 
@@ -333,11 +333,11 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 	)
 }
 
-// TestCleanupConsumedUtxos_APIModeRetains is the regression fix for
-// issue #2350: in API storage mode the periodic cleanup must leave
-// spent UTxO metadata rows in place so historical transaction queries
-// can resolve input / collateral / reference-input associations via
-// spent_at_tx_id, collateral_by_tx_id, and referenced_by_tx_id.
+// TestCleanupConsumedUtxos_APIModeRetains is the regression fix: in API storage
+// mode the periodic cleanup must leave spent UTxO metadata rows in place so
+// historical transaction queries can resolve input / collateral /
+// reference-input associations via spent_at_tx_id, collateral_by_tx_id, and
+// referenced_by_tx_id.
 func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
 	t.Parallel()
 

@@ -114,10 +114,11 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 			Level: slog.LevelDebug,
 		}),
 	)
-	// Header crypto runs for every slot a Mithril certificate does not cover
-	// (issue #3528), and these synthetic blocks carry no VRF/KES material. An
+	// Header crypto runs for every slot a Mithril certificate does not cover,
+	// and these synthetic blocks carry no VRF/KES material. An
 	// epoch the cache covers but whose nonce is not published yet is the
-	// state a catching-up node is actually in when #3771's wedge appears:
+	// state a catching-up node is actually in when the blockfetch wedge
+	// appears:
 	// headerVerificationEpoch reports errEpochNonceUnavailable, which
 	// IsHeaderVerificationDeferred accepts, so the body is admitted and
 	// buffered with its stateful verification deferred instead of being
@@ -261,14 +262,15 @@ func (f *blockfetchRollbackFixture) rollbackToAncestorAndQueueForkB(
 	require.Equal(t, 1, f.ls.chain.HeaderCount())
 }
 
-// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives is issue
-// #3771. Fork resolution rolls the chain back to the common ancestor, queues
-// the winning peer's header path from there, and only then restarts
-// blockfetch. That restart flushes whatever the abandoned batch had already
-// buffered, so the first body from the losing fork reached chain insertion
-// against the replacement header queue, was rejected as not matching it, and
-// cleared it -- leaving nothing queued, nothing fetching, and the remaining
-// bodies logging "does not fit on current chain tip" on their way out.
+// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives pins the
+// blockfetch continuation wedge. Fork resolution rolls the chain back to the
+// common ancestor, queues the winning peer's header path from there, and only
+// then restarts blockfetch. That restart flushes whatever the abandoned batch
+// had already buffered, so the first body from the losing fork reached chain
+// insertion against the replacement header queue, was rejected as not matching
+// it, and cleared it -- leaving nothing queued, nothing fetching, and the
+// remaining bodies logging "does not fit on current chain tip" on their way
+// out.
 //
 // A body fetched for a chain the node has since rolled back must be discarded
 // instead, so the replacement queue survives and the restarted batch fetches
@@ -364,10 +366,10 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 	require.Equal(t, point, f.ls.pendingBlockfetchEvents[0].Point)
 }
 
-// The bounded-recovery half of #3771: a batch that delivered bodies but
-// extended nothing, while headers stayed queued, must feed the same
-// same-range failure streak a NoBlocks reply feeds, so the range is dropped
-// and a fresh intersect requested rather than being re-requested forever.
+// The bounded-recovery half of the blockfetch wedge: a batch that delivered
+// bodies but extended nothing, while headers stayed queued, must feed the same
+// same-range failure streak a NoBlocks reply feeds, so the range is dropped and
+// a fresh intersect requested rather than being re-requested forever.
 func TestBatchDoneTreatsDiscardedBatchAsUnobtainedRange(t *testing.T) {
 	f := newBlockfetchRollbackFixture(t)
 

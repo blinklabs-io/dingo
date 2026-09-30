@@ -43,7 +43,7 @@ func waitForLeiosServeWaiter(t *testing.T, f *chainsyncServerFixture) {
 	)
 }
 
-// TestLeiosServeWaitReleasedByRealPeerDisconnect is the issue #3514 regression
+// TestLeiosServeWaitReleasedByRealPeerDisconnect is the regression
 // test. It runs against the real NtC chainsync server connection the shared
 // ouroboros-mock harness builds, and tears that connection down the way a peer
 // actually does (Harness.Disconnect closes the driver end of the bearer)

@@ -105,14 +105,14 @@ func insertTestDijkstraBlock(
 
 // TestCompareIncomingHeaderToLocalTip_Dijkstra exercises the actual
 // chain-selection caller (ledger/chainsync.go's compareIncomingHeaderToLocalTip,
-// the mechanism issue #3075 identified as reachable from
-// ledger/chainsync.go:1855-1904 and ouroboros/chainsync.go:758) end to end for
-// Dijkstra headers: the local tip is a real Dijkstra block round-tripped
-// through storage (database.BlockByHash -> models.Block.Decode), and the
-// incoming header is a plain in-process *dijkstra.DijkstraBlockHeader as
-// chainsync delivers it. Before the view.go fix this always resolved
-// ChainEqual for a Dijkstra local tip (GetPraosTiebreakerView returned
-// ok=false), silently disarming the VRF tiebreaker in exactly this path.
+// the tiebreaker path reachable from ledger/chainsync.go and
+// ouroboros/chainsync.go) end to end for Dijkstra headers: the local tip is a
+// real Dijkstra block round-tripped through storage (database.BlockByHash ->
+// models.Block.Decode), and the incoming header is a plain in-process
+// *dijkstra.DijkstraBlockHeader as chainsync delivers it. Before the view.go
+// fix this always resolved ChainEqual for a Dijkstra local tip
+// (GetPraosTiebreakerView returned ok=false), silently disarming the VRF
+// tiebreaker in exactly this path.
 func TestCompareIncomingHeaderToLocalTip_Dijkstra(t *testing.T) {
 	t.Parallel()
 

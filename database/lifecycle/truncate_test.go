@@ -904,7 +904,7 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 }
 
 // TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget covers the interaction
-// between CIP-0135 truncate and the consumed-UTxO prune floor (issue #3766).
+// between CIP-0135 truncate and the consumed-UTxO prune floor.
 //
 // The floor records how deep the consumed-UTxO sweep hard-deleted spent rows,
 // and ledger.LedgerState.rollback refuses any target below it. Truncate is

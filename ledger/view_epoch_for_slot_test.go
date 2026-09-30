@@ -17,7 +17,7 @@ import (
 // pool-deposit decision is the case that found this: without an epoch it cannot
 // tell a retired pool from a registered one, charges no deposit for a
 // registration that needs one, and the transaction then fails value
-// conservation by exactly the deposit (issue #3908).
+// conservation by exactly the deposit.
 func TestLedgerViewSatisfiesEpochState(t *testing.T) {
 	t.Parallel()
 

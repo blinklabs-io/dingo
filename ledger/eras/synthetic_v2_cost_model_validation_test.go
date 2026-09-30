@@ -52,14 +52,13 @@ func disablePhase1RulesForTest(t *testing.T) {
 	dijkstraPhase1UtxoValidationRules = nil
 }
 
-// TestValidateTxBabbageRejectsPlutusV2WhenSynthetic covers blinklabs-io/dingo#3962:
-// real cardano-ledger rejects a transaction using a PlutusV2 script outright,
-// at the UTXOW level before any script evaluation runs, whenever PlutusV2 has
-// no real cost model configured yet (NoCostModel, the formal rule "languages
-// txw ⊆ dom(costmdls pp)"). Dingo's HardForkBabbage instead fabricates a
-// value specifically so internal validation always has one, which -- absent
-// this check -- would let Dingo accept the same transaction a real network
-// rejects.
+// TestValidateTxBabbageRejectsPlutusV2WhenSynthetic pins that real
+// cardano-ledger rejects a transaction using a PlutusV2 script outright, at the
+// UTXOW level before any script evaluation runs, whenever PlutusV2 has no real
+// cost model configured yet (NoCostModel, the formal rule "languages txw ⊆
+// dom(costmdls pp)"). Dingo's HardForkBabbage instead fabricates a value
+// specifically so internal validation always has one, which -- absent this
+// check -- would let Dingo accept the same transaction a real network rejects.
 func TestValidateTxBabbageRejectsPlutusV2WhenSynthetic(t *testing.T) {
 	disablePhase1RulesForTest(t)
 
@@ -119,7 +118,7 @@ func TestValidateTxBabbageAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 			},
 			// A real (non-synthetic) PlutusV2 cost model, same as production
 			// carries once an on-chain update lands. requiredCostModel
-			// (issue #3528) fails closed on a missing entry, so this must be
+			// fails closed on a missing entry, so this must be
 			// populated for the "not synthetic" case to actually reach
 			// evaluation instead of being rejected before it ever does.
 			CostModels: map[uint][]int64{
@@ -450,13 +449,12 @@ func dijkstraGuardPParams() *gdijkstra.DijkstraProtocolParameters {
 	}
 }
 
-// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath covers a
-// human-reviewer finding on blinklabs-io/dingo#3962's PR: ValidateTxDijkstra
-// delegates phase-2 validation entirely to
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath covers that
+// ValidateTxDijkstra delegates phase-2 validation entirely to
 // gdijkstra.UtxoValidatePlutusScripts, which has no idea about Dingo's
-// synthetic marker -- without dijkstraSyntheticV2CostModelGuard, a
-// transaction using a synthetic-cost-model PlutusV2 script would reach that
-// delegate and be priced against the fabricated value instead of rejected.
+// synthetic marker -- without dijkstraSyntheticV2CostModelGuard, a transaction
+// using a synthetic-cost-model PlutusV2 script would reach that delegate and be
+// priced against the fabricated value instead of rejected.
 func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath(
 	t *testing.T,
 ) {

@@ -25,11 +25,11 @@ import (
 )
 
 // TestHandlePoolsExtendedSchemaFields is the shape/pagination/order and
-// metadata success/absence/failure acceptance test for #2489: it exercises
-// handlePoolsExtended (not the adapter) against a mock that returns the
-// full pool_list_extended field set, including all three metadata states,
-// and does not reference vrf_key or relays, which are not part of the
-// current OpenAPI schema.
+// metadata success/absence/failure acceptance test for OpenAPI 0.1.90
+// alignment: it exercises handlePoolsExtended (not the adapter) against a mock
+// that returns the full pool_list_extended field set, including all three
+// metadata states, and does not reference vrf_key or relays, which are not part
+// of the current OpenAPI schema.
 func TestHandlePoolsExtendedSchemaFields(t *testing.T) {
 	t.Parallel()
 

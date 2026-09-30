@@ -38,7 +38,7 @@ import (
 
 // The tests in this file drive Dingo's real ChainSync server callbacks over a
 // real protocol connection using the shared ouroboros-mock harness
-// (blinklabs-io/ouroboros-mock#226), and assert the exact protocol messages the
+// (ouroboros-mock), and assert the exact protocol messages the
 // server emits back.
 //
 // This is the difference that matters versus calling the callbacks directly:

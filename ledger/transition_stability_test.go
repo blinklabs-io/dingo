@@ -207,7 +207,7 @@ INSERT INTO auth_committee_hot (
 	}, nil))
 	poolCred := repeatByte(28, 0xDD)
 	// governance.predictedBoundaryStakeEpochFor(currentEpoch) resolves to
-	// currentEpoch itself (dingo#4441): the mid-epoch check tallies the SPO
+	// currentEpoch itself: the mid-epoch check tallies the SPO
 	// vote against mark[currentEpoch], the last mark durably written at the
 	// boundary that opened the currently active epoch. The boundary it
 	// predicts will instead tally mark[currentEpoch+1], which SNAP does not

@@ -259,7 +259,7 @@ func TestDiffBlockUtxoDelta_ProducedMismatchIsReported(t *testing.T) {
 }
 
 // TestDiffBlockUtxoDelta_IntraBlockSpendIsNotReported is a regression test
-// for blinklabs-io/dingo#1900's incremental-mode audit finding: an output
+// for the incremental-mode audit finding: an output
 // created by one transaction and spent by a later transaction in the same
 // block correctly does not appear in either node's live UTxO query result --
 // that is the expected outcome of a real, valid intra-block spend, not a
@@ -477,7 +477,7 @@ func TestHandleIncrementalRollback_TriggersFullCheckWhenPointDiffers(
 // pending at a time, but -- unlike the drop-everything-unconditionally
 // behavior this replaced -- which one survives now depends on priority
 // (fullCheckReasonPriority), not simply which arrived first. This is the
-// blinklabs-io/dingo#4183 review fix: unconditionally dropping a second
+// rationale: unconditionally dropping a second
 // request meant a one-shot Mismatch/Rollback/EpochTransition trigger could
 // be silently lost behind an already-queued, merely-due Interval
 // checkpoint, even though the interval trigger costs nothing to drop
@@ -549,7 +549,7 @@ func TestFullCheckWorker_CoalescesByPriorityWhilePendingOneQueued(
 // request must still reach cfg.OnFullCheck with the request's own reason,
 // but BlocksSinceFullCheck must NOT be reset afterward, since no check
 // actually completed. This is a regression test for
-// blinklabs-io/dingo#1900's incremental-mode audit finding (a): resetting
+// the incremental-mode audit finding (a): resetting
 // the countdown on every attempt regardless of outcome (the prior behavior)
 // silently delayed the next legitimate interval checkpoint by up to a full
 // --full-check-interval's worth of blocks even though nothing was ever
@@ -773,8 +773,8 @@ func TestCursorState_AdvanceIncrementsAndPersists(t *testing.T) {
 	assert.Equal(t, got, *persisted)
 }
 
-// TestCursorState_ResetFullCheckCounterIsRelativeToAt covers a maintainer
-// review finding on blinklabs-io/dingo#4183: a full check runs
+// TestCursorState_ResetFullCheckCounterIsRelativeToAt covers a bug in
+// the full-check counter reset: a full check runs
 // asynchronously (fullCheckWorker's doc comment) precisely so the ChainSync
 // callback goroutine can keep validating and advancing the cursor for every
 // block that arrives while it's in flight -- a real full check commonly
@@ -922,10 +922,10 @@ func TestCursorState_ResetFullCheckCounterFloorsAtZero(t *testing.T) {
 
 // TestDecideFullCheckReason covers every trigger decideFullCheckReason
 // makes, including the interval and epoch-transition paths that no live
-// testnet run could exercise on its own (blinklabs-io/dingo#3854 makes a
+// testnet run could exercise on its own (a stake-distribution divergence made a
 // mismatch fire on effectively every block, always preempting the other
 // two before their own conditions are ever reached) -- this is that
-// coverage, independent of #3854 or any live network at all.
+// coverage, independent of that divergence or any live network at all.
 func TestDecideFullCheckReason(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -1032,7 +1032,7 @@ func testDiscardLogger() *slog.Logger {
 }
 
 // TestReportSessionEnd_RecordsErrorViaCallback is a regression test for
-// blinklabs-io/dingo#1900's incremental-mode audit finding: a per-block
+// the incremental-mode audit finding: a per-block
 // query failure that ends an incrementalSession previously reached only a
 // log line, never any metric-recording callback, so
 // node_parity_check_errors_total could never see this failure class (the

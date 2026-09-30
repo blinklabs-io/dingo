@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Migration v21 (asset-amount-fingerprint-index-drop, dingo#4598) is the
+// Migration v21 (asset-amount-fingerprint-index-drop) is the
 // registry's second DROP INDEX migration, after v19's asset.name_hex drop.
 // Unlike v19, it carries no DROP COLUMN, so SQLite's and PostgreSQL's native
 // "DROP INDEX IF EXISTS" tolerate replay without reaching any guard in
@@ -36,7 +36,7 @@ import (
 // form is not self-idempotent -- it raises error 1091 on replay -- so the
 // MySQL test below is what actually exercises new guard behavior;
 // isMySQLDropAlreadyAppliedOnConn/parseMySQLDropIndexStatement are already
-// generic over the index name (dingo#4482 built them that way), so this
+// generic over the index name (by construction), so this
 // proves that generality holds for a name they were never written against.
 // The PostgreSQL test is included anyway as real-server coverage that the
 // translated statements (backtick-to-quote rewrite) actually apply and

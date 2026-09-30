@@ -73,7 +73,7 @@ func newUniverseTestClient(srv *httptest.Server) *KoiosClient {
 // TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs is the point of
 // the cache. The crawl is 304 sequential /account_list requests on Preview, and
 // paying it once per epoch is why the in-process observer could not keep pace
-// with a syncing node (dingo #3796). A second epoch whose end time the cached
+// with a syncing node. A second epoch whose end time the cached
 // crawl already covers must not touch Koios again.
 func TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs(
 	t *testing.T,

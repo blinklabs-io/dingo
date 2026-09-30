@@ -28,7 +28,7 @@ import (
 // satisfied. Without this assertion, dropping or renaming
 // epochInfoAdapter.ActiveSlotCoeffRat would compile cleanly and quietly restore
 // the float64 approximation, which yields a strictly larger leadership threshold
-// than the reference node's (dingo #2798).
+// than the reference node's.
 func TestEpochInfoAdapterProvidesExactActiveSlotCoeff(t *testing.T) {
 	t.Parallel()
 

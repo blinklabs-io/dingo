@@ -30,11 +30,11 @@ import (
 // TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch is the Conway
 // counterpart to TestPlutusBudgetComparisonIncludesFinalSlippageBatch.
 //
-// evaluateConwayPlutusScript is where this change did the most: the flag
-// selecting restrictive mode was renamed, and the suppression of the CEK
-// machine's trailing slippage flush was dropped from each of the V1, V2 and
-// V3 language branches. The Alonzo and Babbage cases cannot reach it, and
-// the immutable corpus that measured this change contains no Conway Plutus
+// evaluateConwayPlutusScript is where the budget change landed hardest: the
+// flag selecting restrictive mode was renamed, and the suppression of the CEK
+// machine's trailing slippage flush was dropped from each of the V1, V2 and V3
+// language branches. The Alonzo and Babbage cases cannot reach it, and the
+// immutable corpus used to measure the budget contains no Conway Plutus
 // evaluations at all, so the path that changed most had no guard.
 //
 // The purpose is minting rather than spending on purpose. A V1 minting
@@ -169,7 +169,7 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	t.Run(
 		"missing cost model fails closed instead of reaching evaluation",
 		func(t *testing.T) {
-			// Issue #3528: a protocol-parameters map that never populated
+			// A protocol-parameters map that never populated
 			// the PlutusV1 entry (e.g. a hard-fork/governance update, or a
 			// malformed genesis) must return a configuration error rather
 			// than silently evaluating the script under plutigo's built-in

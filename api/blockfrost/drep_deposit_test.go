@@ -42,7 +42,7 @@ func depositReturnAddress(t *testing.T, stakeCred []byte) []byte {
 // TestPredefinedDRepAmountIncludesActiveProposalDeposit proves the
 // Blockfrost single-DRep endpoint reports the same CIP-1694
 // deposit-inclusive voting power ledger/governance.LoadDRepVotingState uses
-// for real ratification (blinklabs-io/dingo#4355), not the plain
+// for real ratification, not the plain
 // GetDRepVotingPowerByType figure alone, for the AlwaysNoConfidence
 // predefined DRep.
 //

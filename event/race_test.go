@@ -345,8 +345,8 @@ func TestStopWaitsForInFlightPublish(t *testing.T) {
 
 // TestPublishBlocksOnFullChannelUntilDrained verifies that Publish applies
 // backpressure when a subscriber's channel buffer is full, and that the event
-// is delivered once capacity appears rather than dropped. Regression test for
-// blinklabs-io/dingo#2932. Close() must still be able to run against an
+// is delivered once capacity appears rather than dropped. Regression test.
+// Close() must still be able to run against an
 // in-flight blocked send without deadlocking, which is why the blocked send
 // wakes on the subscriber's close signal.
 func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {

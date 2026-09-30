@@ -37,9 +37,9 @@ import (
 // TestBuildBlockSupportsAllEras verifies BuildBlock dispatches by era
 // across the full era table — TPraos (Shelley/Allegra/Mary/Alonzo)
 // and Praos (Babbage/Conway) — and that the block re-decodes through
-// the era-correct constructor (issue #2124). Each subtest also asserts
-// the concrete block type so a regression in decodeBlockFromCbor that
-// returned the wrong era's struct would fail loudly.
+// the era-correct constructor. Each subtest also asserts the concrete block
+// type so a regression in decodeBlockFromCbor that returned the wrong era's
+// struct would fail loudly.
 func TestBuildBlockSupportsAllEras(t *testing.T) {
 	creds := setupTestCredentials(t)
 

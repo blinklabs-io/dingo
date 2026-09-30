@@ -83,7 +83,7 @@ func newEBTimingForger(
 
 // TestLeiosEBProducedLineCarriesTimingBreakdown makes endorser-block
 // construction legible from the node's own logs. The field trace behind
-// this change had to be reconstructed from a 3.5-second gap between log
+// this logging had to be reconstructed from a 3.5-second gap between log
 // lines, because nothing recorded how long selection took.
 func TestLeiosEBProducedLineCarriesTimingBreakdown(t *testing.T) {
 	var logs bytes.Buffer

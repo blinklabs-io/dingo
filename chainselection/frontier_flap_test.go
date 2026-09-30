@@ -86,7 +86,7 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // been delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so the call that drove
+// EventBus.PublishOrdered, so the call that drove
 // the decision returns before the lane worker has handed the event to any
 // subscriber. A lane is a FIFO drained by exactly one worker, so a sentinel
 // enqueued after those switches is delivered after them: receiving it back is
@@ -307,7 +307,7 @@ func TestCanonicalPeersWithCrossingFrontiersDoNotFlap(t *testing.T) {
 	)
 }
 
-// TestDivergentPeersStillSwitchOnLongerDeliveredChain is the AC #2 negative
+// TestDivergentPeersStillSwitchOnLongerDeliveredChain is the negative
 // case for genuine chain divergence: the two peers advertise the same height
 // and slot but DIFFERENT blocks, so they are not on the same chain. The
 // delivered-frontier lead is then real chain quality and the selector must
@@ -367,7 +367,7 @@ func TestDivergentPeersStillSwitchOnLongerDeliveredChain(t *testing.T) {
 	)
 }
 
-// TestContradictedAdvertisedTipDoesNotExemptFrontierLag is the AC #2 negative
+// TestContradictedAdvertisedTipDoesNotExemptFrontierLag is the negative
 // case for a spoofed advertisement: a peer copies the honest peer's advertised
 // tip but its delivered headers contradict the honest chain at a shared slot.
 // The delivered history is the trusted signal, so the copied advertisement
@@ -417,7 +417,7 @@ func TestContradictedAdvertisedTipDoesNotExemptFrontierLag(t *testing.T) {
 	assert.Equal(t, honest, *best)
 }
 
-// TestSameChainExemptionDoesNotRescueImplausiblyBehindPeer is the AC #2
+// TestSameChainExemptionDoesNotRescueImplausiblyBehindPeer is the
 // negative case for the implausible-tip bound: the same-chain exemption
 // applies only to the behind-best-frontier filter. A peer whose delivered
 // frontier is more than k behind the APPLIED LOCAL tip is useless and must

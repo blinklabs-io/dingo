@@ -28,12 +28,12 @@ import (
 // RewardAdaPots row with ImportedEpochFees (the fees collected up to and
 // including the anchor block) and a CapturedSlot at the anchor. The node's
 // locally stored transactions for that epoch only cover slots after the
-// anchor -- plus, once the historical backfill (#4061) has run, slots at or
+// anchor -- plus, once the historical backfill has run, slots at or
 // before it too. saveRewardAdaPotsForEpoch must sum the local fees strictly
 // after the anchor and add the imported amount, not sum the whole epoch:
 // summing the whole epoch either silently drops the pre-anchor fees (the
-// defect in dingo #3975) or double-counts them once backfill has stored
-// pre-anchor transactions locally.
+// bootstrap-anchor reward pot defect) or double-counts them once backfill has
+// stored pre-anchor transactions locally.
 func TestSaveRewardAdaPotsForEpochUsesImportedPreAnchorFees(t *testing.T) {
 	t.Parallel()
 	ls, db := newRewardCalculationTestLedger(t)

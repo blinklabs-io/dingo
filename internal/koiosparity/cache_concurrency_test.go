@@ -30,14 +30,15 @@ import (
 // busyTimeoutMargin exceeds OpenCache's hardcoded 5s busy_timeout pragma,
 // so a connection that only frees the WAL writer slot after this long
 // forces any contending connection's own busy-retry loop to exhaust before
-// the slot is released — the specific condition dingo #4091 hits, as
-// opposed to ordinary contention a shorter hold resolves on its own well
+// the slot is released — the specific condition a concurrent chunk writer hits,
+// as opposed to ordinary contention a shorter hold resolves on its own well
 // within busy_timeout: a 100ms hold fails neither before nor after the fix,
 // because busy_timeout's retry genuinely covers short waits.
 const busyTimeoutMargin = 5500 * time.Millisecond
 
-// TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter is dingo
-// #4091's minimal, deterministic reproduction.
+// TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter is the
+// minimal, deterministic reproduction of concurrent chunk writers hitting
+// SQLITE_BUSY.
 //
 // SaveAccountFetchChunkProgress's transaction (cache.go) always opens with
 // two DELETEs targeting a brand-new chunk_hash nothing has written before.
@@ -318,7 +319,7 @@ const sqliteBusySnapshot = 517
 // The assertion is on SQLITE_BUSY_SNAPSHOT specifically rather than on any
 // error, because only that code is structurally impossible once a write runs
 // first. A plain SQLITE_BUSY stays reachable — it is ordinary writer-slot
-// contention against busy_timeout, the dingo #4091 class — and a starved
+// contention against busy_timeout, the concurrent-writer class — and a starved
 // machine can produce one without the ordering having regressed: measured
 // under six concurrent copies of this package's suite, the fixed order
 // produced 1 plain SQLITE_BUSY in 3000 on three runs and zero

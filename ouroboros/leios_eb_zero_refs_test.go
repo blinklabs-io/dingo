@@ -34,7 +34,7 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 	h.observed++
 }
 
-// Investigation for dingo #2729.
+// Investigation of the from-genesis endorser-block decode-to-zero stall.
 //
 // A from-genesis musashi Leios sync stalls in the epoch-15 endorser-block
 // region: a ranking block references an endorser block whose manifest is
@@ -65,7 +65,8 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 //     decoding), a peer that serves an empty manifest for a valid endorser-block
 //     point is diagnosed as a "point hash mismatch" (a fetch/serving error the
 //     backfill can retry against other peers) rather than the misleading decode
-//     invariant failure that made #2729 look like a consensus/decode defect.
+//     invariant failure that made the stall look like a consensus/decode
+//     defect.
 
 // bareRefMapFromArrayWrapped strips the single-element array wrapper produced by
 // LeiosEndorserBlock.MarshalCBOR (0x81 || refMap) to yield the bare {hash=>size}
@@ -87,7 +88,7 @@ func bareRefMapFromArrayWrapped(t *testing.T, arrayWrapped []byte) []byte {
 // TestLeiosEndorserBlockLargeMapDecodesAllRefs proves the manifest decoder reads
 // every reference of a large map. 1200 refs requires a 2-byte CBOR map-header
 // length (0xb9 || uint16); 300 also needs the multi-byte branch. If the header
-// parsing dropped or mis-counted refs for large maps (the #2729 "decode to zero"
+// parsing dropped or mis-counted refs for large maps (the "decode to zero"
 // hypothesis), these would fail.
 func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 	t.Parallel()
@@ -139,7 +140,7 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	_, err = lcommon.NewLeiosEndorserBlockFromCbor([]byte{0x81, 0xa0})
 	require.ErrorContains(t, err, zeroRefsMsg)
 
-	// A large, non-empty manifest of the size reported in #2729 (~1000 refs is
+	// A large, non-empty manifest of the size seen in the field (~1000 refs is
 	// ~35 KB) does NOT produce the zero-refs error in either wire shape.
 	_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
 	require.Greater(t, len(arrayWrapped), 30000, "manifest should be ~35 KB")
@@ -153,7 +154,7 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch reproduces the #2729
+// TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch reproduces the
 // field scenario at the dingo store boundary: a peer returns an empty manifest
 // (0xa0) in response to a by-point fetch for a valid, non-empty endorser block.
 //

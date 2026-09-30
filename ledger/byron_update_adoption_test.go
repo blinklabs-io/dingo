@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint covers the #4378
+// TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint covers the
 // criterion that an adopted update's ppMaxBlockSize and ppMaxHeaderSize
 // govern inbound regular-block validation from the adoption point. A real
 // proposal is registered, voted, endorsed and stable through the update

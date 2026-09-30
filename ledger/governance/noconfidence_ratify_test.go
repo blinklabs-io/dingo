@@ -69,13 +69,13 @@ func seedNoConfidenceProposal(
 }
 
 // TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark covers the
-// second SPO-gated action type dingo#4441's fix touches (HardForkInitiation
+// second SPO-gated action type the ratify fix touches (HardForkInitiation
 // being the first, covered by ledger's TestHardForkInitiation_* tests).
 // stakeEpochFor(newEpoch) resolves to newEpoch, so the SPO tally must read
 // mark[newEpoch] -- seeded here directly, matching how a standalone
 // ProcessEpoch caller (as opposed to a real epoch-rollover transaction)
 // seeds it. The 0.51 threshold and 0.4779/0.6283 stake ratios are the same
-// real values dingo#4441 measured on Preview for HardForkInitiation; using
+// real values measured on Preview for HardForkInitiation; using
 // them here for NoConfidence proves the fix is the shared stakeEpochFor
 // primitive, not a HardForkInitiation-specific patch.
 func TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark(

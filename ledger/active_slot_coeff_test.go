@@ -58,7 +58,7 @@ func newActiveSlotCoeffLedgerState(
 // nearest binary64 value to 0.05 is strictly GREATER than 1/20, so a threshold
 // derived from it is strictly larger than the reference node's — a node using it
 // can only over-claim leader slots, never miss any. That is the one-sided
-// signature reported in dingo #2798, so the direction is pinned here even though
+// signature seen in the field, so the direction is pinned here even though
 // the magnitude (~5.6e-17 relative) is far too small to account for the three
 // phantom slots per epoch reported there.
 func TestActiveSlotCoeffRatIsExactGenesisRational(t *testing.T) {

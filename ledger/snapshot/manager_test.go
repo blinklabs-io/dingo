@@ -2263,7 +2263,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 // boundaries into epochs 1, 2 and 3 all resolve against snapshot epoch 0.
 // Without the row those rounds skip for a missing reward snapshot and the ADA
 // pots never move, which left preview's treasury at 0 and its reserves at the
-// genesis value through epoch 3 (dingo #3381).
+// genesis value through epoch 3.
 //
 // This is distinct from the post-Mithril case, where an empty distribution at
 // slot 0 means the pool data predates the import rather than that no stake

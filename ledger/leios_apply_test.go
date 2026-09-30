@@ -669,12 +669,12 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 
 // TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently is the concurrency
 // regression from review: the manifest is content-addressed, so the same
-// hash can legitimately be required at two different slots at once (issue
-// #3513). Deduping in-flight fetches by hash alone let a still-in-flight
-// fetch for one slot silently suppress spawn for a different slot of the
-// same hash; awaitFetch's "not in flight" skip-fast then fired the moment
-// the *first* slot's fetch cleared the shared key, leaving the second slot's
-// requirement never fetched at all.
+// hash can legitimately be required at two different slots at once. Deduping
+// in-flight fetches by hash alone let a still-in-flight fetch for one slot
+// silently suppress spawn for a different slot of the same hash; awaitFetch's
+// "not in flight" skip-fast then fired the moment the *first* slot's fetch
+// cleared the shared key, leaving the second slot's requirement never fetched
+// at all.
 func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	t.Parallel()
 
@@ -876,7 +876,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 // companion regression to TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots
 // for classifyEndorserBlockFetches: two historical blocks announcing the
 // same hash at different slots must both reach backfill, not collapse to
-// one via the hash-only seen-map dedup (issue #3513 review).
+// one via the hash-only seen-map dedup.
 func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 	t *testing.T,
 ) {

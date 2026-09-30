@@ -106,7 +106,7 @@ func TestTxsubmissionWireSizeOverheadBands(t *testing.T) {
 }
 
 // TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement is the
-// regression test for the size-validation regression from #3883: a
+// regression test for the size-validation regression: a
 // cardano-node peer advertises the wrapped wire size in MsgReplyTxIds while
 // gouroboros hands Dingo only the unwrapped body, so an equality check
 // against len(TxBody) rejects every batch such a peer offers.

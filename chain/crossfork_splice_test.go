@@ -37,7 +37,7 @@ func mockBlockPoint(b *MockBlock) ocommon.Point {
 	}
 }
 
-// buildAbandonedForkChain sets up the exact state that precedes the #3005
+// buildAbandonedForkChain sets up the exact state that precedes the
 // cross-fork splice:
 //
 //	index 1: testBlocks[0]        (shared ancestor)
@@ -154,7 +154,8 @@ func assertChainPrevHashContiguous(t *testing.T, c *chain.Chain) {
 	}
 }
 
-// TestRollbackRejectsPointNotOnChain covers the root cause of issue #3005.
+// TestRollbackRejectsPointNotOnChain covers the root cause of the cross-fork
+// splice.
 //
 // Chain.rollbackLocked resolves the rollback point through
 // ChainManager.blockByPoint, which answers from the retained block cache before
@@ -259,10 +260,10 @@ func TestRollbackToRetainedPointDoesNotSpliceChain(t *testing.T) {
 // tip. Like the stale-index shape, the chain must refuse rather than adopt a
 // tip it does not hold.
 //
-// It must be refused as "point not found", never as an over-K rollback: issue
-// #3035 was a node permanently denying every peer because this case was
-// misclassified as exceeding the security parameter. Not-on-chain re-intersects
-// and recovers; over-K does not.
+// It must be refused as "point not found", never as an over-K rollback:
+// misclassifying it as exceeding the security parameter made a node
+// permanently deny every peer. Not-on-chain re-intersects and recovers; over-K
+// does not.
 func TestRollbackRejectsPointAheadOfTip(t *testing.T) {
 	t.Parallel()
 

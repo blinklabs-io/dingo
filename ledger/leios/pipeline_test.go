@@ -607,7 +607,7 @@ func newMetricsPipelineFixture(
 // a quorum event built before a rollback (VoteManager builds it under its own
 // lock and publishes it after releasing it) must not recreate the pipeline
 // state handleRollback dropped, because the replacement chain re-produces an
-// endorser block for the same produce slot (#3600).
+// endorser block for the same produce slot.
 func TestStaleQuorumAfterRollbackRejected(t *testing.T) {
 	t.Parallel()
 

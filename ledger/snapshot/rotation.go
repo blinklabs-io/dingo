@@ -482,17 +482,16 @@ type rewardStateBundle struct {
 // There are two ways stake goes missing, and they need different repairs. A
 // pool excluded here for degraded registration data is still in the
 // distribution, so the difference is measurable and is recorded as
-// ExcludedActiveStake (dingo #4025). A credential whose pool has left the
-// active pool set is not: enumerating the distribution from that set never
-// fetched it, so both the pool rows and a total summed from them are short by
-// the same amount and no check comparing the two can see it (dingo #4660).
-// The denominator is therefore taken from the calculator's credential-first
-// count (rewardTotalActiveStake over StakeDistribution.TotalActiveStake), not
-// from the pool buckets, and both kinds of exclusion land in
-// ExcludedActiveStake. Reward calculation checks the reward_pool_input rows sum
-// to exactly TotalActiveStake minus that when it is set; a snapshot captured
-// before that tracking existed (nil) falls back to checking the rows sum to no
-// more than it.
+// ExcludedActiveStake. A credential whose pool has left the active pool set is
+// not: enumerating the distribution from that set never fetched it, so both the
+// pool rows and a total summed from them are short by the same amount and no
+// check comparing the two can see it. The denominator is therefore taken from
+// the calculator's credential-first count (rewardTotalActiveStake over
+// StakeDistribution.TotalActiveStake), not from the pool buckets, and both
+// kinds of exclusion land in ExcludedActiveStake. Reward calculation checks the
+// reward_pool_input rows sum to exactly TotalActiveStake minus that when it is
+// set; a snapshot captured before that tracking existed (nil) falls back to
+// checking the rows sum to no more than it.
 func (m *Manager) buildRewardStateInputs(
 	epoch uint64,
 	snapshotType string,
@@ -529,7 +528,7 @@ func (m *Manager) buildRewardStateInputs(
 	// distribution's sum is exactly the stake degraded-pool exclusion removed
 	// from reward_pool_input. Persisting it lets reward calculation verify
 	// the input rows sum to precisely totalActiveStake minus this value
-	// instead of only checking they do not exceed it (dingo #4025); without
+	// instead of only checking they do not exceed it; without
 	// it, a proportionally reduced (rather than merely incomplete) input set
 	// would pass the same non-exceeding bound silently.
 	excludedActiveStake := types.Uint64(
@@ -591,8 +590,8 @@ func rewardStakeDistribution(
 		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
 		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
 		// Carried, not recomputed: StakeInputs holds only the credentials of
-		// pools that are still active, so it cannot express the denominator
-		// (dingo #4660). The calculator summed every delegated credential.
+		// pools that are still active, so it cannot express the denominator.
+		// The calculator summed every delegated credential.
 		TotalActiveStake: dist.TotalActiveStake,
 	}
 	for _, input := range reward.StakeInputs {
@@ -795,7 +794,7 @@ func excludeRewardInputPool(dist *StakeDistribution, poolKeyHash []byte) bool {
 // The pool-bucket sum is the floor, not the answer. It is used only when the
 // distribution carries no credential-first total -- a value built outside the
 // calculator, or one restored from a capture predating this field -- where it
-// is the best available lower bound and matches the pre-#4660 behaviour rather
+// is the best available lower bound and matches the earlier behaviour rather
 // than under-reporting the denominator to zero.
 func rewardTotalActiveStake(dist *StakeDistribution) uint64 {
 	bucketed := sumPoolStakes(dist.PoolStakes)
@@ -1180,7 +1179,7 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 }
 
 // poolSnapshotRetentionMaxDepth bounds how many epochs of pool_stake_snapshot
-// rows the deferred-header retention pin (issue #3727) may ever hold below the
+// rows the deferred-header retention pin may ever hold below the
 // current epoch. It is a safety backstop far larger than any legitimate
 // deferred-header gap (a header awaiting apply needs a snapshot within a few
 // epochs of the apply cursor, and the retention guard additionally evicts
@@ -1202,19 +1201,19 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // is pruned to the same window in CORE storage mode (types.StorageModeCore),
 // matching dingo's original pruning behavior exactly, but retained WITHOUT BOUND
 // in API storage mode (types.StorageModeAPI) so the Blockfrost account
-// reward-history endpoint (GET /accounts/{stake_address}/rewards, dingo #1875)
+// reward-history endpoint (GET /accounts/{stake_address}/rewards)
 // can serve an account's full reward history instead of only the trailing few
-// epochs — the same "silently look empty past the window" failure mode #2987
-// already identified for epoch_summary. reward_account_output is likewise
+// epochs — the same "silently look empty past the window" failure mode that
+// epoch_summary rows once showed. reward_account_output is likewise
 // retained without bound whenever SetRewardAccountOutputRetentionUnbounded(true)
 // has been called (node.go wires this from the koios-parity observer's Enabled
 // config): that observer only validates a closed epoch after fetching and
 // comparing over the network, which can fall arbitrarily far behind chain
 // progression during a from-genesis or catch-up sync, so the fixed 4-epoch
-// window otherwise prunes an epoch's rows before the observer ever reads them
-// (dingo #4188). See rewardstate.DeleteStateBeforeEpoch (core, prunes both
-// tables) and rewardstate.DeleteStakeInputBeforeEpoch (API/koios-parity, prunes
-// only reward_stake_input) for the implementation and full rationale.
+// window otherwise prunes an epoch's rows before the observer ever reads them.
+// See rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
+// rewardstate.DeleteStakeInputBeforeEpoch (API/koios-parity, prunes only
+// reward_stake_input) for the implementation and full rationale.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
@@ -1222,7 +1221,7 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // thousand rows over a network's lifetime — while making historical epoch
 // aggregates permanently queryable. Pruning it also made a legitimately
 // captured boundary indistinguishable from one that was never captured, which
-// is what made dingo #2987 read as a missing epoch-2 snapshot on a node that
+// is what made it read as a missing epoch-2 snapshot on a node that
 // had in fact captured it correctly 400 epochs earlier.
 func (m *Manager) cleanupOldSnapshots(
 	ctx context.Context,
@@ -1244,7 +1243,7 @@ func (m *Manager) cleanupOldSnapshots(
 	// contradicts that for GetStakeDistribution/GetPoolDistr2 pinned to an
 	// older epoch the same way an unbounded UTxO table does for
 	// GetUTxOWhole. VerifyPointQueryable's Acquire-time gate
-	// (blinklabs-io/dingo#382) checks stake retention on every Acquire
+	// checks stake retention on every Acquire
 	// regardless of which query type the caller actually intends to ask,
 	// so even removing only UTxO's own window still leaves a historical
 	// Acquire failing at this pool-snapshot floor instead -- there is no
@@ -1254,7 +1253,7 @@ func (m *Manager) cleanupOldSnapshots(
 	if m.db.StorageMode() != types.StorageModeAPI {
 		// Pool-stake snapshots may still be needed below the default window by a
 		// queued/deferred header that validates leader eligibility against an
-		// older epoch's mark snapshot (issue #3727). Pruning them out from under
+		// older epoch's mark snapshot. Pruning them out from under
 		// such a header makes leaderEligibilityStake read the missing rows as a
 		// zero-stake "pool absent" answer, which the reference node never
 		// intended. So pool-snapshot pruning runs THROUGH the retention guard: the
@@ -1296,7 +1295,7 @@ func (m *Manager) cleanupOldSnapshots(
 		// minPoolSnapshotDeleteBefore is the hard backstop on how far the retention
 		// pin can lower pruning: retain at most poolSnapshotRetentionMaxDepth epochs
 		// of pool snapshots so an unresolvable deferred header cannot pin them
-		// without bound (issue #3727, finding 5). It never rises above the default
+		// without bound. It never rises above the default
 		// window (a header needing a within-window snapshot is unaffected), and the
 		// guard clamps the pinned boundary up to it.
 		minPoolSnapshotDeleteBefore := uint64(0)
@@ -1329,9 +1328,9 @@ func (m *Manager) cleanupOldSnapshots(
 
 	if m.db.StorageMode() == types.StorageModeAPI ||
 		m.RewardAccountOutputRetentionUnbounded() {
-		// API storage mode, or the in-process Koios parity observer enabled
-		// (dingo #4188): retain reward_account_output without bound (see
-		// doc comment above) and prune only reward_stake_input.
+		// API storage mode, or the in-process Koios parity observer enabled:
+		// retain reward_account_output without bound (see doc comment above)
+		// and prune only reward_stake_input.
 		if err := meta.DeleteRewardStakeInputBeforeEpoch(
 			deleteBeforeEpoch,
 			metaTxn,

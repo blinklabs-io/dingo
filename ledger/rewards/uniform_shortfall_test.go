@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-// Mainnet epoch 655 pot and stake state, from dingo #4660.
+// Mainnet epoch 655 pot and stake state, from a field report.
 const (
 	shortfallReserves    = uint64(6126859026912852)
 	shortfallTreasury    = uint64(1356415272910618)
@@ -42,8 +42,8 @@ func shortfallParameters() Parameters {
 	}
 }
 
-// shortfallSnapshot builds the three mainnet pools #4660 cross-checked: two
-// above k=500 saturation and one comfortably below it, so a lever that acts
+// shortfallSnapshot builds the three mainnet pools cross-checked in the report:
+// two above k=500 saturation and one comfortably below it, so a lever that acts
 // through the saturation cap is distinguishable from one that does not.
 func shortfallSnapshot(totalActiveStake, totalBlocks uint64) Snapshot {
 	pools := make([]Pool, 0, 3)
@@ -104,7 +104,7 @@ func shortfallPercent(base, perturbed *Result) []float64 {
 
 // TestTotalBlocksUndercountDoesNotUnderCreditRewards pins the cancellation that
 // rules the block count out as the cause of a uniform network-wide reward
-// shortfall (dingo #4660, which suspected it). totalBlocks is the numerator of
+// shortfall (which the report suspected). totalBlocks is the numerator of
 // the efficiency term that scales the reward pot R and the denominator of every
 // pool's beta, so it cancels: undercounting it by 0.135% moves each pool's
 // reward by less than 0.001%, and slightly upwards, because only R's fee
@@ -132,9 +132,9 @@ func TestTotalBlocksUndercountDoesNotUnderCreditRewards(t *testing.T) {
 }
 
 // TestActiveStakeUndercountUnderCreditsUniformly pins the lever that does
-// produce #4660's signature: total active stake is the denominator of sigmaA
-// alone, so a shortfall there under-credits every pool by the same percentage
-// regardless of pool size or saturation.
+// produce the observed signature: total active stake is the denominator of
+// sigmaA alone, so a shortfall there under-credits every pool by the same
+// percentage regardless of pool size or saturation.
 func TestActiveStakeUndercountUnderCreditsUniformly(t *testing.T) {
 	pots := Pots{
 		Reserves: shortfallReserves,

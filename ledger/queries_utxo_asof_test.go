@@ -61,7 +61,7 @@ func utxoByTxInAsOf(
 }
 
 // TestQueryShelleyUtxoByTxIn_AsOfSlot_LiveBetweenCreationAndSpend covers the
-// core #1900 UTxO-query fix: a pinned point between a UTxO's creation
+// core UTxO-query pinning fix: a pinned point between a UTxO's creation
 // (slot 100, via seedBabbageUtxo) and its later spend (marked deleted at
 // slot 500) must report it live. Before this fix, this handler ignored the
 // pinned point entirely and always answered from live state -- exactly the
@@ -168,7 +168,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_SpentAtExactSlot_Absent(t *testing.T) {
 
 // TestQueryShelleyUtxoByTxIn_AsOfSlot_AfterSpend_Absent covers a pinned
 // point after the UTxO was spent: it must be reported absent, not the
-// live-state answer this handler gave before the #1900 fix.
+// live-state answer this handler gave before pinning.
 func TestQueryShelleyUtxoByTxIn_AsOfSlot_AfterSpend_Absent(t *testing.T) {
 	t.Parallel()
 

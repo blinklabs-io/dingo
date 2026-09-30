@@ -169,17 +169,17 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 }
 
 // TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote closes
-// the gap a PR review found in the two tests above: both call
+// the gap in the two tests above: both call
 // committeeActionRatified directly, so neither one proves ratifyProposals
 // actually routes UpdateCommittee/NoConfidence proposals to it. Reverting
-// just that routing (back to the pre-#4007 hasCC-requiring heuristic) while
+// just that routing (back to the old hasCC-requiring heuristic) while
 // keeping committeeActionRatified and both direct-call tests left the whole
 // package green, including those two tests -- nothing exercised the
 // decision of *which* ratification path a real proposal takes.
 //
 // This test drives the real entry point, ProcessEpochBoundary, the way the
 // harness calls it for every vector: a DRep and an SPO each cast an
-// explicit yes vote (the exact shape issue #4007's "CC re-election" vector
+// explicit yes vote (the exact shape the "CC re-election" vector
 // carries) and no committee vote is ever recorded. It only ratifies if
 // ProcessEpochBoundary's call into ratifyProposals actually reaches
 // committeeActionRatified for this action type; the old heuristic requires
@@ -264,9 +264,9 @@ func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
 
 // TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote is
 // TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote's
-// NoConfidence twin. A PR review found that the UpdateCommittee test alone
+// NoConfidence twin. The UpdateCommittee test alone
 // only pins that half of ratifyProposals's routing: reverting just the
-// NoConfidence arm back to the pre-#4007 hasCC-requiring heuristic (leaving
+// NoConfidence arm back to the old hasCC-requiring heuristic (leaving
 // UpdateCommittee routed through committeeActionRatified) left every test,
 // including both routing tests and both direct-call tests, green.
 func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
@@ -343,7 +343,7 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
 }
 
 // TestProcessEpochBoundaryRatifiesNoConfidenceWithNoExplicitVotes pins a
-// blocker a PR review found: ratifyProposals returned early on
+// blocker: ratifyProposals returned early on
 // `len(proposal.Votes) == 0` before ever reaching the NoConfidence/
 // UpdateCommittee branch, so a proposal backed only by an implicit
 // AlwaysNoConfidence delegation -- no proposal.Votes entry at all, exactly
@@ -397,7 +397,7 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithNoExplicitVotes(
 // setup that TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote
 // proves ratifies at protocol major 10 must NOT ratify at major 9, since
 // ledger/governance's ShouldRatify refuses NoConfidence and UpdateCommittee
-// outright during bootstrap regardless of votes. A PR review found this
+// outright during bootstrap regardless of votes. This
 // gate was added without any test pinning it: deleting it left every
 // existing test green.
 func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
@@ -462,7 +462,7 @@ func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
 }
 
 // TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap pins the
-// bootstrap gate a PR review asked for on ratifyProposals's vote-shape
+// bootstrap gate on ratifyProposals's vote-shape
 // heuristic path: unlike UpdateCommittee/NoConfidence, TreasuryWithdrawal
 // and NewConstitution have no stake tally to hand to ShouldRatify, so
 // ratifyProposals must check inConwayBootstrap directly for them.
@@ -514,7 +514,7 @@ func TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap(
 }
 
 // TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit pins
-// committeeTermsWithinLimit end to end: a PR review found that
+// committeeTermsWithinLimit end to end:
 // proposal.ProposedMembersByCredential is empty at ratification in every
 // vector the corpus and this file's other tests exercise, so
 // syntheticUpdateCommitteeGovAction's loop over it never runs anywhere --
@@ -572,7 +572,7 @@ func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
 }
 
 // TestCommitteeActionRatifiedUsesPassedEpochNotManagerField pins the fix for
-// an epoch-source inconsistency a PR review found unpinned: reverting
+// an epoch-source inconsistency that was otherwise unpinned: reverting
 // drepStakeForCommitteeAction's IsDRepCredentialActive call back to
 // m.currentEpoch left the whole package green, because every other test
 // either sets m.currentEpoch to match the currentEpoch argument or never
@@ -647,8 +647,8 @@ func formatVoteKey(voterType uint8, credential common.Blake2b224) string {
 	return string(rune('0'+voterType)) + ":" + hex.EncodeToString(credential[:])
 }
 
-// TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake pins a PR
-// #4333 review finding: an active proposal deposit raises the return
+// TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake pins that
+// an active proposal deposit raises the return
 // account's DRep voting power, but it is not delegated stake behind a pool
 // and must not enter the SPO tally. Production reads SPO stake straight from
 // the stake distribution snapshot (tallySPOVotes over LoadSPOVotingState's

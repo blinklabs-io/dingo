@@ -202,7 +202,7 @@ WHERE tx_id = ? AND output_idx = ?`,
 // consume is Map.delete on a missing key -- a no-op -- and the transaction's
 // produced outputs are still added.
 //
-// This is the wedge reported as issue #3643 ("UTxO already spent" while
+// This is the wedge reported on Musashi ("UTxO already spent" while
 // applying the certified endorser block at ranking-block slot 1864040): the
 // failing apply is the endorser block's, and the conflict is between two
 // *different* certified transactions, so no transaction-hash dedup can address

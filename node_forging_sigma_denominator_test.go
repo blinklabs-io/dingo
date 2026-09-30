@@ -46,7 +46,7 @@ const (
 	// construction" is a property of the WRITER: it makes the two readers
 	// indistinguishable in every ordinary fixture and so hides which one a
 	// given code path actually consults. Separating them is the only way to
-	// observe that choice, and #3814 is precisely the report that the forge
+	// observe that choice, and the defect was precisely that the forge
 	// and verify paths made it differently.
 	sigmaDenomSummaryTotal = uint64(5_000_000)
 )
@@ -126,7 +126,8 @@ func seedSigmaDenominatorSnapshot(
 }
 
 // TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor is the
-// regression test for dingo #3814.
+// regression test for the forge and verify paths using different active-stake
+// denominators.
 //
 // The forging adapter used to return ledger.StakeDistribution.TotalStake,
 // which LedgerView.GetStakeDistribution accumulates by summing the mark rows
@@ -187,7 +188,7 @@ func TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor(
 //
 // Scope, stated plainly: this drives a re-capture between two SEPARATE
 // adapter calls, not between the two halves of a single call. It therefore
-// does NOT by itself prove the dingo #3815 atomicity property -- a write
+// does NOT by itself prove the torn-read atomicity property -- a write
 // landing inside one call is not reachable from outside the adapter without
 // a seam that does not exist. What it does prove is that both halves of a
 // given read move together to the new generation rather than one of them
@@ -273,7 +274,7 @@ func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
 }
 
 // TestStakeDistributionProviderForbidsTornSigmaRead pins the interface shape
-// that makes the dingo #3815 defect unexpressible.
+// that makes the torn sigma read unexpressible.
 //
 // The fix is not only that the adapter now reads both halves in one
 // transaction; it is that StakeDistributionProvider no longer offers a way to

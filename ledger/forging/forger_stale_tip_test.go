@@ -1153,13 +1153,13 @@ func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 	require.Contains(t, logs.String(), `"msg":"forge context"`)
 }
 
-// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins the state #4013
-// made reachable here.
+// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins the state the
+// local-lag bound made reachable here.
 //
 // LedgerState publishes (0, true) from UpstreamSyncStatus for the whole window
 // between an active-connection switch and the newly selected peer's first
-// admitted trusted header. Before #4013 the sync gate refused every slot in
-// that window outright, so this bound never saw it. #4013 bounded that branch
+// admitted trusted header. The sync gate once refused every slot in
+// that window outright, so this bound never saw it. It now bounds that branch
 // by the local tip's lag instead -- a node at tip forges, and the header it
 // produces is what ends the window -- so a node at tip now arrives at this
 // gate with a live upstream and a target of zero.
@@ -1168,8 +1168,9 @@ func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 // newestKnown cannot hold for a zero target, and NOT because anything below
 // refuses the slot first. Substituting a value for the missing target -- the
 // admitted header frontier was the obvious candidate, and an earlier revision
-// did it -- would refuse leader slots in exactly the window #4013 opened them
-// up for, which is the #4010 wedge again for any operator who set the knob.
+// did it -- would refuse leader slots in exactly the window the lag bound
+// opened them up for, which is the self-sealing wedge again for any operator
+// who set the knob.
 func TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget(t *testing.T) {
 	var logs bytes.Buffer
 	block := newForgerTestBlock(300, 2)
@@ -1185,7 +1186,7 @@ func TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget(t *testing.T) {
 		BlockBroadcaster: &forgerTestBroadcaster{},
 		SlotClock: forgerTestSlotClock{
 			// At tip: the previous slot's block, one slot behind the
-			// current slot, so #4013's local-lag bound passes it through.
+			// current slot, so the local-lag bound passes it through.
 			currentSlot:        300,
 			chainTipSlot:       299,
 			primaryTipExplicit: true,

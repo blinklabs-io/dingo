@@ -128,8 +128,8 @@ type KoiosTotals struct {
 	ReservesWithdrawal string
 }
 
-// KoiosEpochParams holds the Koios /epoch_params reference row for one epoch
-// (dingo #3931). Every value is stored as the literal text Koios published,
+// KoiosEpochParams holds the Koios /epoch_params reference row for one epoch.
+// Every value is stored as the literal text Koios published,
 // with "" meaning the parameter is not defined in that epoch's era — never
 // zero. Rationals therefore keep Koios's decimal/exponent form ("0.0577",
 // "7.21e-05") and are reconciled against Dingo's exact num/denom form by
@@ -182,7 +182,7 @@ type KoiosEpochParams struct {
 }
 
 // KoiosAccountRewards holds one Koios /account_reward_history reference row
-// for (network, epoch, stake_address, reward_type) — issue #3097's
+// for (network, epoch, stake_address, reward_type) — the
 // per-account exact-parity comparison consumes this. RewardType is part of
 // the key (not just a stored field) because a single account can
 // legitimately have both a "member" and a "leader" row in the same epoch
@@ -337,7 +337,7 @@ type CheckMismatch struct {
 const (
 	// ScopeAggregate is the fast epoch/pool comparison every check runs.
 	ScopeAggregate = "aggregate"
-	// ScopeAccount is the slow per-account comparison (#3097) that only runs
+	// ScopeAccount is the slow per-account comparison that only runs
 	// when accounts are enabled.
 	ScopeAccount = "account"
 )
@@ -434,7 +434,7 @@ func OpenCache(
 	// contend for that one slot; busy_timeout=5000 only covers a wait
 	// shorter than 5s; five real chunk workers' large-chunk Prepare/Exec
 	// work can collectively outlast that and fail with SQLITE_BUSY /
-	// "database is locked" (dingo #4091). Restricting the pool to one
+	// "database is locked". Restricting the pool to one
 	// connection makes database/sql itself queue every caller for that
 	// single connection with no fixed budget, so a writer already in
 	// progress is always waited out rather than timed out on. This also
@@ -1158,7 +1158,7 @@ func (c *Cache) MarkAccountCoverageIncomplete(
 
 // SaveAccountFetchChunkProgress durably records one successfully-fetched
 // chunk's rows and per-address "checked" markers for (network, epoch),
-// atomically — dingo #3099's resumable checkpoint: FetchAccountRewardsForEpoch
+// atomically — the resumable checkpoint: FetchAccountRewardsForEpoch
 // calls this once per chunk as it completes, instead of only accumulating
 // rows in memory, so a killed/restarted process resumes from whichever
 // chunks already committed here rather than redoing the whole epoch.
@@ -1316,7 +1316,7 @@ func (c *Cache) GetChunkHashesWithStagedRows(
 // across all committed chunks — read back once every chunk in the current
 // plan is done, then passed as-is to the existing, unmodified
 // Cache.CommitAccountRewardsForEpoch to finalize the epoch exactly the way
-// #3097 already does.
+// the non-chunked path already does.
 func (c *Cache) GetStagedAccountRows(
 	network string,
 	epoch uint64,
@@ -1346,7 +1346,7 @@ func (c *Cache) GetStagedAccountRows(
 }
 
 // InvalidateStaleAccountChunks deletes staged rows/checked markers for any
-// chunk hash not present in currentChunkHashes — dingo #3099's "invalidate/
+// chunk hash not present in currentChunkHashes — "invalidate/
 // re-fetch affected chunks when request parameters or reference data change"
 // requirement. Because chunk hashes are content-addressed (sha256 of a
 // chunk's own sorted address list), only chunks whose address grouping is no
@@ -1361,7 +1361,7 @@ func (c *Cache) GetStagedAccountRows(
 // GetDoneAccountChunkHashes would then still report that chunk as done, so
 // fetchAccountRewardsForEpoch would skip it and GetStagedAccountRows would
 // return nothing for it — letting the epoch commit complete=true with a
-// silently incomplete reward set, exactly what #3099 must prevent.
+// silently incomplete reward set, exactly what chunked fetching must prevent.
 func (c *Cache) InvalidateStaleAccountChunks(
 	network string,
 	epoch uint64,
@@ -1590,7 +1590,7 @@ func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
 // GetEpochsNeedingCheck returns epochs that have Koios reference data but
 // either have no check result yet, OR whose Koios data was refreshed
 // (fetched_at updated) after the last check, OR — when accountsEnabled is
-// true — whose #3097 per-account reference data (koios_account_coverage) is
+// true — whose per-account reference data (koios_account_coverage) is
 // absent, incomplete, or was refreshed after the last check. Pre-staking
 // epochs are excluded from that account-coverage branch because they have no
 // account parity surface and intentionally never receive a coverage row. This
@@ -1602,12 +1602,12 @@ func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
 // freshness is only ever a meaningful recheck trigger when the caller
 // actually runs the per-account comparison phase (CheckConfig.AccountsEnabled/
 // ObserverConfig.AccountsEnabled) — passing false reproduces the exact
-// pre-#3097 query (pool/aggregate staleness only), so a caller that never
-// enables accounts sees no behavior change and never has an epoch queued for
-// recheck purely because its account coverage happens to be absent (which is
-// simply expected in that mode, not a discrepancy worth flagging). See
-// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity"
-// subsection for the full epoch-selection design this is part of.
+// pre-account-parity query (pool/aggregate staleness only), so a caller that
+// never enables accounts sees no behavior change and never has an epoch queued
+// for recheck purely because its account coverage happens to be absent (which
+// is simply expected in that mode, not a discrepancy worth flagging). See
+// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity" subsection
+// for the full epoch-selection design this is part of.
 func (c *Cache) GetEpochsNeedingCheck(
 	network string,
 	accountsEnabled bool,
@@ -1652,7 +1652,7 @@ func (c *Cache) GetEpochsNeedingCheck(
 }
 
 // GetEpochsMissingAccountCoverage returns epoch numbers in [from, through]
-// that already have a fetched koios_epoch_info row but whose #3097
+// that already have a fetched koios_epoch_info row but whose
 // per-account Koios reference data (koios_account_coverage) is either absent
 // or present with complete = 0.
 //
@@ -1856,7 +1856,8 @@ var upsertCheckEpochStatusSQL = `INSERT INTO check_epoch_status
 // that phase itself passes again.
 //
 // A caller that sets only Status (no phase fields) is writing an
-// aggregate-phase result, which is what every pre-#4339 caller meant.
+// aggregate-phase result, which is what every caller that predates
+// phase-specific statuses meant.
 func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
 	aggregateStatus := status.AggregateStatus
 	aggregateCount := status.AggregateMismatchCount
@@ -2532,7 +2533,7 @@ func createCacheSchema(db *sql.DB) error {
 			spendable_epoch INTEGER NOT NULL DEFAULT 0, pool_id_bech32 TEXT NOT NULL DEFAULT '',
 			fetched_at DATETIME NOT NULL)`,
 		// idx_kar_net_epoch_addr_type is deliberately NOT created here: on an
-		// older cache.db (schema-only #1875 era) the table exists without a
+		// older cache.db (schema-only era) the table exists without a
 		// reward_type column yet, so creating an index that references it
 		// would fail. It's created below, after the additive-column
 		// migration guarantees reward_type exists on every koios_account_rewards
@@ -2546,10 +2547,10 @@ func createCacheSchema(db *sql.DB) error {
 			zero_reward_summary_ready INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kac_net_epoch ON koios_account_coverage(network, epoch)`,
 
-		// dingo #3099: durable per-chunk checkpoint staging so a killed/restarted
+		// Durable per-chunk checkpoint staging so a killed/restarted
 		// FetchAccountRewardsForEpoch resumes from already-committed chunks
 		// instead of redoing the whole epoch (see fetch_accounts.go). Purely
-		// additive alongside #3097's koios_account_rewards/koios_account_coverage
+		// additive alongside the koios_account_rewards/koios_account_coverage
 		// — CommitAccountRewardsForEpoch's contract and existing tests are
 		// untouched; these staged rows are only ever read back and passed to it
 		// once every chunk in the current plan has committed.
@@ -2608,8 +2609,8 @@ func createCacheSchema(db *sql.DB) error {
 		// The Koios /account_list crawl, cached across epochs. Without it the
 		// per-account fetch re-walked the whole list once per epoch — 304
 		// sequential requests for Preview's 303k accounts — which is why the
-		// in-process observer could not keep pace with a syncing node
-		// (dingo #3796). fetched_at is per row so a refresh can replace the set
+		// in-process observer could not keep pace with a syncing node.
+		// fetched_at is per row so a refresh can replace the set
 		// wholesale and the newest value still dates the crawl.
 		`CREATE TABLE IF NOT EXISTS koios_account_universe (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
@@ -2661,13 +2662,13 @@ GROUP BY network`); err != nil {
 		return fmt.Errorf("migrate koios_account_universe_state: %w", err)
 	}
 
-	// Older cache files created before #3097 have a koios_account_rewards
-	// table missing reward_type/spendable_epoch/pool_id_bech32 (schema-only
-	// era, #1875) — add each column additively rather than dropping and
-	// recreating the table, so any rows a prior partial run may have written
-	// are preserved rather than lost. Guarded by pragma_table_info the same
-	// way the drop-column migration above is, just adding instead of
-	// dropping.
+	// Older cache files created before per-account parity have a
+	// koios_account_rewards table missing
+	// reward_type/spendable_epoch/pool_id_bech32 (schema-only era) — add each
+	// column additively rather than dropping and recreating the table, so any
+	// rows a prior partial run may have written are preserved rather than lost.
+	// Guarded by pragma_table_info the same way the drop-column migration above
+	// is, just adding instead of dropping.
 	for _, col := range [][2]string{
 		{"reward_type", "TEXT NOT NULL DEFAULT ''"},
 		{"spendable_epoch", "INTEGER NOT NULL DEFAULT 0"},
@@ -2699,7 +2700,7 @@ GROUP BY network`); err != nil {
 	}
 
 	// Cache files written before the aggregate and account phases kept
-	// separate verdicts (#4339) have one status column and no row-level
+	// separate verdicts have one status column and no row-level
 	// record of which phase produced it.
 	for _, col := range [][2]string{
 		{"aggregate_status", "TEXT NOT NULL DEFAULT ''"},
@@ -2741,11 +2742,11 @@ GROUP BY network`); err != nil {
 	); err != nil {
 		return fmt.Errorf("migrate check_epoch_status phase backfill: %w", err)
 	}
-	// The pre-#3097 unique index only covered (network, epoch,
+	// The pre-account-parity unique index only covered (network, epoch,
 	// stake_address); drop it now that reward_type is guaranteed to exist
 	// (old rows default to "" via the ADD COLUMN above, which is fine:
-	// reward_type was never populated pre-#3097 in practice since the table
-	// was schema-only) and create the widened replacement.
+	// reward_type was never populated before per-account parity in practice
+	// since the table was schema-only) and create the widened replacement.
 	if _, err := db.Exec("DROP INDEX IF EXISTS idx_kar_net_epoch_addr"); err != nil {
 		return fmt.Errorf(
 			"migrate koios_account_rewards: drop old index: %w",

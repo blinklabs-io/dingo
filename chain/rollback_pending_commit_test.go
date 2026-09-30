@@ -45,7 +45,7 @@ func pendingCommitHash(label string) []byte {
 // opens its own transaction, which cannot see another transaction's
 // uncommitted writes -- and rollbackLocked's removal loop failed its first
 // iteration with "remove block at index N: block not found" at an index the
-// chain legitimately held. That is issue #3979, observed on CI as an
+// chain legitimately held. That is the failure observed on CI as an
 // intermittent failure of
 // ledger.TestWindowedRewindConvergesWhilePrimaryChainExtends, whose appender
 // goroutine and windowed rewind are the same pairing.

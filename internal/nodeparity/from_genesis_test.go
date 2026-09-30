@@ -26,8 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
 
-// TestResolveStartPoint pins from-genesis's resume-from-point behavior
-// (dingo#1900 follow-up): a killed or restarted process has no on-disk
+// TestResolveStartPoint pins from-genesis's resume-from-point behavior:
+// a killed or restarted process has no on-disk
 // checkpoint of its own, so from-genesis --at-slot/--at-hash lets a caller
 // that already trusts a prior run's epochs resume from that point instead
 // of Origin. Reverting resolveStartPoint to always return

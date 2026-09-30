@@ -99,7 +99,7 @@ func seedTestChain(
 // snapshot makes the next target window+1 below the chain's live tip, and
 // Chain.Rollback refuses it as exceeding K. The whole rewind then fails, the
 // pipeline restarts, and recovery recomputes the same doomed schedule against
-// a tip that has grown further -- issue #3889, where that loop ran for nine
+// a tip that has grown further -- a loop that once ran for nine
 // hours and 1150 restarts without the chain ever being truncated.
 //
 // Each step must therefore be derived from the chain's live tip, so it is a
@@ -203,9 +203,9 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 }
 
 // TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins the second half of
-// issue #3889: a recovery rewind the chain refuses as exceeding K is not a
-// transient failure, so repeating it at an applied tip that never advances
-// must become terminal instead of restarting the pipeline forever.
+// the K-bounded rewind: a recovery rewind the chain refuses as exceeding K is
+// not a transient failure, so repeating it at an applied tip that never
+// advances must become terminal instead of restarting the pipeline forever.
 //
 // recoverFromDeterministicTxValidationError used to return the refusal as a
 // plain error. ledgerProcessBlocks treats anything that is not
@@ -323,7 +323,7 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 }
 
 // TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows pins the shape the
-// live reproduction on Preview showed (issue #3889: a replay wedged at slot
+// live reproduction on Preview showed (a replay wedged at slot
 // 41098815 for over twenty minutes across 97 rejection attempts on one
 // transaction).
 //

@@ -106,7 +106,7 @@ func TestLeiosVerifiedEbSlotRestoresFromPersistedManifest(t *testing.T) {
 // so deleting the o.restoreLeiosVerifiedEbSlot() line from newOuroboros
 // leaves ./ouroboros/ fully green and the restore ships inert -- the same
 // class TestBuildDingoConfigWiresForgeTolerances was added for on the config
-// knobs (chrisguiney review). Constructing a second Ouroboros over the same
+// knobs. Constructing a second Ouroboros over the same
 // database and reading the exported watermark is what closes it.
 func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 	t.Parallel()

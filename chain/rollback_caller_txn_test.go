@@ -102,7 +102,7 @@ func rollbackPoint() ocommon.Point {
 // c.tipBlockIndex, so without the barrier it fails its very first iteration
 // with "remove block at index 5: block not found". Chain.batchCommitMutex
 // closes this window for the batch transactions the chain owns and left it open
-// here (issue #4005).
+// here.
 func TestRollbackWaitsForUncommittedCallerTransaction(t *testing.T) {
 	db, c := callerTxnChain(t)
 	txn := addOnCallerTxn(t, db, c)

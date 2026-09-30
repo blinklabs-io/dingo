@@ -30,7 +30,7 @@ import (
 
 // setupTestDBWithStorageMode mirrors setupTestDB (calculator_test.go) but
 // pins the storage mode, so retention tests can compare CORE vs API mode
-// pruning of reward_account_output (dingo #1875).
+// pruning of reward_account_output.
 func setupTestDBWithStorageMode(
 	t *testing.T,
 	storageMode string,
@@ -48,12 +48,12 @@ func setupTestDBWithStorageMode(
 }
 
 // TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput pins that CORE
-// storage mode's retention behavior is unchanged by dingo #1875: both
+// storage mode's retention behavior is unchanged by API-mode retention: both
 // reward_stake_input and reward_account_output are pruned to the same
 // rotation/reward-replay window. Also pins pool_stake_snapshot's own
-// CORE-mode window (dingo#1900/#382: no test previously exercised the
-// apiStorageMode branch cleanupOldSnapshots gained for this table) -- CORE
-// mode's pool-snapshot pruning is unchanged from before that commit.
+// CORE-mode window (no test previously exercised the apiStorageMode branch
+// cleanupOldSnapshots gained for this table) -- CORE mode's pool-snapshot
+// pruning is unchanged from before that commit.
 func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 	t.Parallel()
 
@@ -124,12 +124,12 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 	}
 }
 
-// TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the dingo #1875
-// regression test: in API storage mode, reward_account_output must be
+// TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the API-mode
+// retention test: in API storage mode, reward_account_output must be
 // retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
 // can serve an account's full history), while reward_stake_input still
 // cannot be kept and continues to be pruned to the rotation/reward-replay
-// window exactly as in core mode. Also the dingo#1900/#382 regression test:
+// window exactly as in core mode. Also the regression test:
 // pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
 // so a from-genesis historical Acquire pinned well outside the ordinary
 // 3-epoch window can still be validated
@@ -203,8 +203,8 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 	}
 }
 
-// TestCleanupOldSnapshotsKoiosParityRetentionUnbounded is the dingo #4188
-// regression test: enabling SetRewardAccountOutputRetentionUnbounded on a
+// TestCleanupOldSnapshotsKoiosParityRetentionUnbounded is the koios-parity
+// retention test: enabling SetRewardAccountOutputRetentionUnbounded on a
 // CORE-mode database (the koios-parity observer's node.go wiring) must retain
 // reward_account_output without bound, exactly like API storage mode, instead
 // of pruning it to the 4-epoch rotation/reward-replay window. Without this,
@@ -272,8 +272,8 @@ func TestCleanupOldSnapshotsKoiosParityRetentionUnbounded(t *testing.T) {
 }
 
 // TestDeleteRewardStateAfterSlotUnaffectedByAPIModeRetention is the rollback
-// correctness check for dingo #1875: retaining reward_account_output without
-// bound in API storage mode must not stop a rollback from removing rows
+// correctness check for API-mode retention: retaining reward_account_output
+// without bound in API storage mode must not stop a rollback from removing rows
 // captured above the rollback point. DeleteRewardStateAfterSlot is
 // unconditional (it does not read storage mode at all), so this pins that
 // behavior directly rather than relying on that being true by omission.

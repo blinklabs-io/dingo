@@ -40,7 +40,7 @@ import (
 // An earlier version of this constructor used a single fixed "conformance"
 // schema and stable os.TempDir() path shared across every call, every
 // process, and every machine running this suite against the same server.
-// That sharing was unsafe on two fronts a reviewer caught: concurrent
+// That sharing was unsafe on two fronts: concurrent
 // `go test` invocations (a local run alongside CI, or two CI shards)
 // truncated or dropped each other's in-progress backend, since Reset and
 // teardown for one process's manager operated on state another process's

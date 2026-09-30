@@ -37,7 +37,7 @@ import (
 // (ledger/governance/epoch.go) and the SQL expiry sweep, whose predicate is
 // `expiry_epoch > 0 AND expiry_epoch <= ?` -- so imported DReps stayed in
 // countActiveDReps permanently and inflated the ratification quorum denominator
-// for the life of the database (issue #4492).
+// for the life of the database.
 //
 // The two DReps carry distinct non-zero expiries, so dropping the field fails
 // both assertions and a fix that stamped one shared constant would fail too.

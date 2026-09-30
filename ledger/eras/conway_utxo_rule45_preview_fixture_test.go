@@ -37,7 +37,7 @@ const (
 	previewConwaySlot       = 58_083_610
 	previewConwayProtoMajor = 9
 
-	// The malformed reference script's hash, matching dingo#4393's log text
+	// The malformed reference script's hash, matching the node's log text
 	// ("malformed reference scripts: [e985ee15...]") exactly.
 	previewConwayMalformedScriptHash = "e985ee15101d2cef31eab9bd0e6ea55423b26aabf78171b87ed440af"
 )
@@ -73,14 +73,13 @@ func previewConwayProtocolParams(
 }
 
 // TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript is the
-// regression test for blinklabs-io/dingo#4393: a genesis Preview sync
-// deterministically and permanently halted at block 2,423,581 / slot
-// 58083610 because conway UTXO validation rule 45
-// (conway.UtxoValidateMalformedReferenceScripts, wired unmodified into
+// regression test: a genesis Preview sync deterministically and permanently
+// halted at block 2,423,581 / slot 58083610 because conway UTXO validation rule
+// 45 (conway.UtxoValidateMalformedReferenceScripts, wired unmodified into
 // ValidateTxConway's rule table) rejected a real, canonical, producer-accepted
 // transaction. The rejected transaction carries a PlutusV2 reference script
-// (hash e985ee15..., 123 bytes) whose flat header declares UPLC program
-// version 89.49.145 -- not a real compiled script, but nothing in upstream
+// (hash e985ee15..., 123 bytes) whose flat header declares UPLC program version
+// 89.49.145 -- not a real compiled script, but nothing in upstream
 // plutus-ledger-api's deserialiseScript inspects the program version for a
 // script that is merely present as a reference script output and never
 // executed. The UPLC-version gate belongs only at execution time
@@ -91,7 +90,7 @@ func previewConwayProtocolParams(
 // time instead, in the same code path used for well-formedness checks of
 // unexecuted reference scripts, so dingo rejected every peer's identical copy
 // of this canonical block and could not resync Preview from genesis on any
-// build. plutigo v0.7.2 (blinklabs-io/plutigo#415) moves the gate to
+// build. plutigo v0.7.2 moves the gate to
 // execution time; this test fails before that bump and passes after it.
 func TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript(
 	t *testing.T,
@@ -122,7 +121,7 @@ func TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript(
 	// This is the exact, unwrapped validation function
 	// buildConwayValidationRules wires into ValidateTxConway's rule table for
 	// upstream rule Id UtxoValidationRuleMalformedReferenceScripts --
-	// dingo#4393's "conway utxo validation rule 45" -- not an extracted
+	// the "conway utxo validation rule 45" the node logged -- not an extracted
 	// helper the production entry point bypasses.
 	err = conway.UtxoValidateMalformedReferenceScripts(
 		tx,
@@ -146,7 +145,7 @@ func TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript(
 }
 
 // TestConwayPlutusV2ScriptStillRejectsMalformedVersionAtExecution is the
-// negative case dingo#4393's root-cause analysis requires alongside the fix:
+// negative case the root-cause analysis requires alongside the fix:
 // the same 123-byte script that rule 45 must now accept as an unexecuted
 // reference script must still be rejected if anything ever tries to execute
 // it, so the fix does not also remove the execution-time gate

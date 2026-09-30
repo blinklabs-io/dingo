@@ -398,14 +398,14 @@ func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
 
 // TestAccountRewardsAdditiveColumnMigration proves OpenCache migrates an
 // older koios_account_rewards table (missing reward_type/spendable_epoch/
-// pool_id_bech32 — the #1875 schema-only shape) forward without errors or
+// pool_id_bech32 — the schema-only shape) forward without errors or
 // data loss, and that the widened unique index is in place afterward.
 func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "cache.db")
 
-	// Build the pre-#3097 shape directly, bypassing createCacheSchema.
+	// Build the pre-account-parity shape directly, bypassing createCacheSchema.
 	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
 	require.NoError(t, err)
 	_, err = db.Exec(`CREATE TABLE koios_account_rewards (
@@ -465,7 +465,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	require.Len(t, got, 2)
 }
 
-// TestCommitEpochMismatchesRollsBackOnFailedInsert proves #3410's fix:
+// TestCommitEpochMismatchesRollsBackOnFailedInsert proves atomicity:
 // CommitEpochMismatches deletes and (re)inserts an epoch's mismatch rows in a
 // single transaction, so a write failure partway through the insert rolls
 // the delete back with it instead of leaving the epoch with zero evidence. A

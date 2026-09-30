@@ -27,7 +27,7 @@ import (
 // A crossable rollback the node actually applies must not leave its point in
 // the per-connection loop detector. Otherwise a later, legitimate rollback to
 // the same fork point counts the crossing we already made and is suppressed as
-// a false loop, which is the reconnect-churn wedge in issue #2790.
+// a false loop, which is the reconnect-churn wedge.
 func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	t *testing.T,
 ) {
@@ -51,7 +51,7 @@ func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	}
 }
 
-// The #2790 loop shape: after crossing a fork point the node advances forward
+// The loop shape: after crossing a fork point the node advances forward
 // on the peer's chain, then the peer rolls it back to the same fork point
 // again. Because the successful first cross reset the loop counter, the second
 // crossable rollback must be applied, not suppressed as a false loop.
@@ -96,10 +96,10 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 }
 
 // When the loop detector breaks a loop for a genuinely un-crossable rollback,
-// the skip path must surface the stuck condition through the point-keyed #2728
+// the skip path must surface the stuck condition through the point-keyed
 // unrecoverable-rollback tracker so the escalation and metric can fire,
 // instead of silently skipping and hiding a persistently un-recoverable
-// divergence (issue #2790 bullet 6).
+// divergence.
 func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 	t *testing.T,
 ) {
@@ -146,9 +146,9 @@ func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 
 // A crossable rollback that reaches the per-connection loop threshold must
 // still be APPLIED, not suppressed as a false loop: the loop detector only
-// breaks loops for rollbacks the node cannot cross (issue #2790, requirement
-// 1). This exercises the appliability guard directly by pre-seeding history to
-// the threshold, unlike the reset-on-success path which never reaches it.
+// breaks loops for rollbacks the node cannot cross. This exercises the
+// appliability guard directly by pre-seeding history to the threshold, unlike
+// the reset-on-success path which never reaches it.
 func TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold(
 	t *testing.T,
 ) {

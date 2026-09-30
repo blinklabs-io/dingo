@@ -1838,7 +1838,7 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 // lone-claim bound: a frontier beyond the localTip+2*K catch-up ceiling that no
 // other connection corroborates stays rejected on every retry, because a
 // rejected frontier is never recorded as a reference. The gap (>4M blocks at
-// K=432) matches the live report on dingo #3624.
+// K=432) matches a live Preview report.
 func TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone(
 	t *testing.T,
 ) {

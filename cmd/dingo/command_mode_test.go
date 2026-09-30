@@ -119,7 +119,7 @@ func TestEffectiveRunMode(t *testing.T) {
 			config.RunModeMithril,
 		},
 		// `dingo database snapshot|restore|truncate` are offline maintenance
-		// commands (dingo#1651 follow-up): they must resolve to
+		// commands: they must resolve to
 		// RunModeDatabase regardless of the configured runMode, the same way
 		// `load`/`sync`/`mithril` ignore it, since main.go uses this to skip
 		// topology resolution (database never opens a peer connection).

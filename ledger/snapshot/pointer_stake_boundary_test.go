@@ -40,7 +40,7 @@ import (
 // position. It returns the credential's staking key so a caller can inspect
 // reward_live_stake directly.
 //
-// This is the dingo #3854/#3811 shape: a pool whose stake is understated
+// This is the understated-stake shape: a pool whose stake is understated
 // because part of one delegator's stake sits at a pointer address.
 func seedPointerStakeFixture(
 	t *testing.T,
@@ -115,14 +115,13 @@ func seedPointerStakeFixture(
 	return stakeKey
 }
 
-// TestCaptureEpochBoundaryAgreesOnPointerStake is the dingo#3854 review's
-// blocking finding: ComputeEpochBoundarySnapshot (the SNAP-point hook a
-// normally operating node installs) reads only the live aggregate, while the
-// event-driven fallback (no stashed SNAP-point distribution) reconstructs
-// historically -- and only the historical route resolved pointer stake. Two
-// nodes on the same chain, or one node across a restart that lost the
-// SNAP-point read, would persist different Mark stake for a pool holding
-// pointer stake.
+// TestCaptureEpochBoundaryAgreesOnPointerStake checks that
+// ComputeEpochBoundarySnapshot (the SNAP-point hook a normally operating node
+// installs) reads only the live aggregate, while the event-driven fallback (no
+// stashed SNAP-point distribution) reconstructs historically -- and only the
+// historical route resolved pointer stake. Two nodes on the same chain, or one
+// node across a restart that lost the SNAP-point read, would persist different
+// Mark stake for a pool holding pointer stake.
 //
 // Both routes must now report the same pool total for the same epoch.
 func TestCaptureEpochBoundaryAgreesOnPointerStake(t *testing.T) {
@@ -190,7 +189,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStake(t *testing.T) {
 }
 
 // TestRewardLiveStakeRebuildAgreesWithIncrementalOnPointerAddresses covers the
-// constraint the PR's own package doc states: reward_live_stake never carries
+// constraint the package doc states: reward_live_stake never carries
 // pointer-derived UTxO stake, because attribution depends on certificate
 // history at the slot being evaluated rather than on anything the live,
 // tip-keyed aggregate can express. That has to hold identically whichever way
@@ -365,7 +364,8 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(
 //
 // mergePointerStakeInputs must add the overlay to the row dedupeStakeInputs
 // will keep. Attaching it to any other duplicate silently drops the pointer
-// stake at aggregation, reinstating dingo#3854 on exactly those nodes.
+// stake at aggregation, reinstating the understated-stake bug on exactly those
+// nodes.
 func TestMergePointerStakeInputsAttachesToTheSurvivingLiveRow(t *testing.T) {
 	credential := bytes.Repeat([]byte{0x9c}, 28)
 	lowPool := bytes.Repeat([]byte{0x01}, 28)

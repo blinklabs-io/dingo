@@ -47,7 +47,7 @@ func (h nonByronTestHeader) Era() gledger.Era {
 // proves that a header whose crypto verification returns a definite (not
 // deferred) error is excluded from chain-selection observation and triggers
 // a connection recycle, instead of being allowed to influence Genesis
-// density or corroboration (dingo #3517).
+// density or corroboration.
 func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	t *testing.T,
 ) {

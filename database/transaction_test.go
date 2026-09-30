@@ -596,7 +596,7 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
 }
 
 // TestRecoveredProducerOnPrimaryChain verifies the membership check that gates
-// blob-recovery of consumed inputs (issue #3005 Mode B cross-fork splice). A
+// blob-recovery of consumed inputs (cross-fork splice). A
 // producer block that is present in the append-only blob store but is not the
 // block indexed on the applied primary chain at its height (an abandoned fork)
 // must be reported off-chain, so recoverConsumedUtxo refuses to resurrect it
@@ -863,9 +863,8 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 
 // TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation covers
 // strict at-tip recovery after a consumed UTxO row was pruned. A canonical
-// producer may be reconstructed from the retained block/blob data (issue
-// #3170), while the primary-chain check still rejects an abandoned-fork
-// producer (issue #3005).
+// producer may be reconstructed from the retained block/blob data, while the
+// primary-chain check still rejects an abandoned-fork producer.
 //
 // The fixture stages the producers so that recovery from the blob WOULD
 // otherwise succeed (blob offsets present, metadata Transaction rows present,
@@ -1032,12 +1031,12 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	})
 }
 
-// TestEnsureTransactionConsumedUtxosStrictValidation covers issue #396:
-// when a consumed UTxO cannot be recovered from either the metadata store
-// or the blob store, StrictUtxoValidation controls whether that is a hard
-// error or a silently skipped condition, gated by the recorded Mithril
-// trust boundary (blocks past the boundary should have complete producer
-// history; blocks at or below it legitimately may not).
+// TestEnsureTransactionConsumedUtxosStrictValidation covers the
+// StrictUtxoValidation contract: when a consumed UTxO cannot be recovered from
+// either the metadata store or the blob store, StrictUtxoValidation controls
+// whether that is a hard error or a silently skipped condition, gated by the
+// recorded Mithril trust boundary (blocks past the boundary should have
+// complete producer history; blocks at or below it legitimately may not).
 func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 	t.Parallel()
 
@@ -1108,7 +1107,7 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 }
 
 // TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer is the end-to-end guard
-// for the Mode B cross-fork splice (issue #3005): it drives recoverConsumedUtxo
+// for the Mode B cross-fork splice: it drives recoverConsumedUtxo
 // itself, with a real offset-format blob entry, rather than only the membership
 // helper. The append-only blob store keeps abandoned-fork blocks, so an
 // offset-format UTxO can still resolve to a producer the applied chain

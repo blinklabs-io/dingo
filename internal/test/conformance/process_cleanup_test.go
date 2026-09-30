@@ -98,7 +98,7 @@ func processCleanupExitCode(testExitCode int, cleanupFailed bool) int {
 
 // TestProcessCleanupExitCodeFailsOnCleanupFailure proves a process-cleanup
 // failure makes TestMain report a nonzero exit code even when every test in the
-// process passed -- a reviewer's forced RemoveAll permission failure otherwise
+// process passed -- a forced RemoveAll permission failure otherwise
 // logged "permission denied" but left `go test` exiting 0, silently leaking the
 // per-run schema, database, or directory this cleanup exists to remove.
 //

@@ -56,7 +56,7 @@ type previewOracleBlockContext struct {
 // serialiseData of a payload containing integers with 101-byte magnitudes. A
 // serialiseData encoding that does not chunk a bignum magnitude makes that
 // validator return "error explicitly called", which rejects a canonical block
-// and freezes the tip. See blinklabs-io/dingo#3780.
+// and freezes the tip.
 func TestValidateTxPlutusConwayPreviewWithdrawalOracle(t *testing.T) {
 	raw, err := os.ReadFile(
 		filepath.Join("testdata", "preview-block-121707875.cbor"),

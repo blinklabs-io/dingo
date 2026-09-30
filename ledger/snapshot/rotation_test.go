@@ -152,12 +152,12 @@ func seedRetentionRows(
 }
 
 // TestCleanupOldSnapshotsRetainsEpochSummaries pins the retention split that
-// dingo #2987 turned up. Rows that scale with delegator count stay bounded to
-// the rotation/reward-replay window, while the three tables that scale with
-// epoch or pool count — epoch_summary, reward_snapshot, reward_pool_input — are
-// kept for the life of the database, so historical closed-epoch comparison has
-// per-epoch aggregates and a per-pool reward basis to compare against (and a
-// missing summary keeps meaning "never captured").
+// Mithril-imported nodes exposed. Rows that scale with delegator count stay
+// bounded to the rotation/reward-replay window, while the three tables that
+// scale with epoch or pool count — epoch_summary, reward_snapshot,
+// reward_pool_input — are kept for the life of the database, so historical
+// closed-epoch comparison has per-epoch aggregates and a per-pool reward basis
+// to compare against (and a missing summary keeps meaning "never captured").
 func TestCleanupOldSnapshotsRetainsEpochSummaries(t *testing.T) {
 	t.Parallel()
 
@@ -525,7 +525,7 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 }
 
 // TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs is the
-// snapshot-side regression guard for issue #3727. When a queued/deferred header
+// snapshot-side regression guard. When a queued/deferred header
 // still needs an older epoch's mark snapshot for leader validation, the
 // retention-floor provider reports that epoch and cleanupOldSnapshots must keep
 // the pool_stake_snapshot rows at/above it instead of pruning them at the
@@ -643,12 +643,12 @@ func TestCleanupOldSnapshotsRetentionFloorAboveWindowIsNoop(t *testing.T) {
 	}
 }
 
-// TestCleanupOldSnapshotsRetentionDepthCapBounds proves the hard backstop
-// (issue #3727, finding 5): even when the retention floor would pin a very old
-// epoch, cleanupOldSnapshots never retains more than poolSnapshotRetentionMaxDepth
-// epochs BELOW the current epoch of pool snapshots (the boundary epoch
-// current-MaxDepth is retained, so the retained span is MaxDepth+1 epochs
-// inclusive), so a stuck deferred header cannot pin them without bound.
+// TestCleanupOldSnapshotsRetentionDepthCapBounds proves the hard backstop:
+// even when the retention floor would pin a very old epoch, cleanupOldSnapshots
+// never retains more than poolSnapshotRetentionMaxDepth epochs BELOW the
+// current epoch of pool snapshots (the boundary epoch current-MaxDepth is
+// retained, so the retained span is MaxDepth+1 epochs inclusive), so a stuck
+// deferred header cannot pin them without bound.
 func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
 	t.Parallel()
 

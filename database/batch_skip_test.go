@@ -115,8 +115,8 @@ func openTestDB(t *testing.T) *Database {
 // survive. If any one was overwritten, the implementation would have to be
 // silently writing some refs while elising others.
 //
-// Addresses reviewer feedback that the prior version probed only one or an
-// unrelated key, which could not detect a partial regression.
+// Every produced ref is checked, since probing only one key or an unrelated
+// key could not detect a partial regression.
 func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 	t *testing.T,
 ) {
@@ -179,8 +179,8 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 // sentinel so the post-condition is meaningful: the tx blob must be a valid
 // offset reference after the call (which it is not before).
 //
-// Addresses reviewer feedback that the prior assertion was tautological
-// because storeBlockOffsetsOnly had already seeded the tx key.
+// The key is checked against a store that has not been pre-seeded, since
+// storeBlockOffsetsOnly seeding the tx key would make the assertion vacuous.
 func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 	t.Parallel()
 

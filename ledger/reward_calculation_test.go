@@ -567,8 +567,7 @@ func applyGuardExpiredLeaderScenario(
 // prefix affects, and therefore has no persisted pparams.
 //
 // This covers the helper contract only. The end-to-end rollover failure was
-// reproduced by the reviewer against real database rows and has no unit-level
-// fixture here.
+// reproduced against real database rows and has no unit-level fixture here.
 func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 	t.Parallel()
 
@@ -673,7 +672,7 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 }
 
 // TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch is the
-// negative case for the 0->1 bootstrap round added for dingo #3381. A network
+// negative case for the 0->1 bootstrap round. A network
 // with a Byron prefix has no Shelley reward round at that boundary, so the
 // Byron performance-epoch guard must suppress it and leave the slot-0 pots
 // untouched -- even though the epoch 0 ADA pots row now exists.
@@ -4844,7 +4843,7 @@ func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
 // derives d, rho, tau and the pool-level parameters it passes to
 // mkPoolRewardInfo from that. Reading tau or d from the calculation epoch
 // instead silently changes reward amounts on any network where the parameters
-// move across the boundary (dingo #3481).
+// move across the boundary.
 func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	t *testing.T,
 ) {
@@ -6276,7 +6275,8 @@ func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
 	require.False(t, match)
 }
 
-// TestRewardCalculatorInputsExactWithTrackedExcludedStake covers dingo #4025:
+// TestRewardCalculatorInputsExactWithTrackedExcludedStake pins the exact bound
+// when the excluded stake is tracked:
 // TestRewardCalculatorInputsAllowExcludedPoolStake's non-exceeding bound
 // tolerates one legitimately excluded pool's stake going missing, but it
 // tolerates just as well a row set proportionally shrunk by some other bug --
@@ -6346,7 +6346,7 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 	// The same 40 tracked as excluded, but the row set is proportionally
 	// shrunk to 50 instead of 100 -- as if every pool's stake had been halved.
 	// 50+40=90 != 140, so this must now be rejected even though 50 <= 140
-	// would have passed the old non-exceeding bound silently (dingo #4025).
+	// would have passed the old non-exceeding bound silently.
 	err = validateRewardCalculatorInputs(
 		snapshot(140, 40),
 		poolInputsWithStake(50),

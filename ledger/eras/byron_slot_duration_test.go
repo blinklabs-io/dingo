@@ -43,14 +43,14 @@ func testByronGenesis(slotDuration string, k int) []byte {
 	}`, slotDuration, k))
 }
 
-// TestEpochLengthByronRejectsNegativeSlotDuration covers dingo#4427: the
-// upstream gouroboros parser accepts a signed slotDuration, so a genesis
-// carrying slotDuration "-1" must not silently wrap to a huge unsigned
-// duration at the uint(...) conversion in EpochLengthByron. This uses
-// LoadByronGenesisFromReader, the config package's own test-only bypass of
-// the CardanoNodeConfig.loadGenesisConfigs load path, so it exercises the
-// guard at EpochLengthByron itself rather than the earlier guard the load
-// path now also has (config/cardano.TestLoadGenesisConfigsRejectsNegativeByronSlotDuration).
+// TestEpochLengthByronRejectsNegativeSlotDuration pins: the upstream gouroboros
+// parser accepts a signed slotDuration, so a genesis carrying slotDuration "-1"
+// must not silently wrap to a huge unsigned duration at the uint(...)
+// conversion in EpochLengthByron. This uses LoadByronGenesisFromReader, the
+// config package's own test-only bypass of the
+// CardanoNodeConfig.loadGenesisConfigs load path, so it exercises the guard at
+// EpochLengthByron itself rather than the earlier guard the load path now also
+// has (config/cardano.TestLoadGenesisConfigsRejectsNegativeByronSlotDuration).
 func TestEpochLengthByronRejectsNegativeSlotDuration(t *testing.T) {
 	t.Parallel()
 

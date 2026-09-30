@@ -452,18 +452,17 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
 }
 
-// TestAggregatePoolStakeKeepsZeroStakePool is the blinklabs-io/dingo#4152
+// TestAggregatePoolStakeKeepsZeroStakePool is the
 // regression: a pool whose only delegator has zero stake at snapshot time
 // (registered and delegated, but with no lovelace behind the credential --
 // e.g. its UTxOs spent and no reward balance) must still get a
 // PoolStakeSnapshot row. A real cardano-node reports such a pool in
 // GetStakeDistribution with an explicit zero fraction rather than omitting
-// it (confirmed live against a real Preview cardano-node during #4152's
-// investigation), and dingo's own live snapshot-rotation path
-// (calculateLiveStakeDistributionInTxn) already does the same. Before the
-// fix, AggregatePoolStake silently dropped this pool's row entirely --
-// exactly the "pool present on a real node, completely absent from dingo's
-// answer" symptom #4152 reported for 36 real Preview pools after a Mithril
+// it (confirmed live against a real Preview cardano-node), and dingo's own live
+// snapshot-rotation path (calculateLiveStakeDistributionInTxn) already does the
+// same. Before the fix, AggregatePoolStake silently dropped this pool's row
+// entirely -- exactly the "pool present on a real node, completely absent from
+// dingo's answer" symptom seen for 36 real Preview pools after a Mithril
 // bootstrap.
 func TestAggregatePoolStakeKeepsZeroStakePool(t *testing.T) {
 	t.Parallel()

@@ -112,7 +112,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 		"epoch nonce must no longer be the NeutralNonce-collapsed candidate",
 	)
 	// The one-epoch-shifted assembly (candidate ⭒ epoch 5's OWN lab) must NOT
-	// be produced — that is the #2734 divergence.
+	// be produced — that is the eta divergence the heal repairs.
 	shifted, err := lcommon.CalculateEpochNonce(
 		candidate,
 		boundaryPrevHash,
