@@ -167,6 +167,10 @@ type stateMetrics struct {
 	// rising value means recovery is asking for rewinds deeper than local
 	// history can support. See issue #3766.
 	atTipRecoveryPruneFloorClamped prometheus.Counter
+	// Incremented when an at-tip recovery rewind target would cross the
+	// most recent epoch boundary and is clamped to the first block at or
+	// after it, so the completed rollover is not discarded and recomputed.
+	atTipRecoveryEpochBoundaryClamped prometheus.Counter
 	// Incremented when unresolved-producer replay recovery repeatedly fails
 	// to move the applied ledger tip forward and holds at that tip instead of
 	// pruning another security-parameter window. See issue #3005.
@@ -1011,6 +1015,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_prune_floor_clamped_total",
 			Help: "times an at-tip validation recovery rewind target below the consumed-UTxO prune floor was clamped to the ledger tip, because UTxOs consumed above that floor were hard-deleted and cannot be restored by a rewind",
+		},
+	)
+	m.atTipRecoveryEpochBoundaryClamped = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_attip_recovery_epoch_boundary_clamped_total",
+			Help: "times an at-tip validation recovery rewind target below the most recent epoch boundary was clamped to the first block after it, to avoid recomputing a completed epoch rollover",
 		},
 	)
 	m.replayRecoveryNonConverging = promautoFactory.NewCounter(

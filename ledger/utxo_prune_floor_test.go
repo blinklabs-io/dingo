@@ -647,3 +647,82 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 	)
 	require.Equal(t, fixture.connId, e.ConnectionId)
 }
+
+// TestAtTipRecoveryRewindKeepsCompletedEpochBoundary covers the clamp. The
+// fixture's epoch 1 starts at slot 120000, between the attempt-2 rewind target
+// (114080) and the ledger tip (140000), and the failing block follows the tip.
+// Rewinding to 114080 would discard the completed rollover and recompute it
+// before reaching the same failing block.
+func TestAtTipRecoveryRewindKeepsCompletedEpochBoundary(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	require.NoError(t, f.db.SetEpoch(
+		boundarySlot, 1,
+		[]byte("nonce-4577"), []byte("evolving-4577"),
+		[]byte("candidate-4577"), []byte("last-4577"),
+		eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+	))
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+
+	f.driveAtTipRecovery(t, 2)
+
+	require.GreaterOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		uint64(boundarySlot),
+		"recovery rewound the ledger below the epoch boundary it had already completed",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+		"the boundary decision must be visible to an operator",
+	)
+}
+
+// TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce pins the preserved
+// behaviour: the deepest scheduled attempt may rewind across
+// the boundary, but only once per epoch, so a repeating failure cannot
+// recompute the rollover on every cycle.
+func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(pruneFixtureTipSlot+1, testHashBytes("4577-f")),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+
+	clampedCounter := f.ls.metrics.atTipRecoveryEpochBoundaryClamped
+
+	// A non-final attempt is clamped to the first block after the boundary.
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts-1,
+	)
+	require.Equal(t, tip, got)
+	require.Equal(t, 1.0, promtestutil.ToFloat64(clampedCounter))
+
+	// The final attempt crosses once...
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, deep, got, "final attempt must be allowed across the boundary")
+
+	// ...and is clamped the next time the same epoch boundary is reached.
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, tip, got, "a second crossing of the same boundary must be refused")
+	require.Equal(t, 2.0, promtestutil.ToFloat64(clampedCounter))
+}
