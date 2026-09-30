@@ -1611,3 +1611,153 @@ func TestCheckProtocolParams_PropagatesExplicitEraQueryError(t *testing.T) {
 	assert.Contains(t, err.Error(), "explicit era query failed")
 	assert.Nil(t, mismatches)
 }
+
+// TestCheckStakeDistributionSkipsAnEpochKoiosHasNotPublished is dingo#4820,
+// observed live rather than in review.
+//
+// Koios computes pool_history only after processing an epoch. For one it has
+// not published, every pool Dingo reports looks absent, and the per-pool
+// loop calls each a divergence -- 646 of them per cycle on preview, forever,
+// because from-genesis keeps re-checking the tip epoch. With #4771's metrics
+// each cycle also increments node_parity_divergence_total, so
+// NodeParityRepeatedDivergence pages critical hourly on false data.
+//
+// The trigger is Koios lag after close, not an open epoch: preview epoch
+// 1435 closed at 00:00 UTC and /pool_history still returned an empty array
+// at 02:37 UTC. So the window is measured from the epoch's end time and
+// covers both an epoch that has not closed and one Koios has not caught up
+// on.
+//
+// Reverting the guard makes this test see one mismatch per pool instead of
+// the single fault.
+func TestCheckStakeDistributionSkipsAnEpochKoiosHasNotPublished(t *testing.T) {
+	const magic = 764824073
+	const epoch = uint64(1435)
+	const dingoStake = uint64(1_200_000_000)
+
+	var poolID ledger.PoolId
+	poolID[0] = 0x7E
+	bech32 := poolID.String()
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setPoolDistr(&localstatequery.PoolDistr2Result{
+		Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{
+			poolID: {
+				StakeFraction:  &cbor.Rat{Rat: big.NewRat(1, 1)},
+				TotalPoolStake: dingoStake,
+			},
+		},
+		TotalActiveStake: dingoStake,
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+	// Any /pool_history request is a failure of this test: the guard must
+	// return before the per-pool loop runs at all.
+	koiosURL, reqCount := countingKoiosServer(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	// Closed an hour ago, and Koios has no pool rows for it yet -- exactly
+	// the state observed at preview 1435.
+	require.NoError(t, cache.UpsertEpochInfo(koiosparity.KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        epoch,
+		ActiveStake:  "1200000000",
+		EpochEndTime: time.Now().UTC().Add(-1 * time.Hour),
+		FetchedAt:    time.Now().UTC(),
+	}))
+
+	mismatches, err := CheckStakeDistribution(
+		ctx, client, koios, cache, "preview", epoch,
+	)
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1,
+		"an unpublished epoch must produce one fault, not one mismatch "+
+			"per pool")
+	require.Equal(t, ReasonKoiosEpochNotPublished, mismatches[0].Reason)
+	require.True(t, mismatches[0].KoiosFault,
+		"reference lag is not a dingo divergence, and must not page")
+	require.Empty(t, mismatches[0].PoolIDBech32)
+	require.Equal(t, dingoStake, mismatches[0].DingoStake)
+	require.Equal(t, int32(0), reqCount.Load(),
+		"no /pool_history request may be made for an epoch koios has not "+
+			"published")
+	_ = bech32
+}
+
+// TestCheckStakeDistributionStillComparesASettledEpoch is the other side of
+// the guard: an epoch that closed long ago must be compared exactly as
+// before, or dingo#4820's fix would silently disable the whole check.
+func TestCheckStakeDistributionStillComparesASettledEpoch(t *testing.T) {
+	const magic = 764824073
+	const epoch = uint64(600)
+	const dingoStake = uint64(1_000_000)
+
+	var poolID ledger.PoolId
+	poolID[0] = 0x3C
+	bech32 := poolID.String()
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setPoolDistr(&localstatequery.PoolDistr2Result{
+		Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{
+			poolID: {
+				StakeFraction:  &cbor.Rat{Rat: big.NewRat(1, 1)},
+				TotalPoolStake: dingoStake,
+			},
+		},
+		TotalActiveStake: dingoStake,
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+	koiosURL, _ := countingKoiosServer(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		})
+	koios, err := NewKoiosClient("preview", "", koiosURL, true, true)
+	require.NoError(t, err)
+
+	cache := openTestCache(t)
+	// Closed well outside the publish grace, and Koios has the pool row.
+	require.NoError(t, cache.UpsertEpochInfo(koiosparity.KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        epoch,
+		ActiveStake:  "1000000",
+		EpochEndTime: time.Now().UTC().Add(-30 * 24 * time.Hour),
+		FetchedAt:    time.Now().UTC(),
+	}))
+	require.NoError(t, cache.UpsertPoolEpoch(koiosparity.KoiosPoolEpoch{
+		Network:     "preview",
+		Epoch:       epoch,
+		PoolBech32:  bech32,
+		ActiveStake: "1000000",
+		FetchedAt:   time.Now().UTC(),
+	}))
+
+	mismatches, err := CheckStakeDistribution(
+		ctx, client, koios, cache, "preview", epoch,
+	)
+	require.NoError(t, err)
+	require.Empty(t, mismatches,
+		"a settled epoch that agrees must still compare clean, not be "+
+			"skipped as unpublished")
+}
