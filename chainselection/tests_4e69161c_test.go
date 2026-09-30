@@ -254,7 +254,7 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // proof that every switch published earlier on this goroutine has already
 // reached the subscription. Its Data type is not ChainSwitchEvent, so it is
 // skipped rather than counted as a decision. Same construction as
-// switchBarrier in ouroboros/consensus_conformance_test.go.
+// switchBarrier in ouroboros/tests_test.go.
 type chainSwitchBarrier struct{}
 
 // collectChainSwitchEvents returns every ChainSwitchEvent the selector has
@@ -993,7 +993,7 @@ func TestChainSwitchEventsPreservePublishOrder(t *testing.T) {
 //
 // The longer-chain escape itself is correct and load-bearing: a challenger
 // genuinely more than catchUpPinHeadMargin ahead must still be adopted (see
-// TestPinSwitchesToGenuinelyLongerChainAtTip in tip_hold_test.go), so the fix
+// TestPinSwitchesToGenuinelyLongerChainAtTip in tests_4e69161c_test.go), so the fix
 // does not touch that comparison. Instead it rate-limits repeated hand-offs
 // between the same small set of connections: a peer the active connection
 // just moved away from cannot reclaim it via the longer-chain escape again

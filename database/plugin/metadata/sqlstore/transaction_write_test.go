@@ -104,7 +104,7 @@ func buildSharedCredentialTx(
 	// WithCertificates is a *MockTransaction-only builder method (not part
 	// of the TransactionBuilder interface), so it has to run before any
 	// interface-returning call narrows tx's static type; see
-	// writeDepositHeldCertWithDeposits in pool_deposit_held_test.go for the
+	// writeDepositHeldCertWithDeposits in pool_076c4ea1_test.go for the
 	// same pattern.
 	tx := mockledger.NewTransactionBuilder().WithCertificates(cert)
 	tx.WithId(txID)

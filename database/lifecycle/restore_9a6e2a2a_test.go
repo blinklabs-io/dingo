@@ -128,7 +128,7 @@ func newCancelOnRestoreTestHost(
 // real completion, an automatic rollback (restoreRollback.restore) or a
 // caller retrying the same restore against the same host can reopen
 // targetDataDir while the prior store's close is still in flight and
-// lose the race for its directory lock -- restore_remote_test.go's
+// lose the race for its directory lock -- restore_03849d7c_test.go's
 // TestRestoreFailureRollsBackPopulatedRemoteStoresExactly/
 // cancellation_after_reset is the user-visible "automatic restore
 // rollback failed ... Cannot acquire directory lock" symptom this
@@ -365,7 +365,7 @@ func TestRebuildRestoredDeferredIndexesTolerateNilLogger(t *testing.T) {
 }
 
 // newRestoreInternalTestDB and newRestoreInternalTestHost duplicate the
-// small fixtures restore_test.go/storage_host_test.go build (newTestDB,
+// small fixtures restore_03849d7c_test.go/tests_65fcd327_test.go build (newTestDB,
 // newTestStorageHost) rather than sharing them: those live in the
 // external lifecycle_test package, which this white-box test file (needed
 // to reach the unexported syncDir var below) cannot see.

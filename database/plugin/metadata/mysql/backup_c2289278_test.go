@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mysqlIntegrationDSN mirrors sqlstore/dialect_integration_test.go's
+// mysqlIntegrationDSN mirrors sqlstore/dialect_3d29378a_test.go's
 // TestMySQLSQLStoreIntegration default: same env var, same fallback.
 func mysqlIntegrationDSN(t *testing.T) string {
 	t.Helper()
@@ -44,7 +44,7 @@ func mysqlIntegrationDSN(t *testing.T) string {
 // createIsolatedDatabase creates a uniquely named database on the server
 // dsn points at and returns a DSN pointed at it, so concurrent test runs
 // (and the src/dst databases within a single test) never see each other's
-// tables -- mirrors dialect_integration_test.go's mysqlDSNWithDatabase.
+// tables -- mirrors database/plugin/metadata/sqlstore/dialect_3d29378a_test.go's mysqlDSNWithDatabase.
 func createIsolatedDatabase(t *testing.T, dsn, namePrefix string) string {
 	t.Helper()
 	admin, err := sql.Open("mysql", dsn)

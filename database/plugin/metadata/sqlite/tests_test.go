@@ -502,7 +502,7 @@ func seedVotingPowerByTypeFixture(t *testing.T, store sharedDrepStore) {
 
 // sharedDrepStore is the subset of *sqlstore.Store this file exercises
 // directly, without going through the full drepStore interface in
-// shared_sqlstore_drep_parity_test.go.
+// shared_sqlstore_test.go.
 type sharedDrepStore interface {
 	CreateAccount(types.Txn, *models.Account) error
 	CreateUtxo(types.Txn, *models.Utxo) error

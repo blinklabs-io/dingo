@@ -656,7 +656,7 @@ func TestNextSessionRetryDelay(t *testing.T) {
 }
 
 // genesisFakeServer combines a real ChainSync block feed (mirroring
-// incremental_harness_test.go's fakeCardanoServer -- FindIntersect, an
+// incremental_test.go's fakeCardanoServer -- FindIntersect, an
 // initial forced RollBackward matching a real session's own
 // NeedsInitialRollback behavior, a step-gated real block feed, and one
 // deliberate extra RollBackward once rollbackAfterCursor blocks have been
@@ -701,7 +701,7 @@ type genesisFakeServer struct {
 	// the next allowStep meant for the reconnected session -- which then
 	// waits forever for a block the test believes it already released. Only
 	// a test that drives a reconnect (see
-	// from_genesis_epochno_failure_test.go) can reach that state; a
+	// from_genesis_test.go) can reach that state; a
 	// single-session test closes nothing.
 	sessionGone chan struct{}
 	// sessions counts FindIntersect calls, i.e. how many chainsync sessions
@@ -882,7 +882,7 @@ func (s *genesisFakeServer) findIntersect(
 // requestNext mirrors fakeCardanoServer.requestNext's three-branch shape
 // (initial forced rollback, one deliberate extra rollback, then a gated
 // real block feed) -- see that function's own doc comment in
-// incremental_harness_test.go for why the initial rollback exists
+// incremental_test.go for why the initial rollback exists
 // unconditionally on every session.
 func (s *genesisFakeServer) requestNext(ctx chainsync.CallbackContext) error {
 	s.mu.Lock()
@@ -933,7 +933,7 @@ func (s *genesisFakeServer) epochForLastAcquired() int {
 
 // lsqConfig answers exactly the query types RunFromGenesis needs:
 // HardForkCurrentEraQuery (always Conway -- this test has no need for the
-// Shelley/Allegra ambiguity koios_check_wiring_test.go exercises),
+// Shelley/Allegra ambiguity koios_check_test.go exercises),
 // ShelleyCurrentProtocolParamsQuery, ShelleyPoolDistr2Query (no pools --
 // CheckStakeDistribution then never calls Koios's /pool_history at all, see
 // its own doc comment), ShelleyUtxoWholeQuery (always an empty set -- this

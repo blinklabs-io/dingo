@@ -45,7 +45,7 @@ import (
 
 // openTestCache opens a real, temp-file-backed koiosparity.Cache -- the same
 // convention internal/koiosparity's own tests use (e.g.
-// account_universe_cache_test.go) -- rather than a fake, so this proves
+// internal/koiosparity/tests_test.go) -- rather than a fake, so this proves
 // behavior against the real Cache/OpenCache implementation dingo's embedded
 // koios-parity observer also uses, including its WAL/busy_timeout setup.
 func openTestCache(t *testing.T) *koiosparity.Cache {
@@ -1172,7 +1172,7 @@ func (s *wiringFakeLSQServer) snapshot() (
 
 // config builds the localstatequery.Config a real gouroboros server uses to
 // answer GetCurrentEra, GetCurrentProtocolParams, and GetPoolDistr2 --
-// mirroring incremental_harness_test.go's fakeLSQState.config() dispatch
+// mirroring incremental_test.go's fakeLSQState.config() dispatch
 // convention (BlockQuery -> HardForkQuery/ShelleyQuery -> leaf query type).
 func (s *wiringFakeLSQServer) config() localstatequery.Config {
 	return localstatequery.NewConfig(
@@ -1293,7 +1293,7 @@ func dialWiringClient(
 // newWiringShelleyProtocolParams returns a fully-populated
 // *shelley.ShelleyProtocolParameters -- every *cbor.Rat field non-nil, since
 // cbor.Rat.MarshalCBOR panics on a nil underlying *big.Rat rather than
-// encoding it as CBOR null (matching incremental_harness_test.go's own
+// encoding it as CBOR null (matching incremental_test.go's own
 // newFakeProtocolParams doc comment on the identical hazard for Conway).
 func newWiringShelleyProtocolParams() *shelley.ShelleyProtocolParameters {
 	return &shelley.ShelleyProtocolParameters{

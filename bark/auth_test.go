@@ -184,7 +184,7 @@ func TestOperatorAuthInterceptorEnforcesTwoStagesForEveryProcedure(
 // r.TLS.PeerCertificates alone (populated for whatever the client
 // presented, verified or not). Driving this via a synthetic
 // *tls.ConnectionState — rather than a real TLS handshake, as
-// auth_wire_test.go's wire-level test does — makes this deterministic
+// auth_test.go's wire-level test does — makes this deterministic
 // regardless of whether tls.VerifyClientCertIfGiven happens to abort the
 // handshake for a given unverifiable certificate (it does not always, as
 // that wire-level test discovered): a bad cert can still reach this

@@ -29,7 +29,7 @@ import (
 // The tests here bind real Unix-domain sockets. They are excluded on Windows
 // for the same reason connmanager/listener_unix_test.go is: the project does
 // not use this transport there. The length checks that need no socket live in
-// unixsocket_test.go and run on every platform.
+// unixsocket_efc04c51_test.go and run on every platform.
 
 // TestUnixSocketPathIsPortablyShort pins the property the helper exists for.
 // A socket path that fits here fits on every platform, so a test using it

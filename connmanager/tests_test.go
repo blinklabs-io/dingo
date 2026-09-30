@@ -593,14 +593,14 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 
 // ConnClosedFunc is the only close notification an NtC connection gets --
 // ConnectionClosedEventType is published for NtN closes only (see
-// ntc_conn_closed_test.go). This pair of tests proves the callback
+// tests_test.go). This pair of tests proves the callback
 // distinguishes the two: before issue #3508's fix, ConnClosedFunc carried no
 // isNtC parameter at all, so nothing downstream could tell an NtC close from
 // an NtN one and wire NtC-specific chainsync teardown to it.
 //
 // Each test gets its own ConnectionManager: newUnstartedConnection returns
 // connections whose ConnectionId is the zero value, so two of them
-// registered with one manager would collide (see ntc_conn_closed_test.go).
+// registered with one manager would collide (see tests_test.go).
 
 func TestConnClosedFunc_ReceivesIsNtCTrueForNtCClose(t *testing.T) {
 	t.Parallel()

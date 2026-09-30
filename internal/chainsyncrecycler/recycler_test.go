@@ -1124,7 +1124,7 @@ func TestTickResyncsOnLocalTipPlateau(t *testing.T) {
 // does, but only through the rollback registration and the
 // awaiting-first-header selectability exemption in chainselection; that half
 // is covered end to end against a real ChainSelector in
-// recycler_chainselection_test.go, and reverting either of those two
+// recycler_test.go, and reverting either of those two
 // chainselection changes turns
 // TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector red.
 func rollbackRegisteredPeer(

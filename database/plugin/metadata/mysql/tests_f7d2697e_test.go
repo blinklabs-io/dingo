@@ -74,7 +74,7 @@ func mysqlConformanceRootDSN() string {
 }
 
 // mysqlConformanceDSN is the root DSN with DBName set to database, the same
-// technique database/plugin/metadata/sqlstore/dialect_integration_test.go
+// technique database/plugin/metadata/sqlstore/dialect_3d29378a_test.go
 // uses for its isolated per-run MySQL database.
 func mysqlConformanceDSN(t *testing.T, database string) string {
 	t.Helper()

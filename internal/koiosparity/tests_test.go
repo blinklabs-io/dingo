@@ -3009,7 +3009,7 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 // TestAccountRewardsPendingFold pins the decision checkEpoch makes about
 // whether the whole epoch's account comparison may be downgraded.
 //
-// member_rewards_timing_test.go's other cases hand rewardsPending to
+// tests_test.go's other cases hand rewardsPending to
 // CompareAccountEpoch directly, so they never reach this fold — replacing it
 // with a bare `true` left the entire package green. It is the code that
 // decides whether every account-level presence *and* amount mismatch in an

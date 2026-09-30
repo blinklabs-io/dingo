@@ -22304,7 +22304,7 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 // BenchmarkTipSnapshotReadOnly as cores increase, exactly the negative
 // scaling issue #1895 asks this framework to catch.
 //
-// BenchmarkConcurrentQueries (see benchmark_test.go) exercises database query
+// BenchmarkConcurrentQueries (see tests_61443820_test.go) exercises database query
 // load under concurrency; it is not a substitute for this benchmark, which
 // targets the specific in-memory snapshot read/publish path #2601 describes.
 

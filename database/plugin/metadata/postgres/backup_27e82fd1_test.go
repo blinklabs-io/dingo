@@ -31,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// postgresIntegrationDSN mirrors sqlstore/dialect_integration_test.go's
+// postgresIntegrationDSN mirrors sqlstore/dialect_3d29378a_test.go's
 // TestPostgresSQLStoreIntegration default: same env var, same fallback.
 func postgresIntegrationDSN(t *testing.T) string {
 	t.Helper()
@@ -46,7 +46,7 @@ func postgresIntegrationDSN(t *testing.T) string {
 // dsn points at and returns a DSN pointed at it, so concurrent test runs
 // (and the src/dst databases within a single test) never see each other's
 // tables. Isolating via a separate database, not a schema within a shared
-// one (contrast dialect_integration_test.go's postgresDSNWithSearchPath,
+// one (contrast database/plugin/metadata/sqlstore/dialect_3d29378a_test.go's postgresDSNWithSearchPath,
 // used for schema-scoped SQL operations): pg_dump/pg_restore operate on the
 // whole database a DSN points at regardless of search_path, so two "schema
 // siblings" in the same database collide the moment either one is dumped

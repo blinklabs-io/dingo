@@ -2398,7 +2398,7 @@ func TestRefusedRollbackKeepsInFlightBatch(t *testing.T) {
 
 // loadRealByronEBB returns a genuine Byron epoch-boundary block from the
 // shared ouroboros-consensus golden fixtures, mirroring loadRealByronMainBlock
-// in block_pipeline_validate_test.go.
+// in tests_dd2e404c_test.go.
 func loadRealByronEBB(t *testing.T) models.Block {
 	t.Helper()
 	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
@@ -3211,7 +3211,7 @@ func TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnecti
 // is already fetching still tears down and restarts unconditionally. There
 // is no "different peer being preempted" to protect against here, and
 // TestStartQueuedBlockfetchAfterForkRestartClearsShadowState
-// (chainsync_shadow_test.go) depends on this path resetting per-batch shadow
+// (chainsync_test.go) depends on this path resetting per-batch shadow
 // state even when connId is already the active connection.
 func TestRestartQueuedBlockfetchAfterForkStillRestartsSameConnection(
 	t *testing.T,
@@ -4205,7 +4205,7 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // back is proof that every switch published earlier on this goroutine has
 // already reached the subscription. Its Data type is not ChainSwitchEvent, so
 // it is skipped rather than counted as a decision. Same construction as
-// switchBarrier in ouroboros/consensus_conformance_test.go.
+// switchBarrier in ouroboros/tests_test.go.
 type chainSwitchBarrier struct{}
 
 // TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip closes the loop

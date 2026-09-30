@@ -764,7 +764,8 @@ func TestSQLiteTestOpensSetSynchronous(t *testing.T) {
 				"_pragma=synchronous(OFF); the driver default (FULL) "+
 				"flushes on every autocommit. Add "+
 				"_pragma=journal_mode(MEMORY) too when the test owns "+
-				"the file alone (see migrations/dsn_test.go); leave the "+
+				"the file alone (see testDBPragmas in "+
+				"migrations/runner_test.go); leave the "+
 				"journal mode alone for a file a provider has opened:"+
 				"\n  %s",
 			strings.Join(violations, "\n  "),

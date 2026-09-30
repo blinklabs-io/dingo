@@ -2092,7 +2092,7 @@ func TestPhase1SkipsHistoryExpiryGateOnPartialReopen(t *testing.T) {
 // dbNeedsRecovery path -- and this test -- specifically needs the
 // *Database New still returns alongside a CommitTimestampError, since a
 // database on that path is available for recovery rather than closed. See
-// newTestDatabaseWithHost's doc comment (test_database_test.go) for the
+// newTestDatabaseWithHost's doc comment (tests_test.go) for the
 // keepOnError contract this delegates to.
 func openForRecoveryTest(
 	tb testing.TB,
@@ -2678,7 +2678,7 @@ func newTestDatabaseWithRunMode(
 }
 
 // newTestDatabaseWithHost is the shared body behind newTestDatabase and
-// openForRecoveryTest (database/node_settings_gates_test.go): register the
+// openForRecoveryTest (database/tests_test.go): register the
 // badger and sqlite providers, resolve the blob and metadata stores from
 // config, and call New. The two callers differ only in keepOnError: New can
 // return a non-nil *Database alongside an error on a CommitTimestampError,
@@ -2846,7 +2846,7 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	db := openTestDB(t)
 	// Swap in the erroring wrapper. Same-package access to the unexported
 	// `metadata` field is intentional and follows the pattern used by
-	// other database/*_test.go files (e.g. batch_skip_test.go) that
+	// other database/*_test.go files (e.g. batch_test.go) that
 	// prod internal state directly.
 	db.metadata = &erroringMetadata{
 		MetadataStore: db.metadata,

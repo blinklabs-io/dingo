@@ -1791,7 +1791,7 @@ func TestBlockfetchServerSendBatch_ServesSparseRangeUpToMaxBlocks(
 	// rejected, since resource usage is now bounded by block count. This
 	// exercises blockfetchServerSendBatch's own backstop bound directly
 	// (blockfetchServerRequestRange's up-front NoBlocks rejection is
-	// covered separately in blockfetch_range_end_test.go, over a real
+	// covered separately in blockfetch_test.go, over a real
 	// chain), so maxBlocks is passed explicitly rather than derived from a
 	// security parameter.
 	const testMaxBlocks = 5000
@@ -1852,7 +1852,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenBlockCountExceedsMax(
 	// (blockfetchServerRequestRange rejects this case with a clean NoBlocks
 	// before StartBatch when it can; see
 	// TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks in
-	// blockfetch_range_end_test.go), so maxBlocks is passed explicitly.
+	// blockfetch_test.go), so maxBlocks is passed explicitly.
 	const testMaxBlocks = 5000
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{

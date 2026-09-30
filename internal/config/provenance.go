@@ -164,7 +164,7 @@ func (c *Config) SetProvenanceForTest(field string, source Source) {
 // literal cannot populate an unexported field, so LoadConfig populating
 // provenance would break that test. LoadConfig leaving provenance nil is
 // pinned by TestLoadConfig_LeavesProvenanceEmpty
-// (provenance_internal_test.go).
+// (provenance_81f71cc5_test.go).
 //
 // configFile is resolved exactly as LoadConfig resolves it — via the
 // shared resolveConfigFile (config.go) — so this inspects the same file

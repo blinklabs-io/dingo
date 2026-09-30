@@ -444,7 +444,7 @@ func recordSnapshotBusy(t *testing.T, err error) {
 // cache commits once per fetched row batch.
 //
 // busy_timeout is the one deliberate difference: it stays at 5s because the
-// concurrency tests in cache_concurrency_test.go are built around that bound.
+// concurrency tests in cache_test.go are built around that bound.
 func TestOpenCacheUsesMetadataStoreSQLiteSettings(t *testing.T) {
 	t.Parallel()
 

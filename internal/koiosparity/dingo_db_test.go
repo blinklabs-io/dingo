@@ -138,7 +138,7 @@ func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 // this is not the pending case, but a NULL or negative start slot is not a
 // representable boundary and the lookup fails closed rather than guessing.
 //
-// rewards_pending_error_test.go covers the two cases either side of this one:
+// tests_test.go covers the two cases either side of this one:
 // an absent row is the pending case, and a failed read is an error.
 func TestGetPoolEpochDataMapRejectsAnUnusableStartSlot(t *testing.T) {
 	const (

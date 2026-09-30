@@ -4463,7 +4463,7 @@ func (t *feelessTransaction) Witnesses() lcommon.TransactionWitnessSet {
 // itself prove the write path is guarded -- reverting the setTransaction call
 // site leaves this green -- so the reproduction that exercises
 // persistImportedCommitteeCertificates end to end lives in
-// ledgerstate/imported_committee_certificates_test.go.
+// ledgerstate/tests_test.go.
 func TestTransactionFeeTreatsNilAsZero(t *testing.T) {
 	t.Parallel()
 

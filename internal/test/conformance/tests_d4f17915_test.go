@@ -44,7 +44,7 @@ import (
 // manager's Close.
 //
 // Registering rather than defining a second TestMain is what keeps the two
-// build configurations from drifting; see process_cleanup_test.go.
+// build configurations from drifting; see tests_cc29688c_test.go.
 func init() {
 	registerProcessCleanup(cleanupPostgresProcessResources)
 	registerProcessCleanup(cleanupMysqlProcessResources)
@@ -233,7 +233,7 @@ func mysqlCorpusResults(t *testing.T) []conformance.VectorResult {
 // TestRulesConformanceVectorsMysql replays the corpus against a real
 // MySQL-backed state manager, then asserts, reports, and compares against the
 // SQLite baseline in one pass. See TestRulesConformanceVectorsPostgres and
-// corpus_test.go for why a per-dialect replay earns its cost while a repeated
+// tests_cc29688c_test.go for why a per-dialect replay earns its cost while a repeated
 // one does not.
 func TestRulesConformanceVectorsMysql(t *testing.T) {
 	skipIfMysqlConformanceNotConfigured(t)
@@ -248,7 +248,7 @@ func TestRulesConformanceVectorsMysql(t *testing.T) {
 // through a real MySQL-backed DingoStateManager survives closing that
 // manager and opening a new one against the same root DSN/database -- the
 // MySQL analog of TestDingoStateManagerRestartSurvivesReopen
-// (state_manager_backend_test.go). Unlike the sqlite case there is no
+// (state_manager_test.go). Unlike the sqlite case there is no
 // local file to reopen: the state lives on the MySQL server itself, so
 // "restart" here means a fresh manager instance pointed at the same
 // database.
@@ -422,7 +422,7 @@ func TestNewDingoMysqlStateManagerBadCredentialsFails(t *testing.T) {
 // rootDSN (with DBName cleared, matching truncateMysqlConformanceDatabase's
 // reasoning). Used to tear down the restart test's own explicitly managed
 // database (see TestNewDingoMysqlStateManagerRestartSurvivesReopen) and,
-// by TestMain (conformance_main_test.go), this whole process's
+// by TestMain (tests_d4f17915_test.go), this whole process's
 // mysqlProcessDatabase once every test has finished. Either way cleanup is
 // a plain drop rather than truncateMysqlConformanceDatabase's in-place
 // empty: nothing else needs the database to keep existing afterward.
@@ -588,7 +588,7 @@ func postgresCorpusResults(t *testing.T) []conformance.VectorResult {
 //
 // The corpus exercises gouroboros ledger rules, which do not vary by storage
 // backend, so this run is not here for rule coverage -- it is here to drive
-// Dingo's storage layer through Postgres' dialect. See corpus_test.go for the
+// Dingo's storage layer through Postgres' dialect. See tests_cc29688c_test.go for the
 // two real bugs that found and for why one pass per dialect is the right
 // amount.
 func TestRulesConformanceVectorsPostgres(t *testing.T) {
@@ -604,7 +604,7 @@ func TestRulesConformanceVectorsPostgres(t *testing.T) {
 // committed through a real Postgres-backed DingoStateManager survives
 // closing that manager and opening a new one against the same DSN/schema
 // -- the Postgres analog of
-// TestDingoStateManagerRestartSurvivesReopen (state_manager_backend_test.go).
+// TestDingoStateManagerRestartSurvivesReopen (state_manager_test.go).
 // Unlike the sqlite case there is no local file to reopen: the state lives
 // on the Postgres server itself, so "restart" here means a fresh manager
 // instance pointed at the same database/schema.
@@ -768,7 +768,7 @@ func TestNewDingoPostgresStateManagerBadCredentialsFails(t *testing.T) {
 // unscoped connection to dsn. Used to tear down the restart test's own
 // explicitly managed schema (see
 // TestNewDingoPostgresStateManagerRestartSurvivesReopen) and, by TestMain
-// (conformance_main_test.go), this whole process's postgresProcessSchema
+// (tests_d4f17915_test.go), this whole process's postgresProcessSchema
 // once every test has finished. Either way cleanup is a plain drop rather
 // than truncatePostgresConformanceSchema's in-place empty: nothing else
 // needs the schema to keep existing afterward.

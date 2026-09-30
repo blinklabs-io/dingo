@@ -32,7 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hasGCSCredentials mirrors internal/integration/cloud_test.go's helper of
+// hasGCSCredentials mirrors internal/integration/tests_24a0bc11_test.go's helper of
 // the same purpose, scoped locally so this package's tests can skip
 // cleanly without real GCS credentials -- there is currently no live GCS
 // emulator in CI (unlike S3, which CI covers via a MinIO service), so this

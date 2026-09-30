@@ -819,7 +819,7 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 // *gdijkstra-compatible transaction carrying one pool registration
 // certificate, WITHOUT writing it to the database -- for passing directly
 // to eras.ValidateTxDijkstra so the actual rejection path (not just its
-// preconditions) is exercised, the way dijkstra_pool_margin_floor_e2e_test.go
+// preconditions) is exercised, the way tests_748bdd11_test.go
 // does for the CIP-23 rule.
 func newUnwrittenDijkstraPoolRegistrationTx(
 	t *testing.T,

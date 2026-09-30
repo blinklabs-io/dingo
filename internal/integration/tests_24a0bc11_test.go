@@ -197,7 +197,7 @@ func TestCloudPluginS3(t *testing.T) {
 // another, proving a migration transfers data without loss rather than just
 // that both backends independently pass conformance. blockCbor is a real
 // block loaded from database/immutable/testdata/ (see loadBlockData in
-// benchmark_test.go) rather than a synthetic placeholder, so the migration
+// tests_7465a5ab_test.go) rather than a synthetic placeholder, so the migration
 // actually moves realistic-sized, realistic-shaped bytes.
 type blobMigrationDataset struct {
 	blockSlot     uint64
@@ -358,8 +358,8 @@ func cleanupBlobMigrationDataset(
 // TestBlobStoreMigration migrates a small dataset from the always-available
 // Badger backend into every cloud blob backend this environment has
 // credentials for, reusing cloudStorageBenchmarkBackends's existing
-// credential/bucket/prefix resolution (see benchmark_test.go and
-// cloud_test.go) instead of re-deriving it. It skips entirely when neither S3
+// credential/bucket/prefix resolution (see tests_7465a5ab_test.go and
+// tests_24a0bc11_test.go) instead of re-deriving it. It skips entirely when neither S3
 // (MinIO in CI) nor GCS (real bucket + ADC only, no local emulator exists)
 // is configured.
 func TestBlobStoreMigration(t *testing.T) {
@@ -489,7 +489,7 @@ func requireMetadataDatasetMatches(
 // TestMetadataStoreMigrationSQLiteToPostgres migrates a small dataset from
 // the always-available SQLite backend into Postgres, skipping when Postgres
 // is not configured -- matching the credential convention
-// database/plugin/metadata/postgres/conformance_test.go and
+// database/plugin/metadata/postgres/tests_84751fec_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
 	t.Parallel()
@@ -578,7 +578,7 @@ func postgresMigrationDSN() string {
 // TestMetadataStoreMigrationSQLiteToMySQL migrates a small dataset from the
 // always-available SQLite backend into MySQL, skipping when MySQL is not
 // configured for admin access -- matching the credential convention
-// database/plugin/metadata/mysql/conformance_test.go and
+// database/plugin/metadata/mysql/tests_f7d2697e_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToMySQL(t *testing.T) {
 	t.Parallel()

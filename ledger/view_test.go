@@ -3334,7 +3334,7 @@ func TestStorageFaultOrErrPrefersRecordedFault(t *testing.T) {
 // newFakeEraLedgerState builds a minimal LedgerState wired to a single,
 // caller-supplied era descriptor so a test can drive the real ValidateTx/
 // EvaluateTx call sites without needing a transaction that satisfies every
-// gouroboros ledger rule. It mirrors view_governance_test.go's
+// gouroboros ledger rule. It mirrors view_test.go's
 // governanceTestView, adding the era wiring ValidateTx/EvaluateTx need.
 func newFakeEraLedgerState(
 	db *database.Database,

@@ -38,13 +38,13 @@ import (
 // This file benchmarks (*LedgerState).ValidateTx and LedgerView.UtxoById
 // using real Preprod chain bytes for blinklabs-io/dingo#4226 (the per-view
 // UTxO memo): the same fixtures
-// ledger/eras/conway_plutus_preprod_fixture_test.go uses to pin execution
+// ledger/eras/conway_test.go uses to pin execution
 // units against producer-declared budgets. That test documents the
 // fixture's provenance: a producer-accepted Preprod block and the funding
 // transactions for one Plutus transaction inside it, fetched over NtN
 // blockfetch.
 //
-// The existing BenchmarkTransactionValidation (ledger/benchmark_test.go)
+// The existing BenchmarkTransactionValidation (ledger/tests_61443820_test.go)
 // validates against an unfunded ledger and discards the error, so it times
 // the missing-input failure path rather than real validation and cannot show
 // this issue's DB-read cost or its removal (see the issue's "Relationship to
@@ -54,7 +54,7 @@ import (
 const utxoMemoBenchFixtureDir = "eras/testdata"
 
 // preprod slot/time conversion constants, duplicated from
-// ledger/eras/conway_plutus_preprod_fixture_test.go (unexported there). The
+// ledger/eras/conway_test.go (unexported there). The
 // Conway V3 script context encodes the tx validity range as POSIX
 // milliseconds, so an approximate conversion would change the bytes the
 // Plutus script branches on and desync the benchmark from the real,

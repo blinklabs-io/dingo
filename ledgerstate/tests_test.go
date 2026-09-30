@@ -636,7 +636,7 @@ func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 // change to the constant or to that range fails it.
 //
 // It is not next to checkedInt64 because checkedInt64 is unexported and the
-// reviewed import direction in internal/architecture/import_boundary_test.go
+// reviewed import direction in internal/architecture/tests_test.go
 // forbids anything under database/ from importing ledger/, test files
 // included. ledgerstate owns the write path the bound was found missing from
 // (importOpCertCounters) and already imports ledger/eras, so it is the

@@ -609,7 +609,7 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 	}
 }
 
-// Network-donation aggregation is covered by network_donation_test.go. The
+// Network-donation aggregation is covered by tests_61443820_test.go. The
 // former metadata-only endorser apply path (and its two dedicated tests here)
 // was removed when the Musashi endorser-block apply switched to the full
 // ValidateNone effect apply (see ledger/leios_apply.go).

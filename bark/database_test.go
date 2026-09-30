@@ -50,7 +50,7 @@ import (
 
 // barkFakeCloudDestination is a minimal stand-in for a real cloud
 // destination (S3/GCS), backed by an ordinary local directory — the same
-// pattern database/lifecycle/destination_test.go uses, redeclared here
+// pattern database/lifecycle/destination_c27ce77b_test.go uses, redeclared here
 // because Go test binaries are per-package: that file's "faketest" scheme
 // registration only exists inside database/lifecycle's own test binary,
 // not bark's.
@@ -1893,7 +1893,7 @@ func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(
 }
 
 // TestListAvailableSnapshotsMirrorsListSnapshots covers the no-cloud-
-// destination-configured case: see database_cloud_test.go for the actual
+// destination-configured case: see database_test.go for the actual
 // local+cloud merge behavior this RPC exists for.
 func TestListAvailableSnapshotsMirrorsListSnapshots(t *testing.T) {
 	t.Parallel()

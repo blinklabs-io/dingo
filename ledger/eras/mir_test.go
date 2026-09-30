@@ -30,7 +30,7 @@ import (
 // valid transaction to clear the unrelated UTXO validation rules first,
 // following the same direct-unit-test convention as
 // validateDelegationConwayBootstrapAware in
-// conway_bootstrap_vote_delegation_test.go); the wiring itself is a plain
+// conway_test.go); the wiring itself is a plain
 // unconditional call from both, visible directly in the diff.
 type mirTx struct {
 	lcommon.Transaction

@@ -3302,7 +3302,7 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 // public NewConfig/With... option API -- not a hand-built struct literal --
 // carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
 // into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
-// NewLedgerState. internal/node/node_test.go's
+// NewLedgerState. internal/node/node_c81a0e1c_test.go's
 // TestBuildDingoConfigWiresBlockPipelineFlags covers the other half: the
 // internal/config.Config -> dingo.Config hop that was the actual defect.
 // Together the two tests span the full path a live serve run takes.

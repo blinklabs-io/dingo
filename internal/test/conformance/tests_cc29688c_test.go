@@ -1040,7 +1040,7 @@ const expectedBlueprintVectorCount = 2575
 //
 // Test vectors are embedded in the ouroboros-mock module and extracted at test
 // time. This asserts and reports from a single corpus replay; see
-// corpus_test.go for why the replay is memoized per backend and what the
+// tests_cc29688c_test.go for why the replay is memoized per backend and what the
 // previous separate statistics pass cost.
 func TestRulesConformanceVectors(t *testing.T) {
 	results := sqliteCorpusResults(t)
@@ -1441,7 +1441,7 @@ func TestAssertCorpusSetsMatchAcceptsIdenticalRuns(t *testing.T) {
 	)
 }
 
-// This file is the entry-point replay machinery; entry_points_test.go holds
+// This file is the entry-point replay machinery; tests_cc29688c_test.go holds
 // the assertions. It is a _test.go file because every identifier in it is
 // test-only and unexported, and .golangci.yml sets run.tests: false, so the
 // same code in a plain .go file is reported as unused by the linter while
@@ -2067,7 +2067,7 @@ func entryPointEraList() []eras.EraDesc {
 // replay of the corpus, separate from sqliteCorpusResults: the shared
 // ouroboros-mock harness validates with its own upstream rule list and offers
 // no hook for a caller-supplied validator, so there is no way to observe
-// Dingo's entry points from inside the harness pass. corpus_test.go's
+// Dingo's entry points from inside the harness pass. tests_cc29688c_test.go's
 // "replay once per backend" reasoning still holds for storage-dialect
 // coverage; what this pass buys is different, and is not obtainable from the
 // harness replay at any count.

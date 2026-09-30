@@ -1191,7 +1191,7 @@ func TestQuery_UnpinnedSkipsPointValidation(t *testing.T) {
 
 // utxoByTxInAsOf calls queryShelleyUtxoByTxIn directly for a single ref
 // pinned at atSlot -- bypassing Query's verifyPointOnChain, the same way
-// queries_asofslot_test.go's PoolStakeDistribution AsOf tests call
+// queries_test.go's PoolStakeDistribution AsOf tests call
 // PoolStakeDistribution directly -- and decodes the reply into a
 // UtxoId->TransactionOutput map for assertions.
 func utxoByTxInAsOf(
@@ -1541,7 +1541,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_PersistedFloorOverridesLenientLi
 // (identical tip and default 50_000 stability window, so the live-tip floor
 // would otherwise be 150_000) except an active upstream connection with no
 // admitted target yet marks pruning as deferred for catchup -- mirroring
-// utxo_pruning_catchup_test.go's "active upstream, target not yet known"
+// tests_61443820_test.go's "active upstream, target not yet known"
 // case. No-opping the !ls.utxoPruningDeferredForCatchup(...) conjunct in
 // checkUtxoRetentionWindow makes this test fail with
 // ErrHistoricalStateUnavailable instead of the required nil.
