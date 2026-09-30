@@ -941,6 +941,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
 		},
 	)
+	// A Conway boundary leaves its mark snapshot to the ledger's post-commit
+	// job, which rebuilds the SNAP point from a read transaction pinned at the
+	// boundary's commit.
+	n.ledgerState.SetDeferredEpochBoundarySnapshotHooks(
+		n.snapshotMgr.DeferEpochBoundaryCapture,
+		n.snapshotMgr.DiscardEpochBoundaryCapture,
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) (ledger.DeferredBoundarySnapshot, error) {
+			return n.snapshotMgr.PrepareEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 
 	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
 	// (and, critically, subscribed to event.EpochTransitionEventType) before

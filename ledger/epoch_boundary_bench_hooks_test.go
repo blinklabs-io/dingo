@@ -15,10 +15,12 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/stretchr/testify/require"
 )
@@ -55,7 +57,27 @@ func epochBoundaryBenchPartialPrecomputeT(
 }
 
 func (ls *LedgerState) waitEpochBoundaryBenchBackground() {
+	_ = ls.WaitEpochBoundaryJob(context.Background())
+	ls.ratificationWG.Wait()
 	ls.deferredStakeInputsWG.Wait()
+	ls.rewardCreditCompactionWG.Wait()
+}
+
+// wireDeferredBoundarySnapshot mirrors node.go's deferred mark snapshot
+// wiring.
+func wireDeferredBoundarySnapshot(ls *LedgerState, mgr *snapshot.Manager) {
+	ls.SetDeferredEpochBoundarySnapshotHooks(
+		mgr.DeferEpochBoundaryCapture,
+		mgr.DiscardEpochBoundaryCapture,
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) (DeferredBoundarySnapshot, error) {
+			return mgr.PrepareEpochBoundarySnapshot(
+				context.Background(), txn, evt,
+			)
+		},
+	)
 }
 
 // epochBoundaryBenchWireDeferred mirrors node.go's

@@ -576,7 +576,11 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 	}
 }
 
-func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
+// GOVCERT's isPotentialFutureMember reads the whole proposals set (Conway
+// Rules/Ledger.hs committeeProposals = proposalsWithPurpose grCommitteeL
+// proposals), so an UpdateCommittee past its last voting epoch still
+// authorizes until the boundary that drops it, in every view.
+func TestLedgerViewCommitteeProposalFollowsProposalSet(t *testing.T) {
 	t.Parallel()
 
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
@@ -587,12 +591,22 @@ func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
 	lv.ls.publishSnapshotsLocked()
 	member, err := lv.CommitteeCredentialMember(cold)
 	require.NoError(t, err)
-	require.NotNil(t, member, "pinned validation view must keep epoch zero")
+	require.NotNil(t, member, "pinned view dropped a proposals-set member")
 
 	fresh := lv.ls.NewView(nil)
 	member, err = fresh.CommitteeCredentialMember(cold)
 	require.NoError(t, err)
-	require.Nil(t, member, "fresh view must observe the later epoch")
+	require.NotNil(t, member, "expired proposal left the set before its drop")
+
+	proposal, err := db.GetGovernanceProposal(governanceTestHash(0x92), 0, nil)
+	require.NoError(t, err)
+	expired, dropped := uint64(101), uint64(102)
+	proposal.ExpiredEpoch = &expired
+	proposal.DroppedEpoch = &dropped
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	member, err = lv.ls.NewView(nil).CommitteeCredentialMember(cold)
+	require.NoError(t, err)
+	require.Nil(t, member, "dropped proposal still authorizes")
 }
 
 func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
@@ -804,7 +818,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 		require.NoError(t, err)
 
 		member, err := lv.CommitteeMember(credential.Credential)
-		require.ErrorContains(t, err, "get active governance proposals")
+		require.ErrorContains(t, err, "get governance proposal set")
 		require.Nil(t, member)
 	})
 }
