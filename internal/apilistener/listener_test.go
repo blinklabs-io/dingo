@@ -87,25 +87,60 @@ func stopNow(t *testing.T, l *Listener) error {
 // address it bound. The caller owns shutdown.
 func startOnFreePort(t *testing.T) (*Listener, string) {
 	t.Helper()
+	l, addr, _ := startOnFreePortServed(t)
+	return l, addr
+}
+
+// startOnFreePortServed is startOnFreePort that also reports what Bind
+// returned for the attempt that won.
+func startOnFreePortServed(t *testing.T) (*Listener, string, bool) {
+	t.Helper()
 	var lastErr error
 	for range testutil.BindAttempts {
 		addr := testutil.FreePort(t)
 		l := newListener()
 		srv, bindDone, err := publish(l, addr)
 		require.NoError(t, err)
-		if _, err := l.Bind(
-			srv, bindDone, apiconfig.EffectiveTLS{},
-		); err != nil {
+		served, err := l.Bind(srv, bindDone, apiconfig.EffectiveTLS{})
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		return l, addr
+		return l, addr, served
 	}
 	t.Fatalf(
 		"could not bind a free loopback port in %d attempts: %v",
 		testutil.BindAttempts, lastErr,
 	)
-	return nil, ""
+	return nil, "", false
+}
+
+// bindDetachedOnFreePort calls Bind with a server that was never published on
+// l, so Bind opens its socket and then closes it again. It retries on a fresh
+// address when another process took the probed one, since a failed listen
+// says nothing about the behaviour under test.
+func bindDetachedOnFreePort(
+	t *testing.T, l *Listener,
+) (addr string, served bool, bindDone chan struct{}) {
+	t.Helper()
+	var lastErr error
+	for range testutil.BindAttempts {
+		addr = testutil.FreePort(t)
+		detached := &http.Server{Addr: addr} //nolint:gosec // test server
+		bindDone = make(chan struct{})
+		var err error
+		served, err = l.Bind(detached, bindDone, apiconfig.EffectiveTLS{})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return addr, served, bindDone
+	}
+	t.Fatalf(
+		"could not bind a free loopback port in %d attempts: %v",
+		testutil.BindAttempts, lastErr,
+	)
+	return "", false, nil
 }
 
 // stop runs the full Stop sequence an API server's Stop performs.
@@ -173,14 +208,16 @@ func TestUnpublishClearsTheBindChannelWithTheServer(t *testing.T) {
 // Shutdown alone leaves the port bound after Stop returns.
 func TestShutdownClosesAListenerServeNeverRegistered(t *testing.T) {
 	l := newListener()
-	addr := testutil.FreePort(t)
+	// Bound on port 0 so no other test can take the port between a probe and
+	// the listen.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
 	_, bindDone, err := publish(l, addr)
 	require.NoError(t, err)
 
 	// Stands in for Bind having opened and published the socket, with Serve
 	// not yet registered on it.
-	ln, err := net.Listen("tcp", addr)
-	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 	l.mu.Lock()
 	l.ln = ln
@@ -204,11 +241,10 @@ func TestShutdownClosesAListenerServeNeverRegistered(t *testing.T) {
 // overwrite the listener of whichever server is current now.
 func TestBindReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
 	l := newListener()
-	addr := testutil.FreePort(t)
 
 	// Stands in for the server a concurrent restart already published; it must
 	// survive this call untouched.
-	currentListener, err := net.Listen("tcp", testutil.FreePort(t))
+	currentListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = currentListener.Close() })
 	current := &http.Server{ //nolint:gosec // test server
@@ -220,10 +256,7 @@ func TestBindReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
 	l.mu.Unlock()
 
 	// The detached server this Bind call is bringing up.
-	detached := &http.Server{Addr: addr} //nolint:gosec // test server
-	bindDone := make(chan struct{})
-	served, err := l.Bind(detached, bindDone, apiconfig.EffectiveTLS{})
-	require.NoError(t, err)
+	addr, served, bindDone := bindDetachedOnFreePort(t, l)
 	require.False(t, served)
 	testutil.RequireReceive(
 		t, bindDone, time.Second,
@@ -272,7 +305,7 @@ func TestBindSignalsBindDoneOnKeypairFailure(t *testing.T) {
 // TestBindSignalsBindDoneOnListenFailure asserts the same for a lost port
 // race, which is the failure an operator actually hits.
 func TestBindSignalsBindDoneOnListenFailure(t *testing.T) {
-	occupied, err := net.Listen("tcp", testutil.FreePort(t))
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = occupied.Close() })
 
@@ -370,15 +403,11 @@ func TestMatchedTakeHandsBackNoTeardownWhenItsServerIsGone(t *testing.T) {
 // up when a concurrent Stop means none did.
 func TestBindReportsLostPublication(t *testing.T) {
 	l := newListener()
-	addr := testutil.FreePort(t)
 
-	// Stands in for a Stop that detached between Publish and Bind.
-	detached := &http.Server{Addr: addr} //nolint:gosec // test server
-	bindDone := make(chan struct{})
+	// Stands in for a Stop that detached between Publish and Bind: the server
+	// was never published on l.
+	addr, served, _ := bindDetachedOnFreePort(t, l)
 
-	served, err := l.Bind(detached, bindDone, apiconfig.EffectiveTLS{})
-
-	require.NoError(t, err, "losing the publication is not a bind failure")
 	require.False(
 		t, served,
 		"Bind must report that it closed the socket rather than serving it",
@@ -389,14 +418,9 @@ func TestBindReportsLostPublication(t *testing.T) {
 // TestBindReportsServed asserts the reporting side that Start's success log
 // depends on.
 func TestBindReportsServed(t *testing.T) {
-	l := newListener()
-	srv, bindDone, err := publish(l, testutil.FreePort(t))
-	require.NoError(t, err)
-
-	served, err := l.Bind(srv, bindDone, apiconfig.EffectiveTLS{})
+	l, _, served := startOnFreePortServed(t)
 	t.Cleanup(func() { _ = stopNow(t, l) })
 
-	require.NoError(t, err)
 	require.True(t, served)
 }
 
@@ -413,9 +437,9 @@ func TestBindReportsServed(t *testing.T) {
 // listener, which net/http does not expose, and would still lose to a Stop
 // landing an instant later.
 func TestServeEnteredAfterShutdownStaysQuiet(t *testing.T) {
-	addr := testutil.FreePort(t)
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+	addr := ln.Addr().String()
 	srv := &http.Server{Addr: addr} //nolint:gosec // test server
 
 	// The teardown, landing before Serve is entered.
@@ -469,9 +493,9 @@ func TestShutdownWaitsForAnInFlightBind(t *testing.T) {
 // left able to close it.
 func TestShutdownTearsDownEvenWhenTheBindWaitTimesOut(t *testing.T) {
 	l := newListener()
-	addr := testutil.FreePort(t)
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+	addr := ln.Addr().String()
 
 	// A published listener plus a bind that never settles.
 	l.mu.Lock()
@@ -604,7 +628,7 @@ func TestListenerIsReusableAfterShutdown(t *testing.T) {
 // other, and a rebind on the same address immediately after.
 //
 // The invariant is the one every caller relies on: once Stop returns without an
-// error, the address is free, so the next bind on it must succeed.
+// error, the socket it bound is closed, so the address is free.
 //
 // What this does NOT cover: the paths that need a bind still in flight when a
 // wait expires. A real bind settles far too quickly for that, so a stalled bind
@@ -614,9 +638,15 @@ func TestListenerIsReusableAfterShutdown(t *testing.T) {
 // TestTimedOutTeardownDoesNotSignalCompletionEarly. Do not read a pass here as
 // covering them.
 func TestConcurrentBindStopNeverLeavesThePortBound(t *testing.T) {
-	addr := testutil.FreePort(t)
+	t.Parallel()
 
+	// Iterations in which the bound socket was observed and proven closed.
+	// Guards against the loop passing without ever reaching an assertion.
+	var verified int
 	for i := range 60 {
+		// A fresh address per iteration: a probed port can be taken by another
+		// process between the probe and the bind.
+		addr := testutil.FreePort(t)
 		l := newListener()
 
 		// Three-way contention on purpose: the bind, and two Stops. Two Stops
@@ -625,6 +655,10 @@ func TestConcurrentBindStopNeverLeavesThePortBound(t *testing.T) {
 		// turns into a false "the port is free".
 		var wg sync.WaitGroup
 		stopErrs := make([]error, 2)
+		var (
+			bindErr error
+			bound   net.Listener
+		)
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
@@ -632,7 +666,15 @@ func TestConcurrentBindStopNeverLeavesThePortBound(t *testing.T) {
 			if err != nil {
 				return
 			}
-			_, _ = l.Bind(srv, bindDone, apiconfig.EffectiveTLS{})
+			_, bindErr = l.Bind(srv, bindDone, apiconfig.EffectiveTLS{})
+			// Taken here so the socket can be checked directly after Stop:
+			// probing the address instead cannot tell our listener from
+			// another process that took the port once it was released. A
+			// Stop that already detached it leaves nil, and that iteration
+			// has nothing to observe.
+			l.mu.Lock()
+			bound = l.ln
+			l.mu.Unlock()
 		}()
 		for slot := range stopErrs {
 			go func() {
@@ -642,31 +684,40 @@ func TestConcurrentBindStopNeverLeavesThePortBound(t *testing.T) {
 		}
 		wg.Wait()
 
+		if bindErr != nil {
+			// The address was taken by someone else; this iteration never
+			// held it, so there is no listener of ours to check.
+			continue
+		}
+
 		// Every Stop that returned nil made the same promise, so the strictest
-		// reading applies: if any of them reported clean, the port must be free.
+		// reading applies: if any of them reported clean, the socket must be
+		// closed.
 		if stopErrs[0] != nil && stopErrs[1] != nil {
 			// Both reported a timeout, which is honest: the callers were told
-			// the port may still be held, so neither is licensed to rebind.
+			// the port may still be held.
 			continue
 		}
 		require.NoError(
 			t, stopNow(t, l),
 			"a second Stop must stay clean (iteration %d)", i,
 		)
-		// The contract Stop's nil return promises: the address is rebindable.
-		// Rebinding is the externally observable assertion here. Closure of
-		// the original listener object is checked directly above, without
-		// confusing a concurrently rebound address for the old listener.
-		next := newListener()
-		nextSrv, bindDone, err := publish(next, addr)
-		require.NoError(t, err)
-		_, err = next.Bind(nextSrv, bindDone, apiconfig.EffectiveTLS{})
-		require.NoError(
-			t, err,
-			"rebinding after a clean Stop must succeed (iteration %d)", i,
+		if bound == nil {
+			continue
+		}
+		// The contract Stop's nil return promises: the socket it bound is
+		// released. A second Close reporting ErrClosed is that fact, read at
+		// the moment Stop returned.
+		require.ErrorIs(
+			t, bound.Close(), net.ErrClosed,
+			"a clean Stop must have closed the bound socket (iteration %d)", i,
 		)
-		require.NoError(t, stopNow(t, next))
+		verified++
 	}
+	require.NotZero(
+		t, verified,
+		"no iteration observed a bound socket, so nothing was asserted",
+	)
 }
 
 // --- the start gate -----------------------------------------------------
@@ -710,7 +761,6 @@ func TestStopWaitsForAStartStillInFlight(t *testing.T) {
 // have landed behind a Stop that had already returned.
 func TestStopTakesDownAServerPublishedWhileItWaited(t *testing.T) {
 	l := newListener()
-	addr := testutil.FreePort(t)
 	startDone, err := l.BeginStart()
 	require.NoError(t, err)
 
@@ -722,11 +772,16 @@ func TestStopTakesDownAServerPublishedWhileItWaited(t *testing.T) {
 	)
 
 	// The start this Stop is waiting on, completing normally.
-	srv, bindDone, err := publish(l, addr)
+	// Port 0, read back once bound: the waiting Stop cannot tear the socket
+	// down before EndStart, and no other test can take a probed port.
+	srv, bindDone, err := publish(l, "127.0.0.1:0")
 	require.NoError(t, err)
 	served, err := l.Bind(srv, bindDone, apiconfig.EffectiveTLS{})
 	require.NoError(t, err)
 	require.True(t, served)
+	l.mu.Lock()
+	addr := l.ln.Addr().String()
+	l.mu.Unlock()
 	l.EndStart(startDone)
 
 	require.NoError(
