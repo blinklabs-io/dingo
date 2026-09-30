@@ -1,0 +1,560 @@
+//go:build dingo_db_integration
+
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package sqlstore
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"fmt"
+	"net/url"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	mysqldriver "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/stretchr/testify/require"
+)
+
+func TestPostgresSQLStoreIntegration(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testSQLStoreIntegration(t, "pgx", dsn, "postgres", schema)
+}
+
+func TestPostgresRewardLiveStakeBatchBoundaries(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testRewardLiveStakeBatchBoundaries(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+// newPostgresIntegrationSchema creates a throwaway schema and returns a DSN
+// whose search_path selects it.
+func newPostgresIntegrationSchema(t *testing.T) (string, string) {
+	t.Helper()
+	dsn := os.Getenv("DINGO_POSTGRES_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:dingo@127.0.0.1:55432/dingo_test?sslmode=disable"
+	}
+	admin, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	require.NoError(t, admin.PingContext(context.Background()))
+	schema := fmt.Sprintf("sqlstore_%d", time.Now().UnixNano())
+	_, err = admin.Exec(`CREATE SCHEMA "` + schema + `"`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
+		_ = admin.Close()
+	})
+	return postgresDSNWithSearchPath(t, dsn, schema), schema
+}
+
+func TestPostgresPParamUpdateOrdering(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testPParamUpdateOrdering(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLPParamUpdateOrdering(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testPParamUpdateOrdering(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+func TestMySQLSQLStoreIntegration(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testSQLStoreIntegration(t, "mysql", dsn, "mysql", database)
+}
+
+func TestMySQLRewardLiveStakeBatchBoundaries(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testRewardLiveStakeBatchBoundaries(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+// newMySQLIntegrationDatabase creates a throwaway database and returns a DSN
+// that selects it.
+func newMySQLIntegrationDatabase(t *testing.T) (string, string) {
+	t.Helper()
+	dsn := os.Getenv("DINGO_MYSQL_DSN")
+	if dsn == "" {
+		dsn = "root:dingo@tcp(127.0.0.1:53306)/dingo_test?parseTime=true"
+	}
+	admin, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	require.NoError(t, admin.PingContext(context.Background()))
+	database := fmt.Sprintf("sqlstore_%d", time.Now().UnixNano())
+	_, err = admin.Exec("CREATE DATABASE `" + database + "`")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
+		_ = admin.Close()
+	})
+	return mysqlDSNWithDatabase(t, dsn, database), database
+}
+
+func postgresDSNWithSearchPath(t *testing.T, dsn, schema string) string {
+	t.Helper()
+	parsed, err := url.Parse(dsn)
+	require.NoError(t, err)
+	query := parsed.Query()
+	query.Set("options", "-csearch_path="+schema)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func mysqlDSNWithDatabase(t *testing.T, dsn, database string) string {
+	t.Helper()
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	require.NoError(t, err)
+	parsed.DBName = database
+	return parsed.FormatDSN()
+}
+
+// newIntegrationSQLStore opens, migrates and starts a store against an
+// external PostgreSQL or MySQL database.
+func newIntegrationSQLStore(
+	t *testing.T,
+	driver, dsn, dialectName, lockNamespace string,
+) *Store {
+	t.Helper()
+	db, err := OpenDB(driver, dsn, dialectName, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	var dialect Dialect
+	var registry []migrations.Migration
+	var locker migrations.Locker
+	switch dialectName {
+	case "postgres":
+		dialect = PostgresDialect()
+		registry, err = migrations.PostgresRegistry()
+		locker = integrationMigrationLocker("postgres", lockNamespace)
+	case "mysql":
+		dialect = MySQLDialect()
+		registry, err = migrations.MySQLRegistry()
+		locker = integrationMigrationLocker("mysql", lockNamespace)
+	}
+	require.NoError(t, err)
+	store, err := New(Config{
+		WriteDB:         db,
+		Dialect:         dialect,
+		StorageMode:     types.StorageModeAPI,
+		Migrations:      registry,
+		MigrationLocker: locker,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	require.NoError(t, store.Start(context.Background()))
+	require.True(t, store.Ready())
+	return store
+}
+
+func testSQLStoreIntegration(
+	t *testing.T,
+	driver, dsn, dialectName, lockNamespace string,
+) {
+	t.Helper()
+	store := newIntegrationSQLStore(t, driver, dsn, dialectName, lockNamespace)
+	db, dialect := store.writeDB, store.dialect
+	testBatchedTransactionWrites(t, store)
+
+	txn := store.Transaction(t.Context())
+	require.NoError(t, store.SetCommitTimestamp(42, txn))
+	require.NoError(t, store.SetNetworkState(11, 22, 33, txn))
+	require.NoError(t, txn.Commit())
+	timestamp, err := store.GetCommitTimestamp()
+	require.NoError(t, err)
+	require.Equal(t, int64(42), timestamp)
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(11), state.Treasury)
+	require.Equal(t, types.Uint64(22), state.Reserves)
+	require.Equal(t, uint64(33), state.Slot)
+
+	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+		StorageMode: types.StorageModeCore,
+		Network:     "integration",
+	}))
+	settings, err := store.GetNodeSettings()
+	require.NoError(t, err)
+	require.Equal(t, "integration", settings.Network)
+	// Simulate a legacy singleton row whose network was left empty.  The
+	// MySQL duplicate no-op upsert must still run the conditional backfill even
+	// when CLIENT_FOUND_ROWS makes the insert report one affected row.
+	_, err = db.Exec(
+		dialect.Rebind("UPDATE node_settings SET network = '' WHERE id = 1"),
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+		StorageMode: types.StorageModeCore,
+		Network:     "legacy-fixed",
+	}))
+	settings, err = store.GetNodeSettings()
+	require.NoError(t, err)
+	require.Equal(t, "legacy-fixed", settings.Network)
+	checkpoint := &models.BackfillCheckpoint{
+		Phase:      "integration",
+		LastSlot:   7,
+		TotalSlots: 11,
+		StartedAt:  time.UnixMilli(100),
+		UpdatedAt:  time.UnixMilli(200),
+	}
+	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
+	require.NotZero(t, checkpoint.ID)
+	loadedCheckpoint, err := store.GetBackfillCheckpoint("integration", nil)
+	require.NoError(t, err)
+	require.Equal(t, checkpoint.ID, loadedCheckpoint.ID)
+	require.Equal(t, checkpoint.LastSlot, loadedCheckpoint.LastSlot)
+
+	account := &models.Account{
+		StakingKey:    []byte{1, 2, 3},
+		CredentialTag: 0,
+		Pool:          []byte{4, 5, 6},
+		AddedSlot:     1,
+		CreatedSlot:   1,
+		Reward:        types.Uint64(9),
+		Active:        true,
+	}
+	require.NoError(t, store.ImportAccount(account, nil))
+	require.NotZero(t, account.ID)
+	loaded, err := store.GetAccountByCredential(
+		0,
+		account.StakingKey,
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, account.ID, loaded.ID)
+	// GetAccountsByCredential's derived-table UNION ALL join binds its
+	// credential_tag/staking_key parameters untyped: PostgreSQL resolves
+	// them to text rather than inferring account's BIGINT/BYTEA column
+	// types from the join, which the SQLite benchmark alone can't catch
+	// (issue: "operator does not exist: bytea = text").
+	batchLoaded, err := store.GetAccountsByCredential(
+		[]models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, account.StakingKey),
+		},
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		batchLoaded,
+		models.NewStakeCredentialRef(0, account.StakingKey).MapKey(),
+	)
+	require.Equal(
+		t,
+		account.ID,
+		batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID,
+	)
+	// GetDrepLastRegistrationDeposits is the other derived-table join in the
+	// shared query set, and a DRep deregistration's refund is validated
+	// against what it returns, so a dialect that resolves the grouped
+	// subquery or its join to drep differently is a consensus difference.
+	// Both rows below carry certificate_id = 0, the shape the Mithril
+	// ledger-state import writes: GetDrepLastRegistrationSlot's
+	// certificate_id filter would drop them, and the deposit queries
+	// deliberately do not copy it.
+	activeDrepCredential := make([]byte, 28)
+	activeDrepCredential[0] = 0x71
+	inactiveDrepCredential := make([]byte, 28)
+	inactiveDrepCredential[0] = 0x72
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: activeDrepCredential,
+			AddedSlot:  10,
+			Active:     true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: activeDrepCredential,
+			AddedSlot:      10,
+			DepositAmount:  types.Uint64(500000000),
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: inactiveDrepCredential,
+			AddedSlot:  11,
+			Active:     false,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: inactiveDrepCredential,
+			AddedSlot:      11,
+			DepositAmount:  types.Uint64(200000000),
+		},
+		nil,
+	))
+	drepDeposit, err := store.GetDrepLastRegistrationDeposit(
+		0,
+		activeDrepCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, drepDeposit)
+	require.Equal(t, uint64(500000000), *drepDeposit)
+	drepDeposits, err := store.GetDrepLastRegistrationDeposits(nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]uint64{
+			models.DrepDepositKey(0, activeDrepCredential): 500000000,
+		},
+		drepDeposits,
+	)
+	_, err = db.Exec(dialect.Rebind(`
+INSERT INTO reward_live_stake (
+ pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,
+ total_stake, registered, pool_delegation_slot, pool_delegation_block_index,
+ pool_delegation_cert_index, updated_slot, calculation_version
+) VALUES (?, ?, 0, ?, ?, ?, TRUE, 1, 0, 0, 1, ?)`),
+		account.Pool, account.StakingKey, "9", "0", "9",
+		models.RewardStakeCalculationVersion,
+	)
+	require.NoError(t, err)
+	stakes, delegators, err := store.GetStakeByPools(
+		[][]byte{account.Pool},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), stakes[string(account.Pool)])
+	require.Equal(t, uint64(1), delegators[string(account.Pool)])
+	require.NoError(t, store.RebuildRewardLiveStake(2, nil))
+	inputs, err := store.GetLiveStakeInputsForPools(
+		[][]byte{account.Pool},
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, types.Uint64(9), inputs[0].Stake)
+
+	outputs := make([]*models.RewardAccountOutput, 120)
+	for index := range outputs {
+		outputs[index] = &models.RewardAccountOutput{
+			Epoch:       uint64(index),
+			StakingKey:  []byte{0x40, byte(index)},
+			PoolKeyHash: []byte{0x50, byte(index)},
+			RewardType:  "member",
+			Amount:      types.Uint64(index + 1),
+			Spendable:   true,
+		}
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	for _, output := range outputs {
+		require.NotZero(t, output.ID)
+	}
+
+	// Exercise the shared RETURNING adapter against a reserved table name and
+	// a reserved column name.  MySQL must quote both identifiers even when
+	// ANSI_QUOTES is disabled, and the duplicate path must return the same ID
+	// without a second pooled connection carrying LAST_INSERT_ID state.
+	queryer := newDialectQueryer(db, dialectName)
+	transactionHash := []byte{0xa0, 0xb0, 0xc0}
+	transactionQuery := `INSERT INTO "transaction" (
+ hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+ block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (hash) DO UPDATE SET block_hash = excluded.block_hash
+RETURNING id`
+	var transactionID int64
+	require.NoError(
+		t,
+		queryer.QueryRowContext(
+			context.Background(),
+			transactionQuery,
+			transactionHash,
+			[]byte{0xd0},
+			nil,
+			int64(100),
+			0,
+			"0",
+			"0",
+			"0",
+			0,
+			true,
+		).Scan(&transactionID),
+	)
+	require.NotZero(t, transactionID)
+	firstTransactionID := transactionID
+	require.NoError(
+		t,
+		queryer.QueryRowContext(
+			context.Background(),
+			transactionQuery,
+			transactionHash,
+			[]byte{0xe0},
+			nil,
+			int64(100),
+			0,
+			"0",
+			"0",
+			"0",
+			0,
+			true,
+		).Scan(&transactionID),
+	)
+	require.Equal(t, firstTransactionID, transactionID)
+	var redeemerCount int
+	_, err = queryer.ExecContext(context.Background(), `
+INSERT INTO redeemer (
+		data, transaction_id, ex_units_memory, ex_units_cpu, "index", tag
+) VALUES (?, ?, ?, ?, ?, ?)`,
+		[]byte{0xf0}, transactionID, int64(1), int64(2), int64(0), int64(0),
+	)
+	require.NoError(t, err)
+	require.NoError(t, queryer.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM redeemer WHERE transaction_id = ?`, transactionID,
+	).Scan(&redeemerCount))
+	require.Equal(t, 1, redeemerCount)
+
+	// Restoring a retained index is dialect DDL of its own, so simulate the
+	// state a binary whose manifest still deferred one leaves on disk.
+	// idx_utxo_staking_deleted_amount is the composite case: it is not a
+	// foreign-key child index, so every dialect can drop it, and it includes
+	// columns MySQL can only key with an explicit prefix length.
+	var retained deferred.Index
+	for _, index := range deferred.Retained {
+		if index.Name == "idx_utxo_staking_deleted_amount" {
+			retained = index
+		}
+	}
+	require.NotEmpty(
+		t,
+		retained.Name,
+		"deferred.Retained must still name the composite live-stake index",
+	)
+	catalog := newDialectQueryer(db, dialect.Name())
+	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
+	require.NoError(t, err)
+	exists, err := store.deferredIndexExists(t.Context(), catalog, retained)
+	require.NoError(t, err)
+	require.False(
+		t,
+		exists,
+		"the simulated pre-change cycle must leave %s absent",
+		retained.Name,
+	)
+
+	// The deferred-index lifecycle is also shared across dialects.  In
+	// particular, MySQL requires `DROP INDEX ... ON table` and a non-IF-NOT-
+	// EXISTS CREATE form, while sync_state has no synthetic id column.
+	require.NoError(t, store.DropDeferredIndexes())
+	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
+	require.NoError(t, err)
+	require.True(
+		t,
+		exists,
+		"%s must be restored on %s: an index the manifest no longer names "+
+			"has no other path back",
+		retained.Name,
+		dialect.Name(),
+	)
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending)
+
+	// The critical rebuild is the last step before the node serves API
+	// writes, so it restores the retained set too. Drop it again to reach the
+	// state a cycle interrupted by an older binary leaves behind.
+	_, err = db.Exec(dialect.DropIndexSQL(retained.Name, retained.Table))
+	require.NoError(t, err)
+	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	exists, err = store.deferredIndexExists(t.Context(), catalog, retained)
+	require.NoError(t, err)
+	require.True(
+		t,
+		exists,
+		"%s must be restored by the critical rebuild on %s",
+		retained.Name,
+		dialect.Name(),
+	)
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(
+		t,
+		pending,
+		"the critical rebuild must leave the marker for the lazy remainder",
+	)
+
+	require.NoError(t, store.BuildDeferredIndexes())
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+
+	// Exercise the many-to-many collateral contract on this dialect.
+	collateralProductionFlow(t, store, db)
+}
+
+func testBatchedTransactionWrites(t *testing.T, store *Store) {
+	t.Helper()
+	makeTransaction := func(id byte) lcommon.Transaction {
+		input, err := mockledger.NewTransactionInputBuilder().
+			WithTxId(bytes.Repeat([]byte{id + 0x10}, 32)).
+			WithIndex(0).
+			Build()
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp").
+			WithLovelace(5_000_000).
+			Build()
+		require.NoError(t, err)
+		transaction, err := mockledger.NewTransactionBuilder().
+			WithId(bytes.Repeat([]byte{id}, 32)).
+			WithInputs(input).
+			WithOutputs(output).
+			Build()
+		require.NoError(t, err)
+		return transaction
+	}
+
+	for id, historical := range []bool{false, true} {
+		transaction := makeTransaction(byte(id + 1))
+		txn := store.Transaction(t.Context())
+		batch := store.NewBatchAccumulator()
+		point := ocommon.Point{Slot: uint64(id + 1), Hash: transaction.Hash().Bytes()}
+		var err error
+		if historical {
+			err = store.SetTransactionBatchedHistorical(
+				transaction, point, uint32(id), nil, false, true, batch, txn,
+			)
+		} else {
+			err = store.SetTransactionBatched(
+				transaction, point, uint32(id), nil, false, batch, txn,
+			)
+		}
+		require.NoError(t, err)
+		require.NoError(t, store.FlushBatch(batch, txn))
+		require.NoError(t, txn.Commit())
+	}
+}

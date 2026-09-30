@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins
 
 package conformance
 
@@ -63,7 +63,7 @@ import (
 // actually fixes the concurrency/staleness problem. Neither is torn down
 // by an individual manager's Close -- a sibling manager elsewhere in this
 // same process may still be using them -- TestMain
-// (conformance_main_test.go) drops the schema and removes the blob
+// (tests_d4f17915_test.go) drops the schema and removes the blob
 // directory once, after every test in this process has finished.
 var (
 	postgresProcessSchema = fmt.Sprintf(
@@ -94,7 +94,7 @@ func ensurePostgresProcessBlobDir() (string, error) {
 //
 // An unreachable host or invalid DSN is a real construction error here,
 // not a swallowed no-op: this is what makes the "invalid DSN must fail"
-// acceptance tests in conformance_postgres_test.go meaningful.
+// acceptance tests in tests_d4f17915_test.go meaningful.
 func NewDingoPostgresStateManager(dsn string) (*DingoStateManager, error) {
 	blobDataDir, err := ensurePostgresProcessBlobDir()
 	if err != nil {
@@ -114,7 +114,7 @@ func NewDingoPostgresStateManager(dsn string) (*DingoStateManager, error) {
 // DingoStateManager using an explicit schema and local blob data directory,
 // for a caller that must manage that schema's lifecycle itself. The restart
 // test (TestNewDingoPostgresStateManagerRestartSurvivesReopen in
-// conformance_postgres_test.go) is the one caller: it opens a second
+// tests_d4f17915_test.go) is the one caller: it opens a second
 // manager against the same schema and blob directory after closing the
 // first, to prove state survives that round trip. Neither Close call drops
 // the schema -- DingoStateManager.Close never does, matching
