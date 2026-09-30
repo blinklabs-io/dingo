@@ -42,7 +42,7 @@ func poolExtendedMetadataKey(url string, hash []byte) string {
 // returns the anchor plus the schema's error object; otherwise every
 // off-chain field is populated. This logic is duplicated rather than
 // factored out of PoolMetadata because that function is owned by the pool
-// detail/metadata feature (#2936/#2995) and is not modified here.
+// detail/metadata feature and is not modified here.
 func buildPoolExtendedMetadata(
 	metadataURL string,
 	metadataHash []byte,
