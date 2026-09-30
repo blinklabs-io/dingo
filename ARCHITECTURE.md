@@ -2911,7 +2911,7 @@ releasing the listening socket before `Stop` returns so this same
 reinitialization can rebind the port, is `internal/apilistener`'s; see "API
 listener lifecycle" below.
 
-A caller-supplied `connmanager.ListenerConfig.Listener` (a test harness binding an OS-assigned port up front and handing the listener object itself to the node, rather than an address string, so a peer can be told the exact port with no discovery race — see `node_lifecycle_multinode_integration_test.go`'s `newLoopbackListener`) needs its own handling across this quiesce/reinit cycle: `ConnectionManager.Stop`'s `stopListeners` closes every listener it is tracking unconditionally, with no way to distinguish one it created itself from one a caller handed it, and a closed `net.Listener` can never be reused. `reinitializeNetworkingCore` rebuilds `connManager` from `n.config.listeners` via `ouroboros.ConfigureListeners`, which only appends connection options and never touches `.Listener` — so without further handling, the same now-closed listener object would be fed straight back in, `connmanager.startListener` would skip rebinding (it only binds fresh when `.Listener == nil`), and the accept loop launched on it would exit immediately on `net.ErrClosed` while `connManager.Start` still returned successfully, silently leaving that listener permanently deaf to new inbound connections after the very first live Restore/Truncate. `ConnectionManager.ResolvedListeners` (called right after every successful `connManager.Start`, both at initial startup in `node.go` and after every reinit in `node_lifecycle.go`) closes this gap: for any listener config entry that came in with a caller-supplied `Listener`, it replaces that field with the concrete `ListenNetwork`/`ListenAddress` the listener actually resolved to (nil-ing `Listener` out), so the next reinit rebinds a fresh listener at that same address instead of trying to reuse the dead object — exactly the self-healing behavior an address-configured entry already had. Entries that started address-configured are left untouched entirely. A caller-supplied Windows named-pipe listener is a special case even though it does get its `Listener` field cleared here: `ListenNetwork` is deliberately *not* overwritten with the resolved listener's own `Addr().Network()` when it is already `"unix"`, because on Windows that value is a cross-platform sentinel meaning "reconstruct via `createPipeListener`" (checked by `startListener`'s pipe-creation branch), while the real `go-winio` pipe listener's `Addr().Network()` reports `"pipe"` — copying that raw value in would silently break the sentinel and make the next reinit's rebind fail.
+A caller-supplied `connmanager.ListenerConfig.Listener` (a test harness binding an OS-assigned port up front and handing the listener object itself to the node, rather than an address string, so a peer can be told the exact port with no discovery race — see `node_lifecycle_5f361685_test.go`'s `newLoopbackListener`) needs its own handling across this quiesce/reinit cycle: `ConnectionManager.Stop`'s `stopListeners` closes every listener it is tracking unconditionally, with no way to distinguish one it created itself from one a caller handed it, and a closed `net.Listener` can never be reused. `reinitializeNetworkingCore` rebuilds `connManager` from `n.config.listeners` via `ouroboros.ConfigureListeners`, which only appends connection options and never touches `.Listener` — so without further handling, the same now-closed listener object would be fed straight back in, `connmanager.startListener` would skip rebinding (it only binds fresh when `.Listener == nil`), and the accept loop launched on it would exit immediately on `net.ErrClosed` while `connManager.Start` still returned successfully, silently leaving that listener permanently deaf to new inbound connections after the very first live Restore/Truncate. `ConnectionManager.ResolvedListeners` (called right after every successful `connManager.Start`, both at initial startup in `node.go` and after every reinit in `node_lifecycle.go`) closes this gap: for any listener config entry that came in with a caller-supplied `Listener`, it replaces that field with the concrete `ListenNetwork`/`ListenAddress` the listener actually resolved to (nil-ing `Listener` out), so the next reinit rebinds a fresh listener at that same address instead of trying to reuse the dead object — exactly the self-healing behavior an address-configured entry already had. Entries that started address-configured are left untouched entirely. A caller-supplied Windows named-pipe listener is a special case even though it does get its `Listener` field cleared here: `ListenNetwork` is deliberately *not* overwritten with the resolved listener's own `Addr().Network()` when it is already `"unix"`, because on Windows that value is a cross-platform sentinel meaning "reconstruct via `createPipeListener`" (checked by `startListener`'s pipe-creation branch), while the real `go-winio` pipe listener's `Addr().Network()` reports `"pipe"` — copying that raw value in would silently break the sentinel and make the next reinit's rebind fail.
 
 `(*Node).Restore` quiesces storage-dependent components and closes the live handles first, because an external provider's configured target cannot be safely reset while the running node still has its connections open. `lifecycle.RestoreRecoverable` then checks the resolved manifest against the running node's configured network, storage mode, providers, and consensus gates, and performs archive validation, rollback capture, and replacement. That compatibility check still precedes every storage mutation, but follows the quiesce, so an incompatible snapshot costs a quiesce and reopen cycle rather than any data. Local Badger/SQLite data is restored in `<dataDir>.restore-staging`, opened again through the node's actual configuration, and atomically swapped by `swapInRestoredDataDir` (rename the current data directory to `<dataDir>.pre-restore`, then rename staging into place, rolling the first rename back if activation fails). Remote replacement failures compensate both external stores before `Restore` attempts `reinitializeAndResume`, so the node resumes on the exact original pair rather than stopping on a mixed metadata/blob state. `n.cancel()` remains reserved for an unconfirmed storage drain, an unrecoverable local directory swap, remote rollback failure, or reinitialization failure.
 
@@ -13940,7 +13940,7 @@ wakes the *retiring* attempt's reader goroutine before the retry loop's
 submitting blocks to the shared pipeline concurrently with the new
 attempt's own submissions (regression test:
 `TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts` in
-`ledger/read_chain_pipeline_test.go`, which fails reliably with the wait
+`ledger/tests_80bccea0_test.go`, which fails reliably with the wait
 removed and passes with it in place). `decodeReadChainBatch` compounds this
 by design: once it starts submitting a batch it always runs the
 submit-and-drain to completion using a background context, not the
@@ -14443,7 +14443,7 @@ merely that it checks `PendingCount()` once),
 `TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline` (proves
 attaching an idle, started `blockPipeline` does not change
 `processChainIteratorRollback`'s rollback decision or resulting state
-versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`; and
+versus pipeline-disabled), all in `ledger/tests_80bccea0_test.go`; and
 `TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather`
 (`ledger/tests_61443820_test.go`), which proves
 `blockPipelineGatherMutex`'s write lock cannot be obtained while the reader
@@ -14472,7 +14472,7 @@ nothing.
 Five facts about the two sides make the wiring unsafe rather than merely
 awkward. The first three are properties of
 `gouroboros/pipeline.ApplyStage` at the pinned version and are pinned by
-contract tests in `ledger/block_pipeline_apply_contract_test.go`, so a
+contract tests in `ledger/tests_67e335ab_test.go`, so a
 gouroboros bump that changes any of them fails CI instead of silently
 invalidating this decision.
 
@@ -14545,7 +14545,7 @@ batch-oriented apply contract with begin/end hooks and a caller-visible
 restart-tolerant — a consensus-critical rewrite of transaction boundaries,
 epoch rollover and retry semantics. Neither is warranted by throughput,
 since the parallelizable work is already parallel. If a contract test in
-`ledger/block_pipeline_apply_contract_test.go` starts failing after a
+`ledger/tests_67e335ab_test.go` starts failing after a
 gouroboros bump, revisit this decision rather than the test.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
@@ -14833,7 +14833,7 @@ was caught only by comparing the two literals by hand or by a test
 asserting that a configured behavior actually survives reinitialization
 (`TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig`,
 `TestLiveTruncatePreservesGenesisForkSelection`, and
-`TestLiveRestorePreservesGenesisForkSelection` in `node_lifecycle_test.go`).
+`TestLiveRestorePreservesGenesisForkSelection` in `node_lifecycle_d22bef78_test.go`).
 The single construction site removes the divergence itself rather than
 leaving each new field to be remembered twice.
 

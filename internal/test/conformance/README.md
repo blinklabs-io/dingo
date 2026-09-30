@@ -379,7 +379,7 @@ access patterns. That needs **one** pass per dialect, not several.
 | `state_manager.go`    | `DingoStateManager` — implements `conformance.StateManager` against a real Dingo `database.Database` and `ledger/governance`, reusing production persistence code |
 | `state_manager_postgres.go` | `NewDingoPostgresStateManager` — same `DingoStateManager`, real Postgres connection with schema isolation (`dingo_extra_plugins` build tag) |
 | `state_manager_mysql.go` | `NewDingoMysqlStateManager` — same `DingoStateManager`, real MySQL connection with database isolation (`dingo_extra_plugins` build tag) |
-| `state_manager_backend_test.go` | Real-backend acceptance tests against the default SQLite manager: restart survival, transaction rollback, and an epoch-transition/stake-snapshot test driving `ledger/governance.ProcessEpoch` and `ledger/snapshot.Manager` end to end |
+| `state_manager_test.go` | Real-backend acceptance tests against the default SQLite manager: restart survival, transaction rollback, and an epoch-transition/stake-snapshot test driving `ledger/governance.ProcessEpoch` and `ledger/snapshot.Manager` end to end |
 | `state_provider.go`   | State-query adapters used by the harness -- every read queries the real backend live (see its type doc comment for the one narrow, documented exception) |
 | `docker-compose.yml`  | Local PostgreSQL and MySQL for the SQL-backed tests |
 
