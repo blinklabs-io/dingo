@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The tests in this file cover blinklabs-io/dingo#2932: neither the
+// The tests in this file cover event backpressure: neither the
 // per-subscriber channel nor the shared async queue may discard events under
 // sustained load, and backpressure must not wedge shutdown.
 

@@ -31,7 +31,7 @@ const OrderedQueueSize = 10000
 // One worker is the whole mechanism: the shared async pool cannot preserve
 // order because AsyncWorkerPoolSize workers dequeue concurrently and race each
 // other into Publish, so two events enqueued in order can be delivered to a
-// subscriber in either order (blinklabs-io/dingo#2287).
+// subscriber in either order.
 type orderedLane struct {
 	queue chan orderedItem
 	// stopCh is the bus stop channel captured when the lane was created.
@@ -85,8 +85,7 @@ type orderedItem struct {
 // they skip rather than act on.
 //
 // See switchBarrier in ouroboros/consensus_conformance_test.go for the
-// pattern, and blinklabs-io/dingo#4145 for the failures a non-blocking drain
-// produced.
+// pattern, and for why a non-blocking drain is not a wait.
 func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
 	return e.PublishOrderedContext(context.Background(), eventType, evt)
 }

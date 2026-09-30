@@ -51,7 +51,7 @@ func TestDeliverFailureUnregisters(t *testing.T) {
 
 // TestChannelSubscriberDeliverWaitsForCapacity verifies that
 // channelSubscriber.Deliver waits for buffer capacity instead of dropping the
-// event. Regression test for blinklabs-io/dingo#2932: the non-blocking send
+// event. Regression test: the non-blocking send
 // this replaces silently discarded events under sustained load.
 func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
 	t.Parallel()

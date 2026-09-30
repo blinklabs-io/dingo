@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The tests in this file cover blinklabs-io/dingo#2932: channelSubscriber must
+// The tests in this file cover event backpressure: channelSubscriber must
 // wait for buffer capacity rather than dropping events, without reintroducing
 // the Close() deadlock that the original non-blocking send avoided.
 
@@ -240,7 +240,7 @@ func TestDeliverStallWarning(t *testing.T) {
 }
 
 // TestDeliverDoesNotWarnWhenCapacityIsAvailable guards against reintroducing
-// the per-event log spam from blinklabs-io/dingo#1556.
+// per-event log spam.
 func TestDeliverDoesNotWarnWhenCapacityIsAvailable(t *testing.T) {
 	origInterval := deliveryStallWarnInterval
 	deliveryStallWarnInterval = 20 * time.Millisecond
