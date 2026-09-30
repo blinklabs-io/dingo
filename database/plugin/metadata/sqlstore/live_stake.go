@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -1370,6 +1371,73 @@ ORDER BY epoch`,
 		return nil, err
 	}
 	return epochs, nil
+}
+
+func (s *Store) GetPostSnapshotRewardCredits(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.AccountRewardDelta, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPostSnapshotRewardCredits: resolve db: %w", err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT credential_tag, staking_key, amount
+FROM account_reward_delta
+WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
+ORDER BY credential_tag, staking_key, id`, slotValue)
+	if err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+	}
+	defer rows.Close()
+	var (
+		ret  []*models.AccountRewardDelta
+		last *models.AccountRewardDelta
+	)
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &raw); err != nil {
+			return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("post-snapshot reward credit", raw.String)
+		if err != nil {
+			return nil, err
+		}
+		if last != nil && last.CredentialTag == tag &&
+			bytes.Equal(last.StakingKey, key) {
+			total := uint64(last.Amount)
+			if ^uint64(0)-total < amount {
+				return nil, errors.New(
+					"GetPostSnapshotRewardCredits: credit total overflows",
+				)
+			}
+			last.Amount = types.Uint64(total + amount)
+			continue
+		}
+		last = &models.AccountRewardDelta{
+			CredentialTag: tag,
+			StakingKey:    key,
+			Amount:        types.Uint64(amount),
+			AddedSlot:     slot,
+			PostSnapshot:  true,
+		}
+		ret = append(ret, last)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+	}
+	return ret, nil
 }
 
 func (s *Store) GetLiveStakeInputsForPools(

@@ -360,6 +360,7 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 		},
 	)
 	epochBoundaryBenchWireDeferred(f.ls, mgr)
+	wireDeferredBoundarySnapshot(f.ls, mgr)
 	f.ls.SetCurrentBoundarySPOStakeHook(
 		func(
 			txn *database.Txn,
