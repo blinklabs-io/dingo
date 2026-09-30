@@ -38,8 +38,8 @@ import (
 // direct child of it here — so name is opened as a single component relative
 // to root's own handle rather than resolved from fullPath
 // (openRelativeForDeletion, setDeleteDisposition; see
-// extract_handlerelative_windows.go). That is what closes the gap issue #3228
-// tracked: earlier, only DeleteFile/RemoveDirectory's path was avoided for
+// extract_handlerelative_windows.go). That is what closes the gap
+// where, earlier, only DeleteFile/RemoveDirectory's path was avoided for
 // removeExtractedFile's and renameExtractedDirectory's own final component,
 // while this operation still resolved fullPath directly and a substituted
 // parent could redirect it. Nothing here resolves any component's name a

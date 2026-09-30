@@ -446,7 +446,7 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 }
 
 // TestSelectLedgerStateSnapshotAcceptsVerifiedAncillaryStateNewerThanCertifiedTip
-// pins issues #3850 / #4038: a verified ancillary tree whose only ledger state
+// pins that a verified ancillary tree whose only ledger state
 // sits above maxTrustedSlot is the shape the aggregator ordinarily ships (the
 // ancillary ledger state comes from the source node's volatile database), not
 // the emptied/tampered tree TestImportLedgerStateWillNotLookPastAVerifiedTree
