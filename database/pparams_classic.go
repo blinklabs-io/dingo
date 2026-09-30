@@ -78,6 +78,8 @@ type classicPParamVote struct {
 //   - votes are grouped by update value, not by encoding, and exactly one
 //     value must reach quorum: none, or two values that both reach it, enact
 //     nothing;
+//   - an agreed update outside the reference domain, or carrying a malformed
+//     cost model before protocol version 9, enacts nothing;
 //   - the agreed update is enacted only if the resulting parameters keep
 //     maxTxSize + maxBlockHeaderSize below maxBlockBodySize.
 //
@@ -165,7 +167,17 @@ func selectClassicPParamUpdate(
 		return nil, nil
 	}
 	if agreed.decodeErr != nil {
+		// A stored row outside the reference domain cannot enact. Refuse it
+		// rather than halt the epoch boundary on a row validation should
+		// never have admitted.
+		var domainErr lcommon.ProtocolParameterUpdateDomainError
+		if errors.As(agreed.decodeErr, &domainErr) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("decode pparam update: %w", agreed.decodeErr)
+	}
+	if !classicUpdateCostModelsValid(currentPParams, agreed.update) {
+		return nil, nil
 	}
 	if !classicUpdateKeepsBlockSizes(currentPParams, agreed.update) {
 		return nil, nil
@@ -291,6 +303,26 @@ func classicUpdateKeepsBlockSizes(
 	}
 	sum := uint64(txSize) + uint64(headerSize)
 	return sum >= uint64(txSize) && sum < uint64(bodySize)
+}
+
+// classicUpdateCostModelsValid applies the cost-model rule the PPUP
+// validation rule applies to a proposal, against the protocol version of the
+// submission epoch's parameters. A stored row can predate that rule.
+func classicUpdateCostModelsValid(
+	currentPParams lcommon.ProtocolParameters,
+	update any,
+) bool {
+	validator, ok := update.(lcommon.ProtocolParameterUpdateVersionValidator)
+	if !ok {
+		return true
+	}
+	provider, ok := currentPParams.(lcommon.ProtocolParametersProtocolVersionProvider)
+	if !ok {
+		return true
+	}
+	return validator.ValidateProtocolParameterUpdateVersion(
+		provider.ProtocolParametersProtocolVersion(),
+	) == nil
 }
 
 func classicPParamBlockSizes(

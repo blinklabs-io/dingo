@@ -239,6 +239,9 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 		MaxTxSize:          16384,
 		MaxBlockHeaderSize: 1100,
 		CostModels:         map[uint][]int64{0: {1, 2, 3}},
+		// From protocol version 9 a cost-model update is not checked for
+		// its parameter count, so the short fixture model is enactable.
+		ProtocolMajor: 9,
 	}
 	decodeFunc := func(data []byte) (any, error) {
 		var update alonzo.AlonzoProtocolParameterUpdate
