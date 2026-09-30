@@ -26,7 +26,12 @@ import (
 // layout decodeFlatMultiAsset documents, mimicking the Haskell toCompact
 // encoder: names are deduplicated, so several entries that carry the SAME
 // asset name under different policies share one name offset.
-func buildFlatMultiAsset(qty []uint64, pids [][]byte, pidIdx []int, nameOffIdx []int) []byte {
+func buildFlatMultiAsset(
+	qty []uint64,
+	pids [][]byte,
+	pidIdx []int,
+	nameOffIdx []int,
+) []byte {
 	n := len(qty)
 	quantitiesEnd := n * 8
 	pidOffsetsEnd := quantitiesEnd + n*2
@@ -47,21 +52,19 @@ func buildFlatMultiAsset(qty []uint64, pids [][]byte, pidIdx []int, nameOffIdx [
 	for i := range pids {
 		pidOff[i] = pidBase + i*28
 	}
-	// region E: unique names, in order of first appearance
-	var names [][]byte
-	seenName := map[int]bool{}
+	// region E: one 8-byte "sharednm" slot per distinct name index, in
+	// order of first appearance; entries with the same index share it.
+	nameOffByIdx := map[int]int{}
 	nameOff := make([]int, n)
 	cursor := pidBase + len(pids)*28
 	for i, ni := range nameOffIdx {
-		if !seenName[ni] {
-			seenName[ni] = true
-			nm := bytes.Repeat([]byte{byte(0xA0 + ni)}, 8)
-			names = append(names, nm)
-			nameOff[i] = cursor
-			cursor += len(nm)
-		} else {
-			nameOff[i] = nameOff[i-1]
+		off, ok := nameOffByIdx[ni]
+		if !ok {
+			off = cursor
+			nameOffByIdx[ni] = off
+			cursor += 8
 		}
+		nameOff[i] = off
 	}
 
 	flat := make([]byte, 0, cursor)
@@ -70,15 +73,20 @@ func buildFlatMultiAsset(qty []uint64, pids [][]byte, pidIdx []int, nameOffIdx [
 		binary.LittleEndian.PutUint64(flat[i*8:], q)
 	}
 	for i := range qty {
-		binary.LittleEndian.PutUint16(flat[quantitiesEnd+i*2:], uint16(pidOff[pidIdx[i]]))
-		binary.LittleEndian.PutUint16(flat[pidOffsetsEnd+i*2:], uint16(nameOff[i]))
+		binary.LittleEndian.PutUint16(
+			flat[quantitiesEnd+i*2:],
+			uint16(pidOff[pidIdx[i]]),
+		)
+		binary.LittleEndian.PutUint16(
+			flat[pidOffsetsEnd+i*2:],
+			uint16(nameOff[i]),
+		)
 	}
 	for i, p := range pids {
 		copy(flat[pidOff[i]:], p)
 	}
-	for i := range qty {
-		_ = names
-		copy(flat[nameOff[i]:], []byte("sharednm"))
+	for _, off := range nameOffByIdx {
+		copy(flat[off:], []byte("sharednm"))
 	}
 	return flat
 }
