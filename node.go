@@ -1829,7 +1829,7 @@ func (n *Node) subscribeRequiredEvent(
 func (n *Node) subscribeDetachableEvent(
 	eventType event.EventType,
 	handler event.EventHandlerFunc,
-) event.EventSubscriberId {
+) event.EventSubscriberId { //nolint:unparam // mirrors subscribeRequiredEvent's signature; no caller needs the subscriber id yet
 	return n.eventBus.SubscribeFuncWithBufferPolicy(
 		eventType,
 		event.DefaultSubscriberBuffer,
@@ -2058,6 +2058,26 @@ func (n *Node) subscribeChainSelectorEvents() {
 				"alternate_head_slot", e.AlternateHead.Slot,
 				"canonical_head_slot", e.CanonicalHead.Slot,
 			)
+		},
+	)
+	// Feed rolled-back blocks to the blockfetch fork-battle ring so a
+	// dashboard can tell a fork-battle delay from a genuinely slow fetch.
+	// ChainUpdateEventType also carries chain.ChainBlockEvent for ordinary
+	// adds; only chain.ChainRollbackEvent is relevant here, so non-matching
+	// payloads are silently ignored rather than logged as unexpected. This
+	// observer only emits diagnostics; dropping it does not affect state.
+	n.subscribeDetachableEvent(
+		chain.ChainUpdateEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chain.ChainRollbackEvent)
+			if !ok {
+				return
+			}
+			o := n.ouroboros()
+			if o == nil {
+				return
+			}
+			o.RecordForkBattleParticipants(e.RolledBackBlocks)
 		},
 	)
 	// Subscribe to connection closed events to remove peers from chain selector
