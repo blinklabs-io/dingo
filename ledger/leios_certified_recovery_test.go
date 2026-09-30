@@ -70,6 +70,62 @@ func TestValidateDijkstraLeiosCertificateResolvesBatchParent(t *testing.T) {
 	require.Equal(t, parent.Hash().Bytes(), gotParent)
 }
 
+func TestLeiosEpochPrecheckDefersUnpublishedBoundaryEpoch(t *testing.T) {
+	t.Parallel()
+
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	parent.BlockHeader.BabbageBlockHeader.Body.Slot = 120
+	certifier.BlockHeader.BabbageBlockHeader.Body.Slot = 140
+	certifier.BlockHeader.BabbageBlockHeader.Body.PrevHash = parent.Hash()
+	certifier.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
+		Signers:             []byte{1},
+		AggregatedSignature: make([]byte, 48),
+	}
+	blocks := []gledger.Block{parent, certifier}
+	currentEpoch := models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		SlotLength:    1,
+		LengthInSlots: 120,
+	}
+	require.Zero(t, leiosEpochPrecheckEnd(blocks, currentEpoch))
+
+	var validatedEpoch uint64
+	ls := &LedgerState{config: LedgerStateConfig{
+		ValidateLeiosCertificate: func(
+			epoch uint64,
+			_, _, _ []byte,
+		) error {
+			validatedEpoch = epoch
+			return nil
+		},
+	}}
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{currentEpoch},
+	})
+	announcements := map[string]leiosEbRef{
+		string(parent.Hash().Bytes()): {slot: parent.SlotNumber()},
+	}
+	err := ls.validateDijkstraLeiosCertificate(certifier, announcements)
+	require.ErrorContains(t, err, "slot 120 not covered")
+
+	nextEpoch := models.Epoch{
+		EpochId:       6,
+		StartSlot:     120,
+		SlotLength:    1,
+		LengthInSlots: 120,
+	}
+	require.Equal(t, len(blocks), leiosEpochPrecheckEnd(blocks, nextEpoch))
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{currentEpoch, nextEpoch},
+	})
+	require.NoError(t, ls.validateDijkstraLeiosCertificate(
+		certifier,
+		announcements,
+	))
+	require.Equal(t, uint64(6), validatedEpoch)
+}
+
 func TestEnsureReferencedEndorserBlocksRejectsCertificateBeforeFetch(t *testing.T) {
 	t.Parallel()
 

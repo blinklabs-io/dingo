@@ -6997,6 +6997,19 @@ func (ls *LedgerState) ProcessTrustedBlockBatches(
 	return ls.ledgerProcessBlocksFromSource(ctx, readChainResultCh)
 }
 
+func leiosEpochPrecheckEnd(blocks []ledger.Block, epoch models.Epoch) int {
+	if epoch.SlotLength == 0 {
+		return 0
+	}
+	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	for i, block := range blocks {
+		if block.SlotNumber() >= epochEnd {
+			return i
+		}
+	}
+	return len(blocks)
+}
+
 func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	ctx context.Context,
 	readChainResultCh <-chan readChainResult,
@@ -7595,6 +7608,18 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				i+batchSize,
 			)
 
+			// Certificate validation resolves the certified endorser block's
+			// epoch from the published cache. Do not pre-check blocks beyond the
+			// current epoch: the normal apply path defers that boundary block,
+			// rolls the cache forward, then replays the deferred batch.
+			ls.RLock()
+			precheckEpoch := ls.currentEpoch
+			ls.RUnlock()
+			precheckEnd := leiosEpochPrecheckEnd(
+				nextBatch[i:end],
+				precheckEpoch,
+			)
+
 			// Leios: gate delivery of this chunk on the availability of the
 			// endorser blocks its Dijkstra ranking blocks reference, so the
 			// endorser transactions are applied ahead of the ranking blocks
@@ -7602,7 +7627,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// and is a no-op for blocks without Leios references.
 			if err := ls.ensureReferencedEndorserBlocks(
 				ctx,
-				nextBatch[i:end],
+				nextBatch[i:i+precheckEnd],
 			); err != nil {
 				completeReadResult()
 				return fmt.Errorf(
