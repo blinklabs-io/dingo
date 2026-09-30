@@ -1565,6 +1565,52 @@ func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(
 	}
 }
 
+func TestChainQueuedVerifiedHeaderMatchesPointFindsNonHeadHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	if err := c.AddVerifiedBlockHeader(testBlocks[0]); err != nil {
+		t.Fatalf("unexpected error adding verified header: %s", err)
+	}
+	if err := c.AddVerifiedBlockHeader(testBlocks[1]); err != nil {
+		t.Fatalf("unexpected error adding verified header: %s", err)
+	}
+	if err := c.AddBlockHeader(testBlocks[2]); err != nil {
+		t.Fatalf("unexpected error adding unverified header: %s", err)
+	}
+	pointOf := func(h *MockBlock) ocommon.Point {
+		return ocommon.NewPoint(h.SlotNumber(), h.Hash().Bytes())
+	}
+
+	if !c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[0])) {
+		t.Fatal("verified head header should match")
+	}
+	if !c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[1])) {
+		t.Fatal("verified non-head header should match its own point")
+	}
+	if c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[2])) {
+		t.Fatal("unverified queued header must not match")
+	}
+	wrongSlot := ocommon.NewPoint(
+		testBlocks[1].SlotNumber()+1,
+		testBlocks[1].Hash().Bytes(),
+	)
+	if c.QueuedVerifiedHeaderMatchesPoint(wrongSlot) {
+		t.Fatal("point with matching hash but different slot must not match")
+	}
+	if c.QueuedVerifiedHeaderMatchesPoint(
+		ocommon.NewPoint(testBlocks[3].SlotNumber(), testBlocks[3].Hash().Bytes()),
+	) {
+		t.Fatal("header that is not queued must not match")
+	}
+}
+
 func TestChainHeaderBlock(t *testing.T) {
 	t.Parallel()
 

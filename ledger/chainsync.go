@@ -4535,7 +4535,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 		// verified queued header by point, a second verification is
 		// redundant. Chain insertion still checks that the block matches the
 		// queued header hash before accepting it.
-		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
+		headerAlreadyVerified := ls.chain.QueuedVerifiedHeaderMatchesPoint(
 			e.Point,
 		)
 		if !headerAlreadyVerified &&
@@ -4543,7 +4543,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 				return err
 			}
-			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
+			headerAlreadyVerified = ls.chain.QueuedVerifiedHeaderMatchesPoint(
 				e.Point,
 			)
 		}
