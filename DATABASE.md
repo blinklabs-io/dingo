@@ -2080,17 +2080,18 @@ flowchart LR
     TxKey --> Offset
     Offset --> BlockKey
     EbManifest -. "body hashes and sizes" .-> EbTxs
-    EbTxs -. "when EB is applied" .-> EbBlob
+    EbTxs -. "when apply path retains bodies" .-> EbBlob
     SqlCommit --- BlobCommit
 ```
 
 The `em`/`et` pair is for historical Leios fetch serving. `em` stores the
 manifest; `et` stores the separately fetched transaction bodies. They are
-written together only when the complete body list is available. When a
-referencing ranking block is applied, the bodies are also written to a
-standalone `bp` blob so normal transaction offsets can resolve them. The
-diagram shows these as separate stages because neither representation is
-inlined into the other.
+written together only when the complete body list is available. Applying a
+referencing ranking block writes a standalone `bp` blob only for a non-empty
+body list. On the CIP path, at least one transaction must also remain after
+deduplication; the Musashi path retains the original list even when all its
+transactions are duplicates. The diagram shows these as separate stages
+because neither representation is inlined into the other.
 
 | Logical key | Value | Used by |
 |---|---|---|
@@ -2239,9 +2240,12 @@ instead. See `Hash`'s doc comment in `blockverify.go` for the full account.
 Leios also uses the ordinary blob-key namespace for ledger application. An EB
 is not itself part of the ranking-block chain. When a Dijkstra ranking block
 references one (`ledger/leios_apply.go`), `SetGenesisCbor` writes its
-transactions as a standalone CBOR blob under `bp` + EB slot + EB hash. This is
-the blob that transaction `DOFF` offsets resolve through cold extraction; it
-is separate from the `em`/`et` historical-serving records described above.
+transactions as a standalone CBOR blob under `bp` + EB slot + EB hash if the
+EB has a non-empty body list. The CIP path also requires at least one
+transaction to remain after deduplication; the Musashi path writes the original
+non-empty list even when every transaction is a duplicate. This is the blob
+that transaction `DOFF` offsets resolve through cold extraction, separate from
+the `em`/`et` historical-serving records described above.
 
 The synthetic `bp` blob has `ID=0` and deliberately has no `bi`/`bh` index
 entries. Chain iteration therefore does not treat it as a real block.
