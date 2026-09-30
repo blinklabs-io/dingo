@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -122,10 +123,30 @@ func HardForkDijkstra(
 			}
 		}
 	}
+	applyDijkstraRefScriptDefaults(&ret)
 	if ret.ProtocolVersion.Major < gdijkstra.MinProtocolVersionDijkstra {
 		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
 	}
 	return &ret, nil
+}
+
+// applyDijkstraRefScriptDefaults fills reference-script parameters the genesis
+// left unset with the fixed Conway values. A zero stride makes the tiered
+// reference-script fee calculation fail, and zero size limits reject every
+// transaction that consumes a reference script.
+func applyDijkstraRefScriptDefaults(p *gdijkstra.DijkstraProtocolParameters) {
+	if p.RefScriptCostStride == 0 {
+		p.RefScriptCostStride = uint32(conway.RefScriptCostStride)
+	}
+	if p.RefScriptCostMultiplier == nil {
+		p.RefScriptCostMultiplier = &cbor.Rat{Rat: big.NewRat(6, 5)}
+	}
+	if p.MaxRefScriptSizePerTx == 0 {
+		p.MaxRefScriptSizePerTx = uint32(conway.MaxRefScriptSizePerTx)
+	}
+	if p.MaxRefScriptSizePerBlock == 0 {
+		p.MaxRefScriptSizePerBlock = uint32(conway.MaxRefScriptSizePerBlock)
+	}
 }
 
 func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
@@ -137,7 +158,19 @@ func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
 		genesis.RefScriptCostStride != 0 ||
 		genesis.RefScriptCostMultiplier != nil ||
 		genesis.CommitteeStakeCoverage != nil ||
-		genesis.QuorumStakeThreshold != nil {
+		genesis.QuorumStakeThreshold != nil ||
+		genesis.MaxPledgeLeverage != nil ||
+		genesis.MinPoolMargin != nil ||
+		len(genesis.PlutusV4CostModel) > 0 ||
+		genesis.LeiosAnnouncementPeriodLength != 0 ||
+		genesis.LeiosVotePeriodLength != 0 ||
+		genesis.LeiosDiffusionPeriodLength != 0 ||
+		genesis.LeiosCommitteeSize != 0 ||
+		genesis.LeiosQuorumStakeThreshold != nil ||
+		genesis.MaxEndorserBlockReferencesSize != 0 ||
+		genesis.MaxEndorserBlockTxsSize != 0 ||
+		genesis.MaxEndorserBlockExUnits != (lcommon.ExUnits{}) ||
+		genesis.MaxRefScriptSizePerEndorserBlock != 0 {
 		return false
 	}
 	return isEmptyConwayGenesis(&genesis.ConwayGenesis)
