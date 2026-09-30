@@ -943,6 +943,46 @@ func TestSlotClockPastHorizonIsNotAnErrorAndResumes(t *testing.T) {
 	assert.NotContains(t, readLog(), "level=ERROR")
 }
 
+// Ticks are paused past the horizon, but wall-clock metrics must keep moving,
+// so the clock reports each skipped slot through OnBehindHorizon and stops
+// once ticks resume.
+func TestSlotClockPastHorizonReportsWallSlot(t *testing.T) {
+	t.Parallel()
+
+	provider := &horizonBoundProvider{
+		mockSlotTimeProvider: newMockSlotTimeProvider(
+			time.Now(), 20*time.Millisecond, 100,
+		),
+	}
+	var calls atomic.Int64
+	var lastSlot atomic.Uint64
+	cfg := DefaultSlotClockConfig()
+	cfg.OnBehindHorizon = func(slot uint64) {
+		lastSlot.Store(slot)
+		calls.Add(1)
+	}
+
+	clock := NewSlotClock(provider, cfg)
+	ch := clock.Subscribe()
+	clock.Start(t.Context())
+	defer clock.Stop()
+
+	require.Eventually(t, func() bool {
+		return calls.Load() >= 2
+	}, testutil.AsyncWait, 10*time.Millisecond,
+		"every skipped slot should be reported, not just the transition")
+	assert.NotZero(t, lastSlot.Load())
+
+	provider.resolved.Store(true)
+	testutil.RequireReceive(
+		t, ch, testutil.AsyncWait, "tick after era history catches up",
+	)
+	settled := calls.Load()
+	time.Sleep(100 * time.Millisecond)
+	assert.LessOrEqual(t, calls.Load(), settled+1,
+		"reports must stop once ticks resume")
+}
+
 // lockedWriter serializes writes from the clock goroutine against test reads.
 type lockedWriter struct {
 	mu *sync.Mutex

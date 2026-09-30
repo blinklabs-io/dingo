@@ -151,3 +151,43 @@ func TestHandleSlotTicksToleratesNilTipGapReporter(t *testing.T) {
 		t.Fatal("handleSlotTicks did not return")
 	}
 }
+
+// While the applied ledger is behind the wall clock the slot clock emits no
+// ticks, so handleBehindHorizon is the only thing keeping the gauges live.
+// Before it existed a from-genesis sync read as a fully synced node.
+func TestHandleBehindHorizonPublishesGaugesButNotReadiness(t *testing.T) {
+	t.Parallel()
+
+	reported := make(chan uint64, 1)
+	ls, _, metrics := newTipGapTestLedgerState(
+		t,
+		6_500_000,
+		func(gap uint64) { reported <- gap },
+	)
+	ls.currentEpoch.LengthInSlots = 432_000
+	ls.publishSnapshotsLocked()
+
+	ls.handleBehindHorizon(74_600_000)
+
+	assert.Equal(t, float64(68_100_000), gaugeValue(t, metrics.tipGapSlots))
+	assert.Equal(t, float64(432_000), gaugeValue(t, metrics.epochLengthSlots))
+	// The readiness probe must not learn a gap from a paused-tick report.
+	select {
+	case gap := <-reported:
+		t.Fatalf("ReportTipGapFunc called during catch-up with gap %d", gap)
+	default:
+	}
+}
+
+// An epoch length that is not yet known is left unset rather than
+// published as a fabricated value.
+func TestHandleBehindHorizonLeavesUnknownEpochLengthUnset(t *testing.T) {
+	t.Parallel()
+
+	ls, _, metrics := newTipGapTestLedgerState(t, 100, nil)
+
+	ls.handleBehindHorizon(1_000)
+
+	assert.Equal(t, float64(900), gaugeValue(t, metrics.tipGapSlots))
+	assert.Zero(t, gaugeValue(t, metrics.epochLengthSlots))
+}

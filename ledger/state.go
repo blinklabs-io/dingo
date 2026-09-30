@@ -2941,7 +2941,8 @@ func (ls *LedgerState) initScheduler() error {
 
 	// Initialize slot clock for slot-boundary-aware timing
 	slotClockConfig := SlotClockConfig{
-		Logger: ls.config.Logger,
+		Logger:          ls.config.Logger,
+		OnBehindHorizon: ls.handleBehindHorizon,
 	}
 	provider := newSlotTimeConverterProvider(ls.timeConv())
 	ls.slotClock = NewSlotClock(provider, slotClockConfig)
@@ -2998,6 +2999,40 @@ func (ls *LedgerState) initForge() {
 	}
 }
 
+// publishWallClockMetrics sets the wall-clock-derived gauges and returns the
+// wall-clock-to-tip distance. epochLength is skipped when zero (not yet
+// known). It does not touch ReportTipGapFunc: that feeds the readiness probe,
+// which must only see gaps observed on a real slot tick.
+func (ls *LedgerState) publishWallClockMetrics(
+	wallSlot uint64,
+	tipSlot uint64,
+	epochLength uint,
+) uint64 {
+	tipGap := uint64(0)
+	if wallSlot > tipSlot {
+		tipGap = wallSlot - tipSlot
+	}
+	ls.metrics.tipGapSlots.Set(float64(tipGap))
+	if epochLength > 0 {
+		ls.metrics.epochLengthSlots.Set(float64(epochLength))
+	}
+	return tipGap
+}
+
+// handleBehindHorizon keeps the wall-clock gauges live while the slot clock
+// pauses ticks because era history has not reached the wall-clock slot, which
+// is exactly when the node is furthest behind. It deliberately does not report
+// to ReportTipGapFunc, so /readyz keeps reporting "no chain tip yet" until a
+// real tick arrives.
+func (ls *LedgerState) handleBehindHorizon(wallSlot uint64) {
+	consensusState, tipState := ls.loadStateSnapshots()
+	ls.publishWallClockMetrics(
+		wallSlot,
+		tipState.currentTip.Point.Slot,
+		consensusState.currentEpoch.LengthInSlots,
+	)
+}
+
 // handleSlotTicks processes slot tick notifications from the slot clock.
 // When the current epoch crosses the nonce stability cutoff or reaches an
 // epoch boundary, it emits events for subscribers like snapshot managers and
@@ -3025,16 +3060,13 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// Update wall-clock-based metrics every tick
 		// (must run even when chain is stalled or catching up)
-		tipGap := uint64(0)
-		if tick.Slot > tipSlot {
-			tipGap = tick.Slot - tipSlot
-		}
-		ls.metrics.tipGapSlots.Set(float64(tipGap))
+		tipGap := ls.publishWallClockMetrics(
+			tick.Slot,
+			tipSlot,
+			currentEpoch.LengthInSlots,
+		)
 		if ls.config.ReportTipGapFunc != nil {
 			ls.config.ReportTipGapFunc(tipGap)
-		}
-		if currentEpoch.LengthInSlots > 0 {
-			ls.metrics.epochLengthSlots.Set(float64(currentEpoch.LengthInSlots))
 		}
 
 		// During catch up, don't emit slot-based epoch events. Block
