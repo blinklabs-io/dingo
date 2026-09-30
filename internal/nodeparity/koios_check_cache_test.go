@@ -17,7 +17,7 @@ package nodeparity
 // Proves node-parity's Koios-backed checks (CheckProtocolParams,
 // CheckStakeDistribution, and the UTxO half's fetchTxInfosCached) actually
 // read and write the shared
-// internal/koiosparity.Cache -- blinklabs-io/dingo#1900's explicit
+// internal/koiosparity.Cache -- the explicit
 // requirement that node-parity stop calling live Koios fresh for every
 // single epoch with nothing ever saved for reuse.
 //
@@ -231,7 +231,7 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
-	// compareTotalActiveStake (dingo#4321) also reads epoch_info, so seed it
+	// compareTotalActiveStake also reads epoch_info, so seed it
 	// too: this test's contract is that a cached POOL row causes no
 	// pool_history call, not that the stake check has only one cache
 	// dependency. Left unseeded it would fetch epoch_info live and the
@@ -302,7 +302,7 @@ func TestCheckStakeDistribution_CacheMissFetchesOnceAndPersists(t *testing.T) {
 	require.NoError(t, err)
 
 	cache := openTestCache(t)
-	// Seed epoch_info: compareTotalActiveStake (dingo#4321) reads it too,
+	// Seed epoch_info: compareTotalActiveStake reads it too,
 	// and this test measures pool_history caching specifically. Without it
 	// the fake server 404s the epoch_info fetch, which correctly is not
 	// cached and so retries, and the request count stops measuring what
@@ -402,7 +402,7 @@ func syntheticTxInfo(hash string) koiosparity.KoiosTxInfoItem {
 // every transaction is already in koios_tx_info costs no live Koios request
 // at all -- the UTxO half of the from-genesis walk reaching the same
 // cache-first behavior CheckProtocolParams/CheckStakeDistribution already
-// have (blinklabs-io/dingo#1900).
+// have.
 //
 // Reverting fetchTxInfosCached's cache lookup in place (calling
 // koios.GetTxInfos on the full chunk) makes the fake below receive a request
@@ -540,11 +540,11 @@ func TestFetchTxInfosCached_LiveFetchErrorIsNotSwallowed(t *testing.T) {
 // just the helper: compareTotalActiveStake is only useful if
 // CheckStakeDistribution actually calls it, and a helper-only test stays
 // green when the call is deleted -- the same unpinned-call-site gap raised
-// on #4319.
+// in earlier coverage.
 //
 // Dingo reports one pool; the cached Koios epoch total covers two. That is
-// dingo#4321's failure mode: the per-pool loop finds nothing wrong, because
-// it never asks about a pool Dingo did not report.
+// the failure mode of a missing pool: the per-pool loop finds nothing wrong,
+// because it never asks about a pool Dingo did not report.
 func TestCheckStakeDistributionReportsATotalShortfall(t *testing.T) {
 	const magic = 764824073
 	const epoch = uint64(502)
@@ -609,9 +609,9 @@ func TestCheckStakeDistributionReportsATotalShortfall(t *testing.T) {
 		"a shortfall is a real divergence, not a Koios-side fault")
 }
 
-// TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails is the
-// blocker raised in review on #4781, and the reason the epoch_info failure
-// is a KoiosFault mismatch rather than an error return.
+// TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails pins
+// why the epoch_info failure is a KoiosFault mismatch rather than an error
+// return.
 //
 // An error return discards every per-pool mismatch CheckStakeDistribution
 // has already collected. from-genesis's recordEpoch then logs only "stake
@@ -698,14 +698,14 @@ func TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails(t *testin
 	require.Contains(t, fault.Reason, ReasonKoiosEpochInfoUnavailable)
 }
 
-// TestCheckStakeDistributionSkipsAnEpochKoiosHasNotPublished is dingo#4820,
-// observed live rather than in review.
+// TestCheckStakeDistributionSkipsAnEpochKoiosHasNotPublished covers a live
+// failure: observed live.
 //
 // Koios computes pool_history only after processing an epoch. For one it has
 // not published, every pool Dingo reports looks absent, and the per-pool
 // loop calls each a divergence -- 646 of them per cycle on preview, forever,
-// because from-genesis keeps re-checking the tip epoch. With #4771's metrics
-// each cycle also increments node_parity_divergence_total, so
+// because from-genesis keeps re-checking the tip epoch. With the divergence
+// metrics each cycle also increments node_parity_divergence_total, so
 // NodeParityRepeatedDivergence pages critical hourly on false data.
 //
 // The trigger is Koios lag after close, not an open epoch: preview epoch
@@ -785,7 +785,7 @@ func TestCheckStakeDistributionSkipsAnEpochKoiosHasNotPublished(t *testing.T) {
 
 // TestCheckStakeDistributionStillComparesASettledEpoch is the other side of
 // the guard: an epoch that closed long ago must be compared exactly as
-// before, or dingo#4820's fix would silently disable the whole check.
+// before, or the unpublished-epoch skip would silently disable the whole check.
 func TestCheckStakeDistributionStillComparesASettledEpoch(t *testing.T) {
 	const magic = 764824073
 	const epoch = uint64(600)

@@ -103,7 +103,7 @@ type wiringFakeLSQServer struct {
 
 	// killConnOnNextPoolDistr, when set (killNextPoolDistr), closes the
 	// connection a ShelleyPoolDistr2Query arrives on instead of answering it
-	// -- reproducing dingo#1900's confirmed live failure shape (the shared
+	// -- reproducing the confirmed live failure shape (the shared
 	// connection between CheckProtocolParams and CheckStakeDistribution
 	// dying mid-sequence) directly, rather than fabricating an
 	// application-level error a real server could never actually send this

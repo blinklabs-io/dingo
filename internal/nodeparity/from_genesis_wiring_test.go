@@ -28,7 +28,7 @@ package nodeparity
 // `_ = false`) leaves every test in from_genesis_test.go and
 // koios_check_wiring_test.go green. Closing that gap needs a seam driving
 // RunFromGenesis's real callbacks through a real ChainSync+LocalStateQuery
-// session and a genuine RollBackward -- tracked as dingo#4365.
+// session and a genuine RollBackward -- not yet built.
 //
 // genesisFakeServer is a purpose-built fake for this file rather than a
 // reuse of incremental_harness_test.go's fakeCardanoServer/fakeLSQState:
@@ -462,7 +462,7 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 // genuine RollBackward and three epoch boundaries, proving
 // utxoTaintedThisEpoch's real lifecycle inside RunFromGenesis's own
 // closures -- not just utxoVerdict/applyTxInfoResults in isolation (see
-// this file's own doc comment, and dingo#4365).
+// this file's own doc comment).
 //
 // Every session gets one forced initial RollBackward before any real block
 // (NeedsInitialRollback -- see genesisFakeServer.requestNext), to the same
@@ -472,7 +472,7 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 // this test's first real reported epoch (clean). The deliberate rollback
 // then fires once block 1 has been delivered (rollbackAfterCursor),
 // re-baselining utxoRefs from Dingo's own (fake) current answer -- which
-// this PR's fix must taint, or block 2's report would trivially compare the
+// the fix must taint, or block 2's report would trivially compare the
 // re-baselined set against itself and falsely read "clean". Block 3's
 // report must NOT still be tainted, proving the post-report reset ran too,
 // not just that the rollback's own assignment did.
@@ -677,7 +677,7 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 // re-baseline and TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch's
 // tx_info-chunk-triggered re-baseline, both of which already re-baseline
 // successfully. This test fails the underlying GetUTxOWhole call itself
-// (server.failUtxoWholeCount), simulating dingo#1900's live "can't assign
+// (server.failUtxoWholeCount), simulating the live "can't assign
 // requested address" transient dial error during a re-baseline attempt.
 //
 // Confirmed by reverting from_genesis.go's fix in place (deleting the
@@ -688,13 +688,13 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 // comparison for every subsequent epoch of the run, never attempting to
 // recover even though only the very first call was ever configured to fail.
 //
-// With the fix restored: block 0's genesis capture (GetUTxOWhole call #1)
+// With the fix restored: block 0's genesis capture (GetUTxOWhole call 1)
 // fails and reports nothing (shares its epoch with the mandatory initial
-// rollback). Block 1's epoch boundary retries (call #2, which succeeds,
+// rollback). Block 1's epoch boundary retries (call 2, which succeeds,
 // since failUtxoWholeCount == 1) -- report1 must be tainted, not a false
 // "clean" match against the just-recovered baseline. Block 2's epoch
 // boundary finds utxoRefs already non-nil (no retry needed) and runs a real
-// comparison (call #3) -- report2 must be clean, proving UTxO checking
+// comparison (call 3) -- report2 must be clean, proving UTxO checking
 // actually resumed rather than staying stuck. Block 3 confirms report3 is
 // still clean, ruling out a one-shot fluke.
 func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
@@ -749,13 +749,13 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	}
 
 	// Block 0: genesis baseline capture attempted and fails (GetUTxOWhole
-	// call #1, the only call configured to fail) -- shares its epoch with
+	// call 1, the only call configured to fail) -- shares its epoch with
 	// the mandatory initial rollback, so it never starts a new epoch
 	// boundary and reports nothing.
 	server.allowStep(t)
 
 	// Block 1: first real epoch boundary. utxoRefs is still nil from
-	// block 0's failed capture, so the fix's retry fires here (call #2,
+	// block 0's failed capture, so the fix's retry fires here (call 2,
 	// which succeeds) -- must be tainted, not a false "clean" match against
 	// the just-recovered baseline.
 	server.allowStep(t)
@@ -765,7 +765,7 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	assert.ErrorIs(t, report1.UTxOErr, errUTxOTainted)
 
 	// Block 2: utxoRefs is now non-nil and untainted -- a real comparison
-	// (call #3) must run and come back clean, proving checking actually
+	// (call 3) must run and come back clean, proving checking actually
 	// resumed rather than staying permanently disabled.
 	server.allowStep(t)
 	report2 := recv()

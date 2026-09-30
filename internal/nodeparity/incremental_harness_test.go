@@ -83,8 +83,8 @@ type fakeLSQState struct {
 	// it is closed, simulating a peer that accepts the connection and
 	// then stalls mid-query -- for exercising that establishBaseline's
 	// context.WithTimeout(ctx, cfg.FullCheckTimeout) wrapping actually
-	// bounds this instead of hanging indefinitely (blinklabs-io/dingo#4183
-	// review). nil means "never stall", the default.
+	// bounds this instead of hanging indefinitely.
+	// nil means "never stall", the default.
 	stall <-chan struct{}
 	// stallQuery is stall's counterpart for the QueryFunc step instead of
 	// Acquire: gouroboros's LocalStateQuery client has its own built-in
@@ -770,7 +770,7 @@ func drainFullCheck(
 
 // TestRunIncremental_ReportsCleanMatch covers a case never once observed
 // live against a real network during this package's development
-// (blinklabs-io/dingo#3854 guarantees a stake-distribution mismatch on
+// (a stake-distribution divergence guaranteed a mismatch on
 // effectively every real block): when both nodes genuinely agree, the
 // per-block pipeline must report an empty Diff, not something that merely
 // looks empty by omission.
@@ -838,9 +838,9 @@ func TestRunIncremental_EpochTransitionFiresOnItsOwn(t *testing.T) {
 }
 
 // TestRunIncremental_MismatchFiresFullCheck covers the one trigger that IS
-// exercisable live (and was -- extensively, against blinklabs-io/dingo#3854's
-// live effect): included here too so the full trigger matrix has coverage
-// in one place, independent of any live network's current state.
+// exercisable live (and was -- extensively, against the stake-distribution
+// divergence's live effect): included here too so the full trigger matrix has
+// coverage in one place, independent of any live network's current state.
 func TestRunIncremental_MismatchFiresFullCheck(t *testing.T) {
 	t.Parallel()
 	dingoAddr, cardanoAddr, dingoState, _, cardanoServer := newIncrementalHarnessWithServer(t, 20, true)
@@ -903,7 +903,7 @@ func TestRunIncremental_GenuineRollbackFiresFullCheck(t *testing.T) {
 }
 
 // TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence is a
-// regression test for blinklabs-io/dingo#1900's incremental-mode audit
+// regression test for the incremental-mode audit
 // finding: querying/comparing stake distribution in the per-block check
 // permanently stalled a real incremental session, since Dingo's
 // GetStakeDistribution handler only answers when the pinned point equals
@@ -955,7 +955,7 @@ func TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence(
 }
 
 // TestEstablishBaseline_ResumesFromReachablePriorCursor is a regression test
-// for blinklabs-io/dingo#1900's incremental-mode audit finding: a restart
+// for the incremental-mode audit finding: a restart
 // used to always discard a saved cursor's own point in favor of wherever
 // the fresh baseline Check happened to land (the live tip at process
 // start), silently skipping every block that arrived during any downtime in
@@ -1141,7 +1141,7 @@ func TestEstablishBaseline_FallsBackWhenPriorEpochDiffersFromLiveTip(
 }
 
 // TestEstablishBaseline_DivergentBaselineLogsDisputed is a regression test
-// for blinklabs-io/dingo#1900's incremental-mode audit finding (b): a
+// for the incremental-mode audit finding (b): a
 // startup baseline whose own full Check found a real divergence (not just
 // Skipped) was accepted as the incremental cursor's starting point with no
 // distinct signal that the session begins life on a disputed point rather
@@ -1179,7 +1179,7 @@ func TestEstablishBaseline_DivergentBaselineLogsDisputed(t *testing.T) {
 }
 
 // TestEstablishBaseline_StalledPeerTimesOutAndRetries is the regression
-// test for a blinklabs-io/dingo#4183 review finding: establishBaseline
+// test for a gap: establishBaseline
 // called Check with the raw, long-lived ctx RunIncremental receives (which
 // only ever cancels at process shutdown), not one bounded by
 // cfg.FullCheckTimeout the way every other full Check this package
@@ -1279,7 +1279,7 @@ func TestEstablishBaseline_StalledPeerTimesOutAndRetries(t *testing.T) {
 }
 
 // TestBuildStartupCursor_StalledEpochQueryIsBounded is the regression test
-// for a blinklabs-io/dingo#4183 review finding: establishBaseline's own
+// for a gap: establishBaseline's own
 // Check call is bounded by cfg.FullCheckTimeout (see
 // TestEstablishBaseline_StalledPeerTimesOutAndRetries above), but
 // buildStartupCursor's separate queryEpochAt call right after it (this
@@ -1351,7 +1351,7 @@ func TestBuildStartupCursor_StalledEpochQueryIsBounded(t *testing.T) {
 }
 
 // TestIncrementalSession_NoProgressWhenFirstBlockAlwaysFails is the
-// regression test for a blinklabs-io/dingo#4183 review finding:
+// regression test for a gap:
 // incrementalSession used to report progressed=true (established) the
 // instant cs.Client.Sync was accepted, regardless of whether any block
 // that followed actually validated. A session whose very first block
