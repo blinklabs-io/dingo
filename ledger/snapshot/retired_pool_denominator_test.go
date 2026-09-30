@@ -45,7 +45,8 @@ SELECT ?, 0, id, ?, ? FROM pool WHERE pool_key_hash = ?`,
 }
 
 // TestStakeDistributionKeepsRetiredPoolStakeInDenominator pins the sigma_a
-// denominator against the defect behind dingo #4660.
+// denominator against the uniform reward-pot shortfall caused by dropping
+// retired-pool stake from the denominator.
 //
 // cardano-ledger's ssTotalActiveStake sums every registered credential holding
 // a delegation and never consults the stake-pool set, so a credential still

@@ -133,7 +133,7 @@ func TestRewardSnapshotActiveStakeKeepsDegradedPoolStake(t *testing.T) {
 		uint64(bundle.snapshot.TotalActiveStake),
 	)
 
-	// The excluded pool's stake is tracked explicitly (dingo #4025), not just
+	// The excluded pool's stake is tracked explicitly, not just
 	// implied by the gap between TotalActiveStake and the surviving pool set,
 	// so reward calculation can check reward_pool_input sums to that gap
 	// exactly instead of merely no more than TotalActiveStake.
@@ -144,8 +144,8 @@ func TestRewardSnapshotActiveStakeKeepsDegradedPoolStake(t *testing.T) {
 // TestRewardSnapshotActiveStakeTracksNoExclusion is the no-degraded-pool
 // companion to TestRewardSnapshotActiveStakeKeepsDegradedPoolStake: when
 // nothing was excluded, ExcludedActiveStake must still be a tracked zero, not
-// left nil. Nil means "unknown, predates tracking" (dingo #4025); a fresh
-// capture always knows the answer, even when that answer is zero.
+// left nil. Nil means "unknown, predates tracking"; a fresh capture always
+// knows the answer, even when that answer is zero.
 func TestRewardSnapshotActiveStakeTracksNoExclusion(t *testing.T) {
 	t.Parallel()
 
@@ -319,10 +319,10 @@ func TestSaveSnapshotKeepsDegradedPoolStakeInPoolAndEpochRows(t *testing.T) {
 	require.Equal(t, uint64(2), summary.TotalPoolCount)
 	require.Equal(t, uint64(2), summary.TotalDelegators)
 
-	// ExcludedActiveStake round-trips through the database exactly (dingo
-	// #4025): a reward calculation reading this row back after a restart or
-	// replay -- not just the in-memory bundle buildRewardStateInputs
-	// returned -- must still be able to reconstruct the excluded amount.
+	// ExcludedActiveStake round-trips through the database exactly: a reward
+	// calculation reading this row back after a restart or replay -- not just
+	// the in-memory bundle buildRewardStateInputs returned -- must still be
+	// able to reconstruct the excluded amount.
 	reloaded, err := db.Metadata().
 		GetRewardSnapshot(1, models.PoolStakeSnapshotTypeMark, nil)
 	require.NoError(t, err)

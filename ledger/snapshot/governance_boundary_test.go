@@ -26,12 +26,11 @@ import (
 )
 
 // TestCurrentBoundarySPOStakeRows_FallsBackToHistoricalReconstruction covers
-// governance's dingo#4441 same-boundary SPO read when no
-// ComputeEpochBoundarySnapshot stash exists for this boundary (the hook was
-// never installed, or its fast path failed): it must still return the
-// correct rows via the same historical reconstruction the persisted write
-// itself falls back to, with the CIP-1694 reward-account auto-vote
-// resolved.
+// governance's same-boundary SPO read when no ComputeEpochBoundarySnapshot
+// stash exists for this boundary (the hook was never installed, or its fast
+// path failed): it must still return the correct rows via the same historical
+// reconstruction the persisted write itself falls back to, with the CIP-1694
+// reward-account auto-vote resolved.
 func TestCurrentBoundarySPOStakeRows_FallsBackToHistoricalReconstruction(
 	t *testing.T,
 ) {
