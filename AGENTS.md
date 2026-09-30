@@ -60,6 +60,27 @@ Prose explaining how a system works belongs in documentation.
 Doc comments on exported identifiers are the exception. They are published API
 documentation: keep them accurate and in `// Name ...` form.
 
+## GitHub communication
+
+- Keep every GitHub issue comment, pull request comment, and review body at or
+  under 600 characters, including Markdown and whitespace. Make one specific
+  point per comment; do not split a long explanation across comments.
+- Write public comments directly and factually. Include only the observed
+  behavior, its impact, and the concrete question or action needed. Omit
+  greetings, praise, filler, repeated summaries, tool narration, AI
+  self-reference, and speculation.
+- Put code-specific review feedback on the relevant diff line. Use a
+  pull-request-level comment only for a concise overall disposition or an
+  important issue that does not belong on one line.
+- An issue describes the observed problem and impact; state a root cause only
+  when confirmed. A pull request describes what the change does and why. Keep
+  both bodies focused; do not paste chat transcripts, verbose walkthroughs, or
+  validation logs.
+- Do not create issues or post comments or reviews on another person's behalf
+  unless the task explicitly asks for that GitHub action.
+- Keep public GitHub text free of local paths, hostnames, private configuration,
+  credentials, and internal operational details.
+
 ## Non-obvious invariants
 
 - EventBus for async cross-component notifications: use `event.EventBus.SubscribeFunc()` for block/chain/mempool/peer events. Synchronous state queries between components still use direct method calls.
