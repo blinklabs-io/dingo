@@ -1009,6 +1009,15 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	// plutusEvalCtxCache holds one *cek.EvalContext per distinct (language
+	// version, protocol major version, cost-model parameter list,
+	// synthetic-V2 flag) combination observed by script evaluation, bounded
+	// with least-recently-used eviction. It is never reset:
+	// cek.NewEvalContext is a pure function of that key, so an entry stays
+	// correct across every epoch/era boundary that does not itself change
+	// the key (see PlutusEvalContextCache's doc comment). Set once in NewLedgerState
+	// and never reassigned; safe for concurrent readers without a lock.
+	plutusEvalCtxCache *eras.PlutusEvalContextCache
 	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
 	// a PlutusV2 cost model (real mainnet/preview/preprod never had one in
 	// genesis -- PlutusV2 postdates the Alonzo genesis format entirely, so
@@ -1526,6 +1535,27 @@ type LedgerState struct {
 	// rewardPrecomputeMu like the precompute worker's registration.
 	deferredStakeInputsWG      sync.WaitGroup
 	deferredStakeInputsWriting map[uint64]struct{}
+	// rewardCreditCompactionWG tracks queueRewardCreditCompaction's job;
+	// rewardCreditCompacting and rewardCreditCompactAgain are guarded by
+	// rewardPrecomputeMu.
+	rewardCreditCompactionWG sync.WaitGroup
+	rewardCreditCompacting   bool
+	rewardCreditCompactAgain bool
+	// ratificationJob is the latest boundary's deferred RATIFY, guarded by
+	// ratificationMu; ratificationWG tracks its goroutine.
+	// deferredBoundarySnapshotHook builds a boundary's mark snapshot after
+	// the boundary commits; nil keeps the capture in the boundary.
+	deferredBoundarySnapshotHook atomic.Pointer[deferredBoundarySnapshotHookHolder]
+	ratificationMu               sync.Mutex
+	ratificationJob              *ratificationJob
+	ratificationWG               sync.WaitGroup
+	ratificationSeq              atomic.Uint64
+	// ratificationApplyHook is a test seam, nil in production. It runs in
+	// the ratification job after it decides and before it writes.
+	ratificationApplyHook func(epoch uint64)
+	// ratifyAtBoundary is a test seam: true runs RATIFY in the boundary
+	// transaction, as every boundary did before it was deferred.
+	ratifyAtBoundary bool
 	// deferredStakeInputsFailHook is a test seam, nil in production. A
 	// non-nil error it returns fails that deferred stake-input chunk.
 	deferredStakeInputsFailHook func() error
@@ -1682,6 +1712,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		chain:              cfg.ChainManager.PrimaryChain(),
 		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		validationEnabled:  cfg.ValidateHistorical,
+		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
@@ -2094,11 +2125,15 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.recoverRollbackIntent(); err != nil {
 		return fmt.Errorf("recover interrupted ledger rollback: %w", err)
 	}
+	if err := ls.resumePendingRatification(); err != nil {
+		return err
+	}
 	// The subscription above cannot fire for an epoch that began before this
 	// process did, so catch up the in-progress epoch's reward round here.
 	// Without it, a node started mid-epoch calculates that round inline inside
 	// the next epoch-rollover transaction instead of ahead of it.
 	ls.queueStartupRewardPrecompute()
+	ls.queueRewardCreditCompaction()
 	if ls.startupRewardPrecomputeHook != nil {
 		ls.startupRewardPrecomputeHook()
 	}
@@ -2872,6 +2907,8 @@ func (ls *LedgerState) Close() (retErr error) {
 	ls.rewardPrecomputeMu.Unlock()
 	ls.rewardPrecomputeWG.Wait()
 	ls.deferredStakeInputsWG.Wait()
+	ls.rewardCreditCompactionWG.Wait()
+	ls.ratificationWG.Wait()
 	ls.config.Logger.Info(
 		"reward precompute handlers finished",
 		"elapsed", time.Since(rewardStart).Round(time.Millisecond),
@@ -3934,6 +3971,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	ls.rewardPrecomputeRetry = nil
 	ls.rewardPrecomputeMu.Unlock()
 	ls.rewardPrecomputeWriteMu.Unlock()
+	defer ls.retryRatificationApply()
 	defer func() {
 		ls.rewardPrecomputeMu.Lock()
 		ls.rewardInputGeneration.Add(1)
@@ -3953,6 +3991,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			if queueStartup {
 				ls.queueStartupRewardPrecompute()
 			}
+			ls.queueRewardCreditCompaction()
 			return
 		}
 		// Close discards queued work and waits for the worker; restoring
@@ -3991,6 +4030,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			ls.RUnlock()
 			ls.maybeQueueStakeRewardPrecomputeRetry(capturedSlot)
 		}
+		ls.queueRewardCreditCompaction()
 	}()
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
@@ -4044,6 +4084,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		// fields (both ahead of its own pool/DRep/governance/etc. sweep),
 		// recompute the expiration_epoch of the affected reward accounts
 		// against the surviving chain. Gate off => no-op.
+		if err := ls.discardPendingRatificationAfterSlot(
+			txn, point.Slot,
+		); err != nil {
+			return fmt.Errorf("discard pending ratification: %w", err)
+		}
 		if err := ls.recomputeAccountExpirationsAfterRollback(
 			txn,
 			point.Slot,
@@ -7614,6 +7659,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				len(nextBatch),
 				i+batchSize,
 			)
+			// Starts the dingo_ledger_block_apply_batch_latency_seconds
+			// window for this chunk: everything from here through
+			// updateTipMetrics reflecting its new tip below, including the
+			// Leios endorser-block wait this chunk may take next. See
+			// blockApplyBatchLatency's doc comment for why this is a
+			// per-batch, not per-block, measurement.
+			batchApplyStart := time.Now()
 
 			// Leios: gate delivery of this chunk on the availability of the
 			// endorser blocks its Dijkstra ranking blocks reference, so the
@@ -8150,6 +8202,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.reachedTip.Store(true)
 				}
 				ls.updateTipMetrics(tipDensity)
+				// This chunk's new tip is now reflected in
+				// cardano_node_metrics_blockNum_int, closing the window
+				// batchApplyStart opened above.
+				ls.metrics.observeBlockApplyBatch(
+					blocksProcessed,
+					time.Since(batchApplyStart),
+				)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then check whether the stability window reaches or exceeds
@@ -9476,6 +9535,16 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	}
 	go func() {
 		defer ls.hfiStabilityEvalInFlight.Store(false)
+		// The scan reads active proposals, which the latest boundary's
+		// RATIFY decision filters by its expiry marks.
+		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+			logger.Warn(
+				"hardfork-initiation stability check skipped",
+				"error", err,
+				"component", "ledger",
+			)
+			return
+		}
 		result, err := governance.EvaluateRatifiableHardForkInitiation(
 			governance.NewStabilityCheckInputs(
 				db,
@@ -11665,6 +11734,15 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
+}
+
+// PlutusEvalContextCache returns the shared PlutusEvalContextCache script
+// evaluation reuses across every redeemer, transaction, and block this
+// LedgerState validates or evaluates. Returns nil for a bare-constructed
+// LedgerState that skipped NewLedgerState (test-only); callers must treat a
+// nil cache as "no cache available" rather than dereferencing it.
+func (ls *LedgerState) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
+	return ls.plutusEvalCtxCache
 }
 
 // GetCurrentPParamsForReporting returns the current protocol parameters with

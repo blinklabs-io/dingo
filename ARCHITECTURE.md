@@ -58,7 +58,10 @@ boundary for relational metadata. It owns
 `database/sql` pools, store-owned transactions, savepoints, readiness, and
 business orchestration. A small dialect capability handles placeholder
 rebinding, identifier quoting, parameter limits, read-only isolation, bulk
-session tuning, and planner statistics. Generated query packages remain
+session tuning, planner statistics, and join-shaped `UPDATE` construction
+(`Dialect.UpdateFromJoinSQL`: SQLite/PostgreSQL's `UPDATE ... SET ... FROM ...`
+versus MySQL's `UPDATE ... JOIN ... ON ... SET ...`, since MySQL has no
+`UPDATE ... FROM` syntax at all). Generated query packages remain
 internal so generated row types cannot leak into ledger or API packages.
 
 The SQLite provider is a thin factory around the pure-Go driver. It configures
@@ -505,6 +508,16 @@ sequenceDiagram
     LS->>LS: reload epoch cache, repair lab nonces
     LS->>DB: clear rollback undo outbox after truncation commits
 ```
+
+Byron PBFT header validation decides "first block of a from-genesis chain"
+against the queued header chain (`chain.IsFirstOnHeaderChain`), not the primary
+tip: headers are verified and queued before blockfetch applies any block, so
+the primary tip is still origin for the whole first batch. Only the first
+queued header at an origin primary tip must be an epoch-0 EBB anchored to the
+configured Byron genesis hash. A rollback to origin drops the queue, so the
+rule applies again. Headers verified before they reach the queue (chain
+selection ingress, `ValidateBlockHeaderCrypto`) are peer-relative and skip
+the rule, since the EBB's own queueing event is delivered asynchronously.
 
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are
@@ -3184,6 +3197,17 @@ input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
 pairing the two lists as `zip` does; and a witness's address root is hashed
 over the canonical encoding of the address's decoded attributes.
 
+The Byron update state is not persisted. It is rebuilt by replaying the stored
+chain from its first block, so a restart or a rollback restores the limits and
+fee policy adopted as of the new tip. A stored chain that begins after genesis,
+as with an intersect start inside Byron, cannot know the updates adopted before
+its first block: `State.AdoptedParams` then marks the parameters
+`AdoptionUnknown`, and the Byron block size, transaction size and minimum fee
+rules are not enforced rather than judged against genesis values. Byron
+epoch-boundary blocks keep their fixed size bound. `ledgerstate` refuses a
+snapshot whose current era is Byron (`ErrByronSnapshotUnsupported`), so an
+import cannot start a node inside Byron either.
+
 The Byron start applies to an empty database only. `setEpochCache` returns as
 soon as `epochCache` is populated, which is what keeps an already-synced node
 untouched — and equally what means a database created by an earlier binary keeps
@@ -3895,9 +3919,12 @@ The `LedgerView` interface provides query access to ledger state:
 - Conway governance validation exposes the authoritative enacted root for each
   CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
   means those roots are known to be absent; lookup failures are propagated
-  instead of weakening ancestry checks. `GovActionById` exposes pending
-  actions and the current enacted roots, while excluding expired and superseded
-  enacted actions. It rehydrates their era-specific action CBOR and reports the
+  instead of weakening ancestry checks. `GovActionById` exposes members of the
+  Conway proposals set and the current enacted roots, while excluding dropped
+  and superseded enacted actions. An action RATIFY classified expired stays a
+  member until the next boundary drops it, so a child may still name it and a
+  vote on it is refused by its expiry epoch, not as unknown; validation during
+  an epoch therefore never reads that epoch's own RATIFY marks. It rehydrates their era-specific action CBOR and reports the
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
@@ -5278,12 +5305,38 @@ connection-closed event spawns a one-shot reconnect goroutine for the affected
 peer, and each reconcile cycle additionally redials known peers that have no
 connection and no active reconnect goroutine: topology local/public roots
 always (and bootstrap peers while bootstrap promotion is still allowed),
-gossip/ledger peers only when the node has no chain-selection-eligible
-upstream connection left, capped per cycle. This guarantees the node converges
-back to connected even when a close event cannot be attributed to its peer or
-a dial loop exited early. Gossip churn never demotes the peer holding the last
-eligible upstream connection, so routine churn cannot leave the node without a
-chainsync source.
+gossip/ledger peers under a shared per-cycle budget triggered by either of two
+conditions: the node has no chain-selection-eligible upstream connection left,
+or the hot set sits below `MinHotPeers` and the warm pool does not hold enough
+promotable gossip/ledger peers (a client connection, not a responder-only
+inbound, and a score at or above `MinScoreThreshold`) to close that gap on its
+own. The budget goes to the highest-scoring cold peers first, never-observed
+peers after observed ones and observed below-threshold peers last; under the
+`MinHotPeers` trigger an observed below-threshold peer is not redialed at all
+until score aging lifts it back over the threshold, so a peer churn just
+dropped cannot cycle straight back to hot. This guarantees the node converges
+back to connected, and back toward `MinHotPeers`, even when a close event
+cannot be attributed to its peer, a dial loop exited early, or the warm pool
+has run dry.
+
+Gossip churn never demotes the peer holding the last eligible upstream
+connection, so routine churn cannot leave the node without a chainsync source.
+Routine churn of a hot gossip/ledger peer scoring at or above
+`MinScoreThreshold` also waits for a replacement: the demotion loop counts the
+promotable warm pool once, before any state changes, and never demotes more
+such peers than that pool can backfill in the same cycle, so rotation cannot
+drain the hot set when the warm pool is empty. A peer scoring below
+`MinScoreThreshold` is still churned to cold without a replacement, and a peer
+whose transport is gone is still demoted by reconcile's inactivity check; the
+resulting deficit is refilled through the redial path above.
+
+Three Prometheus series let an operator confirm both guards are holding on a
+live node: `dingo_metrics_peerSelection_churn_demotions_skipped_total`
+(labeled `reason`: `no_replacement` or `last_eligible_upstream`),
+`dingo_metrics_peerSelection_cold_peer_redials_total` (labeled `trigger`:
+`zero_upstream` or `hot_deficit`), and the
+`dingo_metrics_peerSelection_hot_set_deficit` gauge (`MinHotPeers` minus the
+current hot count, floored at 0).
 
 Conversely, a discovered (gossip/ledger) or public-root peer
 that fails its outbound dial while it has never successfully connected is
@@ -13426,7 +13479,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    `GetExpiredAwaitingDropGovernanceProposals` finds proposals whose
    `expired_epoch` is strictly below the current epoch and whose deposit has
    not yet been returned, refunds each (`refundProposalDeposit`), and stamps
-   `governance_proposal_drop` (`dropped_epoch`/`dropped_slot`). That epoch
+   `governance_proposal_drop` (`dropped_epoch`/`dropped_slot`). The dropped
+   actions' remaining subtrees, including children proposed while they were
+   expired but still members, are removed and refunded in the same tick. That epoch
    bound, rather than this step's position ahead of the expiry step, is what
    enforces the delay: a boundary reprocessed after a commit crash reruns
    against expiries the first pass already wrote. The drop state lives in a
@@ -13462,6 +13517,57 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    later candidates in the same pass. This is another reason the behavior
    described here is specifically the running-treasury subset, not the full
    formal ENACT-state transition.
+
+   RATIFY runs after the boundary commits. `ProcessEpoch` with
+   `DeferRatification` returns a `governance.RatificationPlan` (the epoch
+   input, the post-ENACT parameters and the running treasury) instead of
+   tallying; `processEpochRollover` records it under
+   `dingo:governance:ratify-pending` and, in the boundary transaction's
+   `AfterCommit`, opens a read transaction and reads from it before returning,
+   which pins a snapshot of the committed boundary before any later block
+   commits. A background job decides RATIFY and EXPIRY on that snapshot and
+   writes the marks, at the boundary slot, in its own transaction under
+   `rewardPrecomputeWriteMu`. The next boundary first writes a decision the
+   job has not, waiting for the job to decide but never for its write, so the
+   boundary holding the writer cannot wait on a transaction that needs it.
+   RATIFY stays in the boundary transaction when a major-version change runs
+   HARDFORK after it, when an era transition follows the rollover, and when no
+   in-memory SPO state was resolved, because each would make the committed
+   state differ from what RATIFY reads at its position in the tick. A rollback
+   below the pending boundary discards the decision; start-up with a pending
+   record rewinds below its boundary through the rollback intent and fails when
+   the rewind exceeds the intent's limits. Transaction validation reads the
+   proposals set, not RATIFY's marks; LSQ `GetProposals` returns the proposals
+   set; Blockfrost DRep power and the hard-fork stability check call
+   `WaitEpochBoundaryJob` before reading proposal deposits and active
+   proposals.
+
+   A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
+   leaves its mark snapshot to the same job. At the SNAP point the boundary
+   only reads the stake rows of the pools POOLREAP is about to retire
+   (`snapshot.Manager.DeferEpochBoundaryCapture`, O(their delegators)),
+   because POOLREAP clears those delegations; it skips the full stake read,
+   the same-boundary SPO state and the snapshot write. The job builds
+   mark[new epoch] on the pinned snapshot
+   (`snapshot.Manager.PrepareEpochBoundarySnapshot`): the live stake read,
+   less each stake credential's credits marked
+   `AccountRewardDelta.PostSnapshot` at the boundary slot (POOLREAP deposit
+   refunds, enacted treasury withdrawals, proposal-deposit refunds;
+   `GetPostSnapshotRewardCredits`), with the retired pools' rows replaced by
+   the ones read at the SNAP point. Its persist-time
+   reads (reward inputs, Leios keys, reward-account auto-votes) see the whole
+   committed boundary, as the in-boundary write does. RATIFY takes its SPO
+   state from those rows, and one transaction writes the snapshot and the
+   RATIFY marks. The boundary keeps the capture when HARDFORK or an era
+   transition follows it and when CIP-0163 inactivity is on, and the snapshot
+   manager skips its epoch-transition fallback capture for an epoch the ledger
+   announced (`DeferEpochBoundaryCapture`). HARDFORK is known only after SNAP,
+   so a hard-fork boundary withdraws that announcement
+   (`DiscardEpochBoundaryCapture`) and the fallback still covers a capture that
+   does not persist. LSQ queries and
+   `PoolStakeDistribution` wait for the job; consensus reads of mark[epoch]
+   first happen after the next boundary, which writes the job's work before
+   anything else.
 
    The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
@@ -13715,8 +13821,22 @@ A credential's credits are folded into its account only where its stored
 balance changes: a transaction withdrawing from it first writes them with the
 journal rows and `reward_live_stake` refresh an eager boundary writes
 (`foldRewardCreditsForWithdrawals`, `AddAccountRewardsByCredential`) and marks
-the rows `folded` in the same transaction (`FoldRewardAccountOutputs`), so no
-reader counts a credit twice. A rollback below the boundary removes the round
+the rows `folded` in the same transaction, so no reader counts a credit twice.
+The rows are claimed before they are written
+(`ClaimPendingRewardCreditsForCredential`, `ClaimUnfoldedRewardCredits`): the
+claim marks them folded and, on PostgreSQL and MySQL, locks them first, so a
+concurrent claim of the same row skips it.
+
+Compaction folds every credited round older than the newest two
+(`rewardCreditRoundsKeptUnfolded`) into account rows in the background
+(`queueRewardCreditCompaction`, queued when a boundary credits a round and at
+start), `rewardCreditCompactionChunk` (1,000) credits per transaction under
+`rewardPrecomputeWriteMu`, so the derived-balance sums cover the last few rounds.
+Folding never changes a balance, so no reader needs an old round unfolded; the
+newest two stay unfolded because a rollback within the stability window can
+reach the boundaries that applied them. The folded flag is the job's progress
+record, so a stopped job resumes where it left off, and a rollback over a
+compacted round reverts it the same way as a withdrawal's folds. A rollback below the boundary removes the round
 and clears `folded` on its surviving outputs in the transaction that reverts
 the folded credits' journal rows. Core-mode retention keeps a credited round's
 unfolded rows. A precompute for a credited round does nothing, and replacing a
@@ -14808,6 +14928,57 @@ map key 1) removed, translating a resulting `MissingCostModelError{Version:
 1}` into `ErrNoCostModelForPlutusV2` for consistency with the other eras.
 Any other language's missing-cost-model error passes through unchanged,
 since only PlutusV2 is ever fabricated.
+
+### Plutus EvalContext Cache (blinklabs-io/dingo#4229)
+
+`ledger/eras/{alonzo,babbage,conway}.go` built a fresh `cek.EvalContext` (via
+`cek.NewEvalContext`) on every redeemer evaluation, even though its only
+inputs — Plutus language version, protocol major version, the exact
+cost-model parameter list, and whether the PlutusV2 entry is still
+`HardForkBabbage`'s synthetic default — are unchanged for an entire
+protocol-parameter snapshot and usually for many snapshots in a row.
+`eras.PlutusEvalContextCache` (`ledger/eras/plutus_eval_context_cache.go`)
+holds one `*cek.EvalContext` per distinct `(language version, protocol major
+version, cost-model parameter list, synthetic-V2 flag)` key and is consulted
+instead of calling `cek.NewEvalContext` directly at all nine call sites
+across the three era files.
+
+The cache needs no correctness invalidation and has no snapshot-scoped
+lifetime:
+`cek.NewEvalContext` is a pure function of that four-part key (see
+`cek.EvalContext`'s doc comment in `blinklabs-io/plutigo`, which also
+establishes that a built `*cek.EvalContext` is immutable and safe to share
+across any number of goroutines and evaluations), so reusing an entry across
+any two calls that share the full key is always correct regardless of which
+era, transaction, or protocol-parameter snapshot — including the previous
+era's pparams used at an era-boundary transaction — either call came from.
+A governance-enacted cost-model change simply produces a new key rather than
+making the old one wrong, and the key's cost-model component is the
+exact parameter list (never a digest or truncated form), so it can never
+conflate two distinct lists into one entry. plutigo's `costModelFromList`
+costs any parameter missing from a short list at maxBound, so lists that
+differ only in length build different contexts and a lossy key would return
+the wrong one; values past the parameter-name list are ignored, so an exact
+key at worst builds a duplicate context.
+
+Because each cost-model change adds a key and the cache lives as long as the
+ledger state, it is bounded at 16 entries (`plutusEvalContextCacheMaxEntries`)
+and evicts the least recently used entry to admit a new key. Live keys — up
+to three languages for each of the current and previous-era pparams, plus the
+synthetic-V2 variant — fit well under the bound. Eviction drops only the
+cache's reference: an evaluation already holding the evicted
+`*cek.EvalContext` keeps it, and the next lookup for that key rebuilds it.
+
+`*ledger.LedgerState` owns one `*eras.PlutusEvalContextCache` for its whole
+lifetime (`NewLedgerState`, never reassigned), reachable through
+`LedgerState.PlutusEvalContextCache()` and forwarded by
+`LedgerView.PlutusEvalContextCache()` — the same optional-capability pattern
+`MinPoolMarginProvider` and `CommitteeCredentialState` already use: the era
+package declares an exported `eras.PlutusEvalContextCacheProvider` interface
+and type-asserts the `lcommon.LedgerState` it was given, falling back to an
+uncached `cek.NewEvalContext` call (identical to this cache's absence) for
+any implementation — including most unit-test stand-ins — that doesn't
+provide one.
 
 ### Live Restore/Truncate LedgerStateConfig Parity
 
