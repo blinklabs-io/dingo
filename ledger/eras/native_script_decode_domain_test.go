@@ -16,7 +16,6 @@ package eras_test
 
 import (
 	"bytes"
-	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
@@ -89,12 +88,22 @@ func nsWitnessSet(scripts ...any) map[uint64]any {
 	return map[uint64]any{1: scripts}
 }
 
-func nsTxCbor(t *testing.T, era nsEra, body map[uint64]any, ws map[uint64]any) []byte {
+func nsTxCbor(t *testing.T, era nsEra, body map[uint64]any, ws map[uint64]any, aux any) []byte {
 	t.Helper()
 	if era.blockType >= ledger.BlockTypeAlonzo {
-		return nsMustEncode(t, []any{body, ws, true, nil})
+		return nsMustEncode(t, []any{body, ws, true, aux})
 	}
-	return nsMustEncode(t, []any{body, ws, nil})
+	return nsMustEncode(t, []any{body, ws, aux})
+}
+
+// nsAuxData carries the script in auxiliary data: the Shelley-MA array
+// before Alonzo, and the tag-259 map from Alonzo.
+func nsAuxData(t *testing.T, era nsEra, script any) cbor.RawMessage {
+	t.Helper()
+	if era.blockType >= ledger.BlockTypeAlonzo {
+		return nsMustEncode(t, cbor.Tag{Number: 259, Content: map[uint64]any{1: []any{script}}})
+	}
+	return nsMustEncode(t, []any{map[uint64]any{}, []any{script}})
 }
 
 func nsHeader(era nsEra, bodySize uint64, bodyHash []byte) []any {
@@ -123,9 +132,13 @@ func nsHeader(era nsEra, bodySize uint64, bodyHash []byte) []any {
 // nsBlockCbor assembles a block whose header carries the real body hash and
 // size, because block decode verifies the hash before the witness sets are
 // inspected.
-func nsBlockCbor(t *testing.T, era nsEra, body map[uint64]any, ws map[uint64]any) []byte {
+func nsBlockCbor(t *testing.T, era nsEra, body map[uint64]any, ws map[uint64]any, aux any) []byte {
 	t.Helper()
-	parts := []any{[]any{body}, []any{ws}, map[uint64]any{}}
+	auxSet := map[uint64]any{}
+	if aux != nil {
+		auxSet[0] = aux
+	}
+	parts := []any{[]any{body}, []any{ws}, auxSet}
 	if era.blockType >= ledger.BlockTypeAlonzo {
 		parts = append(parts, []any{})
 	}
@@ -159,33 +172,40 @@ func nsRefScriptBody(t *testing.T, era nsEra, script any) map[uint64]any {
 }
 
 type nsCase struct {
-	name string
-	era  nsEra
-	// script is placed in the witness set, or in an output reference script
-	// when ref is set.
+	era nsEra
+	// script is placed in the witness set, in an output reference script
+	// when ref is set, or in auxiliary data when aux is set.
 	script any
 	ref    bool
+	aux    bool
 }
 
-func (c nsCase) parts(t *testing.T) (map[uint64]any, map[uint64]any) {
+func (c nsCase) parts(t *testing.T) (map[uint64]any, map[uint64]any, any) {
 	t.Helper()
-	if c.ref {
-		return nsRefScriptBody(t, c.era, c.script), map[uint64]any{}
+	switch {
+	case c.ref:
+		return nsRefScriptBody(t, c.era, c.script), map[uint64]any{}, nil
+	case c.aux:
+		aux := nsAuxData(t, c.era, c.script)
+		body := nsBody(c.era)
+		hash := blake2b.Sum256(aux)
+		body[7] = hash[:]
+		return body, map[uint64]any{}, aux
 	}
-	return nsBody(c.era), nsWitnessSet(c.script)
+	return nsBody(c.era), nsWitnessSet(c.script), nil
 }
 
-func (c nsCase) tx(t *testing.T) ([]byte, error) {
+func (c nsCase) tx(t *testing.T) error {
 	t.Helper()
-	body, ws := c.parts(t)
-	_, err := safedecode.Transaction(c.era.txType, nsTxCbor(t, c.era, body, ws))
-	return nil, err
+	body, ws, aux := c.parts(t)
+	_, err := safedecode.Transaction(c.era.txType, nsTxCbor(t, c.era, body, ws, aux))
+	return err
 }
 
 func (c nsCase) block(t *testing.T) error {
 	t.Helper()
-	body, ws := c.parts(t)
-	_, err := ledger.NewBlockFromCbor(c.era.blockType, nsBlockCbor(t, c.era, body, ws))
+	body, ws, aux := c.parts(t)
+	_, err := ledger.NewBlockFromCbor(c.era.blockType, nsBlockCbor(t, c.era, body, ws, aux))
 	return err
 }
 
@@ -193,7 +213,7 @@ func (c nsCase) block(t *testing.T) error {
 // case with an error containing want.
 func (c nsCase) requireRejectedAtDecode(t *testing.T, want string) {
 	t.Helper()
-	_, txErr := c.tx(t)
+	txErr := c.tx(t)
 	require.Error(t, txErr, "transaction decode must reject")
 	require.ErrorContains(t, txErr, want)
 	blockErr := c.block(t)
@@ -203,8 +223,7 @@ func (c nsCase) requireRejectedAtDecode(t *testing.T, want string) {
 
 func (c nsCase) requireAcceptedAtDecode(t *testing.T) {
 	t.Helper()
-	_, txErr := c.tx(t)
-	require.NoError(t, txErr, "transaction decode must accept")
+	require.NoError(t, c.tx(t), "transaction decode must accept")
 	require.NoError(t, c.block(t), "block decode must accept")
 }
 
@@ -248,6 +267,12 @@ func TestNativeScriptConstructorDomainPostShelleyRejectsGuardUnderAnyOf(t *testi
 			nsCase{era: era, script: script, ref: true}.requireRejectedAtDecode(t, nsCtorErr)
 		})
 	}
+	for _, era := range nsPostShelley {
+		t.Run(era.name+"/auxiliary data", func(t *testing.T) {
+			t.Parallel()
+			nsCase{era: era, script: script, aux: true}.requireRejectedAtDecode(t, nsCtorErr)
+		})
+	}
 }
 
 // dingo #4550: positive controls.
@@ -281,6 +306,12 @@ func TestNativeScriptConstructorDomainAcceptsInEraConstructors(t *testing.T) {
 			nsCase{era: era, script: nsAll(nsSig(key), nsBefore(1)), ref: true}.requireAcceptedAtDecode(t)
 		})
 	}
+	for _, era := range nsPostShelley {
+		t.Run(era.name+"/auxiliary data timelock", func(t *testing.T) {
+			t.Parallel()
+			nsCase{era: era, script: nsAll(nsSig(key), nsBefore(1)), aux: true}.requireAcceptedAtDecode(t)
+		})
+	}
 }
 
 // dingo #4552
@@ -308,6 +339,12 @@ func TestNativeScriptSignatureHashWidthRejectedAtDecode(t *testing.T) {
 					requireRejectedAtDecode(t, widthErr)
 			})
 		}
+		if era != nsShelley {
+			t.Run(era.name+"/auxiliary data/29 bytes", func(t *testing.T) {
+				t.Parallel()
+				nsCase{era: era, script: nsSig(overlong), aux: true}.requireRejectedAtDecode(t, widthErr)
+			})
+		}
 		t.Run(era.name+"/canonical 28 bytes", func(t *testing.T) {
 			t.Parallel()
 			nsCase{era: era, script: nsSig(nsKeyHash(0x22))}.requireAcceptedAtDecode(t)
@@ -331,10 +368,10 @@ func TestNativeScriptSignatureHashWidthRejectedAtDecode(t *testing.T) {
 // decoded from the block and from the standalone transaction.
 func nsEvaluate(t *testing.T, c nsCase, slot uint64) []error {
 	t.Helper()
-	body, ws := c.parts(t)
-	tx, err := safedecode.Transaction(c.era.txType, nsTxCbor(t, c.era, body, ws))
+	body, ws, aux := c.parts(t)
+	tx, err := safedecode.Transaction(c.era.txType, nsTxCbor(t, c.era, body, ws, aux))
 	require.NoError(t, err)
-	block, err := ledger.NewBlockFromCbor(c.era.blockType, nsBlockCbor(t, c.era, body, ws))
+	block, err := ledger.NewBlockFromCbor(c.era.blockType, nsBlockCbor(t, c.era, body, ws, aux))
 	require.NoError(t, err)
 	require.Len(t, block.Transactions(), 1)
 	return []error{
@@ -379,7 +416,7 @@ func TestShelleyUnmetNofKIsScriptFailureNotDecodeFailure(t *testing.T) {
 			t.Parallel()
 			for _, err := range nsEvaluate(t, nsCase{era: nsShelley, script: script}, 10) {
 				var failed shelley.NativeScriptFailedError
-				require.True(t, errors.As(err, &failed), "want NativeScriptFailedError, got %v", err)
+				require.ErrorAs(t, err, &failed)
 			}
 		})
 	}
@@ -407,4 +444,10 @@ func TestNativeScriptConstructorDomainDijkstraAcceptsGuard(t *testing.T) {
 	data := nsMustEncode(t, []any{body, ws, true, nil})
 	_, err := safedecode.Transaction(ledger.TxTypeDijkstra, data)
 	require.NoError(t, err)
+	// Control: witness key 1 is decoded as native scripts, so the acceptance
+	// above is not an ignored field.
+	ws = nsWitnessSet(nsAny(nsSig(append(nsKeyHash(0x22), 0x42)), nsGuard(key)))
+	data = nsMustEncode(t, []any{body, ws, true, nil})
+	_, err = safedecode.Transaction(ledger.TxTypeDijkstra, data)
+	require.ErrorContains(t, err, "invalid native script key hash")
 }
