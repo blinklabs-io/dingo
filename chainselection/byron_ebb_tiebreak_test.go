@@ -25,7 +25,7 @@ import (
 )
 
 // TestChainSelectorByronEBBBeatsRegularIncumbentAtEqualBlockNumber exercises
-// normal multi-peer selection (blinklabs-io/dingo#4413): an incumbent peer
+// normal multi-peer selection: an incumbent peer
 // on a Byron regular tip, and a second peer that delivers the EBB successor
 // sharing the same protocol block number, the way Byron routes an EBB and
 // its predecessor. Without the era-aware tiebreak this is exactly

@@ -33,7 +33,7 @@ import (
 // to a value above the blocks the concurrent rollback had already deleted, so
 // the chain claimed a tip it did not store: the ledger's windowed rewind then
 // asked for the point a security parameter behind that tip and was told the
-// block did not exist (issue #3889).
+// block did not exist.
 func TestBatchRestoreIsSafeLocked(t *testing.T) {
 	t.Parallel()
 

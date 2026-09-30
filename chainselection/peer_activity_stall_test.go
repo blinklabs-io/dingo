@@ -34,7 +34,7 @@ import (
 // chainselection.peer_activity subscription. The mechanism under test is
 // buffer-size independent: a handler that stops returning stops draining, and
 // the buffer only decides how long that takes to become visible. In the
-// blinklabs-io/dingo#3550 Preview run the 1024-slot buffer took 12h31m of
+// Preview run the 1024-slot buffer took 12h31m of
 // keepalive traffic to fill, which is exactly why the buffer is shrunk here
 // rather than the events slowed down.
 const peerActivityStallBuffer = 4
@@ -113,8 +113,8 @@ func newStalledSelectionFixture(
 }
 
 // A blocked downstream consumer must not stop the internal
-// chainselection.peer_activity subscriber from draining. The Preview run in
-// blinklabs-io/dingo#3550 shows the opposite: the handler stopped returning,
+// chainselection.peer_activity subscriber from draining. The Preview run
+// showed the opposite: the handler stopped returning,
 // its 1024-slot buffer filled over the next 12h31m, and from then on every
 // keepalive response parked a protocol goroutine inside EventBus.Publish
 // (ouroboros/keepalive.go) with 299 of them blocked by the end of the log.
@@ -189,7 +189,7 @@ func TestPeerActivityHandlerKeepsDrainingWhileDownstreamConsumerBlocks(
 // so decision order and publish order coincide here. They do not in general:
 // every producer decides under cs.mutex and publishes after releasing it, so
 // two goroutines can decide in one order and enqueue in the other, and no lane
-// prevents that (wolf31o2 review). See publishSelection.
+// prevents that See publishSelection.
 func TestChainSwitchEventsPreservePublishOrder(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)

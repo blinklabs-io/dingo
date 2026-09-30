@@ -36,7 +36,7 @@ type originContinuityCase struct {
 // originContinuityCases covers both directions: a chain emptied back to origin
 // must still accept the network's genuine first block, and must reject a block
 // from further along the chain -- which is what a peer whose chainsync cursor
-// survived the rollback offers next (issue #4202).
+// survived the rollback offers next.
 //
 // The chain package does not know the network's genesis hash, so the anchor
 // available at origin is the block number, and the only value that leaves no
@@ -171,7 +171,7 @@ func assertOriginResult(
 // TestAddBlockHeaderAfterRollbackToOriginRequiresFirstBlock is the reported
 // defect: a rollback to origin empties the chain mid-run, and the next roll
 // forward from a peer whose chainsync cursor is still ahead must not be
-// accepted as the chain's first block (issue #4202).
+// accepted as the chain's first block.
 func TestAddBlockHeaderAfterRollbackToOriginRequiresFirstBlock(t *testing.T) {
 	t.Parallel()
 
@@ -318,7 +318,7 @@ func assertStillAtOriginWithQueuedHeader(t *testing.T, c *chain.Chain) {
 // sequence rollback-to-origin -> AddBlockHeader(first header) ->
 // AddRawBlocks(same hash, block number 2) must still be rejected: accepting it
 // would delete the queued header and persist block number 2 as the chain's
-// first block, leaving the missing prefix of issue #4202. The variant with no
+// first block, leaving the chain's prefix missing. The variant with no
 // header queued is covered by
 // TestAddRawBlockAfterRollbackToOriginRequiresFirstBlock.
 func TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader(t *testing.T) {
@@ -422,7 +422,7 @@ func TestAddBlockAfterRollbackToOriginUsesQueuedHeaderBlockNumber(t *testing.T) 
 // chain anchored at block number 1 stays self-consistent forever. Block 2
 // chains onto block 1 and is accepted, and nothing downstream ever notices that
 // block 0 is missing -- the chain is permanently short its first block, which
-// is the same truncated prefix issue #4202 reports.
+// is the truncated-prefix failure.
 //
 // Both halves are asserted here: the number-1 first block is rejected, and the
 // number-2 block that would have cemented the short chain is rejected too,

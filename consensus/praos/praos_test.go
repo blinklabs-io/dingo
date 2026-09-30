@@ -424,7 +424,7 @@ func byronEBBHeaderForView(
 }
 
 // TestComparePraosTipsByronEBBBeatsRegularTipAtEqualBlockNumber pins the
-// canonical Byron PBFT rule (blinklabs-io/dingo#4413): an epoch-boundary
+// canonical Byron PBFT rule: an epoch-boundary
 // block is an additional block despite sharing its predecessor's protocol
 // block number, so it beats a regular tip at that same number. This is the
 // exact "local regular tip vs. peer EBB successor" scenario from the issue.
@@ -498,7 +498,7 @@ func TestComparePraosTipsByronSameKindRemainsEqual(t *testing.T) {
 // EBB tiebreak is a no-op when only one side is a Byron header (an
 // era-transition tip pair): it must not invent a winner, and must leave the
 // existing Praos-only behavior (ChainEqual, no issuer/VRF data on the Byron
-// side) exactly as before this change.
+// side) exactly as before the Byron tiebreak.
 func TestComparePraosTipsByronTiebreakDoesNotArmAcrossEras(t *testing.T) {
 	byronTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("byron")},
