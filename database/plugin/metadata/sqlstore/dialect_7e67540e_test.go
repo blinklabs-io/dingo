@@ -217,3 +217,74 @@ func TestUnwrapDialectQueryerFindsDialectUnderCountingQueryer(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "mysql", got.dialect)
 }
+
+// TestUpdateFromJoinSQLStandardFormUnqualifiesAssignmentTargets covers the
+// SQLite/PostgreSQL shape: both accept UPDATE ... SET ... FROM ... WHERE, and
+// both reject a table-qualified assignment target ("UPDATE t SET t.col = ..."
+// is a syntax error on both), unlike MySQL's JOIN form below.
+func TestUpdateFromJoinSQLStandardFormUnqualifiesAssignmentTargets(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, dialect := range []Dialect{SQLiteDialect(), PostgresDialect()} {
+		got := dialect.UpdateFromJoinSQL(
+			"pool", "latest", "latest.pool_id = pool.id",
+			[]JoinAssignment{
+				{Column: "pledge", Expr: "latest.pledge"},
+				{Column: "cost", Expr: "latest.cost"},
+			},
+		)
+		require.Equal(
+			t,
+			"UPDATE pool SET pledge = latest.pledge, cost = latest.cost "+
+				"FROM latest WHERE latest.pool_id = pool.id",
+			got,
+			dialect.Name(),
+		)
+	}
+}
+
+// TestUpdateFromJoinSQLMySQLQualifiesAssignmentTargets covers MySQL's lack of
+// UPDATE ... FROM syntax: it needs UPDATE ... JOIN ... ON ... SET ..., and
+// every assignment target must be qualified with the target table, since the
+// joined source here projects columns with the same names as the target's
+// own and an unqualified SET is ambiguous (MySQL error 1052).
+func TestUpdateFromJoinSQLMySQLQualifiesAssignmentTargets(t *testing.T) {
+	t.Parallel()
+	got := MySQLDialect().UpdateFromJoinSQL(
+		"pool", "latest", "latest.pool_id = pool.id",
+		[]JoinAssignment{
+			{Column: "pledge", Expr: "latest.pledge"},
+			{Column: "cost", Expr: "latest.cost"},
+		},
+	)
+	require.Equal(
+		t,
+		"UPDATE pool JOIN latest ON latest.pool_id = pool.id "+
+			"SET pool.pledge = latest.pledge, pool.cost = latest.cost",
+		got,
+	)
+}
+
+// TestRestorePoolStateAtSlotQueryClassifiesAsOtherNamedInsteadOfUnknown
+// guards the instrumentation fix for RestorePoolStateAtSlot's CTE-based
+// UPDATE: classifySQLStatement deliberately calls any WITH-leading statement
+// "other" rather than guessing a verb (see that function's doc comment), but
+// before the query carried a "-- name:" comment it fell into the generic
+// "unknown" bucket in dingo_database_sql_query_duration_seconds, aggregating
+// it with every other unnamed hand-written query in the store. This must hold
+// for all three dialects' assembled statement text, not only SQLite's.
+func TestRestorePoolStateAtSlotQueryClassifiesAsOtherNamedInsteadOfUnknown(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, dialect := range []Dialect{
+		SQLiteDialect(), PostgresDialect(), MySQLDialect(),
+	} {
+		op, name := classifySQLStatement(
+			restorePoolDenormalizedFieldsQuery(dialect),
+		)
+		require.Equal(t, "other", op, dialect.Name())
+		require.Equal(t, "RestorePoolStateAtSlot", name, dialect.Name())
+	}
+}
