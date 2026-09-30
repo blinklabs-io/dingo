@@ -95,8 +95,10 @@ func (ls *LedgerState) prefetchBlockUtxos(
 }
 
 // forgetSpentPrefetchedUtxos drops the inputs and collateral of an applied
-// transaction from the prefetched set. Over-dropping is safe: a missing entry
-// falls back to the database read.
+// transaction from the prefetched set, walking every level because a Dijkstra
+// transaction's Inputs() omits its sub-transactions' inputs. Both inputs and
+// collateral are dropped whatever the validity flag: over-dropping is safe,
+// since a missing entry falls back to the database read.
 func forgetSpentPrefetchedUtxos(
 	prefetched map[utxoref.Key]lcommon.Utxo,
 	tx lcommon.Transaction,
@@ -104,10 +106,12 @@ func forgetSpentPrefetchedUtxos(
 	if len(prefetched) == 0 {
 		return
 	}
-	for _, in := range tx.Inputs() {
-		delete(prefetched, utxoref.ForInput(in))
-	}
-	for _, in := range tx.Collateral() {
-		delete(prefetched, utxoref.ForInput(in))
+	for _, level := range TransactionLevels(tx) {
+		for _, in := range level.Inputs() {
+			delete(prefetched, utxoref.ForInput(in))
+		}
+		for _, in := range level.Collateral() {
+			delete(prefetched, utxoref.ForInput(in))
+		}
 	}
 }

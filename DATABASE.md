@@ -2628,7 +2628,10 @@ WHERE u.tx_id = decode($1, 'hex')
 Batched live-UTxO lookup by a list of (tx hash, output index) references —
 used by the `GetUTxOByTxIn` n2c query and the `utxorpc` `ReadUtxos` RPC to
 resolve multiple TxIns/keys in one round trip instead of one query per input
-(#392). Refs with no matching live UTxO are simply absent from the result;
+(#392). Validated block application (`ledger.LedgerState.prefetchBlockUtxos`)
+also calls it once per block for the spend, collateral and reference inputs no
+transaction in that block produces; a failed batch falls back to per-input
+`GetUtxo` reads. Refs with no matching live UTxO are simply absent from the result;
 callers must not treat a partial result as an error. It groups the requested
 references by distinct transaction hash, queries every output for batches of
 up to 400 hashes, then filters to the requested output indexes and live rows in

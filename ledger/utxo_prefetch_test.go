@@ -15,11 +15,14 @@
 package ledger
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-
+	"github.com/blinklabs-io/dingo/utxoref"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -118,4 +121,52 @@ func TestLedgerProcessBlockPrefetchDoesNotResurrectSpentUtxos(t *testing.T) {
 		t, fx, []lcommon.Transaction{fx.tx, fx.tx},
 	)
 	require.Error(t, err, "double spend within one block must be rejected")
+}
+
+// TestForgetSpentPrefetchedUtxosDropsSubTransactionInputs checks that an
+// input consumed by a Dijkstra sub-transaction is dropped from the prefetched
+// set once the enclosing transaction is applied. The enclosing transaction's
+// Inputs() lists only its own body's inputs, so a later transaction in the
+// block spending the same ref would otherwise be answered from the snapshot.
+func TestForgetSpentPrefetchedUtxosDropsSubTransactionInputs(t *testing.T) {
+	t.Parallel()
+	spentHash := bytes.Repeat([]byte{0x11}, 32)
+	subBody, err := cbor.Encode(map[uint]any{
+		0: []any{[]any{spentHash, uint64(3)}},
+		1: []any{},
+	})
+	require.NoError(t, err)
+	subTransaction, err := cbor.Encode([]any{
+		cbor.RawMessage(subBody), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	body, err := cbor.Encode(map[uint]any{
+		0:  []any{},
+		1:  []any{},
+		2:  uint64(0),
+		23: cbor.NewSetType([]cbor.RawMessage{subTransaction}, true),
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode(
+		[]any{cbor.RawMessage(body), map[uint]any{}, true, nil},
+	)
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	levels := TransactionLevels(tx)
+	require.Len(t, levels, 2)
+	require.Len(t, levels[0].Inputs(), 1)
+	require.Empty(t, tx.Inputs())
+
+	key := utxoref.ForInput(levels[0].Inputs()[0])
+	prefetched := map[utxoref.Key]lcommon.Utxo{
+		key: {Id: levels[0].Inputs()[0]},
+	}
+	forgetSpentPrefetchedUtxos(prefetched, tx)
+	require.NotContains(
+		t,
+		prefetched,
+		key,
+		"an input spent by a sub-transaction must leave the prefetched set",
+	)
 }

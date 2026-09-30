@@ -93,9 +93,10 @@ type LedgerView struct {
 	// validated (see prefetchBlockUtxos). It is owned by block application,
 	// shared read-only by that block's per-transaction views, and consulted
 	// only after the overlays and the memo. Block application deletes a
-	// transaction's inputs from it once that transaction is applied, so a
-	// later transaction cannot be answered with an output that is already
-	// spent. A miss falls through to the database read.
+	// transaction's inputs and collateral, including those of Dijkstra
+	// sub-transactions, once that transaction is applied, so a later
+	// transaction cannot be answered with an output that is already spent.
+	// A miss falls through to the database read.
 	prefetchedUtxos map[utxoref.Key]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
