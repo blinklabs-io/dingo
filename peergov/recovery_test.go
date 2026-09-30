@@ -604,12 +604,21 @@ func TestPeerGovernor_Reconcile_RedialsColdGossipPeerBelowMinHotPeers(
 
 	pg.reconcile(t.Context())
 
+	// With an eligible upstream present, a never-connected gossip peer
+	// whose dial fails is dropped and deny-listed, which can happen before
+	// the first poll. The deny-list entry is only written by a failed dial,
+	// so it counts as evidence of the redial.
 	require.Eventually(
 		t,
 		func() bool {
 			pg.mu.Lock()
 			defer pg.mu.Unlock()
-			return pg.peers[1].Reconnecting || pg.peers[1].ReconnectCount > 0
+			if idx := pg.peerIndexByAddress("127.0.0.1:1"); idx != -1 {
+				peer := pg.peers[idx]
+				return peer.Reconnecting || peer.ReconnectCount > 0
+			}
+			_, denied := pg.denyList["127.0.0.1:1"]
+			return denied
 		},
 		5*time.Second,
 		10*time.Millisecond,
