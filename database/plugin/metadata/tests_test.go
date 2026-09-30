@@ -47,6 +47,7 @@ import (
 var governanceStoreMethods = []string{
 	// Proposals and votes
 	"GetGovernanceProposal",
+	"GetGovernanceProposalSet",
 	"GetActiveGovernanceProposals",
 	"GetRatifiedGovernanceProposals",
 	"GetEnactedGovernanceProposalsAt",

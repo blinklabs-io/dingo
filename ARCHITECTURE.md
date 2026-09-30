@@ -3892,9 +3892,12 @@ The `LedgerView` interface provides query access to ledger state:
 - Conway governance validation exposes the authoritative enacted root for each
   CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
   means those roots are known to be absent; lookup failures are propagated
-  instead of weakening ancestry checks. `GovActionById` exposes pending
-  actions and the current enacted roots, while excluding expired and superseded
-  enacted actions. It rehydrates their era-specific action CBOR and reports the
+  instead of weakening ancestry checks. `GovActionById` exposes members of the
+  Conway proposals set and the current enacted roots, while excluding dropped
+  and superseded enacted actions. An action RATIFY classified expired stays a
+  member until the next boundary drops it, so a child may still name it and a
+  vote on it is refused by its expiry epoch, not as unknown; validation during
+  an epoch therefore never reads that epoch's own RATIFY marks. It rehydrates their era-specific action CBOR and reports the
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
@@ -13423,7 +13426,9 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    `GetExpiredAwaitingDropGovernanceProposals` finds proposals whose
    `expired_epoch` is strictly below the current epoch and whose deposit has
    not yet been returned, refunds each (`refundProposalDeposit`), and stamps
-   `governance_proposal_drop` (`dropped_epoch`/`dropped_slot`). That epoch
+   `governance_proposal_drop` (`dropped_epoch`/`dropped_slot`). The dropped
+   actions' remaining subtrees, including children proposed while they were
+   expired but still members, are removed and refunded in the same tick. That epoch
    bound, rather than this step's position ahead of the expiry step, is what
    enforces the delay: a boundary reprocessed after a commit crash reruns
    against expiries the first pass already wrote. The drop state lives in a
@@ -13459,6 +13464,57 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    later candidates in the same pass. This is another reason the behavior
    described here is specifically the running-treasury subset, not the full
    formal ENACT-state transition.
+
+   RATIFY runs after the boundary commits. `ProcessEpoch` with
+   `DeferRatification` returns a `governance.RatificationPlan` (the epoch
+   input, the post-ENACT parameters and the running treasury) instead of
+   tallying; `processEpochRollover` records it under
+   `dingo:governance:ratify-pending` and, in the boundary transaction's
+   `AfterCommit`, opens a read transaction and reads from it before returning,
+   which pins a snapshot of the committed boundary before any later block
+   commits. A background job decides RATIFY and EXPIRY on that snapshot and
+   writes the marks, at the boundary slot, in its own transaction under
+   `rewardPrecomputeWriteMu`. The next boundary first writes a decision the
+   job has not, waiting for the job to decide but never for its write, so the
+   boundary holding the writer cannot wait on a transaction that needs it.
+   RATIFY stays in the boundary transaction when a major-version change runs
+   HARDFORK after it, when an era transition follows the rollover, and when no
+   in-memory SPO state was resolved, because each would make the committed
+   state differ from what RATIFY reads at its position in the tick. A rollback
+   below the pending boundary discards the decision; start-up with a pending
+   record rewinds below its boundary through the rollback intent and fails when
+   the rewind exceeds the intent's limits. Transaction validation reads the
+   proposals set, not RATIFY's marks; LSQ `GetProposals` returns the proposals
+   set; Blockfrost DRep power and the hard-fork stability check call
+   `WaitEpochBoundaryJob` before reading proposal deposits and active
+   proposals.
+
+   A Conway boundary with `SetDeferredEpochBoundarySnapshotHooks` wired also
+   leaves its mark snapshot to the same job. At the SNAP point the boundary
+   only reads the stake rows of the pools POOLREAP is about to retire
+   (`snapshot.Manager.DeferEpochBoundaryCapture`, O(their delegators)),
+   because POOLREAP clears those delegations; it skips the full stake read,
+   the same-boundary SPO state and the snapshot write. The job builds
+   mark[new epoch] on the pinned snapshot
+   (`snapshot.Manager.PrepareEpochBoundarySnapshot`): the live stake read,
+   less each stake credential's credits marked
+   `AccountRewardDelta.PostSnapshot` at the boundary slot (POOLREAP deposit
+   refunds, enacted treasury withdrawals, proposal-deposit refunds;
+   `GetPostSnapshotRewardCredits`), with the retired pools' rows replaced by
+   the ones read at the SNAP point. Its persist-time
+   reads (reward inputs, Leios keys, reward-account auto-votes) see the whole
+   committed boundary, as the in-boundary write does. RATIFY takes its SPO
+   state from those rows, and one transaction writes the snapshot and the
+   RATIFY marks. The boundary keeps the capture when HARDFORK or an era
+   transition follows it and when CIP-0163 inactivity is on, and the snapshot
+   manager skips its epoch-transition fallback capture for an epoch the ledger
+   announced (`DeferEpochBoundaryCapture`). HARDFORK is known only after SNAP,
+   so a hard-fork boundary withdraws that announcement
+   (`DiscardEpochBoundaryCapture`) and the fallback still covers a capture that
+   does not persist. LSQ queries and
+   `PoolStakeDistribution` wait for the job; consensus reads of mark[epoch]
+   first happen after the next boundary, which writes the job's work before
+   anything else.
 
    The proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
@@ -13712,8 +13768,22 @@ A credential's credits are folded into its account only where its stored
 balance changes: a transaction withdrawing from it first writes them with the
 journal rows and `reward_live_stake` refresh an eager boundary writes
 (`foldRewardCreditsForWithdrawals`, `AddAccountRewardsByCredential`) and marks
-the rows `folded` in the same transaction (`FoldRewardAccountOutputs`), so no
-reader counts a credit twice. A rollback below the boundary removes the round
+the rows `folded` in the same transaction, so no reader counts a credit twice.
+The rows are claimed before they are written
+(`ClaimPendingRewardCreditsForCredential`, `ClaimUnfoldedRewardCredits`): the
+claim marks them folded and, on PostgreSQL and MySQL, locks them first, so a
+concurrent claim of the same row skips it.
+
+Compaction folds every credited round older than the newest two
+(`rewardCreditRoundsKeptUnfolded`) into account rows in the background
+(`queueRewardCreditCompaction`, queued when a boundary credits a round and at
+start), `rewardCreditCompactionChunk` (1,000) credits per transaction under
+`rewardPrecomputeWriteMu`, so the derived-balance sums cover the last few rounds.
+Folding never changes a balance, so no reader needs an old round unfolded; the
+newest two stay unfolded because a rollback within the stability window can
+reach the boundaries that applied them. The folded flag is the job's progress
+record, so a stopped job resumes where it left off, and a rollback over a
+compacted round reverts it the same way as a withdrawal's folds. A rollback below the boundary removes the round
 and clears `folded` on its surviving outputs in the transaction that reverts
 the folded credits' journal rows. Core-mode retention keeps a credited round's
 unfolded rows. A precompute for a credited round does nothing, and replacing a

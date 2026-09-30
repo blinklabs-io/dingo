@@ -581,6 +581,21 @@ undo delivered before the record is removed. Malformed or unsupported records
 are logged and removed so one damaged notification record cannot permanently
 prevent startup.
 
+**Pending ratification.** Key `dingo:governance:ratify-pending` in
+`sync_state` holds a JSON record (`epoch`, `boundary_slot`, `id`, and
+`snapshot` when the boundary left that epoch's `pool_stake_snapshot`,
+`epoch_summary` and reward-input rows to the same job) naming the latest
+boundary whose RATIFY decision or mark snapshot has not been written yet. `GetPostSnapshotRewardCredits(slot)` returns
+each stake credential's total of the `account_reward_delta` credits at `slot`
+with `post_snapshot` set, which the deferred mark snapshot subtracts from the
+live stake read to recover the SNAP point. The boundary
+transaction writes it; the transaction that writes the decision's ratified and
+expired marks -- the background ratification job's, or the next boundary's --
+deletes it. A rollback below `boundary_slot` deletes it in the rollback
+transaction. Start-up with the record present rewinds below the boundary through
+a rollback intent, because the state the decision must be taken on no longer
+exists; a rewind beyond the intent's block or byte limit fails start-up.
+
 **Reward precompute chunk cursor.** Key
 `dingo:stake-reward:precompute-cursor:<snapshot epoch>` in `sync_state` holds a
 version-2 JSON record: `format_version`, `snapshot_epoch`, the `generation` the
@@ -607,9 +622,19 @@ output rows in an applied round with `spendable = TRUE`, `guarded = FALSE` and
 `GetLiveStakeInputsForPools`, DRep voting-power reads and historical stake
 reconstruction join through this table, so the set of applied rounds does not
 consume a growing SQL bind list. Historical reads include only rounds whose
-`boundary_slot` is at or before the requested slot. `FoldPendingRewardAccountOutputs`
-sets `folded` on one credential's rows in the transaction that writes them to
-its account. `GetPendingRewardCreditRounds` and
+`boundary_slot` is at or before the requested slot.
+`ClaimPendingRewardCreditsForCredential` (one stake credential's rows) and
+`ClaimUnfoldedRewardCredits` (up to a limit of one round's rows, in `id` order)
+select a credited round's unfolded rows, with `FOR UPDATE` on PostgreSQL and
+MySQL, set `folded` on them and return them for the caller to write to their
+accounts in the same transaction. `FoldPendingRewardAccountOutputs` sets
+`folded` on one credential's rows. Lookups of one stake credential's unfolded
+rows test the flag as `NOT folded`, so SQLite reads them on the credential
+index rather than the `(spendable, guarded, folded, epoch)` pending index,
+which serves the per-round probes (`HasPendingRewardCreditRounds`,
+`ClaimUnfoldedRewardCredits`, and the compaction due probe
+`HasUnfoldedRewardCreditsThroughEpoch`, which tests the rounds through a given
+epoch). `GetPendingRewardCreditRounds` and
 `SetPendingRewardCreditRounds` read and replace the table rows.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
 the rollback slot and clears `folded` on its surviving outputs.
@@ -1257,7 +1282,7 @@ updates preserve the previous activity and expiry epochs.
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
-| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes only rows without `enacted_epoch` or `expired_epoch` as pending actions, while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. |
+| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes rows without `enacted_epoch` or a `governance_proposal_drop` row as members of the Conway proposals set -- an expired action stays a member, and may still be named as a parent or refused a vote by its expiry epoch, until the boundary that drops it -- while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. |
 | `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment (dingo#4411). A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. `SetGovernanceVote` upserts by the unique voter/proposal key, so a replaced vote overwrites `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` in place; `governance_vote_history` is what lets rollback recover the value that predated a replacement (dingo#4463). |
@@ -2067,6 +2092,9 @@ flowchart LR
     UtxoKey["u + tx hash + output index<br/>UTxO CBOR or DOFF"]
     TxKey["t + tx hash<br/>DOFF or DTXP"]
     Offset["DOFF / DTXP<br/>slot + block hash + byte ranges"]
+    EbManifest["em + EB hash + slot<br/>raw EB manifest CBOR"]
+    EbTxs["et + EB hash + slot<br/>CBOR list of transaction bodies"]
+    EbBlob["bp + EB slot + EB hash<br/>standalone transaction CBOR blob"]
     BlobCommit["metadata_commit_timestamp"]
     SqlCommit["SQL commit_timestamp"]
 
@@ -2076,8 +2104,19 @@ flowchart LR
     UtxoKey --> Offset
     TxKey --> Offset
     Offset --> BlockKey
+    EbManifest -. "body hashes and sizes" .-> EbTxs
+    EbTxs -. "when apply path retains bodies" .-> EbBlob
     SqlCommit --- BlobCommit
 ```
+
+The `em`/`et` pair is for historical Leios fetch serving. `em` stores the
+manifest; `et` stores the separately fetched transaction bodies. They are
+written together only when the complete body list is available. Applying a
+referencing ranking block writes a standalone `bp` blob only for a non-empty
+body list. On the CIP path, at least one transaction must also remain after
+deduplication; the Musashi path retains the original list even when all its
+transactions are duplicates. The diagram shows these as separate stages
+because neither representation is inlined into the other.
 
 | Logical key | Value | Used by |
 |---|---|---|
@@ -2223,42 +2262,38 @@ main block outright, as bark's archive-fetch path does, would make
 Byron-era history permanently unretrievable from an S3/GCS-backed node
 instead. See `Hash`'s doc comment in `blockverify.go` for the full account.
 
-Leios endorser-block storage uses the same blob-key namespace, even though an
-endorser block is not part of the ranking-block chain. When a Dijkstra ranking
-block references an endorser block (`ledger/leios_apply.go`), `SetGenesisCbor`
-writes a standalone CBOR blob under a `bp` + `(endorser-block slot,
-endorser-block hash)` key. That `bp` value is the endorser-block offset blob
-used by cold extraction, not a chain block and not the transaction metadata
-rows. Which transaction commits this `bp` blob depends on the apply path
-(`LeiosApplyEndorserBlockTxs`). On the Haskell-conformant path (Musashi,
-`LeiosApplyEndorserBlockTxs` false) it is committed in its own blob transaction,
-not in the shared block-processing transaction that covers up to a full 50-block
-chunk: every certified endorser block in a chunk would otherwise pile its full
-blob (plus one `DOFF` entry per endorser transaction body, each ranging over
-that body's bytes: every Dijkstra sub-transaction body, then the enclosing
-body element, never the whole transaction array; and one per produced output)
-into that single transaction, and on a dense Leios backlog the accumulated
-writes exceed Badger's per-transaction budget (`ErrTxnTooBig`), wedging the
-chunk. That path applies the endorser transactions without validation and never
-reads the blob back within the chunk, and the blob is content-addressed and
-idempotent (`ID=0`, off the chain index), so an independent commit is safe — the
-endorser transactions' `DOFF` ledger effects still go into the shared
-transaction under the ranking block's point, so rollback semantics are
-unchanged; a blob orphaned by a crash or rollback is harmless and overwritten
-identically on re-apply. On the CIP-conformant path
-(`LeiosApplyEndorserBlockTxs` true) the endorser transactions are validated and
-a later block in the same chunk that spends an endorser-block-produced output
-reads the blob back through the shared transaction, so the blob stays in the
-shared transaction to be resolvable via read-your-writes (a separately committed
-blob is not visible to that transaction's start-of-transaction snapshot). Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
-keys and deliberately omits the `bi`/`bh` index keys, so the chain iterator
-never treats it as a chain block. Its `bp..._metadata` carries `ID=0` (real
-ranking blocks created via `BlockCreate` get `ID >= 1`), which is also how the
-`bp`-prefix scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0`
-blobs so a synthetic endorser/genesis blob is never returned as the "previous
-block." This matters for storage callers, but it does not make a slot-key scan
-a canonical chain query: retained fork blobs can still sort before an epoch
+Leios also uses the ordinary blob-key namespace for ledger application. An EB
+is not itself part of the ranking-block chain. When a Dijkstra ranking block
+references one (`ledger/leios_apply.go`), `SetGenesisCbor` writes its
+transactions as a standalone CBOR blob under `bp` + EB slot + EB hash if the
+EB has a non-empty body list. The CIP path also requires at least one
+transaction to remain after deduplication; the Musashi path writes the original
+non-empty list even when every transaction is a duplicate. This is the blob
+that transaction `DOFF` offsets resolve through cold extraction, separate from
+the `em`/`et` historical-serving records described above.
+
+The synthetic `bp` blob has `ID=0` and deliberately has no `bi`/`bh` index
+entries. Chain iteration therefore does not treat it as a real block.
+`BlockBeforeSlotTxn` skips `ID=0`, though a raw slot-key scan still is not a
+canonical chain query because retained fork blobs may sort before an epoch
 boundary.
+
+The blob transaction boundary depends on `LeiosApplyEndorserBlockTxs`:
+
+- **Musashi / Haskell-conformant path (`false`):** the standalone blob commits
+  separately from the shared block-processing transaction, which can cover up
+  to 50 blocks. Keeping large EB blobs out of that transaction avoids Badger's
+  per-transaction size limit (`ErrTxnTooBig`) during dense backlogs. The blob
+  is idempotent, and transaction ledger effects remain associated with the
+  ranking block for rollback.
+- **CIP-conformant path (`true`):** the blob remains in the shared transaction.
+  A later block in the same chunk may spend an EB-produced output and must be
+  able to read the blob through read-your-writes; a separately committed blob
+  is not visible to that transaction's starting snapshot.
+
+Both paths store transaction effects under the referencing ranking block's
+point, so rolling back that ranking block removes the effects. A blob left
+behind by a crash or rollback is harmless and is overwritten on reprocessing.
 Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
 ranking block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain
 index is attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and
@@ -4248,6 +4283,19 @@ WHERE expires_epoch >= $1
 ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
 ```
 
+`GetGovernanceProposalSet` returns the Conway proposals set that transaction
+validation resolves votes, parents, and potential committee members against:
+
+```sql
+SELECT gp.*
+FROM governance_proposal gp
+LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
+WHERE gp.enacted_epoch IS NULL
+  AND gpd.dropped_epoch IS NULL
+  AND gp.deleted_slot IS NULL
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+```
+
 Epoch-boundary replay uses exact epoch/slot lifecycle lookups:
 
 ```sql
@@ -4326,7 +4374,7 @@ The sweep is transitive (BFS): each orphaned proposal is itself used as a seed t
 Which tick returns an orphan's deposit depends on why it was removed, because cardano-ledger unions the enacted action with the siblings its enactment removed and returns all of those deposits in one tick, while an expired action is removed a tick after it was flagged:
 
 - Removed because a competing sibling enacted: refunded in the enacting tick, alongside the winner's own deposit, and stamped into `governance_proposal_drop` at that boundary so the drop step does not return it again.
-- Removed as the descendant subtree of a naturally expired action: marked expired only, and refunded one epoch later alongside its expired ancestor.
+- Removed as the descendant subtree of a naturally expired action: marked expired only, and refunded one epoch later alongside its expired ancestor. The drop step sweeps the dropped action's remaining subtree again with an immediate refund, because children proposed while the action was expired but still a member leave the proposals set with it.
 
 A proposal reachable both ways takes the enactment tick, which is when cardano-ledger would have removed it.
 

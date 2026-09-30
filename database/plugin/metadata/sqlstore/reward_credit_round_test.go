@@ -192,3 +192,42 @@ func TestRollbackRewardCreditUnfoldUsesEpochIndex(t *testing.T) {
 	require.NotContains(t, plan, "SCAN reward_account_output")
 	require.True(t, strings.Contains(plan, "SEARCH reward_account_output"), plan)
 }
+
+// TestUnfoldedCreditLookupsUseTheCredentialIndex pins the SQLite plan of the
+// per-stake-credential unfolded-credit lookups. On the (spendable, guarded,
+// folded, epoch) index they walk every unfolded row once per stake credential,
+// which turns the SNAP-point stake read quadratic in delegators.
+func TestUnfoldedCreditLookupsUseTheCredentialIndex(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	queries := map[string]string{
+		"live stake": `SELECT rls.staking_key, ` +
+			store.pendingRewardCreditSubquery(
+				"rls.credential_tag", "rls.staking_key",
+			) + ` FROM reward_live_stake rls WHERE rls.registered = TRUE`,
+		"one stake credential": `SELECT id FROM reward_account_output
+WHERE credential_tag = 0 AND staking_key = x'00'
+  AND ` + credentialUnfoldedRewardCreditPredicate,
+	}
+	for name, query := range queries {
+		rows, err := store.readDB.Query("EXPLAIN QUERY PLAN " + query)
+		require.NoError(t, err, name)
+		var plan []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
+			if strings.Contains(detail, "reward_account_output") ||
+				strings.Contains(detail, " prc ") {
+				plan = append(plan, detail)
+			}
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		joined := strings.Join(plan, "; ")
+		require.Contains(t, joined, "idx_reward_account_output_credential",
+			"%s: plan %s", name, joined)
+		require.NotContains(t, joined, "pending_round",
+			"%s: plan %s", name, joined)
+	}
+}

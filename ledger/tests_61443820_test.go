@@ -7518,7 +7518,27 @@ func epochBoundaryBenchPartialPrecomputeT(
 }
 
 func (ls *LedgerState) waitEpochBoundaryBenchBackground() {
+	_ = ls.WaitEpochBoundaryJob(context.Background())
+	ls.ratificationWG.Wait()
 	ls.deferredStakeInputsWG.Wait()
+	ls.rewardCreditCompactionWG.Wait()
+}
+
+// wireDeferredBoundarySnapshot mirrors node.go's deferred mark snapshot
+// wiring.
+func wireDeferredBoundarySnapshot(ls *LedgerState, mgr *snapshot.Manager) {
+	ls.SetDeferredEpochBoundarySnapshotHooks(
+		mgr.DeferEpochBoundaryCapture,
+		mgr.DiscardEpochBoundaryCapture,
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) (DeferredBoundarySnapshot, error) {
+			return mgr.PrepareEpochBoundarySnapshot(
+				context.Background(), txn, evt,
+			)
+		},
+	)
 }
 
 // epochBoundaryBenchWireDeferred mirrors node.go's
@@ -7853,6 +7873,7 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 		},
 	)
 	epochBoundaryBenchWireDeferred(f.ls, mgr)
+	wireDeferredBoundarySnapshot(f.ls, mgr)
 	f.ls.SetCurrentBoundarySPOStakeHook(
 		func(
 			txn *database.Txn,
@@ -13135,6 +13156,9 @@ func (f *hardForkRatifyFixture) rollover(
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	// RATIFY runs after the boundary commits; its marks are durable once
+	// the decision settles.
+	require.NoError(t, f.ls.WaitEpochBoundaryJob(t.Context()))
 	return result
 }
 
@@ -13471,6 +13495,48 @@ func TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook(
 		"without SetCurrentBoundarySPOStakeHook wired, governance falls "+
 			"back to reading the not-yet-persisted mark[742] row and must "+
 			"see zero SPO stake, never ratifying")
+}
+
+// A hard fork is found only after the SNAP point has registered the deferred
+// capture, so the boundary must withdraw it when it keeps the capture itself;
+// a leftover entry stops the epoch-transition fallback from writing mark[743]
+// if the boundary's own capture does not persist.
+func TestHardForkBoundaryDiscardsDeferredSnapshotCapture(t *testing.T) {
+	t.Parallel()
+
+	f := newHardForkRatifyFixture(t)
+	ratifyResult := f.rollover(t, f.ls.currentEpoch, f.pparams)
+	require.Equal(t, uint64(742), ratifyResult.NewCurrentEpoch.EpochId)
+
+	noop := func(*database.Txn, event.EpochTransitionEvent) error { return nil }
+	f.ls.SetEpochBoundarySnapshotStakeHook(noop)
+	f.ls.SetEpochBoundarySnapshotHook(noop)
+	f.ls.SetCurrentBoundarySPOStakeHook(
+		func(
+			*database.Txn, event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return nil, nil
+		},
+	)
+	var captured, discarded []uint64
+	f.ls.SetDeferredEpochBoundarySnapshotHooks(
+		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+			captured = append(captured, evt.NewEpoch)
+			return nil
+		},
+		func(epoch uint64) { discarded = append(discarded, epoch) },
+		func(
+			*database.Txn, event.EpochTransitionEvent,
+		) (DeferredBoundarySnapshot, error) {
+			return nil, errors.New("hard-fork boundary deferred its snapshot")
+		},
+	)
+
+	enactResult := f.rollover(t, ratifyResult.NewCurrentEpoch, f.pparams)
+	require.Equal(t, uint64(743), enactResult.NewCurrentEpoch.EpochId)
+	require.Equal(t, []uint64{743}, captured,
+		"the SNAP point must register the capture before the hard fork is known")
+	require.Equal(t, []uint64{743}, discarded)
 }
 
 // TestHealEmptyLabNoncesRepairsAndRecomputes verifies that healEmptyLabNonces
