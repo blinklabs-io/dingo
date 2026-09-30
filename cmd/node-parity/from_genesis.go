@@ -284,7 +284,7 @@ func (c *fromGenesisCounters) recordEpoch(
 //
 // Split out of the command body so the decision is reachable from a test.
 // Left inline it was unpinned: replacing it with addr != "" left the whole
-// cmd/node-parity suite green (review on #4771).
+// cmd/node-parity suite green.
 //
 // flags.Changed reports explicit use, so "--metrics-addr=" means off.
 func shouldServeMetrics(flags *pflag.FlagSet, addr string) bool {

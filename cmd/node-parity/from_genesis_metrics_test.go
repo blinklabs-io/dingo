@@ -169,8 +169,8 @@ func TestRecordEpochWithoutMetricsDoesNotPanic(t *testing.T) {
 	require.Equal(t, 1, c.stakeMismatches)
 }
 
-// TestRecordEpochDoesNotCountAWhollyIncompleteEpoch pins CodeRabbit's
-// finding on #4771: an epoch whose every check was untrusted verified
+// TestRecordEpochDoesNotCountAWhollyIncompleteEpoch pins that
+// an epoch whose every check was untrusted verified
 // nothing, so folding it into epochsTotal would inflate the count an
 // operator reads as "epochs actually validated" and make a wholly-degraded
 // run look like a working one.
@@ -223,7 +223,7 @@ func TestRecordDivergenceIdentifiesKoiosAsTheReference(t *testing.T) {
 }
 
 // TestFromGenesisMetricsRegistersNoWatchCounters is the regression test for
-// the review finding on #4771 that from-genesis would false-alert.
+// the finding that from-genesis would false-alert.
 //
 // NodeParityNotChecking fires when checks_total, checks_skipped_total and
 // check_errors_total are all flat for 10 minutes. from-genesis records one
@@ -286,12 +286,11 @@ func TestFromGenesisMetricsPreMaterializesZeroSeries(t *testing.T) {
 	}
 }
 
-// TestShouldServeMetrics pins the --metrics-addr opt-in, which was unpinned
-// until review on #4771: replacing the condition with
-// `globalFlags.metricsAddr != ""` left the whole cmd/node-parity suite
-// green. The flag defaults to ":9464", so that mutation makes every
-// from-genesis run bind a wildcard port nobody asked for, and fail outright
-// when the port is taken -- on a replay that runs for days.
+// TestShouldServeMetrics pins the --metrics-addr opt-in, which was once
+// unpinned: replacing the condition with `globalFlags.metricsAddr != ""` left
+// the whole cmd/node-parity suite green. The flag defaults to ":9464", so that
+// mutation makes every from-genesis run bind a wildcard port nobody asked for,
+// and fail outright when the port is taken -- on a replay that runs for days.
 //
 // The three cases are the whole contract: absent means off despite the
 // non-empty default, present means on, and an explicit empty value is the
