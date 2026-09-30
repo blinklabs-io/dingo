@@ -390,7 +390,7 @@ func TestMempoolRevalidationDropsDescendantsOfBatchSpentByBlock(t *testing.T) {
 		outputs: []uint64{900_000},
 	})
 	require.NoError(t, addBatch(t, pool, descendantCbor))
-	_, survivorCbor := buildDijkstraBatch(t, batchSpec{
+	survivor, survivorCbor := buildDijkstraBatch(t, batchSpec{
 		inputs:  []batchOutRef{batchInput(0x62, 0)},
 		outputs: []uint64{700_000},
 	})
@@ -408,5 +408,5 @@ func TestMempoolRevalidationDropsDescendantsOfBatchSpentByBlock(t *testing.T) {
 
 	remaining := pool.Transactions()
 	require.Len(t, remaining, 1)
-	require.NotEqual(t, parent.Hash().String(), remaining[0].Hash)
+	require.Equal(t, survivor.Hash().String(), remaining[0].Hash)
 }
