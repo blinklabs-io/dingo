@@ -58,7 +58,10 @@ boundary for relational metadata. It owns
 `database/sql` pools, store-owned transactions, savepoints, readiness, and
 business orchestration. A small dialect capability handles placeholder
 rebinding, identifier quoting, parameter limits, read-only isolation, bulk
-session tuning, and planner statistics. Generated query packages remain
+session tuning, planner statistics, and join-shaped `UPDATE` construction
+(`Dialect.UpdateFromJoinSQL`: SQLite/PostgreSQL's `UPDATE ... SET ... FROM ...`
+versus MySQL's `UPDATE ... JOIN ... ON ... SET ...`, since MySQL has no
+`UPDATE ... FROM` syntax at all). Generated query packages remain
 internal so generated row types cannot leak into ledger or API packages.
 
 The SQLite provider is a thin factory around the pure-Go driver. It configures
