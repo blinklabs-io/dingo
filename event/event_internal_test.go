@@ -88,10 +88,6 @@ func TestAsyncWorkerDropsQueuedEventAfterStop(t *testing.T) {
 	}
 }
 
-// The tests in this file cover blinklabs-io/dingo#2932: channelSubscriber must
-// wait for buffer capacity rather than dropping events, without reintroducing
-// the Close() deadlock that the original non-blocking send avoided.
-
 // TestDeliverWaitsForCapacityThenDelivers is the core no-loss property: a
 // delivery into a full buffer parks until a slot frees, then lands.
 func TestDeliverWaitsForCapacityThenDelivers(t *testing.T) {
@@ -952,21 +948,6 @@ func newBlockingSubscriber() *blockingSubscriber {
 	}
 }
 
-func (s *blockingSubscriber) Deliver(Event) error {
-	s.startOnce.Do(func() {
-		close(s.deliverStarted)
-	})
-	<-s.releaseDeliver
-	s.doneOnce.Do(func() {
-		close(s.deliverDone)
-	})
-	return nil
-}
-
-func (s *blockingSubscriber) Close() {
-	s.closeCalled.Store(true)
-}
-
 // TestStopWaitsForInFlightPublish verifies that Stop cannot close subscribers
 // and return while a Publish call is still delivering to a subscriber.
 func TestStopWaitsForInFlightPublish(t *testing.T) {
@@ -1109,97 +1090,6 @@ func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {
 	eb.Stop()
 }
 
-// TestCloseDoesNotDeadlockWithFullChannel verifies that Close
-// completes promptly even when the channel buffer is full and a
-// concurrent Publish is in progress.
-//
-// The property is about a Publish parked on a *full* buffer racing Close.
-// How large that buffer is does not change the interleaving, only how long
-// each attempt spends filling it before the interesting part begins --
-// subscribing at EventQueueSize meant every one of the 500 attempts
-// published 100,000 events first, which made this single test the event
-// package's floor at 49.3s of a 51.1s run, and left the race window a
-// vanishing fraction of each attempt.
-//
-// So the attempt count that hunts the interleaving now fills a small
-// buffer, and a few attempts still run at the production queue size so
-// that path keeps its coverage.
-func TestCloseDoesNotDeadlockWithFullChannel(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		name     string
-		buffer   int
-		attempts int
-	}{
-		{name: "small buffer", buffer: 8, attempts: 500},
-		{name: "production queue size", buffer: EventQueueSize, attempts: 5},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			for range tc.attempts {
-				closeDeadlockAttempt(t, tc.buffer)
-			}
-		})
-	}
-}
-
-// closeDeadlockAttempt runs one Close-versus-Publish attempt against a
-// subscriber whose buffer it first fills, and fails if Close does not
-// complete.
-func closeDeadlockAttempt(t *testing.T, buffer int) {
-	t.Helper()
-
-	eb := NewEventBus(nil, nil)
-	typ := EventType("close.deadlock.test")
-	subId, ch := eb.SubscribeWithBuffer(typ, buffer)
-
-	// Fill the buffer.
-	for range buffer {
-		eb.Publish(typ, NewEvent(typ, "fill"))
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Concurrent publisher that keeps trying to publish.
-	go func() {
-		defer wg.Done()
-		for range 50 {
-			eb.Publish(typ, NewEvent(typ, "storm"))
-		}
-	}()
-
-	// Concurrent unsubscribe (triggers Close).
-	go func() {
-		defer wg.Done()
-		eb.Unsubscribe(typ, subId)
-	}()
-
-	// Drain channel so it eventually closes.
-	go func() {
-		for range ch { //nolint:revive
-		}
-	}()
-
-	// wg.Wait must complete. If Close deadlocks this will
-	// hang and the test will time out.
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// success
-	case <-time.After(5 * time.Second):
-		t.Fatal("deadlock: Close/Publish blocked for 5s")
-	}
-
-	eb.Stop()
-}
-
 // TestSubscribeFuncDoneVisibleBeforeSubIdPublished guards against a real
 // bug: subscribeInternal published chSub into channelSubsById while still
 // holding e.mu, but chSub.done for a SubscribeFuncWithBuffer subscriber was
@@ -1287,92 +1177,6 @@ func TestSubscribeFuncDoneVisibleBeforeSubIdPublished(t *testing.T) {
 	)
 }
 
-// The stall warning is rate-limited per delivery, which bounds it to one line
-// per interval per *blocked publisher*. That is not a bound at all when the
-// publishers are what is numerous: a wedged subscriber with N goroutines parked
-// on it emits N lines per interval, forever.
-//
-// This is not hypothetical. A node-to-client peer reconnecting in a tight loop
-// parked publishers on connmanager.conn_closed faster than they drained and
-// produced 7.7 million identical warnings in a 40-minute run -- enough to bury
-// the one signal an operator needs to see, and to make the logs themselves a
-// second problem. The bound has to be per subscriber.
-// Not t.Parallel: swaps the package-level deliveryStallWarnInterval.
-func TestDeliverStallWarningIsRateLimitedPerSubscriber(t *testing.T) {
-	origInterval := deliveryStallWarnInterval
-	deliveryStallWarnInterval = 20 * time.Millisecond
-	t.Cleanup(func() { deliveryStallWarnInterval = origInterval })
-
-	// Compare warning volume at two very different publisher counts over the
-	// same observation condition. This is a ratio rather than an absolute
-	// count on purpose: any assertion that samples "how many warnings by
-	// now" races the burst, because a per-delivery limiter emits all of its
-	// warnings within a single interval and the sample can land part-way
-	// through. What cannot be faked by timing is the *scaling* -- a
-	// per-subscriber bound is independent of publisher count, a per-delivery
-	// bound is proportional to it.
-	const fewPublishers = 4
-	const manyPublishers = 40
-	const observedRepeats = 3
-
-	few := stallWarningsForPublishers(t, fewPublishers, observedRepeats)
-	many := stallWarningsForPublishers(t, manyPublishers, observedRepeats)
-	t.Logf("stall warnings: %d publishers -> %d, %d publishers -> %d",
-		fewPublishers, few, manyPublishers, many)
-
-	// A per-delivery limit multiplies the volume by the publisher ratio
-	// (10x here). A per-subscriber limit leaves it flat, so a generous 3x
-	// allowance still separates them decisively.
-	require.LessOrEqual(t, many, few*3,
-		"stall warnings scaled with the number of blocked publishers "+
-			"(%d publishers -> %d warnings, %d -> %d): the rate limit must "+
-			"be per subscriber, not per delivery",
-		fewPublishers, few, manyPublishers, many,
-	)
-}
-
-// stallWarningsForPublishers parks publishers on a subscriber that never
-// drains, waits until the stall warning has repeated observedRepeats times,
-// and reports how many warnings were emitted by that point.
-func stallWarningsForPublishers(
-	t *testing.T,
-	publishers int,
-	observedRepeats int,
-) int {
-	t.Helper()
-
-	var buf lockedBuffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	}))
-	sub := newChannelSubscriber("test", 1, logger)
-	require.NoError(t, sub.Deliver(NewEvent("test.stalled", "fill")))
-
-	var wg sync.WaitGroup
-	for i := range publishers {
-		wg.Go(func() {
-			_ = sub.Deliver(NewEvent("test.stalled", i))
-		})
-	}
-	// Park everyone before the first interval elapses, so both runs are
-	// measured from the same starting condition.
-	require.Eventually(t, func() bool {
-		return sub.stallWaiters.Load() == int64(publishers)
-	}, 2*time.Second, time.Millisecond,
-		"every publisher should park on the stalled subscriber",
-	)
-	require.Eventually(t, func() bool {
-		return countStallWarnings(buf.String()) >= observedRepeats
-	}, 5*time.Second, time.Millisecond,
-		"the warning should repeat while the stall continues",
-	)
-	got := countStallWarnings(buf.String())
-
-	sub.Close()
-	requirePublishersUnpark(t, &wg)
-	return got
-}
-
 // A stalled subscriber must still be reported often enough to be actionable,
 // and the report must say how many publishers are parked on it -- that count
 // is what distinguishes ordinary backpressure from a wedged subscriber.
@@ -1431,8 +1235,4 @@ func requirePublishersUnpark(t *testing.T, wg *sync.WaitGroup) {
 		5*time.Second,
 		"blocked publishers did not unpark after Close",
 	)
-}
-
-func countStallWarnings(logs string) int {
-	return strings.Count(logs, "event delivery stalled")
 }

@@ -16,18 +16,13 @@ package ledger
 
 import (
 	"errors"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -35,376 +30,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockForgedBlockChecker is a test implementation of ForgedBlockChecker.
-type mockForgedBlockChecker struct {
-	forgedSlots map[uint64][]byte
-}
-
 func (m *mockForgedBlockChecker) WasForgedByUs(
 	slot uint64,
 ) ([]byte, bool) {
 	hash, ok := m.forgedSlots[slot]
 	return hash, ok
-}
-
-func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
-	t.Parallel()
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
-	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: localHash,
-		},
-	}
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Subscribe to slot battle events
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
-
-	// Simulate an incoming block at slot 1000 with a different hash.
-	// Pass a non-nil error to indicate the remote block was rejected
-	// (local block stays on chain, so local won).
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: remoteHash,
-		},
-	}
-	ls.checkSlotBattle(e, errors.New("block rejected"))
-
-	// Verify the event was emitted
-	evt := testutil.RequireReceive(
-		t,
-		evtCh,
-		testutil.AsyncWait,
-		"timeout waiting for SlotBattleEvent",
-	)
-	battle, ok := evt.Data.(forging.SlotBattleEvent)
-	require.True(t, ok, "event data should be SlotBattleEvent")
-	assert.Equal(t, uint64(1000), battle.Slot)
-	assert.Equal(t, localHash, battle.LocalBlockHash)
-	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
-	assert.True(t, battle.Won,
-		"local should win when remote block is rejected")
-}
-
-func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
-	t.Parallel()
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
-	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: localHash,
-		},
-	}
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
-
-	// Pass nil error to indicate the remote block was accepted
-	// (remote won, our block is replaced).
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: remoteHash,
-		},
-	}
-	ls.checkSlotBattle(e, nil)
-
-	evt := testutil.RequireReceive(
-		t,
-		evtCh,
-		testutil.AsyncWait,
-		"timeout waiting for SlotBattleEvent",
-	)
-	battle, ok := evt.Data.(forging.SlotBattleEvent)
-	require.True(t, ok)
-	assert.Equal(t, uint64(1000), battle.Slot)
-	assert.False(t, battle.Won,
-		"local should lose when remote block is accepted")
-}
-
-func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
-	t.Parallel()
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: {0x01, 0x02, 0x03, 0x04},
-		},
-	}
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
-
-	// Incoming block is at slot 2000, not a slot we forged
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 2000,
-			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
-		},
-	}
-	ls.checkSlotBattle(e, nil)
-
-	// Verify no event was emitted
-	testutil.RequireNoReceive(
-		t,
-		evtCh,
-		50*time.Millisecond,
-		"unexpected SlotBattleEvent",
-	)
-}
-
-func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
-	t.Parallel()
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	blockHash := []byte{0x01, 0x02, 0x03, 0x04}
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: blockHash,
-		},
-	}
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
-
-	// Incoming block has the same hash (it's our own block echoed back)
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: blockHash,
-		},
-	}
-	ls.checkSlotBattle(e, nil)
-
-	testutil.RequireNoReceive(
-		t,
-		evtCh,
-		50*time.Millisecond,
-		"same-hash block should not trigger slot battle",
-	)
-}
-
-func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
-	t.Parallel()
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: nil, // No checker configured
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
-
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
-		},
-	}
-	ls.checkSlotBattle(e, nil)
-
-	testutil.RequireNoReceive(
-		t,
-		evtCh,
-		50*time.Millisecond,
-		"nil checker should not emit events",
-	)
-}
-
-func TestCheckSlotBattle_NilEventBus(t *testing.T) {
-	t.Parallel()
-
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
-	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: localHash,
-		},
-	}
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           nil, // No event bus
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Should not panic with nil event bus
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: remoteHash,
-		},
-	}
-	ls.checkSlotBattle(e, errors.New("rejected"))
-}
-
-// TestCheckSlotBattle_UnderWriteLock is a regression test for the
-// deadlock where checkSlotBattle was called while holding ls.Lock()
-// (write lock) but internally attempted ls.RLock() on the same
-// non-reentrant sync.RWMutex.
-func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
-	t.Parallel()
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
-	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: localHash,
-		},
-	}
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
-
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: remoteHash,
-		},
-	}
-
-	// Call checkSlotBattle while holding the write lock, exactly
-	// as processBlockEvents does. Before the fix this deadlocked.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ls.Lock()
-		ls.checkSlotBattle(e, errors.New("block rejected"))
-		ls.Unlock()
-	}()
-
-	testutil.RequireReceive(
-		t,
-		done,
-		testutil.AsyncWait,
-		"checkSlotBattle deadlocked under write lock",
-	)
-
-	evt := testutil.RequireReceive(
-		t,
-		evtCh,
-		testutil.AsyncWait,
-		"timeout waiting for SlotBattleEvent",
-	)
-	battle, ok := evt.Data.(forging.SlotBattleEvent)
-	require.True(t, ok)
-	assert.Equal(t, uint64(1000), battle.Slot)
-	assert.True(t, battle.Won)
-}
-
-func TestSetForgedBlockChecker(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	assert.Nil(t, ls.config.ForgedBlockChecker)
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: {0x01},
-		},
-	}
-	ls.SetForgedBlockChecker(checker)
-
-	assert.NotNil(t, ls.config.ForgedBlockChecker)
-
-	hash, ok := ls.config.ForgedBlockChecker.WasForgedByUs(1000)
-	assert.True(t, ok)
-	assert.Equal(t, []byte{0x01}, hash)
-}
-
-// futureSystemStartCfg returns a CardanoNodeConfig whose Shelley
-// SystemStart is in the future, simulating a node that booted before the
-// configured genesis time (clock skew, misconfig, or early bring-up).
-func futureSystemStartCfg(
-	t *testing.T,
-	future time.Time,
-) *cardano.CardanoNodeConfig {
-	t.Helper()
-	var sb strings.Builder
-	sb.WriteString(`{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
-		"systemStart": "`)
-	sb.WriteString(future.UTC().Format(time.RFC3339))
-	sb.WriteString(`"
-	}`)
-	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(
-		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(sb.String())),
-	)
-	return cfg
 }
 
 // TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError pins that when the
@@ -441,24 +71,6 @@ func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
 		err,
 		"TimeToSlot must reject far-future times when the epoch cache is empty; "+
 			"the nearNowSlot fallback is only for times within ±5s of now",
-	)
-}
-
-// TestNearNowSlot_FutureSystemStartReturnsZero pins that nearNowSlot does
-// not silently wrap a negative `time.Since` to a huge uint64. Under clock
-// skew or node-before-genesis boot, `time.Since(SystemStart)` is negative,
-// and `uint64(negative)` produces a near-MaxUint value — bogus and
-// indistinguishable from a valid slot.
-func TestNearNowSlot_FutureSystemStartReturnsZero(t *testing.T) {
-	t.Parallel()
-
-	cfg := futureSystemStartCfg(t, time.Now().Add(time.Hour))
-	got := nearNowSlot(cfg.ShelleyGenesis(), time.Now())
-	assert.Equal(
-		t,
-		uint64(0),
-		got,
-		"nearNowSlot with SystemStart in the future must return 0, not a huge wrapped uint64",
 	)
 }
 
@@ -899,99 +511,6 @@ func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
 	}
 }
 
-// slotToTimeBehindHorizonState builds a ledger whose applied tip is near
-// genesis, with an injected wall clock far ahead of it, so the forecast horizon
-// is deterministically behind the current slot regardless of when the suite
-// runs.
-func slotToTimeBehindHorizonState(
-	t *testing.T,
-	slotLengthMs uint,
-	slotsAhead uint64,
-) (*LedgerState, uint64, time.Time) {
-	t.Helper()
-	cfg := newTestEraHistoryCfg(t)
-	systemStart := cfg.ShelleyGenesis().SystemStart
-	slotLength := time.Duration(slotLengthMs) * time.Millisecond
-
-	ls := &LedgerState{
-		epochCache: []models.Epoch{{
-			EpochId:       0,
-			StartSlot:     0,
-			SlotLength:    slotLengthMs,
-			LengthInSlots: 432_000,
-			EraId:         eras.ConwayEraDesc.Id,
-		}},
-		currentEra: eras.ConwayEraDesc,
-		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("tip"))},
-		config:     LedgerStateConfig{CardanoNodeConfig: cfg},
-	}
-	// A fixed clock slotsAhead slots past genesis: hermetic, and far enough
-	// ahead that the era's safe zone cannot cover it.
-	now := systemStart.Add(time.Duration(slotsAhead) * slotLength)
-	ls.timeConv().nowFunc = func() time.Time { return now }
-	ls.publishSnapshotsLocked()
-	return ls, slotsAhead, now
-}
-
-// TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon is the regression test
-// for the slot clock spinning on "failed to get next slot time" for the whole
-// of a from-genesis sync or a `dingo load`.
-//
-// The clock's tick loop calls TimeToSlot(now) and then SlotToTime(slot+1). The
-// first has a near-now current-era extrapolation for exactly this case; the
-// second did not, so on a ledger whose applied tip is still near genesis while
-// the wall clock is far ahead, every tick logged an error and retried after
-// 100ms instead of sleeping to the next slot boundary.
-func TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon(t *testing.T) {
-	t.Parallel()
-
-	const slotLengthMs = 1000
-	ls, nowSlot, now := slotToTimeBehindHorizonState(
-		t, slotLengthMs, 5_000_000,
-	)
-	nextSlot := nowSlot + 1
-
-	// Confirm the premise: that slot really is past the bounded horizon, so
-	// this test cannot silently become vacuous.
-	sum, err := ls.HardForkSummary()
-	require.NoError(t, err)
-	_, horizonErr := sum.SlotToTime(nextSlot)
-	require.ErrorIs(t, horizonErr, hardfork.ErrPastHorizon,
-		"premise: the next wall-clock slot must be past the forecast horizon")
-
-	// SlotToTime must still resolve it, by extrapolating the current era.
-	when, err := ls.SlotToTime(nextSlot)
-	require.NoError(t, err,
-		"the slot clock must be able to resolve the next slot while behind")
-	assert.Equal(t, now.Add(time.Second), when,
-		"the next slot starts exactly one slot length after now")
-
-	// Consecutive slots stay one slot length apart.
-	next2, err := ls.SlotToTime(nextSlot + 1)
-	require.NoError(t, err)
-	assert.Equal(t, time.Second, next2.Sub(when))
-
-	// An arbitrary future slot stays bounded: the escape hatch is only for
-	// operational timing, not a general weakening of the horizon.
-	_, err = ls.SlotToTime(nextSlot + 1_000_000)
-	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
-		"a far-future slot must still be past the horizon")
-
-	// Slot 0 keeps its genesis special case.
-	genesis, err := ls.SlotToTime(0)
-	require.NoError(t, err)
-	assert.Equal(t, ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart,
-		genesis)
-
-	// A slot inside the horizon is still answered by the bounded Summary.
-	inHorizon, err := ls.SlotToTime(100)
-	require.NoError(t, err)
-	assert.Equal(t,
-		ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart.
-			Add(100*time.Second),
-		inHorizon)
-}
-
 // TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras covers eras whose slot length
 // exceeds the fixed 5s near-now window. Byron is 20s per slot in real Cardano
 // shapes, so the next slot boundary sits 20s in the future: gating on a fixed
@@ -1038,25 +557,86 @@ func TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras(t *testing.T) {
 		"a time many slot lengths ahead must still be refused as past-horizon")
 }
 
-// The window scales with slot length but stays a bounded operational window.
-func TestWithinOperationalWindowScalesWithSlotLength(t *testing.T) {
+// newShelleyOnlyForecastLedger builds a LedgerState whose epoch cache covers
+// slots [100_000, 532_000) but whose config cannot produce a hard-fork shape.
+func newShelleyOnlyForecastLedger(t testing.TB) *LedgerState {
+	t.Helper()
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       500,
+			StartSlot:     100_000,
+			SlotLength:    1_000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+			Nonce:         []byte("nonce"),
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       500,
+			StartSlot:     100_000,
+			LengthInSlots: 432_000,
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(200_000, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: shelleyOnlyGenesisCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	return ls
+}
+
+// TestSlotToTime_CachedSlotWithoutForecast pins SlotToTime against
+// SlotToEpoch: a slot the epoch cache already covers has known era parameters
+// and must convert without a forecast. Returning the summary-build error
+// verbatim leaves the slot clock (ledger/slot_clock.go) unable to resolve a
+// slot boundary, retrying every 100ms for the life of the process.
+func TestSlotToTime_CachedSlotWithoutForecast(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	ls := newShelleyOnlyForecastLedger(t)
 
-	// With no slot length it is the plain near-now window.
-	assert.True(t, isNearNow(now, now.Add(4*time.Second)))
-	assert.False(t, isNearNow(now, now.Add(6*time.Second)))
+	// SlotToEpoch already answers from the cache alone.
+	epoch, err := ls.SlotToEpoch(200_000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(500), epoch.EpochId)
 
-	// A 20s era admits its own next boundary...
-	assert.True(t, withinOperationalWindow(
-		now, now.Add(20*time.Second), 20*time.Second))
-	// ...and still rejects times many slot lengths out.
-	assert.False(t, withinOperationalWindow(
-		now, now.Add(5*time.Minute), 20*time.Second))
-	// Symmetric in the past direction.
-	assert.True(t, withinOperationalWindow(
-		now, now.Add(-20*time.Second), 20*time.Second))
-	assert.False(t, withinOperationalWindow(
-		now, now.Add(-5*time.Minute), 20*time.Second))
+	// The same slot must convert to a time without a forecast. The cache
+	// anchors relative time at its first entry's StartSlot, exactly as
+	// hardForkSummaryAnchoredAt does, so slot 200_000 is 100_000 slots of
+	// 1000ms past SystemStart.
+	when, err := ls.SlotToTime(200_000)
+	require.NoError(t, err,
+		"a slot inside the epoch cache must not require a forecast")
+	assert.Equal(
+		t,
+		time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC).
+			Add(100_000*time.Second),
+		when.UTC(),
+	)
+
+	// The absence case: a slot the cache does NOT cover has no known era
+	// parameters, so it must still fail rather than be extrapolated.
+	_, err = ls.SlotToTime(532_000)
+	require.Error(t, err,
+		"a slot past the epoch cache must not be answered without a forecast")
+	_, err = ls.SlotToTime(99_999)
+	require.Error(t, err,
+		"a slot before the epoch cache must not be answered without a forecast")
+}
+
+func TestSlotToTime_NearNowWithoutForecast(t *testing.T) {
+	t.Parallel()
+
+	ls := newShelleyOnlyForecastLedger(t)
+	const slot = uint64(532_000)
+	want := ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart.Add(
+		time.Duration(slot) * time.Second,
+	)
+	ls.timeConv().nowFunc = func() time.Time { return want }
+
+	when, err := ls.SlotToTime(slot)
+	require.NoError(t, err)
+	assert.Equal(t, want, when)
 }

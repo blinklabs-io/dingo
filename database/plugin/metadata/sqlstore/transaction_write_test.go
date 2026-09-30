@@ -17,7 +17,9 @@ package sqlstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -104,7 +106,7 @@ func buildSharedCredentialTx(
 	// WithCertificates is a *MockTransaction-only builder method (not part
 	// of the TransactionBuilder interface), so it has to run before any
 	// interface-returning call narrows tx's static type; see
-	// writeDepositHeldCertWithDeposits in pool_076c4ea1_test.go for the
+	// writeDepositHeldCertWithDeposits in pool_deposit_held_test.go for the
 	// same pattern.
 	tx := mockledger.NewTransactionBuilder().WithCertificates(cert)
 	tx.WithId(txID)
@@ -480,4 +482,269 @@ func BenchmarkRefreshRewardLiveStakeAggregateRepeatedTouch(b *testing.B) {
 			}
 		})
 	}
+}
+
+// TestSetTransactionIncrementalDeltaMatchesFullScan drives the production
+// entry point (SetTransaction, not the internal helper directly) for a
+// credential whose running total is already warm -- established the way an
+// earlier block's touch would -- so this transaction's own certificate,
+// consumed input, and produced output all take
+// refreshRewardLiveStakeAggregateDelta's incremental path together, exactly
+// as setTransactionWithAccumulator wires them. It proves the result matches
+// a fresh authoritative scan and that no full scan ran.
+func TestSetTransactionIncrementalDeltaMatchesFullScan(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x07)
+	seedConsumedUtxo(t, store, fx)
+	establishRunningTotal(t, store, fx.ref, 1)
+	require.Equal(
+		t,
+		fx.consumedAmount,
+		readUtxoStake(t, store, fx.ref),
+		"baseline must include the UTxO this transaction is about to spend",
+	)
+
+	before := store.sumCredentialUtxoStakeCalls.Load()
+	require.NoError(t, store.SetTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+	))
+	require.Equal(
+		t,
+		before,
+		store.sumCredentialUtxoStakeCalls.Load(),
+		"a warm running total must not fall back to a full scan through "+
+			"SetTransaction",
+	)
+
+	got := readUtxoStake(t, store, fx.ref)
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, want, got, "must match a fresh authoritative scan")
+	require.Equal(t, fx.producedAmount, got)
+}
+
+// TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the
+// incremental path rests on: a delta must state the change this write made to
+// the utxo table, not the change the transaction describes. Re-applying an
+// already-stored transaction mutates nothing -- the produced output collides
+// with insertUtxoQueryIgnoreConflict's ON CONFLICT DO NOTHING, and the
+// consumed input's UPDATE matches no row because this same transaction
+// already spent it -- so the credential's running total must not move.
+//
+// Counting those no-op mutations again drives the stored value away from the
+// authoritative scan in both directions at once (a spurious gain for the
+// output, a spurious loss for the input), and a loss larger than the
+// credential's recorded total fails applyUtxoStakeDelta's underflow guard,
+// which aborts block application rather than merely reporting wrong stake.
+func TestSetTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x41)
+	seedConsumedUtxo(t, store, fx)
+	establishRunningTotal(t, store, fx.ref, 1)
+
+	require.NoError(t, store.SetTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+	))
+	require.Equal(t, fx.producedAmount, readUtxoStake(t, store, fx.ref))
+
+	require.NoError(t, store.SetTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, fx.producedAmount, want, "the utxo table must not move")
+	require.Equal(
+		t,
+		want,
+		readUtxoStake(t, store, fx.ref),
+		"a re-applied transaction must not move the running total",
+	)
+}
+
+// TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta covers the same
+// invariant on the Leios closure path, where an input already spent by a
+// *different* certified endorser-block transaction is deliberately a no-op
+// (see setTransactionWithAccumulator's tolerateConsumedInputConflict branch).
+// The row stays deleted with its original spender, so this write removed no
+// live stake and must subtract none.
+func TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x43)
+	seedConsumedUtxo(t, store, fx)
+
+	otherSpender := make([]byte, 32)
+	otherSpender[0] = 0xfe
+	_, err := store.writeDB.ExecContext(ctx, `
+UPDATE utxo SET deleted_slot = 900, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = 0`, otherSpender, fx.consumedTxID)
+	require.NoError(t, err)
+
+	// A second live UTxO keeps the credential's reward_live_stake row in
+	// place, so the write exercises the warm incremental path rather than
+	// refreshRewardLiveStakeAggregateDelta's cold-start full-scan fallback.
+	const retained = 9_000_000
+	otherTx := make([]byte, 32)
+	otherTx[0] = 0x77
+	require.NoError(t, store.withWriteTransaction(
+		nil,
+		func(db queryer, ctx context.Context) error {
+			return insertLiveUtxoTx(ctx, db, fx.ref, otherTx[0], retained)
+		},
+	))
+	establishRunningTotal(t, store, fx.ref, 1)
+	require.Equal(t, uint64(retained), readUtxoStake(t, store, fx.ref))
+
+	require.NoError(t, store.SetTransactionLeiosClosure(
+		fx.tx, fx.point, 0, fx.certDeposits, false, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, uint64(retained+fx.producedAmount), want)
+	require.Equal(
+		t,
+		want,
+		readUtxoStake(t, store, fx.ref),
+		"an already-spent input must contribute no loss delta",
+	)
+}
+
+// TestSetGapBlockTransactionReapplyAppliesNoSecondDelta is the same check for
+// SetGapBlockTransaction, the other caller on the incremental path. It is the
+// likeliest place for a colliding produced output in practice: gap closure
+// replays blocks whose outputs a Mithril snapshot import may already have
+// created.
+func TestSetGapBlockTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x44)
+
+	require.NoError(t, store.SetGapBlockTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, nil,
+	))
+	first := readUtxoStake(t, store, fx.ref)
+	require.Equal(t, fx.producedAmount, first)
+
+	require.NoError(t, store.SetGapBlockTransaction(
+		fx.tx, fx.point, 0, fx.certDeposits, nil,
+	))
+	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
+	require.NoError(t, err)
+	require.Equal(t, fx.producedAmount, want, "the utxo table must not move")
+	require.Equal(
+		t,
+		want,
+		readUtxoStake(t, store, fx.ref),
+		"a replayed gap block must not double-count its produced outputs",
+	)
+}
+
+// fakePrepareOnlyQueryer implements queryer with a PrepareContext that
+// always fails, so insertTransaction returns before touching the *sql.Stmt
+// it would otherwise store -- this test only needs to observe the dialect
+// flag insertTransaction sets before calling PrepareContext, not to execute
+// a real statement.
+type fakePrepareOnlyQueryer struct {
+	prepareErr error
+}
+
+// TestInsertTransactionDetectsMySQLThroughCountingQueryer is the regression
+// test for the type assertion insertTransaction uses to detect a MySQL
+// dialect: db.(dialectQueryer) alone misses a dialectQueryer wrapped in
+// countingQueryer, which is exactly what every real caller passes once
+// Config.PromRegistry is set (see Store.instrumentedQueryer). Without
+// unwrapDialectQueryer, a.mysql stays false on a metrics-enabled MySQL
+// store, and insertTransaction takes the RETURNING-id QueryRowContext path
+// MySQL cannot serve instead of the ExecContext/LastInsertId path this test
+// proves gets selected.
+func TestInsertTransactionDetectsMySQLThroughCountingQueryer(t *testing.T) {
+	t.Parallel()
+	prepareErr := errors.New("prepare not needed for this assertion")
+	inner := dialectQueryer{
+		queryer: fakePrepareOnlyQueryer{prepareErr: prepareErr},
+		dialect: "mysql",
+	}
+	wrapped := countingQueryer{queryer: inner, counter: nil}
+
+	acc := &transactionBatchAccumulator{}
+	_, err := acc.insertTransaction(context.Background(), wrapped)
+	require.ErrorIs(t, err, prepareErr)
+	require.True(
+		t,
+		acc.mysql,
+		"expected insertTransaction to detect the mysql dialect through countingQueryer",
+	)
+}
+
+func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
+	store := newMigratedSQLiteStore(t)
+	txn := store.Transaction(context.Background())
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+
+	acc := &transactionBatchAccumulator{}
+	oldStmtArgs := []any{
+		[]byte{0x01}, []byte{0x02}, nil, 1, 0,
+		"0", "0", "0", 0, true,
+	}
+	_, err = acc.insertTransaction(ctx, db, oldStmtArgs...)
+	require.NoError(t, err)
+	stmt := acc.transactionInsert
+	require.NotNil(t, stmt)
+
+	acc.Reset()
+	require.Nil(t, acc.transactionInsert)
+	_, err = stmt.ExecContext(ctx, oldStmtArgs...)
+	require.Error(t, err, "reset must close statements bound to the batch transaction")
+
+	require.NoError(t, txn.Rollback())
+	var count int
+	require.NoError(t, store.readDB.QueryRowContext(
+		context.Background(),
+		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+		[]byte{0x01},
+	).Scan(&count))
+	require.Zero(t, count, "rollback must discard writes made through the accumulator")
+}
+
+// feelessTransaction stands in for a transaction body whose Fee is nil, which
+// is what TransactionBodyBase returns for any body that does not override it --
+// the synthetic transaction carrying imported certificates among them. Fee is
+// overridden here only so a single type can cover both the nil and non-nil
+// cases; the write-path reproduction lives in ledgerstate.
+type feelessTransaction struct {
+	lcommon.TransactionBodyBase
+	fee *big.Int
+}
+
+// TestTransactionFeeTreatsNilAsZero unit-tests the accessor. It does not by
+// itself prove the write path is guarded -- reverting the setTransaction call
+// site leaves this green -- so the reproduction that exercises
+// persistImportedCommitteeCertificates end to end lives in
+// ledgerstate/tests_test.go.
+func TestTransactionFeeTreatsNilAsZero(t *testing.T) {
+	t.Parallel()
+
+	require.NotPanics(t, func() {
+		require.Equal(
+			t,
+			uint64(0),
+			uint64(transactionFee(&feelessTransaction{})),
+		)
+	})
+
+	// A real fee is still recorded unchanged.
+	require.Equal(
+		t,
+		uint64(174301),
+		uint64(transactionFee(
+			&feelessTransaction{fee: big.NewInt(174301)},
+		)),
+	)
 }

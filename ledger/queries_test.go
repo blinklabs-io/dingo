@@ -1550,7 +1550,7 @@ func TestQueryShelleyUtxoByTxIn_RetentionWindow_PersistedFloorOverridesLenientLi
 // (identical tip and default 50_000 stability window, so the live-tip floor
 // would otherwise be 150_000) except an active upstream connection with no
 // admitted target yet marks pruning as deferred for catchup -- mirroring
-// tests_61443820_test.go's "active upstream, target not yet known"
+// state_test.go's "active upstream, target not yet known"
 // case. No-opping the !ls.utxoPruningDeferredForCatchup(...) conjunct in
 // checkUtxoRetentionWindow makes this test fail with
 // ErrHistoricalStateUnavailable instead of the required nil.
@@ -3853,4 +3853,490 @@ func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
 	assert.NoError(t, err)
 	// Cardano block numbers are 0-indexed, so block 0 is not origin.
 	assert.Equal(t, []any{1, uint64(0)}, result)
+}
+
+// protocolParamsQuery wraps GetCurrentProtocolParams the way the wire
+// delivers it, matching poolDistr2Query/stakeDistributionQuery in the
+// neighboring query test files.
+func protocolParamsQuery() *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCurrentProtocolParamsQuery{},
+		},
+	}
+}
+
+// conwayPParamsWithCostModels builds a Conway pparams value with every
+// cbor.Rat-bearing field populated, not just CostModels -- blinklabs-io/dingo#3825's
+// PR review (wolf31o2): a fixture that only sets CostModels type-asserts fine
+// but is not actually encodable, since cbor.Rat.MarshalCBOR panics on the nil
+// *big.Rat a zero-value cbor.Rat (or a nil *cbor.Rat pointer field) carries,
+// and PoolVotingThresholds/DRepVotingThresholds's value-typed cbor.Rat fields
+// are always encoded (never skippable as CBOR null the way a nil *cbor.Rat
+// pointer field is). This is what real cardano-node protocol-parameter data
+// always has populated, so an end-to-end wire test should encode a value
+// shaped like the real thing, not a partial struct that happens to satisfy a
+// type assertion.
+func conwayPParamsWithCostModels(
+	costModels map[uint][]int64,
+) *conway.ConwayProtocolParameters {
+	rat := func(n, d int64) cbor.Rat { return cbor.Rat{Rat: big.NewRat(n, d)} }
+	ratPtr := func(n, d int64) *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(n, d)} }
+	return &conway.ConwayProtocolParameters{
+		CostModels:                 costModels,
+		A0:                         ratPtr(3, 10),
+		Rho:                        ratPtr(3, 1000),
+		Tau:                        ratPtr(1, 5),
+		MinFeeRefScriptCostPerByte: ratPtr(15, 1),
+		ExecutionCosts: lcommon.ExUnitPrice{
+			MemPrice:  ratPtr(577, 10000),
+			StepPrice: ratPtr(721, 10000000),
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    rat(51, 100),
+			CommitteeNormal:       rat(51, 100),
+			CommitteeNoConfidence: rat(51, 100),
+			HardForkInitiation:    rat(51, 100),
+			PpSecurityGroup:       rat(51, 100),
+		},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    rat(67, 100),
+			CommitteeNormal:       rat(67, 100),
+			CommitteeNoConfidence: rat(60, 100),
+			UpdateToConstitution:  rat(75, 100),
+			HardForkInitiation:    rat(60, 100),
+			PpNetworkGroup:        rat(67, 100),
+			PpEconomicGroup:       rat(67, 100),
+			PpTechnicalGroup:      rat(67, 100),
+			PpGovGroup:            rat(75, 100),
+			TreasuryWithdrawal:    rat(67, 100),
+		},
+	}
+}
+
+// TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel is the
+// end-to-end regression test for blinklabs-io/dingo#3825: confirmed against
+// a real cardano-node's raw wire bytes (captured via a temporary diagnostic,
+// decoded with the real client-side type, independent of any display-layer
+// bug) that on a chain which has never received a real PlutusV2
+// cost-model update, a real cardano-node's GetCurrentProtocolParams reply
+// has no PlutusV2 entry at all -- while Dingo's internal state always
+// carries HardForkBabbage's fabricated one, needed for real script
+// validation. The LocalStateQuery reply must match the real node's
+// observable behavior; internal validation must not be affected.
+func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newPoolDistr2Ledger(t, newTestDB(t))
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
+		0: {1, 1, 1},
+		1: eras.DefaultPlutusV2CostModel,
+		2: {3, 3, 3},
+	})
+	ls.syntheticV2CostModel = true
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(protocolParamsQuery(), QueryPoint{})
+	require.NoError(t, err)
+
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	pp, ok := arr[0].(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+
+	assert.NotContains(t, pp.CostModels, uint(1),
+		"the reply must omit the synthetic PlutusV2 cost model")
+	assert.Contains(t, pp.CostModels, uint(0))
+	assert.Contains(t, pp.CostModels, uint(2))
+
+	// This is a wire-level regression test, not just a type-assertion check:
+	// encode what the reply actually contains and decode it back with the
+	// real client-side type, matching the raw-CBOR verification this issue's
+	// original diagnosis relied on independent of any display-layer bug.
+	encoded, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	var decoded conway.ConwayProtocolParameters
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.NotContains(
+		t,
+		decoded.CostModels,
+		uint(1),
+		"the encoded wire bytes must not carry the synthetic PlutusV2 cost model",
+	)
+
+	// Internal validation state must be completely unaffected by the query.
+	internal, ok := ls.currentPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Contains(t, internal.CostModels, uint(1),
+		"internal state must keep the default for real script validation")
+}
+
+// TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel covers the
+// other half: once real governance data has cleared the synthetic marker
+// (LedgerState.syntheticV2CostModel == false), the reply must include
+// whatever is actually in CostModels -- including a value that happens to
+// equal the known synthetic default, since real governance re-affirming
+// that exact value is still real data, not still a guess.
+func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newPoolDistr2Ledger(t, newTestDB(t))
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
+		0: {1, 1, 1},
+		1: eras.DefaultPlutusV2CostModel,
+		2: {3, 3, 3},
+	})
+	ls.syntheticV2CostModel = false
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(protocolParamsQuery(), QueryPoint{})
+	require.NoError(t, err)
+
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	pp, ok := arr[0].(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+
+	assert.Contains(t, pp.CostModels, uint(1))
+	assert.Equal(t, eras.DefaultPlutusV2CostModel, pp.CostModels[1])
+
+	encoded, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	var decoded conway.ConwayProtocolParameters
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		eras.DefaultPlutusV2CostModel,
+		decoded.CostModels[1],
+		"real data equal to the known default must still round-trip on the wire",
+	)
+}
+
+// cardanoNodeConfigWithMaxLovelaceSupply builds a *cardano.CardanoNodeConfig
+// whose ShelleyGenesis().MaxLovelaceSupply is nonzero -- the exact condition
+// circulatingSupplyGenesis (ledger/queries.go) gates
+// verifyStakeDistributionRetentionOnly's network_state floor on. A fixture
+// with no CardanoNodeConfig at all leaves that floor inactive, so a case
+// built without this helper can pass for the wrong reason: pinning
+// over-rejection when the gate it means to test was never active, not the
+// real requirement.
+func cardanoNodeConfigWithMaxLovelaceSupply(t *testing.T, maxLovelaceSupply uint64) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
+		fmt.Sprintf(`{"maxLovelaceSupply": %d}`, maxLovelaceSupply),
+	)))
+	return cfg
+}
+
+// TestVerifyPointQueryable_WithinAllFloors_Accepted covers the accept
+// direction: a point inside every point-aware query type's own retention
+// floor -- on chain, within the UTxO/stake/pparams/era windows -- must be
+// accepted so a well-behaved client's Acquire actually succeeds, not just
+// so a stale one is rejected.
+func TestVerifyPointQueryable_WithinAllFloors_Accepted(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	// Activates verifyStakeDistributionRetentionOnly's network_state floor
+	// (circulatingSupplyGenesis) -- see cardanoNodeConfigWithMaxLovelaceSupply's
+	// doc comment for why this fixture must set it to genuinely prove the
+	// accept direction, not just the case where the floor never runs at all.
+	ls.config.CardanoNodeConfig = cardanoNodeConfigWithMaxLovelaceSupply(t, 45_000_000_000_000_000)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 3}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3})
+	// verifyStakeDistributionRetentionOnly's second floor requires a
+	// network_state row at or before the pinned slot, matching what
+	// PoolStakeDistribution's own totalCirculatingSupply call separately
+	// requires -- without this row, a point can be inside the epoch-based
+	// retention window and still get rejected.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 300, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(350, hash),
+	}, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.NoError(t, err)
+}
+
+// TestVerifyPointQueryable_PastRetentionFloor_Rejected covers the reject
+// direction: a point on-chain but past the stake-snapshot retention floor
+// must fail with ErrHistoricalStateUnavailable, the sentinel
+// localstatequeryServerAcquire maps to a clean wire-level
+// AcquireFailurePointTooOld -- exactly mirroring
+// TestPoolStakeDistribution_AsOfSlot_TooOldRejected's scenario, but through
+// VerifyPointQueryable (which checks verifyPointOnChain first, unlike a
+// bare PoolStakeDistribution call) to prove the whole upfront check
+// rejects it, not just the one retention check it happens to hit first.
+func TestVerifyPointQueryable_PastRetentionFloor_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 10}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3, 1000: 10})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1050, repeatedBytes(32, 0x0C)),
+	}, nil))
+
+	// Epoch 3 is 7 epochs behind the live epoch (10) -- outside the
+	// 3-epoch stake-snapshot retention window.
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted covers
+// checkAsOfEpochRecency's apiStorageMode early-return branch (ledger/pool_stake_distribution.go):
+// pool-stake snapshots are never pruned when the database runs in API
+// storage mode, so a point whose mark-snapshot epoch would be rejected under
+// the default (core) retention window must still be accepted here, matching
+// cleanupOldSnapshots' own API-mode carve-out that this check mirrors.
+//
+// Same shape as TestVerifyPointQueryable_PastRetentionFloor_Rejected -- an
+// epoch 3 pinned point 7 epochs behind live epoch 10, well outside the
+// 3-epoch stake-snapshot retention window -- except the database is opened
+// in API storage mode instead of the default core mode, and epoch 3 carries
+// its own persisted epoch row and pparams row (so the historical-epoch reads
+// further down VerifyPointQueryable, which that rejected-in-core-mode test
+// never reaches, succeed here on their own merits rather than accidentally
+// masking the check under test). That test proves core mode must reject
+// this point; this test proves API mode must accept the identical point
+// instead. No-opping the apiStorageMode branch in checkAsOfEpochRecency
+// (i.e. falling through to the pruning-window check regardless of storage
+// mode) makes this test fail with ErrHistoricalStateUnavailable instead of
+// the required nil.
+func TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDBForCleanup(t, types.StorageModeAPI)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {9, 9, 9}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 10}
+	ls.publishSnapshotsLocked()
+
+	conwayEraId := uint(eras.ConwayEraDesc.Id)
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	require.NoError(t, ls.db.SetEpoch(
+		1000, 10, nil, nil, nil, nil, conwayEraId, 1, 100, nil,
+	))
+	historicalPParams := conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	historicalCbor, err := cbor.Encode(historicalPParams)
+	require.NoError(t, err)
+	require.NoError(t, ls.db.SetPParams(
+		historicalCbor, 300, 3, conwayEraId, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1050, repeatedBytes(32, 0x0C)),
+	}, nil))
+
+	// Epoch 3 is 7 epochs behind the live epoch (10) -- outside the
+	// 3-epoch stake-snapshot retention window that applies in core storage
+	// mode (see TestVerifyPointQueryable_PastRetentionFloor_Rejected). In
+	// API storage mode, pool-stake snapshots are never pruned, so this must
+	// be accepted instead.
+	verifyErr := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.NoError(t, verifyErr)
+}
+
+// TestVerifyPointQueryable_NoNetworkStateRow_Rejected covers a regression:
+// checking only checkAsOfEpochRecency's mark-snapshot floor is not enough,
+// since PoolStakeDistribution's own totalCirculatingSupply call separately
+// requires a network_state row at or before the pinned slot (asOfSlot,
+// non-nil for a pinned point) and rejects with ErrHistoricalStateUnavailable
+// when missing. Before this second floor was added, VerifyPointQueryable
+// accepted this exact point,
+// and a client that then Acquired it and issued GetPoolDistr2 or
+// GetStakeDistribution got that same error from a live query instead --
+// handleQuery returns it bare, tearing the connection down, the identical
+// failure this whole change exists to close at Acquire time instead.
+//
+// Identical to TestVerifyPointQueryable_WithinAllFloors_Accepted (pinned
+// point's epoch equals the live epoch, so queryShelleyCurrentProtocolParams
+// answers from the live snapshot rather than needing a historical pparams
+// row, and CardanoNodeConfig is set so the network_state floor is actually
+// active -- see cardanoNodeConfigWithMaxLovelaceSupply's doc comment; a
+// fixture without it would pass here for the wrong reason, since the floor
+// this test targets would never run at all) except for the one thing this
+// test is about: no db.Metadata().SetNetworkState call, so no
+// network_state row exists at any slot. Isolating every other floor this
+// way means only the new check this test targets can be why this fails.
+func TestVerifyPointQueryable_NoNetworkStateRow_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = cardanoNodeConfigWithMaxLovelaceSupply(t, 45_000_000_000_000_000)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 3}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(350, hash),
+	}, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive
+// covers the companion case: an unconditional network_state floor would
+// reject a point every real query would have answered whenever
+// totalCirculatingSupply itself never reaches GetNetworkStateAsOfSlot --
+// no CardanoNodeConfig (as here, and as every other ledger test in this
+// repository already constructs a LedgerState), no ShelleyGenesis, or a
+// genesis with no MaxLovelaceSupply. Identical to
+// TestVerifyPointQueryable_NoNetworkStateRow_Rejected (same missing row)
+// except CardanoNodeConfig is left nil, so this one must accept where that
+// one must reject -- proving the floor is genuinely conditional, not just
+// present or absent.
+func TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 3}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(350, hash),
+	}, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.NoError(t, err)
+}
+
+// TestVerifyPointQueryable_UnknownEraId_Rejected covers a regression:
+// VerifyPointQueryable's queryHardFork call (HardForkCurrentEraQuery) is
+// the only one of its five checks that ever inspects an epoch row's era at
+// all, so nothing else here
+// would catch it being silently dropped. Both existing regression tests
+// pass whether or not that call exists, because neither fixture gives it
+// anything to reject on: WithinAllFloors_Accepted's epoch row names a real
+// era, and PastRetentionFloor_Rejected is already rejected earlier by
+// verifyStakeDistributionRetentionOnly.
+//
+// Identical to TestVerifyPointQueryable_WithinAllFloors_Accepted (every
+// other floor passes cleanly: on chain, within the UTxO/stake/pparams
+// windows, with a covering network_state row) except the epoch row itself
+// names era 255, which eras.GetEraById cannot resolve. Deleting the
+// queryHardFork call from VerifyPointQueryable would make this pass when it
+// must fail.
+func TestVerifyPointQueryable_UnknownEraId_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 3}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, 255, 1, 100, nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 300, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(350, hash),
+	}, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestVerifyPointQueryable_PParamsRowOnly_Rejected covers a gap the other
+// TestVerifyPointQueryable* cases leave open: deleting the
+// checkUtxoRetentionWindow call, or this queryShelleyCurrentProtocolParams
+// call, from VerifyPointQueryable leaves every existing
+// TestVerifyPointQueryable* case green -- neither deletion
+// changes PastRetentionFloor_Rejected's outcome, since the stake floor
+// already rejects that fixture, and no case has a missing pparams row as its
+// only failure. The pinned point's epoch (3) sits exactly at the
+// stake-retention window's edge relative to the live epoch (5) -- mark
+// snapshot epoch 2 equals the floor 5-3=2, so checkAsOfEpochRecency accepts
+// it (the same boundary TestQueryShelleyUtxoByTxIn_RetentionWindow_AtFloor_Succeeds
+// covers for the UTxO floor) -- and no CardanoNodeConfig means the
+// network_state floor never runs, so only the missing persisted pparams row
+// for epoch 3 can reject this point.
+func TestVerifyPointQueryable_PParamsRowOnly_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = models.Epoch{EpochId: 5}
+	ls.publishSnapshotsLocked()
+
+	hash := repeatedBytes(32, 0x0B)
+	seedBlockAtSlot(t, ls, 350, hash)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3, 700: 5})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(750, repeatedBytes(32, 0x0C)),
+	}, nil))
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }

@@ -20,7 +20,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -287,4 +290,74 @@ func TestRestorePoolStateAtSlotQueryClassifiesAsOtherNamedInsteadOfUnknown(
 		require.Equal(t, "other", op, dialect.Name())
 		require.Equal(t, "RestorePoolStateAtSlot", name, dialect.Name())
 	}
+}
+
+// TestApplyMIRCertificatePersistsProjectedDeltas proves the persistence path
+// writes exactly what the certificate's reward projection returns, for every
+// credential, rather than a value it re-derives from the underlying field.
+// RewardsAmount is *big.Int on every gouroboros release, so this is the path a
+// signed delta travels once the underlying field is widened to delta_coin.
+func TestApplyMIRCertificatePersistsProjectedDeltas(t *testing.T) {
+	t.Parallel()
+	store := newMigratedTestStore(t)
+
+	first := mirTestCredential(0x21)
+	second := mirTestCredential(0x22)
+	cert := decodeMIRDistributionCertificate(
+		t,
+		uint(lcommon.MirSourceReserves),
+		map[*lcommon.Credential]uint64{
+			first:  1_200,
+			second: 450,
+		},
+	)
+	_, err := applyMIRCertificate(
+		context.Background(),
+		newDialectQueryer(store.writeDB, store.dialect.Name()),
+		cert,
+		0,
+		400,
+	)
+	require.NoError(t, err)
+
+	want := map[string]string{}
+	for credential, amount := range cert.Reward.RewardsAmount() {
+		want[string(credential.Credential[:])] = amount.String()
+	}
+	require.Len(t, want, 2)
+
+	effects, err := store.GetMIRCertsInSlotRange(0, 1_000, nil)
+	require.NoError(t, err)
+	require.Len(t, effects, 1)
+	got := map[string]string{}
+	for _, reward := range effects[0].Rewards {
+		require.NotNil(t, reward.Amount)
+		got[string(reward.Credential)] = reward.Amount.String()
+	}
+	assert.Equal(t, want, got)
+}
+
+// decodeMIRDistributionCertificate builds a distribution MIR certificate
+// through the CBOR decoder, so the test does not depend on the Go type of the
+// reward map.
+func decodeMIRDistributionCertificate(
+	t *testing.T,
+	source uint,
+	rewards map[*lcommon.Credential]uint64,
+) *lcommon.MoveInstantaneousRewardsCertificate {
+	t.Helper()
+	encoded, err := cbor.Encode(struct {
+		cbor.StructAsArray
+		Source  uint
+		Rewards map[*lcommon.Credential]uint64
+	}{
+		Source:  source,
+		Rewards: rewards,
+	})
+	require.NoError(t, err)
+	cert := &lcommon.MoveInstantaneousRewardsCertificate{
+		CertType: uint(lcommon.CertificateTypeMoveInstantaneousRewards),
+	}
+	require.NoError(t, cert.Reward.UnmarshalCBOR(encoded))
+	return cert
 }
