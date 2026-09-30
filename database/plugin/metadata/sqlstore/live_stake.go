@@ -668,6 +668,43 @@ LEFT JOIN latest_delegation
  AND latest_delegation.pool_key_hash = account.pool` + runningTotalJoin, args
 }
 
+// sqliteRewardLiveStakeAccountFirstQuery keeps SQLite's loop order on the
+// bounded account-key range. The active/pool index orders pool before the
+// credential columns, so its non-NULL pool range hides the batch key bound.
+func sqliteRewardLiveStakeAccountFirstQuery(query string) (string, error) {
+	fromAccount := "FROM account a\n"
+	if count := strings.Count(query, fromAccount); count != 4 {
+		return "", fmt.Errorf(
+			"reward live stake query has %d account assignment sources, want 4",
+			count,
+		)
+	}
+	query = strings.ReplaceAll(
+		query,
+		fromAccount,
+		"FROM account a INDEXED BY idx_account_credential\n",
+	)
+	for _, assignment := range []struct {
+		table string
+		alias string
+	}{
+		{table: "stake_delegation", alias: "sd"},
+		{table: "stake_registration_delegation", alias: "srd"},
+		{table: "stake_vote_delegation", alias: "svd"},
+		{table: "stake_vote_registration_delegation", alias: "svrd"},
+	} {
+		join := "JOIN " + assignment.table + " " + assignment.alias + "\n"
+		if !strings.Contains(query, join) {
+			return "", fmt.Errorf(
+				"reward live stake query has no %s assignment source",
+				assignment.table,
+			)
+		}
+		query = strings.Replace(query, join, "CROSS "+join, 1)
+	}
+	return query, nil
+}
+
 func (s *Store) rebuildRewardLiveStake(
 	slot uint64,
 	txn types.Txn,
@@ -808,14 +845,20 @@ func (s *Store) rebuildRewardLiveStakeRange(
 	slotValue int64,
 ) (int, error) {
 	var utxoStakes map[string]uint64
+	var err error
 	if !fromRunningTotals {
-		var err error
 		utxoStakes, err = sumRewardLiveStakeUtxos(ctx, db, keys)
 		if err != nil {
 			return 0, err
 		}
 	}
 	query, args := rewardLiveStakeCredentialQuery(fromRunningTotals, keys)
+	if s.dialect.Name() == "sqlite" {
+		query, err = sqliteRewardLiveStakeAccountFirstQuery(query)
+		if err != nil {
+			return 0, err
+		}
+	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("load reward live stake credentials: %w", err)
