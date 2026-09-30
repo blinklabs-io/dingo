@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -264,6 +265,9 @@ type Ouroboros struct {
 	// second description of the same ranking block from being relayed.
 	leiosAnnouncementsMu       sync.Mutex
 	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosAnnouncementInFlight  map[string]struct{}
+	leiosInvalidAnnouncements  *ratewindow.FixedWindow
+	leiosInvalidAnnouncementMu sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64
@@ -551,15 +555,26 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
-		blockDecodeCache:         newDecodeCache[gledger.Block](),
-		headerDecodeCache:        newDecodeCache[gledger.BlockHeader](),
-		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosClosureWaiters:      make(map[string][]chan struct{}),
+		blockDecodeCache: newDecodeCacheWithByteLimit[gledger.Block](
+			blockDecodeCacheMaxBytes,
+		),
+		headerDecodeCache: newDecodeCacheWithByteLimit[gledger.BlockHeader](
+			headerDecodeCacheMaxBytes,
+		),
+		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters: make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),
-		leiosEBLog:                 newLeiosForgedEBLog(),
-		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosEBLog:                newLeiosForgedEBLog(),
+		leiosAnnouncements:        make(map[string]leiosAnnouncement),
+		leiosAnnouncementInFlight: make(map[string]struct{}),
+		leiosInvalidAnnouncements: ratewindow.NewFixedWindow(
+			leiosInvalidAnnouncementWindow,
+			0,
+			0,
+			leiosInvalidAnnouncementMaxPeers,
+		),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
 		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
@@ -670,8 +685,20 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 // all recognised the same way a client connecting to this listener would
 // resolve them. Anything else (including a wildcard bind like "0.0.0.0",
 // which resolves to the unspecified address, not a loopback one) is
-// untrusted, and gets gouroboros' own anti-DoS defaults instead.
+// untrusted, and gets gouroboros' own anti-DoS defaults instead. When the
+// caller supplies a bound Listener, its Addr is authoritative; ListenAddress
+// is used only when the connection manager will bind the listener itself.
 func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
+	if l.Listener != nil {
+		switch addr := l.Listener.Addr().(type) {
+		case *net.TCPAddr:
+			return addr.IP != nil && addr.IP.IsLoopback()
+		case *net.UnixAddr:
+			return true
+		default:
+			return false
+		}
+	}
 	if l.ListenNetwork == "unix" {
 		return true
 	}
@@ -717,12 +744,13 @@ func (o *Ouroboros) ConfigureListeners(
 			// review). A resolution failure here is left for
 			// startListener's own bind to report -- isTrustedNtCListener
 			// treats it as untrusted either way.
-			if l.ListenNetwork == "tcp" {
+			if l.Listener == nil && l.ListenNetwork == "tcp" {
 				if addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress); err == nil {
 					l.ListenAddress = addr.String()
 				}
 			}
 			trusted := isTrustedNtCListener(l)
+			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				o.chainsyncConnectionConfigOption(false),
