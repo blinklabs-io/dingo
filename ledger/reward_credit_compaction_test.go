@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"slices"
 	"testing"
 
@@ -60,6 +61,33 @@ func TestRewardCreditCompactionWithFoldedRoundIsNotDue(t *testing.T) {
 	due, err := f.ls.rewardCreditRoundDue()
 	require.NoError(t, err)
 	require.False(t, due)
+}
+
+// The probe is bounded to rounds older than the newest two, which in steady
+// state hold unfolded credits; an unbounded probe would report due at every
+// start and credited round.
+func TestRewardCreditCompactionIgnoresUnfoldedKeptRounds(t *testing.T) {
+	t.Parallel()
+	f := agedCreditedRound(t)
+	require.NoError(t, f.ls.compactRewardCreditRounds())
+	require.Zero(t, unfoldedCreditCount(t, f))
+	for i := range uint64(rewardCreditRoundsKeptUnfolded) {
+		require.NoError(t, f.db.Metadata().SaveRewardAccountOutputs(
+			[]*models.RewardAccountOutput{{
+				StakingKey:  bytes.Repeat([]byte{byte(0xa0 + i)}, 28),
+				PoolKeyHash: bytes.Repeat([]byte{0xb0}, 28),
+				RewardType:  "member",
+				Epoch:       9 + i,
+				Amount:      1_000_000,
+				Spendable:   true,
+			}}, nil,
+		))
+	}
+	require.Equal(t, rewardCreditRoundsKeptUnfolded, unfoldedCreditCount(t, f))
+
+	due, err := f.ls.rewardCreditRoundDue()
+	require.NoError(t, err)
+	require.False(t, due, "credits in the newest two rounds are kept unfolded")
 }
 
 // TestRewardCreditCompactionFoldsDueRoundsExactly pins compaction: a due

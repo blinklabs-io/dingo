@@ -632,7 +632,9 @@ accounts in the same transaction. `FoldPendingRewardAccountOutputs` sets
 rows test the flag as `NOT folded`, so SQLite reads them on the credential
 index rather than the `(spendable, guarded, folded, epoch)` pending index,
 which serves the per-round probes (`HasPendingRewardCreditRounds`,
-`ClaimUnfoldedRewardCredits`). `GetPendingRewardCreditRounds` and
+`ClaimUnfoldedRewardCredits`, and the compaction due probe
+`HasUnfoldedRewardCreditsThroughEpoch`, which tests the rounds through a given
+epoch). `GetPendingRewardCreditRounds` and
 `SetPendingRewardCreditRounds` read and replace the table rows.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
 the rollback slot and clears `folded` on its surviving outputs.
