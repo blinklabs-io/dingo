@@ -103,12 +103,10 @@ func TestLeiosPersistQueueConcurrentAdmissionHonorsByteBudget(t *testing.T) {
 	for i := range enqueuers {
 		point, blockRaw, data, s := leiosPersistTestEntry(t, 200+i, 4, 512)
 		require.Equal(t, size, s, "entries must be equal-sized")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			o.enqueueLeiosPersist(point, blockRaw, data)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
