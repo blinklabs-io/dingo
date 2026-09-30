@@ -134,7 +134,7 @@ func newHandleConnManagerClosedOwnerConn(
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces
-// issue #3508: NtC connections never received any close notification (the
+// the case where NtC connections never received any close notification (the
 // EventBus's ConnectionClosedEventType is intentionally NtN-only), so
 // chainsync.State.RemoveClient -- which cancels the live chain iterator and
 // deletes the per-connection client state -- was never invoked for a closed
@@ -206,8 +206,8 @@ func TestHandleConnManagerClosedOwner_NilChainsyncState(t *testing.T) {
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters covers the node
-// half of the issue #3514 wiring. The connection manager's ConnClosedOwnerFunc is
-// the only close notification an NtC connection gets, and it is what wakes a
+// half of the Leios serve wiring. The connection manager's ConnClosedOwnerFunc
+// is the only close notification an NtC connection gets, and it is what wakes a
 // chainsync server callback parked waiting for a certified endorser closure --
 // the protocol's own done channel cannot close while that callback is running.
 // Without the owner-aware release in handleConnManagerClosedOwner the
@@ -306,7 +306,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint covers
-// the NtC-close half of blinklabs-io/dingo#382's point-pinning: a client
+// the NtC-close half of LocalStateQuery point-pinning: a client
 // that pins a point and then disconnects without a clean Release must not
 // leak its map entry, since NtC closes never reach
 // Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType

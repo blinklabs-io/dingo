@@ -68,7 +68,7 @@ func nodeFuncBodyForSnapshotWiring(
 // package defaults instead of the operator's configuration -- which is
 // exactly what happened to SetDelegatorInactivity (see
 // TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig)
-// and is the same gap dingo #4188's retention setter would leave.
+// and is the same gap the Koios parity retention setter would leave.
 func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	t.Parallel()
 
@@ -106,7 +106,7 @@ func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	}
 }
 
-// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins dingo #4188's
+// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins the retention
 // wiring itself: both node startup paths must widen reward_account_output
 // retention from the operator's koios-parity enablement. Without the call the
 // node keeps CORE mode's 4-epoch window, and the observer -- whose network

@@ -48,7 +48,7 @@ func (n *Node) chainsyncSyncTarget(
 // The two were previously written out separately, and every divergence
 // silently disabled operator-configured behavior until the process
 // restarted: the CIP-23/CIP-50/CIP-0163 reward flags, then the block
-// pipeline flags, then GenesisSelectionStateFunc (issue #3273), which left
+// pipeline flags, then GenesisSelectionStateFunc, which left
 // a restored or truncated node resolving deep forks by Praos length alone
 // with Ouroboros Genesis density selection switched off. Building the
 // config once makes that class of drift structurally impossible rather
@@ -76,10 +76,10 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),
 		// Parallel block-decode pipeline for the chainsync replay loop
-		// (issue #1894 phase 1). Not consensus-affecting; off by default.
+		// (phase 1 of the pipeline). Not consensus-affecting; off by default.
 		BlockPipelineEnabled: n.config.blockPipelineEnabled,
-		// Parallel VRF/KES validate stage for the same pipeline (issue
-		// #1894 phase 3). Off by default; requires BlockPipelineEnabled.
+		// Parallel VRF/KES validate stage for the same pipeline (phase 3).
+		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
 		// Supplies fetched Leios endorser-block transactions so the ledger
 		// can apply them when their referencing Dijkstra ranking block is
