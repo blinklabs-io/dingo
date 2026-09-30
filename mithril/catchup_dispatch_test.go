@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -728,6 +729,16 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	require.NoError(t, db.SetSyncState(
 		RewardStateRepairPendingKey, "1", nil,
 	))
+	require.NoError(t, db.SetEpoch(
+		1050, 99, []byte{1}, []byte{2}, []byte{3}, nil,
+		uint(shelley.EraShelley.Id), 1, 432000, nil,
+	))
+	require.NoError(t, db.Metadata().SaveRewardAdaPots(
+		&models.RewardAdaPots{
+			Epoch: 99, Treasury: 10, Reserves: 20,
+			Fees: 30, Rewards: 40, CapturedSlot: 1050,
+		}, nil,
+	))
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	result, err := Sync(context.Background(), SyncConfig{
@@ -759,6 +770,126 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1100, retained.Slot,
 		"canonical blocks after the selected state must remain for replay")
+	pots, err := db.Metadata().GetRewardAdaPots(99, nil)
+	require.NoError(t, err)
+	require.Nil(t, pots,
+		"reward pots after a state below the certified tip must be removed")
+	epoch, err := db.GetEpoch(99, nil)
+	require.NoError(t, err)
+	require.Nil(t, epoch,
+		"epochs after a state below the certified tip must be removed")
+}
+
+func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	block1050 := rewardRepairTestBlock(t, 1050, 3, certifiedHash)
+	block1100 := rewardRepairTestBlock(t, 1100, 4, block1050.Hash)
+	txID := bytes.Repeat([]byte{0x61}, 32)
+	address := append([]byte{0x60}, bytes.Repeat([]byte{0x71}, 28)...)
+	txInCBOR, err := cbor.Encode([]any{txID, uint64(0)})
+	require.NoError(t, err)
+	txOutCBOR, err := cbor.Encode([]any{address, uint64(42)})
+	require.NoError(t, err)
+	utxoMap := append([]byte{0xa1}, txInCBOR...)
+	utxoMap = append(utxoMap, txOutCBOR...)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber: 0,
+		validImmutable:      true,
+		ancillaryLedgerSlot: 1100,
+		ancillaryLedgerState: minimalLedgerStateWithUTxOMap(
+			t, 1100, block1100.Hash, utxoMap,
+		),
+	})
+
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	for _, block := range []models.Block{
+		{
+			Slot:     1000,
+			Hash:     certifiedHash,
+			PrevHash: bytes.Repeat([]byte{0}, 32),
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     uint(shelley.BlockTypeShelley),
+		},
+		block1050,
+		block1100,
+	} {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	utxoTxn := db.Transaction(true)
+	t.Cleanup(utxoTxn.Release)
+	require.NoError(t, db.CreateUtxo(utxoTxn, &models.Utxo{
+		TxId:      txID,
+		AddedSlot: 1100,
+	}))
+	require.NoError(t, db.Metadata().MarkUtxosDeletedAtSlot(
+		utxoTxn.Metadata(),
+		[]types.UtxoKey{{TxId: txID, OutputIdx: 0}},
+		1200,
+	))
+	require.NoError(t, utxoTxn.Commit())
+	spent, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, spent)
+	require.EqualValues(t, 1200, spent.DeletedSlot,
+		"fixture must model the snapshot output spent by a later local block")
+	require.NoError(t, setImmutableImportMarker(db, 0))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey, "1000", nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerHashSyncKey, hex.EncodeToString(certifiedHash), nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		RewardStateRepairPendingKey, "1", nil,
+	))
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	_, err = Sync(context.Background(), SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "core",
+		CardanoNodeConfig: &cardano.CardanoNodeConfig{
+			MithrilGenesisVerificationKey:          fixture.genesisVKey,
+			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
+		},
+		Backend:                 BackendV2,
+		PinnedDigest:            "original-bootstrap-pin",
+		VerifyCertChain:         true,
+		AggregatorURL:           fixture.server.URL,
+		AllowInsecureHTTP:       true,
+		StoragePlugins:          testStoragePlugins(),
+		DatabaseWorkers:         1,
+		Logger:                  discard,
+		RepairLegacyRewardState: true,
+	})
+	require.NoError(t, err)
+
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	utxo, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	require.Zero(t, utxo.DeletedSlot,
+		"Sync must restore snapshot-live outputs spent after its ledger state")
+	exists, err := db.UtxoExists(txID, 0, nil)
+	require.NoError(t, err)
+	require.True(t, exists,
+		"ordinary replay must see the snapshot output as live")
 }
 
 func TestVerifyRewardRepairLocalTailResolvesHashlessAnchorOnChain(t *testing.T) {
