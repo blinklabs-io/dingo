@@ -16,11 +16,131 @@ package sqlstore
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
+
+// TestGetAccountsByCredentialGroupedByTag verifies the grouped-by-tag,
+// single-column-IN rewrite of GetAccountsByCredential: it must return exactly
+// the accounts named by the caller's refs, for both credential tags, across
+// chunk boundaries, and it must still honor includeInactive. A per-ref
+// (credential_tag = ? AND staking_key = ?) OR ... predicate and the grouped
+// form agree on results; this pins the result shape independently of which
+// one is in use.
+func TestGetAccountsByCredentialGroupedByTag(t *testing.T) {
+	store := newManagementTestStore(t)
+
+	// Larger than the SQLite dialect's 999-parameter limit, so the grouped
+	// IN list for each tag must itself be chunked (twice over per tag).
+	const perTag = 1200
+	refs := make([]models.StakeCredentialRef, 0, perTag*2)
+	for tag := range uint8(2) {
+		for i := range perTag {
+			key := make([]byte, 28)
+			key[0] = tag
+			binary.BigEndian.PutUint32(key[24:], uint32(i))
+			require.NoError(t, store.ImportAccount(&models.Account{
+				StakingKey:    key,
+				CredentialTag: tag,
+				Active:        true,
+			}, nil))
+			refs = append(
+				refs,
+				models.StakeCredentialRef{Tag: tag, Key: key},
+			)
+		}
+	}
+
+	inactiveKey := make([]byte, 28)
+	inactiveKey[0] = 0
+	binary.BigEndian.PutUint32(inactiveKey[24:], uint32(perTag))
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey:    inactiveKey,
+		CredentialTag: 0,
+		Active:        false,
+	}, nil))
+	inactiveRef := models.StakeCredentialRef{Tag: 0, Key: inactiveKey}
+
+	// Two refs are left unrequested so the result must be exactly the
+	// requested set, not "every account of that tag".
+	requested := append(
+		append([]models.StakeCredentialRef{}, refs[:len(refs)-2]...),
+		inactiveRef,
+	)
+
+	accounts, err := store.GetAccountsByCredential(requested, false, nil)
+	require.NoError(t, err)
+	// The inactive account is filtered out by includeInactive=false.
+	require.Len(t, accounts, len(requested)-1)
+	for _, ref := range refs[:len(refs)-2] {
+		account, ok := accounts[ref.MapKey()]
+		require.True(t, ok, "missing account for tag %d", ref.Tag)
+		require.Equal(t, ref.Tag, account.CredentialTag)
+		require.Equal(t, ref.Key, account.StakingKey)
+	}
+	_, ok := accounts[inactiveRef.MapKey()]
+	require.False(
+		t,
+		ok,
+		"inactive account leaked through with includeInactive=false",
+	)
+	for _, ref := range refs[len(refs)-2:] {
+		_, ok := accounts[ref.MapKey()]
+		require.False(t, ok, "unrequested account leaked into the result")
+	}
+
+	withInactive, err := store.GetAccountsByCredential(
+		[]models.StakeCredentialRef{inactiveRef},
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Contains(t, withInactive, inactiveRef.MapKey())
+}
+
+// TestAccountsByCredentialChunkQueryShape pins the query form
+// GetAccountsByCredential emits: a single-column staking_key IN (...)
+// predicate, never a per-ref (credential_tag = ? AND staking_key = ?)
+// OR ... predicate. This is the regression guard the result-only tests
+// above can't provide — reverting the query to the old per-ref OR form is
+// still correct (same rows come back, just slower), so no assertion on
+// returned data can distinguish the two. An EXPLAIN QUERY PLAN assertion
+// isn't durable here either: the plan SQLite picks depends on table size
+// and whether ANALYZE has run, not on which predicate form generated it.
+// Asserting on the generated SQL text instead pins our intent directly.
+func TestAccountsByCredentialChunkQueryShape(t *testing.T) {
+	keys := [][]byte{
+		{0x01, 0x02},
+		{0x03, 0x04},
+		{0x05, 0x06},
+	}
+
+	query, args := accountsByCredentialChunkQuery(1, keys, false)
+	require.Contains(t, query, "staking_key IN (")
+	require.NotContains(t, query, " OR ")
+	require.Contains(t, query, "credential_tag = ?")
+	require.Contains(t, query, "AND active = TRUE")
+	require.Equal(t, []any{uint8(1), keys[0], keys[1], keys[2]}, args)
+
+	queryInactive, argsInactive := accountsByCredentialChunkQuery(
+		0,
+		keys,
+		true,
+	)
+	require.Contains(t, queryInactive, "staking_key IN (")
+	require.NotContains(t, queryInactive, " OR ")
+	require.NotContains(t, queryInactive, "active = TRUE")
+	require.Equal(
+		t,
+		[]any{uint8(0), keys[0], keys[1], keys[2]},
+		argsInactive,
+	)
+}
 
 // snapshotStakingKey returns a distinct 28-byte stake credential.
 func snapshotStakingKey(marker byte) []byte {
@@ -409,4 +529,52 @@ func TestWriteAccountImportBaselineRequiresTransaction(t *testing.T) {
 			Active:        true,
 		},
 	))
+}
+
+func TestAddAccountRewardsByCredentialRespectsSQLiteParameterLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	stakingKey := bytesRepeat(0x61, 28)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: stakingKey,
+		Active:     true,
+	}))
+
+	ctx := context.Background()
+	conn, err := store.writeDB.Conn(ctx)
+	require.NoError(t, err)
+	_, err = sqlite.Limit(
+		conn,
+		sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,
+		store.dialect.ParameterLimit(),
+	)
+	require.NoError(t, err)
+	tx, err := conn.BeginTx(ctx, store.dialect.BeginOptions(false))
+	require.NoError(t, err)
+	txn := &sqlTxn{owner: store, tx: tx, ctx: ctx}
+	t.Cleanup(func() {
+		require.NoError(t, txn.Rollback())
+		require.NoError(t, conn.Close())
+	})
+
+	credits := make([]models.AccountRewardCredit, 200)
+	for index := range credits {
+		sourceHash := make([]byte, 32)
+		binary.BigEndian.PutUint64(sourceHash[24:], uint64(index+1))
+		credits[index] = models.AccountRewardCredit{
+			StakingKey:    stakingKey,
+			SourceHash:    sourceHash,
+			Amount:        1,
+			Slot:          100,
+			CredentialTag: 0,
+		}
+	}
+	require.NoError(t, store.AddAccountRewardsByCredential(credits, txn))
+	require.NoError(t, txn.Commit())
+
+	account, err := store.GetAccountByCredential(0, stakingKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(credits)), uint64(account.Reward))
 }

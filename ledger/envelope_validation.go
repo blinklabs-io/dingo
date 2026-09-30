@@ -17,10 +17,12 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -43,6 +45,14 @@ type envelopeParent struct {
 	// was not loaded, or is not recognised, leaves the era rule unchecked.
 	eraId    uint8
 	eraKnown bool
+	// byronEpoch and byronSlot are a Byron parent's raw epoch and slot within
+	// it, set when the parent is a decoded Byron block or a persisted tip
+	// positioned by withStoredByronPosition. Otherwise only the stored slot is
+	// known, numbered with gouroboros' fixed epoch length; see
+	// byronParentPosition.
+	byronEpoch      uint64
+	byronSlot       uint64
+	byronPositioned bool
 }
 
 // envelopeParentFromTip reconstructs the envelope metadata for a persisted
@@ -70,15 +80,142 @@ func envelopeParentFromTip(
 	return parent
 }
 
+// withStoredByronPosition sets a persisted Byron tip's epoch and slot within
+// it from the stored block. The stored slot is numbered with gouroboros'
+// fixed epoch length and cannot be split back once the configured epoch is
+// longer, so the header's own fields are the only exact source. A parent that
+// is not a Byron block, or is already positioned, is returned unchanged.
+func (p envelopeParent) withStoredByronPosition(
+	stored models.Block,
+) (envelopeParent, error) {
+	if p.byronPositioned || !p.eraKnown || p.eraId != byron.EraIdByron {
+		return p, nil
+	}
+	decoded, err := stored.Decode()
+	if err != nil {
+		return p, fmt.Errorf("decode stored Byron parent: %w", err)
+	}
+	if decoded.SlotNumber() != p.slot {
+		return p, fmt.Errorf(
+			"stored Byron parent decodes to slot %d, not tip slot %d",
+			decoded.SlotNumber(),
+			p.slot,
+		)
+	}
+	p.byronEpoch, p.byronSlot, p.byronPositioned = byronBlockPosition(decoded)
+	return p, nil
+}
+
 func envelopeParentFromBlock(block gledger.Block) envelopeParent {
 	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
-	return envelopeParent{
+	parent := envelopeParent{
 		slot:        block.SlotNumber(),
 		blockNumber: block.BlockNumber(),
 		byronEbb:    isEbb,
 		eraId:       block.Era().Id,
 		eraKnown:    true,
 	}
+	epoch, slot, positioned := byronBlockPosition(block)
+	parent.byronEpoch = epoch
+	parent.byronSlot = slot
+	parent.byronPositioned = positioned
+	return parent
+}
+
+// byronBlockPosition returns a Byron block's epoch and its slot within that
+// epoch, which are the header's own fields and do not depend on the epoch
+// length. An epoch boundary block sits at slot 0 of its epoch.
+func byronBlockPosition(block gledger.Block) (epoch, slot uint64, ok bool) {
+	switch header := block.Header().(type) {
+	case *byron.ByronMainBlockHeader:
+		if header != nil {
+			return header.ConsensusData.SlotId.Epoch,
+				header.ConsensusData.SlotId.Slot,
+				true
+		}
+	case *byron.ByronEpochBoundaryBlockHeader:
+		if header != nil {
+			return header.ConsensusData.Epoch, 0, true
+		}
+	}
+	return 0, 0, false
+}
+
+// byronEpochSlots returns the configured Byron epoch length, 10 * k. Without
+// a Byron genesis it returns gouroboros' fixed mainnet length.
+func byronEpochSlots(config *cardano.CardanoNodeConfig) uint64 {
+	if config == nil || config.ByronGenesis() == nil {
+		return byron.ByronSlotsPerEpoch
+	}
+	k := config.ByronGenesis().ProtocolConsts.K
+	if k <= 0 {
+		return byron.ByronSlotsPerEpoch
+	}
+	return uint64(k) * 10
+}
+
+// byronParentPosition returns the parent's epoch and slot within it. A parent
+// rebuilt from a persisted tip only has the slot the chain stored, which is
+// epoch * ByronSlotsPerEpoch + slot; that splits back into the two fields
+// exactly when the slot within the epoch fits both lengths, and not at all
+// once the configured epoch is longer than the stored one.
+func byronParentPosition(
+	parent envelopeParent,
+	epochSlots uint64,
+) (epoch, slot uint64, ok bool) {
+	if parent.byronPositioned {
+		return parent.byronEpoch, parent.byronSlot, true
+	}
+	if !parent.eraKnown || parent.eraId != byron.EraIdByron ||
+		epochSlots > byron.ByronSlotsPerEpoch {
+		return 0, 0, false
+	}
+	epoch = parent.slot / byron.ByronSlotsPerEpoch
+	slot = parent.slot % byron.ByronSlotsPerEpoch
+	if slot >= epochSlots {
+		return 0, 0, false
+	}
+	return epoch, slot, true
+}
+
+// byronOrderSlots numbers a Byron block and its Byron parent with the
+// configured epoch length. ok is false when either cannot be numbered that
+// way, and the caller then compares the slots the chain stored.
+func byronOrderSlots(
+	block gledger.Block,
+	parent envelopeParent,
+	epochSlots uint64,
+) (blockSlot, parentSlot uint64, ok bool, err error) {
+	blockEpoch, blockInEpoch, blockOk := byronBlockPosition(block)
+	if !blockOk {
+		return 0, 0, false, nil
+	}
+	parentEpoch, parentInEpoch, parentOk := byronParentPosition(
+		parent,
+		epochSlots,
+	)
+	if !parentOk {
+		return 0, 0, false, nil
+	}
+	blockSlot, err = byron.SlotNumberFromEpochAndSlot(
+		blockEpoch, blockInEpoch, epochSlots,
+	)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf(
+			"byron block epoch %d slot %d: %w",
+			blockEpoch, blockInEpoch, err,
+		)
+	}
+	parentSlot, err = byron.SlotNumberFromEpochAndSlot(
+		parentEpoch, parentInEpoch, epochSlots,
+	)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf(
+			"byron parent epoch %d slot %d: %w",
+			parentEpoch, parentInEpoch, err,
+		)
+	}
+	return blockSlot, parentSlot, true, nil
 }
 
 // validateInboundBlockEnvelope runs the consensus envelope checks that must
@@ -92,20 +229,23 @@ func validateInboundBlockEnvelope(
 	if block == nil {
 		return errors.New("validate inbound block envelope: nil block")
 	}
-	if err := validateByronEbbPlacement(block); err != nil {
+	epochSlots := byronEpochSlots(nodeConfig)
+	if err := validateByronEbbPlacement(block, epochSlots); err != nil {
 		return err
 	}
 	if isNilBlockHeader(block.Header()) {
 		return errors.New("validate inbound block envelope: nil block header")
 	}
-	if err := validateBlockOrder(block, parent); err != nil {
+	if err := validateBlockOrder(block, parent, epochSlots); err != nil {
 		return err
 	}
 	if block.Era().Id == byron.EraIdByron {
-		// Byron does not carry the Shelley-style body-size field, but its
-		// header carries a separate proof over every body payload. Verify it
-		// before admitting the block so a genuine header cannot be paired with
-		// a substituted body.
+		// Byron does not carry the Shelley-style body-size field, but a main
+		// block's header carries a separate proof over every body payload.
+		// Verify it before admitting the block so a genuine header cannot be
+		// paired with a substituted body. The reference decodes an EBB's
+		// body proof as a byte string and discards it, so an EBB body is not
+		// bound to its header.
 		// Decoded inbound blocks preserve their complete CBOR. Synthetic
 		// blocks used by callers that do not carry wire bytes cannot provide a
 		// body proof to verify and are handled by the normal structural path.
@@ -121,10 +261,11 @@ func validateInboundBlockEnvelope(
 			if err := byronBlock.ValidateBodyProof(); err != nil {
 				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
 			}
+			return validateByronEbbSize(byronBlock)
 		default:
 			return nil
 		}
-		return validateByronBlockSizes(block, nodeConfig)
+		return validateByronBlockSizes(block, pparams, nodeConfig)
 	}
 	if err := validateBlockSizes(block, pparams); err != nil {
 		return err
@@ -204,8 +345,14 @@ func isNilBlockHeader(header lcommon.BlockHeader) bool {
 //	EBB      regular  parent + 1     same or later
 //	EBB      EBB      parent + 1     later
 //
-// A regular block may share an EBB parent's slot only within Byron.
-func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
+// A regular block may share an EBB parent's slot only within Byron. Between
+// two Byron blocks the slots are compared as the configured epoch length
+// numbers them, so epochSlots is the Byron epoch length, 10 * k.
+func validateBlockOrder(
+	block gledger.Block,
+	parent envelopeParent,
+	epochSlots uint64,
+) error {
 	if parent.origin {
 		return nil
 	}
@@ -240,31 +387,48 @@ func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
 			parent.blockNumber,
 		)
 	}
+	blockSlot, parentSlot := block.SlotNumber(), parent.slot
+	if block.Era().Id == byron.EraIdByron {
+		byronBlockSlot, byronParentSlot, ok, err := byronOrderSlots(
+			block, parent, epochSlots,
+		)
+		if err != nil {
+			return err
+		}
+		if ok {
+			blockSlot, parentSlot = byronBlockSlot, byronParentSlot
+		}
+	}
 	if !isEbb && parent.byronEbb &&
 		block.Era().Id == byron.EraIdByron &&
-		block.SlotNumber() == parent.slot {
+		blockSlot == parentSlot {
 		return nil
 	}
-	if block.SlotNumber() <= parent.slot {
+	if blockSlot <= parentSlot {
 		if isEbb {
 			return fmt.Errorf(
 				"byron EBB slot %d does not follow parent slot %d",
-				block.SlotNumber(),
-				parent.slot,
+				blockSlot,
+				parentSlot,
 			)
 		}
 		return fmt.Errorf(
 			"block slot %d does not follow parent slot %d",
-			block.SlotNumber(),
-			parent.slot,
+			blockSlot,
+			parentSlot,
 		)
 	}
 	return nil
 }
 
 // validateByronEbbPlacement rejects Byron epoch boundary blocks outside their
-// declared epoch boundary slot, while ignoring non-EBB blocks.
-func validateByronEbbPlacement(block gledger.Block) error {
+// declared epoch boundary slot, while ignoring non-EBB blocks. The boundary
+// slot is the EBB's epoch times the configured epoch length, so epochSlots is
+// the Byron epoch length, 10 * k.
+func validateByronEbbPlacement(
+	block gledger.Block,
+	epochSlots uint64,
+) error {
 	ebb, isEbb := block.(*byron.ByronEpochBoundaryBlock)
 	if !isEbb {
 		return nil
@@ -272,20 +436,41 @@ func validateByronEbbPlacement(block gledger.Block) error {
 	if ebb.BlockHeader == nil {
 		return errors.New("byron EBB has nil header")
 	}
-	slot := ebb.SlotNumber()
-	if slot%byron.ByronSlotsPerEpoch != 0 {
+	slot, err := ebb.BlockHeader.SlotNumberWithEpochLength(epochSlots)
+	if err != nil {
+		return fmt.Errorf(
+			"byron EBB epoch %d: %w",
+			ebb.BlockHeader.ConsensusData.Epoch,
+			err,
+		)
+	}
+	if slot%epochSlots != 0 {
 		return fmt.Errorf(
 			"byron EBB slot %d is not an epoch boundary slot",
 			slot,
 		)
 	}
-	expectedSlot := ebb.BlockHeader.ConsensusData.Epoch * byron.ByronSlotsPerEpoch
-	if slot != expectedSlot {
+	if slot/epochSlots != ebb.BlockHeader.ConsensusData.Epoch {
 		return fmt.Errorf(
-			"byron EBB slot %d does not match epoch %d boundary slot %d",
+			"byron EBB slot %d does not match epoch %d boundary slot",
 			slot,
 			ebb.BlockHeader.ConsensusData.Epoch,
-			expectedSlot,
+		)
+	}
+	return nil
+}
+
+// byronMaxEbbSize is the reference updateChainBoundary bound on an epoch
+// boundary block's whole encoding. It replaces maxBlockSize and
+// maxHeaderSize for EBBs rather than adding to them.
+const byronMaxEbbSize = 2_000_000
+
+func validateByronEbbSize(block *byron.ByronEpochBoundaryBlock) error {
+	if size := len(block.Cbor()); size > byronMaxEbbSize {
+		return fmt.Errorf(
+			"byron epoch boundary block size %d exceeds fixed limit %d",
+			size,
+			byronMaxEbbSize,
 		)
 	}
 	return nil
@@ -334,34 +519,72 @@ func validateBlockSizes(
 	return nil
 }
 
-// validateByronBlockSizes enforces the limits carried by Byron genesis. Byron
-// does not put a body-size declaration in its header, so the encoded block
-// size is the value checked against maxBlockSize.
+// validateByronBlockSizes enforces the Byron block and header size limits.
+// A main block is measured against ppMaxBlockSize and ppMaxHeaderSize as
+// adopted for its epoch when pparams carries them; genesis only initializes
+// those parameters. Epoch boundary blocks, and callers with no adopted
+// parameters, use the genesis limits. A main block whose adopted parameters
+// are unknown (eras.ByronProtocolParameters.AdoptionUnknown) is not measured.
 func validateByronBlockSizes(
 	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
 	config *cardano.CardanoNodeConfig,
 ) error {
-	if config == nil || config.ByronGenesis() == nil {
-		return errors.New("byron genesis is required for block size validation")
+	if _, isMain := block.(*byron.ByronMainBlock); isMain {
+		if adopted, ok := pparams.(*eras.ByronProtocolParameters); ok &&
+			adopted != nil && adopted.AdoptionUnknown {
+			return nil
+		}
 	}
-	genesis := config.ByronGenesis()
-	version := genesis.BlockVersionData
-	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
-		return errors.New("byron genesis has invalid block size limits")
+	maxBlockSize, maxHeaderSize, err := byronBlockSizeLimits(
+		block, pparams, config,
+	)
+	if err != nil {
+		return err
 	}
-	if uint64(len(block.Header().Cbor())) > uint64(version.MaxHeaderSize) {
+	headerSize := new(big.Int).SetInt64(int64(len(block.Header().Cbor())))
+	if headerSize.Cmp(maxHeaderSize) > 0 {
 		return fmt.Errorf(
-			"byron block header size %d exceeds maxHeaderSize %d",
-			len(block.Header().Cbor()), version.MaxHeaderSize,
+			"byron block header size %s exceeds maxHeaderSize %s",
+			headerSize, maxHeaderSize,
 		)
 	}
-	if uint64(len(block.Cbor())) > uint64(version.MaxBlockSize) {
+	blockSize := new(big.Int).SetInt64(int64(len(block.Cbor())))
+	if blockSize.Cmp(maxBlockSize) > 0 {
 		return fmt.Errorf(
-			"byron block size %d exceeds maxBlockSize %d",
-			len(block.Cbor()), version.MaxBlockSize,
+			"byron block size %s exceeds maxBlockSize %s",
+			blockSize, maxBlockSize,
 		)
 	}
 	return nil
+}
+
+func byronBlockSizeLimits(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+	config *cardano.CardanoNodeConfig,
+) (maxBlockSize, maxHeaderSize *big.Int, err error) {
+	if _, isMain := block.(*byron.ByronMainBlock); isMain {
+		if adopted, ok := pparams.(*eras.ByronProtocolParameters); ok &&
+			adopted != nil && adopted.MaxBlockSize != nil &&
+			adopted.MaxHeaderSize != nil {
+			return adopted.MaxBlockSize, adopted.MaxHeaderSize, nil
+		}
+	}
+	if config == nil || config.ByronGenesis() == nil {
+		return nil, nil, errors.New(
+			"byron genesis is required for block size validation",
+		)
+	}
+	version := config.ByronGenesis().BlockVersionData
+	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
+		return nil, nil, errors.New(
+			"byron genesis has invalid block size limits",
+		)
+	}
+	return big.NewInt(int64(version.MaxBlockSize)),
+		big.NewInt(int64(version.MaxHeaderSize)),
+		nil
 }
 
 // serializedBlockBodySize measures the serialized body portion of block CBOR

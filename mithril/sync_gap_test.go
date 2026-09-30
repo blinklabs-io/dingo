@@ -31,6 +31,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -502,6 +503,127 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 	assert.Equal(t, ccCred, votes[0].VoterCredential)
 	assert.Equal(t, uint8(models.VoteYes), votes[0].Vote)
 	assert.Equal(t, point.Slot, votes[0].AddedSlot)
+}
+
+func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
+	t *testing.T,
+) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xe0}, testGapHash28("dijkstra-subproposal")...),
+	)
+	require.NoError(t, err)
+	proposal := dijkstra.DijkstraProposalProcedure{
+		PPDeposit:       42,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: dijkstra.DijkstraGovAction{
+			Type: uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{
+				Type: uint(lcommon.GovActionTypeInfo),
+			},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/dijkstra-gap-child-proposal",
+			DataHash: [32]byte(testGapHash32("dijkstra-gap-anchor")),
+		},
+	}
+	outputCbor, err := cbor.Encode(map[uint]any{
+		0: append([]byte{0x60}, testGapHash28("dijkstra-child-output")...),
+		1: uint64(1_000_000),
+	})
+	require.NoError(t, err)
+	var output dijkstra.DijkstraTransactionOutput
+	_, err = cbor.Decode(outputCbor, &output)
+	require.NoError(t, err)
+	tx := &dijkstra.DijkstraTransaction{
+		Body: dijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]dijkstra.DijkstraSubTransaction{{
+					Body: dijkstra.DijkstraSubTransactionBody{
+						TxOutputs:            []dijkstra.DijkstraTransactionOutput{output},
+						TxProposalProcedures: []dijkstra.DijkstraProposalProcedure{proposal},
+					},
+				}},
+				true,
+			),
+		},
+		TxIsValid: true,
+	}
+	txCbor, err := tx.MarshalCBOR()
+	require.NoError(t, err)
+	decodedTx, err := gledger.NewTransactionFromCbor(
+		gledger.TxTypeDijkstra,
+		txCbor,
+	)
+	require.NoError(t, err)
+	tx = decodedTx.(*dijkstra.DijkstraTransaction)
+	childHash := tx.Body.TxSubTransactions.Items()[0].Body.Id()
+	rootHash := tx.Hash()
+	require.NotEqual(t, childHash, rootHash)
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: testGapHash32("dijkstra-gap-block"),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var childHashArray, rootHashArray [32]byte
+	copy(childHashArray[:], childHash.Bytes())
+	copy(rootHashArray[:], rootHash.Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			childHashArray: {
+				BlockSlot: point.Slot, BlockHash: blockHash,
+				ByteOffset: 0, ByteLength: 1,
+			},
+			rootHashArray: {
+				BlockSlot: point.Slot, BlockHash: blockHash,
+				ByteOffset: 1, ByteLength: 1,
+			},
+		},
+		UtxoOffsets: map[database.UtxoRef]database.CborOffset{
+			{TxId: childHashArray, OutputIdx: 0}: {
+				BlockSlot: point.Slot, BlockHash: blockHash,
+				ByteOffset: 2, ByteLength: 1,
+			},
+		},
+	}
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			GovActionValidityPeriod: 20,
+			DRepInactivityPeriod:    20,
+		},
+	}
+	require.NoError(t, processGapBlockTransactions(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point,
+		[]lcommon.Transaction{tx},
+		offsets,
+		100,
+		dijkstra.EraIdDijkstra,
+		pparams,
+		&pparams.ConwayProtocolParameters,
+	))
+
+	got, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, childHash.Bytes(), got.TxHash)
+	rootProposal, err := db.GetGovernanceProposal(rootHash.Bytes(), 0, nil)
+	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
+	require.Nil(t, rootProposal)
+	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, childUtxo)
+	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, rootUtxo)
 }
 
 func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {

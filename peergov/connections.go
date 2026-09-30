@@ -649,9 +649,13 @@ func (p *PeerGovernor) createOutboundConnection(
 			return
 		}
 		if !p.isTopologyPeer(peerSource) &&
-			reconnectCount > p.config.MaxReconnectFailureThreshold {
+			reconnectCount > p.config.MaxReconnectFailureThreshold &&
+			p.countEligibleUpstreamsLocked() > 0 {
 			// Fail fast for non-topology peers. Waiting for the long
-			// reconcile interval causes large reconnect storms.
+			// reconcile interval causes large reconnect storms. With no
+			// eligible upstream the peer is kept and retried with backoff:
+			// a removed peer is never restored when its deny entry expires,
+			// so deleting the last leads strands the node.
 			p.denyList[peerNormalizedAddress] = time.Now().Add(
 				p.config.DenyDuration,
 			)

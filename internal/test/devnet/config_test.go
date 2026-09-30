@@ -206,6 +206,29 @@ func TestCanonicalSpecsKeepCanonicalTiming(t *testing.T) {
 	}
 }
 
+func TestKoiosParityServicesUseOptInProfile(t *testing.T) {
+	composeData, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	var compose struct {
+		Services map[string]struct {
+			Profiles []string `yaml:"profiles"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(composeData, &compose))
+
+	for _, service := range []string{
+		"dingo-preview",
+		"koios-parity-prometheus",
+		"koios-parity-grafana",
+	} {
+		definition, ok := compose.Services[service]
+		require.True(t, ok, "Compose service %s must exist", service)
+		require.Equal(t, []string{"koios-parity"}, definition.Profiles,
+			"Preview observability must stay opt-in and separate from the generated DevNet profiles")
+	}
+}
+
 // run-tests.sh and start.sh each map a mode to a network spec, and
 // docker-compose.yml supplies the defaults. Nothing makes them agree, so a
 // rename that updates one and not another would leave the Go harness

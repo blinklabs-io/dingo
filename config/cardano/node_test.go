@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,7 +24,38 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
+
+func FuzzNewCardanoNodeConfigFromReader(f *testing.F) {
+	f.Add("")
+	f.Add("Protocol: Cardano\nRequiresNetworkMagic: RequiresMagic\n")
+	f.Add("PeerSharing: true\nTargetNumberOfActivePeers: 20\n")
+
+	f.Fuzz(func(t *testing.T, data string) {
+		if len(data) > 64*1024 {
+			t.Skip("config input is too large for fast fuzzing")
+		}
+
+		cfg, err := NewCardanoNodeConfigFromReader(bytes.NewBufferString(data))
+		if err != nil {
+			return
+		}
+		if cfg == nil {
+			t.Fatalf(
+				"NewCardanoNodeConfigFromReader returned nil without an error",
+			)
+		}
+
+		encoded, err := yaml.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("yaml.Marshal(parsed config): %v", err)
+		}
+		if _, err := NewCardanoNodeConfigFromReader(bytes.NewReader(encoded)); err != nil {
+			t.Fatalf("reparse marshaled config: %v", err)
+		}
+	})
+}
 
 const (
 	testDataDir = "testdata"
@@ -105,6 +136,51 @@ func TestCardanoNodeConfig(t *testing.T) {
 			t.Fatalf("got nil instead of ConwayGenesis")
 		}
 	})
+}
+
+// TestPBFTSignatureLimit pins ouroboros-consensus's Word64 limit
+// floor(threshold * k), computed in Double: 0.57 * 100 is
+// 56.99999999999999 in Double, so the limit is 56 where an exact rational
+// would give 57, and a negative product wraps.
+func TestPBFTSignatureLimit(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     string
+		k          uint64
+		limit      uint64
+		configured bool
+		wantError  bool
+	}{
+		{name: "absent", config: "{}\n", k: 10},
+		{name: "0.10", config: "PBftSignatureThreshold: 0.10\n", k: 10, limit: 1, configured: true},
+		{name: "0.22", config: "PBftSignatureThreshold: 0.22\n", k: 10, limit: 2, configured: true},
+		{name: "0.50", config: "PBftSignatureThreshold: 0.50\n", k: 10, limit: 5, configured: true},
+		{name: "above one", config: "PBftSignatureThreshold: 1.1\n", k: 10, limit: 11, configured: true},
+		{name: "exponent", config: "PBftSignatureThreshold: 1e-1\n", k: 10, limit: 1, configured: true},
+		{name: "integer", config: "PBftSignatureThreshold: 1\n", k: 10, limit: 10, configured: true},
+		{name: "double rounding", config: "PBftSignatureThreshold: 0.57\n", k: 100, limit: 56, configured: true},
+		{name: "mainnet default spelled out", config: "PBftSignatureThreshold: 0.22\n", k: 2160, limit: 475, configured: true},
+		{name: "negative wraps", config: "PBftSignatureThreshold: -0.1\n", k: 10, limit: ^uint64(0), configured: true},
+		{name: "string", config: "PBftSignatureThreshold: invalid\n", wantError: true},
+		{name: "quoted", config: "PBftSignatureThreshold: \"0.5\"\n", wantError: true},
+		{name: "infinite", config: "PBftSignatureThreshold: .inf\n", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := NewCardanoNodeConfigFromReader(
+				bytes.NewBufferString(test.config),
+			)
+			if test.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			limit, configured, err := config.PBFTSignatureLimit(test.k)
+			require.NoError(t, err)
+			require.Equal(t, test.limit, limit)
+			require.Equal(t, test.configured, configured)
+		})
+	}
 }
 
 func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {

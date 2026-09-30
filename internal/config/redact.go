@@ -184,6 +184,7 @@ var logPlainConfigFields = []string{
 	"MaxConnectionsPerIP",
 	"MaxInboundConns",
 	"MaxNtCConns",
+	"MaxTrustedLocalNtCConns",
 	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
 	"MetricsPort",

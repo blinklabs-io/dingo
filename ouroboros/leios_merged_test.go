@@ -32,6 +32,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
+	dingleios "github.com/blinklabs-io/dingo/ledger/leios"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -48,8 +49,10 @@ import (
 )
 
 type fakeLeiosAnnouncementLedger struct {
-	currentSlot uint64
-	slotTime    time.Time
+	currentSlot    uint64
+	currentSlotErr error
+	slotTime       time.Time
+	slotTimeErr    error
 	// slotTimeFunc, when set, overrides slotTime with a per-slot mapping --
 	// e.g. so a test can make one slot's binding read as expired while
 	// another's does not. Every other caller leaves it nil and gets the
@@ -62,12 +65,15 @@ type fakeLeiosAnnouncementLedger struct {
 }
 
 func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
-	return f.currentSlot, nil
+	return f.currentSlot, f.currentSlotErr
 }
 
 func (f *fakeLeiosAnnouncementLedger) SlotToTime(
 	slot uint64,
 ) (time.Time, error) {
+	if f.slotTimeErr != nil {
+		return time.Time{}, f.slotTimeErr
+	}
 	if f.slotTimeFunc != nil {
 		return f.slotTimeFunc(slot), nil
 	}
@@ -369,6 +375,38 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 	require.NoError(t, err)
 }
 
+type misbehavingPrototypeVoteHandler struct{ fakeLeiosVoteHandler }
+
+func (*misbehavingPrototypeVoteHandler) HandlePrototypeVote(
+	string,
+	lcommon.LeiosPrototypeVote,
+) error {
+	return dingleios.ErrPeerMisbehavior
+}
+
+func TestLeiosNotifyDisconnectsPeerAfterRepeatedInvalidPrototypeVotes(
+	t *testing.T,
+) {
+	t.Parallel()
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	conn, err := gouroboros.New()
+	require.NoError(t, err)
+	require.True(t, cm.AddConnection(conn, false, "127.0.0.1:1234"))
+	defer func() { conn.ErrorChan() <- errors.New("test connection closed") }()
+
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+	o.leiosVotes = &misbehavingPrototypeVoteHandler{}
+	vote := lcommon.LeiosPrototypeVote{}
+	err = o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+		&oleiosnotify.MsgVotesOffer{PrototypeVotes: []lcommon.LeiosPrototypeVote{vote}},
+	)
+	require.ErrorIs(t, err, dingleios.ErrPeerMisbehavior)
+}
+
 func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	t.Parallel()
 
@@ -572,6 +610,217 @@ func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
 	require.Empty(t, o.leiosEBLog.items)
 	_, stillDeferred := o.leiosDeferredAnnouncements["pending"]
 	require.True(t, stillDeferred)
+}
+
+func TestAcceptLeiosAnnouncementDeduplicatesBeforeValidation(t *testing.T) {
+	t.Parallel()
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 10,
+		slotTime:    time.Now().Add(-time.Minute),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	require.NoError(t, o.acceptLeiosAnnouncement(raw, "first-peer"))
+	require.NoError(t, o.acceptLeiosAnnouncement(raw, "second-peer"))
+	require.Equal(t, 1, announcementLedger.validated,
+		"an identical announced ranking block must not repeat ledger validation")
+	require.Empty(t, o.leiosAnnouncementInFlight)
+}
+
+func TestRepeatedInvalidLeiosAnnouncementsArePenalizedPerConnection(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	invalid := errors.New("invalid ranking block")
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.recordInvalidLeiosAnnouncement("connection-a", invalid))
+	}
+	require.ErrorIs(t,
+		o.recordInvalidLeiosAnnouncement("connection-a", invalid), invalid,
+	)
+	require.NoError(t,
+		o.recordInvalidLeiosAnnouncement("connection-b", invalid),
+		"one connection's invalid-message count must not penalize another",
+	)
+}
+
+func TestLeiosAnnouncementValidationCapacityDoesNotCountAsPeerMisbehavior(
+	t *testing.T,
+) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	for idx := range leiosMaxAnnouncementValidationInFlight {
+		_, release, err := o.reserveLeiosAnnouncementValidation(
+			fmt.Sprintf("rb-%d", idx),
+			lcommon.Blake2b256{},
+			0,
+			nil,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, release)
+	}
+	_, _, capacityErr := o.reserveLeiosAnnouncementValidation(
+		"overflow-rb", lcommon.Blake2b256{}, 0, nil,
+	)
+	require.ErrorIs(t, capacityErr, errLeiosAnnouncementValidationBudget)
+	require.NoError(t, o.handleInvalidLeiosAnnouncement("honest-peer", capacityErr))
+
+	invalid := errors.New("invalid announcement")
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("honest-peer", invalid))
+	}
+	require.ErrorIs(
+		t,
+		o.handleInvalidLeiosAnnouncement("honest-peer", invalid),
+		invalid,
+	)
+}
+
+func TestLeiosAnnouncementLocalStateFailuresDoNotPenalizePeer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(*fakeLeiosAnnouncementLedger, error)
+	}{
+		{
+			name: "current slot unavailable",
+			setup: func(l *fakeLeiosAnnouncementLedger, err error) {
+				l.currentSlotErr = err
+			},
+		},
+		{
+			name: "slot time unavailable",
+			setup: func(l *fakeLeiosAnnouncementLedger, err error) {
+				l.slotTimeErr = err
+			},
+		},
+	}
+
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			localErr := errors.New("local ledger state unavailable")
+			announcementLedger := &fakeLeiosAnnouncementLedger{
+				currentSlot: 10,
+				slotTime:    time.Now().Add(-time.Minute),
+				staleness:   ledger.LeiosAnnouncementFreshOCIN,
+			}
+			tt.setup(announcementLedger, localErr)
+			o := newOuroboros(OuroborosConfig{
+				EnableLeios:             true,
+				LeiosAnnouncementLedger: announcementLedger,
+			})
+
+			for range leiosInvalidAnnouncementLimit {
+				err := o.acceptLeiosAnnouncement(raw, "peer-a")
+				require.ErrorIs(t, err, errLeiosAnnouncementLocalState)
+				require.ErrorIs(t, err, localErr)
+				require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+			}
+
+			invalid := errors.New("invalid announcement")
+			for range leiosInvalidAnnouncementLimit - 1 {
+				require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid))
+			}
+			require.ErrorIs(
+				t,
+				o.handleInvalidLeiosAnnouncement("peer-a", invalid),
+				invalid,
+			)
+		})
+	}
+}
+
+func TestDeferredLeiosAnnouncementDoesNotPenalizePeer(t *testing.T) {
+	t.Parallel()
+
+	probe := newTestOuroborosWithLeiosDB(t)
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	header, err := decodeLeiosAnnouncementHeader(raw)
+	require.NoError(t, err)
+	deferredErr := probe.ledgerState.ValidateChainSelectionHeaderCrypto(header)
+	require.Error(t, deferredErr)
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 10,
+		slotTime:    time.Now().Add(-time.Minute),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+		err:         deferredErr,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	for range leiosInvalidAnnouncementLimit {
+		err := o.acceptLeiosAnnouncement(raw, "peer-a")
+		require.Error(t, err)
+		require.True(t, ledger.IsHeaderVerificationDeferred(err))
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+	}
+	require.Len(t, o.leiosDeferredAnnouncements, 1)
+
+	invalid := errors.New("invalid announcement")
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid))
+	}
+	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid), invalid)
+}
+
+func TestAheadOfCurrentSlotLeiosAnnouncementStillPenalizesPeer(t *testing.T) {
+	t.Parallel()
+
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 0,
+		slotTime:    time.Now().Add(-time.Minute),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	for range leiosInvalidAnnouncementLimit - 1 {
+		err := o.acceptLeiosAnnouncement(raw, "peer-a")
+		require.ErrorContains(t, err, "ahead of current slot")
+		require.NotErrorIs(t, err, errLeiosAnnouncementLocalState)
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+	}
+	err := o.acceptLeiosAnnouncement(raw, "peer-a")
+	require.ErrorContains(t, err, "ahead of current slot")
+	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", err), err)
+}
+
+func TestEarlyWithinLeiosAnnouncementClockSkewDoesNotPenalizePeer(t *testing.T) {
+	t.Parallel()
+	raw := testDijkstraAnnouncementHeaderRaw(t)
+	header, err := decodeLeiosAnnouncementHeader(raw)
+	require.NoError(t, err)
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: header.SlotNumber(),
+		slotTime:    time.Now().Add(leiosAnnouncementClockSkew / 2),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	for range leiosInvalidAnnouncementLimit {
+		err := o.acceptLeiosAnnouncement(raw, "peer-a")
+		require.ErrorIs(t, err, errLeiosAnnouncementClockSkew)
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", err))
+	}
+	invalid := errors.New("invalid announcement")
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid))
+	}
+	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid), invalid)
 }
 
 var errLeiosEndorserBlockNotCached = errors.New(
@@ -1278,7 +1527,21 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 		100,
 		make([]byte, lcommon.Blake2b256Size),
 	)
-	ebTxs := []cbor.RawMessage{testDijkstraTx(t, 1), testDijkstraTx(t, 2)}
+	// Endorser-block transaction bytes use the mempool transaction order,
+	// where is_valid precedes auxiliary_data. The served Dijkstra block uses
+	// the block transaction order, where auxiliary_data precedes is_valid.
+	ebTxs := make([]cbor.RawMessage, 0, 2)
+	wantBlockTxs := make([][]byte, 0, 2)
+	for seed := byte(1); seed <= 2; seed++ {
+		var blockTx []cbor.RawMessage
+		_, err := cbor.Decode(testDijkstraTx(t, seed), &blockTx)
+		require.NoError(t, err)
+		wantBlockTxs = append(wantBlockTxs, []byte(mustCbor(t, blockTx)))
+		mempoolTx := []cbor.RawMessage{
+			blockTx[0], blockTx[1], blockTx[3], blockTx[2],
+		}
+		ebTxs = append(ebTxs, mustCbor(t, mempoolTx))
+	}
 
 	merged, err := spliceEndorserTxsIntoDijkstraBlock(certRB, ebTxs)
 	require.NoError(t, err)
@@ -1318,16 +1581,8 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	_, err = cbor.Decode(mergedBody[0], &mergedTxs)
 	require.NoError(t, err)
 	require.Len(t, mergedTxs, 2)
-	for i, tx := range ebTxs {
-		var components []cbor.RawMessage
-		_, err = cbor.Decode(tx, &components)
-		require.NoError(t, err)
-		wantBlockTx, encodeErr := cbor.Encode([]cbor.RawMessage{
-			components[0], components[1], components[2], {0xf5},
-		})
-		require.NoError(t, encodeErr)
-		require.Equal(t, wantBlockTx, []byte(mergedTxs[i]))
-	}
+	require.Equal(t, wantBlockTxs[0], []byte(mergedTxs[0]))
+	require.Equal(t, wantBlockTxs[1], []byte(mergedTxs[1]))
 
 	// The merged block deliberately has a stale body hash: the preserved header
 	// still commits to the original empty body, so a full parse (which verifies
@@ -1348,6 +1603,51 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, decoded.Transactions(), 2)
+}
+
+func TestSpliceEndorserMempoolTxReordersValidityAndAuxiliaryData(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	body := mustCbor(t, []any{uint64(1)})
+	witnesses := mustCbor(t, map[uint]any{})
+	isValid := mustCbor(t, true)
+	auxiliaryData := mustCbor(t, map[uint]any{0: []byte{0x01}})
+	mempoolTx := mustCbor(t, []cbor.RawMessage{
+		body, witnesses, isValid, auxiliaryData,
+	})
+	certRB := testDijkstraCertRBRaw(
+		t,
+		100,
+		make([]byte, lcommon.Blake2b256Size),
+	)
+
+	merged, err := spliceEndorserTxsIntoDijkstraBlock(
+		certRB,
+		[]cbor.RawMessage{mempoolTx},
+	)
+	require.NoError(t, err)
+
+	var top []cbor.RawMessage
+	_, err = cbor.Decode(merged, &top)
+	require.NoError(t, err)
+	var blockBody []cbor.RawMessage
+	_, err = cbor.Decode(top[1], &blockBody)
+	require.NoError(t, err)
+	var transactions []cbor.RawMessage
+	_, err = cbor.Decode(blockBody[0], &transactions)
+	require.NoError(t, err)
+	require.Len(t, transactions, 1)
+
+	var blockTx []cbor.RawMessage
+	_, err = cbor.Decode(transactions[0], &blockTx)
+	require.NoError(t, err)
+	require.Len(t, blockTx, 4)
+	require.Equal(t, []byte(body), []byte(blockTx[0]))
+	require.Equal(t, []byte(witnesses), []byte(blockTx[1]))
+	require.Equal(t, []byte(auxiliaryData), []byte(blockTx[2]))
+	require.Equal(t, []byte(isValid), []byte(blockTx[3]))
 }
 
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {

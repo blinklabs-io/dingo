@@ -941,6 +941,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
 		},
 	)
+	// A Conway boundary leaves its mark snapshot to the ledger's post-commit
+	// job, which rebuilds the SNAP point from a read transaction pinned at the
+	// boundary's commit.
+	n.ledgerState.SetDeferredEpochBoundarySnapshotHooks(
+		n.snapshotMgr.DeferEpochBoundaryCapture,
+		n.snapshotMgr.DiscardEpochBoundaryCapture,
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) (ledger.DeferredBoundarySnapshot, error) {
+			return n.snapshotMgr.PrepareEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 
 	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
 	// (and, critically, subscribed to event.EpochTransitionEventType) before
@@ -1167,12 +1180,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:           n.config.promRegistry,
-			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
-			MaxInboundConns:        n.config.maxInboundConns,
-			MaxNtCConns:            n.config.maxNtCConns,
-			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
-			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
+			PromRegistry:            n.config.promRegistry,
+			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
+			MaxInboundConns:         n.config.maxInboundConns,
+			MaxNtCConns:             n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP:  n.config.maxNtCConnectionsPerIP,
+			MaxTrustedLocalNtCConns: n.config.maxTrustedLocalNtCConns,
+			ConnClosedOwnerFunc:     n.handleConnManagerClosedOwner,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
