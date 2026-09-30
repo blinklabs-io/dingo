@@ -63,6 +63,13 @@ type ByronProtocolParameters struct {
 	TxFeeSummand        uint64
 	TxFeeMultiplierNano *big.Int
 	UnlockStakeEpoch    uint64
+	// AdoptionUnknown marks parameters whose adopted values could not be
+	// established: the update state was rebuilt from a chain that starts
+	// after genesis, so any update adopted before its first block is
+	// missing. The block size, transaction size and minimum fee rules that
+	// read them are not enforced, since genesis values could reject a block
+	// the network accepted.
+	AdoptionUnknown bool
 }
 
 // Utxorpc satisfies lcommon.ProtocolParameters. utxorpc defines no Byron
@@ -206,7 +213,8 @@ func (p *ByronProtocolParameters) Equal(other *ByronProtocolParameters) bool {
 		p.SoftforkRule == other.SoftforkRule &&
 		p.TxFeeSummand == other.TxFeeSummand &&
 		bigEqual(p.TxFeeMultiplierNano, other.TxFeeMultiplierNano) &&
-		p.UnlockStakeEpoch == other.UnlockStakeEpoch
+		p.UnlockStakeEpoch == other.UnlockStakeEpoch &&
+		p.AdoptionUnknown == other.AdoptionUnknown
 }
 
 // ApplyUpdate returns the parameters with a proposal's

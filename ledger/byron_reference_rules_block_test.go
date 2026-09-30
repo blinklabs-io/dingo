@@ -146,6 +146,24 @@ func processByronReferenceRuleBlock(
 	tx lcommon.Transaction,
 ) error {
 	t.Helper()
+	pparams, err := eras.NewByronProtocolParametersFromGenesis(
+		nodeConfig.ByronGenesis(),
+	)
+	require.NoError(t, err)
+	return processByronBlockWithPParams(t, db, nodeConfig, tx, pparams)
+}
+
+// processByronBlockWithPParams applies one Byron block holding tx through
+// ledgerProcessBlock, validating it against pparams as block application
+// does with the parameters adopted for the block's epoch.
+func processByronBlockWithPParams(
+	t *testing.T,
+	db *database.Database,
+	nodeConfig *cardano.CardanoNodeConfig,
+	tx lcommon.Transaction,
+	pparams *eras.ByronProtocolParameters,
+) error {
+	t.Helper()
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ByronEraDesc,
@@ -180,12 +198,6 @@ func processByronReferenceRuleBlock(
 			TxId:      txHash,
 			OutputIdx: utxo.Id.Index(),
 		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
-	}
-	pparams, err := eras.NewByronProtocolParametersFromGenesis(
-		nodeConfig.ByronGenesis(),
-	)
-	if err != nil {
-		return err
 	}
 	return db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
