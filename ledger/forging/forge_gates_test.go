@@ -242,16 +242,16 @@ func TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot(
 // behind.
 //
 // This test replaces TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip
-// and reverses its assertion. That test asserted the behaviour #3955
-// deliberately left in place -- a best-peer switch disabled forging outright,
-// independent of local tip freshness and of forgeSyncToleranceSlots -- and
-// said in as many words that keying the gate on local tip freshness instead
-// would fail it and name the decision being revisited. This is that decision,
-// taken because the old behaviour is self-sealing: LedgerState publishes the
-// zero target for the window before the new peer's first admitted trusted
-// header, and on a network where forging is the only source of headers no node
-// forges, so none is admitted, so nothing lifts the target and the window never
-// closes (issue #4010).
+// and reverses its assertion. That test asserted the behaviour the
+// contested-slot handling deliberately left in place -- a best-peer switch
+// disabled forging outright, independent of local tip freshness and of
+// forgeSyncToleranceSlots -- and said in as many words that keying the gate on
+// local tip freshness instead would fail it and name the decision being
+// revisited. This is that decision, taken because the old behaviour is
+// self-sealing: LedgerState publishes the zero target for the window before the
+// new peer's first admitted trusted header, and on a network where forging is
+// the only source of headers no node forges, so none is admitted, so nothing
+// lifts the target and the window never closes.
 //
 // The clock below is a healthy steady-state producer: the tip is the previous
 // slot's block, so the node is at tip and has no evidence it is behind. It is
@@ -335,7 +335,7 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 // TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale verifies that a
 // quiet network is not mistaken for an upstream peer being ahead. The target
 // is unknown, so the forge gate has no peer-relative evidence that this node
-// is behind (issue #4201).
+// is behind.
 func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 	t *testing.T,
 ) {
@@ -374,13 +374,13 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
-	// #4013 asserted 991 here, the local tip's lag behind the wall clock,
-	// because the sync-skip path was then the only writer that could make
-	// dingo_forge_tip_gap_slots non-zero on this branch. This PR gives that
-	// gauge a single meaning -- the ledger-apply backlog, primary chain tip
-	// minus applied tip -- and sets it once per leader check instead, so the
-	// skip paths no longer overwrite it. The primary tip mirrors the applied tip
-	// on this fixture, so the backlog is 0 and the gauge says so.
+	// The earlier gauge asserted 991 here, the local tip's lag behind the wall
+	// clock, because the sync-skip path was then the only writer that could
+	// make dingo_forge_tip_gap_slots non-zero on this branch. The current code
+	// gives that gauge a single meaning -- the ledger-apply backlog, primary
+	// chain tip minus applied tip -- and sets it once per leader check instead,
+	// so the skip paths no longer overwrite it. The primary tip mirrors the
+	// applied tip on this fixture, so the backlog is 0 and the gauge says so.
 	//
 	// The lag itself is not lost: ledger exports it continuously as
 	// dingo_tip_gap_slots ("slots between wall-clock slot and chain tip",
@@ -911,7 +911,7 @@ func (c *forgerMovingTipSlotClock) reads() (int, int) {
 //
 // What must change is that the loss stops being silent. Reporting it as
 // "slot already has our own block" at Debug is both false and exactly
-// the invisible leader-slot loss this PR exists to remove, so the
+// the invisible leader-slot loss the Info-level log avoids, so the
 // declined leader slot is counted as a could-not-forge and logged at
 // Warn with both hashes.
 //

@@ -191,9 +191,9 @@ func TestEqualSlotAlternativeLosingChainSelectionIsNotPublished(
 }
 
 // TestEqualSlotAlternativeReservesTheFenceBeforeSigning pins the ordering the
-// #3734 fence depends on. The slot must be recorded durably before the builder
-// is asked for a block, so a crash between signing and adoption still leaves
-// the slot unusable.
+// duplicate-slot fence depends on. The slot must be recorded durably before the
+// builder is asked for a block, so a crash between signing and adoption still
+// leaves the slot unusable.
 func TestEqualSlotAlternativeReservesTheFenceBeforeSigning(t *testing.T) {
 	fence := &fenceTestStore{}
 	builder := &forgerTestBuilder{

@@ -29,7 +29,8 @@ import (
 
 // corruptBlock mirrors the Conway block envelope but encodes
 // transaction_bodies as a CBOR map instead of an array — the structural
-// defect behind issue #2063. Used only to exercise forgedBlockDiagnostics.
+// defect of a forged block that fails to round-trip. Used only to exercise
+// forgedBlockDiagnostics.
 type corruptBlock struct {
 	cbor.StructAsArray
 	Header                 cbor.RawMessage
@@ -41,8 +42,8 @@ type corruptBlock struct {
 
 // TestForgedBlockDiagnosticsPinpointsBadBodiesField verifies that the
 // diagnostic dump labels the offending block field. When the bodies slot
-// holds a map instead of an array (issue #2063), the notation must show
-// "transaction_bodies" rendered as a map so the mismatch is obvious.
+// holds a map instead of an array, the notation must show "transaction_bodies"
+// rendered as a map so the mismatch is obvious.
 func TestForgedBlockDiagnosticsPinpointsBadBodiesField(t *testing.T) {
 	// A minimal but structurally valid Conway header: [header_body, sig].
 	header, err := cbor.Encode([]any{[]any{uint64(0)}, []byte{0x00}})

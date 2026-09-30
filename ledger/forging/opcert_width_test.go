@@ -128,10 +128,9 @@ func TestPraosOpCertEncodesCounterBeyondUint32(t *testing.T) {
 //
 // buildBlock re-decodes the block it encoded, so the assertion depends on
 // gouroboros decoding the field at full width: the module is pinned past
-// gouroboros #2256, which widened
-// shelley.ShelleyBlockHeaderBody.OpCertSequenceNumber from uint32 to
-// uint64, so the re-decode now returns a block whose header carries the
-// full counter rather than reporting an upstream overflow.
+// gouroboros's widening of shelley.ShelleyBlockHeaderBody.OpCertSequenceNumber
+// from uint32 to uint64, so the re-decode now returns a block whose header
+// carries the full counter rather than reporting an upstream overflow.
 func TestBuildBlockDoesNotNarrowOpCertCounterAtUint32(t *testing.T) {
 	const counter = uint64(math.MaxUint32) + 1
 	creds := setupTestCredentials(t)

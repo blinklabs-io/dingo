@@ -28,7 +28,7 @@ import (
 
 // TestEBSelectionBudgetSkipsALateSlot rejects both earlier behaviours: an
 // expired budget neither drops the bound (an unbounded re-validation of
-// the whole mempool, the defect this change exists to remove) nor buys a
+// the whole mempool, the defect the bound exists to remove) nor buys a
 // fresh one. The slot is over, so there is nothing to produce for.
 func TestEBSelectionBudgetSkipsALateSlot(t *testing.T) {
 	now := time.Now()

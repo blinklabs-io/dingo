@@ -44,8 +44,8 @@ func (f *fakeRemoteKESSigner) Sign(
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the
 // opcert-lifetime gate applies inside kesSign itself, not only at its callers
-// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock). dingo#3115's
-// KES agent client bypassed exactly this: it signed through a direct call to
+// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock). The KES
+// agent client once bypassed exactly this: it signed through a direct call to
 // the agent instead of through this method, so the opcert-lifetime check both
 // of those callers otherwise rely on never ran for the agent path.
 //

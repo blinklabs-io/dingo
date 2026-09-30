@@ -386,7 +386,7 @@ func TestForgeCountsARetriedSlotOnlyAfterAdoption(t *testing.T) {
 	)
 }
 
-// The tests below are the second blocker: after #4053 the entry gates decide
+// The tests below are the second blocker: the entry gates now decide
 // a slot against BOTH tips, and a re-check that reads only the applied tip
 // lets through exactly the builds the entry gates refuse. All three share
 // one shape -- the applied tip stays below the forged slot for the whole

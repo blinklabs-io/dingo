@@ -46,11 +46,11 @@ func leiosCandidateTxs(t *testing.T, count int) []MempoolTransaction {
 }
 
 // TestLeiosEBSelectionStopsAtTheDeadline is the endorser-block half of the
-// lost-slot defect fixed for ranking blocks in #3988. Endorser-block
-// selection re-validated every mempool candidate serially with no clock, so
-// on a chain holding ~1000 transactions it spent seconds of a 1-second slot
-// before the ranking block was even started. An endorser block with fewer
-// references beats one that arrives after its slot.
+// lost-slot defect fixed for ranking blocks. Endorser-block selection
+// re-validated every mempool candidate serially with no clock, so on a chain
+// holding ~1000 transactions it spent seconds of a 1-second slot before the
+// ranking block was even started. An endorser block with fewer references beats
+// one that arrives after its slot.
 func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 	const (
 		candidates    = 10
