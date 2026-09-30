@@ -1869,7 +1869,9 @@ func storeDijkstraRawBlockUtxoOffsets(
 	store blob.BlobStore,
 	block chain.RawBlock,
 ) (int, error) {
-	decoded, err := gledger.NewBlockFromCbor(block.Type, block.Cbor)
+	// Stored blocks can keep the early Musashi layout, which only the
+	// stored-block decoder accepts.
+	decoded, err := models.DecodeBlockCbor(block.Type, block.Cbor)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"block at slot %d: decode Dijkstra block: %w",

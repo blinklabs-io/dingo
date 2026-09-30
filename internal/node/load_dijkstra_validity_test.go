@@ -16,10 +16,14 @@ package node
 
 import (
 	"bytes"
+	"encoding/hex"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -171,4 +175,46 @@ func TestStoreRawBlockUtxoOffsetsDijkstraTransactionValidity(t *testing.T) {
 		subTxs[0].Body.TxOutputs[0].Cbor(),
 	)
 	require.Equal(t, 3, stored)
+}
+
+// The raw copy must accept a stored block in the early Musashi Dijkstra
+// layout, as every other stored-block path does.
+func TestStoreRawBlockUtxoOffsetsAcceptsMusashiDijkstraBlock(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := os.ReadFile(
+		"../../database/models/testdata/musashi_dijkstra_block.hex",
+	)
+	require.NoError(t, err)
+	blockCbor, err := hex.DecodeString(strings.TrimSpace(string(encoded)))
+	require.NoError(t, err)
+	decoded, err := models.DecodeBlockCbor(gledger.BlockTypeDijkstra, blockCbor)
+	require.NoError(t, err)
+	var produced []lcommon.Utxo
+	for _, tx := range decoded.Transactions() {
+		produced = append(produced, tx.Produced()...)
+	}
+
+	db := newTestDB(t)
+	txn := db.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+
+	stored, err := storeRawBlockUtxoOffsets(txn, chain.RawBlock{
+		Slot: decoded.SlotNumber(),
+		Hash: decoded.Hash().Bytes(),
+		Cbor: blockCbor,
+		Type: gledger.BlockTypeDijkstra,
+	})
+	require.NoError(t, err)
+	require.Equal(t, len(produced), stored)
+	for _, utxo := range produced {
+		data, err := db.Blob().GetUtxo(
+			txn.Blob(), utxo.Id.Id().Bytes(), utxo.Id.Index(),
+		)
+		require.NoError(t, err)
+		offset, err := database.DecodeUtxoOffset(data)
+		require.NoError(t, err)
+		end := offset.ByteOffset + offset.ByteLength
+		require.Equal(t, utxo.Output.Cbor(), blockCbor[offset.ByteOffset:end])
+	}
 }
