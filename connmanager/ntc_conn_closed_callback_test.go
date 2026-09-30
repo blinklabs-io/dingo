@@ -27,7 +27,7 @@ import (
 // ConnClosedFunc is the only close notification an NtC connection gets --
 // ConnectionClosedEventType is published for NtN closes only (see
 // ntc_conn_closed_test.go). This pair of tests proves the callback
-// distinguishes the two: before issue #3508's fix, ConnClosedFunc carried no
+// distinguishes the two: ConnClosedFunc once carried no
 // isNtC parameter at all, so nothing downstream could tell an NtC close from
 // an NtN one and wire NtC-specific chainsync teardown to it.
 //
