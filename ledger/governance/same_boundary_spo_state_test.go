@@ -32,9 +32,8 @@ import (
 // votes and the same pparams yield no mid-epoch prediction during epoch 741
 // and a ratification at the boundary into 742.
 //
-// The stakes are Preview's own Plomin numbers (dingo#4441): mark[741] at
-// 0.4757 against the 0.51 pvtHardForkInitiation threshold, mark[742] at
-// 0.6283.
+// The stakes are Preview's own Plomin numbers: mark[741] at 0.4757 against the
+// 0.51 pvtHardForkInitiation threshold, mark[742] at 0.6283.
 func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
 	t.Parallel()
 

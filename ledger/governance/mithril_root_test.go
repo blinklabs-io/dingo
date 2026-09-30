@@ -24,7 +24,7 @@ import (
 )
 
 // TestMithrilSeededRootUnblocksChainedProposal mirrors the failure
-// shape of issue #2195: a chained HardForkInitiation arriving on a
+// shape of unseeded roots: a chained HardForkInitiation arriving on a
 // node whose only enacted-root visibility comes from a Mithril
 // snapshot must be accepted by validateParentChain when the per-
 // purpose root has been seeded as a synthetic enacted row.
