@@ -1,3 +1,5 @@
+//go:build archive_demo
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build archive_demo
 
 // demo-fetch is a small CLI used by the archive-demo's demo.sh to make
 // the BlockFetch step of the demo visible: it connects to a Dingo NtN

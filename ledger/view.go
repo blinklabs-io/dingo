@@ -88,6 +88,16 @@ type LedgerView struct {
 	// the cached Output and must not mutate it. Lazily allocated; never
 	// shared across views.
 	utxoMemo map[utxoref.Key]lcommon.Utxo
+	// prefetchedUtxos holds the live UTxOs a block's transactions reference,
+	// resolved with one batch query before the first transaction is
+	// validated (see prefetchBlockUtxos). It is owned by block application,
+	// shared read-only by that block's per-transaction views, and consulted
+	// only after the overlays and the memo. Block application deletes a
+	// transaction's inputs and collateral, including those of Dijkstra
+	// sub-transactions, once that transaction is applied, so a later
+	// transaction cannot be answered with an output that is already spent.
+	// A miss falls through to the database read.
+	prefetchedUtxos map[utxoref.Key]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	// Currently unreachable from production: ledgerProcessBlock's sole
@@ -218,6 +228,24 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // in the MinPoolMarginProvider method signature a compile error instead of a
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
+
+// PlutusEvalContextCache forwards the underlying LedgerState's shared
+// PlutusEvalContextCache so that a *LedgerView (the value passed to
+// ValidateTx*/EvaluateTx*) satisfies eras.PlutusEvalContextCacheProvider.
+// Returns nil for a bare-constructed LedgerView with no ls (test-only),
+// which era script evaluation already treats as "no cache available".
+func (lv *LedgerView) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.PlutusEvalContextCache()
+}
+
+// var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil) makes any
+// future drift in the PlutusEvalContextCacheProvider method signature a
+// compile error instead of a silent fallback to uncached EvalContext
+// construction.
+var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil)
 
 // MIRDelegState returns the move instantaneous rewards DELEG state that a
 // certificate at slot is checked against: the chain account pots, the
@@ -429,6 +457,10 @@ func (lv *LedgerView) UtxoById(
 		}
 	}
 	lv.utxoMemoMu.Unlock()
+
+	if utxo, ok := lv.prefetchedUtxos[key]; ok {
+		return utxo, nil
+	}
 
 	lv.ls.utxoByRefReads.Add(1)
 	utxo, err := lv.ls.db.UtxoByRef(
@@ -1378,13 +1410,12 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 func (lv *LedgerView) proposedCommitteeMember(
 	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
-	epoch, pparams := lv.committeeSnapshot()
-	proposals, err := lv.ls.db.GetActiveGovernanceProposals(
-		epoch,
-		lv.txn,
-	)
+	_, pparams := lv.committeeSnapshot()
+	// GOVCERT's isPotentialFutureMember reads the whole proposals set, which
+	// keeps an expired UpdateCommittee until the boundary that drops it.
+	proposals, err := lv.ls.db.GetGovernanceProposalSet(lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get active governance proposals: %w", err)
+		return nil, fmt.Errorf("get governance proposal set: %w", err)
 	}
 	// NoConfidence and UpdateCommittee chain off the same committee root, so
 	// the root must be the latest enacted member of the pair. Querying only
@@ -2130,8 +2161,12 @@ func (lv *LedgerView) GovActionById(
 		}
 		return nil, fmt.Errorf("get governance proposal: %w", err)
 	}
-	// Expired proposals are no longer members of their purpose tree.
-	if proposal.ExpiredEpoch != nil {
+	// The Conway GOV rule resolves votes and parents against the proposals
+	// set, which loses an expired action only when EPOCH removes it one
+	// boundary after RATIFY classified it (DroppedEpoch). The expiry mark
+	// itself must not hide it: a vote is refused by gasExpiresAfter
+	// arithmetic on ExpirySlot, and a child may still name it as parent.
+	if proposal.DroppedEpoch != nil {
 		return nil, nil
 	}
 	// The current enacted root must remain resolvable because content-aware
@@ -2368,10 +2403,11 @@ func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 		}
 		return false
 	}
-	// Voting procedures may target only pending actions. GovActionById also
-	// resolves the current enacted purpose root for content-aware predecessor
-	// rules, so it cannot be used as the existence predicate here.
-	return proposal.EnactedEpoch == nil && proposal.ExpiredEpoch == nil
+	// Voting procedures may target only members of the proposals set.
+	// GovActionById also resolves the current enacted purpose root for
+	// content-aware predecessor rules, so it cannot be used as the existence
+	// predicate here.
+	return proposal.EnactedEpoch == nil && proposal.DroppedEpoch == nil
 }
 
 // StakeDistribution represents the stake distribution at an epoch boundary.

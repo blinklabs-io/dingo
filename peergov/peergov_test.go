@@ -571,10 +571,12 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 
 	pg.reconcile(t.Context())
 
+	// A node with no eligible upstream keeps its last known peers (#4664).
 	peers := pg.GetPeers()
-	assert.Len(t, peers, 0)
-
-	// Event publishing is tested indirectly
+	require.Len(t, peers, 1)
+	pg.mu.Lock()
+	assert.NotContains(t, pg.denyList, pg.peers[0].NormalizedAddress)
+	pg.mu.Unlock()
 }
 
 func TestPeerGovernor_Reconcile_RemovalThresholdBoundary(t *testing.T) {
@@ -781,6 +783,13 @@ func TestPeerGovernor_TransitionMetrics_GossipChurnDemotion(t *testing.T) {
 		{
 			Address: "gossip2:3001", Source: PeerSourceP2PGossip,
 			State: PeerStateHot, PerformanceScore: 0.2,
+		},
+		// Warm replacement so the demotion below is not blocked by the
+		// "no promotable replacement" guard (dingo#4783).
+		{
+			Address: "gossip3:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateWarm, PerformanceScore: 0.5,
+			Connection: &PeerConnection{IsClient: true},
 		},
 	}
 
@@ -3254,11 +3263,29 @@ func TestPeerGovernor_GossipChurn_DemotesLowestScoringPeers(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.2,
 		}, // Below threshold
+		// Warm replacements (dingo#4783): churn only demotes a hot peer
+		// to cold when a promotable replacement is available, so these
+		// stand in for the 2 peers the 50% churn rate demotes below.
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.6,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "ledger2:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.4,
+			Connection:       &PeerConnection{IsClient: true},
+		},
 	}
 
 	pg.gossipChurn()
 
-	// With 4 peers and 50% churn, should demote 2 peers
+	// With 4 hot peers and 50% churn, 2 should demote to cold and the 2
+	// warm replacements above should be promoted to backfill the hot set.
 	hotCount := 0
 	coldCount := 0
 	for _, peer := range pg.peers {
@@ -3269,7 +3296,12 @@ func TestPeerGovernor_GossipChurn_DemotesLowestScoringPeers(t *testing.T) {
 			coldCount++
 		}
 	}
-	assert.Equal(t, 2, hotCount, "should have 2 hot peers remaining")
+	assert.Equal(
+		t,
+		4,
+		hotCount,
+		"should have 4 hot peers (2 survivors + 2 promoted replacements)",
+	)
 	assert.Equal(t, 2, coldCount, "should have 2 cold peers (demoted)")
 
 	// Highest scoring peers should remain hot
@@ -3315,12 +3347,31 @@ func TestPeerGovernor_GossipChurn_DemotesToCold(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
 		},
+		// Warm replacements (dingo#4783) so both demotions above are not
+		// blocked by the "no promotable replacement" guard.
+		{
+			Address:          "gossip2:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.6,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "ledger2:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.6,
+			Connection:       &PeerConnection{IsClient: true},
+		},
 	}
 
 	pg.gossipChurn()
 
-	// Both should be demoted to cold (not warm)
+	// Both original hot peers should be demoted to cold (not warm)
 	for _, peer := range pg.peers {
+		if peer.Address != "gossip1:3001" && peer.Address != "ledger1:3001" {
+			continue
+		}
 		assert.Equal(
 			t,
 			PeerStateCold,
@@ -3351,6 +3402,17 @@ func TestPeerGovernor_GossipChurn_SkipsLocalRoots(t *testing.T) {
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateHot,
 			PerformanceScore: 0.5,
+		},
+		// Warm replacement (dingo#4783, using the Ledger source so it
+		// does not collide with the PeerSourceP2PGossip assertion below)
+		// so the gossip demotion is not blocked by the "no promotable
+		// replacement" guard.
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.6,
+			Connection:       &PeerConnection{IsClient: true},
 		},
 	}
 
@@ -3399,6 +3461,17 @@ func TestPeerGovernor_GossipChurn_SkipsPublicRoots(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.5,
 		},
+		// Warm replacement (dingo#4783, using the Ledger source so it
+		// does not collide with the PeerSourceP2PGossip assertion below)
+		// so the gossip demotion is not blocked by the "no promotable
+		// replacement" guard.
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.6,
+			Connection:       &PeerConnection{IsClient: true},
+		},
 	}
 
 	pg.gossipChurn()
@@ -3439,21 +3512,21 @@ func TestPeerGovernor_GossipChurn_PromotesWarmPeers(t *testing.T) {
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 		{
 			Address:          "gossip2:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.8,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // High score, should promote
 		{
 			Address:          "gossip3:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.2,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Low score, should not promote
 	}
 
@@ -3485,6 +3558,144 @@ func TestPeerGovernor_GossipChurn_PromotesWarmPeers(t *testing.T) {
 			)
 		}
 	}
+}
+
+// TestPeerGovernor_GossipChurn_NoWarmReplacement_LeavesHotCountUnchanged is
+// the dingo#4783 regression: gossip churn used to demote its lowest-scoring
+// hot peers to cold on every interval regardless of whether anything was
+// available to promote in their place. On a live sync where warm stayed at
+// 0, that drained the hot set to a single peer over a few hours with no
+// fallback. With no promotable warm replacement, churn must now leave the
+// hot count (and every peer's connection) completely unchanged.
+func TestPeerGovernor_GossipChurn_NoWarmReplacement_LeavesHotCountUnchanged(
+	t *testing.T,
+) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		PromRegistry:       reg,
+		GossipChurnPercent: 1.0, // Would churn all hot peers if allowed
+		MinScoreThreshold:  0.3,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address:          "gossip1:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateHot,
+			PerformanceScore: 0.9,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "gossip2:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateHot,
+			PerformanceScore: 0.7,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateHot,
+			PerformanceScore: 0.5,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+	}
+	// No warm peers at all: the replacement pool is empty.
+
+	pg.gossipChurn()
+
+	hotCount, coldCount := 0, 0
+	for _, peer := range pg.peers {
+		switch peer.State {
+		case PeerStateHot:
+			hotCount++
+			assert.NotNil(
+				t,
+				peer.Connection,
+				"a hot peer churn declined to demote must keep its connection",
+			)
+		case PeerStateCold:
+			coldCount++
+		}
+	}
+	assert.Equal(
+		t,
+		3,
+		hotCount,
+		"hot count must be unchanged when no warm replacement is available",
+	)
+	assert.Equal(t, 0, coldCount, "no peer should have been demoted")
+
+	assert.Equal(
+		t,
+		float64(3),
+		testutil.ToFloat64(
+			pg.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+				"no_replacement",
+			),
+		),
+		"every candidate demotion should be recorded as skipped for lack of a replacement",
+	)
+}
+
+// A hot peer scoring below MinScoreThreshold is still churned to cold
+// when the warm pool is empty. Holding it hot until a replacement appears
+// would keep it forever once the hot set is at MinHotPeers, because the
+// redial deficit trigger never fires and no replacement is ever dialed.
+func TestPeerGovernor_GossipChurn_BelowThresholdDemotesWithoutReplacement(
+	t *testing.T,
+) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		PromRegistry:       reg,
+		MinHotPeers:        2,
+		GossipChurnPercent: 0.2,
+		MinScoreThreshold:  0.3,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address:          "gossip1:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateHot,
+			PerformanceScore: 0.9,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateHot,
+			PerformanceScore: 0.1,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+	}
+
+	pg.gossipChurn()
+
+	assert.Equal(t, PeerStateHot, pg.peers[0].State)
+	assert.NotNil(t, pg.peers[0].Connection)
+	assert.Equal(
+		t,
+		PeerStateCold,
+		pg.peers[1].State,
+		"a below-threshold peer must be churned even with no warm replacement",
+	)
+	assert.Nil(t, pg.peers[1].Connection)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			pg.metrics.churnDemotionsSkippedByReason.WithLabelValues(
+				"no_replacement",
+			),
+		),
+	)
 }
 
 func TestPeerGovernor_PublicRootChurn_DemotesToWarm(t *testing.T) {
@@ -3727,6 +3938,15 @@ func TestPeerGovernor_GossipChurn_AtLeastOneChurned(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
 		},
+		// Warm replacement (dingo#4783) so the demotion below is not
+		// blocked by the "no promotable replacement" guard.
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.6,
+			Connection:       &PeerConnection{IsClient: true},
+		},
 	}
 
 	pg.gossipChurn()
@@ -3794,21 +4014,21 @@ func TestPeerGovernor_PromoteWarmNonRootPeers_RespectsScoreThreshold(
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.8,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Above threshold
 		{
 			Address:          "gossip2:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.3,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Below threshold
 		{
 			Address:          "gossip3:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.4,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		}, // Below threshold
 	}
 
@@ -3894,14 +4114,14 @@ func TestPeerGovernor_GossipChurn_Metrics(t *testing.T) {
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 		{
 			Address:          "gossip2:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			PerformanceScore: 0.8,
-			Connection:       &PeerConnection{},
+			Connection:       &PeerConnection{IsClient: true},
 		},
 	}
 
@@ -6264,13 +6484,22 @@ func TestPeerGovernor_ChurnMetricsBySource(t *testing.T) {
 			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.4,
 		},
-		// Warm peers to be promoted
+		// Warm peers to be promoted. Both are needed (dingo#4783): churn
+		// only demotes a hot peer to cold when a promotable replacement
+		// is available, and this test demotes both hot peers above.
 		{
 			Address:          "192.168.1.3:3001",
 			Source:           PeerSourceP2PGossip,
 			State:            PeerStateWarm,
 			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.8,
+		},
+		{
+			Address:          "192.168.1.4:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			Connection:       &PeerConnection{IsClient: true},
+			PerformanceScore: 0.7,
 		},
 	}
 	pg.mu.Unlock()
@@ -6377,6 +6606,15 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 			State:            PeerStateHot,
 			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.9,
+		},
+		// Warm replacement (dingo#4783) so the demotion is not blocked by
+		// the "no promotable replacement" guard.
+		{
+			Address:          "192.168.1.3:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			Connection:       &PeerConnection{IsClient: true},
+			PerformanceScore: 0.6,
 		},
 	}
 	pg.mu.Unlock()

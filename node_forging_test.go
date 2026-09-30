@@ -16,29 +16,842 @@ package dingo
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// TestEpochInfoAdapterProvidesExactActiveSlotCoeff pins the wiring that makes
+// the leader schedule use the exact Shelley genesis active slot coefficient.
+//
+// leader.ActiveSlotCoeffRatProvider is an optional interface: computeSchedule
+// type-asserts it and silently falls back to the float64 accessor when it is not
+// satisfied. Without this assertion, dropping or renaming
+// epochInfoAdapter.ActiveSlotCoeffRat would compile cleanly and quietly restore
+// the float64 approximation, which yields a strictly larger leadership threshold
+// than the reference node's (dingo #2798).
+func TestEpochInfoAdapterProvidesExactActiveSlotCoeff(t *testing.T) {
+	t.Parallel()
+
+	var adapter any = &epochInfoAdapter{}
+	if _, ok := adapter.(leader.EpochInfoProvider); !ok {
+		t.Fatal("epochInfoAdapter must satisfy leader.EpochInfoProvider")
+	}
+	if _, ok := adapter.(leader.ActiveSlotCoeffRatProvider); !ok {
+		t.Fatal(
+			"epochInfoAdapter must satisfy " +
+				"leader.ActiveSlotCoeffRatProvider so the leader schedule " +
+				"uses the exact genesis coefficient",
+		)
+	}
+}
+
+func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := fixtures.GenerateConwayChain(
+		0,
+		lcommon.Blake2b256{},
+		1,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+	cm, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	broadcaster := &blockBroadcaster{
+		chain:  cm.PrimaryChain(),
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	require.NoError(t, broadcaster.AddBlock(blocks[0], blocks[0].Cbor()))
+	require.Equal(
+		t,
+		blocks[0].Hash().Bytes(),
+		cm.PrimaryChain().Tip().Point.Hash,
+	)
+}
+
+func TestBlockBroadcasterRejectsUnavailableChain(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := fixtures.GenerateConwayChain(
+		0,
+		lcommon.Blake2b256{},
+		1,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+	broadcaster := &blockBroadcaster{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err = broadcaster.AddBlock(blocks[0], blocks[0].Cbor())
+	require.EqualError(t, err, "chain unavailable")
+}
+
+const (
+	sigmaDenomEpoch = uint64(7)
+	// The mark rows sum to 4_000_000 ...
+	sigmaDenomPoolAStake = uint64(3_000_000)
+	sigmaDenomPoolBStake = uint64(1_000_000)
+	sigmaDenomRowSum     = sigmaDenomPoolAStake + sigmaDenomPoolBStake
+	// ... while epoch_summary.total_active_stake carries a different value.
+	//
+	// Rotation normally writes both from one calculation, so they match. This
+	// fixture drives them apart on purpose, because "they agree by
+	// construction" is a property of the WRITER: it makes the two readers
+	// indistinguishable in every ordinary fixture and so hides which one a
+	// given code path actually consults. Separating them is the only way to
+	// observe that choice, and #3814 is precisely the report that the forge
+	// and verify paths made it differently.
+	sigmaDenomSummaryTotal = uint64(5_000_000)
+)
+
+// newSigmaDenominatorLedger builds a real LedgerState over a real database,
+// so the assertions below run against the production forging adapter rather
+// than a reimplementation of it.
+func newSigmaDenominatorLedger(
+	t *testing.T,
+) (*ledger.LedgerState, *database.Database) {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+		Logger:       logger,
+	})
+	require.NoError(t, err)
+	return ledgerState, db
+}
+
+func sigmaDenomPoolKeyHash(fill byte) []byte {
+	hash := make([]byte, 28)
+	for i := range hash {
+		hash[i] = fill
+	}
+	return hash
+}
+
+// seedSigmaDenominatorSnapshot writes the mark rows and the epoch summary with
+// deliberately different totals.
+func seedSigmaDenominatorSnapshot(
+	t *testing.T,
+	db *database.Database,
+	poolA, poolB []byte,
+) {
+	t.Helper()
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{
+			{
+				Epoch:          sigmaDenomEpoch,
+				SnapshotType:   models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:    poolA,
+				TotalStake:     dbtypes.Uint64(sigmaDenomPoolAStake),
+				DelegatorCount: 1,
+				CapturedSlot:   1,
+			},
+			{
+				Epoch:          sigmaDenomEpoch,
+				SnapshotType:   models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:    poolB,
+				TotalStake:     dbtypes.Uint64(sigmaDenomPoolBStake),
+				DelegatorCount: 1,
+				CapturedSlot:   1,
+			},
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{
+			Epoch:            sigmaDenomEpoch,
+			TotalActiveStake: dbtypes.Uint64(sigmaDenomSummaryTotal),
+			TotalPoolCount:   2,
+			TotalDelegators:  2,
+			BoundarySlot:     1,
+			// Required for GetTotalActiveStake to prefer the summary; this is
+			// what rotation sets, so it is the state a synced node is in.
+			SnapshotReady: true,
+		},
+		nil,
+	))
+}
+
+// TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor is the
+// regression test for dingo #3814.
+//
+// The forging adapter used to return ledger.StakeDistribution.TotalStake,
+// which LedgerView.GetStakeDistribution accumulates by summing the mark rows
+// itself. Header verification instead reads
+// epoch_summary.total_active_stake through Metadata().GetTotalActiveStake.
+// Two derivations of one consensus quantity: a node whose forge denominator
+// differs from its verify denominator can forge a block it would itself
+// reject, or decline a slot it is genuinely eligible for.
+//
+// The fixture makes the summary and the row sum differ, then asserts the
+// adapter reports the value VERIFICATION would use. Before the fix the
+// adapter returns sigmaDenomRowSum (4_000_000) and both assertions fail.
+func TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ledgerState, db := newSigmaDenominatorLedger(t)
+	poolA := sigmaDenomPoolKeyHash(0x41)
+	poolB := sigmaDenomPoolKeyHash(0x42)
+	seedSigmaDenominatorSnapshot(t, db, poolA, poolB)
+
+	// The denominator header verification resolves, read through the accessor
+	// verify_header.go uses. Captured from the database rather than restated
+	// as a literal, so the test compares the two paths instead of comparing
+	// one path to a number this test chose.
+	verifyTotal, err := db.Metadata().GetTotalActiveStake(
+		sigmaDenomEpoch,
+		models.PoolStakeSnapshotTypeMark,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, sigmaDenomSummaryTotal, verifyTotal,
+		"fixture precondition: the verify accessor must serve the summary")
+
+	adapter := &stakeDistributionAdapter{ledgerState: ledgerState}
+	poolStake, forgeTotal, err := adapter.GetPoolAndTotalActiveStake(
+		sigmaDenomEpoch,
+		poolA,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, verifyTotal, forgeTotal,
+		"forge and verify must resolve one denominator through one accessor "+
+			"(dingo #3814)")
+	assert.NotEqual(t, sigmaDenomRowSum, forgeTotal,
+		"the forge denominator must not be re-derived by summing the mark "+
+			"rows; that is the second derivation #3814 removes")
+
+	// The numerator is unchanged by this fix and must still come from the
+	// pool's own mark row.
+	assert.Equal(t, sigmaDenomPoolAStake, poolStake,
+		"the numerator must remain the pool's mark-snapshot stake")
+}
+
+// TestStakeDistributionAdapterSigmaPairSurvivesRecapture checks that each
+// adapter read yields a self-consistent sigma across a snapshot re-capture.
+//
+// Scope, stated plainly: this drives a re-capture between two SEPARATE
+// adapter calls, not between the two halves of a single call. It therefore
+// does NOT by itself prove the dingo #3815 atomicity property -- a write
+// landing inside one call is not reachable from outside the adapter without
+// a seam that does not exist. What it does prove is that both halves of a
+// given read move together to the new generation rather than one of them
+// lagging, and it would catch a fix that made only one half transactional.
+//
+// The atomicity property itself is pinned two ways instead:
+// TestStakeDistributionProviderForbidsTornSigmaRead below makes the split
+// read unexpressible in the provider interface, and
+// TestComputeScheduleReadsSigmaPairInOneProviderCall in ledger/leader
+// asserts the real schedule computation performs exactly one paired read.
+//
+// The two generations are chosen with DIFFERENT absolute values but the SAME
+// sigma, so a torn pair is detectable as a sigma matching neither.
+func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
+	t.Parallel()
+
+	ledgerState, db := newSigmaDenominatorLedger(t)
+	poolA := sigmaDenomPoolKeyHash(0x41)
+	poolB := sigmaDenomPoolKeyHash(0x42)
+
+	// Generation one: sigma = 3_000_000 / 5_000_000.
+	seedSigmaDenominatorSnapshot(t, db, poolA, poolB)
+
+	adapter := &stakeDistributionAdapter{ledgerState: ledgerState}
+	poolStake, total, err := adapter.GetPoolAndTotalActiveStake(
+		sigmaDenomEpoch,
+		poolA,
+	)
+	require.NoError(t, err)
+
+	// Generation two: every value doubled, so sigma is identical while both
+	// halves differ. Written AFTER the read above, then read again below.
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{
+			{
+				Epoch:          sigmaDenomEpoch,
+				SnapshotType:   models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:    poolA,
+				TotalStake:     dbtypes.Uint64(sigmaDenomPoolAStake * 2),
+				DelegatorCount: 1,
+				CapturedSlot:   2,
+			},
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{
+			Epoch:            sigmaDenomEpoch,
+			TotalActiveStake: dbtypes.Uint64(sigmaDenomSummaryTotal * 2),
+			TotalPoolCount:   2,
+			TotalDelegators:  2,
+			BoundarySlot:     2,
+			SnapshotReady:    true,
+		},
+		nil,
+	))
+
+	poolStake2, total2, err := adapter.GetPoolAndTotalActiveStake(
+		sigmaDenomEpoch,
+		poolA,
+	)
+	require.NoError(t, err)
+
+	// Each read must be self-consistent: numerator*otherDenominator equals
+	// denominator*otherNumerator only when both pairs carry the same sigma.
+	// Cross-multiplied to keep this exact rather than float.
+	assert.Equal(t,
+		poolStake*sigmaDenomSummaryTotal,
+		total*sigmaDenomPoolAStake,
+		"the first read's sigma must come from a single snapshot generation",
+	)
+	assert.Equal(t,
+		poolStake2*sigmaDenomSummaryTotal,
+		total2*sigmaDenomPoolAStake,
+		"the second read's sigma must come from a single snapshot generation",
+	)
+	// And the second read must actually have observed the re-capture, or the
+	// assertions above would be vacuous.
+	assert.Equal(t, sigmaDenomPoolAStake*2, poolStake2,
+		"the second read must observe the re-captured snapshot")
+	assert.Equal(t, sigmaDenomSummaryTotal*2, total2,
+		"the second read must observe the re-captured summary")
+}
+
+// TestStakeDistributionProviderForbidsTornSigmaRead pins the interface shape
+// that makes the dingo #3815 defect unexpressible.
+//
+// The fix is not only that the adapter now reads both halves in one
+// transaction; it is that StakeDistributionProvider no longer offers a way to
+// read them separately. A future adapter cannot reintroduce the torn read
+// without changing the interface, which this test makes a visible decision
+// rather than an accident.
+func TestStakeDistributionProviderForbidsTornSigmaRead(t *testing.T) {
+	t.Parallel()
+
+	var adapter any = &stakeDistributionAdapter{}
+
+	if _, ok := adapter.(leader.StakeDistributionProvider); !ok {
+		t.Fatal(
+			"stakeDistributionAdapter must satisfy " +
+				"leader.StakeDistributionProvider",
+		)
+	}
+
+	// The separate accessors must be gone. Either one surviving means a
+	// caller can still take the numerator and the denominator from different
+	// transactions.
+	type poolStakeReader interface {
+		GetPoolStake(uint64, []byte) (uint64, error)
+	}
+	type totalStakeReader interface {
+		GetTotalActiveStake(uint64) (uint64, error)
+	}
+	if _, ok := adapter.(poolStakeReader); ok {
+		t.Error(
+			"stakeDistributionAdapter must not expose a standalone " +
+				"GetPoolStake; the sigma pair is read together (dingo #3815)",
+		)
+	}
+	if _, ok := adapter.(totalStakeReader); ok {
+		t.Error(
+			"stakeDistributionAdapter must not expose a standalone " +
+				"GetTotalActiveStake; the sigma pair is read together " +
+				"(dingo #3815)",
+		)
+	}
+}
+
+func replaceSigmaSnapshotAtomically(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	poolStake, totalStake uint64,
+	capturedSlot uint64,
+) {
+	t.Helper()
+	txn := db.Transaction(true)
+	defer func() { require.NoError(t, txn.Rollback()) }()
+
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{{
+			Epoch:          sigmaDenomEpoch,
+			SnapshotType:   models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:    poolKeyHash,
+			TotalStake:     dbtypes.Uint64(poolStake),
+			DelegatorCount: 1,
+			CapturedSlot:   capturedSlot,
+		}},
+		txn.Metadata(),
+	))
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{
+			Epoch:            sigmaDenomEpoch,
+			TotalActiveStake: dbtypes.Uint64(totalStake),
+			TotalPoolCount:   2,
+			TotalDelegators:  2,
+			BoundarySlot:     capturedSlot,
+			SnapshotReady:    true,
+		},
+		txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+}
+
+// TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture proves the
+// reader's transaction is the consistency boundary for the sigma pair.
+//
+// The hook releases an atomic recapture after the numerator query has fixed the
+// read transaction's snapshot but before the denominator query. A reader that
+// opens one transaction per half can combine generation one and generation two;
+// the paired accessor must return generation one in full.
+func TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ledgerState, db := newSigmaDenominatorLedger(t)
+	poolA := sigmaDenomPoolKeyHash(0x41)
+	poolB := sigmaDenomPoolKeyHash(0x42)
+	replaceSigmaSnapshotAtomically(
+		t, db, poolA,
+		sigmaDenomPoolAStake, sigmaDenomSummaryTotal, 1,
+	)
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{{
+			Epoch:          sigmaDenomEpoch,
+			SnapshotType:   models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:    poolB,
+			TotalStake:     dbtypes.Uint64(sigmaDenomPoolBStake),
+			DelegatorCount: 1,
+			CapturedSlot:   1,
+		}},
+		nil,
+	))
+
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRead) }) }
+	defer release()
+	result := make(chan struct {
+		poolStake  uint64
+		totalStake uint64
+		err        error
+	}, 1)
+	adapter := &stakeDistributionAdapter{
+		ledgerState: ledgerState,
+		afterPoolStakeReadFn: func() {
+			close(readStarted)
+			<-releaseRead
+		},
+	}
+	go func() {
+		poolStake, totalStake, err := adapter.GetPoolAndTotalActiveStake(
+			sigmaDenomEpoch,
+			poolA,
+		)
+		result <- struct {
+			poolStake  uint64
+			totalStake uint64
+			err        error
+		}{poolStake, totalStake, err}
+	}()
+
+	select {
+	case <-readStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sigma reader did not reach the coordinated recapture point")
+	}
+	// Generation two changes both halves while the reader is paused between
+	// its two SQL statements. The write is one transaction, matching the
+	// snapshot publication path in ledger/snapshot/rotation.go.
+	replaceSigmaSnapshotAtomically(
+		t, db, poolA,
+		sigmaDenomPoolAStake*2, sigmaDenomSummaryTotal*2, 2,
+	)
+	release()
+
+	var got struct {
+		poolStake  uint64
+		totalStake uint64
+		err        error
+	}
+	select {
+	case got = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sigma reader did not finish after recapture")
+	}
+	require.NoError(t, got.err)
+	require.Equal(t, sigmaDenomPoolAStake, got.poolStake,
+		"the numerator must remain from the reader's snapshot generation")
+	require.Equal(t, sigmaDenomSummaryTotal, got.totalStake,
+		"the denominator must not come from the recaptured generation")
+	require.Equal(t,
+		got.poolStake*sigmaDenomSummaryTotal,
+		got.totalStake*sigmaDenomPoolAStake,
+		"a sigma read must use one committed snapshot generation",
+	)
+}
+
+// opCertFixtureWithCounter writes an operational certificate carrying
+// issueNumber over the devnet KES verification key, signed by a freshly
+// generated cold key. The shipped devnet opcert is fixed at issue number 0,
+// which cannot express a counter gap against an observed on-chain value.
+func opCertFixtureWithCounter(t *testing.T, issueNumber uint64) string {
+	t.Helper()
+	devnetCert, err := bursa.LoadKeyFromFile(
+		filepath.Join(devnetKeysDir, "opcert.cert"),
+	)
+	if err != nil {
+		t.Fatalf("load devnet opcert fixture: %v", err)
+	}
+	kesVKey := devnetCert.VKey
+	kesPeriod := devnetCert.OpCertKesPeriod
+
+	coldVKey, coldSKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate cold key: %v", err)
+	}
+	// cardano-ledger OCertSignable.getSignableRepresentation:
+	//   KES vkey (32) || issue number (8 BE) || KES period (8 BE)
+	var certBody [48]byte
+	copy(certBody[:32], kesVKey)
+	binary.BigEndian.PutUint64(certBody[32:40], issueNumber)
+	binary.BigEndian.PutUint64(certBody[40:48], kesPeriod)
+	signature := ed25519.Sign(coldSKey, certBody[:])
+
+	certCbor, err := cbor.Encode([]any{
+		[]any{kesVKey, issueNumber, kesPeriod, signature},
+		[]byte(coldVKey),
+	})
+	if err != nil {
+		t.Fatalf("encode operational certificate: %v", err)
+	}
+	envelope, err := json.Marshal(map[string]string{
+		"type":        "NodeOperationalCertificate",
+		"description": "",
+		"cborHex":     hex.EncodeToString(certCbor),
+	})
+	if err != nil {
+		t.Fatalf("encode operational certificate envelope: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "opcert.cert")
+	if err := os.WriteFile(path, envelope, 0o644); err != nil {
+		t.Fatalf("write operational certificate: %v", err)
+	}
+	return path
+}
+
+// laggingEraSource models a LedgerState whose applied tip is behind
+// wall-clock time. ProtocolParamsForSlot mirrors
+// LedgerState.ProtocolParamsForSlot: it forecasts forward through the era
+// shape for a slot beyond the applied tip, so a wall-clock slot resolves to a
+// Praos era the applied chain has not reached.
+type laggingEraSource struct {
+	tipSlot       uint64
+	wallSlot      uint64
+	praosFromSlot uint64
+}
+
+func (s laggingEraSource) Tip() ochainsync.Tip {
+	return ochainsync.Tip{Point: ocommon.Point{Slot: s.tipSlot}}
+}
+
+func (s laggingEraSource) CurrentSlot() (uint64, error) {
+	return s.wallSlot, nil
+}
+
+func (s laggingEraSource) GetCurrentPParams() lcommon.ProtocolParameters {
+	return s.ProtocolParamsForSlot(s.tipSlot)
+}
+
+func (s laggingEraSource) ProtocolParamsForSlot(
+	slot uint64,
+) lcommon.ProtocolParameters {
+	if slot >= s.praosFromSlot {
+		return &babbage.BabbageProtocolParameters{}
+	}
+	return &alonzo.AlonzoProtocolParameters{}
+}
+
+// opCertSeqLedgerView reports a pool registration matching the loaded VRF key
+// and a fixed observed on-chain opcert counter.
+type opCertSeqLedgerView struct {
+	regVRFHash [32]byte
+	latestSeq  uint64
+}
+
+func (v opCertSeqLedgerView) PoolRegistrationVRFKeyHash(
+	[28]byte,
+) ([32]byte, bool, error) {
+	return v.regVRFHash, true, nil
+}
+
+func (v opCertSeqLedgerView) LatestOpCertSequence(
+	[28]byte,
+) (uint64, bool, error) {
+	return v.latestSeq, true, nil
+}
+
+// TestValidateBlockProducerLedger_LaggingTipStarts covers the operational
+// case: a producer restarting with an applied tip well behind wall-clock time.
+// The observed counter is the pre-catch-up value, so measuring it against the
+// era wall-clock time has reached reports a gap that does not exist on the
+// chain the node has actually applied. Startup must proceed; the forge loop
+// applies the era-scoped rule per leader slot once the node is near the tip.
+func TestValidateBlockProducerLedger_LaggingTipStarts(t *testing.T) {
+	t.Parallel()
+
+	vrf, kes, _ := devnetCredPaths(t)
+	opcert := opCertFixtureWithCounter(t, 7)
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+	n.config.network = "preview"
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
+	}
+	view := opCertSeqLedgerView{
+		regVRFHash: lcommon.Blake2b256Hash(creds.GetVRFVKey()),
+		latestSeq:  5,
+	}
+	err = n.validateBlockProducerLedgerWithSource(
+		creds,
+		view,
+		laggingEraSource{
+			tipSlot:       1_000,
+			wallSlot:      2_000,
+			praosFromSlot: 1_500,
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"block producer with a lagging applied tip must start, got: %v",
+			err,
+		)
+	}
+}
+
+// TestValidateBlockProducerLedger_SyncedTipRejectsGap pins the property the
+// lagging-tip allowance must not cost: on a node whose applied tip is already
+// in a Praos era, a genuine counter gap still refuses startup.
+func TestValidateBlockProducerLedger_SyncedTipRejectsGap(t *testing.T) {
+	t.Parallel()
+
+	vrf, kes, _ := devnetCredPaths(t)
+	opcert := opCertFixtureWithCounter(t, 7)
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+	n.config.network = "preview"
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
+	}
+	view := opCertSeqLedgerView{
+		regVRFHash: lcommon.Blake2b256Hash(creds.GetVRFVKey()),
+		latestSeq:  5,
+	}
+	err = n.validateBlockProducerLedgerWithSource(
+		creds,
+		view,
+		laggingEraSource{
+			tipSlot:       2_000,
+			wallSlot:      2_000,
+			praosFromSlot: 1_500,
+		},
+	)
+	if err == nil {
+		t.Fatal("expected a gapped counter on a synced node to be rejected")
+	}
+	if !strings.Contains(err.Error(), "skips ahead") {
+		t.Fatalf("expected a gapped-rotation error, got: %v", err)
+	}
+}
+
+// TestValidateBlockProducerLedger_SyncedTipRejectsStaleCounter pins the other
+// half of the rule: a counter below the observed on-chain value is a stale or
+// stolen hot key and refuses startup regardless of era.
+func TestValidateBlockProducerLedger_SyncedTipRejectsStaleCounter(t *testing.T) {
+	t.Parallel()
+
+	vrf, kes, _ := devnetCredPaths(t)
+	opcert := opCertFixtureWithCounter(t, 4)
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+	n.config.network = "preview"
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
+	}
+	view := opCertSeqLedgerView{
+		regVRFHash: lcommon.Blake2b256Hash(creds.GetVRFVKey()),
+		latestSeq:  5,
+	}
+	err = n.validateBlockProducerLedgerWithSource(
+		creds,
+		view,
+		laggingEraSource{
+			tipSlot:       1_000,
+			wallSlot:      2_000,
+			praosFromSlot: 1_500,
+		},
+	)
+	if err == nil {
+		t.Fatal("expected a stale counter to be rejected")
+	}
+	if !strings.Contains(err.Error(), "below last seen") {
+		t.Fatalf("expected a stale-counter error, got: %v", err)
+	}
+}
+
+// TestValidateBlockProducerLedger_NilSourceStarts covers the absent era
+// context: no slot clock, no protocol parameters. That is an unevaluated rule,
+// not a violated one, so startup proceeds on the staleness rule alone.
+func TestValidateBlockProducerLedger_NilSourceStarts(t *testing.T) {
+	t.Parallel()
+
+	vrf, kes, _ := devnetCredPaths(t)
+	opcert := opCertFixtureWithCounter(t, 7)
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+	n.config.network = "preview"
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
+	}
+	view := opCertSeqLedgerView{
+		regVRFHash: lcommon.Blake2b256Hash(creds.GetVRFVKey()),
+		latestSeq:  5,
+	}
+	if err := n.validateBlockProducerLedgerWithSource(
+		creds, view, nil,
+	); err != nil {
+		t.Fatalf("missing era context must not refuse startup, got: %v", err)
+	}
+}
+
+// unobservedOpCertLedgerView reports a pool registration matching the loaded
+// VRF key and no opcert counter observed on chain for it.
+type unobservedOpCertLedgerView struct {
+	regVRFHash [32]byte
+}
+
+func (v unobservedOpCertLedgerView) PoolRegistrationVRFKeyHash(
+	[28]byte,
+) ([32]byte, bool, error) {
+	return v.regVRFHash, true, nil
+}
+
+func (v unobservedOpCertLedgerView) LatestOpCertSequence(
+	[28]byte,
+) (uint64, bool, error) {
+	return 0, false, nil
+}
+
+// TestValidateBlockProducerLedger_SyncedTipUnobservedCounterUsesZeroBaseline
+// pins startup to the rule block application applies to a registered pool
+// with no observed counter: zero is the baseline, so on a Praos applied tip
+// counter 1 starts and counter 2 is a gapped rotation.
+func TestValidateBlockProducerLedger_SyncedTipUnobservedCounterUsesZeroBaseline(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		counter uint64
+		wantErr bool
+	}{
+		{name: "counter one starts", counter: 1},
+		{name: "counter two is refused", counter: 2, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			vrf, kes, _ := devnetCredPaths(t)
+			opcert := opCertFixtureWithCounter(t, tt.counter)
+			cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+			n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+			n.config.network = "preview"
+			creds, err := n.validateBlockProducerStartupAtSlot(0)
+			if err != nil {
+				t.Fatalf("validateBlockProducerStartupAtSlot: %v", err)
+			}
+			view := unobservedOpCertLedgerView{
+				regVRFHash: lcommon.Blake2b256Hash(creds.GetVRFVKey()),
+			}
+			err = n.validateBlockProducerLedgerWithSource(
+				creds,
+				view,
+				laggingEraSource{
+					tipSlot:       2_000,
+					wallSlot:      2_000,
+					praosFromSlot: 1_500,
+				},
+			)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("counter %d must start, got: %v", tt.counter, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected counter %d to be refused", tt.counter)
+			}
+			if !strings.Contains(err.Error(), "skips ahead of last seen 0") {
+				t.Fatalf("expected a gapped-rotation error, got: %v", err)
+			}
+		})
+	}
+}
 
 // devnetKeysDir locates the credential fixtures shipped with the repo.
 // Path is relative to this file (top-level dingo package).
@@ -594,5 +1407,114 @@ func TestValidateBlockProducerStartupForClock_DeferredStillValidatesMaterial(
 	}
 	if !strings.Contains(err.Error(), "load pool credentials") {
 		t.Errorf("expected 'load pool credentials' in error, got: %v", err)
+	}
+}
+
+// TestApplyForgeTuningCarriesTheForgingKnobs covers the hop the binary
+// takes between dingo.Config and the forger: internal/node's
+// buildDingoConfig fills the former, initBlockForger builds the forger
+// from the latter, and nothing else connects them. A field missing here
+// reaches the forger as its zero value, which the forger then replaces
+// with its own default -- so the operator's yaml, env or CLI setting
+// disappears without an error anywhere.
+func TestApplyForgeTuningCarriesTheForgingKnobs(t *testing.T) {
+	t.Parallel()
+
+	const refs, maxBytes = uint64(4321), uint64(98765)
+	cfg := NewConfig(
+		WithForgeSyncToleranceSlots(11),
+		WithForgeStaleGapThresholdSlots(22),
+		WithForgeEBSelectionReserve(750*time.Millisecond),
+		WithForgeEBMaxTxRefs(refs),
+		WithForgeEBMaxBytes(maxBytes),
+	)
+
+	var fc forging.ForgerConfig
+	applyForgeTuning(&fc, &cfg)
+
+	if fc.ForgeSyncToleranceSlots != 11 {
+		t.Fatalf(
+			"forgeSyncToleranceSlots = %d, want 11",
+			fc.ForgeSyncToleranceSlots,
+		)
+	}
+	if fc.ForgeStaleGapThresholdSlots != 22 {
+		t.Fatalf(
+			"forgeStaleGapThresholdSlots = %d, want 22",
+			fc.ForgeStaleGapThresholdSlots,
+		)
+	}
+	if fc.ForgeEBSelectionReserve != 750*time.Millisecond {
+		t.Fatalf(
+			"forgeEbSelectionReserve = %s, want 750ms",
+			fc.ForgeEBSelectionReserve,
+		)
+	}
+	if fc.ForgeEBMaxTxRefs == nil || *fc.ForgeEBMaxTxRefs != refs {
+		t.Fatalf("forgeEbMaxTxRefs = %v, want %d", fc.ForgeEBMaxTxRefs, refs)
+	}
+	if fc.ForgeEBMaxBytes == nil || *fc.ForgeEBMaxBytes != maxBytes {
+		t.Fatalf("forgeEbMaxBytes = %v, want %d", fc.ForgeEBMaxBytes, maxBytes)
+	}
+}
+
+type forgedValidationRecorder struct {
+	aggregateCalls int
+	fullCalls      int
+	err            error
+}
+
+func (v *forgedValidationRecorder) ValidateForgedBlock(
+	gledger.Block,
+	[]byte,
+) error {
+	v.fullCalls++
+	return v.err
+}
+
+func (v *forgedValidationRecorder) ValidateBlockReferenceScripts(
+	gledger.Block,
+) error {
+	v.aggregateCalls++
+	return v.err
+}
+
+func TestForgedBlockValidatorDefaultAndFullModes(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		name := "default"
+		if full {
+			name = "full"
+		}
+		t.Run(name, func(t *testing.T) {
+			failure := errors.New("aggregate reference-script budget exceeded")
+			state := &forgedValidationRecorder{err: failure}
+			validator := newForgedBlockValidator(state, full)
+			require.NotNil(
+				t,
+				validator,
+				"default mode must retain aggregate validation",
+			)
+			require.ErrorIs(
+				t,
+				validator.ValidateForgedBlock(&conway.ConwayBlock{}, nil),
+				failure,
+			)
+			state.err = nil
+			require.NoError(
+				t,
+				validator.ValidateForgedBlock(&conway.ConwayBlock{}, nil),
+			)
+			if full {
+				require.Equal(t, 2, state.fullCalls)
+				require.Zero(
+					t,
+					state.aggregateCalls,
+					"full validation owns its aggregate check",
+				)
+			} else {
+				require.Equal(t, 2, state.aggregateCalls)
+				require.Zero(t, state.fullCalls, "default mode must not execute full validation")
+			}
+		})
 	}
 }

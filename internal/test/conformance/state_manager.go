@@ -228,7 +228,7 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 // newDingoStateManagerAt creates a sqlite-backed DingoStateManager rooted at
 // an explicit, caller-owned data directory. Used directly by tests that
 // close one manager and open a second at the same path to prove state
-// survives a restart (see state_manager_backend_test.go); NewDingoStateManager
+// survives a restart (see state_manager_test.go); NewDingoStateManager
 // uses it with a manager-owned temp directory.
 func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 	m, err := newDingoStateManager(realBackendOptions{
@@ -254,7 +254,7 @@ func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 // mysqlProcessDatabase's in state_manager_mysql.go), so an individual
 // manager's Close must not drop a resource a sibling manager elsewhere in
 // the same process may still be using -- that cleanup belongs to TestMain
-// (conformance_main_test.go), once, after every test in the process has
+// (tests_d4f17915_test.go), once, after every test in the process has
 // finished.
 func (m *DingoStateManager) Close() error {
 	err := closeRealDatabase(m.db, m.host)
@@ -1455,7 +1455,7 @@ func (m *DingoStateManager) recordVotesInGovState(tx common.Transaction) {
 // enact it -- reusing dingo's production side-effect code without
 // re-deriving its ratification math. governance.ProcessEpoch is exercised
 // directly, end-to-end, by TestProcessEpochAgainstRealBackend in
-// state_manager_backend_test.go.
+// state_manager_test.go.
 func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 	m.currentEpoch = newEpoch
 	m.govState.CurrentEpoch = newEpoch

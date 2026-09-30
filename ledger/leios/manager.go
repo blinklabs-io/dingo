@@ -552,7 +552,7 @@ type VoteManager struct {
 	// Its readers are tests, which use it as a barrier to wait until a
 	// published header event has been applied before asserting on what it
 	// did. Only an invalidation's sequence is a sound barrier -- see
-	// waitForAnnouncement in manager_header_arming_test.go for why an
+	// waitForAnnouncement in manager_test.go for why an
 	// announcement's is not. Guarded by mu.
 	lastHeaderStreamSeq uint64
 }

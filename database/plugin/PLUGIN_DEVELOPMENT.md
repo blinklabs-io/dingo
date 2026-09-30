@@ -129,8 +129,9 @@ unreachable-endpoint, bad-credential, and resource-cleanup checks. See
 for what each check covers, the environment variables each cloud/database
 backend reads, and CI availability.
 
-Add a new plugin's conformance test as a thin `conformance_test.go` in its
-own package, in-package so it can use the plugin's real constructor:
+Add a new plugin's conformance test as a thin in-package test in its own
+package, so it can use the plugin's real constructor, in the `_test.go` file
+named for the implementation file it exercises:
 
 ```go
 func TestBlobStoreConformance(t *testing.T) {
@@ -150,7 +151,7 @@ Cloud- or database-backed plugins skip cleanly (never fail) when their
 backend is not configured, following the same convention this repository
 already uses for cloud credentials and CI database services.
 
-`internal/integration/storage_migration_test.go` covers a distinct
+`internal/integration/tests_24a0bc11_test.go` covers a distinct
 concern -- migrating data between two different plugins, not just each
 plugin in isolation -- by writing a small dataset through one backend's
 typed API and replaying the exact retrieved values into a second backend.
