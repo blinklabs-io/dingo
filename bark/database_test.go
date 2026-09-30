@@ -620,6 +620,9 @@ func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
 	// land at slots 10/20/30 — block_count=3, oldest_slot=10.
 	require.Equal(t, uint64(3), resp.Msg.GetBlockCount())
 	require.Equal(t, uint64(10), resp.Msg.GetOldestSlot())
+	// Tier reports the database's configured storage mode, not a placeholder.
+	require.NotEmpty(t, db.StorageMode())
+	require.Equal(t, db.StorageMode(), resp.Msg.GetTier())
 }
 
 // TestListSnapshotsReturnsCreatedSnapshotWithLabel verifies that
