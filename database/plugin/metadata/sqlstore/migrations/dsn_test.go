@@ -17,7 +17,7 @@ package migrations_test
 // testDBPragmas relaxes durability for throwaway per-test SQLite databases:
 // each one is created, migrated, asserted against, and deleted inside a
 // single test, so an fsync'd rollback journal buys nothing and is expensive
-// on a contended CI runner (dingo#4171). No test in this package kills a
+// on a contended CI runner. No test in this package kills a
 // connection mid-transaction, simulates crash recovery, or inspects a
 // journal/WAL file, so relaxing durability does not change what any
 // assertion observes. This is a twin of the identical constant in package

@@ -228,7 +228,7 @@ func TestStakeCalculationVersionRoundTrip(t *testing.T) {
 }
 
 // TestStaleConsensusStakeSnapshotsExistFailsClosed covers the fail-closed
-// gate itself (dingo #4026 finding 3): every prior test writes the symbolic
+// gate itself: every prior test writes the symbolic
 // current version, so none of them exercise a literal old
 // calculation_version tripping the gate. It also covers finding 2: a
 // non-authoritative (fallback) Mark reward_snapshot row must fail the gate

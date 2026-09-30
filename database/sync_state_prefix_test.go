@@ -21,7 +21,7 @@ import (
 )
 
 // TestListSyncStateKeysByPrefix covers the byte-prefix scan used to repopulate
-// the deferred-header retention set after a restart (issue #3727). The match
+// the deferred-header retention set after a restart. The match
 // must be an exact BYTE prefix on every backend, so this asserts cases a
 // collation-sensitive SQL range or LIKE could get wrong: uppercase/mixed-case
 // variants a case-insensitive column collation would fold in, a sibling prefix

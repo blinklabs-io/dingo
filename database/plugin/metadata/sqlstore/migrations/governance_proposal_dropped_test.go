@@ -26,7 +26,7 @@ import (
 )
 
 // TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals covers
-// dingo#4411's upgrade path. Before v17 the epoch tick refunded an expired
+// the upgrade path. Before v17 the epoch tick refunded an expired
 // proposal's deposit in the tick that marked it expired, so on an upgraded
 // database every expired_epoch row has already been refunded. The drop step
 // selects on `dropped_epoch IS NULL`, so without the v17 backfill it would

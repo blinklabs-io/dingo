@@ -127,8 +127,8 @@ SELECT hash, id FROM "transaction" WHERE slot >= ? AND slot < ?`,
 	require.NoError(t, err)
 }
 
-// TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop covers issue
-// #3253.
+// TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop covers the
+// witness cleanup plan.
 //
 // Mithril drops the deferred-index manifest before API-mode historical
 // backfill, and backfill then calls SetTransaction for every transaction it
@@ -306,7 +306,7 @@ func requireWitnessCleanupIndexed(t *testing.T, db *sql.DB, when string) {
 }
 
 // preChangeDeferredWitnessIndexes names the witness transaction_id indexes a
-// binary shipped before issue #3253 still carried in its deferred-index
+// binary shipped before the change still carried in its deferred-index
 // manifest, and therefore dropped at the start of every bulk-load cycle.
 var preChangeDeferredWitnessIndexes = []string{
 	"idx_key_witness_transaction_id",
@@ -344,12 +344,12 @@ func seedPreChangeDeferredCycle(t *testing.T, db *sql.DB) {
 }
 
 // TestRetainedIndexesRepairPreChangeDeferredCycle covers the upgrade path for
-// issue #3253.
+// the retained witness indexes.
 //
 // Taking the three witness transaction_id indexes out of the manifest fixes
 // databases the fixed binary bootstraps itself, but not one already on disk.
 // A binary whose manifest still held them dropped them before backfill and
-// rebuilds them only in the full rebuild, and #3253's own reporter ran that
+// rebuilds them only in the full rebuild, and a real operator ran that
 // backfill for hours across restarts, so an interrupted cycle is the expected
 // state rather than a corner case. On such a database the newer manifest can
 // no longer name the indexes to rebuild them and migration v1 is recorded

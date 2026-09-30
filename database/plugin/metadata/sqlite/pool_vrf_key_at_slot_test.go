@@ -59,8 +59,9 @@ VALUES (?, ?, ?, ?)`,
 	require.NoError(t, err)
 }
 
-// TestGetPoolVrfKeyHashAtSlotFollowsRotation is the dingo #3842 regression,
-// built from the rotation that wedged a Preview replay at epoch 38.
+// TestGetPoolVrfKeyHashAtSlotFollowsRotation is the regression test for the
+// pool VRF key rotation wedge, built from the rotation that wedged a Preview
+// replay at epoch 38.
 //
 // The pool ran on one VRF key from slot 1014930, rotated to a second at slot
 // 3279920, and produced a block at slot 3362555. The snapshot that elected that

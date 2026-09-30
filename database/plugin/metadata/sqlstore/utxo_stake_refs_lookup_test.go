@@ -24,7 +24,7 @@ import (
 )
 
 // legacyUtxoStakeRefsQuery rebuilds the OR-of-pairs statement
-// queryUtxoStakeRefs used to run (see issue #4067): a per-(tx_id,
+// queryUtxoStakeRefs used to run: a per-(tx_id,
 // output_idx) equality OR'd together, gated by liveOnly's "deleted_slot = 0".
 // Kept here, rather than in production code, purely so the plan and
 // correctness tests below can show the old and new statements side by side
@@ -110,7 +110,7 @@ func utxoIDAt(i int) models.UtxoId {
 // tx_id_output_idx index once liveOnly's "deleted_slot = 0" gives the
 // planner a falsely attractive alternative: idx_utxo_deleted_staking_amount
 // matches nearly every live row, so past a handful of OR terms SQLite drives
-// off that index instead and visits the whole table (issue #4067). The
+// off that index instead and visits the whole table. The
 // tx_id-IN form this test also exercises stays on tx_id_output_idx
 // regardless of term count, because a plain IN list has no such competing
 // index to be lured by.

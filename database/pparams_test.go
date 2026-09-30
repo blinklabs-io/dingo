@@ -203,7 +203,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 }
 
 // TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): on a network that forks
+// the case where, on a network that forks
 // into Babbage before receiving a real PlutusV2 cost model, that model can
 // arrive through this classic Shelley-style update system rather than
 // CIP-1694 governance (as it did on real mainnet, well before Conway

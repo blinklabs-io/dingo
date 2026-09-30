@@ -320,7 +320,7 @@ func TestInsertUtxoModelCachesAssetIDLookup(t *testing.T) {
 }
 
 // TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction is the
-// regression test for the retention bug raised against this PR: production
+// regression test for the statement-retention bug: production
 // applies many outputs within one shared write transaction (a whole block
 // batch via LedgerDeltaBatch.apply, or the entire genesis UTxO set in one
 // txn.Do), not one transaction per output, so insertUtxoModel's INSERT and

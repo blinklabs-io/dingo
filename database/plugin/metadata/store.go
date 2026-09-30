@@ -241,7 +241,7 @@ type GovernanceStore interface {
 	// later, the same one-epoch delay ratification has before enactment.
 	// Used at epoch start, before marking any new proposals expired, to
 	// return the deposit and finalize ("drop") proposals expired as of a
-	// prior boundary (dingo#4411). Only proposals whose expired_epoch is
+	// prior boundary. Only proposals whose expired_epoch is
 	// strictly below the given epoch are returned, so a reprocessed
 	// boundary cannot drop a proposal in the epoch that expired it.
 	GetExpiredAwaitingDropGovernanceProposals(
@@ -666,7 +666,7 @@ type UtxoStore interface {
 	// live at atSlot but its spend record has since been hard-deleted by
 	// the periodic stability-window cleanup" (see UtxosDeleteConsumed).
 	// This method has no way to tell the two apart -- callers pinning a
-	// historical point (ledger.Query, blinklabs-io/dingo#382/#1900) must
+	// historical point (ledger.Query, node-parity) must
 	// reject a point older than their own retention floor themselves
 	// before calling this, rather than trust a possibly-incomplete result
 	// here.
@@ -1227,7 +1227,7 @@ type StakeSnapshotStore interface {
 	// including pools that are no longer registered. It is the historical-path
 	// counterpart of GetDelegatedPoolKeyHashes, and exists for the same reason:
 	// the sigma_a denominator must be enumerated from delegations, not from the
-	// stake-pool set (dingo #4660).
+	// stake-pool set.
 	GetEpochBoundaryDelegatedPoolKeyHashes(
 		uint64, // snapshotSlot
 		uint64, // boundarySlot
@@ -2021,7 +2021,7 @@ type MetadataStore interface {
 	// checker asks about an epoch it reaches long after the fact.
 	// pool_registration/pool_retirement are retained for the life of the
 	// database, so this evidence outlives the pool_stake_snapshot retention
-	// window a trailing observer runs behind (dingo #3925).
+	// window a trailing observer runs behind.
 	GetPoolKeyHashesRetiredByEpoch(
 		epoch uint64,
 		boundarySlot uint64,
@@ -2057,7 +2057,7 @@ type MetadataStore interface {
 	// registered. cardano-ledger's ssTotalActiveStake sums registered
 	// credentials holding a delegation without consulting the stake-pool set,
 	// so the snapshot's sigma_a denominator must cover these pools too or every
-	// reward on the node is under-credited by their share (dingo #4660).
+	// reward on the node is under-credited by their share.
 	GetDelegatedPoolKeyHashes(types.Txn) ([][]byte, error)
 
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
@@ -2724,7 +2724,7 @@ type MetadataStore interface {
 
 	// GetNetworkStateAsOfSlot retrieves the most recent network state
 	// recorded at or before the given slot, for a historical
-	// GetStakeDistribution answer (blinklabs-io/dingo#382) rather than
+	// GetStakeDistribution answer rather than
 	// GetNetworkState's always-latest row.
 	GetNetworkStateAsOfSlot(uint64, types.Txn) (*models.NetworkState, error)
 
@@ -2800,7 +2800,7 @@ type MetadataStore interface {
 
 	// ListSyncStateKeysByPrefix returns every sync_state key that begins with
 	// the given prefix (used to enumerate the persisted deferred-header
-	// markers so their retention floor survives a restart -- issue #3727).
+	// markers so their retention floor survives a restart).
 	ListSyncStateKeysByPrefix(string, types.Txn) ([]string, error)
 
 	// ClearSyncState removes all sync state entries.

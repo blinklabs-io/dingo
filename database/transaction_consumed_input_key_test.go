@@ -126,7 +126,7 @@ func TestConsumedInputKeyAllocationFree(t *testing.T) {
 
 // BenchmarkConsumedInputKeyOldPattern reproduces, verbatim, the dedup-key
 // construction ensureTransactionConsumedUtxos and ensureGapConsumedUtxos
-// used before this change: a hex-formatted "hash:index" string built with
+// used previously: a hex-formatted "hash:index" string built with
 // fmt.Sprintf, once per consumed input, purely to key a same-transaction
 // "seen" dedup set. Kept for direct before/after comparison against
 // BenchmarkConsumedInputKeyNewPattern.

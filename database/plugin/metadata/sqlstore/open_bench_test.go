@@ -80,8 +80,8 @@ func BenchmarkOpenDBQueryLoop_TracingDisabled(b *testing.B) {
 }
 
 // BenchmarkOpenDBQueryLoop_TracingEnabled reproduces the otelsql-wrapped
-// behavior every query paid before this change, and that an operator who
-// explicitly enables --tracing still gets today.
+// behavior every query paid before tracing was made opt-in, and that an
+// operator who explicitly enables --tracing still gets today.
 func BenchmarkOpenDBQueryLoop_TracingEnabled(b *testing.B) {
 	benchmarkOpenDBQueryLoop(b, true)
 }

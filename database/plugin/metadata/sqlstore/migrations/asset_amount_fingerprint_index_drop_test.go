@@ -26,15 +26,15 @@ import (
 )
 
 // TestAssetAmountFingerprintIndexDropRemovesIndexes proves migration v21
-// (asset-amount-fingerprint-index-drop, dingo#4598) drops idx_asset_amount
+// (asset-amount-fingerprint-index-drop) drops idx_asset_amount
 // and idx_asset_fingerprint from a database migrated all the way through,
 // while leaving the asset.amount and asset.fingerprint columns themselves
-// untouched -- unlike dingo#4482's asset.name_hex, both columns are still
+// untouched -- unlike the dropped asset.name_hex, both columns are still
 // genuinely read and returned via the blockfrost/mesh API adapters. Before
 // this migration existed, a fully migrated (through v20) database still
 // carried both indexes: a real WAL-frame-churn measurement during genesis
 // sync found neither backs any WHERE/JOIN/ORDER BY predicate anywhere in the
-// tree (dingo#4464).
+// tree.
 func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 	t.Parallel()
 

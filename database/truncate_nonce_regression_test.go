@@ -135,16 +135,16 @@ func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
 		"sanity check: the epoch's checkpoint row must survive retention pruning")
 
 	// Re-run the exact same truncate against the now-pruned target. Before
-	// PR #4343's fix, this silently returned (Tip, nil-nonce, nil-error) --
-	// the exact live-incident mechanism: a deep 'dingo database truncate'
-	// landing on a pruned slot silently corrupted the resumed nonce chain,
-	// causing every VRF verification in the following epoch to fail against
-	// real, canonical chain headers on 4 independent Preview-testnet nodes.
-	// It must still return a nil nonce here (there is nothing else to
-	// return -- the target's own row is gone), but must NOT error now that
-	// a checkpoint survives to reconstruct from: LedgerState's startup heal
-	// is responsible for actually computing and persisting the correct
-	// nonce before anything folds forward from it.
+	// the truncate-nonce fix, this silently returned (Tip, nil-nonce,
+	// nil-error) -- the exact live-incident mechanism: a deep 'dingo database
+	// truncate' landing on a pruned slot silently corrupted the resumed nonce
+	// chain, causing every VRF verification in the following epoch to fail
+	// against real, canonical chain headers on 4 independent Preview-testnet
+	// nodes. It must still return a nil nonce here (there is nothing else to
+	// return -- the target's own row is gone), but must NOT error now that a
+	// checkpoint survives to reconstruct from: LedgerState's startup heal is
+	// responsible for actually computing and persisting the correct nonce
+	// before anything folds forward from it.
 	_, nonceAfterPruning, err := db.TruncateAfterSlot(point, 0, nil)
 	require.NoError(t, err,
 		"TruncateAfterSlot must allow a truncate whose target's block_nonce "+

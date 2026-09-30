@@ -167,7 +167,7 @@ func applyUtxoStakeDelta(
 // refreshRewardLiveStakeAggregateDelta is refreshRewardLiveStakeAggregate's
 // incremental counterpart: instead of recomputing a credential's entire
 // live-UTxO total from scratch (sumCredentialUtxoStake's O(live UTxOs for
-// this credential) scan, dingo #4421), it reads the running total already
+// this credential) scan), it reads the running total already
 // stored in reward_live_stake and adjusts it by delta -- the exact signed
 // change this one write's UTxO mutations made to the credential's total, an
 // O(1) indexed point lookup plus an in-memory add.
@@ -430,7 +430,7 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotals(
 // finalizer's own SELECT. The per-credential form made the finalizer's cost
 // grow with the credential population twice over, and it is a large part of
 // why that SELECT could hold its write transaction -- and so the WAL snapshot
-// -- far longer than the work required (#4610).
+// -- far longer than the work required.
 func (s *Store) verifyRewardLiveStakeRunningTotals(
 	ctx context.Context,
 	db queryer,
@@ -474,7 +474,7 @@ LIMIT 1`)
 // until it finishes. Batching bounds both the Go-side rows and SQLite's
 // per-statement temp b-trees to one batch, and gives the rebuild a place to
 // report progress, while each batch reads only its own index ranges so the
-// total work stays linear in the key count (#4610).
+// total work stays linear in the key count.
 const rewardLiveStakeRebuildBatch = 20_000
 
 func (s *Store) rewardLiveStakeBatch() int {
@@ -1304,8 +1304,7 @@ func (s *Store) StaleConsensusStakeSnapshotsExist(
 	// captureMarkSnapshot) is a real source for reward calculation whenever
 	// no authoritative row has been captured yet, so it must fail this gate
 	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
-	// separately rejecting a version mismatch when the fallback is consulted
-	// (dingo #4026).
+	// separately rejecting a version mismatch when the fallback is consulted.
 	err = db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM pool_stake_snapshot
@@ -1509,10 +1508,10 @@ func dedupeByteSlices(values [][]byte) [][]byte {
 // resolveInstantStake), so a snapshot whose stake is enumerated from the
 // active pool set alone silently drops the stake of any credential whose pool
 // is absent from it -- which raises sigma_a for every surviving pool and
-// under-credits every reward on the node by that stake's share (dingo #4660,
-// the same failure #3969 and #4025 fixed on the exclusion side). Unioning this
-// set into the one the distribution is fetched for restores the ledger's
-// credential-first denominator while leaving which pools earn rewards alone.
+// under-credits every reward on the node by that stake's share (the same
+// failure as on the exclusion side). Unioning this set into the one the
+// distribution is fetched for restores the ledger's credential-first
+// denominator while leaving which pools earn rewards alone.
 //
 // The result is deliberately a superset: it applies no registration or expiry
 // predicate, because those are applied by the stake fetch this feeds, and a

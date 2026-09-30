@@ -34,7 +34,7 @@ import (
 // repeated (Hash, Idx) pairs, including a repeat that would otherwise land
 // in a different 400-ref chunk, while preserving order of first occurrence
 // and leaving distinct refs (including a same-hash-different-index pair)
-// untouched (#392).
+// untouched.
 func TestDedupeUtxoIDs(t *testing.T) {
 	hashA := []byte{0x01, 0x02, 0x03}
 	hashB := []byte{0x04, 0x05, 0x06}

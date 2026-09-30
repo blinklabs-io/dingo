@@ -110,11 +110,11 @@ func newCancelOnRestoreTestHost(
 }
 
 // TestRestoreBlobStoreStopWaitsForProviderAfterCanceledRestore is a
-// regression test for the restore-rollback lock race in dingo#4179's
-// class: restoreBlobStore's own StopCapability call must not surface as
-// "the provider is stopped" before the provider's Stop has genuinely
-// finished, even when Restore failed because the operation's own context
-// was just canceled -- the ordinary case, since Restore and the cleanup
+// regression test for the restore-rollback lock race, in the class of a missing
+// async-close completion signal: class: restoreBlobStore's own StopCapability
+// call must not surface as "the provider is stopped" before the provider's Stop
+// has genuinely finished, even when Restore failed because the operation's own
+// context was just canceled -- the ordinary case, since Restore and the cleanup
 // Stop that follows it share the same ctx.
 //
 // If StopCapability races that canceled ctx instead of waiting for the

@@ -37,7 +37,7 @@ import (
 //
 // This is the harness that turns this test file into an integration test
 // of the three real wrap sites, rather than a same-file duplication of
-// the format strings (per PR #2982 review).
+// the format strings.
 type erroringMetadata struct {
 	metadata.MetadataStore
 	injectErr error
@@ -99,7 +99,7 @@ func (e *erroringMetadata) SetTransactionBatched(
 func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	t.Parallel()
 
-	// Inner error mimics the real #2976 failure that motivated the wrap.
+	// Inner error mimics a real failure that motivated the wrap.
 	inner := errors.New(
 		"pool reward account: pool cert reward_account: got 2 bytes, want 29",
 	)

@@ -48,8 +48,7 @@ func newOnDiskTestDB(t *testing.T) *Database {
 // blob deletes than this exhausts the transaction. Everything staged after
 // that point fails, including the 8-byte commit timestamp Txn.Commit writes
 // into the same transaction -- which turns a tolerated partial blob cleanup
-// into a rollback that cannot be committed at all
-// (blinklabs-io/dingo#4657).
+// into a rollback that cannot be committed at all.
 const (
 	testBadgerMaxBatchSize  = 15 * testutil.TestBadgerMemTableSize / 100
 	testBadgerMaxBatchCount = testBadgerMaxBatchSize / 96
@@ -132,7 +131,7 @@ func countUtxoBlobs(t *testing.T, db *Database, utxos []models.Utxo) int {
 }
 
 // TestTruncateAfterSlotCommitsWithOverBudgetBlobDeletes is the startup
-// rollback of blinklabs-io/dingo#4657: TruncateAfterSlot runs inside a
+// rollback case: TruncateAfterSlot runs inside a
 // combined transaction the caller commits, and it stages every rolled-back
 // UTxO's blob delete into that one transaction. Past badger's per-
 // transaction budget every further staged write is rejected, and the last of

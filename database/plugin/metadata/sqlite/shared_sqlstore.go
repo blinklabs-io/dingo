@@ -100,16 +100,16 @@ func sqliteVacuum(
 // not after every commit -- a committed transaction survives an application
 // crash (the bytes are already in the OS page cache) but an OS crash/power
 // loss can still roll back whatever was written since the last checkpoint's
-// fsync. That was already true at the old 1000-page threshold; this change
-// only widens the rolled-back window from ~4MB to ~40MB of recent commits.
-// It does not introduce a new failure class: SQLite's own WAL replay
+// fsync. That was already true at the old 1000-page threshold; the larger
+// threshold only widens the rolled-back window from ~4MB to ~40MB of recent
+// commits. It does not introduce a new failure class: SQLite's own WAL replay
 // guarantees the database is never corrupted, only reverted to an earlier
-// consistent point, and Dingo already resumes chain-sync from whatever tip
-// the metadata store reports after any restart (ledger.LedgerState.loadTip),
-// re-fetching and re-applying any blocks peers show as missing via the
-// ordinary FindIntersect/chain-sync path -- the same mechanism that already
-// recovers from an explicit rollback or from the pre-existing Badger-behind-
-// metadata race the Cross-Store Durability Contract section above documents.
+// consistent point, and Dingo already resumes chain-sync from whatever tip the
+// metadata store reports after any restart (ledger.LedgerState.loadTip),
+// re-fetching and re-applying any blocks peers show as missing via the ordinary
+// FindIntersect/chain-sync path -- the same mechanism that already recovers
+// from an explicit rollback or from the pre-existing Badger-behind- metadata
+// race the Cross-Store Durability Contract section above documents.
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=wal_autocheckpoint(10000)" +
@@ -499,7 +499,7 @@ const sqliteDiskSizeQueryTimeout = 5 * time.Second
 // (neither pool sets SetConnMaxIdleTime/SetConnMaxLifetime), confirmed by
 // inspecting readDB's own sql.DB.Stats().OpenConnections after a single
 // DiskSize() call (see TestDiskSizeDoesNotLeaveReadDBConnectionOpen). Against
-// the live perf-branch containers this change was written to fix,
+// live containers running the perf branch,
 // checkpointWAL's PRAGMA wal_checkpoint(TRUNCATE) logged busy=1 on
 // essentially every tick from shortly after startup onward, and an external,
 // independently-opened `sqlite3 metadata.sqlite "PRAGMA

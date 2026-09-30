@@ -30,7 +30,7 @@ import (
 // collateral-return fixtures only need a decodable one.
 const collateralReturnAddress = "addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd"
 
-// noOutputsTx is the legal zero-output shape from issue #3932: a valid
+// noOutputsTx is the legal zero-output shape: a valid
 // transaction that declares no outputs, so Produced() is empty too. On chain
 // this is e.g. a stake registration that spends its whole input on the deposit
 // plus the fee and returns no change.

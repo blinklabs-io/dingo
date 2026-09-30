@@ -137,7 +137,7 @@ func seedRollbackUtxos(
 }
 
 // analyzeStore populates sqlite_stat1 for the fixture. A node only runs
-// ANALYZE at the points added by #2367 (after a Mithril import, before
+// ANALYZE at fixed points (after a Mithril import, before
 // API-mode backfill), so a producer's utxo table is normally queried without
 // current stats -- which is the state in which the DISTINCT plan goes wrong.
 func analyzeStore(tb testing.TB, store *Store) {
@@ -181,7 +181,7 @@ func queryPlan(tb testing.TB, db *sql.DB, query string, args ...any) string {
 // only visits the rolled-back window, and it does so whether or not
 // sqlite_stat1 has been populated. That stats independence is the reason to
 // dedupe in Go rather than to rely on ANALYZE: a long-running node's utxo
-// stats are stale or absent (#2367 runs ANALYZE only around a Mithril import),
+// stats are stale or absent (ANALYZE runs only around a Mithril import),
 // and the MySQL and Postgres stores have their own planners.
 //
 // The assertion is on the plan rather than on elapsed time so it is
