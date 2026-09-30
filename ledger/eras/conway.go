@@ -1115,6 +1115,14 @@ func newTxInfoCache(
 
 func (c *txInfoCache) v1() (script.TxInfoV1, error) {
 	if !c.txInfoV1Built {
+		// Unlike Alonzo, which drops a Byron TxOut from a V1 context (and
+		// does not use this cache), Babbage and Conway reject it. The shared
+		// V1 builder always drops it, so reject before building.
+		if err := rejectByronTxOutsForV1(c.tx, c.resolvedInputs); err != nil {
+			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
+				Err: err,
+			}
+		}
 		txInfo, err := script.NewTxInfoV1FromTransaction(
 			c.ls,
 			c.tx,
@@ -1131,6 +1139,40 @@ func (c *txInfoCache) v1() (script.TxInfoV1, error) {
 		c.txInfoV1Built = true
 	}
 	return c.txInfoV1, nil
+}
+
+var errByronTxOutInV1Context = errors.New(
+	"cannot represent a Byron TxOut in Plutus context",
+)
+
+// rejectByronTxOutsForV1 returns an error when a spent input or an output of
+// tx carries a Byron address. Only spent inputs are checked: a reference
+// input never appears in a V1 context.
+func rejectByronTxOutsForV1(
+	tx lcommon.Transaction,
+	resolvedInputs []lcommon.Utxo,
+) error {
+	spent := make(map[string]struct{}, len(tx.Inputs()))
+	for _, in := range tx.Inputs() {
+		spent[fmt.Sprintf("%s#%d", in.Id(), in.Index())] = struct{}{}
+	}
+	for _, utxo := range resolvedInputs {
+		if utxo.Output == nil || utxo.Id == nil {
+			continue
+		}
+		if _, ok := spent[fmt.Sprintf("%s#%d", utxo.Id.Id(), utxo.Id.Index())]; !ok {
+			continue
+		}
+		if utxo.Output.Address().Type() == lcommon.AddressTypeByron {
+			return errByronTxOutInV1Context
+		}
+	}
+	for _, output := range tx.Outputs() {
+		if output != nil && output.Address().Type() == lcommon.AddressTypeByron {
+			return errByronTxOutInV1Context
+		}
+	}
+	return nil
 }
 
 func (c *txInfoCache) v2() (script.TxInfoV2, error) {
