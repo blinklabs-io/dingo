@@ -1953,10 +1953,12 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 
 // clampRecoveryRewindToEpochBoundary keeps an at-tip recovery rewind from
 // discarding an epoch rollover that has already completed. When the ledger
-// tip is in the current epoch and the target lies before that epoch's start
-// slot, re-delivery would recompute the whole rollover before reaching the
-// same failing block, so the target moves to the first block at or after the
-// boundary. The final scheduled attempt may cross the boundary once per
+// tip or the failing block is in the current epoch and the target lies before
+// that epoch's start slot, re-delivery would recompute the whole rollover
+// before reaching the same failing block, so the target moves to the first
+// block at or after the boundary, or to the ledger tip when none is applied.
+// The failing block counts because the rollover commits before the first
+// block of the epoch applies, leaving the tip in the previous epoch. The final scheduled attempt may cross the boundary once per
 // epoch, so a failure that only a different pre-boundary history can repair
 // still gets the deepest rewind. Any lookup failure holds at the ledger tip.
 func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
@@ -1968,8 +1970,10 @@ func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
 	ls.RLock()
 	boundary := ls.currentEpoch.StartSlot
 	ls.RUnlock()
-	if boundary == 0 || ledgerTip.Slot < boundary ||
-		rewindPoint.Slot >= boundary {
+	if boundary == 0 ||
+		max(ledgerTip.Slot, validationErr.BlockPoint.Slot) < boundary ||
+		rewindPoint.Slot >= boundary ||
+		pointMatches(rewindPoint, ledgerTip) {
 		return rewindPoint
 	}
 	logger := ls.config.Logger.With(

@@ -726,3 +726,45 @@ func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
 	require.Equal(t, tip, got, "a second crossing of the same boundary must be refused")
 	require.Equal(t, 2.0, promtestutil.ToFloat64(clampedCounter))
 }
+
+// TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock covers a failure in
+// the first block of an epoch. The rollover commits before that block applies,
+// so the ledger tip is still in the previous epoch while the current epoch
+// already starts at the failing block. A deep rewind would discard the rollover
+// just as it does when the tip is inside the epoch.
+func TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = pruneFixtureTipSlot + 1
+	f := newPrunedUtxoFixture(t, 0)
+	completeRollover := func() {
+		require.NoError(t, f.db.SetEpoch(
+			boundarySlot, 1,
+			[]byte("nonce-first-block"), []byte("evolving-first-block"),
+			[]byte("candidate-first-block"), []byte("last-first-block"),
+			eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+		))
+		f.ls.currentEpoch = models.Epoch{
+			EpochId:   1,
+			StartSlot: boundarySlot,
+			EraId:     eras.ConwayEraDesc.Id,
+		}
+	}
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+	// Re-delivery of the failing block recomputes the rollover the first
+	// attempt's same-tip repair discarded.
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+
+	require.Equal(
+		t,
+		uint64(pruneFixtureTipSlot),
+		f.ls.currentTip.Point.Slot,
+		"recovery rewound below the tip that precedes the completed rollover",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+	)
+}
