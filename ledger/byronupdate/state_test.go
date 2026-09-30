@@ -393,6 +393,20 @@ func TestComplete(t *testing.T) {
 	assert.False(t, fromTrustedStart.Complete())
 }
 
+// TestAdoptedParamsUnknownAfterTrustedStart pins that only a state holding
+// the whole update history vouches for its adopted parameters.
+func TestAdoptedParamsUnknownAfterTrustedStart(t *testing.T) {
+	t.Parallel()
+	fresh := NewState(testGenesisParams())
+	assert.False(t, fresh.AdoptedParams().AdoptionUnknown)
+	fromGenesis := fresh.Advance(0, 0).Advance(5, 1)
+	assert.False(t, fromGenesis.AdoptedParams().AdoptionUnknown)
+	fromTrustedStart := fresh.Advance(4_492_799, 4_490_510)
+	assert.True(t, fromTrustedStart.AdoptedParams().AdoptionUnknown)
+	assert.False(t, fromTrustedStart.adoptedParams.AdoptionUnknown,
+		"the state itself keeps the genesis values unmarked")
+}
+
 func TestCheckTransition(t *testing.T) {
 	t.Parallel()
 	delegates := newDelegates(t, 7)

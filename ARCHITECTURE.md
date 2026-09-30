@@ -3184,6 +3184,17 @@ input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
 pairing the two lists as `zip` does; and a witness's address root is hashed
 over the canonical encoding of the address's decoded attributes.
 
+The Byron update state is not persisted. It is rebuilt by replaying the stored
+chain from its first block, so a restart or a rollback restores the limits and
+fee policy adopted as of the new tip. A stored chain that begins after genesis,
+as with an intersect start inside Byron, cannot know the updates adopted before
+its first block: `State.AdoptedParams` then marks the parameters
+`AdoptionUnknown`, and the Byron block size, transaction size and minimum fee
+rules are not enforced rather than judged against genesis values. Byron
+epoch-boundary blocks keep their fixed size bound. `ledgerstate` refuses a
+snapshot whose current era is Byron (`ErrByronSnapshotUnsupported`), so an
+import cannot start a node inside Byron either.
+
 The Byron start applies to an empty database only. `setEpochCache` returns as
 soon as `epochCache` is populated, which is what keeps an already-synced node
 untouched — and equally what means a database created by an earlier binary keeps
