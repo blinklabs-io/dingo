@@ -562,16 +562,11 @@ func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	)
 }
 
-// TestLedgerReadChainRequestsResyncOnOverKReconcile covers a Cubic finding
-// on PR #3611: unlike handleEventChainsyncRollback/tryResolveFork,
-// ledgerReadChain's own retry loop treated any reconcilePrimaryChainTipWithLedgerTip
-// error identically -- log and stop the reader goroutine -- with no
-// over-K-specific handling. Before #3516 bounded RewindPrimaryChainToPoint,
-// this reader could never observe ErrRollbackExceedsSecurityParam at all;
-// now that it can, it must surface the same ChainsyncResyncEventType/reason
-// the other two call sites use, not just a generic error log, so connection
-// management gets the signal to reconnect and negotiate a fresh
-// intersection.
+// TestLedgerReadChainRequestsResyncOnOverKReconcile verifies that the reader
+// emits a resync event when reconciliation exceeds the security parameter,
+// matching the behavior of handleEventChainsyncRollback and tryResolveFork.
+// This lets connection management reconnect and negotiate a fresh
+// intersection instead of silently stopping the reader.
 func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	t.Parallel()
 
@@ -617,17 +612,10 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
-// TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile covers a
-// Cubic finding on PR #3611: reconcilePrimaryChainTipWithLedgerTip's new
-// Mithril-boundary pre-check (added the same round, to stop it emitting an
-// undo for a rollback ls.rollback would then deterministically reject) can
-// now return ErrRollbackExceedsMithrilBoundary to ledgerReadChain's retry
-// loop -- a case that loop did not classify, unlike the sibling
-// over-K/ErrRollbackExceedsSecurityParam case it already handles. It must
-// surface the same ChainsyncResyncEventType/
-// ChainsyncResyncReasonRollbackExceedsMithril handleEventChainsyncRollback
-// uses for a peer-driven Mithril-boundary rejection, not just a generic
-// error log.
+// TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile verifies that
+// ledgerReadChain emits the same resync reason as
+// handleEventChainsyncRollback when reconciliation reaches the Mithril
+// boundary, rather than only logging an error.
 func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 	t *testing.T,
 ) {

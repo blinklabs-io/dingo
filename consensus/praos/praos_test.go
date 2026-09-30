@@ -404,6 +404,124 @@ func TestGetVRFOutput_ByronReturnsNil(t *testing.T) {
 		"NoTiebreakerAcrossEras must be symmetric")
 }
 
+// byronMainHeaderForView builds a Byron main-block header with the given
+// block number, for chain-selection tests. Slot is left at zero since these
+// tests compare block-number ties, not slot ordering.
+func byronMainHeaderForView(blockNumber uint64) *byron.ByronMainBlockHeader {
+	h := &byron.ByronMainBlockHeader{}
+	h.ConsensusData.Difficulty.Value = blockNumber
+	return h
+}
+
+// byronEBBHeaderForView builds a Byron epoch-boundary header with the given
+// block number.
+func byronEBBHeaderForView(
+	blockNumber uint64,
+) *byron.ByronEpochBoundaryBlockHeader {
+	h := &byron.ByronEpochBoundaryBlockHeader{}
+	h.ConsensusData.Difficulty.Value = blockNumber
+	return h
+}
+
+// TestComparePraosTipsByronEBBBeatsRegularTipAtEqualBlockNumber pins the
+// canonical Byron PBFT rule (blinklabs-io/dingo#4413): an epoch-boundary
+// block is an additional block despite sharing its predecessor's protocol
+// block number, so it beats a regular tip at that same number. This is the
+// exact "local regular tip vs. peer EBB successor" scenario from the issue.
+func TestComparePraosTipsByronEBBBeatsRegularTipAtEqualBlockNumber(
+	t *testing.T,
+) {
+	localRegularTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-regular")},
+		BlockNumber: 50,
+	}
+	peerEBBTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer-ebb")},
+		BlockNumber: 50,
+	}
+
+	localView, ok := GetPraosTiebreakerView(byronMainHeaderForView(50))
+	require.False(t, ok, "Byron header has no Praos select view")
+	peerView, ok := GetPraosTiebreakerView(byronEBBHeaderForView(50))
+	require.False(t, ok, "Byron header has no Praos select view")
+
+	result := ComparePraosTips(
+		localRegularTip,
+		peerEBBTip,
+		localView,
+		peerView,
+	)
+	assert.Equal(
+		t,
+		ChainBBetter,
+		result,
+		"peer's EBB successor must beat the local regular tip at the same block number",
+	)
+
+	result = ComparePraosTips(
+		peerEBBTip,
+		localRegularTip,
+		peerView,
+		localView,
+	)
+	assert.Equal(t, ChainABetter, result,
+		"the Byron EBB tiebreak must be symmetric")
+}
+
+// TestComparePraosTipsByronSameKindRemainsEqual confirms that two Byron tips
+// of the same kind (both regular, or both EBB) at an equal block number are
+// left equal, so an unrelated rule (or the incumbent) still decides.
+func TestComparePraosTipsByronSameKindRemainsEqual(t *testing.T) {
+	tipA := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("a")},
+		BlockNumber: 50,
+	}
+	tipB := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("b")},
+		BlockNumber: 50,
+	}
+
+	mainViewA, _ := GetPraosTiebreakerView(byronMainHeaderForView(50))
+	mainViewB, _ := GetPraosTiebreakerView(byronMainHeaderForView(50))
+	assert.Equal(t, ChainEqual,
+		ComparePraosTips(tipA, tipB, mainViewA, mainViewB),
+		"two regular Byron tips at the same block number must remain equal")
+
+	ebbViewA, _ := GetPraosTiebreakerView(byronEBBHeaderForView(50))
+	ebbViewB, _ := GetPraosTiebreakerView(byronEBBHeaderForView(50))
+	assert.Equal(t, ChainEqual,
+		ComparePraosTips(tipA, tipB, ebbViewA, ebbViewB),
+		"two EBB tips at the same block number must remain equal")
+}
+
+// TestComparePraosTipsByronTiebreakDoesNotArmAcrossEras confirms the Byron
+// EBB tiebreak is a no-op when only one side is a Byron header (an
+// era-transition tip pair): it must not invent a winner, and must leave the
+// existing Praos-only behavior (ChainEqual, no issuer/VRF data on the Byron
+// side) exactly as before this change.
+func TestComparePraosTipsByronTiebreakDoesNotArmAcrossEras(t *testing.T) {
+	byronTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("byron")},
+		BlockNumber: 50,
+	}
+	shelleyTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("shelley")},
+		BlockNumber: 50,
+	}
+
+	byronView, ok := GetPraosTiebreakerView(byronEBBHeaderForView(50))
+	require.False(t, ok)
+	shelleyHeader := &shelley.ShelleyBlockHeader{}
+	shelleyHeader.Body.LeaderVrf.Output = make64ByteVRF(0x01)
+	shelleyView, ok := GetPraosTiebreakerView(shelleyHeader)
+	require.True(t, ok)
+
+	assert.Equal(t, ChainEqual,
+		ComparePraosTips(byronTip, shelleyTip, byronView, shelleyView),
+		"an EBB vs. a Shelley tip at the same block number must not be "+
+			"decided by the Byron tiebreak")
+}
+
 // --- helpers ----------------------------------------------------------------
 
 func make64ByteVRF(fill byte) []byte {
