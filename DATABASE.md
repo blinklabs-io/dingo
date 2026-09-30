@@ -2067,6 +2067,9 @@ flowchart LR
     UtxoKey["u + tx hash + output index<br/>UTxO CBOR or DOFF"]
     TxKey["t + tx hash<br/>DOFF or DTXP"]
     Offset["DOFF / DTXP<br/>slot + block hash + byte ranges"]
+    EbManifest["em + EB hash + slot<br/>raw EB manifest CBOR"]
+    EbTxs["et + EB hash + slot<br/>CBOR list of transaction bodies"]
+    EbBlob["bp + EB slot + EB hash<br/>standalone transaction CBOR blob"]
     BlobCommit["metadata_commit_timestamp"]
     SqlCommit["SQL commit_timestamp"]
 
@@ -2076,8 +2079,19 @@ flowchart LR
     UtxoKey --> Offset
     TxKey --> Offset
     Offset --> BlockKey
+    EbManifest -. "body hashes and sizes" .-> EbTxs
+    EbTxs -. "when apply path retains bodies" .-> EbBlob
     SqlCommit --- BlobCommit
 ```
+
+The `em`/`et` pair is for historical Leios fetch serving. `em` stores the
+manifest; `et` stores the separately fetched transaction bodies. They are
+written together only when the complete body list is available. Applying a
+referencing ranking block writes a standalone `bp` blob only for a non-empty
+body list. On the CIP path, at least one transaction must also remain after
+deduplication; the Musashi path retains the original list even when all its
+transactions are duplicates. The diagram shows these as separate stages
+because neither representation is inlined into the other.
 
 | Logical key | Value | Used by |
 |---|---|---|
@@ -2223,42 +2237,38 @@ main block outright, as bark's archive-fetch path does, would make
 Byron-era history permanently unretrievable from an S3/GCS-backed node
 instead. See `Hash`'s doc comment in `blockverify.go` for the full account.
 
-Leios endorser-block storage uses the same blob-key namespace, even though an
-endorser block is not part of the ranking-block chain. When a Dijkstra ranking
-block references an endorser block (`ledger/leios_apply.go`), `SetGenesisCbor`
-writes a standalone CBOR blob under a `bp` + `(endorser-block slot,
-endorser-block hash)` key. That `bp` value is the endorser-block offset blob
-used by cold extraction, not a chain block and not the transaction metadata
-rows. Which transaction commits this `bp` blob depends on the apply path
-(`LeiosApplyEndorserBlockTxs`). On the Haskell-conformant path (Musashi,
-`LeiosApplyEndorserBlockTxs` false) it is committed in its own blob transaction,
-not in the shared block-processing transaction that covers up to a full 50-block
-chunk: every certified endorser block in a chunk would otherwise pile its full
-blob (plus one `DOFF` entry per endorser transaction body, each ranging over
-that body's bytes: every Dijkstra sub-transaction body, then the enclosing
-body element, never the whole transaction array; and one per produced output)
-into that single transaction, and on a dense Leios backlog the accumulated
-writes exceed Badger's per-transaction budget (`ErrTxnTooBig`), wedging the
-chunk. That path applies the endorser transactions without validation and never
-reads the blob back within the chunk, and the blob is content-addressed and
-idempotent (`ID=0`, off the chain index), so an independent commit is safe — the
-endorser transactions' `DOFF` ledger effects still go into the shared
-transaction under the ranking block's point, so rollback semantics are
-unchanged; a blob orphaned by a crash or rollback is harmless and overwritten
-identically on re-apply. On the CIP-conformant path
-(`LeiosApplyEndorserBlockTxs` true) the endorser transactions are validated and
-a later block in the same chunk that spends an endorser-block-produced output
-reads the blob back through the shared transaction, so the blob stays in the
-shared transaction to be resolvable via read-your-writes (a separately committed
-blob is not visible to that transaction's start-of-transaction snapshot). Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
-keys and deliberately omits the `bi`/`bh` index keys, so the chain iterator
-never treats it as a chain block. Its `bp..._metadata` carries `ID=0` (real
-ranking blocks created via `BlockCreate` get `ID >= 1`), which is also how the
-`bp`-prefix scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0`
-blobs so a synthetic endorser/genesis blob is never returned as the "previous
-block." This matters for storage callers, but it does not make a slot-key scan
-a canonical chain query: retained fork blobs can still sort before an epoch
+Leios also uses the ordinary blob-key namespace for ledger application. An EB
+is not itself part of the ranking-block chain. When a Dijkstra ranking block
+references one (`ledger/leios_apply.go`), `SetGenesisCbor` writes its
+transactions as a standalone CBOR blob under `bp` + EB slot + EB hash if the
+EB has a non-empty body list. The CIP path also requires at least one
+transaction to remain after deduplication; the Musashi path writes the original
+non-empty list even when every transaction is a duplicate. This is the blob
+that transaction `DOFF` offsets resolve through cold extraction, separate from
+the `em`/`et` historical-serving records described above.
+
+The synthetic `bp` blob has `ID=0` and deliberately has no `bi`/`bh` index
+entries. Chain iteration therefore does not treat it as a real block.
+`BlockBeforeSlotTxn` skips `ID=0`, though a raw slot-key scan still is not a
+canonical chain query because retained fork blobs may sort before an epoch
 boundary.
+
+The blob transaction boundary depends on `LeiosApplyEndorserBlockTxs`:
+
+- **Musashi / Haskell-conformant path (`false`):** the standalone blob commits
+  separately from the shared block-processing transaction, which can cover up
+  to 50 blocks. Keeping large EB blobs out of that transaction avoids Badger's
+  per-transaction size limit (`ErrTxnTooBig`) during dense backlogs. The blob
+  is idempotent, and transaction ledger effects remain associated with the
+  ranking block for rollback.
+- **CIP-conformant path (`true`):** the blob remains in the shared transaction.
+  A later block in the same chunk may spend an EB-produced output and must be
+  able to read the blob through read-your-writes; a separately committed blob
+  is not visible to that transaction's starting snapshot.
+
+Both paths store transaction effects under the referencing ranking block's
+point, so rolling back that ranking block removes the effects. A blob left
+behind by a crash or rollback is harmless and is overwritten on reprocessing.
 Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
 ranking block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain
 index is attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and
