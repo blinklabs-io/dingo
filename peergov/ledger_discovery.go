@@ -72,7 +72,11 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 			p.mu.Lock()
 			snapshotRelays = p.peerSnapshotRelays
 			p.mu.Unlock()
-			if len(snapshotRelays) == 0 || !p.ledgerPeersUrgent() {
+			urgent := p.ledgerPeersUrgent()
+			if !urgent {
+				p.emergencyRefreshRounds.Store(0)
+			}
+			if len(snapshotRelays) == 0 || !urgent {
 				p.config.Logger.Debug(
 					"ledger peers not yet enabled",
 					"current_slot", currentSlot,
@@ -81,6 +85,12 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 				return
 			}
 		}
+	}
+
+	if !belowLedgerSlot &&
+		p.snapshotRefreshPending.CompareAndSwap(true, false) {
+		p.lastLedgerPeerRefresh.Store(0)
+		p.emergencyRefreshRounds.Store(0)
 	}
 
 	// Count existing ledger peers to determine how many we need.
@@ -209,6 +219,9 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 		// Count only a complete urgent round. Interval-gated, failed, canceled,
 		// or panicking rounds retain the existing backoff and retry immediately.
 		p.emergencyRefreshRounds.Add(1)
+	}
+	if belowLedgerSlot {
+		p.snapshotRefreshPending.Store(true)
 	}
 	completed = true
 }

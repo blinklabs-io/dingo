@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,7 +124,11 @@ func TestDiscoverLedgerPeers_UrgentBelowSlotRefillsFromSnapshot(t *testing.T) {
 		LedgerPeerTarget:   2,
 		LedgerPeerProvider: provider,
 	})
-	require.Equal(t, 2, pg.LoadPeerSnapshot(context.Background(), testSnapshot()))
+	require.Equal(
+		t,
+		2,
+		pg.LoadPeerSnapshot(context.Background(), testSnapshot()),
+	)
 	denied := collapseLedgerPeers(pg)
 
 	pg.discoverLedgerPeersContext(t.Context())
@@ -149,11 +154,92 @@ func TestDiscoverLedgerPeers_NotUrgentBelowSlotDoesNotRefill(t *testing.T) {
 		LedgerPeerTarget:   2,
 		LedgerPeerProvider: &countingLedgerPeerProvider{},
 	})
-	require.Equal(t, 2, pg.LoadPeerSnapshot(context.Background(), testSnapshot()))
+	require.Equal(
+		t,
+		2,
+		pg.LoadPeerSnapshot(context.Background(), testSnapshot()),
+	)
 	collapseLedgerPeers(pg)
 	addEligibleUpstreamPeers(pg, pg.config.MinHotPeers)
 
 	pg.discoverLedgerPeersContext(t.Context())
 
 	assert.Equal(t, 0, countPeersBySource(pg, PeerSourceP2PLedger))
+}
+
+type slotLedgerPeerProvider struct {
+	slot  atomic.Uint64
+	calls atomic.Int32
+}
+
+func (p *slotLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+	p.calls.Add(1)
+	return nil, nil
+}
+
+func (p *slotLedgerPeerProvider) CurrentSlot() uint64 {
+	return p.slot.Load()
+}
+
+// A snapshot refill below UseLedgerAfterSlot must not delay the first ledger
+// query once the threshold is reached: that query is the node's switch from
+// the static snapshot to live relay registrations.
+func TestDiscoverLedgerPeers_SnapshotRefillDoesNotDelayFirstLedgerQuery(
+	t *testing.T,
+) {
+	t.Parallel()
+	provider := &slotLedgerPeerProvider{}
+	provider.slot.Store(1)
+	pg := newStrandedSetGovernor(PeerGovernorConfig{
+		UseLedgerAfterSlot:                 1000,
+		LedgerPeerTarget:                   2,
+		LedgerPeerProvider:                 provider,
+		EmergencyLedgerPeerRefreshInterval: time.Hour,
+		LedgerPeerRefreshInterval:          2 * time.Hour,
+	})
+	require.Equal(
+		t,
+		2,
+		pg.LoadPeerSnapshot(context.Background(), testSnapshot()),
+	)
+	collapseLedgerPeers(pg)
+
+	pg.discoverLedgerPeersContext(t.Context())
+	require.Zero(t, provider.calls.Load())
+	require.Equal(t, 2, countPeersBySource(pg, PeerSourceP2PLedger),
+		"urgent discovery must refill from the snapshot below the slot")
+
+	provider.slot.Store(1000)
+	pg.discoverLedgerPeersContext(t.Context())
+	assert.Equal(t, int32(1), provider.calls.Load(),
+		"first ledger query above the slot must not wait out a snapshot round")
+	assert.Equal(t, int64(1), int64(pg.emergencyRefreshRounds.Load()),
+		"snapshot rounds must not escalate the ledger emergency backoff")
+}
+
+// Recovering below UseLedgerAfterSlot must reset the emergency backoff, as it
+// does above the slot, so a later collapse starts at the base cadence.
+func TestDiscoverLedgerPeers_RecoveryBelowSlotResetsEmergencyBackoff(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := newStrandedSetGovernor(PeerGovernorConfig{
+		UseLedgerAfterSlot: 1000,
+		LedgerPeerTarget:   2,
+		LedgerPeerProvider: &countingLedgerPeerProvider{},
+	})
+	require.Equal(
+		t,
+		2,
+		pg.LoadPeerSnapshot(context.Background(), testSnapshot()),
+	)
+	collapseLedgerPeers(pg)
+	pg.discoverLedgerPeersContext(t.Context())
+	require.Equal(t, uint32(1), pg.emergencyRefreshRounds.Load())
+
+	addEligibleUpstreamPeers(pg, pg.config.MinHotPeers)
+	pg.discoverLedgerPeersContext(t.Context())
+
+	assert.Zero(t, pg.emergencyRefreshRounds.Load(),
+		"recovery below the slot must reset the emergency backoff")
 }

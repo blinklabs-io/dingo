@@ -195,6 +195,12 @@ type PeerGovernor struct {
 	// Below UseLedgerAfterSlot the ledger provider cannot answer, so urgent
 	// discovery refills from these instead. Guarded by mu.
 	peerSnapshotRelays []PoolRelay
+	// snapshotRefreshPending is set when a completed discovery round
+	// refilled from the peer snapshot. The first round above
+	// UseLedgerAfterSlot clears it along with the refresh timestamp and the
+	// emergency backoff, so snapshot rounds never delay the first query
+	// against the live ledger.
+	snapshotRefreshPending atomic.Bool
 	// emergencyRefreshRounds counts consecutive emergency ledger-discovery
 	// rounds since the node last had enough upstreams. It drives the
 	// escalating emergency refresh interval and resets on recovery.
