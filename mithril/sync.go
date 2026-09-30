@@ -78,6 +78,99 @@ func setStableMithrilLedgerTip(
 	return nil
 }
 
+func verifyRewardRepairStateNotBehindStablePoint(
+	db *database.Database,
+	prepared *preparedLedgerStateImport,
+) error {
+	anchorSlotText, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("reading existing Mithril ledger slot: %w", err)
+	}
+	if anchorSlotText == "" {
+		return nil
+	}
+	anchorSlot, err := strconv.ParseUint(anchorSlotText, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parsing existing Mithril ledger slot: %w", err)
+	}
+	stateTip := prepared.state.Tip
+	if stateTip.Slot < anchorSlot {
+		return fmt.Errorf(
+			"%w: selected state at slot %d is behind existing stable ledger point %d",
+			ErrRewardStateRepairWaitingForSnapshot,
+			stateTip.Slot,
+			anchorSlot,
+		)
+	}
+	return nil
+}
+
+func cleanupInvalidRepairStoredGapBeforeImport(
+	db *database.Database,
+	certifiedTip ocommon.Point,
+	prepared *preparedLedgerStateImport,
+	preservedLocalTail map[string]struct{},
+	logger *slog.Logger,
+) (bool, error) {
+	stateTip := prepared.state.Tip
+	if stateTip.Slot <= certifiedTip.Slot {
+		return false, nil
+	}
+	recent, err := database.BlocksRecent(db, 1)
+	if err != nil {
+		return false, fmt.Errorf("reading local chain tip for repair gap: %w", err)
+	}
+	if len(recent) == 0 || recent[0].Slot <= certifiedTip.Slot {
+		return false, nil
+	}
+	resumeGapEnd := min(recent[0].Slot, stateTip.Slot)
+	storedGapBlocks, err := loadGapBlocksFromBlob(
+		db,
+		certifiedTip.Slot+1,
+		resumeGapEnd,
+	)
+	if err != nil {
+		return false, fmt.Errorf("loading stored repair gap before import: %w", err)
+	}
+	immutableTip, err := database.BlockByPoint(db, certifiedTip)
+	if err != nil {
+		return false, fmt.Errorf("reading certified tip for repair gap: %w", err)
+	}
+	var validateErr error
+	if recent[0].Slot < stateTip.Slot {
+		validateErr = errors.New(
+			"stored partial gap does not reach the signed ledger-state point",
+		)
+	} else if resumeGapEnd == stateTip.Slot {
+		validateErr = validateCompleteGapBlocks(
+			storedGapBlocks,
+			certifiedTip,
+			ocommon.NewPoint(stateTip.Slot, stateTip.BlockHash),
+		)
+	} else {
+		validateErr = validateStoredGapContinuity(storedGapBlocks, immutableTip)
+	}
+	if validateErr == nil {
+		return false, nil
+	}
+	logger.Warn(
+		"stored volatile gap blocks failed continuity check before reward-state import; refetching from relay",
+		"component", "mithril",
+		"immutable_tip_slot", certifiedTip.Slot,
+		"resume_gap_end_slot", resumeGapEnd,
+		"ledger_state_slot", stateTip.Slot,
+		"error", validateErr,
+	)
+	if err := deleteBlobBlocksAboveSlotExcept(
+		db,
+		certifiedTip.Slot,
+		preservedLocalTail,
+	); err != nil {
+		return false, fmt.Errorf("cleaning rejected stored repair gap before import: %w", err)
+	}
+	return true, nil
+}
+
 func verifyRewardRepairLocalTail(
 	db *database.Database,
 	localTip models.Block,
@@ -91,7 +184,7 @@ func verifyRewardRepairLocalTail(
 	if err != nil {
 		return nil, fmt.Errorf("reading existing Mithril ledger hash: %w", err)
 	}
-	if anchorSlotText == "" || anchorHashText == "" {
+	if anchorSlotText == "" {
 		return nil, errors.New(
 			"cannot repair local-ahead Mithril database without its existing stable ledger point",
 		)
@@ -100,11 +193,24 @@ func verifyRewardRepairLocalTail(
 	if err != nil {
 		return nil, fmt.Errorf("parsing existing Mithril ledger slot: %w", err)
 	}
-	anchorHash, err := hex.DecodeString(anchorHashText)
-	if err != nil || len(anchorHash) != 32 {
-		return nil, errors.New(
-			"existing Mithril ledger hash is not a 32-byte hexadecimal block hash",
-		)
+	var anchorHash []byte
+	if anchorHashText == "" {
+		anchorBlock, blockErr := database.BlockBySlot(db, anchorSlot)
+		if blockErr != nil {
+			return nil, fmt.Errorf(
+				"resolving existing Mithril ledger point at slot %d: %w",
+				anchorSlot,
+				blockErr,
+			)
+		}
+		anchorHash = anchorBlock.Hash
+	} else {
+		anchorHash, err = hex.DecodeString(anchorHashText)
+		if err != nil || len(anchorHash) != 32 {
+			return nil, errors.New(
+				"existing Mithril ledger hash is not a 32-byte hexadecimal block hash",
+			)
+		}
 	}
 	anchorPoint := ocommon.NewPoint(anchorSlot, anchorHash)
 	stateTip := prepared.state.Tip
@@ -1033,19 +1139,26 @@ func Sync(
 				)
 			}
 			defer preparedRepairImport.Close()
-			preservedLocalTail, err = verifyRewardRepairLocalTail(
-				db, localTip, preparedRepairImport,
-			)
-			if err != nil {
+			if err := verifyRewardRepairStateNotBehindStablePoint(
+				db, preparedRepairImport,
+			); err != nil {
 				return SyncResult{}, err
 			}
-			logger.Info(
-				"reward repair will preserve the verified local chain tail for startup replay",
-				"component", "mithril",
-				"snapshot_slot", preparedRepairImport.state.Tip.Slot,
-				"local_tip_slot", localTip.Slot,
-				"preserved_blocks", len(preservedLocalTail),
-			)
+			if localTip.Slot > certifiedTip.Slot {
+				preservedLocalTail, err = verifyRewardRepairLocalTail(
+					db, localTip, preparedRepairImport,
+				)
+				if err != nil {
+					return SyncResult{}, err
+				}
+				logger.Info(
+					"reward repair will preserve the verified local chain tail for startup replay",
+					"component", "mithril",
+					"snapshot_slot", preparedRepairImport.state.Tip.Slot,
+					"local_tip_slot", localTip.Slot,
+					"preserved_blocks", len(preservedLocalTail),
+				)
+			}
 		}
 		if cfg.RepairLegacyRewardState && isAPIMode(cfg.StorageMode) {
 			if err := resetMithrilBackfillCheckpoint(db); err != nil {
@@ -1088,6 +1201,24 @@ func Sync(
 	// goroutines so both importLedgerState and LoadBlobsWithDB
 	// share the same pragma settings without racing.
 	defer node.WithBulkLoadPragmas(db, logger)()
+
+	// A rejected pre-existing gap must be cleared before importing an
+	// ancillary state beyond ImmutableDB: cleanup rolls back UTxO rows by
+	// slot, and doing that after import would remove the authoritative snapshot
+	// UTxOs whose AddedSlot is the selected state slot.
+	repairGapCleanedBeforeImport := false
+	if preparedRepairImport != nil {
+		repairGapCleanedBeforeImport, err = cleanupInvalidRepairStoredGapBeforeImport(
+			db,
+			*certifiedTip,
+			preparedRepairImport,
+			preservedLocalTail,
+			logger,
+		)
+		if err != nil {
+			return SyncResult{}, err
+		}
+	}
 
 	// Drop the deferred-index manifest BEFORE inserting any rows
 	// so secondary indexes are not maintained during ledger-state
@@ -1227,14 +1358,21 @@ func Sync(
 	if err := g.Wait(); err != nil {
 		return SyncResult{}, err
 	}
-	if len(preservedLocalTail) > 0 {
-		mithrilFloor := uint64(0)
-		if loadResult != nil {
-			mithrilFloor = loadResult.ImmutableTipSlot
+	if cfg.RepairLegacyRewardState && preparedRepairImport != nil {
+		// No gap blocks have been processed yet. Rolling back to the selected
+		// state must discard post-state metadata and restore spends, whether or
+		// not the local chain has a tail beyond the certified ImmutableDB tip.
+		if deferredIndexes != nil {
+			if err := deferredIndexes.BuildCritical(); err != nil {
+				return SyncResult{}, fmt.Errorf(
+					"rebuilding indexes before reward-repair metadata rollback: %w",
+					err,
+				)
+			}
 		}
 		if err := db.RollbackMetadataAfterSlot(
 			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
-			mithrilFloor,
+			0,
 			nil,
 		); err != nil {
 			return SyncResult{}, fmt.Errorf(
@@ -1308,7 +1446,8 @@ func Sync(
 			"ledger_state_slot", ledgerStateSlot,
 		)
 		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
-			db, immutableTipSlot, preservedLocalTail,
+			db, immutableTipSlot,
+			preservedLocalTail,
 		); cleanupErr != nil {
 			return SyncResult{}, fmt.Errorf(
 				"removing stale volatile blocks above slot %d: %w",
@@ -1399,13 +1538,16 @@ func Sync(
 			// Drop the rejected blob blocks so neither the upcoming
 			// BlocksRecent query nor any slot-ordered iterator can
 			// resurface them as the chain tip after the relay refetch.
-			if cleanupErr := deleteBlobBlocksAboveSlotExcept(
-				db, immutableTipSlot, preservedLocalTail,
-			); cleanupErr != nil {
-				return SyncResult{}, fmt.Errorf(
-					"removing rejected gap blocks above slot %d: %w",
-					immutableTipSlot, cleanupErr,
-				)
+			if !repairGapCleanedBeforeImport {
+				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+					db, immutableTipSlot,
+					preservedLocalTail,
+				); cleanupErr != nil {
+					return SyncResult{}, fmt.Errorf(
+						"removing rejected gap blocks above slot %d: %w",
+						immutableTipSlot, cleanupErr,
+					)
+				}
 			}
 			recentBlocks = []models.Block{immutableTip}
 		} else {
@@ -1418,7 +1560,8 @@ func Sync(
 					"resume_gap_end_slot", resumeGapEnd,
 				)
 				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
-					db, resumeGapEnd, preservedLocalTail,
+					db, resumeGapEnd,
+					preservedLocalTail,
 				); cleanupErr != nil {
 					return SyncResult{}, fmt.Errorf(
 						"removing stored gap blocks above slot %d: %w",

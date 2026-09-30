@@ -175,6 +175,16 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, db.SetSyncState(
 			RewardStateRepairPendingKey, "1", nil,
 		))
+		require.NoError(t, db.SetEpoch(
+			1050, 99, []byte{1}, []byte{2}, []byte{3}, nil,
+			uint(shelley.EraShelley.Id), 1, 432000, nil,
+		))
+		require.NoError(t, db.Metadata().SaveRewardAdaPots(
+			&models.RewardAdaPots{
+				Epoch: 99, Treasury: 10, Reserves: 20,
+				Fees: 30, Rewards: 40, CapturedSlot: 1050,
+			}, nil,
+		))
 		require.NoError(t, dbtest.CloseDatabase(db))
 
 		result, err := Sync(context.Background(), SyncConfig{
@@ -206,6 +216,14 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot,
 			"repair must retain the existing chain anchor")
+		pots, err := db.Metadata().GetRewardAdaPots(99, nil)
+		require.NoError(t, err)
+		require.Nil(t, pots,
+			"repair must remove reward pots derived beyond the selected state")
+		epoch, err := db.GetEpoch(99, nil)
+		require.NoError(t, err)
+		require.Nil(t, epoch,
+			"repair must remove epoch state derived beyond the selected state")
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
@@ -244,9 +262,6 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NoError(t, setImmutableImportMarker(db, 0))
 		require.NoError(t, db.SetSyncState(
 			mithrilLedgerSlotSyncKey, "1000", nil,
-		))
-		require.NoError(t, db.SetSyncState(
-			mithrilLedgerHashSyncKey, hex.EncodeToString(anchorHash), nil,
 		))
 		require.NoError(t, db.SetSyncState(
 			RewardStateRepairPendingKey, "1", nil,

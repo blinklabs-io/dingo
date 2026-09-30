@@ -7094,11 +7094,19 @@ immutable import marker only while the pending repair marker remains; ordinary
 API-mode metadata replacement is rejected. A certified artifact may trail the
 local tip. Repair verifies that the artifact's immutable tip is an ancestor of
 the local chain and that the selected state is not earlier than the database's
-existing stable Mithril ledger point. When the selected state is at or below the
-local tip, it also verifies that state point is on the local chain and retains
-only the canonical block tail beyond it for ordinary ledger replay, while
-discarding other volatile blocks and rebuilding their derived metadata. A
-selected state beyond the local tip goes through the existing gap validation.
+existing stable Mithril ledger point. A selected state beyond the local tip
+goes through the existing gap validation.
+Before replay, every repair rolls metadata back to the selected state slot,
+including restoring UTxOs spent afterward. When the local tip is beyond the
+certified tip, repair also verifies that state point on the local chain and
+retains only its canonical block tail for ordinary replay, discarding other
+volatile blocks. It rebuilds critical deferred indexes before the metadata
+rollback so foreign-key checks and rollback queries remain indexed. Legacy
+anchors that predate stored Mithril block hashes resolve the anchor hash from
+the block stored at the recorded slot. A stored gap that does not reach the
+signed state, or fails continuity validation, is cleaned before importing an
+ancillary state beyond the certified immutable tip, so rollback removes stale
+gap metadata before the snapshot UTxOs are written.
 If the selected state predates the existing stable point, repair does not alter
 block or ledger contents, keeps the marker pending, and retries for a newer
 artifact.

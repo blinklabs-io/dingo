@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -698,6 +699,67 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, recent, 1)
 	assert.Equal(t, uint64(200), recent[0].Slot)
+}
+
+func TestCleanupInvalidRepairGapBeforeImport(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	immutableHash := testGapHash32("repair-immutable-tip")
+	staleGapHash := testGapHash32("stale-repair-gap")
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 100,
+		Hash: immutableHash,
+		Cbor: []byte{0x82, 0x01},
+		Type: 1,
+	}, nil))
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:     150,
+		Hash:     staleGapHash,
+		PrevHash: immutableHash,
+		Cbor:     []byte{0x82, 0x02},
+		Type:     1,
+	}, nil))
+	staleTxID := testGapHash32("stale-gap-output")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId: staleTxID, AddedSlot: 150,
+	}))
+
+	cleaned, err := cleanupInvalidRepairStoredGapBeforeImport(
+		db,
+		ocommon.NewPoint(100, immutableHash),
+		&preparedLedgerStateImport{state: &ledgerstate.RawLedgerState{
+			Tip: &ledgerstate.SnapshotTip{
+				Slot:      200,
+				BlockHash: testGapHash32("signed-state-tip"),
+			},
+		}},
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	require.NoError(t, err)
+	require.True(t, cleaned)
+	_, err = database.BlockByHash(db, staleGapHash)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	exists, err := db.UtxoExists(staleTxID, 0, nil)
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	// Even a linked partial prefix cannot be tied to a signed state it does
+	// not reach. Importing that state after cleanup leaves its UTxOs intact.
+	snapshotTxID := testGapHash32("signed-snapshot-output")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId: snapshotTxID, AddedSlot: 200,
+	}))
+	exists, err = db.UtxoExists(snapshotTxID, 0, nil)
+	require.NoError(t, err)
+	require.True(t, exists)
 }
 
 func TestLoadGapBlocksFromBlob(t *testing.T) {
