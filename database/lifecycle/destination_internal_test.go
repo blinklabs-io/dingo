@@ -144,7 +144,7 @@ func TestParseCloudDestinationCleansNoncanonicalPath(t *testing.T) {
 // satisfy ParseCloudDestination's factory signature in this package's
 // internal tests, which need to inspect the *url.URL a factory is called
 // with directly rather than round-tripping through an actual upload/
-// download (destination_c27ce77b_test.go's fakeCloudDestination, in the external
+// download (destination_test.go's fakeCloudDestination, in the external
 // _test package, already covers that).
 type fakeInternalCloudDestination struct{}
 

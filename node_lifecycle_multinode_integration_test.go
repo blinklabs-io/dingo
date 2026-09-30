@@ -398,7 +398,7 @@ func requireInboundListenerAcceptsConnections(t *testing.T, ln net.Listener) {
 // verification: the syncing node is truncated mid-flight, while the
 // forger keeps producing blocks over a real network connection, and must
 // resume syncing correctly afterward — not just reconstruct its own
-// storage in isolation (already proven by node_lifecycle_d22bef78_test.go), but do
+// storage in isolation (already proven by node_lifecycle_test.go), but do
 // so while a real peer connection is live and blocks keep arriving.
 func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	t.Parallel()

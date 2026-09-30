@@ -44,7 +44,7 @@ import (
 // transactions for one Plutus transaction inside it, fetched over NtN
 // blockfetch.
 //
-// The existing BenchmarkTransactionValidation (ledger/tests_61443820_test.go)
+// The existing BenchmarkTransactionValidation (ledger/benchmark_test.go)
 // validates against an unfunded ledger and discards the error, so it times
 // the missing-input failure path rather than real validation and cannot show
 // this issue's DB-read cost or its removal (see the issue's "Relationship to

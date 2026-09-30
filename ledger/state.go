@@ -1744,7 +1744,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// the submitter synchronously, so errRestartLedgerPipeline /
 		// errStaleChainIterator cannot be expressed through it. Those
 		// upstream properties are pinned by the contract tests in
-		// ledger/tests_67e335ab_test.go; if a gouroboros
+		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
 		// bump makes any of them fail, revisit the decision rather than
 		// the test.
 		workerCount := blockPipelineWorkerCount()

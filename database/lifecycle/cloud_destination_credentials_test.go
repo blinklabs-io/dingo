@@ -16,12 +16,12 @@
 
 // This file exercises the real S3/GCS CloudDestination implementations
 // (destination_s3.go, destination_gcs.go) against a real bucket, unlike
-// destination_c27ce77b_test.go's fakeCloudDestination, which only covers the
+// destination_test.go's fakeCloudDestination, which only covers the
 // generic orchestration logic (SnapshotToCloud/ListCloudSnapshots/
 // FetchCloudManifest/DeleteCloudSnapshot) without ever touching an actual
 // cloud SDK client. It was previously possible for the real S3/GCS client
 // code to have zero test coverage of its own; these tests close that gap
-// the same way internal/integration/tests_24a0bc11_test.go's TestCloudPluginS3/GCS
+// the same way internal/integration/storage_migration_test.go's TestCloudPluginS3/GCS
 // do for the blob-store plugins, following the exact same
 // credentials-detection and DINGO_TEST_S3_BUCKET/DINGO_TEST_GCS_BUCKET
 // convention so both suites behave identically in CI and locally.
@@ -56,7 +56,7 @@ var cloudCredentialsTestRegistry = func() *lifecycle.DestinationRegistry {
 	return r
 }()
 
-// hasS3Credentials mirrors internal/integration/tests_24a0bc11_test.go's helper of
+// hasS3Credentials mirrors internal/integration/storage_migration_test.go's helper of
 // the same name exactly, since that package's unexported helper can't be
 // imported from here.
 func hasS3Credentials() bool {
@@ -73,7 +73,7 @@ func hasS3Credentials() bool {
 	return false
 }
 
-// hasGCSCredentials mirrors internal/integration/tests_24a0bc11_test.go's helper of
+// hasGCSCredentials mirrors internal/integration/storage_migration_test.go's helper of
 // the same name exactly.
 func hasGCSCredentials() bool {
 	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {

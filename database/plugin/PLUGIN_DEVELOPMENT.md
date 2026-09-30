@@ -151,7 +151,7 @@ Cloud- or database-backed plugins skip cleanly (never fail) when their
 backend is not configured, following the same convention this repository
 already uses for cloud credentials and CI database services.
 
-`internal/integration/tests_24a0bc11_test.go` covers a distinct
+`internal/integration/storage_migration_test.go` covers a distinct
 concern -- migrating data between two different plugins, not just each
 plugin in isolation -- by writing a small dataset through one backend's
 typed API and replaying the exact retrieved values into a second backend.

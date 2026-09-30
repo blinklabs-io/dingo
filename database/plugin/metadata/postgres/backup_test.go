@@ -82,7 +82,7 @@ func TestConnEnvEscapesSpacesAndBackslashesInPGOPTIONS(t *testing.T) {
 }
 
 // TestConnEnvPassesThroughRawOptionsParam guards the search_path-isolation
-// case database/plugin/metadata/sqlstore/dialect_3d29378a_test.go's postgresDSNWithSearchPath relies on:
+// case database/plugin/metadata/sqlstore/dialect_integration_test.go's postgresDSNWithSearchPath relies on:
 // an explicit "options=-c..." DSN parameter is pgconn's own placeholder for
 // a raw, already-formatted PGOPTIONS fragment and must be forwarded as-is,
 // not re-wrapped as "-c options=...".

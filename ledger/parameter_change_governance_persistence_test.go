@@ -36,7 +36,7 @@ import (
 // production entry point that runs the real, unstubbed era ValidateTxFunc
 // before any transaction (including its governance proposals) can be
 // persisted. It is deliberately self-contained rather than reusing
-// validityOutcomeTestBlock from tests_1d3b6c16_test.go, which
+// validityOutcomeTestBlock from block_transaction_validity_test.go, which
 // only special-cases Byron and Dijkstra block types.
 type parameterChangeGovernanceTestBlock struct {
 	header lcommon.BlockHeader

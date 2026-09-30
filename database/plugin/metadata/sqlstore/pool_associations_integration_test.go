@@ -224,7 +224,7 @@ func testGetPoolDoesNotCorruptConnection(
 }
 
 // TestPostgresRestorePoolStateAtSlotScopesAndReverts is the real-PostgreSQL
-// counterpart to the SQLite-based scope tests in pool_076c4ea1_test.go.
+// counterpart to the SQLite-based scope tests in pool_deposit_held_test.go.
 // See testRestorePoolStateAtSlotScopesAndReverts's doc comment for why scope
 // is asserted through RowsAffected rather than an "UPDATE OF column-list"
 // trigger here.

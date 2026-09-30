@@ -1155,7 +1155,7 @@ func (d *manifestOnlyCloudDestination) FetchManifest(
 var _ lifecycle.CloudManifestFetcher = &manifestOnlyCloudDestination{}
 
 // Registered directly on the package's shared testDestinationRegistry
-// (defined in destination_c27ce77b_test.go) — package-level var initializers all
+// (defined in destination_test.go) — package-level var initializers all
 // complete before any init() runs, regardless of which file they're in, so
 // referencing it here is safe.
 func init() {
