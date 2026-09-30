@@ -19,6 +19,10 @@ type importBoundaryRule struct {
 	from      string
 	forbidden []string
 	reason    string
+	// testImportExemptions maps a repository-relative _test.go file to the
+	// forbidden packages it may import. Keep each entry to a test that must
+	// compose both sides of the boundary, and name the reason beside it.
+	testImportExemptions map[string][]string
 }
 
 // importBoundaryRules encode reviewed package directions for critical domains.
@@ -34,6 +38,13 @@ var importBoundaryRules = []importBoundaryRule{
 		},
 		reason: "ledger owns validation and state, while node wiring translates " +
 			"neutral events/callbacks into networking or mempool actions",
+		testImportExemptions: map[string][]string{
+			// Drives a Dijkstra collateral-return transaction through both
+			// mempool admission and ledger block application.
+			"ledger/dijkstra_collateral_return_production_test.go": {
+				"mempool",
+			},
+		},
 	},
 	{
 		from:      "chainselection",
@@ -200,15 +211,20 @@ func importBoundaryViolationsForFile(
 		return nil, err
 	}
 
+	relFile, err := relativePath(repoRoot, file)
+	if err != nil {
+		return nil, err
+	}
+	var exempt []string
+	if strings.HasSuffix(relFile, "_test.go") {
+		exempt = rule.testImportExemptions[relFile]
+	}
 	var violations []string
 	for _, importPath := range imports {
 		for _, forbidden := range rule.forbidden {
-			if !isLocalPackageImport(importPath, forbidden) {
+			if !isLocalPackageImport(importPath, forbidden) ||
+				slices.Contains(exempt, forbidden) {
 				continue
-			}
-			relFile, err := relativePath(repoRoot, file)
-			if err != nil {
-				return nil, err
 			}
 			violations = append(
 				violations,
@@ -320,4 +336,76 @@ func relativePath(repoRoot, file string) (string, error) {
 		return "", fmt.Errorf("make %s relative to %s: %w", file, repoRoot, err)
 	}
 	return filepath.ToSlash(rel), nil
+}
+
+// TestGoFilesBelowIncludesTestFiles pins that the shared walker returns
+// _test.go files: TestSQLiteTestOpensSetSynchronous scans only test code, so a
+// walker that dropped them would leave that guard with nothing to check.
+func TestGoFilesBelowIncludesTestFiles(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := findRepoRoot(t)
+	files, err := goFilesBelow(repoRoot, "internal/architecture")
+	if err != nil {
+		t.Fatalf("list go files: %v", err)
+	}
+	want := filepath.Join(
+		repoRoot,
+		"internal",
+		"architecture",
+		"sqlite_test_durability_test.go",
+	)
+	if !slices.Contains(files, want) {
+		t.Fatalf("goFilesBelow omitted %s; got %v", want, files)
+	}
+}
+
+// TestImportBoundaryTestExemptionIsScoped pins that a test-import exemption
+// admits only the named package from the named file: another test file, and
+// another forbidden package from the exempt file, are still reported.
+func TestImportBoundaryTestExemptionIsScoped(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	writeGoFile := func(rel string, imports ...string) {
+		t.Helper()
+		var src strings.Builder
+		src.WriteString("package ledger\n\nimport (\n")
+		for _, imp := range imports {
+			fmt.Fprintf(&src, "\t_ %q\n", modulePath+"/"+imp)
+		}
+		src.WriteString(")\n")
+		path := filepath.Join(repoRoot, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeGoFile("ledger/exempt_test.go", "mempool", "peergov")
+	writeGoFile("ledger/other_test.go", "mempool")
+	writeGoFile("ledger/state.go", "mempool")
+
+	rule := importBoundaryRule{
+		from:      "ledger",
+		forbidden: []string{"peergov", "mempool"},
+		reason:    "test",
+		testImportExemptions: map[string][]string{
+			"ledger/exempt_test.go": {"mempool"},
+		},
+	}
+	violations, err := importBoundaryViolations(repoRoot, rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(violations)
+	want := []string{
+		"ledger/exempt_test.go imports " + modulePath + "/peergov: test",
+		"ledger/other_test.go imports " + modulePath + "/mempool: test",
+		"ledger/state.go imports " + modulePath + "/mempool: test",
+	}
+	if !slices.Equal(violations, want) {
+		t.Fatalf("violations:\n%v\nwant:\n%v", violations, want)
+	}
 }
