@@ -22,6 +22,7 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -31,6 +32,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func initialNodeSettingsGates() nodesettings.Values {
@@ -1020,4 +1022,66 @@ func TestNodeSettingsAreImmutableWithNetworkBackfill(t *testing.T) {
 		StorageMode: types.StorageModeCore,
 		Network:     "preview",
 	}, settings)
+}
+
+// TestTransactionContextCancellationRollsBackWrites guards "preserve
+// transaction rollback on cancellation": a write issued through a
+// Transaction(ctx) must not survive once ctx is canceled mid-transaction,
+// and the connection it held must be released back to the pool rather than
+// leaked.
+//
+// This intentionally does not pin writeDB to a single connection: doing so
+// with SQLite's mode=memory&cache=shared DSN interacts badly with
+// database/sql discarding (rather than idling) a connection whose in-flight
+// statement failed from ctx cancellation -- a brief window with zero live
+// connections destroys the shared in-memory database out from under the
+// test, which is a SQLite test-fixture artifact, not the behavior under
+// test. Connection release is instead asserted directly against pool
+// stats.
+func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	// database/sql discards (rather than idles) a pooled connection whose
+	// in-flight statement failed from ctx cancellation, and reopens a fresh
+	// one lazily on next use. For SQLite's mode=memory&cache=shared DSN, a
+	// window with zero live connections destroys the shared in-memory
+	// database along with it. Hold one extra, otherwise-unused connection
+	// open for the test's duration so the schema survives that window.
+	keepAlive, err := store.writeDB.Conn(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = keepAlive.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	txn := store.Transaction(ctx)
+	require.NoError(t, store.SetCommitTimestamp(42, txn))
+
+	cancel()
+
+	// database/sql rolls back a Tx once the ctx supplied to BeginTx is
+	// canceled, per BeginTx's documented contract -- but that happens on an
+	// internal watcher goroutine, not synchronously with cancel(), so poll
+	// rather than assert immediately. (In practice this also fails on the
+	// first attempt regardless of that goroutine's timing: dbFromTxn hands
+	// this statement the transaction's own now-canceled ctx directly.)
+	require.Eventually(t, func() bool {
+		return store.SetCommitTimestamp(43, txn) != nil
+	}, 2*time.Second, 5*time.Millisecond,
+		"transaction must stop accepting writes once its ctx is canceled")
+
+	require.Error(t, txn.Commit())
+
+	// The connection the aborted transaction held must come back to the
+	// pool rather than being leaked: only the keepAlive connection above
+	// should remain checked out.
+	require.Eventually(t, func() bool {
+		return store.writeDB.Stats().InUse <= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"canceled transaction's connection must be released back to the pool")
+
+	// Neither the successful first write nor anything else from the
+	// canceled transaction may be durably visible.
+	persisted, err := store.GetCommitTimestamp()
+	require.NoError(t, err)
+	require.Zero(t, persisted)
 }

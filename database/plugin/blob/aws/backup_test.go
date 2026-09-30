@@ -34,7 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hasS3Credentials mirrors internal/integration/tests_24a0bc11_test.go's helper of
+// hasS3Credentials mirrors internal/integration/storage_migration_test.go's helper of
 // the same purpose, scoped locally so this package's tests can skip
 // cleanly without a live S3/MinIO backend.
 func hasS3Credentials() bool {
