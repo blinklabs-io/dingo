@@ -161,3 +161,83 @@ func TestHardForkDijkstraCarriesFieldsSkippedByEmptyCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestHardForkDijkstraKeepsConwayGovernanceParamsGenesisOmits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		genesis string
+	}{
+		{
+			name: "refScriptFieldsOnly",
+			genesis: `{"maxRefScriptSizePerBlock":1048576,` +
+				`"maxRefScriptSizePerTx":204800,"refScriptCostStride":25600,` +
+				`"refScriptCostMultiplier":1.2}`,
+		},
+		{
+			name:    "plutusV4CostModelOnly",
+			genesis: `{"plutusV4CostModel":[1,2,3]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &cardano.CardanoNodeConfig{}
+			require.NoError(
+				t,
+				cfg.LoadDijkstraGenesisFromReader(
+					strings.NewReader(tc.genesis),
+				),
+			)
+			prev := &conway.ConwayProtocolParameters{
+				MinCommitteeSize:        7,
+				CommitteeTermLimit:      146,
+				GovActionValidityPeriod: 6,
+				GovActionDeposit:        100_000_000_000,
+				DRepDeposit:             500_000_000,
+				DRepInactivityPeriod:    20,
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 10,
+				},
+			}
+			got, err := eras.HardForkDijkstra(cfg, prev)
+			require.NoError(t, err)
+			p, ok := got.(*dijkstra.DijkstraProtocolParameters)
+			require.True(t, ok)
+			require.Equal(t, uint(7), p.MinCommitteeSize)
+			require.Equal(t, uint64(146), p.CommitteeTermLimit)
+			require.Equal(t, uint64(6), p.GovActionValidityPeriod)
+			require.Equal(t, uint64(100_000_000_000), p.GovActionDeposit)
+			require.Equal(t, uint64(500_000_000), p.DRepDeposit)
+			require.Equal(t, uint64(20), p.DRepInactivityPeriod)
+		})
+	}
+}
+
+func TestHardForkDijkstraAppliesConwayGovernanceParamsGenesisSets(
+	t *testing.T,
+) {
+	t.Parallel()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadDijkstraGenesisFromReader(strings.NewReader(
+			`{"govActionDeposit":5,"dRepDeposit":6,"committeeMinSize":3}`,
+		)),
+	)
+	prev := &conway.ConwayProtocolParameters{
+		MinCommitteeSize: 7,
+		GovActionDeposit: 42,
+		DRepDeposit:      84,
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: 10,
+		},
+	}
+	got, err := eras.HardForkDijkstra(cfg, prev)
+	require.NoError(t, err)
+	p, ok := got.(*dijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, uint(3), p.MinCommitteeSize)
+	require.Equal(t, uint64(5), p.GovActionDeposit)
+	require.Equal(t, uint64(6), p.DRepDeposit)
+}

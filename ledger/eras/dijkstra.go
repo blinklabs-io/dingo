@@ -121,6 +121,11 @@ func HardForkDijkstra(
 			if err := ret.UpdateFromGenesis(dijkstraGenesis); err != nil {
 				return nil, err
 			}
+			keepConwayGovernanceParams(
+				&ret,
+				conwayPParams,
+				&dijkstraGenesis.ConwayGenesis,
+			)
 		}
 	}
 	applyDijkstraRefScriptDefaults(&ret)
@@ -128,6 +133,35 @@ func HardForkDijkstra(
 		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
 	}
 	return &ret, nil
+}
+
+// keepConwayGovernanceParams restores the Conway governance parameters that
+// conway.UpdateFromGenesis copies unconditionally. A Dijkstra genesis that
+// sets only Dijkstra fields leaves them zero, which would otherwise wipe the
+// deposits, lifetimes and committee bounds carried over from Conway.
+func keepConwayGovernanceParams(
+	p *gdijkstra.DijkstraProtocolParameters,
+	prev *conway.ConwayProtocolParameters,
+	genesis *conway.ConwayGenesis,
+) {
+	if genesis.MinCommitteeSize == 0 {
+		p.MinCommitteeSize = prev.MinCommitteeSize
+	}
+	if genesis.CommitteeTermLimit == 0 {
+		p.CommitteeTermLimit = prev.CommitteeTermLimit
+	}
+	if genesis.GovActionValidityPeriod == 0 {
+		p.GovActionValidityPeriod = prev.GovActionValidityPeriod
+	}
+	if genesis.GovActionDeposit == 0 {
+		p.GovActionDeposit = prev.GovActionDeposit
+	}
+	if genesis.DRepDeposit == 0 {
+		p.DRepDeposit = prev.DRepDeposit
+	}
+	if genesis.DRepInactivityPeriod == 0 {
+		p.DRepInactivityPeriod = prev.DRepInactivityPeriod
+	}
 }
 
 // applyDijkstraRefScriptDefaults fills reference-script parameters the genesis
