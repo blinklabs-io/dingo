@@ -509,6 +509,16 @@ sequenceDiagram
     LS->>DB: clear rollback undo outbox after truncation commits
 ```
 
+Byron PBFT header validation decides "first block of a from-genesis chain"
+against the queued header chain (`chain.IsFirstOnHeaderChain`), not the primary
+tip: headers are verified and queued before blockfetch applies any block, so
+the primary tip is still origin for the whole first batch. Only the first
+queued header at an origin primary tip must be an epoch-0 EBB anchored to the
+configured Byron genesis hash. A rollback to origin drops the queue, so the
+rule applies again. Headers verified before they reach the queue (chain
+selection ingress, `ValidateBlockHeaderCrypto`) are peer-relative and skip
+the rule, since the EBB's own queueing event is delivered asynchronously.
+
 While the local header tip is at least `blockfetchMinBatchGapSlots` behind the
 peer tip, BlockFetch starts only once `blockfetchMinBatchHeaders` headers are
 queued. The header handler and the chain-switch handoff
@@ -5292,12 +5302,38 @@ connection-closed event spawns a one-shot reconnect goroutine for the affected
 peer, and each reconcile cycle additionally redials known peers that have no
 connection and no active reconnect goroutine: topology local/public roots
 always (and bootstrap peers while bootstrap promotion is still allowed),
-gossip/ledger peers only when the node has no chain-selection-eligible
-upstream connection left, capped per cycle. This guarantees the node converges
-back to connected even when a close event cannot be attributed to its peer or
-a dial loop exited early. Gossip churn never demotes the peer holding the last
-eligible upstream connection, so routine churn cannot leave the node without a
-chainsync source.
+gossip/ledger peers under a shared per-cycle budget triggered by either of two
+conditions: the node has no chain-selection-eligible upstream connection left,
+or the hot set sits below `MinHotPeers` and the warm pool does not hold enough
+promotable gossip/ledger peers (a client connection, not a responder-only
+inbound, and a score at or above `MinScoreThreshold`) to close that gap on its
+own. The budget goes to the highest-scoring cold peers first, never-observed
+peers after observed ones and observed below-threshold peers last; under the
+`MinHotPeers` trigger an observed below-threshold peer is not redialed at all
+until score aging lifts it back over the threshold, so a peer churn just
+dropped cannot cycle straight back to hot. This guarantees the node converges
+back to connected, and back toward `MinHotPeers`, even when a close event
+cannot be attributed to its peer, a dial loop exited early, or the warm pool
+has run dry.
+
+Gossip churn never demotes the peer holding the last eligible upstream
+connection, so routine churn cannot leave the node without a chainsync source.
+Routine churn of a hot gossip/ledger peer scoring at or above
+`MinScoreThreshold` also waits for a replacement: the demotion loop counts the
+promotable warm pool once, before any state changes, and never demotes more
+such peers than that pool can backfill in the same cycle, so rotation cannot
+drain the hot set when the warm pool is empty. A peer scoring below
+`MinScoreThreshold` is still churned to cold without a replacement, and a peer
+whose transport is gone is still demoted by reconcile's inactivity check; the
+resulting deficit is refilled through the redial path above.
+
+Three Prometheus series let an operator confirm both guards are holding on a
+live node: `dingo_metrics_peerSelection_churn_demotions_skipped_total`
+(labeled `reason`: `no_replacement` or `last_eligible_upstream`),
+`dingo_metrics_peerSelection_cold_peer_redials_total` (labeled `trigger`:
+`zero_upstream` or `hot_deficit`), and the
+`dingo_metrics_peerSelection_hot_set_deficit` gauge (`MinHotPeers` minus the
+current hot count, floored at 0).
 
 Conversely, a discovered (gossip/ledger) or public-root peer
 that fails its outbound dial while it has never successfully connected is
