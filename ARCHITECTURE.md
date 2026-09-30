@@ -3291,7 +3291,10 @@ With the Leios mini-protocols active (below), the node fetches a referenced endo
 than the best-effort fetch behavior described above once an EB is certified.
 `ensureReferencedEndorserBlocks` resolves every CertRB's parent announcement and
 requires the complete certified EB to be cached before opening the block
-transaction. If the parent cannot be resolved, every peer returns an
+transaction. It checks only the blocks that transaction applies: a batch that
+crosses an epoch boundary stops there, and the first block of the next epoch and
+those after it are checked after the rollover publishes their epoch, so each
+certificate is resolved against an epoch in the epoch cache. If the parent cannot be resolved, every peer returns an
 empty/partial closure, decoding fails, or application fails, the CertRB is not
 committed. The ledger pipeline retries after a short bounded delay. Uncertified
 current announcements and the forward/CIP path retain their existing
