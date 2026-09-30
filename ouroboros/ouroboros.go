@@ -314,6 +314,11 @@ type Ouroboros struct {
 	leiosPersistStop     chan struct{}
 	leiosPersistDone     chan struct{}
 	leiosPersistDropped  atomic.Uint64
+	// leiosPersistAfterReserve, when non-nil, runs between the byte
+	// reservation and the payload copy. Tests use it to unwind or to stall
+	// inside that window, which allocation failure alone would reach only
+	// nondeterministically.
+	leiosPersistAfterReserve func()
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
