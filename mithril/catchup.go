@@ -257,6 +257,41 @@ func localChainDescendsFromPoint(
 	return descends, err
 }
 
+func localChainBlockAtSlot(
+	db *database.Database,
+	localTip models.Block,
+	slot uint64,
+) (models.Block, bool, error) {
+	visited := make(map[string]struct{})
+	for cur := localTip; ; {
+		if cur.Slot == slot {
+			return cur, true, nil
+		}
+		if cur.Slot < slot || len(cur.PrevHash) == 0 {
+			return models.Block{}, false, nil
+		}
+		key := string(cur.Hash)
+		if _, ok := visited[key]; ok {
+			return models.Block{}, false, fmt.Errorf(
+				"cycle while walking back from local tip slot %d block %x",
+				localTip.Slot, localTip.Hash,
+			)
+		}
+		visited[key] = struct{}{}
+		prev, err := database.BlockByHash(db, cur.PrevHash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return models.Block{}, false, nil
+			}
+			return models.Block{}, false, fmt.Errorf(
+				"looking up parent block %x for slot %d block %x: %w",
+				cur.PrevHash, cur.Slot, cur.Hash, err,
+			)
+		}
+		cur = prev
+	}
+}
+
 func localChainBlockHashesAfterPoint(
 	db *database.Database,
 	localTip models.Block,

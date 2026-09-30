@@ -195,12 +195,20 @@ func verifyRewardRepairLocalTail(
 	}
 	var anchorHash []byte
 	if anchorHashText == "" {
-		anchorBlock, blockErr := database.BlockBySlot(db, anchorSlot)
+		anchorBlock, found, blockErr := localChainBlockAtSlot(
+			db, localTip, anchorSlot,
+		)
 		if blockErr != nil {
 			return nil, fmt.Errorf(
 				"resolving existing Mithril ledger point at slot %d: %w",
 				anchorSlot,
 				blockErr,
+			)
+		}
+		if !found {
+			return nil, fmt.Errorf(
+				"resolving existing Mithril ledger point at slot %d: no block on local chain",
+				anchorSlot,
 			)
 		}
 		anchorHash = anchorBlock.Hash
@@ -1430,6 +1438,28 @@ func Sync(
 	immutableTipSlot := uint64(0)
 	if loadResult != nil {
 		immutableTipSlot = loadResult.ImmutableTipSlot
+	}
+	if cfg.RepairLegacyRewardState &&
+		ledgerStateSlot < immutableTipSlot &&
+		len(preservedLocalTail) > 0 {
+		// The selected state can precede the certified tip. Keep the verified
+		// local chain after that point, including certified blocks, and remove
+		// same-range fork blobs before ordinary ledger replay sees them.
+		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+			db, ledgerStateSlot, preservedLocalTail,
+		); cleanupErr != nil {
+			return SyncResult{}, fmt.Errorf(
+				"removing non-canonical blocks above reward-repair state slot %d: %w",
+				ledgerStateSlot, cleanupErr,
+			)
+		}
+		recentBlocks, err = database.BlocksRecent(db, 1)
+		if err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"reading chain tip after reward-repair tail cleanup: %w",
+				err,
+			)
+		}
 	}
 	// When the snapshot's ledger state lands exactly on an immutable
 	// boundary, there is no gap to fill — but stale volatile blocks

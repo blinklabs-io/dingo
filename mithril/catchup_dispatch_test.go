@@ -23,10 +23,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
@@ -565,6 +568,266 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.GreaterOrEqual(t, checkpoint.LastSlot, uint64(1000))
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
+}
+
+func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	block1050 := rewardRepairTestBlock(t, 1050, 3, certifiedHash)
+	block1100 := rewardRepairTestBlock(t, 1100, 4, block1050.Hash)
+	block1200 := rewardRepairTestBlock(t, 1200, 5, block1100.Hash)
+	stateHash := bytes.Clone(block1100.Hash)
+	txID := bytes.Repeat([]byte{0x61}, 32)
+	address := append([]byte{0x60}, bytes.Repeat([]byte{0x71}, 28)...)
+	txInCBOR, err := cbor.Encode([]any{txID, uint64(0)})
+	require.NoError(t, err)
+	txOutCBOR, err := cbor.Encode([]any{address, uint64(42)})
+	require.NoError(t, err)
+	utxoMap := append([]byte{0xa1}, txInCBOR...)
+	utxoMap = append(utxoMap, txOutCBOR...)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber: 0,
+		validImmutable:      true,
+		ancillaryLedgerSlot: 1100,
+		ancillaryLedgerState: minimalLedgerStateWithUTxOMap(
+			t, 1100, stateHash, utxoMap,
+		),
+	})
+
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:     1000,
+		Hash:     certifiedHash,
+		PrevHash: bytes.Repeat([]byte{0}, 32),
+		Cbor:     []byte{0x80},
+		Number:   2,
+		Type:     uint(shelley.BlockTypeShelley),
+	}, nil))
+	staleFork := rewardRepairTestBlock(
+		t, 1075, 99, bytes.Repeat([]byte{0xee}, 32),
+	)
+	for _, block := range []models.Block{
+		block1050, block1100, staleFork, block1200,
+	} {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	require.NoError(t, setImmutableImportMarker(db, 0))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey, "1000", nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerHashSyncKey, hex.EncodeToString(certifiedHash), nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		RewardStateRepairPendingKey, "1", nil,
+	))
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = Sync(ctx, SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "core",
+		CardanoNodeConfig: &cardano.CardanoNodeConfig{
+			MithrilGenesisVerificationKey:          fixture.genesisVKey,
+			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
+		},
+		Backend:                 BackendV2,
+		PinnedDigest:            "original-bootstrap-pin",
+		VerifyCertChain:         true,
+		AggregatorURL:           fixture.server.URL,
+		AllowInsecureHTTP:       true,
+		StoragePlugins:          testStoragePlugins(),
+		DatabaseWorkers:         1,
+		Logger:                  discard,
+		RepairLegacyRewardState: true,
+		OnProgress: func(progress SyncProgress) {
+			if progress.Phase == PhaseGapBlocks && progress.Active {
+				cancel()
+			}
+		},
+	})
+	require.ErrorContains(t, err, "fetching volatile blocks")
+
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	exists, err := db.UtxoExists(txID, 0, nil)
+	require.NoError(t, err)
+	require.True(t, exists,
+		"post-import cleanup must preserve UTxOs carried by the signed state")
+	_, err = database.BlockByHash(db, staleFork.Hash)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	files, certifiedHash := validImmutableFiles(t, 1000)
+	stateHash := bytes.Clone(files["immutable/00000.secondary"][16:48])
+	block1050 := rewardRepairTestBlock(t, 1050, 3, certifiedHash)
+	block1100 := rewardRepairTestBlock(t, 1100, 4, block1050.Hash)
+	staleFork := rewardRepairTestBlock(
+		t, 1025, 99, bytes.Repeat([]byte{0xee}, 32),
+	)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber:     0,
+		validImmutable:          true,
+		fallbackLedgerState:     true,
+		fallbackLedgerStateSlot: 999,
+		missingAncillary:        true,
+	})
+
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:     999,
+		Hash:     stateHash,
+		PrevHash: bytes.Repeat([]byte{0}, 32),
+		Cbor:     []byte{0x80},
+		Number:   1,
+		Type:     uint(shelley.BlockTypeShelley),
+	}, nil))
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:     1000,
+		Hash:     certifiedHash,
+		PrevHash: stateHash,
+		Cbor:     []byte{0x80},
+		Number:   2,
+		Type:     uint(shelley.BlockTypeShelley),
+	}, nil))
+	for _, block := range []models.Block{block1050, staleFork, block1100} {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	require.NoError(t, setImmutableImportMarker(db, 0))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey, "999", nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerHashSyncKey, hex.EncodeToString(stateHash), nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		RewardStateRepairPendingKey, "1", nil,
+	))
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	result, err := Sync(context.Background(), SyncConfig{
+		Network:                 "preprod",
+		DataDir:                 dataDir,
+		StorageMode:             "core",
+		Backend:                 BackendV2,
+		PinnedDigest:            "original-bootstrap-pin",
+		AggregatorURL:           fixture.server.URL,
+		AllowInsecureHTTP:       true,
+		StoragePlugins:          testStoragePlugins(),
+		DatabaseWorkers:         1,
+		Logger:                  discard,
+		RepairLegacyRewardState: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result.Snapshot)
+
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+	_, err = database.BlockByHash(db, staleFork.Hash)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	retained, err := database.BlockByHash(db, block1100.Hash)
+	require.NoError(t, err)
+	require.EqualValues(t, 1100, retained.Slot,
+		"canonical blocks after the selected state must remain for replay")
+}
+
+func TestVerifyRewardRepairLocalTailResolvesHashlessAnchorOnChain(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	canonical := rewardRepairTestBlock(
+		t, 1000, 2, bytes.Repeat([]byte{0x11}, 32),
+	)
+	sibling := rewardRepairTestBlock(
+		t, 1000, 2, bytes.Repeat([]byte{0x22}, 32),
+	)
+	localTip := rewardRepairTestBlock(t, 1100, 3, canonical.Hash)
+	for _, block := range []models.Block{canonical, sibling, localTip} {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "1000", nil))
+
+	preserved, err := verifyRewardRepairLocalTail(
+		db,
+		localTip,
+		&preparedLedgerStateImport{state: &ledgerstate.RawLedgerState{
+			Tip: &ledgerstate.SnapshotTip{
+				Slot:      1000,
+				BlockHash: canonical.Hash,
+			},
+		}},
+	)
+	require.NoError(t, err)
+	_, ok := preserved[string(localTip.Hash)]
+	require.True(t, ok,
+		"hashless legacy anchor resolution must follow the local chain")
+}
+
+func rewardRepairTestBlock(
+	t *testing.T,
+	slot, number uint64,
+	previousHash []byte,
+) models.Block {
+	t.Helper()
+	var previous lcommon.Blake2b256
+	copy(previous[:], previousHash)
+	header := shelley.ShelleyBlockHeader{
+		Body: shelley.ShelleyBlockHeaderBody{
+			BlockNumber:       number,
+			Slot:              slot,
+			PrevHash:          previous,
+			BlockBodySize:     0,
+			ProtoMajorVersion: 1,
+		},
+	}
+	headerCBOR, err := cbor.Encode(header)
+	require.NoError(t, err)
+	blockBody, err := cbor.Encode([]any{
+		cbor.RawMessage(headerCBOR), []any{}, []any{}, map[uint]any{},
+	})
+	require.NoError(t, err)
+	hash := lcommon.Blake2b256Hash(headerCBOR)
+	return models.Block{
+		Slot: slot, Hash: hash[:], PrevHash: bytes.Clone(previousHash),
+		Cbor: blockBody, Number: number,
+		Type: uint(shelley.BlockTypeShelley),
+	}
 }
 
 func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
