@@ -217,7 +217,7 @@ func TestCompareEpochProtocolParamsReportsWedgeClassMismatch(t *testing.T) {
 
 	now := time.Now()
 	dingo := dingoPParamsPreview380()
-	dingo.MaxTxSize = "32768" // a wedge-class parameter: wrong accepted tx size
+	dingo.MaxTxSize = "32768" // a wrong max tx size wedges replay
 
 	got := CompareEpochProtocolParams(
 		"preview",
