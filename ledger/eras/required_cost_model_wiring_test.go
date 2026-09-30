@@ -45,17 +45,16 @@ func (m *mockConwayFeeTxV3) Donation() *big.Int {
 }
 
 // TestRequiredCostModelWiringMissingEntryFailsClosed is a regression test
-// for a human-review finding: requiredCostModel (issue #3528) is exercised
-// by nine call sites across alonzo.go, babbage.go and conway.go, but before
-// this test only one of them -- conway.go's PlutusV1 branch, via
-// TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch -- had a test
-// that failed if it were reverted to a bare, unguarded map index. The other
-// eight (ValidateTxAlonzo, EvaluateTxAlonzo, ValidateTxBabbage's V1 and V2
-// branches, EvaluateTxBabbage's V1 and V2 branches, and
-// evaluateConwayPlutusScript's V2 and V3 branches) could each silently
-// regress to evaluating a missing cost model under plutigo's built-in
-// defaults without any test noticing. This pins all eight remaining sites
-// to the same fail-closed contract.
+// for requiredCostModel, which is exercised by nine call sites across
+// alonzo.go, babbage.go and conway.go, but before this test only one of them --
+// conway.go's PlutusV1 branch, via
+// TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch -- had a test that
+// failed if it were reverted to a bare, unguarded map index. The other eight
+// (ValidateTxAlonzo, EvaluateTxAlonzo, ValidateTxBabbage's V1 and V2 branches,
+// EvaluateTxBabbage's V1 and V2 branches, and evaluateConwayPlutusScript's V2
+// and V3 branches) could each silently regress to evaluating a missing cost
+// model under plutigo's built-in defaults without any test noticing. This pins
+// all eight remaining sites to the same fail-closed contract.
 func TestRequiredCostModelWiringMissingEntryFailsClosed(t *testing.T) {
 	// A minimal unit-returning program. Its behavior under evaluation is
 	// irrelevant here: a missing cost model must be rejected by

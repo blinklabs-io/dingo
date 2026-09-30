@@ -195,7 +195,7 @@ func fundByronInput(
 	return input
 }
 
-// TestValidateTxByron_PositionalWitnesses covers #4394: witness i must
+// TestValidateTxByron_PositionalWitnesses pins: witness i must
 // authorize input i.
 func TestValidateTxByron_PositionalWitnesses(t *testing.T) {
 	t.Parallel()
@@ -248,7 +248,7 @@ func TestValidateTxByron_PositionalWitnesses(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_RepeatedInput covers #4401: a repeated input is valid,
+// TestValidateTxByron_RepeatedInput pins: a repeated input is valid,
 // and the input balance counts it once.
 func TestValidateTxByron_RepeatedInput(t *testing.T) {
 	t.Parallel()
@@ -270,7 +270,7 @@ func TestValidateTxByron_RepeatedInput(t *testing.T) {
 	assert.Equal(t, big.NewInt(1_000), notConserved.Consumed)
 }
 
-// TestValidateTxByron_LovelaceBounds covers #4405: balances are summed as
+// TestValidateTxByron_LovelaceBounds pins: balances are summed as
 // bounded Lovelace, so an aggregate above 45e15 fails.
 func TestValidateTxByron_LovelaceBounds(t *testing.T) {
 	t.Parallel()
@@ -304,7 +304,7 @@ func TestValidateTxByron_LovelaceBounds(t *testing.T) {
 	assert.Equal(t, "output balance", bound.Balance)
 }
 
-// TestByronMinFee covers #4403: summand div 10^9 plus the ceiling of the
+// TestByronMinFee pins: summand div 10^9 plus the ceiling of the
 // exact rational multiplier times the size.
 func TestByronMinFee(t *testing.T) {
 	t.Parallel()
@@ -360,8 +360,8 @@ func TestByronMinFee(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_MaxTxSize covers #4379: ppMaxTxSize bounds the
-// serialized TxAux, whatever fee it pays.
+// TestValidateTxByron_MaxTxSize pins: ppMaxTxSize bounds the serialized TxAux,
+// whatever fee it pays.
 func TestValidateTxByron_MaxTxSize(t *testing.T) {
 	t.Parallel()
 	const maxTxSize = 64
@@ -390,7 +390,7 @@ func TestValidateTxByron_MaxTxSize(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_UnknownAttributes covers #4381 for transaction
+// TestValidateTxByron_UnknownAttributes pins the rule for transaction
 // attributes: the unknown values must total fewer than 128 bytes.
 func TestValidateTxByron_UnknownAttributes(t *testing.T) {
 	t.Parallel()
@@ -433,7 +433,7 @@ func TestValidateTxByron_UnknownAttributes(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_UnknownAddressAttributes covers #4381 for output
+// TestValidateTxByron_UnknownAddressAttributes pins the rule for output
 // addresses. A derivation path is a recognized attribute and never counts.
 func TestValidateTxByron_UnknownAddressAttributes(t *testing.T) {
 	t.Parallel()
@@ -480,7 +480,7 @@ func TestValidateTxByron_UnknownAddressAttributes(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_WitnessRootUsesCanonicalAttributes covers #4414: the
+// TestValidateTxByron_WitnessRootUsesCanonicalAttributes pins: the
 // root a witness is checked against is hashed over the canonical encoding of
 // the address's decoded attributes, not the bytes it carries on the wire.
 func TestValidateTxByron_WitnessRootUsesCanonicalAttributes(t *testing.T) {

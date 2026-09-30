@@ -240,7 +240,7 @@ func TestValidateTxByron_MainnetBootstrapWitness(t *testing.T) {
 }
 
 // TestValidateTxByron_RejectsExtraMalformedWitness is the regression for
-// issue #4384: a transaction with a genuine, matching witness must not
+// this rule: a transaction with a genuine, matching witness must not
 // validate merely because that one witness resolves every input. A second,
 // unrecognized witness entry appended after it must reject the whole
 // transaction, mirroring the reference decoder's lack of a catch-all case.
@@ -349,7 +349,7 @@ func TestValidateTxByron_NilOutputs(t *testing.T) {
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
-// TestValidateTxByron_DuplicateInputs covers #4401: the reference keeps
+// TestValidateTxByron_DuplicateInputs pins: the reference keeps
 // inputs as a list and has no duplicate-input rejection.
 func TestValidateTxByron_DuplicateInputs(t *testing.T) {
 	tx := &testByronTx{
@@ -435,7 +435,7 @@ type mockLedgerState struct {
 	slotToTimeCalls int
 	// syntheticV2CostModel backs SyntheticV2CostModelInEffect, so a test can
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
-	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
+	// check without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
 	// pendingMIR seeds the Pending map MIRDelegState reports, letting a test
 	// simulate InstantaneousRewards already accumulated earlier in the

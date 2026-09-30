@@ -63,8 +63,7 @@ var preprodSerialiseDataFundingTxIds = []string{
 // indefinite-length field list the Plutus encoder writes. Passing the
 // definite-length wire encoding through instead changes what serialiseData
 // returns, so the policy computed a different asset name than the network
-// minted, called error, and wedged a preprod replay at this block. See
-// blinklabs-io/dingo#3860.
+// minted, called error, and wedged a preprod replay at this block.
 func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 	t.Parallel()
 	tx, err := conway.NewConwayTransactionFromCbor(

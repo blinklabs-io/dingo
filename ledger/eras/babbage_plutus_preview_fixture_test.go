@@ -104,7 +104,7 @@ func previewBabbageProtocolParams(t *testing.T) *babbage.BabbageProtocolParamete
 // the reference evaluator sees one signatory; rendering both makes the spending
 // validator take 621 extra CEK steps and 16 extra builtin calls, for 16359467
 // CPU and 62240 memory over the declared budget, which rejects a block the
-// network accepted and wedges a preview replay. See blinklabs-io/dingo#3935.
+// network accepted and wedges a preview replay.
 //
 // The declared budget is an external oracle: cardano-node computed it with the
 // reference evaluator. Equality in both directions catches an overcharge, which

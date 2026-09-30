@@ -28,7 +28,7 @@ import (
 
 // conwayParameterChangeProposal builds a proposal procedure carrying a
 // ConwayParameterChangeGovAction. When protocolVersion is non-nil, the
-// action sets protocol-version key 14, which dingo#4439 requires rejecting.
+// action sets protocol-version key 14, which must be rejected.
 func conwayParameterChangeProposal(
 	protocolVersion *lcommon.ProtocolParametersProtocolVersion,
 ) lcommon.ProposalProcedure {
@@ -97,8 +97,8 @@ func TestValidateParameterChangeExcludesProtocolVersionRejectsConway(
 
 // TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra is the
 // Dijkstra analogue: the same protocol-version key 14 exclusion carries into
-// Dijkstra's ParameterChange action (dingo#4439's "apply the same protection
-// to Dijkstra" acceptance criterion, PV12).
+// Dijkstra's ParameterChange action (the same protection applies to Dijkstra,
+// PV12).
 func TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra(
 	t *testing.T,
 ) {
@@ -298,14 +298,14 @@ func TestValidateParameterChangeExcludesProtocolVersionAllowsRawUpdateWithoutKey
 }
 
 // TestValidateTxConwayRejectsParameterChangeProtocolVersion is a production
-// ValidateTxConway regression (dingo#4439's "test through production
-// ValidateTxConway" and "end-to-end PV9, PV10, and PV11 rejection coverage"
-// criteria). Every other Conway rule is stubbed to a no-op so only the new
-// rule's contribution to the joined error is under test, matching the
-// isolation technique TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure
-// uses below. The table covers every Conway-era major protocol version: the
-// rule must reject a protocol-version-setting ParameterChange regardless of
-// which Conway PV the ledger currently runs.
+// ValidateTxConway regression (through production ValidateTxConway, with
+// "end-to-end PV9, PV10, and PV11 rejection coverage" criteria). Every other
+// Conway rule is stubbed to a no-op so only the new rule's contribution to the
+// joined error is under test, matching the isolation technique
+// TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure uses below.
+// The table covers every Conway-era major protocol version: the rule must
+// reject a protocol-version-setting ParameterChange regardless of which Conway
+// PV the ledger currently runs.
 func TestValidateTxConwayRejectsParameterChangeProtocolVersion(t *testing.T) {
 	originalRules := conwayUtxoValidationRules
 	conwayUtxoValidationRules = nil
@@ -364,8 +364,8 @@ func TestValidateTxDijkstraRejectsParameterChangeProtocolVersion(t *testing.T) {
 }
 
 // TestPParamsUpdateConwayIgnoresProtocolVersion is the defense-in-depth
-// regression for dingo#4439's "remove protocol-version mutation from Conway
-// PPU application" criterion: even called directly with an update that sets
+// regression for removing protocol-version mutation from Conway
+// PPU application: even called directly with an update that sets
 // protocol version, PParamsUpdateConway must not change it, while still
 // applying every other field normally.
 func TestPParamsUpdateConwayIgnoresProtocolVersion(t *testing.T) {
@@ -439,19 +439,19 @@ func TestPParamsUpdateDijkstraIgnoresProtocolVersion(t *testing.T) {
 	)
 }
 
-// TestEraDescWiresProtocolVersionProtection is the dingo#4439 "protect
-// replay, import, and backfill paths" regression. ConwayEraDesc and
+// TestEraDescWiresProtocolVersionProtection is the regression for protecting
+// replay, import, and backfill paths. ConwayEraDesc and
 // DijkstraEraDesc.{ValidateTxFunc,PParamsUpdateFunc} are the single
 // implementation every caller shares -- live block application
 // (ledger/delta.go), Mithril bootstrap (mithril/sync_gap.go), backfill
 // (internal/node/backfill.go), and conformance replay
 // (internal/test/conformance/state_manager.go) all resolve validation and
 // enactment through these fields rather than calling ValidateTxConway or
-// PParamsUpdateConway directly. There is no separate replay-specific
-// validation or enactment path to protect; this pins that the era
-// descriptors actually point at the protected functions, so a future
-// refactor cannot quietly rewire one path to a stale copy while leaving
-// this test's direct-call coverage green.
+// PParamsUpdateConway directly. There is no separate replay-specific validation
+// or enactment path to protect; this pins that the era descriptors actually
+// point at the protected functions, so a future refactor cannot quietly rewire
+// one path to a stale copy while leaving this test's direct-call coverage
+// green.
 func TestEraDescWiresProtocolVersionProtection(t *testing.T) {
 	require.Equal(
 		t,

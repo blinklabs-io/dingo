@@ -392,10 +392,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// comment): this script never invokes an actual builtin function, only
 	// CEK machine steps, so it reproduces the exact 112100/800 numbers
 	// plutigo's own default cost model already produced before
-	// requiredCostModel (issue #3528) started rejecting the incomplete
-	// cost models that used to silently trigger that fallback. These
-	// numbers would still change if plutigo's DefaultMachineCosts changes,
-	// same as before.
+	// requiredCostModel started rejecting the incomplete cost models that used
+	// to silently trigger that fallback. These numbers would still change if
+	// plutigo's DefaultMachineCosts changes, same as before.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -4545,7 +4544,7 @@ func TestConwayCommitteeRulesSkipPhase2InvalidTransaction(t *testing.T) {
 // other's member.
 //
 // This test passes both with and without the fail-closed change by design; it
-// covers the tag-preservation behavior this PR adds, not the availability
+// covers the tag-preservation behavior, not the availability
 // gate. It fails if the tag is ever dropped or defaulted in voter resolution.
 func TestConwayCommitteeHotVoterTagsDoNotCrossMatch(t *testing.T) {
 	var hash lcommon.Blake2b224
@@ -4678,8 +4677,8 @@ func committeeCert(
 	}
 }
 
-// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins
-// dingo#4377: a committee cold credential resignation is rejected both when
+// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins:
+// a committee cold credential resignation is rejected both when
 // it was already resigned before the transaction and when an earlier
 // certificate in the same transaction resigned it. Dingo's replacement
 // previously checked member.Resigned only on the authorize path and queried

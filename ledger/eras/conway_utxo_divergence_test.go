@@ -113,9 +113,8 @@ func newConwayDivergenceTxWithReference(
 // Position is not a stable property. gouroboros composes
 // conway.UtxoValidationRules from the ordered descriptor list, so any upstream
 // insertion renumbers every rule after it; the Id does not move. Tests that
-// pinned literal positions broke on the v0.202.5 and v0.202.9 bumps
-// (issues #3764, #3976, #3983), while production, which keys on the Id, did
-// not.
+// pinned literal positions broke on the v0.202.5 and v0.202.9 bumps,
+// while production, which keys on the Id, did not.
 func conwayUtxoValidationRuleIndex(
 	t *testing.T,
 	id lcommon.UtxoValidationRuleId,
@@ -250,9 +249,10 @@ func TestValidateTxConwayGenuinelyMissingReferenceInputStillRejected(
 }
 
 // TestValidateTxConwayGenuinelyUnbalancedStillRejected is the negative case for
-// the value-conservation half of issue #3678: a transaction whose inputs all
-// resolve but whose consumed and produced values genuinely differ must still be
-// rejected, and must still be reported under the value-not-conserved rule.
+// the value-conservation half of the Conway UTxO divergence fix: a transaction
+// whose inputs all resolve but whose consumed and produced values genuinely
+// differ must still be rejected, and must still be reported under the
+// value-not-conserved rule.
 func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 	notConservedIndex := conwayUtxoValidationRuleIndex(
 		t,
@@ -290,7 +290,7 @@ func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 
 	// The input resolved, so bad-inputs must NOT also fire. This is what
 	// separates a genuinely unbalanced transaction from the single-cause
-	// pairing in issue #3678, where one unresolvable input produces both.
+	// pairing, where one unresolvable input produces both.
 	var badInputs shelley.BadInputsUtxoError
 	assert.NotErrorAs(t, err, &badInputs)
 }
