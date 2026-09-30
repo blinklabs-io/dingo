@@ -227,7 +227,7 @@ func TestFetchAccountRewardsForEpochPermanentErrorAbortsImmediately(
 }
 
 // TestFetchAccountRewardsForEpochZeroRowsWithinGraceLeavesIncomplete proves a
-// just-closed epoch (EpochEndTime within graceHours of now) whose #3097
+// just-closed epoch (EpochEndTime within graceHours of now) whose
 // account fetch returns zero rows across the whole address universe is left
 // with coverage incomplete rather than permanently accepted as "zero
 // accounts earned rewards" — Koios's own /account_reward_history publishing
@@ -472,7 +472,7 @@ func TestBuildAccountAddressUniverseNilSourceIsKoiosOnly(t *testing.T) {
 }
 
 // TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError guards
-// against the dispatcher race flagged in review: `select { case
+// against the dispatcher race: `select { case
 // <-fetchCtx.Done(): ...; case sem <- struct{}{}: }` can nondeterministically
 // choose the semaphore branch even after a concurrently-running chunk's
 // error has already called cancel(), because Done() and a buffered
@@ -529,7 +529,7 @@ func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
 	t *testing.T,
 ) {
 	const totalChunks = 30
-	// "stake0poison" sorts before every "stake1addrN" address (dingo #3099's
+	// "stake0poison" sorts before every "stake1addrN" address (as
 	// fetchAccountRewardsForEpoch sorts the address universe before chunking
 	// for content-addressed chunk-hash determinism — see its doc comment),
 	// guaranteeing this still lands in the first-dispatched chunk the way

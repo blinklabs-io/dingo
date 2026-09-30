@@ -9,10 +9,10 @@ import (
 )
 
 // TestGetPoolEpochDataMapReportsRewardsPending covers the standalone source's
-// half of dingo #3852. The in-process source resolves the applying boundary
-// from the ledger tip; DingoDB reads the same two values out of SQL, and if it
-// does not, every pre-boundary forfeiture is still reported as a value_mismatch
-// no matter what the comparison does with the flag.
+// half of the pending-rewards guard. The in-process source resolves the
+// applying boundary from the ledger tip; DingoDB reads the same two values out
+// of SQL, and if it does not, every pre-boundary forfeiture is still reported
+// as a value_mismatch no matter what the comparison does with the flag.
 func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 	const (
 		stakeEpoch   = uint64(9)

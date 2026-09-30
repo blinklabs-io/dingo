@@ -62,10 +62,10 @@ type fakeEpochRef struct {
 }
 
 // fakeKoiosAccountFixtures optionally extends newFakeKoiosServer with
-// #3097's /account_list and /account_reward_history endpoints. Zero value
+// the /account_list and /account_reward_history endpoints. Zero value
 // (the default for every existing caller passing no options) serves an empty
 // address list and empty reward history for every epoch — indistinguishable
-// from the pre-#3097 fake server for every test that never enables
+// from the pre-account-parity fake server for every test that never enables
 // ObserverConfig.AccountsEnabled, since those tests never issue a request to
 // either endpoint at all.
 type fakeKoiosAccountFixtures struct {
@@ -93,7 +93,7 @@ func (t countingNotFoundTransport) RoundTrip(
 // /pool_updates always report zero pools; /epoch_info and /totals serve
 // exactly the epochs present in epochs (any other epoch number 404s, which
 // the real client classifies as a permanent, non-retryable error).
-// accounts is optional (pass nothing for the pre-#3097 behavior every
+// accounts is optional (pass nothing for the pre-account-parity behavior every
 // existing caller relies on).
 func newFakeKoiosServer(
 	t *testing.T,
@@ -763,7 +763,7 @@ func TestObserverStrictModeCancelsOnFirstMismatch(t *testing.T) {
 	)
 }
 
-// TestObserverStrictModeCancelsOnAccountMismatch is #3097's observer-level
+// TestObserverStrictModeCancelsOnAccountMismatch is the observer-level
 // proof: with ObserverConfig.AccountsEnabled, a per-account exact-parity
 // mismatch (not merely a pool/aggregate one, as
 // TestObserverStrictModeCancelsOnFirstMismatch already covers) fires
@@ -915,15 +915,16 @@ func TestObserverNonStrictModeContinuesAfterFailure(t *testing.T) {
 	)
 }
 
-// TestObserverStrictModeDoesNotFatalOnReferenceLagOnly guards dingo #4645: an
-// epoch whose only significant mismatches are reference_lag (Koios's data had
-// not caught up, so the comparison could not be trusted yet) must never fire
-// FatalFunc in strict mode. Epoch 5 is left unseeded on the Dingo side while
-// its fake Koios epoch_info reports a recent end_time inside the configured
-// grace window, so the comparison emits only reference_lag mismatches. Epoch 7
-// is seeded normally and passes; both are published in the same batch (as in
-// TestObserverStrictModeCancelsOnFirstMismatch) so epoch 7 being checked at
-// all proves strict mode did not stop on epoch 5.
+// TestObserverStrictModeDoesNotFatalOnReferenceLagOnly guards against fatal
+// shutdown on reference lag: an epoch whose only significant mismatches are
+// reference_lag (Koios's data had not caught up, so the comparison could not be
+// trusted yet) must never fire FatalFunc in strict mode. Epoch 5 is left
+// unseeded on the Dingo side while its fake Koios epoch_info reports a recent
+// end_time inside the configured grace window, so the comparison emits only
+// reference_lag mismatches. Epoch 7 is seeded normally and passes; both are
+// published in the same batch (as in
+// TestObserverStrictModeCancelsOnFirstMismatch) so epoch 7 being checked at all
+// proves strict mode did not stop on epoch 5.
 //
 // It runs once per queue: processEpoch and processAccountEpoch each call fail
 // on their own result, so each call site needs its own proof.
@@ -974,7 +975,7 @@ func TestObserverStrictModeDoesNotFatalOnReferenceLagOnly(t *testing.T) {
 			}
 			require.Equal(t, StatusError, byEpoch[5])
 			require.Equal(t, StatusPass, byEpoch[7])
-			// Pin the ERROR to #4645's exact category: dingo_db_missing is
+			// Pin the ERROR to the exact category: dingo_db_missing is
 			// also ERROR-severity but stays fatal (see
 			// TestObserverStrictModeFatalsOnDBMissingPastGrace).
 			mismatches, err := o.cache.GetMismatches("preview", 5, "")
@@ -1185,10 +1186,10 @@ func TestObserverConcurrentStopCallsDoNotPanic(t *testing.T) {
 
 // TestObserverStartSeedsBacklogForMissingAccountCoverage is the
 // observer-backlog-seeding regression test for the account-coverage-blind
-// epoch-selection bug found in review of #3097: an epoch whose pool data and
-// check status are already fine (fresh koios_epoch_info, a fresh persisted
-// PASS) but whose koios_account_coverage row is entirely absent — the
-// realistic state a Dingo deployment upgrading from a pre-#3097 koios-parity
+// epoch-selection bug found in the per-account phase: an epoch whose pool data
+// and check status are already fine (fresh koios_epoch_info, a fresh persisted
+// PASS) but whose koios_account_coverage row is entirely absent — the realistic
+// state a Dingo deployment upgrading from a pre-account-parity koios-parity
 // attach would be in — must still be added to Start's seeded backlog purely
 // because its account coverage is missing, independent of whatever
 // GetEpochsNeedingCheck/GetUncachedEpochs already decided about it.
@@ -1624,14 +1625,14 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 			"not re-request /epoch_info")
 }
 
-// TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch is dingo #4339's
+// TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch is the queue-split
 // regression test: a slow per-account Koios fetch for one epoch must never
 // hold up the fast pool/aggregate check for a later epoch, since the fast
 // check alone is what can catch a reward-round defect in strict mode before
 // an unbounded per-account backlog develops.
 //
 // Epoch 5's /account_reward_history request blocks until the test releases
-// it, simulating #4339's live-observed ~17-minutes-per-epoch account-fetch
+// it, simulating the live-observed ~17-minutes-per-epoch account-fetch
 // bottleneck. Epoch 6 carries a genuine Koios/Dingo aggregate mismatch.
 // Before the fix, Observer.run processed epochs strictly in order through one
 // fetchIfNeeded call that fetched pools+params+accounts before ever invoking
@@ -1796,16 +1797,16 @@ func TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch(t *testing.T) {
 }
 
 // TestObserverSeedBacklogQueuesUncachedEpochsForAccountCheck pins the half of
-// #4339's queue split that the split itself can silently drop: an epoch whose
+// the queue split that the split itself can silently drop: an epoch whose
 // Koios reference has never been fetched at all.
 //
 // Every other backlog-seed query reads FROM koios_epoch_info
 // (GetEpochsNeedingCheck) or requires a row in it
 // (GetEpochsMissingAccountCoverage), so a never-fetched epoch is visible only
 // to GetUncachedEpochs. Queuing that result into the aggregate queue alone
-// would leave #3097's per-account exact parity unrun for the entire seeded
-// backlog until the next restart — precisely the bulk-sync case #4339 is
-// about, where the whole backlog is uncached.
+// would leave per-account exact parity unrun for the entire seeded
+// backlog until the next restart — precisely the bulk-sync case
+// where the whole backlog is uncached.
 func TestObserverSeedBacklogQueuesUncachedEpochsForAccountCheck(t *testing.T) {
 	t.Parallel()
 
@@ -1847,7 +1848,7 @@ func TestObserverSeedBacklogQueuesUncachedEpochsForAccountCheck(t *testing.T) {
 }
 
 // TestObserverFetchesAggregateReferenceOncePerEpochAcrossQueues pins the
-// Koios request cost of #4339's queue split. Both queues need the same
+// Koios request cost of the queue split. Both queues need the same
 // pool/epoch-aggregate reference rows for an epoch, and both are woken by the
 // same epoch transition, so an ungated split issues the whole aggregate fetch
 // — pool universe resolution, /epoch_info, /epoch_params, /totals and every
@@ -2107,7 +2108,7 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 }
 
 // TestObserverSeedBacklogExcludesEpochsBeforeEarliestAvailableEpoch guards
-// against dingo #4172: a fresh Mithril-bootstrapped node has no local ledger
+// the case where a fresh Mithril-bootstrapped node has no local ledger
 // history before its own bootstrap boundary, so seeding the backlog from
 // epoch 0 (as before this fix) queues a Koios fetch+check for every historical
 // epoch the node can never have local data for -- on preview/preprod that can

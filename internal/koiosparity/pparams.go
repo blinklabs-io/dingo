@@ -42,7 +42,7 @@ import (
 // Dingo's exact num/denom form ("577/10000") rather than converted to a
 // float: Koios publishes the same number as a decimal ("0.0577") and the
 // comparison reconciles the two with rationalsEqual, so nothing is rounded on
-// either side (dingo #3931).
+// either side.
 type DingoProtocolParams struct {
 	// SourceEpoch is the epoch of the `pparams` row this view was decoded
 	// from, which is <= the requested epoch: Dingo stores one row per
@@ -95,7 +95,7 @@ type DingoProtocolParams struct {
 	CostModels map[string][]int64
 
 	// SyntheticV2CostModel reports whether CostModels["PlutusV2"], if
-	// present, is still HardForkBabbage's fabricated default (dingo #3825)
+	// present, is still HardForkBabbage's fabricated default
 	// for this epoch rather than real governance/protocol-update data --
 	// i.e. whether Dingo has a PlutusV2 model in force before the chain
 	// actually enacted one. Callers (GetProtocolParams's own
@@ -105,7 +105,7 @@ type DingoProtocolParams struct {
 	// historical-epoch resolution exactly (see isSyntheticV2CostModel).
 	// compareCostModels reads it to classify a PlutusV2-only-on-Dingo
 	// divergence as informational rather than a real mismatch when this is
-	// true (dingo #4127) -- Koios's absence and Dingo's placeholder both
+	// true -- Koios's absence and Dingo's placeholder both
 	// correctly describe "no real PlutusV2 model exists on chain yet".
 	// Always false when CostModels has no "PlutusV2" entry.
 	SyntheticV2CostModel bool
@@ -114,8 +114,7 @@ type DingoProtocolParams struct {
 // isSyntheticV2CostModel reports whether v2 (targetEpoch's decoded PlutusV2
 // cost model, if hasV2) should be treated as HardForkBabbage's fabricated
 // default rather than real data, mirroring
-// ledger.queryShelleyCurrentProtocolParams's historical-epoch resolution
-// (dingo #4127, following #3825's design):
+// ledger.queryShelleyCurrentProtocolParams's historical-epoch resolution:
 //
 //   - No PlutusV2 model at all: not synthetic (there is nothing to fabricate
 //     a divergence from).
@@ -201,7 +200,7 @@ func decodeProtocolParams(
 // never as a PASS with nothing compared.
 //
 // Exported (not just decodeProtocolParams' own internal helper) because
-// cmd/node-parity's Koios-backed comparison (blinklabs-io/dingo#1900) needs
+// cmd/node-parity's Koios-backed comparison needs
 // exactly the same conversion from a live LocalStateQuery
 // GetCurrentProtocolParams() result, which decodes to this same
 // lcommon.ProtocolParameters interface -- reusing this avoids a second,

@@ -56,7 +56,7 @@ func TestCountSignificantCountsErrors(t *testing.T) {
 }
 
 // TestReferenceLagOnly pins the one non-pass shape strict mode does not treat
-// as fatal (dingo #4645): at least one significant mismatch, all of them
+// as fatal: at least one significant mismatch, all of them
 // reference_lag. The other ERROR-severity categories must not qualify, or a
 // row Dingo never wrote would stop failing a strict node once the grace
 // window closes.

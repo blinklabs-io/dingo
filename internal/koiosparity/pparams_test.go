@@ -176,13 +176,13 @@ func TestCompareEpochProtocolParamsReportsUtxoUnitMismatch(t *testing.T) {
 	require.Equal(t, CategoryValueMismatch, got[0].Category)
 }
 
-// TestCompareEpochProtocolParamsRationalsMatchKoiosDecimals is trap #2 from
-// dingo #3931: Dingo stores execution prices and the reward-formula constants
-// as exact rationals ("577/10000", "721/10000000", "3/1000") while Koios
-// publishes the same numbers as decimals, sometimes in exponent form
-// ("0.0577", "7.21e-05", "0.003"). They are equal, so a checker comparing the
-// strings would report five permanent, bogus FAILs on every epoch of every
-// run. This is real preview epoch-380 data on both sides.
+// TestCompareEpochProtocolParamsRationalsMatchKoiosDecimals is the second trap
+// in the protocol-parameter comparison: Dingo stores execution prices and the
+// reward-formula constants as exact rationals ("577/10000", "721/10000000",
+// "3/1000") while Koios publishes the same numbers as decimals, sometimes in
+// exponent form ("0.0577", "7.21e-05", "0.003"). They are equal, so a checker
+// comparing the strings would report five permanent, bogus FAILs on every epoch
+// of every run. This is real preview epoch-380 data on both sides.
 //
 // Discriminates: replacing the rational comparison with string equality makes
 // this test report a0/rho/tau/price_mem/price_step mismatches.
@@ -217,7 +217,7 @@ func TestCompareEpochProtocolParamsReportsWedgeClassMismatch(t *testing.T) {
 
 	now := time.Now()
 	dingo := dingoPParamsPreview380()
-	dingo.MaxTxSize = "32768" // the #3928-class wedge: wrong accepted tx size
+	dingo.MaxTxSize = "32768" // a wedge-class parameter: wrong accepted tx size
 
 	got := CompareEpochProtocolParams(
 		"preview",
@@ -455,11 +455,12 @@ func TestCompareEpochProtocolParamsFetchError(t *testing.T) {
 	require.Equal(t, StatusError, DetermineStatus(got))
 }
 
-// TestDingoDBGetProtocolParamsResolvesEffectiveRow is trap #1 from dingo
-// #3931: `pparams` holds one row per parameter *change*, not one per epoch —
-// preview has ~12 rows spanning epochs 0-415. Asking for epoch 200 must
-// resolve the latest row at or before it (the epoch-107 row), not report the
-// parameters as missing and not fall back to an older row.
+// TestDingoDBGetProtocolParamsResolvesEffectiveRow is the first trap in the
+// protocol-parameter comparison: `pparams` holds one row per parameter
+// *change*, not one per epoch — preview has ~12 rows spanning epochs 0-415.
+// Asking for epoch 200 must resolve the latest row at or before it (the
+// epoch-107 row), not report the parameters as missing and not fall back to an
+// older row.
 //
 // The fixtures are the real preview CBOR blobs for the epoch-22 and epoch-107
 // rows, which differ in max_block_ex_steps (40000000000 -> 20000000000). That
@@ -745,10 +746,10 @@ func TestDatabaseSourceGetProtocolParams(t *testing.T) {
 }
 
 // TestDatabaseSourceGetProtocolParamsMarksSyntheticV2CostModel is
-// DatabaseSource's half of TestDingoDBGetProtocolParamsMarksSyntheticV2CostModel
-// (dingo #4127): both RewardParitySource implementations must classify the
-// same fabricated-default row the same way, since checkEpoch's comparison
-// logic is shared between them.
+// DatabaseSource's half of
+// TestDingoDBGetProtocolParamsMarksSyntheticV2CostModel: both
+// RewardParitySource implementations must classify the same fabricated-default
+// row the same way, since checkEpoch's comparison logic is shared between them.
 func TestDatabaseSourceGetProtocolParamsMarksSyntheticV2CostModel(
 	t *testing.T,
 ) {
@@ -900,7 +901,7 @@ func TestCheckPassesWithMatchingProtocolParams(t *testing.T) {
 
 // TestCheckDetectsWedgeClassProtocolParamDivergence is the end-to-end version
 // of the reason this comparison exists: a stored max_tx_size that disagrees
-// with the network is the #3928 wedge, and before this change the parity run
+// with the network is a replay wedge, and the parity run previously
 // reported PASS for exactly this database.
 func TestCheckDetectsWedgeClassProtocolParamDivergence(t *testing.T) {
 	t.Parallel()
@@ -1206,8 +1207,8 @@ func TestDingoDBGetProtocolParamsDecodesCostModels(t *testing.T) {
 	require.Equal(t, costModelFixture(t), got.CostModels)
 }
 
-// TestIsSyntheticV2CostModel pins isSyntheticV2CostModel's classification
-// (dingo #4127): the durable cleared-epoch marker is authoritative when
+// TestIsSyntheticV2CostModel pins isSyntheticV2CostModel's classification:
+// the durable cleared-epoch marker is authoritative when
 // present, and the value-based comparison against
 // eras.DefaultPlutusV2CostModel is only a fallback for when it is absent.
 func TestIsSyntheticV2CostModel(t *testing.T) {
@@ -1296,11 +1297,11 @@ func TestIsSyntheticV2CostModel(t *testing.T) {
 }
 
 // TestCompareEpochProtocolParamsSyntheticV2CostModelIsInformational is the
-// regression for dingo #4127: a from-genesis Preview replay reported
-// pparams_cost_model_plutus_v2 as a FAIL for epochs 3-8, where Dingo holds
-// HardForkBabbage's fabricated PlutusV2 default (dingo #3825) and Koios
-// correctly has no PlutusV2 model at all -- both sides agree no real model
-// exists yet, so this must classify as informational, not a divergence.
+// regression for the synthetic PlutusV2 cost model: a from-genesis Preview
+// replay reported pparams_cost_model_plutus_v2 as a FAIL for epochs 3-8, where
+// Dingo holds HardForkBabbage's fabricated PlutusV2 default and Koios correctly
+// has no PlutusV2 model at all -- both sides agree no real model exists yet, so
+// this must classify as informational, not a divergence.
 //
 // Discriminates: with SyntheticV2CostModel left false (or the classification
 // removed), this reports CategoryValueMismatch and DetermineStatus is FAIL.
@@ -1332,7 +1333,7 @@ func TestCompareEpochProtocolParamsSyntheticV2CostModelIsInformational(
 }
 
 // TestCompareEpochProtocolParamsRealV2CostModelAheadOfKoiosStillFails is the
-// negative case for #4127's fix: when Dingo's PlutusV2 model is NOT flagged
+// negative case for that downgrade: when Dingo's PlutusV2 model is NOT flagged
 // synthetic, a Koios-side absence stays a real, wedge-class divergence
 // (FAIL) exactly as before. SyntheticV2CostModel is the only thing that may
 // downgrade this classification.
@@ -1364,7 +1365,7 @@ func TestCompareEpochProtocolParamsRealV2CostModelAheadOfKoiosStillFails(
 }
 
 // TestCompareEpochProtocolParamsSyntheticDowngradeIsNarrow pins the two
-// bounds on #4127's downgrade, which are what keep it from widening into a
+// bounds on that downgrade, which are what keep it from widening into a
 // suppression of real divergences while SyntheticV2CostModel is true:
 //
 //   - It applies to PlutusV2 only. During the synthetic window Dingo also
@@ -1468,7 +1469,7 @@ func TestCompareEpochProtocolParamsSyntheticDowngradeIsNarrow(t *testing.T) {
 }
 
 // TestDingoDBGetProtocolParamsMarksSyntheticV2CostModel is the DB-layer half
-// of #4127's regression, using the exact shape the issue reported: a real
+// of that regression, using the exact shape reported: a real
 // preview Babbage pparams row (pparams_preview_epoch2_babbage.hex) whose
 // PlutusV2 cost model is byte-for-byte HardForkBabbage's fabricated default,
 // resolved for epochs before and after the durable cleared-epoch marker
