@@ -13584,11 +13584,14 @@ sets `rewards.Parameters.MinPoolMargin` via `applyMinPoolMarginConfig` only for
 protocol major version >= 12, and the reward split uses
 `params.effectiveMargin(pool.Margin) = max(pool.Margin, MinPoolMargin)` for both
 the operator (leader) and delegator (member) shares. In the same era,
-`ValidateTxDijkstra` rejects pool registration certificates whose margin is below
-the floor via `checkPoolMarginFloor`. Disabled or pre-Dijkstra, the field is nil,
-the split is byte-for-byte the pre-CIP-23 calculation, and no certificate is
-rejected. Because it changes reward amounts (and therefore ADA pots and reward
-accounts) and certificate acceptance, enable a nonzero value only on a network
+`ValidateTxDijkstra` rejects a phase-2-valid (`is_valid=true`) transaction
+carrying a pool registration certificate whose margin is below the floor, via
+`checkPoolMarginFloor`. An `is_valid=false` transaction applies none of its
+certificates, so the floor is not checked for it. Disabled or pre-Dijkstra, the
+field is nil, the split is byte-for-byte the pre-CIP-23 calculation, and no
+certificate is rejected. Because it changes reward amounts (and therefore ADA
+pots and reward accounts) and which phase-2-valid transactions are accepted,
+enable a nonzero value only on a network
 where every node also enables the same value; the precompute-reuse member
 validator is left unclamped, so when the feature is active and any pool in the
 epoch's snapshot is below the floor, reuse is conservatively bypassed for that
