@@ -33,6 +33,38 @@ with the corrected decoder or a verified repair from original outputs that
 updates both stores; reversing all stored datum hashes would also alter
 correctly imported outputs.
 
+## Mithril MemPack multi-asset name deduplication
+
+MemPack's flat multi-asset representation (`ledgerstate.decodeFlatMultiAsset`)
+deduplicates asset names in its Region E content block: when two or more
+entries in the same output carry byte-identical asset names, the Haskell
+encoder writes the name once and every such entry's name offset points at
+that single occurrence. The decoder previously computed an entry's name
+length from `nextEntry.nameOff - thisEntry.nameOff` (position-relative)
+instead of from the entry's own offset against the next *distinct* offset
+(offset-keyed); the former reads 0 for every entry but the last one sharing
+that offset. The decoder also allocated a name only when the computed length
+was greater than zero, leaving Go's `nil` slice otherwise. Combined, a
+zero-length result meant one of two things: a deduplicated (non-empty) name
+wrongly computed as length 0, or a genuinely empty Cardano asset name, which
+is valid and also produced length 0. Both classes decoded as `nil`, and a nil
+`ParsedAsset.Name` encodes as CBOR null instead of a bytestring, so both a
+deduplicated name and a genuine empty name were silently dropped from the
+persisted UTxO CBOR under the old decoder. The fix resolves each length by
+offset (not position) and always allocates, even for a zero-length result,
+so a deduplicated name now decodes correctly and a genuine empty name decodes
+as a proper non-nil, zero-length slice (CBOR bytestring(0), `0x40`) rather
+than null.
+
+As with the tag-3 datum-hash decoder above, this is a decode-time defect:
+fixing `decodeFlatMultiAsset` does not repair a UTxO already imported with the
+broken decoder. Recovery requires a fresh Mithril import with the corrected
+decoder, or a verified repair that reconstructs the missing asset name from
+the original snapshot data and rewrites both the affected `utxo` row's stored
+CBOR and any metadata derived from it. A stored asset with a null CBOR name
+is unambiguous evidence of the old decoder having run on it, but does not by
+itself distinguish which of the two classes above produced it.
+
 ## Storage provider ownership
 
 Blob and metadata stores are constructed by the application plugin host and
