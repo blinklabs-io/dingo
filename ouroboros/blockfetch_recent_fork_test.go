@@ -25,17 +25,18 @@ import (
 )
 
 // gatherRecentForkBattles scrapes reg and returns, per idx label, the
-// participant count and distinct-slot count exported for that ring slot
-// ([0]=participants, [1]=distinct slots).
+// participant count, distinct-slot count, and block number exported for that
+// ring slot ([0]=participants, [1]=distinct slots, [2]=block number).
 func gatherRecentForkBattles(
 	t *testing.T,
 	reg *prometheus.Registry,
-) map[string][2]float64 {
+) map[string][3]float64 {
 	t.Helper()
 	families, err := reg.Gather()
 	require.NoError(t, err)
 	participants := map[string]float64{}
 	distinctSlots := map[string]float64{}
+	blockNumbers := map[string]float64{}
 	for _, mf := range families {
 		var dst map[string]float64
 		switch mf.GetName() {
@@ -43,6 +44,8 @@ func gatherRecentForkBattles(
 			dst = participants
 		case recentForkDistinctSlotsMetricName:
 			dst = distinctSlots
+		case recentForkBlockNumberMetricName:
+			dst = blockNumbers
 		default:
 			continue
 		}
@@ -68,7 +71,13 @@ func gatherRecentForkBattles(
 		len(participants),
 		"participants and distinct-slots slots must match",
 	)
-	out := make(map[string][2]float64, len(participants))
+	require.Len(
+		t,
+		blockNumbers,
+		len(participants),
+		"participants and block-number slots must match",
+	)
+	out := make(map[string][3]float64, len(participants))
 	for idx, p := range participants {
 		d, ok := distinctSlots[idx]
 		require.True(
@@ -77,7 +86,9 @@ func gatherRecentForkBattles(
 			"idx %s has participants but no distinct-slots",
 			idx,
 		)
-		out[idx] = [2]float64{p, d}
+		b, ok := blockNumbers[idx]
+		require.True(t, ok, "idx %s has participants but no block number", idx)
+		out[idx] = [3]float64{p, d, b}
 	}
 	return out
 }
@@ -109,6 +120,7 @@ func TestRecentForkBattlesSingleDeliveryIsNotABattle(t *testing.T) {
 	got := gatherRecentForkBattles(t, reg)[idx]
 	assert.Equal(t, 1.0, got[0], "one participant")
 	assert.Equal(t, 1.0, got[1], "one distinct slot")
+	assert.Equal(t, 100.0, got[2], "block number")
 }
 
 // Two different blocks at the same slot (a slot battle) are two participants
@@ -219,40 +231,43 @@ func TestRecentForkBattlesBoundsParticipantCount(t *testing.T) {
 
 // RecordForkBattleParticipants exists so a battle is visible even when the
 // eventual winner never passes through blockfetchClientBlock (a locally
-// forged block); it registers a real, decodable rolled-back block by
-// decoding it to reach the block number/slot/hash recordParticipant needs.
+// forged block). It reads Number/Slot/Hash straight off models.Block rather
+// than decoding, so a rolled-back block registers as a participant even if
+// its stored CBOR were malformed.
 func TestRecordForkBattleParticipantsRegistersRolledBackBlocks(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
-	blockType, raw := conwayBlockFixtureBytes(t)
-	decoded, err := models.Block{Type: blockType, Cbor: raw}.Decode()
-	require.NoError(t, err)
 
-	o.RecordForkBattleParticipants([]models.Block{{Type: blockType, Cbor: raw}})
+	o.RecordForkBattleParticipants([]models.Block{
+		{Number: 100, Slot: 1000, Hash: []byte{0x01}},
+	})
 
-	idx := strconv.FormatUint(
-		decoded.BlockNumber()%recentBlockDelaySlots,
-		10,
-	)
+	idx := strconv.FormatUint(100%recentBlockDelaySlots, 10)
 	got := gatherRecentForkBattles(t, reg)[idx]
 	assert.Equal(t, 1.0, got[0])
 	assert.Equal(t, 1.0, got[1])
+	assert.Equal(t, 100.0, got[2])
 }
 
-// A block that fails to decode never reached the ledger as a real
-// competitor, so it is skipped rather than recorded or causing a panic.
-func TestRecordForkBattleParticipantsSkipsUndecodableBlocks(t *testing.T) {
+// Two rolled-back blocks at the same height with different hashes (e.g. both
+// sides of a battle got rolled back across a deeper reorg) both register.
+func TestRecordForkBattleParticipantsRegistersMultipleRolledBackBlocks(
+	t *testing.T,
+) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
 
-	assert.NotPanics(t, func() {
-		o.RecordForkBattleParticipants(
-			[]models.Block{{Type: 99, Cbor: []byte{0xff, 0xff}}},
-		)
+	o.RecordForkBattleParticipants([]models.Block{
+		{Number: 100, Slot: 1000, Hash: []byte{0x01}},
+		{Number: 100, Slot: 1002, Hash: []byte{0x02}},
 	})
-	assert.Empty(t, gatherRecentForkBattles(t, reg))
+
+	idx := strconv.FormatUint(100%recentBlockDelaySlots, 10)
+	got := gatherRecentForkBattles(t, reg)[idx]
+	assert.Equal(t, 2.0, got[0])
+	assert.Equal(t, 2.0, got[1])
 }
 
 // With metrics disabled (no PromRegistry configured), recentForks is never
@@ -260,11 +275,10 @@ func TestRecordForkBattleParticipantsSkipsUndecodableBlocks(t *testing.T) {
 func TestRecordForkBattleParticipantsNilMetricsSafe(t *testing.T) {
 	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
-	blockType, raw := conwayBlockFixtureBytes(t)
 
 	assert.NotPanics(t, func() {
-		o.RecordForkBattleParticipants(
-			[]models.Block{{Type: blockType, Cbor: raw}},
-		)
+		o.RecordForkBattleParticipants([]models.Block{
+			{Number: 100, Slot: 1000, Hash: []byte{0x01}},
+		})
 	})
 }

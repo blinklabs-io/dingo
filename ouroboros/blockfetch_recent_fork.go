@@ -26,6 +26,7 @@ import (
 const (
 	recentForkParticipantsMetricName  = "dingo_blockfetch_recent_fork_participants"
 	recentForkDistinctSlotsMetricName = "dingo_blockfetch_recent_fork_distinct_slots"
+	recentForkBlockNumberMetricName   = "dingo_blockfetch_recent_fork_block_number"
 
 	// recentForkMaxParticipants bounds memory for a single ring slot. Real
 	// battles rarely exceed a handful of competing blocks; this only guards
@@ -38,13 +39,27 @@ const (
 var (
 	recentForkParticipantsDesc = prometheus.NewDesc(
 		recentForkParticipantsMetricName,
-		"distinct competing blocks observed for the height held in each slot of "+recentBlockDelayMetricName+" (1 = no battle, 2 = an ordinary two-way race, 3+ = an N-way battle); pair with "+recentForkDistinctSlotsMetricName+" by idx to tell a slot battle (all participants share one slot) from a height battle (each has its own slot) from a mix of the two",
+		"distinct competing blocks observed for the height held in each slot of this ring (1 = no battle, 2 = an ordinary two-way race, 3+ = an N-way battle); pair with "+recentForkDistinctSlotsMetricName+" and "+recentForkBlockNumberMetricName+" by idx to tell a slot battle (all participants share one slot) from a height battle (each has its own slot) from a mix of the two. Undercounts by one when the eventual winner is a locally forged block: only fetched arrivals and rolled-back blocks are counted, and a local forge that wins outright is never fetched",
 		[]string{"idx"},
 		nil,
 	)
 	recentForkDistinctSlotsDesc = prometheus.NewDesc(
 		recentForkDistinctSlotsMetricName,
 		"distinct slot numbers among the participants counted in "+recentForkParticipantsMetricName+" for that idx",
+		[]string{"idx"},
+		nil,
+	)
+	// recentForkBlockNumberDesc lets a consumer confirm which height
+	// recentForkParticipantsMetricName/recentForkDistinctSlotsMetricName
+	// describe at a given idx without assuming it matches
+	// recentBlockNumberMetricName from the delay ring: the two rings are
+	// separate collectors updated by different, independently-timed
+	// triggers (this one is not gated on IsAtTip and also sees rolled-back
+	// blocks the delay ring never records), so the same idx can hold
+	// different heights in each at the moment of a scrape.
+	recentForkBlockNumberDesc = prometheus.NewDesc(
+		recentForkBlockNumberMetricName,
+		"block number held in each slot of the ring behind "+recentForkParticipantsMetricName,
 		[]string{"idx"},
 		nil,
 	)
@@ -59,11 +74,13 @@ type recentForkBattle struct {
 
 // recentForkBattles tracks, per ring index (blockNumber % recentBlockDelaySlots,
 // the same indexing recentBlockDelays uses), the set of distinct blocks
-// observed competing for that height -- both the eventual winner and any
-// blocks displaced before it. Unlike a single "pending competitor" scalar,
-// a set handles battles of arbitrary width (multiple pools winning the same
-// slot by VRF chance, or a stacked short fork) without special-casing the
-// common two-way case.
+// observed competing for that height: both blocks fetched at tip and blocks
+// later rolled back. It is a separate collector from recentBlockDelays, so it
+// exports its own block-number gauge rather than relying on a shared idx to
+// mean the same height in both -- see recentForkBlockNumberDesc. Unlike a
+// single "pending competitor" scalar, a set handles battles of arbitrary
+// width (multiple pools winning the same slot by VRF chance, or a stacked
+// short fork) without special-casing the common two-way case.
 type recentForkBattles struct {
 	mu    sync.Mutex
 	slots [recentBlockDelaySlots]recentForkBattle
@@ -108,25 +125,26 @@ func (r *recentForkBattles) recordParticipant(
 	s.slots[slotNumber] = struct{}{}
 }
 
-// RecordForkBattleParticipants registers each rolled-back block as a
-// participant for its own height, so a battle is visible even when the
-// eventual winner is a locally forged block that never passes through
-// blockfetchClientBlock. A block that fails to decode is skipped: it never
-// reached the ledger as a real competitor, so it cannot be identified as
-// one. Safe to call with o.blockfetchMetrics == nil (metrics disabled).
+// RecordForkBattleParticipants registers each rolled-back (displaced,
+// losing) block as a participant for its own height. models.Block already
+// carries Number/Slot/Hash from the chain's own record of it, so no CBOR
+// decode is needed here. Safe to call with o.blockfetchMetrics == nil
+// (metrics disabled).
+//
+// This does not, by itself, count the eventual winner: a winner that was
+// fetched from a peer is separately recorded by blockfetchClientBlock, but a
+// winner that this node forged locally is never fetched and so is never
+// counted here either, undercounting that battle's participants by one. See
+// recentForkParticipantsDesc.
 func (o *Ouroboros) RecordForkBattleParticipants(rolledBack []models.Block) {
 	if o.blockfetchMetrics == nil {
 		return
 	}
 	for _, b := range rolledBack {
-		header, err := b.Decode()
-		if err != nil {
-			continue
-		}
 		o.blockfetchMetrics.recentForks.recordParticipant(
-			header.BlockNumber(),
-			header.SlotNumber(),
-			header.Hash(),
+			b.Number,
+			b.Slot,
+			lcommon.NewBlake2b256(b.Hash),
 		)
 	}
 }
@@ -134,6 +152,7 @@ func (o *Ouroboros) RecordForkBattleParticipants(rolledBack []models.Block) {
 func (r *recentForkBattles) Describe(ch chan<- *prometheus.Desc) {
 	ch <- recentForkParticipantsDesc
 	ch <- recentForkDistinctSlotsDesc
+	ch <- recentForkBlockNumberDesc
 }
 
 func (r *recentForkBattles) Collect(ch chan<- prometheus.Metric) {
@@ -154,6 +173,12 @@ func (r *recentForkBattles) Collect(ch chan<- prometheus.Metric) {
 			recentForkDistinctSlotsDesc,
 			prometheus.GaugeValue,
 			float64(len(s.slots)),
+			idx,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			recentForkBlockNumberDesc,
+			prometheus.GaugeValue,
+			float64(s.blockNumber),
 			idx,
 		)
 	}
