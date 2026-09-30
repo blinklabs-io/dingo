@@ -34,6 +34,9 @@ func (p *PeerGovernor) LoadPeerSnapshot(
 		return 0
 	}
 	relays := PoolRelaysFromPeerSnapshot(snapshot)
+	p.mu.Lock()
+	p.peerSnapshotRelays = relays
+	p.mu.Unlock()
 	added := p.addLedgerRelaysContext(ctx, relays, 0)
 	p.config.Logger.Info(
 		"loaded peer snapshot",

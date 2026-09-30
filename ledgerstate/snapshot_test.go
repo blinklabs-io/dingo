@@ -1327,3 +1327,34 @@ func TestVerifyChecksumFileValid(t *testing.T) {
 	err = VerifyChecksumFile(lstatePath)
 	require.NoError(t, err)
 }
+
+// TestParseSnapshotDataRefusesByronEra pins that a ledger state whose current
+// era is Byron is refused by name. Importing one would start a node inside
+// Byron with no record of the update state that decides its adopted block
+// size limits and fee policy.
+func TestParseSnapshotDataRefusesByronEra(t *testing.T) {
+	t.Parallel()
+	bound := []any{uint64(0), uint64(0), uint64(0)}
+	// ByronLedgerState: [tip block number, chain validation state, transition].
+	byronState := []any{[]any{uint64(5)}, []any{uint64(1)}, uint64(0)}
+	header := []any{[]any{}, []any{}}
+	telescopes := map[string]any{
+		"nested":      []any{uint64(0), []any{bound, byronState}},
+		"flat single": []any{[]any{bound, byronState}},
+	}
+	for name, telescope := range telescopes {
+		for _, utxoHD := range []bool{false, true} {
+			var outer any = []any{telescope, header}
+			if utxoHD {
+				outer = []any{uint64(1), outer}
+			}
+			data, err := cbor.Encode(outer)
+			require.NoError(t, err)
+			_, err = parseSnapshotData(data)
+			require.ErrorIs(
+				t, err, ErrByronSnapshotUnsupported,
+				"%s telescope, UTxO-HD %v", name, utxoHD,
+			)
+		}
+	}
+}

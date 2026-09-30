@@ -3184,6 +3184,17 @@ input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
 pairing the two lists as `zip` does; and a witness's address root is hashed
 over the canonical encoding of the address's decoded attributes.
 
+The Byron update state is not persisted. It is rebuilt by replaying the stored
+chain from its first block, so a restart or a rollback restores the limits and
+fee policy adopted as of the new tip. A stored chain that begins after genesis,
+as with an intersect start inside Byron, cannot know the updates adopted before
+its first block: `State.AdoptedParams` then marks the parameters
+`AdoptionUnknown`, and the Byron block size, transaction size and minimum fee
+rules are not enforced rather than judged against genesis values. Byron
+epoch-boundary blocks keep their fixed size bound. `ledgerstate` refuses a
+snapshot whose current era is Byron (`ErrByronSnapshotUnsupported`), so an
+import cannot start a node inside Byron either.
+
 The Byron start applies to an empty database only. `setEpochCache` returns as
 soon as `epochCache` is populated, which is what keeps an already-synced node
 untouched — and equally what means a database created by an earlier binary keeps
@@ -14875,6 +14886,57 @@ map key 1) removed, translating a resulting `MissingCostModelError{Version:
 1}` into `ErrNoCostModelForPlutusV2` for consistency with the other eras.
 Any other language's missing-cost-model error passes through unchanged,
 since only PlutusV2 is ever fabricated.
+
+### Plutus EvalContext Cache (blinklabs-io/dingo#4229)
+
+`ledger/eras/{alonzo,babbage,conway}.go` built a fresh `cek.EvalContext` (via
+`cek.NewEvalContext`) on every redeemer evaluation, even though its only
+inputs — Plutus language version, protocol major version, the exact
+cost-model parameter list, and whether the PlutusV2 entry is still
+`HardForkBabbage`'s synthetic default — are unchanged for an entire
+protocol-parameter snapshot and usually for many snapshots in a row.
+`eras.PlutusEvalContextCache` (`ledger/eras/plutus_eval_context_cache.go`)
+holds one `*cek.EvalContext` per distinct `(language version, protocol major
+version, cost-model parameter list, synthetic-V2 flag)` key and is consulted
+instead of calling `cek.NewEvalContext` directly at all nine call sites
+across the three era files.
+
+The cache needs no correctness invalidation and has no snapshot-scoped
+lifetime:
+`cek.NewEvalContext` is a pure function of that four-part key (see
+`cek.EvalContext`'s doc comment in `blinklabs-io/plutigo`, which also
+establishes that a built `*cek.EvalContext` is immutable and safe to share
+across any number of goroutines and evaluations), so reusing an entry across
+any two calls that share the full key is always correct regardless of which
+era, transaction, or protocol-parameter snapshot — including the previous
+era's pparams used at an era-boundary transaction — either call came from.
+A governance-enacted cost-model change simply produces a new key rather than
+making the old one wrong, and the key's cost-model component is the
+exact parameter list (never a digest or truncated form), so it can never
+conflate two distinct lists into one entry. plutigo's `costModelFromList`
+costs any parameter missing from a short list at maxBound, so lists that
+differ only in length build different contexts and a lossy key would return
+the wrong one; values past the parameter-name list are ignored, so an exact
+key at worst builds a duplicate context.
+
+Because each cost-model change adds a key and the cache lives as long as the
+ledger state, it is bounded at 16 entries (`plutusEvalContextCacheMaxEntries`)
+and evicts the least recently used entry to admit a new key. Live keys — up
+to three languages for each of the current and previous-era pparams, plus the
+synthetic-V2 variant — fit well under the bound. Eviction drops only the
+cache's reference: an evaluation already holding the evicted
+`*cek.EvalContext` keeps it, and the next lookup for that key rebuilds it.
+
+`*ledger.LedgerState` owns one `*eras.PlutusEvalContextCache` for its whole
+lifetime (`NewLedgerState`, never reassigned), reachable through
+`LedgerState.PlutusEvalContextCache()` and forwarded by
+`LedgerView.PlutusEvalContextCache()` — the same optional-capability pattern
+`MinPoolMarginProvider` and `CommitteeCredentialState` already use: the era
+package declares an exported `eras.PlutusEvalContextCacheProvider` interface
+and type-asserts the `lcommon.LedgerState` it was given, falling back to an
+uncached `cek.NewEvalContext` call (identical to this cache's absence) for
+any implementation — including most unit-test stand-ins — that doesn't
+provide one.
 
 ### Live Restore/Truncate LedgerStateConfig Parity
 

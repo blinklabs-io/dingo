@@ -1443,6 +1443,71 @@ func TestNeverConnectedDropGate_RetainsCurrentClientConnection(t *testing.T) {
 	)
 }
 
+// When no eligible upstream remains, the fail-fast removal of a repeatedly
+// failing non-topology peer must not delete the node's last leads: a deleted
+// peer is never redialed when its deny entry expires, so the known set would
+// stay empty.
+func TestCreateOutboundConnection_RetainsFailingLedgerPeerWhenNoUpstream(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := newReconnectGateTestGovernor(t, 1)
+	target := setupReconnectGateTest(pg, PeerSourceP2PLedger, true, false)
+
+	go pg.createOutboundConnection(target, false)
+
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			return target.ReconnectCount > 1
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"failed dials must exceed the fail-fast threshold",
+	)
+
+	pg.mu.Lock()
+	present := peersContainAddress(pg.peers, deadDialAddress)
+	_, denied := pg.denyList[deadDialAddress]
+	pg.mu.Unlock()
+	assert.True(
+		t,
+		present,
+		"last-lead ledger peer must stay in the known set when no upstream remains",
+	)
+	assert.False(
+		t,
+		denied,
+		"last-lead ledger peer must not be denied when no upstream remains",
+	)
+}
+
+// With another eligible upstream present, the fail-fast removal still applies.
+func TestCreateOutboundConnection_RemovesFailingLedgerPeerWhenUpstreamRemains(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := newReconnectGateTestGovernor(t, 1)
+	target := setupReconnectGateTest(pg, PeerSourceP2PLedger, true, true)
+
+	go pg.createOutboundConnection(target, false)
+
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			_, denied := pg.denyList[deadDialAddress]
+			return !peersContainAddress(pg.peers, deadDialAddress) && denied
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"repeatedly failing ledger peer must be removed while an upstream remains",
+	)
+}
+
 // TestIsRoutableIP pins the routability policy shared by gossip, ledger, and
 // peer-sharing candidates. The accepted cases are as load-bearing as the
 // rejected ones: RFC 5737 and RFC 3849 documentation addresses are rejected,

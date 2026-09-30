@@ -989,6 +989,15 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	// plutusEvalCtxCache holds one *cek.EvalContext per distinct (language
+	// version, protocol major version, cost-model parameter list,
+	// synthetic-V2 flag) combination observed by script evaluation, bounded
+	// with least-recently-used eviction. It is never reset:
+	// cek.NewEvalContext is a pure function of that key, so an entry stays
+	// correct across every epoch/era boundary that does not itself change
+	// the key (see PlutusEvalContextCache's doc comment). Set once in NewLedgerState
+	// and never reassigned; safe for concurrent readers without a lock.
+	plutusEvalCtxCache *eras.PlutusEvalContextCache
 	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
 	// a PlutusV2 cost model (real mainnet/preview/preprod never had one in
 	// genesis -- PlutusV2 postdates the Alonzo genesis format entirely, so
@@ -1683,6 +1692,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		chain:              cfg.ChainManager.PrimaryChain(),
 		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		validationEnabled:  cfg.ValidateHistorical,
+		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
@@ -11676,6 +11686,15 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
+}
+
+// PlutusEvalContextCache returns the shared PlutusEvalContextCache script
+// evaluation reuses across every redeemer, transaction, and block this
+// LedgerState validates or evaluates. Returns nil for a bare-constructed
+// LedgerState that skipped NewLedgerState (test-only); callers must treat a
+// nil cache as "no cache available" rather than dereferencing it.
+func (ls *LedgerState) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
+	return ls.plutusEvalCtxCache
 }
 
 // GetCurrentPParamsForReporting returns the current protocol parameters with

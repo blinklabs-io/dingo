@@ -642,7 +642,7 @@ func byronValidateMaxTxSize(
 	pp lcommon.ProtocolParameters,
 ) error {
 	params, err := byronProtocolParameters(ls, pp)
-	if err != nil || params == nil {
+	if err != nil || params == nil || params.AdoptionUnknown {
 		return err
 	}
 	size := TxSizeForFee(tx)
@@ -662,7 +662,7 @@ func byronValidateMinFee(
 	pp lcommon.ProtocolParameters,
 ) error {
 	params, err := byronProtocolParameters(ls, pp)
-	if err != nil || params == nil {
+	if err != nil || params == nil || params.AdoptionUnknown {
 		return err
 	}
 	consumed, produced, redeemOnly, err := byronBalances(tx, ls)

@@ -571,10 +571,12 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 
 	pg.reconcile(t.Context())
 
+	// A node with no eligible upstream keeps its last known peers (#4664).
 	peers := pg.GetPeers()
-	assert.Len(t, peers, 0)
-
-	// Event publishing is tested indirectly
+	require.Len(t, peers, 1)
+	pg.mu.Lock()
+	assert.NotContains(t, pg.denyList, pg.peers[0].NormalizedAddress)
+	pg.mu.Unlock()
 }
 
 func TestPeerGovernor_Reconcile_RemovalThresholdBoundary(t *testing.T) {
