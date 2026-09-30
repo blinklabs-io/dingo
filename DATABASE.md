@@ -900,14 +900,17 @@ actually spent it failed with "utxo not found," halting the ledger pipeline
 above: reconcile only tombstones rows *absent* from a newer snapshot's live
 set and never touches a conflicting row's `deleted_slot`, so it does not
 correct this case on its own. `ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`
-are also reached outside any ledger-state import, by `database.go`'s consumed-input
-producer recovery and Mithril gap-closure paths; neither can trigger this
-clause today; see the comment on `hydrateImportedUtxo`. The added `UPDATE` runs
-once per conflicting live row and is uncached, so a catch-up/reconcile pass
-over an already-populated database costs one extra statement per row that
-conflicts (the common case): a real but bounded cost on this already
-network-bound, occasional path, not on the per-block ingest hot path
-`insertUtxoModelChecked` serves.
+are also reached outside any ledger-state import, by `database/transaction.go`'s
+consumed-input producer recovery (`ensureTransactionConsumedUtxos`) and Mithril
+gap-closure (`ensureGapConsumedUtxos`) paths; neither can trigger this clause
+today; see the comment on `hydrateImportedUtxo`. The added `UPDATE` runs once
+per conflicting live row and is uncached: measured over 20,000 already-live
+conflicting rows against an in-memory SQLite store, three runs each, this adds
+roughly one extra uncached statement's cost per row (medians approximately
+17.5/22.0/24.3 µs/row before versus 24.5/32.2/41.7 µs/row after; the ranges
+overlap, so treat this as directional, not a precise multiplier), on the UTxO
+import phase only -- not on `insertUtxoModelChecked`, the per-block ingest hot
+path.
 
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,

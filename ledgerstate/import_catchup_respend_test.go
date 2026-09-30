@@ -98,7 +98,11 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
-				UTxOData:            inlineUTxOMap(t, addr, []uint64{5_000_000}),
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{5_000_000},
+				),
 				Epoch:               100,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
@@ -153,12 +157,13 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 			"the post-anchor spend must not survive re-import",
 	)
 
-	// 4. A subsequent real block spends the restored output. Before the fix
-	// this fails, because the row never actually became live again.
+	// 4. A subsequent real block spends the restored output. This must apply
+	// cleanly after the repair (step 3 already fails first without the fix,
+	// so this assertion is never reached on the broken build).
 	require.NoError(t, applySpendingTransaction(
 		t, db, 0x52, utxoTxID, 0, 2_000,
-	), "applying the real block that spends the repaired output must not "+
-		"fail with 'utxo not found'")
+	), "applying the real block that spends the repaired output must "+
+		"apply after the repair")
 
 	spentAfterSecondSpend, err := db.Metadata().GetUtxo(utxoTxID, 0, nil)
 	require.NoError(t, err)
@@ -200,7 +205,11 @@ func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 			Reconcile: reconcile,
 			State: &RawLedgerState{
-				UTxOData:            inlineUTxOMap(t, addr, []uint64{5_000_000}),
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{5_000_000},
+				),
 				CertStateData:       minimalCertStateData(t),
 				GovStateData:        testGovStateData(t, govStateTxHash, 100),
 				Epoch:               100,
@@ -255,11 +264,14 @@ func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 			"the post-anchor spend must not survive re-import",
 	)
 
-	// 4. A subsequent real block spends the restored output.
+	// 4. A subsequent real block spends the restored output. This must apply
+	// cleanly after the reconcile catch-up (step 3 already fails first
+	// without the fix, so this assertion is never reached on the broken
+	// build).
 	require.NoError(t, applySpendingTransaction(
 		t, db, 0x54, utxoTxID, 0, 2_000,
-	), "applying the real block that spends the repaired output must not "+
-		"fail after a reconcile catch-up")
+	), "applying the real block that spends the repaired output must "+
+		"apply after the reconcile catch-up")
 
 	spentAfterSecondSpend, err := db.Metadata().GetUtxo(utxoTxID, 0, nil)
 	require.NoError(t, err)

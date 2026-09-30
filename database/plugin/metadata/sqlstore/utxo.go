@@ -703,13 +703,13 @@ WHERE tx_id = ? AND output_idx = ?
 	// columns SetUtxosNotDeletedAfterSlot's rollback path clears.
 	//
 	// ImportUtxos/ImportUtxosDeferredRewardLiveStakeRefresh (and so this
-	// conflict path) are also reached by database.go's
-	// recoverConsumedTransactionInputUtxos and ensureGapConsumedUtxos, which
+	// conflict path) are also reached by database/transaction.go's
+	// ensureTransactionConsumedUtxos and ensureGapConsumedUtxos, which
 	// recover a missing input's producer row from the blob store rather than
 	// hydrate a certified snapshot. Neither can trigger this clause in
 	// practice: ensureGapConsumedUtxos always sets its own DeletedSlot to the
-	// consuming slot (never 0), and recoverConsumedTransactionInputUtxos only
-	// ever inserts a reference GetUtxoIncludingSpent just confirmed absent, so
+	// consuming slot (never 0), and ensureTransactionConsumedUtxos only ever
+	// inserts a reference GetUtxoIncludingSpent just confirmed absent, so
 	// reaching this ON CONFLICT branch for it would require a concurrent
 	// writer to the same row within one block's write transaction -- which
 	// the single-writer block-apply pipeline does not have today. If that

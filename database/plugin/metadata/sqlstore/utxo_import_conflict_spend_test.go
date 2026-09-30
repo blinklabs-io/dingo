@@ -104,7 +104,11 @@ func TestImportUtxosClearsPostAnchorSpendOnLiveReimport(t *testing.T) {
 	markUtxoSpentDirect(t, store, txID, 0, spender, 150)
 	spentUtxo, err := store.GetUtxo(txID, 0, nil)
 	require.NoError(t, err)
-	require.Nil(t, spentUtxo, "precondition: not live after the post-anchor spend")
+	require.Nil(
+		t,
+		spentUtxo,
+		"precondition: not live after the post-anchor spend",
+	)
 
 	// 3. The catch-up/repair import re-inserts the snapshot's live UTxO set.
 	// This output is in it: the snapshot says it is live at the anchor
