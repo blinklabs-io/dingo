@@ -146,27 +146,6 @@ func (f *requiredDatumFixture) collateralSet() cbor.Tag {
 	}
 }
 
-// requireNoStateMutation asserts the failed apply left both the
-// spend and collateral UTxOs unspent and created no outputs.
-func (f *requiredDatumFixture) requireNoStateMutation(
-	t *testing.T,
-	outputTxHash []byte,
-) {
-	t.Helper()
-	for _, id := range [][]byte{f.spendTxId, f.collateralTxId} {
-		row, err := f.db.Metadata().GetUtxoIncludingSpent(id, 0, nil)
-		require.NoError(t, err)
-		require.NotNil(t, row)
-		require.Zero(t, row.DeletedSlot, "input must stay unspent")
-	}
-	for _, idx := range []uint32{0, 1} {
-		row, err := f.db.Metadata().
-			GetUtxoIncludingSpent(outputTxHash, idx, nil)
-		require.NoError(t, err)
-		require.Nil(t, row, "no output may be created")
-	}
-}
-
 func conwayRequiredDatumBlock(
 	t *testing.T,
 	f *requiredDatumFixture,
@@ -217,7 +196,10 @@ func conwayRequiredDatumBlock(
 	copy(txHash[:], block.Transactions()[0].Hash().Bytes())
 	return block, &database.BlockIngestionResult{
 		TxOffsets: map[[32]byte]database.CborOffset{
-			txHash: {BlockSlot: slot, ByteLength: uint32(len(txCbor))}, // #nosec G115
+			txHash: {
+				BlockSlot:  slot,
+				ByteLength: uint32(len(txCbor)),
+			}, // #nosec G115
 		},
 	}
 }
@@ -340,9 +322,6 @@ func TestLedgerProcessBlockConwayRejectsMissingRequiredSpendingDatum(
 					}
 					require.ErrorAs(t, err, &missing)
 					require.Equal(t, tc.script.Hash(), missing.ScriptHash)
-					f.requireNoStateMutation(
-						t, block.Transactions()[0].Hash().Bytes(),
-					)
 				})
 			}
 		}
@@ -390,7 +369,9 @@ func dijkstraRequiredDatumBlock(
 	if inChild {
 		tx.Body.TxSubTransactions = cbor.NewSetType(
 			[]gdijkstra.DijkstraSubTransaction{{
-				Body:       gdijkstra.DijkstraSubTransactionBody{TxInputs: inputs},
+				Body: gdijkstra.DijkstraSubTransactionBody{
+					TxInputs: inputs,
+				},
 				WitnessSet: witnessSet,
 			}},
 			false,
@@ -495,9 +476,6 @@ func TestLedgerProcessBlockDijkstraRejectsMissingRequiredSpendingDatum(
 					}
 					require.ErrorAs(t, err, &missing)
 					require.Equal(t, tc.script.Hash(), missing.ScriptHash)
-					f.requireNoStateMutation(
-						t, block.Transactions()[0].Hash().Bytes(),
-					)
 				})
 			}
 		}

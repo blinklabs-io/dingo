@@ -99,7 +99,10 @@ func blockV3CertificateBlock(
 	copy(txHash[:], block.Transactions()[0].Hash().Bytes())
 	return block, &database.BlockIngestionResult{
 		TxOffsets: map[[32]byte]database.CborOffset{
-			txHash: {BlockSlot: slot, ByteLength: uint32(len(txCbor))}, // #nosec G115
+			txHash: {
+				BlockSlot:  slot,
+				ByteLength: uint32(len(txCbor)),
+			}, // #nosec G115
 		},
 	}
 }
@@ -107,9 +110,12 @@ func blockV3CertificateBlock(
 // TestLedgerProcessBlockConwayV3TxInfoFollowsBlockProtocolVersion applies a
 // block whose only transaction carries a Plutus V3 script that serialises the
 // explicit deposit or refund option from its own certificate. The protocol
-// version handed to block application decides whether that option is Nothing
-// (PV9) or Just the amount (PV10 and later). Live apply and replay share the
-// same call, differing only in the reachesTip argument.
+// parameters handed to block application decide whether that option is
+// Nothing (PV9) or Just the amount (PV10 and later). A block header may
+// announce the next major version before the ledger adopts it, so each case
+// also runs with a header one major ahead, and the answer must not move. Live
+// apply and replay share the same call, differing only in the reachesTip
+// argument.
 //
 // The era validator is replaced by a wrapper that records the protocol
 // parameters block application supplied and runs the real Conway evaluation
@@ -182,86 +188,102 @@ func TestLedgerProcessBlockConwayV3TxInfoFollowsBlockProtocolVersion(
 				lcommon.ProtocolVersionPlomin,
 				lcommon.ProtocolVersionVanRossem,
 			} {
-				for _, reachesTip := range []bool{false, true} {
-					name := fmt.Sprintf(
-						"%s/%s/PV%d",
-						certificateCase.name,
-						scriptExpectation.name,
-						major,
-					)
-					if reachesTip {
-						name += "/live"
-					} else {
-						name += "/replay"
-					}
-					t.Run(name, func(t *testing.T) {
-						t.Parallel()
-						plutusScript := lcommon.PlutusV3Script(
-							blockV3StakeAmountObserver(
-								t, scriptExpectation.option,
-							),
+				for _, headerMajor := range []uint{major, major + 1} {
+					for _, reachesTip := range []bool{false, true} {
+						name := fmt.Sprintf(
+							"%s/%s/PV%d/header%d",
+							certificateCase.name,
+							scriptExpectation.name,
+							major,
+							headerMajor,
 						)
-						certificate := certificateCase.certificate(
-							lcommon.Credential{
-								CredType:   lcommon.CredentialTypeScriptHash,
-								Credential: plutusScript.Hash(),
-							},
-						)
-						const slot = uint64(10)
-						block, offsets := blockV3CertificateBlock(
-							t, plutusScript, certificate, major, slot,
-						)
-						pparams := &conway.ConwayProtocolParameters{
-							ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-								Major: major,
-							},
-							CostModels: map[uint][]int64{
-								2: blockV3MachineCostModel(
-									t, lang.LanguageVersionV3,
+						if reachesTip {
+							name += "/live"
+						} else {
+							name += "/replay"
+						}
+						t.Run(name, func(t *testing.T) {
+							t.Parallel()
+							plutusScript := lcommon.PlutusV3Script(
+								blockV3StakeAmountObserver(
+									t, scriptExpectation.option,
 								),
-							},
-							MaxBlockBodySize:   100_000,
-							MaxBlockHeaderSize: 100_000,
-							MaxTxExUnits: lcommon.ExUnits{
-								Memory: 10_000_000, Steps: 100_000_000,
-							},
-							MaxBlockExUnits: lcommon.ExUnits{
-								Memory: 50_000_000, Steps: 500_000_000,
-							},
-						}
-						var gotMajor uint
-						called := false
-						testEra := eras.ConwayEraDesc
-						testEra.ValidateTxFunc = func(
-							tx lcommon.Transaction,
-							_ uint64,
-							view lcommon.LedgerState,
-							pp lcommon.ProtocolParameters,
-						) error {
-							called = true
-							conwayPP, ok := pp.(*conway.ConwayProtocolParameters)
-							require.True(t, ok)
-							gotMajor = conwayPP.ProtocolVersion.Major
-							_, _, _, err := eras.EvaluateTxConway(tx, view, pp)
-							if err != nil {
-								return err
+							)
+							certificate := certificateCase.certificate(
+								lcommon.Credential{
+									CredType:   lcommon.CredentialTypeScriptHash,
+									Credential: plutusScript.Hash(),
+								},
+							)
+							const slot = uint64(10)
+							block, offsets := blockV3CertificateBlock(
+								t, plutusScript, certificate, headerMajor, slot,
+							)
+							pparams := &conway.ConwayProtocolParameters{
+								ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+									Major: major,
+								},
+								CostModels: map[uint][]int64{
+									2: blockV3MachineCostModel(
+										t, lang.LanguageVersionV3,
+									),
+								},
+								MaxBlockBodySize:   100_000,
+								MaxBlockHeaderSize: 100_000,
+								MaxTxExUnits: lcommon.ExUnits{
+									Memory: 10_000_000, Steps: 100_000_000,
+								},
+								MaxBlockExUnits: lcommon.ExUnits{
+									Memory: 50_000_000, Steps: 500_000_000,
+								},
 							}
-							return errBlockTxInfoEvaluated
-						}
-						ls := newRequiredDatumLedger(t, newTestDB(t), testEra)
-						err := applyRequiredDatumBlock(
-							ls, block, slot, reachesTip, offsets,
-							testEra, pparams,
-						)
-						require.True(t, called, "validator not reached: %v", err)
-						require.Equal(t, major, gotMajor)
-						if scriptExpectation.passesAt(major) {
-							require.ErrorIs(t, err, errBlockTxInfoEvaluated)
-							return
-						}
-						require.Error(t, err)
-						require.NotErrorIs(t, err, errBlockTxInfoEvaluated)
-					})
+							var gotMajor uint
+							called := false
+							testEra := eras.ConwayEraDesc
+							testEra.ValidateTxFunc = func(
+								tx lcommon.Transaction,
+								_ uint64,
+								view lcommon.LedgerState,
+								pp lcommon.ProtocolParameters,
+							) error {
+								called = true
+								conwayPP, ok := pp.(*conway.ConwayProtocolParameters)
+								require.True(t, ok)
+								gotMajor = conwayPP.ProtocolVersion.Major
+								_, _, _, err := eras.EvaluateTxConway(
+									tx,
+									view,
+									pp,
+								)
+								if err != nil {
+									return err
+								}
+								return errBlockTxInfoEvaluated
+							}
+							ls := newRequiredDatumLedger(
+								t,
+								newTestDB(t),
+								testEra,
+							)
+							err := applyRequiredDatumBlock(
+								ls, block, slot, reachesTip, offsets,
+								testEra, pparams,
+							)
+							require.True(
+								t,
+								called,
+								"validator not reached: %v",
+								err,
+							)
+							require.Equal(t, major, gotMajor)
+							if scriptExpectation.passesAt(major) {
+								require.ErrorIs(t, err, errBlockTxInfoEvaluated)
+								return
+							}
+							require.Error(t, err)
+							require.NotErrorIs(t, err, errBlockTxInfoEvaluated)
+						})
+					}
 				}
 			}
 		}
@@ -286,12 +308,11 @@ var blockMachineCostMachineCosts = map[string][2]int64{
 // machine-step parameter, and a placeholder for every builtin-function cost
 // parameter. A test whose script never invokes an actual Plutus builtin
 // function (only constants/lambdas/application, no e.g. addInteger) gets
-// the exact same evaluated cost plutigo's empty-cost-model fallback used to
-// silently produce -- matching known-good, externally-verified reference
-// numbers -- while still supplying requiredCostModel a complete,
-// non-fallback-triggering list. A script that does invoke a builtin
-// function needs its own model with real values for that builtin, since
-// this helper's builtin-cost entries are placeholders.
+// the same evaluated cost as plutigo's default machine costs, while
+// requiredCostModel still receives a complete list. A script that invokes a
+// builtin function needs real values for that builtin, since the
+// builtin-cost entries here are placeholders. The machine costs are copied
+// from the ledger/eras tests and must track plutigo's DefaultMachineCosts.
 func blockV3MachineCostModel(
 	t testing.TB,
 	version lang.LanguageVersion,
