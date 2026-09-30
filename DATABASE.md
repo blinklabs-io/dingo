@@ -881,6 +881,34 @@ the `metadata.MetadataStore` methods
 `RetirePools` plus the existing
 `IterateLiveUtxos` / `MarkUtxosDeletedAtSlot`. Live-state rows are never deleted.
 
+The UTxO import itself (`ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`,
+used by every ledger-state import including this reconcile pass and the legacy
+reward-state repair) inserts with `ON CONFLICT (tx_id, output_idx) DO NOTHING`,
+since a catch-up or repair import routinely re-declares an output the local
+database already has a row for. On conflict, `hydrateImportedUtxo` also clears
+`deleted_slot`/`spent_at_tx_id` for that exact `(tx_id, output_idx)` reference
+whenever the incoming row itself declares the output live (`DeletedSlot == 0`).
+This is scoped to the conflicting row only, never a table-wide unspend: an
+output the snapshot declares live could only have been spent locally *after*
+its anchor, because a row genuinely spent at or before the anchor would not
+appear in the snapshot's live set to conflict with in the first place. Before
+this, a local chain that spent such an output after bootstrapping from an
+earlier anchor kept the row marked spent forever across a later catch-up or
+repair re-import of that same output as live, and the first later block that
+actually spent it failed with "utxo not found," halting the ledger pipeline
+(dingo#4770). This is independent of, and narrower than, the reconcile pass
+above: reconcile only tombstones rows *absent* from a newer snapshot's live
+set and never touches a conflicting row's `deleted_slot`, so it does not
+correct this case on its own. `ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`
+are also reached outside any ledger-state import, by `database.go`'s consumed-input
+producer recovery and Mithril gap-closure paths; neither can trigger this
+clause today; see the comment on `hydrateImportedUtxo`. The added `UPDATE` runs
+once per conflicting live row and is uncached, so a catch-up/reconcile pass
+over an already-populated database costs one extra statement per row that
+conflicts (the common case): a real but bounded cost on this already
+network-bound, occasional path, not on the per-block ingest hot path
+`insertUtxoModelChecked` serves.
+
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
 `BlobPlugin`, and `MetadataPlugin`, alongside the pre-existing `StorageMode`
