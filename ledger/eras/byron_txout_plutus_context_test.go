@@ -29,7 +29,8 @@ import (
 // TestByronTxOutInPlutusContext pins the per-era treatment of a Byron TxOut
 // in a Plutus script context through the production validators. Alonzo drops
 // a Byron input or output from a V1 TxInfo. Babbage and Conway reject it for
-// every language version with ByronTxOutInContext, and that context error
+// every language version with ByronTxOutInContext, including a Byron
+// reference input that the Conway V1 translation never places in the context, and that context error
 // must surface for an invalid transaction too rather than count as an
 // expected phase-2 failure.
 // Not t.Parallel: this test temporarily replaces package-level rule slices.
@@ -116,7 +117,11 @@ func TestByronTxOutInPlutusContext(t *testing.T) {
 
 	for _, v := range validators {
 		for _, version := range v.versions {
-			for _, placement := range []string{"input", "output"} {
+			for _, placement := range []string{"input", "reference", "output"} {
+				// Reference inputs do not exist in Alonzo.
+				if placement == "reference" && v.era == "Alonzo" {
+					continue
+				}
 				for _, valid := range []bool{true, false} {
 					name := v.era + "/" + fmt.Sprintf("V%d", modelIndex[version]+1) + "/" + placement
 					if !valid {
@@ -141,6 +146,11 @@ func TestByronTxOutInPlutusContext(t *testing.T) {
 							spent = newTestOutputWithAddress(10_000_000, byronAddr)
 						}
 						ls.addUtxo(input, spent)
+						if placement == "reference" {
+							refInput := newTestInput(0xf2, 0)
+							tx.referenceInputs = []lcommon.TransactionInput{refInput}
+							ls.addUtxo(refInput, newTestOutputWithAddress(10_000_000, byronAddr))
+						}
 
 						if v.era == "Alonzo" {
 							// The Alonzo validator reads each redeemer's

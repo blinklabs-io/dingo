@@ -1145,25 +1145,17 @@ var errByronTxOutInV1Context = errors.New(
 	"cannot represent a Byron TxOut in Plutus context",
 )
 
-// rejectByronTxOutsForV1 returns an error when a spent input or an output of
-// tx carries a Byron address. Only spent inputs are checked: a reference
-// input never appears in a V1 context.
+// rejectByronTxOutsForV1 returns an error when a resolved input or an output
+// of tx carries a Byron address. resolvedInputs holds the spent and reference
+// inputs: the Conway V1 translation omits reference inputs from the context
+// but still translates each one, so a Byron reference input is rejected too.
 func rejectByronTxOutsForV1(
 	tx lcommon.Transaction,
 	resolvedInputs []lcommon.Utxo,
 ) error {
-	spent := make(map[string]struct{}, len(tx.Inputs()))
-	for _, in := range tx.Inputs() {
-		spent[fmt.Sprintf("%s#%d", in.Id(), in.Index())] = struct{}{}
-	}
 	for _, utxo := range resolvedInputs {
-		if utxo.Output == nil || utxo.Id == nil {
-			continue
-		}
-		if _, ok := spent[fmt.Sprintf("%s#%d", utxo.Id.Id(), utxo.Id.Index())]; !ok {
-			continue
-		}
-		if utxo.Output.Address().Type() == lcommon.AddressTypeByron {
+		if utxo.Output != nil &&
+			utxo.Output.Address().Type() == lcommon.AddressTypeByron {
 			return errByronTxOutInV1Context
 		}
 	}
