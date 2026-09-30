@@ -339,6 +339,25 @@ func bootstrapV2(
 			}
 			if ancErr != nil {
 				ancillaryErr = ancErr
+				// A fully downloaded archive that failed extraction or
+				// verification is removed here because no result is
+				// returned for Cleanup to act on. Left in place, the next
+				// run's resume request is answered 416 with a matching
+				// total and the same bad archive is accepted again. A
+				// failed download keeps its partial file so it can resume.
+				var dlErr *ancillaryDownloadError
+				if archPath != "" && !errors.As(ancErr, &dlErr) {
+					if err := os.Remove(archPath); err != nil &&
+						!errors.Is(err, os.ErrNotExist) {
+						cfg.Logger.Warn(
+							"failed to remove bad ancillary archive",
+							"component", "mithril",
+							"path", archPath,
+							"error", err,
+						)
+					}
+					ancillaryArchivePath = ""
+				}
 				return
 			}
 			// The handle the manifest was checked through, carried straight
@@ -710,7 +729,7 @@ func downloadDigestsArchive(
 	uri string,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) ([]CardanoDatabaseDigestEntry, error) {
+) (_ []CardanoDatabaseDigestEntry, retErr error) {
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
 			MaxBytes: cfg.DownloadMaxBytes,
@@ -735,6 +754,14 @@ func downloadDigestsArchive(
 	if err != nil {
 		return nil, err
 	}
+	// Once the archive is fully downloaded, any failure to use it discards
+	// it: a cached file of the right size is otherwise accepted again by the
+	// resume request's 416 answer.
+	defer func() {
+		if retErr != nil {
+			removeDigestsCache(artifact, downloadDir)
+		}
+	}()
 	destDir := filepath.Join(
 		downloadDir,
 		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
@@ -1397,6 +1424,16 @@ func sha256Reader(r io.Reader, name string) (string, int64, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
+// ancillaryDownloadError marks a failure to fetch the ancillary archive, as
+// opposed to a failure to use a complete one.
+type ancillaryDownloadError struct{ err error }
+
+func (e *ancillaryDownloadError) Error() string {
+	return "downloading ancillary archive: " + e.err.Error()
+}
+
+func (e *ancillaryDownloadError) Unwrap() error { return e.err }
+
 // downloadAncillaryV2 downloads and extracts the v2 ancillary archive
 // (ledger state plus the next in-progress immutable trio) and, when
 // certificate verification is enabled, verifies the signed ancillary
@@ -1487,10 +1524,7 @@ func downloadAncillaryV2(
 			DestDir:  downloadDir,
 			Filename: ancillaryFilename,
 		})
-		return nil, nil, dest, fmt.Errorf(
-			"downloading ancillary archive: %w",
-			err,
-		)
+		return nil, nil, dest, &ancillaryDownloadError{err: err}
 	}
 
 	ancillaryDir := filepath.Join(

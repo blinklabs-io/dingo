@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -275,6 +276,10 @@ type v2FixtureOptions struct {
 	missingAncillary     bool
 	validImmutable       bool
 	fallbackLedgerState  bool
+	// ancillaryHonorsRange serves the ancillary archive with Range support,
+	// so resuming a fully cached file yields 416 with the total size, the way
+	// object storage does.
+	ancillaryHonorsRange bool
 }
 
 type v2Fixture struct {
@@ -296,6 +301,8 @@ type v2Fixture struct {
 	ancillaryVKey        string
 	genesisVKey          string
 	immutableHits        atomic.Int32
+	// ancillaryServed, when set, replaces ancillaryArchive on the wire.
+	ancillaryServed atomic.Pointer[[]byte]
 }
 
 // newV2Fixture fabricates a complete, internally-consistent v2 mock
@@ -609,7 +616,18 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				}
 				_, _ = w.Write(fixture.digestArchive)
 			case p == "/files/ancillary.tar.zst":
-				_, _ = w.Write(fixture.ancillaryArchive)
+				body := fixture.ancillaryArchive
+				if served := fixture.ancillaryServed.Load(); served != nil {
+					body = *served
+				}
+				if opts.ancillaryHonorsRange {
+					http.ServeContent(
+						w, r, "ancillary.tar.zst", time.Time{},
+						bytes.NewReader(body),
+					)
+					return
+				}
+				_, _ = w.Write(body)
 			case strings.HasPrefix(p, "/files/imm-bad/"):
 				name := strings.TrimSuffix(
 					strings.TrimPrefix(p, "/files/imm-bad/"),
@@ -1705,4 +1723,70 @@ func TestBootstrapV2CarriesTheVerifiedAncillaryHandle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, got,
 		"AncillaryVerified must describe the tree the handle refers to")
+}
+
+// A corrupt ancillary archive left in the download directory must not be
+// re-accepted on the next run: the resume request for a file whose size
+// equals the server's total returns 416, which is indistinguishable from a
+// complete download when no expected size is configured.
+func TestBootstrapV2RedownloadsAfterCorruptAncillaryArchive(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber:  1,
+		ancillaryHonorsRange: true,
+	})
+	corrupt := bytes.Repeat([]byte{'x'}, len(fixture.ancillaryArchive))
+	fixture.ancillaryServed.Store(&corrupt)
+	downloadDir := t.TempDir()
+	cfg := fixture.bootstrapConfig(downloadDir)
+	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, err := Bootstrap(context.Background(), cfg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "extracting ancillary archive")
+
+	fixture.ancillaryServed.Store(nil)
+	result, err := Bootstrap(context.Background(), cfg)
+	require.NoError(t, err)
+	defer result.Cleanup(cfg.Logger)
+	assert.NotEmpty(t, result.AncillaryDir)
+}
+
+// A cached digests archive that fails extraction must be removed, or the
+// next attempt's resume request is answered 416 with a matching total and
+// the same bad archive is accepted again.
+func TestDownloadDigestsArchiveDiscardsCorruptCache(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	var served atomic.Pointer[[]byte]
+	corrupt := bytes.Repeat([]byte{'x'}, len(fixture.digestArchive))
+	served.Store(&corrupt)
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.ServeContent(
+				w, r, "digests.tar.zst", time.Time{},
+				bytes.NewReader(*served.Load()),
+			)
+		},
+	))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := BootstrapConfig{
+		AllowInsecureHTTP: true,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	_, err := downloadDigestsArchive(
+		context.Background(), cfg, srv.URL, fixture.artifact, dir,
+	)
+	require.ErrorContains(t, err, "extracting digests archive")
+
+	served.Store(&fixture.digestArchive)
+	entries, err := downloadDigestsArchive(
+		context.Background(), cfg, srv.URL, fixture.artifact, dir,
+	)
+	require.NoError(t, err)
+	assert.NotEmpty(t, entries)
 }
