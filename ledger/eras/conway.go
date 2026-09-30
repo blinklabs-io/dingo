@@ -1217,13 +1217,15 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
-		evalContext, err := cek.NewEvalContext(
+		evalContext, err := plutusEvalContext(
+			txInfos.ls,
 			lang.LanguageVersionV3,
 			cek.ProtoVersion{
 				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
+			false,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1263,13 +1265,15 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
-		evalContext, err := cek.NewEvalContext(
+		evalContext, err := plutusEvalContext(
+			txInfos.ls,
 			lang.LanguageVersionV2,
 			cek.ProtoVersion{
 				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
+			syntheticV2CostModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1301,13 +1305,15 @@ func evaluateConwayPlutusScript(
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
-		evalContext, err := cek.NewEvalContext(
+		evalContext, err := plutusEvalContext(
+			txInfos.ls,
 			lang.LanguageVersionV1,
 			cek.ProtoVersion{
 				Major: protocolMajorVersion(pp),
 				Minor: pp.ProtocolVersion.Minor,
 			},
 			costModel,
+			false,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)

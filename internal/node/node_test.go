@@ -653,17 +653,7 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	// found while writing this test and deliberately not fixed in the same
 	// commit as that unrelated fix; dingo#4600 tracks all three. Remove an
 	// entry here once its fix lands, so this test starts asserting it.
-	knownGaps := map[string]string{
-		"MaxNtCConns": "dingo.WithMaxNtCConns exists but buildDingoConfig " +
-			"never calls it, so --max-ntc-conns is silently ignored",
-		"MaxNtCConnectionsPerIP": "dingo.WithMaxNtCConnectionsPerIP exists " +
-			"but buildDingoConfig never calls it, so " +
-			"--max-ntc-connections-per-ip is silently ignored",
-		"SkipRewardLiveStakeBackfillCheck": "no With... option exists at " +
-			"all for this field, and buildDingoConfig has no call to set " +
-			"it, so --skip-reward-live-stake-backfill-check is silently " +
-			"ignored on the serve path despite being consumed by node.go",
-	}
+	knownGaps := map[string]string{}
 	// excluded are cfg fields resolved through a separate buildDingoConfig
 	// parameter, or otherwise not part of the direct cfg-to-dingo.Config
 	// passthrough this test checks; see the function doc comment.

@@ -100,6 +100,17 @@ func (s *Store) GetActiveGovernanceProposals(
 	)
 }
 
+func (s *Store) GetGovernanceProposalSet(
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"enacted_epoch IS NULL AND dropped_epoch IS NULL "+
+			"AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+	)
+}
+
 func (s *Store) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn types.Txn,

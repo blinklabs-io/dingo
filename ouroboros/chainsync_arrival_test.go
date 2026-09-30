@@ -159,7 +159,7 @@ func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 	var releaseOnce sync.Once
 	release := func() {
 		releaseOnce.Do(func() {
-			o.headerDecodeCache.finishDecode(key, header, nil)
+			o.headerDecodeCache.finishDecodeSized(key, 0, header, nil)
 		})
 	}
 	defer release()

@@ -86,7 +86,7 @@ func BenchmarkBlockDecodeCacheAllDuplicate(b *testing.B) {
 		// once outside the loop would omit that per-delivery cost from the
 		// reported numbers.
 		key := hashDecodeInput(blockType, raw)
-		if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
+		if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}
 	}
@@ -114,7 +114,7 @@ func BenchmarkBlockDecodeCacheAllUnique(b *testing.B) {
 		key[0] ^= byte(i)
 		key[1] ^= byte(i >> 8)
 		key[2] ^= byte(i >> 16)
-		if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
+		if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}
 	}
@@ -166,7 +166,7 @@ func BenchmarkBlockDecodeConcurrentCacheAllUnique(b *testing.B) {
 			key[1] ^= byte(n >> 8)
 			key[2] ^= byte(n >> 16)
 			key[3] ^= byte(n >> 24)
-			if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
+			if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
 				b.Errorf("decode: %v", err)
 			}
 		}
@@ -201,7 +201,7 @@ func BenchmarkHeaderDecodeCacheAllDuplicate(b *testing.B) {
 	for range b.N {
 		// Hash inside the timed loop -- see BenchmarkBlockDecodeCacheAllDuplicate.
 		key := hashDecodeInput(headerType, raw)
-		if _, err, _ := o.headerDecodeCache.getOrDecode(key, decodeFn); err != nil {
+		if _, err, _ := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}
 	}
@@ -220,7 +220,7 @@ func BenchmarkHeaderDecodeCacheAllUnique(b *testing.B) {
 		key[0] ^= byte(i)
 		key[1] ^= byte(i >> 8)
 		key[2] ^= byte(i >> 16)
-		if _, err, _ := o.headerDecodeCache.getOrDecode(key, decodeFn); err != nil {
+		if _, err, _ := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}
 	}
@@ -260,7 +260,7 @@ func BenchmarkHeaderDecodeConcurrentCacheAllUnique(b *testing.B) {
 			key[1] ^= byte(n >> 8)
 			key[2] ^= byte(n >> 16)
 			key[3] ^= byte(n >> 24)
-			if _, err, _ := o.headerDecodeCache.getOrDecode(key, decodeFn); err != nil {
+			if _, err, _ := o.headerDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
 				b.Errorf("decode: %v", err)
 			}
 		}
@@ -300,7 +300,7 @@ func BenchmarkBlockDecodeCacheMixedRatio(b *testing.B) {
 	b.ResetTimer()
 	for i := range b.N {
 		key := hashDecodeInput(blockType, rawVariants[i%distinctInputs])
-		if _, err, _ := o.blockDecodeCache.getOrDecode(key, decodeFn); err != nil {
+		if _, err, _ := o.blockDecodeCache.getOrDecodeSizedWithErrorRetention(key, 0, true, decodeFn); err != nil {
 			b.Fatalf("decode: %v", err)
 		}
 	}

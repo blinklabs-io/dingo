@@ -22,6 +22,16 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+type listenerWithAddress struct {
+	addr net.Addr
+}
+
+func (l *listenerWithAddress) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+
+func (l *listenerWithAddress) Close() error { return nil }
+
+func (l *listenerWithAddress) Addr() net.Addr { return l.addr }
+
 // TestIsTrustedNtCListener is the blinklabs-io/dingo#4183 review regression:
 // ConfigureListeners used to grant every UseNtC listener gouroboros' relaxed
 // mux/query timeouts and 2GiB reassembly buffer unconditionally, on the
@@ -98,6 +108,36 @@ func TestIsTrustedNtCListener(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "supplied non-loopback listener overrides loopback ListenAddress",
+			l: connmanager.ListenerConfig{
+				Listener: &listenerWithAddress{
+					addr: &net.TCPAddr{
+						IP:   net.ParseIP("192.0.2.10"),
+						Port: 3002,
+					},
+				},
+				ListenNetwork: "tcp",
+				ListenAddress: "127.0.0.1:3002",
+				UseNtC:        true,
+			},
+			want: false,
+		},
+		{
+			name: "supplied loopback listener overrides routable ListenAddress",
+			l: connmanager.ListenerConfig{
+				Listener: &listenerWithAddress{
+					addr: &net.TCPAddr{
+						IP:   net.ParseIP("127.0.0.1"),
+						Port: 3002,
+					},
+				},
+				ListenNetwork: "tcp",
+				ListenAddress: "192.0.2.10:3002",
+				UseNtC:        true,
+			},
+			want: true,
+		},
+		{
 			name: "unparseable tcp address is not trusted",
 			l: connmanager.ListenerConfig{
 				ListenNetwork: "tcp",
@@ -158,6 +198,26 @@ func TestConfigureListeners_UntrustedNtCListenerSkipsRelaxedTimeout(
 			"ConnectionOpts entry than a trusted one -- the omitted "+
 			"WithMuxerSegmentReadTimeout(0)",
 	)
+}
+
+func TestConfigureListenersClassifiesSuppliedListenerByBoundAddress(t *testing.T) {
+	t.Parallel()
+
+	o := &Ouroboros{config: OuroborosConfig{}}
+	configured := o.ConfigureListeners([]connmanager.ListenerConfig{{
+		Listener: &listenerWithAddress{
+			addr: &net.TCPAddr{
+				IP:   net.ParseIP("192.0.2.10"),
+				Port: 3002,
+			},
+		},
+		ListenNetwork: "tcp",
+		ListenAddress: "127.0.0.1:3002",
+		UseNtC:        true,
+	}})
+
+	assert.Len(t, configured, 1)
+	assert.False(t, configured[0].TrustedLocal)
 }
 
 // TestConfigureListeners_NormalizesTCPListenAddressToNumeric is the

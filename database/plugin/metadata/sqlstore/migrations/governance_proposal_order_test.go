@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGovernanceProposalOrderBackfillUsesStoredBlockPosition covers the v30
+// TestGovernanceProposalOrderBackfillUsesStoredBlockPosition covers the v32
 // upgrade: a proposal whose transaction is stored takes that transaction's
 // block position, and one without a stored transaction (a Mithril-imported
 // proposal) gets no row, so it keeps the transaction-hash order it had
@@ -38,7 +38,7 @@ func TestGovernanceProposalOrderBackfillUsesStoredBlockPosition(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 30)
+	require.Len(t, registry, 32)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -51,7 +51,7 @@ func TestGovernanceProposalOrderBackfillUsesStoredBlockPosition(
 		require.NoError(t, runner.Run(context.Background()))
 	}
 
-	runTo(registry[:29])
+	runTo(registry[:31])
 	storedHash := []byte{0x02, 0x02}
 	importedHash := []byte{0x01, 0x01}
 	_, err = db.Exec(

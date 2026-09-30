@@ -343,7 +343,7 @@ func TestEvaluateTxConwayRejectsPlutusV2WhenSynthetic(t *testing.T) {
 }
 
 // TestValidateTxConwayRejectsPlutusV2WhenSyntheticEvenIfDeclaredInvalid
-// covers a gap CodeRabbit flagged in review: validatePlutusOutcome
+// verifies that validatePlutusOutcome
 // (ledger/eras/validation.go) treats a failed script as the expected,
 // acceptable outcome for a transaction declared invalid -- but only when
 // the phase-2 error is a conway.PlutusScriptFailedError specifically.
@@ -518,9 +518,10 @@ func TestValidateTxDijkstraAllowsNonPlutusV2TxWhenSynthetic(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSubTransaction covers a
-// Cubic finding on blinklabs-io/dingo#3962's PR: the earlier Dijkstra tests
-// all used a *mockConwayFeeTx (not a concrete *gdijkstra.DijkstraTransaction),
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSubTransaction verifies
+// the concrete Dijkstra transaction path, in addition to the mock path used
+// by other tests. The earlier Dijkstra tests all used a *mockConwayFeeTx (not
+// a concrete *gdijkstra.DijkstraTransaction),
 // which takes usedPlutusVersions' plain witness-set-scan fallback rather
 // than the dijkstraScriptLevels resolution a real Dijkstra transaction
 // actually goes through -- leaving the sub-transaction and reference-script

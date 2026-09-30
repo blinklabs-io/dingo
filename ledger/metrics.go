@@ -87,6 +87,11 @@ type stateMetrics struct {
 	// "where does per-block processing time go", which no existing
 	// histogram covers end to end.
 	blockStageDuration *prometheus.HistogramVec
+	// epochRolloverDuration is the whole processEpochRollover transaction
+	// body, and epochRolloverPhaseDuration each of its named phases; see
+	// timeRolloverPhase.
+	epochRolloverDuration      prometheus.Histogram
+	epochRolloverPhaseDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
 	blockStageHeaderVerify  prometheus.Observer
@@ -287,11 +292,7 @@ type stateMetrics struct {
 	// cache advances, per this section's own doc comment); the unexpected
 	// counter tracks everything else reaching errorsChan (decode errors,
 	// non-Byron validation failures, apply-stage invariant violations),
-	// which should stay at 0 in healthy operation; the apply-pending-limit
-	// counter tracks pipeline.ErrPendingLimitExceeded (the apply stage's
-	// out-of-order buffer grew past MaxPendingBlocks because one stage
-	// worker fell behind its siblings -- a load signal, not a block
-	// failure: the item stays buffered and is applied in sequence); the
+	// which should stay at 0 in healthy operation; the
 	// shutdown counter tracks context.Canceled/context.DeadlineExceeded
 	// (BlockPipeline.Stop cancels the pipeline context before draining, so
 	// a stage worker mid-item at shutdown can report the cancellation
@@ -300,7 +301,6 @@ type stateMetrics struct {
 	// incremented directly as each error is drained.
 	blockPipelineExpectedEta0Errors       prometheus.Counter
 	blockPipelineDeferredEpochCacheErrors prometheus.Counter
-	blockPipelineApplyPendingLimitErrors  prometheus.Counter
 	blockPipelineShutdownErrors           prometheus.Counter
 	blockPipelineUnexpectedErrors         prometheus.Counter
 	// Per-block composition metrics (issue #4367), all labelled by era
@@ -719,20 +719,6 @@ func (m *stateMetrics) incBlockPipelineDeferredEpochCacheError() {
 	m.blockPipelineDeferredEpochCacheErrors.Inc()
 }
 
-// incBlockPipelineApplyPendingLimitError records a block-processing pipeline
-// apply-stage backpressure signal drained from errorsChan
-// (pipeline.ErrPendingLimitExceeded): more out-of-order blocks were buffered
-// waiting for an earlier sequence number than MaxPendingBlocks allows. The
-// item is still buffered and still applied in sequence, so this is a
-// throughput/scheduling signal rather than a decode, validation, or apply
-// failure.
-func (m *stateMetrics) incBlockPipelineApplyPendingLimitError() {
-	if m == nil || m.blockPipelineApplyPendingLimitErrors == nil {
-		return
-	}
-	m.blockPipelineApplyPendingLimitErrors.Inc()
-}
-
 // incBlockPipelineShutdownError records a block-processing pipeline stage
 // worker reporting its own context cancellation
 // (context.Canceled/context.DeadlineExceeded) rather than an item outcome.
@@ -939,6 +925,23 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
 		},
+	)
+	m.epochRolloverDuration = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_epoch_rollover_duration_seconds",
+			Help: "wall-clock time of the epoch-boundary transaction body, during which no block is applied",
+			// 1ms to ~2.3h: a healthy boundary is sub-second, a stalled one
+			// has been measured at 13m30s on mainnet.
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 24),
+		},
+	)
+	m.epochRolloverPhaseDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "dingo_ledger_epoch_rollover_phase_duration_seconds",
+			Help:    "wall-clock time of each named phase of the epoch-boundary transaction",
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 27),
+		},
+		[]string{"phase"},
 	)
 	m.blockStageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -1176,12 +1179,6 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total",
 			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as a transient epoch-cache lag behind an already-committed block; expected to resolve once the epoch cache catches up",
-		},
-	)
-	m.blockPipelineApplyPendingLimitErrors = promautoFactory.NewCounter(
-		prometheus.CounterOpts{
-			Name: "dingo_ledger_block_pipeline_apply_pending_limit_errors_total",
-			Help: "block-processing pipeline apply-stage backpressure signals drained from errorsChan because the out-of-order pending buffer exceeded MaxPendingBlocks; the block is still buffered and applied in sequence, so this reports stage-worker scheduling lag rather than a block failure",
 		},
 	)
 	m.blockPipelineShutdownErrors = promautoFactory.NewCounter(

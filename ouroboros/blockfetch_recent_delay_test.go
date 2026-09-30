@@ -24,18 +24,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gatherRecentDelays scrapes reg and returns, per idx label, the block number
-// and delay exported for that ring slot. It fails the test if a slot exports
-// only one of the two gauges, since consumers pair them by idx.
+// gatherRecentDelays scrapes reg and returns, per idx label, the block
+// number, delay, and fetch duration exported for that ring slot ([0]=block
+// number, [1]=delay, [2]=fetch duration). It fails the test if a slot
+// exports only some of the three gauges, since consumers pair them by idx.
 func gatherRecentDelays(
 	t *testing.T,
 	reg *prometheus.Registry,
-) map[string][2]float64 {
+) map[string][3]float64 {
 	t.Helper()
 	families, err := reg.Gather()
 	require.NoError(t, err)
 	delays := map[string]float64{}
 	blocks := map[string]float64{}
+	fetchDurations := map[string]float64{}
 	for _, mf := range families {
 		var dst map[string]float64
 		switch mf.GetName() {
@@ -43,6 +45,8 @@ func gatherRecentDelays(
 			dst = delays
 		case recentBlockNumberMetricName:
 			dst = blocks
+		case recentFetchDurationMetricName:
+			dst = fetchDurations
 		default:
 			continue
 		}
@@ -68,11 +72,19 @@ func gatherRecentDelays(
 		len(delays),
 		"delay and block-number slots must match",
 	)
-	out := make(map[string][2]float64, len(delays))
+	require.Len(
+		t,
+		fetchDurations,
+		len(delays),
+		"fetch-duration and delay slots must match",
+	)
+	out := make(map[string][3]float64, len(delays))
 	for idx, d := range delays {
 		b, ok := blocks[idx]
 		require.True(t, ok, "idx %s has a delay but no block number", idx)
-		out[idx] = [2]float64{b, d}
+		f, ok := fetchDurations[idx]
+		require.True(t, ok, "idx %s has a delay but no fetch duration", idx)
+		out[idx] = [3]float64{b, d, f}
 	}
 	return out
 }
@@ -106,22 +118,51 @@ func TestRecentBlockDelaysExportsNothingUntilRecorded(t *testing.T) {
 func TestRecentBlockDelaysKeepsEveryBlockBetweenScrapes(t *testing.T) {
 	t.Parallel()
 	r, reg := newTestRecentDelays(t)
-	r.record(100, testBlockHash(1), 0.31)
+	r.record(100, testBlockHash(1), 0.31, 0.30)
 	require.Len(t, gatherRecentDelays(t, reg), 1)
 
-	r.record(101, testBlockHash(2), 0.28)
-	r.record(102, testBlockHash(3), 3.40)
-	r.record(103, testBlockHash(4), 0.45)
+	r.record(101, testBlockHash(2), 0.28, 0.27)
+	r.record(102, testBlockHash(3), 3.40, 0.09)
+	r.record(103, testBlockHash(4), 0.45, 0.44)
 
 	got := gatherRecentDelays(t, reg)
-	want := map[uint64]float64{100: 0.31, 101: 0.28, 102: 3.40, 103: 0.45}
+	want := map[uint64][2]float64{
+		100: {0.31, 0.30},
+		101: {0.28, 0.27},
+		102: {3.40, 0.09},
+		103: {0.45, 0.44},
+	}
 	require.Len(t, got, len(want))
-	for blockNum, delay := range want {
+	for blockNum, vals := range want {
 		idx := strconv.FormatUint(blockNum%recentBlockDelaySlots, 10)
 		require.Contains(t, got, idx)
 		assert.Equal(t, float64(blockNum), got[idx][0])
-		assert.InDelta(t, delay, got[idx][1], 1e-9)
+		assert.InDelta(t, vals[0], got[idx][1], 1e-9)
+		assert.InDelta(t, vals[1], got[idx][2], 1e-9)
 	}
+}
+
+// The reason fetch duration is tracked separately from delay: a block whose
+// request was dispatched late (e.g. the ledger held off requesting a fork's
+// replacement block until a rollback finished) can show a large delay
+// alongside a small fetch duration, and both numbers must survive intact so
+// a dashboard can tell "the fetch was fast, something upstream was slow"
+// apart from "the fetch itself was slow".
+func TestRecentBlockDelaysKeepsFetchDurationIndependentOfDelay(t *testing.T) {
+	t.Parallel()
+	r, reg := newTestRecentDelays(t)
+	r.record(200, testBlockHash(1), 5.76, 0.093)
+
+	idx := strconv.FormatUint(200%recentBlockDelaySlots, 10)
+	got := gatherRecentDelays(t, reg)[idx]
+	assert.InDelta(t, 5.76, got[1], 1e-9, "delay must stay as recorded")
+	assert.InDelta(
+		t,
+		0.093,
+		got[2],
+		1e-9,
+		"fetch duration must stay independent of the larger delay",
+	)
 }
 
 // Once full, each new block overwrites the slot of the block N heights below
@@ -133,7 +174,7 @@ func TestRecentBlockDelaysOverwritesOldestWhenFull(t *testing.T) {
 	total := recentBlockDelaySlots + 3
 	for i := range total {
 		n := uint64(first + i)
-		r.record(n, testBlockHash(byte(i)), float64(i))
+		r.record(n, testBlockHash(byte(i)), float64(i), float64(i))
 	}
 
 	got := gatherRecentDelays(t, reg)
@@ -159,12 +200,16 @@ func TestRecentBlockDelaysSameBlockKeepsFirstDelivery(t *testing.T) {
 	r, reg := newTestRecentDelays(t)
 	idx := strconv.FormatUint(200%recentBlockDelaySlots, 10)
 
-	r.record(200, testBlockHash(7), 0.40)
-	r.record(200, testBlockHash(7), 2.50)
-	assert.InDelta(t, 0.40, gatherRecentDelays(t, reg)[idx][1], 1e-9)
+	r.record(200, testBlockHash(7), 0.40, 0.35)
+	r.record(200, testBlockHash(7), 2.50, 2.45)
+	got := gatherRecentDelays(t, reg)[idx]
+	assert.InDelta(t, 0.40, got[1], 1e-9)
+	assert.InDelta(t, 0.35, got[2], 1e-9)
 
-	r.record(200, testBlockHash(8), 1.10)
-	assert.InDelta(t, 1.10, gatherRecentDelays(t, reg)[idx][1], 1e-9)
+	r.record(200, testBlockHash(8), 1.10, 1.05)
+	got = gatherRecentDelays(t, reg)[idx]
+	assert.InDelta(t, 1.10, got[1], 1e-9)
+	assert.InDelta(t, 1.05, got[2], 1e-9)
 }
 
 // The ring is wired into the blockfetch metrics and registered with the
@@ -176,7 +221,7 @@ func TestBlockfetchMetricsRegistersRecentBlockDelays(t *testing.T) {
 	require.NotNil(t, o.blockfetchMetrics)
 	require.NotNil(t, o.blockfetchMetrics.recentDelays)
 
-	o.blockfetchMetrics.recentDelays.record(5, testBlockHash(1), 0.5)
+	o.blockfetchMetrics.recentDelays.record(5, testBlockHash(1), 0.5, 0.4)
 	got := gatherRecentDelays(t, reg)
 	require.Contains(t, got, strconv.FormatUint(5%recentBlockDelaySlots, 10))
 }
@@ -189,12 +234,18 @@ func TestRecentBlockDelaysWrappedSlotIgnoresStaleDelivery(t *testing.T) {
 	r, reg := newTestRecentDelays(t)
 	idx := strconv.FormatUint(100%recentBlockDelaySlots, 10)
 
-	r.record(100, testBlockHash(1), 0.40)
-	r.record(100+recentBlockDelaySlots, testBlockHash(2), 0.55)
-	r.record(100, testBlockHash(1), 3.00) // late repeat of the older block
-	r.record(100, testBlockHash(9), 2.00) // older height, different hash
+	r.record(100, testBlockHash(1), 0.40, 0.35)
+	r.record(100+recentBlockDelaySlots, testBlockHash(2), 0.55, 0.50)
+	r.record(
+		100,
+		testBlockHash(1),
+		3.00,
+		2.95,
+	) // late repeat of the older block
+	r.record(100, testBlockHash(9), 2.00, 1.95) // older height, different hash
 
 	got := gatherRecentDelays(t, reg)[idx]
 	assert.Equal(t, float64(100+recentBlockDelaySlots), got[0])
 	assert.InDelta(t, 0.55, got[1], 1e-9)
+	assert.InDelta(t, 0.50, got[2], 1e-9)
 }

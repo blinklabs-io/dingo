@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -147,6 +146,24 @@ func processByronReferenceRuleBlock(
 	tx lcommon.Transaction,
 ) error {
 	t.Helper()
+	pparams, err := eras.NewByronProtocolParametersFromGenesis(
+		nodeConfig.ByronGenesis(),
+	)
+	require.NoError(t, err)
+	return processByronBlockWithPParams(t, db, nodeConfig, tx, pparams)
+}
+
+// processByronBlockWithPParams applies one Byron block holding tx through
+// ledgerProcessBlock, validating it against pparams as block application
+// does with the parameters adopted for the block's epoch.
+func processByronBlockWithPParams(
+	t *testing.T,
+	db *database.Database,
+	nodeConfig *cardano.CardanoNodeConfig,
+	tx lcommon.Transaction,
+	pparams *eras.ByronProtocolParameters,
+) error {
+	t.Helper()
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ByronEraDesc,
@@ -194,7 +211,7 @@ func processByronReferenceRuleBlock(
 			envelopeParent{origin: true},
 			offsets,
 			eras.ByronEraDesc,
-			&shelley.ShelleyProtocolParameters{},
+			pparams,
 			nil,
 			0,
 			0,

@@ -19,12 +19,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros_cbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -623,14 +625,28 @@ func (b *Backfill) calculateCertDeposits(
 	return certDeposits
 }
 
-// processBlockGovernance calls governance processing for valid Conway-era
-// transactions that have proposals, votes, or DRep activity certificates.
-func (b *Backfill) processBlockGovernance(
+func backfillConwayProtocolParameters(
+	pp lcommon.ProtocolParameters,
+) *conway.ConwayProtocolParameters {
+	switch p := pp.(type) {
+	case *conway.ConwayProtocolParameters:
+		if p != nil {
+			return p
+		}
+	case *dijkstra.DijkstraProtocolParameters:
+		if p != nil {
+			return &p.ConwayProtocolParameters
+		}
+	}
+	return nil
+}
+
+func (b *Backfill) processBlockGovernanceLevel(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	txIndex uint32,
 	epochId uint64,
-	pp lcommon.ProtocolParameters,
+	conwayPP *conway.ConwayProtocolParameters,
 	txn *database.Txn,
 ) error {
 	if !tx.IsValid() {
@@ -642,17 +658,10 @@ func (b *Backfill) processBlockGovernance(
 	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
 		return nil
 	}
-	var conwayPP *conway.ConwayProtocolParameters
-	switch p := pp.(type) {
-	case *conway.ConwayProtocolParameters:
-		conwayPP = p
-	case *dijkstra.DijkstraProtocolParameters:
-		if p != nil {
-			conwayPP = &p.ConwayProtocolParameters
-		}
-	}
 	if conwayPP == nil {
-		return nil
+		return errors.New(
+			"missing Conway protocol parameters for governance backfill",
+		)
 	}
 	if len(proposals) > 0 {
 		if err := governance.ProcessProposals(
@@ -982,7 +991,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		var blockTxCount int
 
-		parsedBlock, parseErr := gledger.NewBlockFromCbor(
+		parsedBlock, parseErr := models.DecodeBlockCbor(
 			blk.BlockType,
 			blk.Cbor,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},
@@ -1192,55 +1201,65 @@ func (b *Backfill) processBlockTxsBatched(
 	if opts.SkipProducedUtxoOffsetWrites {
 		b.skippedBlocks++
 	}
-	for i, tx := range txs {
-		updateEpoch, paramUpdates := tx.ProtocolParameterUpdates()
-		certDeposits := b.calculateCertDeposits(
-			tx, eraId, pp,
-		)
-		if opts.SkipProducedUtxoOffsetWrites {
-			// Counter is informational; Produced() is cheap (slice length).
-			b.skippedUtxoRefs += uint64(len(tx.Produced()))
-		}
-		setTxStart := time.Now()
-		if err := b.db.SetTransactionBatchedWithOpts(
-			tx, point, uint32(i), // #nosec G115
-			updateEpoch, paramUpdates,
-			certDeposits, offsets, acc, txn,
-			database.BatchedTxIngestOpts{
-				SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
-				// Only skip consumed-input recovery on fresh backfill starts.
-				// Resumed runs may have inconsistencies from interrupted batches
-				// that need repair via the recovery path.
-				SkipConsumedInputRecovery: isFreshStart,
-				Stats:                     stats,
-				// Mirrors the live-apply path (ledger/delta.go): derived from
-				// the operator's real gate setting via
-				// SetDelegatorInactivityEnabled, not hardcoded, so a future
-				// caller of this path is correct by construction rather than
-				// relying on the Mithril-only invariant enforced separately by
-				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
-				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
-				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
-				// Historical replay follows the snapshot's complete reward
-				// state, not the balance at each historical slot. Preserve
-				// withdrawal history without applying the live-path balance
-				// sufficiency check.
-				HistoricalBackfill: true,
-			},
-		); err != nil {
-			return fmt.Errorf("storing TX: %w", err)
-		}
-		if stats != nil {
-			// Track end-to-end batched transaction ingestion.
-			stats.SetTransactionBatched += time.Since(setTxStart)
-		}
-		if err := b.processBlockGovernance(
-			tx, point, uint32(i), epochId, pp, txn, // #nosec G115
-		); err != nil {
+	var storageIndexOffset uint64
+	for txIndex, tx := range txs {
+		levels := dledger.TransactionLevelsForApply(tx)
+		childCount := uint64(len(levels)) - 1
+		storageBaseIndex := uint64(txIndex) + storageIndexOffset
+		storageParentIndex := storageBaseIndex + childCount
+		if storageParentIndex > math.MaxUint32 {
 			return fmt.Errorf(
-				"governance at slot %d tx %d: %w",
-				point.Slot, i, err,
+				"expanded transaction index out of range: %d",
+				storageParentIndex,
 			)
+		}
+		storageIndexOffset += childCount
+		for levelIndex, level := range levels {
+			storageIndex := storageBaseIndex + uint64(levelIndex)
+			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
+			if opts.SkipProducedUtxoOffsetWrites {
+				b.skippedUtxoRefs += uint64(len(level.Produced()))
+			}
+			setTxStart := time.Now()
+			if err := b.db.SetTransactionBatchedWithOpts(
+				level, point, uint32(storageIndex), //nolint:gosec
+				updateEpoch, paramUpdates,
+				b.calculateCertDeposits(level, eraId, pp), offsets, acc, txn,
+				database.BatchedTxIngestOpts{
+					SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
+					SkipConsumedInputRecovery:    isFreshStart,
+					Stats:                        stats,
+					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
+					HistoricalBackfill:           true,
+				},
+			); err != nil {
+				return fmt.Errorf(
+					"storing transaction body %d at slot %d tx %d: %w",
+					levelIndex,
+					point.Slot,
+					txIndex,
+					err,
+				)
+			}
+			if stats != nil {
+				stats.SetTransactionBatched += time.Since(setTxStart)
+			}
+			if err := b.processBlockGovernanceLevel(
+				level,
+				point,
+				uint32(storageIndex), //nolint:gosec
+				epochId,
+				backfillConwayProtocolParameters(pp),
+				txn,
+			); err != nil {
+				return fmt.Errorf(
+					"governance at slot %d tx %d body %d: %w",
+					point.Slot,
+					txIndex,
+					levelIndex,
+					err,
+				)
+			}
 		}
 	}
 	return nil

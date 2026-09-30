@@ -37,6 +37,16 @@ const (
 	entrypointChildKindEnv = "DINGO_TEST_ENTRYPOINT_CHILD_KIND"
 	bootstrapChild         = "bootstrap"
 	serveChild             = "serve"
+
+	// entrypointStepTimeout bounds each step the tests wait for: a child
+	// becoming ready and the entrypoint exiting after a forwarded signal.
+	// Both spawn real processes, so a loaded or race-instrumented runner can
+	// take well past a couple of seconds. It is only ever reached on failure.
+	entrypointStepTimeout = 30 * time.Second
+
+	// entrypointChildDelayEnv makes the fake child stall before signalling
+	// ready and before exiting, standing in for a starved runner.
+	entrypointChildDelayEnv = "DINGO_TEST_ENTRYPOINT_CHILD_DELAY"
 )
 
 // TestMain turns a re-executed copy of this test binary into the fake dingo
@@ -54,6 +64,7 @@ func runEntrypointChild(kind string) int {
 	readyFile := os.Getenv(
 		"DINGO_TEST_" + strings.ToUpper(kind) + "_READY_FILE",
 	)
+	childDelay, _ := time.ParseDuration(os.Getenv(entrypointChildDelayEnv))
 	if kind == bootstrapChild && os.Getenv("DINGO_TEST_BOOTSTRAP_WAIT") == "" {
 		if err := os.WriteFile(readyFile, []byte("ready\n"), 0o600); err != nil {
 			return 125
@@ -64,10 +75,12 @@ func runEntrypointChild(kind string) int {
 	signals := make(chan os.Signal, 1)
 	signalNotify(signals)
 	defer signal.Stop(signals)
+	time.Sleep(childDelay)
 	if err := os.WriteFile(readyFile, []byte("ready\n"), 0o600); err != nil {
 		return 125
 	}
 	received := <-signals
+	time.Sleep(childDelay)
 
 	signalName := received.String()
 	if received == syscall.SIGINT {
@@ -135,7 +148,7 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 			testutil.WaitForCondition(
 				t,
 				func() bool { return fileExists(harness.bootstrapReadyFile) },
-				2*time.Second,
+				entrypointStepTimeout,
 				"Mithril bootstrap child did not become ready",
 			)
 			require.NoError(t, cmd.Process.Signal(test.signal))
@@ -161,6 +174,35 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 	}
 }
 
+// A child that is slow to start and slow to exit, as on a starved runner, must
+// not fail the forwarding assertions: only a missing forward should.
+func TestEntrypointForwardsSignalsToSlowChild(t *testing.T) {
+	t.Parallel()
+
+	harness := newEntrypointHarness(t, false)
+	harness.env = append(
+		harness.env,
+		"DINGO_TEST_BOOTSTRAP_WAIT=1",
+		"DINGO_TEST_BOOTSTRAP_EXIT_CODE=41",
+		entrypointChildDelayEnv+"=2500ms",
+	)
+	cmd, done, output := harness.start(t)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return fileExists(harness.bootstrapReadyFile) },
+		entrypointStepTimeout,
+		"Mithril bootstrap child did not become ready",
+	)
+	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+
+	err := waitForEntrypoint(t, cmd, done, output)
+	require.Equal(t, 41, commandExitCode(t, err), output.String())
+	require.Equal(
+		t, "SIGTERM\n", readFile(t, harness.bootstrapSignalFile),
+	)
+}
+
 func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
 	harness := newEntrypointHarness(t, false)
 	harness.env = append(harness.env, "DINGO_TEST_SERVE_EXIT_CODE=39")
@@ -169,7 +211,7 @@ func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
 	testutil.WaitForCondition(
 		t,
 		func() bool { return fileExists(harness.serveReadyFile) },
-		2*time.Second,
+		entrypointStepTimeout,
 		"serve child did not become ready after Mithril bootstrap",
 	)
 	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
@@ -308,7 +350,7 @@ func waitForEntrypoint(
 	select {
 	case <-process.done:
 		return process.err
-	case <-time.After(2 * time.Second):
+	case <-time.After(entrypointStepTimeout):
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-process.done
 		t.Fatalf(
