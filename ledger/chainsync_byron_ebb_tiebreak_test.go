@@ -62,11 +62,11 @@ func loadRealByronEBB(t *testing.T) models.Block {
 
 // TestCompareIncomingHeaderToLocalTip_ByronEBBBeatsRegularTip exercises the
 // real chain-selection caller (ledger/chainsync.go's
-// compareIncomingHeaderToLocalTip) end to end for the exact scenario
-// blinklabs-io/dingo#4413 describes: a locally applied Byron regular tip
-// against a peer's EBB successor sharing its block number. Canonical Byron
-// PBFT counts the boundary block as an additional block despite the shared
-// number, so the incoming EBB must beat the local regular tip.
+// compareIncomingHeaderToLocalTip) end to end for the exact scenario:
+// a locally applied Byron regular tip against a peer's EBB successor sharing
+// its block number. Canonical Byron PBFT counts the boundary block as an
+// additional block despite the shared number, so the incoming EBB must beat the
+// local regular tip.
 //
 // The local tip is a real Byron main block round-tripped through storage
 // (database.BlockByHash -> models.Block.Decode, same as

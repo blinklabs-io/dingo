@@ -160,7 +160,7 @@ func newPreviewRewardPotsTestLedger(
 // applies monetary expansion and the treasury tax at the first boundary of a
 // network whose epoch 0 is already Shelley-era, with an empty fee pot and no
 // distribution. Skipping that round leaves the treasury at 0 and the reserves
-// at their genesis value, which is what dingo #3381 observed on Preview.
+// at their genesis value, which is what Preview showed.
 func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
 	t.Parallel()
 
@@ -227,7 +227,7 @@ func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
 // carries exactly two transactions, at slots 60 and 320, whose fees (200000 and
 // 237793) are the 437793 the 1->2 boundary folds into the reward pot.
 //
-// This is the unit-level counterpart of dingo #3381's reproduction: the
+// This is the unit-level counterpart of the Preview reproduction: the
 // epoch-2 treasury and reserves must equal the Koios Preview reference values.
 func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
 	t.Parallel()
@@ -305,7 +305,7 @@ INSERT INTO "transaction" (
 // the d >= 0.8 short circuit. Reading d from the calculation epoch instead
 // gives d = 0, no short circuit, and an eta of zero against an empty epoch-0
 // mark snapshot, which drops the monetary expansion entirely and moves only
-// the fee pot (dingo #3481).
+// the fee pot.
 func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 	t.Parallel()
 

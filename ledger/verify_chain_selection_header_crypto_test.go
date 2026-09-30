@@ -57,7 +57,7 @@ func TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader(
 // header with an internally-invalid VRF proof is a definite (non-deferred)
 // failure, even while local ledger state has not caught up to the header's
 // slot. An invalid header must never be counted toward Genesis density
-// regardless of local sync state (dingo #3517).
+// regardless of local sync state.
 func TestValidateChainSelectionHeaderCryptoRejectsTamperedProof(
 	t *testing.T,
 ) {
@@ -147,15 +147,15 @@ func TestValidateChainSelectionHeaderCryptoDoesNotAdvanceEpochCache(
 }
 
 // TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce is a
-// regression test for a bot-review finding: a cached epoch entry that
-// genuinely covers the header's slot but has no published nonce yet (a
-// post-Byron epoch transiently, or Byron always) must defer, not hard-fail.
-// ShouldVerifyChainSelectionHeaderCrypto now returns true for every
-// non-Mithril slot (see TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce),
-// so this case is reachable in practice: without IsHeaderVerificationDeferred
-// also recognizing errEpochNonceUnavailable, an honest peer whose header
-// simply arrived before the local nonce was published would be treated as
-// invalid and have its connection recycled.
+// regression test: a cached epoch entry that genuinely covers the header's slot
+// but has no published nonce yet (a post-Byron epoch transiently, or Byron
+// always) must defer, not hard-fail. ShouldVerifyChainSelectionHeaderCrypto now
+// returns true for every non-Mithril slot (see
+// TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce), so this case
+// is reachable in practice: without IsHeaderVerificationDeferred also
+// recognizing errEpochNonceUnavailable, an honest peer whose header simply
+// arrived before the local nonce was published would be treated as invalid and
+// have its connection recycled.
 func TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce(
 	t *testing.T,
 ) {
@@ -194,10 +194,9 @@ func TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce(
 // ShouldVerifyChainSelectionHeaderCrypto shares the same Mithril exemption as
 // the ledger's own chainsync header-queue gate (shouldEnforceBlockPipelineCrypto),
 // so a competing peer's header is exempt under exactly the same condition the
-// applied chain already is. Issue #3528: a coarse ValidateHistorical=false
-// historical-sync toggle must not exempt header crypto -- only a slot a
-// Mithril certificate already covers may skip it, regardless of
-// validationEnabled.
+// applied chain already is. A coarse ValidateHistorical=false historical-sync
+// toggle must not exempt header crypto -- only a slot a Mithril certificate
+// already covers may skip it, regardless of validationEnabled.
 func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 	t *testing.T,
 ) {
@@ -233,7 +232,7 @@ func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 }
 
 // TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce is a
-// regression test for a bot-review finding: ShouldVerifyChainSelectionHeaderCrypto
+// regression test: ShouldVerifyChainSelectionHeaderCrypto
 // used to delegate to shouldEnforceBlockPipelineCrypto, which also returns
 // false when the epoch nonce isn't cached yet -- a condition the chainsync
 // header-queue path can safely retry later, but chain selection cannot (a

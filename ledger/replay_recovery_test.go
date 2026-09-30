@@ -1088,7 +1088,7 @@ func atTipDescentFailure(slot uint64, tag string) *txValidationError {
 // TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop verifies
 // that a descending series of distinct at-tip validation failures trips the
 // non-convergence guard: recovery holds at the ledger tip and records the
-// condition instead of rewinding the primary chain ever deeper (issue #2939).
+// condition instead of rewinding the primary chain ever deeper.
 func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 	t *testing.T,
 ) {
@@ -1098,7 +1098,7 @@ func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 
 	// Feed a descending series of DISTINCT failures. Each first appears
 	// (attempt 1: shallow rewind to ledger tip) then repeats (attempt 2:
-	// same block re-delivered), mirroring the field log in #2939.
+	// same block re-delivered), mirroring the field log.
 	for _, slot := range []uint64{500, 480, 460, 440} {
 		ferr := atTipDescentFailure(slot, fmt.Sprintf("%d", slot))
 		for range 2 {
@@ -1981,7 +1981,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 }
 
 // TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds
-// reproduces the terminal #3005 recovery cycle after prior, distinct failures
+// reproduces the terminal recovery cycle after prior, distinct failures
 // failed to advance the applied ledger high-water mark. Once the guard trips,
 // recovery must keep the applied tip instead of pruning another
 // security-parameter window and must force a fresh ChainSync connection even
@@ -2032,9 +2032,10 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 		),
 	)
 	// Preserve the replay candidates in the block store while leaving the
-	// primary chain tip below the applied ledger tip. This is the #3005
-	// topology: an earlier recovery rewind has already moved the primary
-	// chain back, but ledger replay rebuilt to its previous high-water mark.
+	// primary chain tip below the applied ledger tip. This is the
+	// non-converging topology: an earlier recovery rewind has already moved the
+	// primary chain back, but ledger replay rebuilt to its previous high-water
+	// mark.
 	for _, block := range []chain.RawBlock{ledgerTipBlock, failingBlock} {
 		require.NoError(t, db.BlockCreate(models.Block{
 			Hash:     block.Hash,
@@ -2118,8 +2119,8 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	ls.publishSnapshotsLocked()
 
 	// Model the two earlier recovery cycles. Failure identities are
-	// intentionally absent from this tracker: #3005 showed that their slots
-	// can creep forward while the applied tip remains unchanged.
+	// intentionally absent from this tracker: field logs showed that their
+	// slots can creep forward while the applied tip remains unchanged.
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 
@@ -3171,7 +3172,7 @@ func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
 }
 
 // TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs is the
-// dingo #3805 regression.
+// script-data-hash rejection regression.
 //
 // Replay recovery exists to repair one thing: a transaction spending an input
 // whose producer is missing from the applied chain. txValidationError carries
@@ -3288,7 +3289,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 // producer for two unrelated situations — the input is present so there is
 // nothing to find, and the input is missing and its producer could not be
 // located — and folding both into unresolvedInputs is what let a failure with
-// nothing missing drive a rewind (dingo #3805).
+// nothing missing drive a rewind.
 func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	t.Parallel()
 

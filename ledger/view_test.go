@@ -484,10 +484,11 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 }
 
 // TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral is the
-// LedgerView-level regression test for issue #4352, exercised through the
-// real certificate-application pipeline rather than the store layer
-// directly: a pool re-registering with a new VRF key mid-epoch must not
-// free its old key before the epoch boundary IsVrfKeyInUse is asked about.
+// LedgerView-level regression test for the VRF reservation across deferred
+// re-registration, exercised through the real certificate-application pipeline
+// rather than the store layer directly: a pool re-registering with a new VRF
+// key mid-epoch must not free its old key before the epoch boundary
+// IsVrfKeyInUse is asked about.
 func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 	t.Parallel()
 
@@ -708,18 +709,18 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 }
 
 // TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey
-// is the LedgerView-level regression test for the PV11+ follow-up to
-// #4352: pool P cycles A -> B -> C within one epoch, then attempts to
+// is the LedgerView-level regression test for the PV11+ follow-up:
+// pool P cycles A -> B -> C within one epoch, then attempts to
 // reuse B again. IsVrfKeyInUse must report B as still claimed by P (even
 // though B is neither P's effective key, A, nor its current pending key,
 // C), which is the signal gouroboros's validatePoolRegistration needs to
 // compare against PoolCurrentState and reject the reuse: PoolCurrentState
 // returns P's latest registration (C), which does not equal the requested
 // key (B).
-// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins dingo#4466 at the
-// LedgerView production entry point: once a pool's same-epoch registration
-// is itself superseded by a later same-epoch registration, IsVrfKeyInUse
-// must report it free, not still claimed.
+// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins release of a
+// superseded future VRF key at the LedgerView production entry point: once a
+// pool's same-epoch registration is itself superseded by a later same-epoch
+// registration, IsVrfKeyInUse must report it free, not still claimed.
 func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 	t *testing.T,
 ) {
@@ -862,7 +863,7 @@ func newUnwrittenDijkstraPoolRegistrationTx(
 }
 
 // TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral
-// is the full end-to-end proof of #4352's acceptance criterion "reject a
+// is the full end-to-end proof of the acceptance criterion "reject a
 // different pool registering the active key during the deferral window":
 // not just that IsVrfKeyInUse reports the right owner, but that the real
 // validation entry point actually returns a rejection for it. Protocol
@@ -929,12 +930,13 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 }
 
 // TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey is
-// the full end-to-end proof of the PV11+ follow-up to #4352: pool P cycles
+// the full end-to-end proof of the PV11+ follow-up: pool P cycles
 // A -> B -> C within one epoch, then attempts to reuse B again. This
 // proves the actual rejection fires through the real validation entry
 // point, not just that IsVrfKeyInUse and PoolCurrentState individually
 // return the values the rejection depends on.
-// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins dingo#4466
+// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins release of a
+// superseded future VRF key
 // through the full production validation entry point: a key a pool cycled
 // through and then superseded within the same epoch is free for any pool
 // (including the pool that originally proposed it) to register.
@@ -1000,8 +1002,8 @@ func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 	}
 }
 
-// TestLedgerStateNewViewPinsEpochStartSlot is the regression test for a
-// human reviewer finding on this PR: every prior epochStartSlot-pinning
+// TestLedgerStateNewViewPinsEpochStartSlot is the regression test: every prior
+// epochStartSlot-pinning
 // test set the field by hand on a bare &LedgerView{ls: ls}, so a real
 // construction site (NewView, ledgerProcessBlock, validateTxCore,
 // ValidateTxWithOverlay, EvaluateTx) could drop its own epochStartSlot:

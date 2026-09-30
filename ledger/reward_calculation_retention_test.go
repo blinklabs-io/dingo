@@ -88,13 +88,13 @@ func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
 }
 
 // TestApplyStakeRewardsSkipsPrunedStakeInputs covers the retention interaction
-// tracked in dingo #4578. reward_ada_pots, reward_snapshot,
-// reward_pool_input and reward_pool_output are retained for the life of the
-// database while reward_stake_input is pruned to the rotation window, so an
-// aged-out epoch presents complete-looking pots and snapshot rows over an empty
-// credential set. Reward application must skip that epoch rather than hand
-// validateRewardCalculatorInputs an unreconcilable snapshot, whose error would
-// fail the whole epoch rollover.
+// between retention pruning and truncate replay. reward_ada_pots,
+// reward_snapshot, reward_pool_input and reward_pool_output are retained for
+// the life of the database while reward_stake_input is pruned to the rotation
+// window, so an aged-out epoch presents complete-looking pots and snapshot rows
+// over an empty credential set. Reward application must skip that epoch rather
+// than hand validateRewardCalculatorInputs an unreconcilable snapshot, whose
+// error would fail the whole epoch rollover.
 func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
 	t.Parallel()
 
@@ -262,15 +262,15 @@ func seedPrunedStakeInputSnapshot(
 }
 
 // TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly proves the
-// retention skip tracked in dingo #4578 is reported the same way its three
+// retention skip is reported the same way its three
 // sibling skips in calculateStakeRewardApplication are, through
 // reportSkippedStakeRewards: counted, and logged with the permanent-shortfall
 // consequence spelled out. Before this fix the retention skip was the one
 // silent-by-comparison exception to what this file otherwise guards against
-// (see TestSkippedStakeRewardsIsReportedLoudly and issue #3165) -- it logged
-// inline at Warn with a bare reason and no metric increment, so monitoring
-// built on the shared skippedStakeRewardRounds counter never saw this
-// specific permanent-reward-loss condition.
+// (see TestSkippedStakeRewardsIsReportedLoudly and its sibling tests) -- it
+// logged inline at Warn with a bare reason and no metric increment, so
+// monitoring built on the shared skippedStakeRewardRounds counter never saw
+// this specific permanent-reward-loss condition.
 func TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly(t *testing.T) {
 	t.Parallel()
 
@@ -646,7 +646,7 @@ func TestReconstructedRewardStakeTieBreaksAreDeterministic(t *testing.T) {
 }
 
 // TestApplyStakeRewardsReconstructsRetentionPrunedInputs is the positive
-// control for dingo #4578's retention-vs-resume gap: reward_stake_input is
+// control for the retention-vs-resume gap: reward_stake_input is
 // aged out of retention (as it is for the other tests in this file), but this
 // time the underlying certificate/UTxO/reward-delta history the historical
 // CTE reconstructs from is real, matching the shape

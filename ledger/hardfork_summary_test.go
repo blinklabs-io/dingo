@@ -937,18 +937,18 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 }
 
 // TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip is a regression
-// test for a node-side horizon-computation gap distinct from #3844: the
-// appended successor era used to measure its own safe zone only from the
-// announced boundary, never from how far the live tip has actually advanced
-// past it. A node that fails to apply the block crossing that boundary (for
-// any reason -- this is the exact class of bug this fixture reproduces, not
-// its cause) keeps reconstructing this same Summary on every retry with the
-// SAME transitionInfo and epoch cache, since neither changes without a
-// successful apply. Before this fix, the successor's horizon was pinned at
-// boundary+safeZone forever, so once the live tip passed that fixed point
-// every further block or transaction slot fell "past horizon" permanently --
-// a live, canonical chain rejected as though its own tip did not exist, even
-// though nothing about the transition or the chain's own history changed.
+// test for a node-side horizon-computation gap distinct from the horizon-anchor
+// gap: the appended successor era used to measure its own safe zone only from
+// the announced boundary, never from how far the live tip has actually advanced
+// past it. A node that fails to apply the block crossing that boundary (for any
+// reason -- this is the exact class of bug this fixture reproduces, not its
+// cause) keeps reconstructing this same Summary on every retry with the SAME
+// transitionInfo and epoch cache, since neither changes without a successful
+// apply. Before this fix, the successor's horizon was pinned at
+// boundary+safeZone forever, so once the live tip passed that fixed point every
+// further block or transaction slot fell "past horizon" permanently -- a live,
+// canonical chain rejected as though its own tip did not exist, even though
+// nothing about the transition or the chain's own history changed.
 //
 // This reproduces the reported live-incident signature directly: the current
 // published tip's own slot judged past horizon, looping "block processing
@@ -1259,7 +1259,7 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 }
 
 // TestHardForkSummary_HorizonAnchoredAtAppliedParent is the summary half of the
-// dingo #3844 fix. HardForkSummary measures the safe zone from the published
+// horizon-anchor fix. HardForkSummary measures the safe zone from the published
 // tip, which only advances when a whole block batch commits; the reference
 // implementation measures it from the applied block's immediate predecessor.
 // Because applySafeZone snaps up to an epoch boundary, that difference is not

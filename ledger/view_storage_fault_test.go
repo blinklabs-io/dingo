@@ -42,7 +42,7 @@ import (
 // specific lookups to fail with a caller-supplied error instead of
 // delegating to the wrapped store, reproducing a genuine non-not-found
 // storage fault (a timeout, a lost connection) without corrupting on-disk
-// rows. See blinklabs-io/dingo#1649.
+// rows.
 type errInjectingMetadataStore struct {
 	metadata.MetadataStore
 	getPoolErr                error

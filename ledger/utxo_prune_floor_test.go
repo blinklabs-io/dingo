@@ -181,12 +181,13 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	return f
 }
 
-// inLiveSet mirrors the probe used by the issue #3678 rollback tests: it asks
-// the database.UtxoByRef lookup that LedgerView.UtxoById delegates to, so it
-// exercises the deleted_slot filter that decides Conway bad-inputs and, through
-// it, the consumed term of value conservation. A row seeded straight into
-// metadata carries no blob CBOR, so ErrUtxoCborUnavailable counts as present;
-// any error other than ErrUtxoNotFound is a lookup failure and fails the test.
+// inLiveSet mirrors the probe used by the same-slot-competitor rollback tests:
+// it asks the database.UtxoByRef lookup that LedgerView.UtxoById delegates to,
+// so it exercises the deleted_slot filter that decides Conway bad-inputs and,
+// through it, the consumed term of value conservation. A row seeded straight
+// into metadata carries no blob CBOR, so ErrUtxoCborUnavailable counts as
+// present; any error other than ErrUtxoNotFound is a lookup failure and fails
+// the test.
 func (f *prunedUtxoFixture) inLiveSet(t *testing.T, txId []byte) bool {
 	t.Helper()
 	var live bool
@@ -270,7 +271,7 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 	}
 }
 
-// TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor covers issue #3766.
+// TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor pins the behavior below.
 //
 // cleanupConsumedUtxos hard-deletes consumed UTxO rows whose deleted_slot is at
 // or below tip-stabilityWindow. database.TruncateAfterSlot restores consumed
@@ -334,7 +335,7 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 }
 
 // TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor covers the Mithril-
-// bootstrapped shape reported in issue #3766. The Mithril anchor sits far below
+// bootstrapped shape seen in the field. The Mithril anchor sits far below
 // the consumed-UTxO prune floor, so the existing trust-boundary check admits
 // every target the rewind schedule produces while the sweep has already made
 // them unrestorable. The prune floor is the binding constraint, and the node
@@ -509,7 +510,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 }
 
 // TestRollbackChainAndStateRefusesRedirectBelowPruneFloor covers the ordering
-// hazard between the same-slot competitor redirect (issue #3678) and the prune
+// hazard between the same-slot competitor redirect and the prune
 // floor. rollbackChainAndStateDeferred truncates the primary chain and only then
 // synchronizes the ledger. A target sitting exactly on the floor whose hash
 // differs from the applied tip resolves to an applied ancestor strictly below

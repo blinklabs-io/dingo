@@ -46,7 +46,7 @@ type trustWindowLedger struct {
 	resyncs   <-chan event.Event
 }
 
-// newTrustWindowLedger builds the shape of issue #3261: the applied ledger tip
+// newTrustWindowLedger builds the trust-window shape: the applied ledger tip
 // sits exactly on the Mithril trust anchor and the failing block is a short
 // distance past it, so the only rewind target at or above the anchor is the tip
 // itself. Every deeper target the at-tip recovery schedule produces lands on
@@ -194,13 +194,13 @@ func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
 	}
 }
 
-// TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers issue
-// #3261: when every rewind target the at-tip recovery schedule produces lies
-// inside the Mithril protected window, the trust boundary guard refuses all of
-// them. Each refusal rewinds to the applied tip and asks ChainSync for a fresh
-// intersection, which cannot help for a canonical block -- every peer serves
-// the same one. Recovery must therefore stop and surface a terminal condition
-// instead of rejecting peers forever.
+// TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers the
+// trust-window terminal state: when every rewind target the at-tip recovery
+// schedule produces lies inside the Mithril protected window, the trust
+// boundary guard refuses all of them. Each refusal rewinds to the applied tip
+// and asks ChainSync for a fresh intersection, which cannot help for a
+// canonical block -- every peer serves the same one. Recovery must therefore
+// stop and surface a terminal condition instead of rejecting peers forever.
 func TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState(
 	t *testing.T,
 ) {
@@ -296,7 +296,8 @@ func TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering(t *testing.T) {
 }
 
 // TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState covers the
-// post-bootstrap replay path from issues #3301 and #3318. The producer is
+// post-bootstrap replay path from the boundary-rejection budget. The producer
+// is
 // canonical but below the imported anchor, so its parent can never be a legal
 // local rewind target. Changing failing block/transaction identities must not
 // rearm the budget while the applied tip remains fixed; replay failures can

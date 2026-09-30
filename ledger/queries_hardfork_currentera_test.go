@@ -28,20 +28,19 @@ import (
 
 // TestQueryHardFork_CurrentEra_PinnedPointResolvesEraAtThatPoint is the
 // regression test for the gap this session's node-parity --from-genesis
-// live validation surfaced (blinklabs-io/dingo#1900): HardForkCurrentEraQuery
-// used to always answer with dingo's live era regardless of the pinned
-// point, a real point-pinning gap #382's original scope decision left open
-// (it covered queryShelleyCurrentProtocolParams and friends, not this
+// live validation surfaced: HardForkCurrentEraQuery used to always answer with
+// dingo's live era regardless of the pinned point, a real point-pinning gap the
+// original scope decision left open (it covered
+// queryShelleyCurrentProtocolParams and friends, not this
 // HardFork-mini-protocol query type). gouroboros's client-side
 // GetCurrentProtocolParams queries this first specifically to decide which
-// era-shaped struct to decode the *next* query's reply into, so answering
-// with the wrong era here breaks decoding a perfectly correct, already
-// point-aware queryShelleyCurrentProtocolParams reply for any pinned point
-// whose real era differs from dingo's live one -- confirmed live pinning at
-// genesis (slot 0, Shelley) against a dingo instance already in a later
-// era. Epoch 3 (Shelley) and epoch 6 (Conway, live) are seeded with
-// deliberately different eras so a handler that silently fell back to the
-// live era would be caught.
+// era-shaped struct to decode the *next* query's reply into, so answering with
+// the wrong era here breaks decoding a perfectly correct, already point-aware
+// queryShelleyCurrentProtocolParams reply for any pinned point whose real era
+// differs from dingo's live one -- confirmed live pinning at genesis (slot 0,
+// Shelley) against a dingo instance already in a later era. Epoch 3 (Shelley)
+// and epoch 6 (Conway, live) are seeded with deliberately different eras so a
+// handler that silently fell back to the live era would be caught.
 func TestQueryHardFork_CurrentEra_PinnedPointResolvesEraAtThatPoint(
 	t *testing.T,
 ) {

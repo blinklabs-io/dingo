@@ -39,13 +39,11 @@ import (
 )
 
 // This file benchmarks (*LedgerState).ValidateTx and LedgerView.UtxoById
-// using real Preprod chain bytes for blinklabs-io/dingo#4226 (the per-view
-// UTxO memo): the same fixtures
-// ledger/eras/conway_plutus_preprod_fixture_test.go uses to pin execution
-// units against producer-declared budgets. That test documents the
-// fixture's provenance: a producer-accepted Preprod block and the funding
-// transactions for one Plutus transaction inside it, fetched over NtN
-// blockfetch.
+// using real Preprod chain bytes for the per-view UTxO memo: the same fixtures
+// ledger/eras/conway_plutus_preprod_fixture_test.go uses to pin execution units
+// against producer-declared budgets. That test documents the fixture's
+// provenance: a producer-accepted Preprod block and the funding transactions
+// for one Plutus transaction inside it, fetched over NtN blockfetch.
 //
 // The existing BenchmarkTransactionValidation (ledger/benchmark_test.go)
 // validates against an unfunded ledger and discards the error, so it times
@@ -265,7 +263,7 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 
 // BenchmarkLedgerStateValidateTxUtxoMemo measures the DB-backed
 // (*LedgerState).ValidateTx path and the LedgerView.UtxoById resolution it
-// repeats per input, before/after blinklabs-io/dingo#4226's per-view memo.
+// repeats per input, before/after the per-view memo.
 func BenchmarkLedgerStateValidateTxUtxoMemo(b *testing.B) {
 	fx := loadUtxoMemoPreprodFixture(b)
 
@@ -274,7 +272,7 @@ func BenchmarkLedgerStateValidateTxUtxoMemo(b *testing.B) {
 		// ls.db.UtxoByRef -> blob fetch + CBOR decode), one open read
 		// transaction and one LedgerView reused across iterations. After
 		// the first iteration, every further call hits the per-view memo
-		// added by #4226 instead of the database.
+		// instead of the database.
 		b.ReportAllocs()
 		txn := fx.db.Transaction(false)
 		defer txn.Release()

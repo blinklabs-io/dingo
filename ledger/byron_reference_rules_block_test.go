@@ -210,8 +210,9 @@ func processByronReferenceRuleBlock(
 }
 
 // TestLedgerProcessBlockByronReferenceRules drives real, correctly signed
-// Byron transactions through block application for #4379, #4381, #4394,
-// #4401 and #4405. The genesis supplies ppMaxTxSize, a zero fee policy and
+// Byron transactions through block application for the Byron reference rules
+// (ppMaxTxSize, unknown attributes, positional witnesses, repeated inputs,
+// Lovelace bounds). The genesis supplies ppMaxTxSize, a zero fee policy and
 // the mainnet protocol magic the witnesses sign under, so each case isolates
 // one rule.
 func TestLedgerProcessBlockByronReferenceRules(t *testing.T) {

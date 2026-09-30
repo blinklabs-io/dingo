@@ -1154,9 +1154,8 @@ func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
 
 // newByronGenesisAnchorTestLedger builds a LedgerState wired to a fresh,
 // real *chain.Chain and a Byron genesis hash, for testing
-// validateByronPBFTHeaderCrypto's origin-anchor checks
-// (blinklabs-io/dingo#4399). The chain starts at origin unless the caller
-// adds blocks to it first.
+// validateByronPBFTHeaderCrypto's origin-anchor checks.
+// The chain starts at origin unless the caller adds blocks to it first.
 func newByronGenesisAnchorTestLedger(
 	t *testing.T,
 	genesisHash string,
@@ -1194,7 +1193,7 @@ func newByronGenesisAnchorTestLedger(
 }
 
 // TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb is the
-// blinklabs-io/dingo#4399 positive case: at origin, an epoch-boundary block
+// positive case: at origin, an epoch-boundary block
 // whose previous hash matches the configured Byron genesis hash is accepted.
 func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
 	t.Parallel()
@@ -1217,7 +1216,7 @@ func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderRejectsGenesisHashMismatch is the
-// blinklabs-io/dingo#4399 regression itself: at origin, an epoch-boundary
+// regression itself: at origin, an epoch-boundary
 // block whose previous hash does not match the configured Byron genesis
 // hash must be rejected, even though it is otherwise correctly placed and
 // sized. The reference rejects this with ChainValidationGenesisHashMismatch.
@@ -1285,7 +1284,7 @@ func TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin is the
-// blinklabs-io/dingo#4399 acceptance criterion that a PBFT-signed regular
+// acceptance criterion that a PBFT-signed regular
 // Byron block must never be accepted as the first block of a from-genesis
 // chain, even one that (like the genuine first block) carries block number
 // and difficulty 0. Only an epoch-boundary block may open the chain. This
@@ -1314,7 +1313,7 @@ func TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin(t *testing.T) {
 // genesis, and a ledger started from a trusted snapshot or bulk import at a
 // non-origin point has the same shape: its primary chain tip is that
 // trusted point, not origin. Both must reach the ordinary current-slot
-// check unaffected by the genesis hash, matching pre-#4399 behavior.
+// check unaffected by the genesis hash, matching the earlier behavior.
 func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -1348,7 +1347,7 @@ func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin is
-// the blinklabs-io/dingo#4399 acceptance criterion that the EBB-only
+// the acceptance criterion that the EBB-only
 // anchor rule applies identically after a rollback empties the chain back
 // to origin, not only on a chain that has never been touched.
 // chain.Chain.atOriginAfterMutation documents the equivalent chain-layer

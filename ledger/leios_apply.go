@@ -557,7 +557,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// unavailable certified closure reports WHY it is unavailable. Without it the
 	// only field evidence for a wedged pipeline was the bare
 	// "certified Leios endorser block unavailable" line -- the fetch failures
-	// were logged at Debug and dropped in production (dingo #3552).
+	// were logged at Debug and dropped in production.
 	fetchErrs := make(map[string]error, len(required))
 	ensureRequiredAvailable := func() error {
 		for _, r := range required {
@@ -594,7 +594,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// certified closure is mandatory whether or not the best-effort
 	// announcement window is configured, and returning "unavailable" without
 	// having tried to fetch it is what left the pipeline restarting on an
-	// endorser block nobody had asked any peer for (dingo #3552).
+	// endorser block nobody had asked any peer for.
 	fetchMissingRequired := func(poll time.Duration) {
 		if !certDrivenHistorical || ls.leiosBackfill == nil {
 			return
@@ -726,7 +726,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// which a fetch skipped as "connection busy" does within microseconds -- so
 	// before this the pipeline aborted the chunk, restarted, re-read and
 	// re-decoded the batch, and made at most one endorser block of progress per
-	// restart, or none at all when every connection was unusable (dingo #3552).
+	// restart, or none at all when every connection was unusable.
 	fetchMissingRequired(poll)
 	return ensureRequiredAvailable()
 }
@@ -1031,11 +1031,10 @@ type leiosEbRef struct {
 
 // leiosEbRefKey returns a stable per-(slot, hash) dedup key for r, not hash
 // alone. The manifest is content-addressed, so the same hash can legitimately
-// be a distinct requirement at two different slots at once (issue #3513
-// review); every dedup/in-flight-tracking map keyed on an endorser-block
-// reference in this file uses this key, so a second, slot-distinct reference
-// to an already-seen hash is never collapsed into (or suppressed by) the
-// first.
+// be a distinct requirement at two different slots at once; every
+// dedup/in-flight-tracking map keyed on an endorser-block reference in this
+// file uses this key, so a second, slot-distinct reference to an already-seen
+// hash is never collapsed into (or suppressed by) the first.
 func leiosEbRefKey(r leiosEbRef) string {
 	return fmt.Sprintf("%d:%s", r.slot, r.hash.Bytes())
 }
@@ -1044,7 +1043,7 @@ func leiosEbRefKey(r leiosEbRef) string {
 // endorser block identified by hash bound to exactly the given slot -- not
 // merely present under some slot. The manifest is content-addressed, so the
 // same hash can be a live, independently required occurrence at more than
-// one slot at once (issue #3513); every call site here already knows the
+// one slot at once; every call site here already knows the
 // slot its own reference requires (leiosEbRef pairs them), and the provider
 // itself resolves exactly that (slot, hash) occurrence rather than
 // whichever one happens to be cached for the hash. Without this, a stale
@@ -1085,7 +1084,7 @@ type leiosBlockInfo struct {
 // rejected: proceeding would commit a ledger state known to be incomplete.
 // Deduped by leiosEbRefKey (slot, hash), not hash alone: two certifying
 // blocks in the same batch can legitimately require the same hash at
-// different slots (issue #3513 review), and a hash-only dedup would drop the
+// different slots, and a hash-only dedup would drop the
 // second requirement from the result entirely.
 func requiredCertifiedEndorserBlocks(
 	infos []leiosBlockInfo,
@@ -1240,8 +1239,8 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 // endorser block); the caller supplies parents outside the batch. cached
 // reports whether an endorser block is already available *at r's slot*, so a
 // stale occurrence of the hash under a different slot is not mistaken for
-// availability and is fetched like any other missing reference (issue #3513
-// review). backfillSeen/tipWaitSeen (via appendRef's leiosEbRefKey) dedup by
+// availability and is fetched like any other missing reference.
+// backfillSeen/tipWaitSeen (via appendRef's leiosEbRefKey) dedup by
 // (slot, hash), not hash alone, for the same reason: two blocks in the batch
 // can legitimately require the same hash at different slots, and a
 // hash-only dedup would drop the second requirement's fetch entirely. When
@@ -1344,7 +1343,7 @@ func leiosAnnouncementFromBlockCbor(
 // provider result against it (endorserBlockAvailableAt) rather than trust
 // whatever slot the provider itself reports, since the manifest is
 // content-addressed and the same hash can legitimately recur at a different
-// slot (issue #3513 review).
+// slot.
 func (ls *LedgerState) leiosEndorserBlockForApply(
 	block ledger.Block,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
@@ -1460,7 +1459,7 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 // requirement's spawn find the first already in flight and silently no-op,
 // and then let awaitFetch's "not in flight" skip-fast fire the moment the
 // *first* requirement's fetch cleared the (shared) key, even though the
-// second requirement's slot was never fetched at all (issue #3513 review).
+// second requirement's slot was never fetched at all.
 // ctx bounds the spawned fetch: it is the block-processing context, so a
 // shutdown or a pipeline restart stops the fetch instead of leaving it running
 // against a connection the node is tearing down.

@@ -347,16 +347,14 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 }
 
 // TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled is a
-// regression test for a human-review finding: no test failed if
-// handleEventBlockfetchBlockDeferred's Mithril-slot gate were reverted to
-// the previous validationEnabled check. Issue #3528 made header crypto
-// verification unconditional -- before it, an entire
-// ValidateHistorical=false bulk-sync run skipped VRF/KES/opcert
-// verification and stake-derived leader eligibility for every block. This
-// proves the fail-closed behavior directly: with validationEnabled=false
-// on a non-Mithril slot, a block with unverifiable header crypto still
-// returns a definite (non-deferred) error instead of being silently
-// accepted.
+// regression test: no test failed if handleEventBlockfetchBlockDeferred's
+// Mithril-slot gate were reverted to the previous validationEnabled check.
+// Header crypto verification is now unconditional -- before, an entire
+// ValidateHistorical=false bulk-sync run skipped VRF/KES/opcert verification
+// and stake-derived leader eligibility for every block. This proves the
+// fail-closed behavior directly: with validationEnabled=false on a non-Mithril
+// slot, a block with unverifiable header crypto still returns a definite
+// (non-deferred) error instead of being silently accepted.
 func TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled(
 	t *testing.T,
 ) {
@@ -454,7 +452,7 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 }
 
 // TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails is a
-// regression test for a human-review finding: handleEventBlockfetchBlockDeferred
+// regression test: handleEventBlockfetchBlockDeferred
 // checked errors.Is(verifyErr, errHeaderVerificationDeferred) directly
 // instead of the exported IsHeaderVerificationDeferred, so a covered epoch
 // with no published nonce yet (errEpochNonceUnavailable, which
@@ -499,7 +497,7 @@ func TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails(
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))
 }
 
-// --- non-extending-block flood demotion (issue #4272) ---
+// --- non-extending-block flood demotion ---
 
 // TestEvaluateNonExtendingBlockRejection exercises the pure threshold/window
 // decision directly against synthetic timestamps, matching

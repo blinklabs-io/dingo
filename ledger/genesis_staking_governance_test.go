@@ -31,16 +31,16 @@ import (
 )
 
 // TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap is the
-// same-bug-class regression test the #4151 PR review recommended: it
-// found that SetGenesisStaking (and SetGenesisGovernance, covered by
+// same-bug-class regression test: it found that SetGenesisStaking (and
+// SetGenesisGovernance, covered by
 // TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap below)
 // weren't gated by the same bootstrappedFromMithril guard as genesis UTxO
-// insertion. Both upsert current-state rows (ON CONFLICT ... DO UPDATE),
-// and a Mithril-bootstrapped node's imported ledger snapshot
-// (ledgerstate/import.go's importCertState) already reflects the correct
-// current pool/delegation state as of the bootstrap point -- reapplying
-// stale genesis-config values would silently resurrect a pool genuinely
-// retired (or a delegation genuinely changed) before the bootstrap point.
+// insertion. Both upsert current-state rows (ON CONFLICT ... DO UPDATE), and a
+// Mithril-bootstrapped node's imported ledger snapshot (ledgerstate/import.go's
+// importCertState) already reflects the correct current pool/delegation state
+// as of the bootstrap point -- reapplying stale genesis-config values would
+// silently resurrect a pool genuinely retired (or a delegation genuinely
+// changed) before the bootstrap point.
 //
 // Uses the embedded devnet config, the only bundled network that declares
 // a nonzero genesis pool + stake delegation (mainnet/preview/preprod/

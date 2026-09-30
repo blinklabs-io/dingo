@@ -169,7 +169,7 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 
 // TestWaitForBlockfetchRequestLockedWithSignalWaitsForBothPipelinedRequests
 // pins the blockfetchRequestsInFlight generalization from a single channel to
-// a slice (issue #4651): with pipelining, two requests can be outstanding on
+// a slice: with pipelining, two requests can be outstanding on
 // the same connection at once (the active batch and one pre-queued "next"
 // request), and gouroboros resolves them strictly FIFO, so the wait must
 // drain both, in order, not return after only the first.

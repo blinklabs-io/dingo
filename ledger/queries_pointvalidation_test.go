@@ -41,8 +41,7 @@ func seedBlockAtSlot(t *testing.T, ls *LedgerState, slot uint64, hash []byte) {
 
 // TestQuery_PinnedPointOnChain_Succeeds covers the common case: a pinned
 // point naming a block this node's current chain actually has at that slot
-// must be accepted, dispatching through to the query as normal
-// (blinklabs-io/dingo#382, #5 in the follow-up review).
+// must be accepted, dispatching through to the query as normal.
 func TestQuery_PinnedPointOnChain_Succeeds(t *testing.T) {
 	t.Parallel()
 

@@ -109,8 +109,8 @@ func newBenchLedgerState(tb testing.TB, n int) *LedgerState {
 }
 
 // BenchmarkHardForkSummary_SmallCache measures HardForkSummary's per-call
-// cost against a ~10-epoch cache -- the size implied by issue #2093's
-// original (incorrect) "O(eras) ~= 7" cost assumption.
+// cost against a ~10-epoch cache -- the size implied by the original
+// (incorrect) "O(eras) ~= 7" cost assumption.
 func BenchmarkHardForkSummary_SmallCache(b *testing.B) {
 	ls := newBenchLedgerState(b, 10)
 	b.ReportAllocs()

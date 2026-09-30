@@ -50,8 +50,8 @@ func previewEpochs(from, to uint64, nonce []byte) []models.Epoch {
 	return epochs
 }
 
-// TestElectingVrfKeyHashLagsPoolParamsByOneEpoch is the dingo #3842 regression,
-// built from the rotation that wedged a Preview replay twice.
+// TestElectingVrfKeyHashLagsPoolParamsByOneEpoch is the pre-rotation-key
+// regression, built from the rotation that wedged a Preview replay twice.
 //
 // The pool ran on oldKey, rotated to newKey at slot 3279920 (epoch 37), and
 // rotated back at slot 3366753 (epoch 38). The chain elected it on oldKey in
@@ -366,11 +366,11 @@ func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 		"not skipping means the threshold's denominator is actually read")
 }
 
-// TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor is the dingo #4047
-// regression: a Mithril-bootstrapped node wedges at its first epoch boundary
-// because the pool's only registration row is stamped at the bootstrap
-// anchor slot, which is later than the parameter cutoff and stake-snapshot
-// capture slots the electing snapshot resolves against.
+// TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor is the
+// Mithril-anchor regression: a Mithril-bootstrapped node wedges at its first
+// epoch boundary because the pool's only registration row is stamped at the
+// bootstrap anchor slot, which is later than the parameter cutoff and
+// stake-snapshot capture slots the electing snapshot resolves against.
 //
 // A Mithril snapshot import writes the pool's live-at-anchor registration
 // (ImportPool) -- it never replays the certificate history that produced it
@@ -431,13 +431,13 @@ func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
 }
 
 // TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll pins the
-// boundary the #4047 fix must not erase: on a Mithril-bootstrapped node, a
+// boundary the Mithril-anchor fix must not erase: on a Mithril-bootstrapped
+// node, a
 // pool with no registration row at all still raises
-// errVrfKeyRegistrationHistoryUnavailable rather than silently resolving.
-// The fallback reads the pool's live registration; a pool nothing was ever
-// imported or registered for has none, so GetPool finds nothing and the
-// fallback yields ok == false, falling through to the same error as before
-// the fix.
+// errVrfKeyRegistrationHistoryUnavailable rather than silently resolving. The
+// fallback reads the pool's live registration; a pool nothing was ever imported
+// or registered for has none, so GetPool finds nothing and the fallback yields
+// ok == false, falling through to the same error as before the fix.
 func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
 	t *testing.T,
 ) {
@@ -469,7 +469,7 @@ func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
 // half of the boundary: on a node with no Mithril bootstrap
 // (mithrilLedgerSlot == 0, e.g. a genesis sync), a missing-history gap must
 // still hard-reject even though the pool has a resolvable live registration.
-// This is the #3842 guarantee the fix must not erase: falling back to the
+// This is the guarantee the fix must not erase: falling back to the
 // live registration whenever history merely looks incomplete reintroduces
 // the VRF-rotation wedge that issue fixed. The fallback here fires only when
 // mithrilLedgerSlot pins a bootstrap boundary that explains the gap.

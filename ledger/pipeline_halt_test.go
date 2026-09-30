@@ -43,10 +43,10 @@ func newPipelineLoopLedger(t *testing.T) *LedgerState {
 }
 
 // TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure covers the terminal
-// half of issue #3261. Recovery raises errHaltLedgerPipeline once it has
-// established that no local replay can change a block's verdict; the restart
-// loop must then stop rather than restart into the same block forever, and must
-// leave a terminal signal behind for an operator.
+// half of the trust-window recovery. Recovery raises errHaltLedgerPipeline once
+// it has established that no local replay can change a block's verdict; the
+// restart loop must then stop rather than restart into the same block forever,
+// and must leave a terminal signal behind for an operator.
 func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
 	t.Parallel()
 

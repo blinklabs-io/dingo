@@ -492,8 +492,8 @@ func TestHardForkSummaryCache_ConcurrentAccessIsRaceFree(t *testing.T) {
 // the ledger suite all pass unchanged when the cache lookup is removed
 // entirely, because they only prove a *stale* result is never served. Without
 // this test a refactor that made the key never match would stay green while
-// silently restoring the per-call O(known epochs) rebuild that issue #2093 was
-// filed for.
+// silently restoring the per-call O(known epochs) rebuild the cache
+// exists to avoid.
 //
 // Pointer identity is the assertion rather than value equality precisely
 // because the published state is left untouched across the repeated calls: a

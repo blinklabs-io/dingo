@@ -349,7 +349,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 	// applied even when it repeats (see
 	// TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback and
 	// TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold),
-	// which is the issue #2790 fix.
+	// which is what breaks the rollback loop.
 	uncrossablePoint := ocommon.Point{
 		Slot: fixture.currentTip.Point.Slot - 3,
 		Hash: testHashBytes("uncrossable-missing-fork-block"),
@@ -380,12 +380,12 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 }
 
 // TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTip
-// covers issue #3516's rollback-depth bound: the common ancestor between the
-// diverged primary chain and the stale ledger tip here sits 3 blocks behind
-// the primary chain's tip, beyond the fixture's K=2. Live reconciliation
-// must decline rather than force that rewind through, leaving chain and
-// ledger state untouched, and fall back to the existing over-K handling
-// that rejects the peer chain and requests a fresh intersection.
+// pins: the common ancestor between the diverged primary chain and the stale
+// ledger tip here sits 3 blocks behind the primary chain's tip, beyond the
+// fixture's K=2. Live reconciliation must decline rather than force that rewind
+// through, leaving chain and ledger state untouched, and fall back to the
+// existing over-K handling that rejects the peer chain and requests a fresh
+// intersection.
 func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTip(
 	t *testing.T,
 ) {
@@ -460,15 +460,15 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 }
 
 // TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor
-// covers wolf31o2's review on PR #3611: when an over-K rollback triggers
+// pins: when an over-K rollback triggers
 // reconcileLivePrimaryChainLedgerDivergence and the common ancestor that
 // reconciliation itself finds sits at or below the Mithril boundary,
-// reconcilePrimaryChainTipWithLedgerTip's own pre-check (added earlier
-// this round) returns ErrRollbackExceedsMithrilBoundary -- a case
+// reconcilePrimaryChainTipWithLedgerTip's own pre-check (added earlier this
+// round) returns ErrRollbackExceedsMithrilBoundary -- a case
 // handleEventChainsyncRollback's over-K branch did not classify, so it
-// propagated as a generic reconciliation error instead of the same
-// classified ChainsyncResyncReasonRollbackExceedsMithril resync a direct
-// rollback failure against that boundary already gets.
+// propagated as a generic reconciliation error instead of the same classified
+// ChainsyncResyncReasonRollbackExceedsMithril resync a direct rollback failure
+// against that boundary already gets.
 func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	t *testing.T,
 ) {
@@ -679,7 +679,7 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 }
 
 // TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile is the
-// pipeline-level regression a wolf31o2 review on PR #3611 required.
+// pipeline-level regression for the over-K reconcile branch.
 // TestLedgerReadChainRequestsResyncOnOverKReconcile above only proves
 // ledgerReadChain itself returns and publishes a resync event; it says
 // nothing about what happens to block processing afterward. Before this
@@ -688,11 +688,10 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 // turned into a nil error -- ledgerProcessBlocksWithAttempt's err == nil
 // branch then exited its restart loop for good, permanently and silently
 // halting all ledger block processing with nothing to resume it short of a
-// full LedgerState restart. That the K-bounded rewind added by #3516 is
-// what made this branch reachable at all (RewindPrimaryChainToPoint had no
-// bound before) is what makes this a merge blocker for this PR rather than
-// a candidate for the general, already-deferred pattern tracked in issue
-// #3776.
+// full LedgerState restart. That the K-bounded rewind is what made this
+// branch reachable at all (RewindPrimaryChainToPoint had no bound before), so
+// it must be handled directly rather than left to the general,
+// already-deferred give-up pattern.
 //
 // This wires the real ledgerReadChain/ledgerProcessBlocksFromSource pair
 // through ledgerProcessBlocksWithAttempt exactly as production
@@ -868,7 +867,7 @@ func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
 	// so it cannot be exempted as Mithril-covered either (that would forbid
 	// the very rollback this fork resolution performs). An unverified fork
 	// header is still admitted onto the local header chain -- that's
-	// ordinary, safe chain-shape bookkeeping -- but issue #3528 requires
+	// ordinary, safe chain-shape bookkeeping -- but consensus requires
 	// genuine trust (real verification or a Mithril certificate) before it
 	// may advance the shared "trusted sync progress" frontier
 	// (recordAdmittedHeaderFrontier), so syncUpstreamTipSlot must stay at
@@ -1142,8 +1141,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 	}
 }
 
-// TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip covers
-// issue #3516's rollback-depth bound from the fork-resolution call site: the
+// TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip pins
+// the rollback-depth bound from the fork-resolution call site: the
 // common ancestor here sits 3 blocks behind the fixture's K=2, so live
 // reconciliation must decline the rewind rather than force it through, and
 // fork resolution must fall back to rejecting the fork and requesting a

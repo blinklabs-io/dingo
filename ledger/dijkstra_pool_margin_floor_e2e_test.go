@@ -70,7 +70,7 @@ func dijkstraTestProtocolParameters() *gdijkstra.DijkstraProtocolParameters {
 // (built from a *LedgerState whose config.MinPoolMargin is nonzero) passed to
 // eras.ValidateTxDijkstra as the lcommon.LedgerState argument. This is the
 // path that depends on *LedgerView satisfying eras.MinPoolMarginProvider —
-// fix #1's compile-time assertion guards the interface signature, but only
+// the compile-time assertion guards the interface signature, but only
 // this test proves the value actually reaches checkPoolMarginFloor at
 // runtime. Other Dijkstra UTxO validation rules may also error on this
 // deliberately minimal transaction; that's fine, since ValidateTxDijkstra

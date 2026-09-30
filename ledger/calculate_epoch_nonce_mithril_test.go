@@ -32,8 +32,8 @@ import (
 )
 
 // TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff
-// reproduces the persisted-state shape that issue #2128 reports after a
-// Mithril bootstrap inside a Conway epoch:
+// reproduces the persisted-state shape that the epoch-boundary VRF failure
+// shows after a Mithril bootstrap inside a Conway epoch:
 //
 //   - The bootstrap epoch row carries CandidateNonce == EvolvingNonce
 //     because the snapshot was taken before the candidate-freeze cutoff
@@ -55,8 +55,8 @@ import (
 // If the rollover instead returns the imported tip-time value as the
 // candidate (i.e. it inherited prevEpoch.CandidateNonce without ever
 // iterating past the cutoff), the next epoch's nonce diverges from peers
-// and every header in that epoch fails VRF verification — the freeze
-// described in #2128.
+// and every header in that epoch fails VRF verification — the candidate
+// freeze.
 func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 	t *testing.T,
 ) {
@@ -341,10 +341,10 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 // TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint covers
 // the operational hazard where a deployment was bootstrapped with an
 // importer that did not write the block_nonce checkpoint at the
-// snapshot tip slot (older code paths predating PR #2032). Branch B
-// in calculateEpochNonce searches for a block_nonce row matching
-// prevEpoch.EvolvingNonce; with no checkpoint that row does not
-// exist, and the resume seam is not found.
+// snapshot tip slot (older code paths predating the Mithril bootstrap fix).
+// Branch B in calculateEpochNonce searches for a block_nonce row matching
+// prevEpoch.EvolvingNonce; with no checkpoint that row does not exist, and the
+// resume seam is not found.
 //
 // The fast path should still produce correct results because it does
 // NOT depend on Branch B — it directly looks up the cutoff block and
@@ -490,7 +490,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
 // while the persisted epoch row written by processEpochRollover uses
 // calculateEpochNonce. Disagreement means peer headers verifying
 // against one nonce while we recompute another — the freeze pattern
-// in #2128.
+// above.
 func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 	t *testing.T,
 ) {

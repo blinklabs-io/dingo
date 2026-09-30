@@ -21,15 +21,16 @@ import (
 )
 
 // BenchmarkTipSnapshotReadOnly and BenchmarkTipSnapshotReadUnderWriter are the
-// regression sentinel for issue #2601: LedgerState.Tip, GetCurrentPParams,
-// CurrentEpoch, and IsAtTip are read constantly from API handlers, chainsync,
-// forging, and block validation, and used to take the embedded RWMutex's read
-// lock. A concurrent writer stalled every reader (RWMutex with 1% concurrent
-// writer measured ~591ns at 16 cores in #2601's prototype, versus ~133ns
-// read-only), because each writer Lock blocks the shared reader counter. The
-// fix (already landed, see LedgerState.consensus/tip atomic.Pointer fields
-// and publishSnapshotsLocked) moved these fields behind immutable
-// copy-on-write snapshots so reads never block on a concurrent writer.
+// regression sentinel for copy-on-write tip snapshots: LedgerState.Tip,
+// GetCurrentPParams, CurrentEpoch, and IsAtTip are read constantly from API
+// handlers, chainsync, forging, and block validation, and used to take the
+// embedded RWMutex's read lock. A concurrent writer stalled every reader
+// (RWMutex with 1% concurrent writer measured ~591ns at 16 cores in the
+// prototype, versus ~133ns read-only), because each writer Lock blocks the
+// shared reader counter. The fix (already landed, see LedgerState.consensus/tip
+// atomic.Pointer fields and publishSnapshotsLocked) moved these fields behind
+// immutable copy-on-write snapshots so reads never block on a concurrent
+// writer.
 //
 // Comparing these two benchmarks' ns/op across -cpu=1,4,8,16 is the
 // regression signal: on the current atomic.Pointer implementation both should
@@ -37,11 +38,12 @@ import (
 // RWMutex (or any lock) on this read path would show
 // BenchmarkTipSnapshotReadUnderWriter degrading sharply relative to
 // BenchmarkTipSnapshotReadOnly as cores increase, exactly the negative
-// scaling issue #1895 asks this framework to catch.
+// scaling the CI benchmarking framework is meant to catch.
 //
 // BenchmarkConcurrentQueries (see benchmark_test.go) exercises database query
 // load under concurrency; it is not a substitute for this benchmark, which
-// targets the specific in-memory snapshot read/publish path #2601 describes.
+// targets the specific in-memory snapshot read/publish path the copy-on-write
+// design covers.
 
 func benchmarkTipSnapshotReaders(b *testing.B, ledgerState *LedgerState) {
 	b.Helper()
@@ -68,10 +70,10 @@ func BenchmarkTipSnapshotReadOnly(b *testing.B) {
 // BenchmarkTipSnapshotReadUnderWriter adds a background writer that
 // continuously republishes the consensus/tip snapshots (the same
 // publishSnapshotsLocked call a real per-block writer makes), while readers
-// run concurrently. Run with -cpu=1,4,8,16 to see the scaling curve; per
-// #2601's regression, an implementation using a plain RWMutex here would
-// degrade sharply at higher core counts, while the atomic.Pointer
-// implementation should stay close to BenchmarkTipSnapshotReadOnly.
+// run concurrently. Run with -cpu=1,4,8,16 to see the scaling curve; an
+// implementation using a plain RWMutex here would degrade sharply at higher
+// core counts, while the atomic.Pointer implementation should stay close to
+// BenchmarkTipSnapshotReadOnly.
 //
 // The writer runs as fast as possible (deliberately more aggressive than a
 // real per-block cadence) so a reintroduced lock's contention shows up

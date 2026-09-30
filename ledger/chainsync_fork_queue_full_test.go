@@ -74,7 +74,7 @@ func assertPeerHeaderHistoryByteAccounting(t *testing.T, ls *LedgerState) {
 // cap -- required to build a path that exceeds MaxQueuedHeaders (the
 // default floor is 10,000), matching the shape of the live-sync freeze this
 // file regression-tests (a single reconciliation event with several
-// thousand fork-path headers, issue #1894 phase 3).
+// thousand fork-path headers).
 func buildOverflowForkPath(
 	fixture *chainsyncRollbackFixture,
 	connId ouroboros.ConnectionId,
@@ -310,16 +310,15 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 }
 
 // TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow pins the
-// fix for the #1894 phase 3 live-sync freeze: a fork-resolution path whose
-// length exceeds the header queue's capacity fails partway through
-// (chain.ErrHeaderQueueFull) appending onto the current chain tip. Before
-// the fix, tryResolveFork's "fork extends from current tip" loop returned
-// immediately on that failure without ever restarting blockfetch for the
-// headers it DID manage to queue -- and because chain.AddBlockHeader's
-// capacity check runs before any "should I start a fetch" decision, no
-// later header event, from any peer, fork or not, could ever trigger a
-// fresh blockfetch again: the queue would never drain and the node would
-// stop advancing permanently.
+// fix for the live-sync freeze: a fork-resolution path whose length exceeds the
+// header queue's capacity fails partway through (chain.ErrHeaderQueueFull)
+// appending onto the current chain tip. Before the fix, tryResolveFork's "fork
+// extends from current tip" loop returned immediately on that failure without
+// ever restarting blockfetch for the headers it DID manage to queue -- and
+// because chain.AddBlockHeader's capacity check runs before any "should I start
+// a fetch" decision, no later header event, from any peer, fork or not, could
+// ever trigger a fresh blockfetch again: the queue would never drain and the
+// node would stop advancing permanently.
 func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 	t *testing.T,
 ) {

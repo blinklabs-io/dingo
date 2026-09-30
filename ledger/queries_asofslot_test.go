@@ -47,7 +47,7 @@ func seedEpochs(
 }
 
 // TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot covers the
-// core #382 stake-distribution fix: a pinned point in an older epoch must
+// core stake-distribution pinning fix: a pinned point in an older epoch must
 // read that epoch's own mark snapshot, not the live tip's -- the two are
 // seeded with deliberately different stake for the same pool so a test that
 // silently fell back to live data would be caught.
@@ -166,7 +166,7 @@ func TestPoolStakeDistribution_AsOfSlot_AheadOfLiveRejected(t *testing.T) {
 }
 
 // TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds covers the
-// safe case for #382's protocol-parameters gap: a pinned point in the same
+// safe case for the protocol-parameters gap: a pinned point in the same
 // epoch as the live tip is answerable, since protocol parameters only
 // change at epoch boundaries -- "as of asOfSlot" and "live right now" are
 // necessarily the same value within one epoch.
@@ -305,7 +305,7 @@ func TestQueryShelleyCurrentProtocolParams_NoPersistedRow_Rejected(
 
 // TestQueryShelleyCurrentProtocolParams_HistoricalRowStripsSyntheticV2CostModel
 // covers a pinned epoch whose persisted pparams row still carries
-// HardForkBabbage's fabricated PlutusV2 cost model (blinklabs-io/dingo#3825):
+// HardForkBabbage's fabricated PlutusV2 cost model:
 // transitionToEraFrom persists newPParams verbatim, synthetic or not, so a
 // historical epoch from before real V2 data arrived carries that same
 // fabrication in its persisted CBOR. Answering it unfiltered would show a

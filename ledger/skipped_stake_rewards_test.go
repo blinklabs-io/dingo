@@ -32,9 +32,9 @@ import (
 // That shortfall is what rejects canonical blocks: leader eligibility
 // compares a VRF value against a stake-derived threshold, so a sigma
 // shortfall of eps flips a decision with probability about eps per block.
-// Measured on preview for issue #3165, the shortfall was ~3 epochs of reward
-// accrual, sigma was 0.042% short, and the rejected block's leader value sat
-// between this node's threshold and the reference's.
+// Measured on preview, the shortfall was ~3 epochs of reward accrual, sigma was
+// 0.042% short, and the rejected block's leader value sat between this node's
+// threshold and the reference's.
 //
 // Both skip paths logged at Debug before this, invisible at the default
 // level, which is why three separate field reports were investigated without

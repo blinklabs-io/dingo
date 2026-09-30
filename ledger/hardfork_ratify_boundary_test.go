@@ -35,7 +35,7 @@ import (
 )
 
 // hardForkRatifyFixture reproduces the exact Preview Plomin hard-fork
-// incident (dingo#4441) at a real epoch-rollover level: a HardForkInitiation
+// incident at a real epoch-rollover level: a HardForkInitiation
 // proposal, 49 SPO votes' worth of yes/no stake collapsed into two pools
 // carrying the real observed mark[740]/mark[741]/mark[742] ratios
 // (0.4779/0.4757/0.6283), and a single seated CC member voting yes with a
@@ -81,7 +81,7 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 	pparams := donationTestConwayPParams(9)
 	pparams.MinCommitteeSize = 1
 
-	// mark[740]/mark[741]/mark[742], the exact ratios dingo#4441 measured on
+	// mark[740]/mark[741]/mark[742], the exact ratios measured on
 	// Preview. Yes stake is hfrYesPool's explicit Yes vote; the remainder is
 	// hfrSilentPool, which casts no vote at all -- HardForkInitiation always
 	// keeps a silent pool's stake in the active denominator as implicit No
@@ -234,14 +234,14 @@ func (f *hardForkRatifyFixture) reloadProposal(
 }
 
 // TestHardForkInitiation_RatifiesAtRealIncidentBoundary reproduces
-// dingo#4441: the Preview Plomin hard fork (protocol major 9 -> 10) must
-// ratify at the boundary into epoch 742, using mark[742] (ratio 0.6283),
-// not mark[740] (0.4779) -- reproducing the real network's
-// ratified_epoch=742. Before the stakeEpochFor fix this proposal never
-// ratifies at this boundary (it would need to wait until mark[742] became
-// readable as mark[newEpoch-2], i.e. two epochs later than upstream, and in
-// the live incident the node halted on a downstream PV9-bootstrap
-// validation rule before ever reaching that point).
+// the Preview incident: the Preview Plomin hard fork (protocol major 9 -> 10)
+// must ratify at the boundary into epoch 742, using mark[742] (ratio 0.6283),
+// not mark[740] (0.4779) -- reproducing the real network's ratified_epoch=742.
+// Before the stakeEpochFor fix this proposal never ratifies at this boundary
+// (it would need to wait until mark[742] became readable as mark[newEpoch-2],
+// i.e. two epochs later than upstream, and in the live incident the node halted
+// on a downstream PV9-bootstrap validation rule before ever reaching that
+// point).
 func TestHardForkInitiation_RatifiesAtRealIncidentBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -295,7 +295,7 @@ func TestHardForkInitiation_EnactsOneBoundaryAfterRatification(t *testing.T) {
 }
 
 // hardForkRatifyLiveStakeFixture is hardForkRatifyFixture's sibling for
-// proving the *plumbing* half of dingo#4441, not the epoch-offset half: it
+// proving the *plumbing* half of the ratify fix, not the epoch-offset half: it
 // seeds live Pool/Account/UTxO delegation state -- never a pre-written
 // pool_stake_snapshot "mark" row -- and drives the same real
 // processEpochRollover path through the same epoch-boundary hooks node.go
@@ -319,7 +319,7 @@ const (
 // pre-written mark[742] row, and wires the authoritative persist hook
 // unconditionally (see the comment below for why not the SNAP-point
 // fast-path hook too). wireCurrentBoundaryHook controls only the new
-// dingo#4441 hook (SetCurrentBoundarySPOStakeHook), so a test can wire
+// current-boundary hook (SetCurrentBoundarySPOStakeHook), so a test can wire
 // everything else exactly like production and isolate what that one hook
 // contributes.
 func newHardForkRatifyLiveStakeFixture(
@@ -532,9 +532,9 @@ func TestHardForkInitiation_RatifiesFromLiveStakeWithHookWired(t *testing.T) {
 }
 
 // TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook is the
-// negative control for the plumbing half of dingo#4441: even after the
+// negative control for the plumbing half of the ratify fix: even after the
 // stakeEpochFor offset fix, wiring only the pre-existing SNAP-point stake
-// and capture hooks (exactly as before this change) leaves governance
+// and capture hooks (exactly as before the offset fix) leaves governance
 // reading the not-yet-written mark[742] row and permanently unable to
 // ratify -- worse than the original epoch-lag bug, not better. This is the
 // scenario SetCurrentBoundarySPOStakeHook's doc comment warns a production

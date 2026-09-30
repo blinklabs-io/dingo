@@ -35,7 +35,8 @@ import (
 // The first RUPD reads an empty nesBprev, not epoch 0's nesBcur.
 // With d=0 this gives eta=0; the same 180 blocks enter the next update,
 // giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
-// too. These are the reference devnet inputs and pots from issue #4502.
+// too. These are the reference devnet inputs and pots from the
+// extra-reward-round report.
 func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
 	t.Parallel()
 	ls, db := newRewardCalculationTestLedger(t)

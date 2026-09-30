@@ -82,8 +82,8 @@ func (s *scriptedGapLedgerReadIterator) Next(
 }
 
 // TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay is a regression
-// test for dingo#4464's confirmed premature-flush defect: the gather loop
-// used to flush a batch the moment a non-blocking iter.Next(false) returned
+// test for the premature-flush defect: the gather loop used to flush a batch
+// the moment a non-blocking iter.Next(false) returned
 // chain.ErrIteratorChainTip, even with only one block gathered and 49 more
 // blocks about to arrive. On the harness that produced the issue, this
 // fragmented an intended 50-block batch into ~6-9 block commits.
@@ -150,9 +150,9 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 }
 
 // TestLedgerReadChainIteratorNearTipFlushesSingleBlockPromptly confirms the
-// coalescing wait added for dingo#4464 does not regress live tip-following
-// latency: once isNearTip is true, a solitary new block must still commit
-// immediately rather than wait for a batch that will never fill.
+// coalescing wait does not regress live tip-following latency: once isNearTip
+// is true, a solitary new block must still commit immediately rather than wait
+// for a batch that will never fill.
 //
 // The retry interval is deliberately set far larger (minutes) than the
 // receive deadline (seconds) below, so this does not race a tight timing
@@ -250,8 +250,8 @@ func tryLockGatherMutex(ls *LedgerState) bool {
 }
 
 // TestLedgerReadChainIteratorHoldsGatherMutexAcrossCoalesceWait pins the
-// safety property the dingo#4464 coalescing branch rests on: unlike the
-// genuinely-blocking wait for a still-empty batch, the coalescing wait keeps
+// safety property the coalescing branch rests on: unlike the genuinely-blocking
+// wait for a still-empty batch, the coalescing wait keeps
 // blockPipelineGatherMutex's read lock held, because rawBatch already holds
 // real gathered blocks a concurrent rollback must not race ahead of.
 //

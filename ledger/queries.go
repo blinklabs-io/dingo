@@ -85,11 +85,11 @@ func checkLocalStateQueryItemLimit(query string, items int) error {
 }
 
 // QueryPoint pins a Query call to a specific historical block instead of
-// live-right-now (blinklabs-io/dingo#382). The zero value (Slot 0, no Hash)
-// means no pin -- the existing, default behavior of answering from whatever
-// is live right now -- matching the same "0 accepts the live/published
-// value" convention SlotToTimeWithHorizonFrom's horizonAnchorSlot already
-// uses elsewhere in this package.
+// live-right-now. The zero value (Slot 0, no Hash) means no pin -- the
+// existing, default behavior of answering from whatever is live right now --
+// matching the same "0 accepts the live/published value" convention
+// SlotToTimeWithHorizonFrom's horizonAnchorSlot already uses elsewhere in this
+// package.
 //
 // Hash is required whenever Slot is non-zero: identifying a historical
 // point by slot alone is ambiguous across a rollback (a fork switch can
@@ -113,9 +113,9 @@ func (p QueryPoint) pinned() bool {
 // this node cannot answer historically -- either because retained history
 // (a stake snapshot, a spent-UTxO row) has already been pruned past it, or
 // because the requested field's historical reconstruction is not
-// implemented for a point that far from the live tip
-// (blinklabs-io/dingo#382). errors.Is distinguishes this from a generic
-// query failure or ErrPointNotOnChain.
+// implemented for a point that far from the live tip.
+// errors.Is distinguishes this from a generic query failure or
+// ErrPointNotOnChain.
 var ErrHistoricalStateUnavailable = errors.New(
 	"historical ledger state unavailable for the requested point",
 )
@@ -133,8 +133,8 @@ var ErrPointNotOnChain = errors.New(
 
 // verifyPointOnChain confirms this node's current canonical chain has a
 // block at at.Slot whose hash is at.Hash, so a pinned query can't silently
-// reconstruct against a fork the caller never acquired
-// (blinklabs-io/dingo#382). Only called when at.pinned().
+// reconstruct against a fork the caller never acquired.
+// Only called when at.pinned().
 //
 // txn bounds both the tip read and the block lookup to one transaction, so
 // the two describe the same moment: database.BlockBySlot on its own has no
@@ -186,9 +186,8 @@ func (ls *LedgerState) verifyPointOnChain(
 
 // VerifyPointOnChain validates at against this node's current chain, the
 // same way Query does for a pinned point, but callable at Acquire time
-// (blinklabs-io/dingo#4156) rather than deferred to the first Query. An
-// unpinned at (the live/no-pin zero value) always succeeds -- there is
-// nothing to validate.
+// rather than deferred to the first Query. An unpinned at (the live/no-pin zero
+// value) always succeeds -- there is nothing to validate.
 //
 // Ordinary LocalStateQuery clients (a real cardano-node included) validate
 // a specific-point Acquire synchronously, replying with a graceful
@@ -218,7 +217,7 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 // resolveAsOfEpoch resolves at to the epoch that governed it -- unpinned
 // (at.pinned() false) means live, resolving the live tip's own epoch
 // instead. Shared by every query handler that reconstructs epoch-keyed
-// historical state (blinklabs-io/dingo#382) -- PoolStakeDistribution,
+// historical state -- PoolStakeDistribution,
 // queryShelleyCurrentProtocolParams, queryShelleyEpochNo, queryHardFork,
 // queryShelleyStakeDistribution -- so the live-vs-pinned epoch lookup is
 // written once rather than once per handler.
@@ -425,8 +424,8 @@ func (ls *LedgerState) VerifyPointQueryable(
 // ErrHistoricalStateUnavailable only when no such row was ever recorded or
 // it was pruned after a rollback), and epoch number (queryShelleyEpochNo,
 // unconditionally safe). Every other
-// query type ignores at and continues answering from live state; #382's
-// full scope (every query pinnable at any historical point) remains out of
+// query type ignores at and continues answering from live state; full
+// scope (every query pinnable at any historical point) remains out of
 // scope for what cross-node validation via node-parity actually needs.
 func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
 	return ls.query(query, at, 0)
@@ -547,7 +546,7 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 // single era ID is.
 //
 // HardForkCurrentEraQuery previously always answered with dingo's live era
-// regardless of at, a real point-pinning gap left open by #382's original
+// regardless of at, a real point-pinning gap left open by the original
 // scope decision (queryShelleyCurrentProtocolParams and friends, not this
 // HardFork-mini-protocol query type). This mattered more than its own
 // query type suggests: gouroboros's client-side GetCurrentProtocolParams
@@ -562,7 +561,7 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 // with different number of elements)" when the pinned point's real era
 // differs from dingo's live one -- e.g. pinning at genesis (slot 0)
 // against a dingo instance already many eras past it
-// (blinklabs-io/dingo#1900 node-parity --from-genesis validation).
+// (node-parity --from-genesis validation).
 func (ls *LedgerState) queryHardFork(
 	query *olocalstatequery.HardForkQuery,
 	at QueryPoint,
@@ -940,7 +939,7 @@ func (ls *LedgerState) queryShelley(
 // re-runs the wrapped inner query through it. at is Query's pinned point
 // (Slot 0 = live).
 //
-// #382 point-pinning coverage audit (every case below, classified):
+// Point-pinning coverage audit (every case below, classified):
 //
 // Honors at today: ShelleyStakeDistributionQuery and ShelleyPoolDistr2Query
 // (both via PoolStakeDistribution, resolving at to its epoch and reading
@@ -955,18 +954,18 @@ func (ls *LedgerState) queryShelley(
 // ShelleyUtxoByTxinQuery (queryShelleyUtxoByTxIn, resolving each requested
 // ref's per-row AddedSlot/DeletedSlot against at.Slot -- safe back to
 // checkUtxoRetentionWindow's retention floor, rejected with
-// ErrHistoricalStateUnavailable beyond it; blinklabs-io/dingo#1900's
-// node-parity incremental mode is the real caller this closes a gap for),
-// and ShelleyUtxoWholeQuery (queryShelleyUtxoWhole, same
-// AddedSlot/DeletedSlot predicate as ShelleyUtxoByTxinQuery applied to the
-// whole table via IterateUtxosAsOf instead of a bounded ref list, and the
-// same checkUtxoRetentionWindow floor -- unlike a per-ref lookup this has
-// no indexed shortcut, so a pinned call costs a full-table scan; accepted
-// deliberately, since node-parity's periodic full checks were reporting a
-// spurious UTxO "divergence" on essentially every run that took long
-// enough for the live tip to move during the walk before this closed the
-// gap -- confirmed live against a real Preview cardano-node, every flagged
-// row's own AddedSlot was strictly after the pinned slot).
+// ErrHistoricalStateUnavailable beyond it; the node-parity
+// incremental mode is the real caller this closes a gap for), and
+// ShelleyUtxoWholeQuery (queryShelleyUtxoWhole, same AddedSlot/DeletedSlot
+// predicate as ShelleyUtxoByTxinQuery applied to the whole table via
+// IterateUtxosAsOf instead of a bounded ref list, and the same
+// checkUtxoRetentionWindow floor -- unlike a per-ref lookup this has no indexed
+// shortcut, so a pinned call costs a full-table scan; accepted deliberately,
+// since node-parity's periodic full checks were reporting a spurious UTxO
+// "divergence" on essentially every run that took long enough for the live tip
+// to move during the walk before this closed the gap -- confirmed live against
+// a real Preview cardano-node, every flagged row's own AddedSlot was strictly
+// after the pinned slot).
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
@@ -1059,7 +1058,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 		return ls.queryShelleyStakeDistribution(at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
 		return ls.queryShelleyUtxoWhole(at, txn)
-	// TODO (#394)
+	// TODO: implement the remaining Shelley ledger queries below.
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
@@ -1081,7 +1080,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 // inner query and returns its result re-encoded as raw serialised CBOR
 // (CBOR-in-CBOR, tag 24), matching cardano-node. cardano-cli wraps several
 // queries this way (e.g. `query stake-snapshot`), so the whole class of
-// GetCBOR-wrapped queries flows through here. See issue #2917.
+// GetCBOR-wrapped queries flows through here.
 func (ls *LedgerState) queryShelleyCbor(
 	q *olocalstatequery.ShelleyCborQuery,
 	at QueryPoint,
@@ -1167,7 +1166,7 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	// From protocol version 11, GetStakeSnapshots omits any pool whose
 	// mark/set/go stake are all zero, regardless of the reason (unregistered,
 	// no delegations, or zero stake) and regardless of whether the pool was
-	// explicitly requested (cardano-ledger issue 5581). Below PV11 an
+	// explicitly requested (cardano-ledger behavior). Below PV11 an
 	// explicitly requested pool is always returned, even with zero stake.
 	omitZeroPools := false
 	if pv, err := GetProtocolVersion(consensus.currentPParams); err == nil {
@@ -1369,8 +1368,7 @@ func (ls *LedgerState) markStakeForPools(
 // cardano-node 11.0.1 on a fresh devnet, where every pool's set/go stake is 0
 // yet the set/go totals are reported as 1). Emitting a literal 0 makes
 // cardano-cli fail with "Encountered zero while trying to construct a NonZero
-// value". Per-pool stakes are plain Coin and are left un-clamped. See issue
-// #2917.
+// value". Per-pool stakes are plain Coin and are left un-clamped.
 func (ls *LedgerState) totalActiveStake(
 	epoch uint64,
 	exists bool,
@@ -1400,7 +1398,7 @@ func (ls *LedgerState) totalActiveStake(
 // really is the sum of delegated stake -- confirmed against the real
 // cardano-ledger source (calculatePoolDistr/SnapShot.ssTotalActiveStake,
 // IntersectMBO/cardano-ledger) -- and Dingo already gets that right; an
-// earlier attempt at blinklabs-io/dingo#3824 wrongly "fixed" GetPoolDistr2's
+// earlier attempt wrongly "fixed" GetPoolDistr2's
 // total to use this instead, which was reverted.
 //
 // GetStakeDistribution is a different, older query, and a real cardano-node
@@ -1421,13 +1419,13 @@ func (ls *LedgerState) totalActiveStake(
 //
 // asOfSlot, when non-nil, reads reserves as they stood at or before that
 // slot (GetNetworkStateAsOfSlot) instead of the always-latest row
-// (GetNetworkState) -- what a historical GetStakeDistribution answer needs
-// (blinklabs-io/dingo#382), since network_state already carries one row per
-// slot its reserves/treasury actually changed, not just the current value.
-// nil (the live case) is not the same as a zero slot: a real historical
-// caller who happens to name slot 0 still passes a non-nil pointer to it,
-// exactly the same "whole QueryPoint, not a bare uint64" caution
-// resolveAsOfEpoch's doc comment explains for other pinned-point callers.
+// (GetNetworkState) -- what a historical GetStakeDistribution answer needs,
+// since network_state already carries one row per slot its reserves/treasury
+// actually changed, not just the current value. nil (the live case) is not the
+// same as a zero slot: a real historical caller who happens to name slot 0
+// still passes a non-nil pointer to it, exactly the same "whole QueryPoint, not
+// a bare uint64" caution resolveAsOfEpoch's doc comment explains for other
+// pinned-point callers.
 //
 // circulatingSupplyGenesis (below) decides whether this function reads
 // network_state at all -- shared with
@@ -2327,10 +2325,10 @@ func stakeCredentialFromVote(
 // unspent or was spent strictly after at.Slot. The utxo table already
 // tracks both slots per row (AddedSlot, DeletedSlot -- see
 // database.UtxosByRefsAsOf), so this is a real, exact historical query,
-// not an approximation (blinklabs-io/dingo#382).
+// not an approximation.
 //
 // Before this existed, this handler ignored at entirely and always
-// answered from live state: node-parity's incremental mode (#1900) proved
+// answered from live state: node-parity's incremental mode proved
 // this live, both via a direct probe (acquire an older point, then query a
 // ref created by a later block through the same still-acquired session --
 // Dingo returned the newer output) and via a held-acquisition repro
@@ -2427,8 +2425,8 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 //     from-genesis replay's tip advances far faster than real block
 //     cadence, so this window used to open within single-digit epochs of
 //     starting, tearing down the whole LocalStateQuery connection with no
-//     graceful per-query failure available; blinklabs-io/dingo#382 residual
-//     Acquire/Query race).
+//     graceful per-query failure available; a residual
+//     race between Acquire and Query remains).
 //   - The durably persisted floor (readConsumedUtxoPruneFloor) recording
 //     the highest slot cleanup has ever actually begun pruning up to. This
 //     is exactly right for what's already been pruned, but reads zero on a

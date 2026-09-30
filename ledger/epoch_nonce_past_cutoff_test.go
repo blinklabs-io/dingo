@@ -30,7 +30,7 @@ import (
 )
 
 // TestEpochNonce_SnapshotTipPastCutoff covers the one Mithril-bootstrap
-// shape the existing #2128 suite does not: a snapshot whose tip slot lies
+// shape the existing epoch-nonce suite does not: a snapshot whose tip slot lies
 // PAST the candidate-freeze cutoff of its epoch. In that shape the imported
 // epoch row carries CandidateNonce != EvolvingNonce — psCandidateNonce
 // froze at the cutoff (before the tip) while psEvolvingNonce kept rolling

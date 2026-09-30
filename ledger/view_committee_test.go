@@ -1119,7 +1119,7 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 // governance.EnactProposal -- the same production entry point epoch-boundary
 // processing calls -- rather than seeding committee_member/auth rows
 // directly, so this test exercises applyUpdateCommittee's actual
-// TermStartSlot-stamping decision (blinklabs-io/dingo#4584).
+// TermStartSlot-stamping decision.
 func enactTestUpdateCommittee(
 	t *testing.T,
 	db *database.Database,
@@ -1156,7 +1156,7 @@ func enactTestUpdateCommittee(
 }
 
 // TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal reproduces the
-// blinklabs-io/dingo#4584 live Preview halt end-to-end, driving the real
+// live Preview halt from a committee term renewal end-to-end, driving the real
 // enactment path (governance.EnactProposal -> applyUpdateCommittee) rather
 // than seeding raw rows: a continuing committee member's one-time hot-key
 // authorization must survive a later UpdateCommittee action that renews the
@@ -1628,15 +1628,15 @@ func TestLedgerViewCommitteeResignationSurvivesTermRenewal(t *testing.T) {
 }
 
 // TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization
-// is the direct proof for the gouroboros#2574 plural capability: when two
-// cold credentials both currently authorize the same hot credential,
+// is the direct proof for the plural CommitteeHotCredentialMembers capability:
+// when two cold credentials both currently authorize the same hot credential,
 // CommitteeHotCredentialMembers must return both, not just whichever one the
 // singular CommitteeHotCredentialMember happens to find first (GOVCERT keeps
 // one authorization entry per cold credential, and cardano-ledger's own
 // authorizedHotCommitteeCredentials folds every entry into a set for exactly
 // this reason -- see the CommitteeHotCredentialMembers doc comment in
-// gouroboros ledger/common/state.go). Resigning one cold credential must
-// leave only the other in the result.
+// gouroboros ledger/common/state.go). Resigning one cold credential must leave
+// only the other in the result.
 func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
 	t *testing.T,
 ) {
@@ -1703,7 +1703,7 @@ func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
 }
 
 // TestValidateTxDijkstraAcceptsVoteWhenSharedHotCredentialColdKeyResignsInTx
-// is the end-to-end regression for gouroboros#2574 through dingo's real
+// is the end-to-end regression for the plural capability through dingo's real
 // Dijkstra validation path (eras.ValidateTxDijkstra -> a real *LedgerView).
 //
 // Cold A and cold B both currently authorize hot H (persisted, before this
@@ -1717,12 +1717,12 @@ func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
 // (dijkstraGovernanceStateView) tracks only cold credentials this
 // transaction's own certificates touched (cold A here); for every other cold
 // credential it falls back to what the ledger state reports for hot H. Before
-// gouroboros#2574 that fallback was the singular CommitteeHotCredentialMember,
-// which returns at most one witness and could return cold A -- correctly
-// excluded as touched, but leaving cold B's authorization undiscovered and the
-// vote wrongly rejected as unknown. LedgerView.CommitteeHotCredentialMembers
-// (added by this change) reports both, so gouroboros can exclude the touched
-// one and still find cold B.
+// the plural capability that fallback was the singular
+// CommitteeHotCredentialMember, which returns at most one witness and could
+// return cold A -- correctly excluded as touched, but leaving cold B's
+// authorization undiscovered and the vote wrongly rejected as unknown.
+// LedgerView.CommitteeHotCredentialMembers reports both, so gouroboros can
+// exclude the touched one and still find cold B.
 func TestValidateTxDijkstraAcceptsVoteWhenSharedHotCredentialColdKeyResignsInTx(
 	t *testing.T,
 ) {

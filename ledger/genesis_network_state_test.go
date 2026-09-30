@@ -73,10 +73,10 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 }
 
 // TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput guards the
-// offset-map and metadata-insert side of dingo#4428: for a valid,
-// duplicate-free genesis UTxO set, every output must resolve to exactly one
-// live UTxO row -- not zero (a missed offset) and not more than one (an
-// overwritten or resurrected offset).
+// offset-map and metadata-insert side of duplicate-genesis-UTxO rejection: for
+// a valid, duplicate-free genesis UTxO set, every output must resolve to
+// exactly one live UTxO row -- not zero (a missed offset) and not more than one
+// (an overwritten or resurrected offset).
 func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +149,7 @@ func TestCreateGenesisBlockStoresExactlyOneUtxoPerGenesisOutput(t *testing.T) {
 
 // TestCreateGenesisBlockRejectsAvvmNonAvvmCollisionBeforeWriting exercises
 // the full createGenesisBlock path -- not just the standalone helper -- with
-// an AVVM/non-AVVM collision (the case dingo#4428 cites via gouroboros#2378)
+// an AVVM/non-AVVM collision (the upstream gouroboros source-construction case)
 // injected into the real musashi genesis config, and checks the failure
 // happens before either the genesis network state row or the synthetic
 // genesis CBOR is committed. A rejected genesis must not leave partial
@@ -363,7 +363,7 @@ func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
 }
 
 // TestRejectDuplicateGenesisUtxosDetectsOverlap pins the divergence from
-// dingo#4428: two genesis entries sharing a transaction ID and output index
+// the reference: two genesis entries sharing a transaction ID and output index
 // (here with different amounts, as a duplicate AVVM/non-AVVM or
 // Byron/Shelley overlap would produce) must be rejected before any
 // downstream view -- reserve summation, synthetic CBOR, or the
@@ -413,11 +413,11 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 	)
 }
 
-// TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision pins dingo#4428's
-// cited upstream case (gouroboros#2378): an AVVM redeem address and a
-// non-AVVM address that resolve to the same underlying address bytes
-// produce the same transaction ID through Byron's real
-// ByronGenesis.GenesisUtxos() path, not a hand-built duplicate.
+// TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision pins the
+// upstream gouroboros case: an AVVM redeem address and a non-AVVM address that
+// resolve to the same underlying address bytes produce the same transaction ID
+// through Byron's real ByronGenesis.GenesisUtxos() path, not a hand-built
+// duplicate.
 func TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision(t *testing.T) {
 	t.Parallel()
 
@@ -438,7 +438,7 @@ func TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision(t *testing.T) {
 		NonAvvmBalances: map[string]string{
 			// Same underlying address bytes as the AVVM redeem entry
 			// above, expressed as a plain non-AVVM balance -- the exact
-			// overlap gouroboros#2378 rejects at source construction.
+			// overlap gouroboros rejects at source construction.
 			redeemAddr.String(): "2000000",
 		},
 	}
@@ -486,7 +486,7 @@ func TestGenesisReserveBalanceRejectsInvalidInputs(t *testing.T) {
 // reward_ada_pots row against the same slot-0 baseline as the network state.
 // The delayed reward calculation reads the pots row for epoch newEpoch-1, so
 // without a row for epoch 0 the 0->1 boundary has no pot inputs and its
-// monetary expansion is skipped (dingo #3381). Fees are 0 because no epoch
+// monetary expansion is skipped. Fees are 0 because no epoch
 // precedes epoch 0.
 func TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots(t *testing.T) {
 	t.Parallel()

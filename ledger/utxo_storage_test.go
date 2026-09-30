@@ -564,7 +564,7 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 // returns every produced UTxO for a transaction in one call, exactly once
 // even when a ref is requested more than once, and silently omits a ref
 // that doesn't correspond to any live UTxO rather than erroring the whole
-// batch (see #392).
+// batch.
 func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
 	t.Parallel()
 

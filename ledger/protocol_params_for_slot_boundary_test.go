@@ -283,17 +283,17 @@ func newMultiEraForecastCfg(
 
 // TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary is
 // the normal-boundary counterpart of the era-fork forecast test above, and
-// the regression guard for issue #3061. Preview launches federated (Shelley
-// genesis decentralisationParam = 1) and drops decentralization below 1 at
-// the epoch 1->2 boundary through an ordinary on-chain protocol-parameter
-// update, not an era hard fork. Before the fix, ProtocolParamsForSlot
-// forecast future-epoch params by applying only era HardForkFuncs, so it
-// returned the pre-boundary d = 1 for the next epoch. The genesis-overlay
-// check then classified the first Praos block of the new epoch (on an
-// irregular slot) as a non-active overlay slot and rejected it, deadlocking
-// a from-genesis sync at the boundary: entering the new epoch requires
-// accepting that block, which requires the post-update d, which only became
-// available after entering the epoch.
+// the regression guard for the genesis-overlay stall. Preview launches
+// federated (Shelley genesis decentralisationParam = 1) and drops
+// decentralization below 1 at the epoch 1->2 boundary through an ordinary
+// on-chain protocol-parameter update, not an era hard fork. Before the fix,
+// ProtocolParamsForSlot forecast future-epoch params by applying only era
+// HardForkFuncs, so it returned the pre-boundary d = 1 for the next epoch. The
+// genesis-overlay check then classified the first Praos block of the new epoch
+// (on an irregular slot) as a non-active overlay slot and rejected it,
+// deadlocking a from-genesis sync at the boundary: entering the new epoch
+// requires accepting that block, which requires the post-update d, which only
+// became available after entering the epoch.
 //
 // The pending update was proposed by a transaction the node already applied,
 // so it is in ledger state (a PParamUpdate row keyed to the target epoch)

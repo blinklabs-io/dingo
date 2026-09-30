@@ -198,12 +198,13 @@ func requireValueNotConserved(
 }
 
 // TestValueConservationRefundsUnknownStakeDepositAtKeyDeposit is the
-// regression test for #3829. A registration ingested without a computable
-// deposit records NULL, LedgerView.StakeCredentialDeposit reports absence, and
-// gouroboros' UtxoValidateValueNotConservedUtxo falls back to the current
-// KeyDeposit. Before the fix the three zero-reporting sites stored an
-// authoritative 0, the rule refunded 0, and this otherwise valid transaction
-// failed value conservation.
+// regression test for refunding an unknown deposit at KeyDeposit. A
+// registration ingested without a computable deposit records NULL,
+// LedgerView.StakeCredentialDeposit reports absence, and gouroboros'
+// UtxoValidateValueNotConservedUtxo falls back to the current KeyDeposit.
+// Before the fix the three zero-reporting sites stored an authoritative 0, the
+// rule refunded 0, and this otherwise valid transaction failed value
+// conservation.
 //
 // The assertion is on acceptance through eras.ValidateTxConway with a real
 // *LedgerView, not on the helper's return value, because the defect was that

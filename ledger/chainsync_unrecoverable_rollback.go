@@ -63,8 +63,7 @@ func unrecoverableRollbackKey(point ocommon.Point) string {
 // Unlike the rollbackHistory loop detector this tracker is keyed on the
 // point alone and is NOT wiped by resetChainsyncResyncState/
 // requestChainsyncResync, so it accumulates across the reset+reconnect
-// cycle that a diverged node would otherwise loop through forever
-// (see issue #2728).
+// cycle that a diverged node would otherwise loop through forever.
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) noteUnrecoverableRollback(

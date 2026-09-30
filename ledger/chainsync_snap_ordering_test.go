@@ -40,14 +40,13 @@ import (
 // and TestProcessEpochRollover_OrderingInvariant lock the rest of the sequence.
 //
 // currentBoundarySPOStakeState is a second read at the same point, resolving
-// mark[NewEpoch] for RATIFY's SPO tally (dingo#4441). Its position is load
-// bearing for the same reason: when no SNAP-point distribution was stashed it
-// reconstructs the boundary itself, and the reconstruction counts reward
-// deltas up to and including the boundary slot. Moved below
-// applyPoolRetirements or ProcessEpoch it would absorb the deposit refunds and
-// enactment credits those rules record at that slot, and every SPO-gated
-// action would be tallied against a mark that cardano-ledger's SNAP never
-// sees.
+// mark[NewEpoch] for RATIFY's SPO tally. Its position is load bearing for the
+// same reason: when no SNAP-point distribution was stashed it reconstructs the
+// boundary itself, and the reconstruction counts reward deltas up to and
+// including the boundary slot. Moved below applyPoolRetirements or ProcessEpoch
+// it would absorb the deposit refunds and enactment credits those rules record
+// at that slot, and every SPO-gated action would be tallied against a mark that
+// cardano-ledger's SNAP never sees.
 func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 	t.Parallel()
 

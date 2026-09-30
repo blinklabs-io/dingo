@@ -31,7 +31,7 @@ import (
 )
 
 // TestEpochNonceUsesCarriedLastEpochBlockNonce verifies the cardano-ledger
-// epoch-nonce assembly (#2734): the epoch nonce mixes the frozen candidate with
+// epoch-nonce assembly: the epoch nonce mixes the frozen candidate with
 // the CARRIED last-block-of-previous-epoch nonce
 // (prevEpoch.LastEpochBlockNonce == cardano praosStateLastEpochBlockNonce),
 // NOT the hash of the last block of the epoch being closed. The closing epoch's
@@ -165,7 +165,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 	// The carried lab stored for the NEXT boundary is the PARENT hash of the
 	// closing epoch's last block (prevHashToNonce(lastBlock.prevHash) ==
 	// hashAtPreCut, the post-cutoff block's PrevHash), NOT the last block's own
-	// hash — a one-block Praos lag (#2734 eta_1349 root cause).
+	// hash — a one-block Praos lag (the eta_1349 root cause).
 	require.Equal(
 		t,
 		hex.EncodeToString(hashAtPreCut),
@@ -193,7 +193,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 }
 
 // TestEpochNonceGenesisEdgeUsesNeutralLab pins the from-genesis initialization
-// of the carried lastEpochBlockNonce (#2734). When the initial epoch is created
+// of the carried lastEpochBlockNonce. When the initial epoch is created
 // (no prior nonce), the epoch/evolving/candidate nonces are the genesis nonce
 // but the carried lab is Neutral (nil) — NOT the genesis nonce. cardano-ledger
 // initializes praosStateLastEpochBlockNonce to NeutralNonce at genesis
@@ -265,7 +265,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 		hex.EncodeToString(rCandidate),
 		"initial candidate nonce is the genesis nonce",
 	)
-	// The key #2734 assertion: the carried lab is Neutral (nil), NOT the genesis
+	// The key assertion: the carried lab is Neutral (nil), NOT the genesis
 	// nonce, so the first from-genesis boundary uses the identity.
 	require.Empty(
 		t,

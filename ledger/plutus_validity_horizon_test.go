@@ -32,7 +32,7 @@ import (
 )
 
 // previewWedgeLedgerState reproduces the ledger state the from-genesis Preview
-// replay was in when it wedged on issue #3844: epoch 40 of the Babbage era, a
+// replay was in when it wedged: epoch 40 of the Babbage era, a
 // published tip at block 168143 (slot 3516450), and the next two blocks not yet
 // reflected in that tip because their batch had not committed. Preview's
 // genesis gives the 25920-slot safe zone (see newTestEraHistoryCfg).
@@ -65,9 +65,9 @@ func previewWedgeLedgerState(t testing.TB) *LedgerState {
 }
 
 // TestLedgerViewSlotToTimeUsesHorizonAnchor pins the routing at the call site
-// the #3844 fix changes. LedgerView.SlotToTime is the converter every Plutus
-// script context translates its validity interval through, so the anchor has to
-// reach the summary from there and the horizon has to survive the trip.
+// the horizon-anchor fix changes. LedgerView.SlotToTime is the converter every
+// Plutus script context translates its validity interval through, so the anchor
+// has to reach the summary from there and the horizon has to survive the trip.
 func TestLedgerViewSlotToTimeUsesHorizonAnchor(t *testing.T) {
 	t.Parallel()
 
