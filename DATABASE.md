@@ -2112,6 +2112,15 @@ already lost that metadata is a non-match rather than block ID zero.
 magic "DOFF" (4) + block_slot (8) + block_hash (32) + byte_offset (4) + byte_length (4)
 ```
 
+The raw immutable copy (`dingo load` and the Mithril block import, both
+through `storeRawBlockUtxoOffsets` in `internal/node/load.go`) writes a `DOFF`
+only for outputs the transaction produces: its outputs when phase-2 valid, and
+otherwise only its collateral return, at index `len(outputs)`. Alonzo through
+Conway blocks take validity from `invalid_transactions` in wire order. A
+Dijkstra block is decoded and indexed with `BlockIndexer`, because validity is
+each transaction's own `is_valid` field and a valid transaction also produces
+its sub-transactions' outputs, keyed by the sub-transaction body hash.
+
 `DTXP` transaction-part references are 69 bytes:
 
 ```text
