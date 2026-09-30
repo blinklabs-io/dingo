@@ -625,10 +625,13 @@ func TestListenerIsReusableAfterShutdown(t *testing.T) {
 
 // TestConcurrentBindStopNeverLeavesThePortBound hammers the interleavings the
 // individual tests each pin one of: a bind racing Stop, two Stops racing each
-// other, and a rebind on the same address immediately after.
+// other, and a further Stop immediately after.
 //
 // The invariant is the one every caller relies on: once Stop returns without an
-// error, the socket it bound is closed, so the address is free.
+// error, the socket it bound is closed, so the address is free. It is checked
+// on the socket Bind published; a Bind that saw the detach first closes a
+// socket this test cannot reach, which
+// TestBindReleasesListenerWhenServerAlreadyDetached covers instead.
 //
 // What this does NOT cover: the paths that need a bind still in flight when a
 // wait expires. A real bind settles far too quickly for that, so a stalled bind
@@ -641,9 +644,17 @@ func TestConcurrentBindStopNeverLeavesThePortBound(t *testing.T) {
 	t.Parallel()
 
 	// Iterations in which the bound socket was observed and proven closed.
-	// Guards against the loop passing without ever reaching an assertion.
+	// How often the bind publishes before a Stop detaches it depends on the
+	// scheduler -- a few iterations in a hundred on an idle host -- so the loop
+	// runs until it has wantVerified of them rather than for a fixed count.
+	const (
+		minIterations = 60
+		maxIterations = 5000
+		wantVerified  = 20
+	)
 	var verified int
-	for i := range 60 {
+	for i := 0; i < maxIterations &&
+		(i < minIterations || verified < wantVerified); i++ {
 		// A fresh address per iteration: a probed port can be taken by another
 		// process between the probe and the bind.
 		addr := testutil.FreePort(t)
