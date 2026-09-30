@@ -5465,3 +5465,50 @@ func TestPinInactiveWithoutLocalTip(t *testing.T) {
 	assert.False(t, stalled,
 		"stall must be false before any forward progress is recorded")
 }
+
+func TestChainSelectorForkSwitchReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	tipAt := func(slot uint64, hash string) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+			BlockNumber: slot,
+		}
+	}
+
+	// Both peers share slots 1-2 and fork at slot 3; B ends up longer.
+	for _, tip := range []ochainsync.Tip{
+		tipAt(1, "c1"), tipAt(2, "c2"), tipAt(3, "a3"), tipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	for _, tip := range []ochainsync.Tip{
+		tipAt(1, "c1"), tipAt(2, "c2"), tipAt(3, "b3"), tipAt(4, "b4"),
+		tipAt(5, "b5"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "fork switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}

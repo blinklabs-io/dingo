@@ -263,17 +263,10 @@ type replayAdapter struct {
 	tipCh      <-chan event.Event
 	switchCh   <-chan event.Event
 	switches   []format.SwitchEvent
-	headers    map[string]replayHeader
 	downstream []format.ServedMessage
 
 	headersFed    int
 	tipEventsSeen int
-}
-
-type replayHeader struct {
-	hash     []byte
-	prevHash []byte
-	slot     uint64
 }
 
 func newReplayAdapter(
@@ -328,7 +321,6 @@ func newReplayAdapter(
 		capture:  capture,
 		tipCh:    tipCh,
 		switchCh: switchCh,
-		headers:  make(map[string]replayHeader),
 	}
 }
 
@@ -344,13 +336,6 @@ func (a *replayAdapter) RollForward(
 		era, hdr, toGouroborosTip(tip),
 	); err != nil {
 		return err
-	}
-	hash := hdr.Hash()
-	prevHash := hdr.PrevHash()
-	a.headers[string(hash[:])] = replayHeader{
-		hash:     append([]byte(nil), hash[:]...),
-		prevHash: append([]byte(nil), prevHash[:]...),
-		slot:     hdr.SlotNumber(),
 	}
 	a.headersFed++
 	return nil
@@ -425,11 +410,17 @@ func (a *replayAdapter) collectSwitchesThroughBarrier() {
 		case switchBarrier:
 			return
 		case chainselection.ChainSwitchEvent:
-			a.switches = append(a.switches, format.SwitchEvent{
-				PreviousTip:   fromGouroborosTip(e.PreviousTip),
-				NewTip:        fromGouroborosTip(e.NewTip),
-				RollbackPoint: a.rollbackPoint(e),
-			})
+			sw := format.SwitchEvent{
+				PreviousTip: fromGouroborosTip(e.PreviousTip),
+				NewTip:      fromGouroborosTip(e.NewTip),
+			}
+			if e.RollbackPoint != nil {
+				sw.RollbackPoint = &format.Point{
+					Slot: e.RollbackPoint.Slot,
+					Hash: append(format.HexBytes(nil), e.RollbackPoint.Hash...),
+				}
+			}
+			a.switches = append(a.switches, sw)
 		default:
 			// Only the selector and the barrier above publish on this
 			// lane, so anything else is a bug in one of them. Skipping it
@@ -475,53 +466,6 @@ func (a *replayAdapter) selectedPeerTrace() []format.ServedMessage {
 		}
 	}
 	return nil
-}
-
-func (a *replayAdapter) rollbackPoint(e chainselection.ChainSwitchEvent) *format.Point {
-	previous := e.PreviousObservedTip
-	if len(previous.Point.Hash) == 0 && previous.Point.Slot == 0 {
-		previous = e.PreviousTip
-	}
-	newTip := e.NewObservedTip
-	if !e.NewObservedTipSet {
-		newTip = e.NewTip
-	}
-
-	newAncestors := a.ancestors(newTip)
-	for current := previous; ; {
-		key := string(current.Point.Hash)
-		if header, ok := newAncestors[key]; ok {
-			return &format.Point{
-				Slot: header.slot,
-				Hash: append(format.HexBytes(nil), header.hash...),
-			}
-		}
-		header, ok := a.headers[key]
-		if !ok || isZeroHash(header.prevHash) {
-			break
-		}
-		current.Point.Hash = append([]byte(nil), header.prevHash...)
-		current.Point.Slot = 0
-	}
-	return &format.Point{}
-}
-
-func (a *replayAdapter) ancestors(tip ochainsync.Tip) map[string]replayHeader {
-	ancestors := make(map[string]replayHeader)
-	current := tip.Point.Hash
-	for len(current) != 0 && !isZeroHash(current) {
-		header, ok := a.headers[string(current)]
-		if !ok {
-			break
-		}
-		ancestors[string(current)] = header
-		current = header.prevHash
-	}
-	return ancestors
-}
-
-func isZeroHash(hash []byte) bool {
-	return len(hash) == 0 || bytes.Equal(hash, make([]byte, len(hash)))
 }
 
 func cloneServedMessages(messages []format.ServedMessage) []format.ServedMessage {

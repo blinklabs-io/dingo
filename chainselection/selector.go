@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -2221,11 +2222,17 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			var previousTip ochainsync.Tip
 			var previousObservedTip ochainsync.Tip
 			var previousConnId ouroboros.ConnectionId
+			var rollbackPoint *ocommon.Point
 			if previousBest != nil {
 				previousConnId = *previousBest
 				if pt, ok := cs.peerTips[*previousBest]; ok {
 					previousTip = pt.Tip
 					previousObservedTip = pt.SelectionTip()
+					if point, found := pt.CandidateFragment().Intersect(
+						newPeerTip.CandidateFragment(),
+					); found {
+						rollbackPoint = &point
+					}
 				}
 			}
 			// Compute comparison result and block difference
@@ -2256,6 +2263,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 					PreviousObservedTip:  previousObservedTip,
 					ComparisonResult:     comparisonResult,
 					BlockDifference:      blockDiff,
+					RollbackPoint:        rollbackPoint,
 				},
 			)
 			switchEvent = &evt
