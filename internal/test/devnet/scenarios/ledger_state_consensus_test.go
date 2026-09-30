@@ -31,7 +31,7 @@ import (
 )
 
 // TestLedgerStateConsensus is Dingo's automated cross-node ledger-state
-// comparison against cardano-node (blinklabs-io/dingo#1900): it samples
+// comparison against cardano-node: it samples
 // dingo-producer's and cardano-producer's ledger state (current protocol
 // parameters, stake distribution, ADA pots, absolute stake snapshots, and
 // the whole UTxO set) in epochs 1 and 2. This exercises both bootstrap reward
@@ -40,7 +40,7 @@ import (
 // Sampling, not true per-block comparison: Dingo's LocalStateQuery server
 // (ouroboros/localstatequery.go) currently answers every Acquire against
 // its live tip regardless of the requested point — it has no point-specific
-// ledger view yet (tracked upstream as blinklabs-io/dingo#382). That means
+// ledger view yet (a known gap: no historical ledger view). That means
 // Acquire(specific historical point) cannot be used to pin an exact block on
 // Dingo today, so a true block-by-block replay comparison isn't possible
 // yet. Instead, each sample: (1) polls both nodes' chain tips over NtN until
@@ -51,8 +51,8 @@ import (
 // still anchors every successful sample to one exact, agreed-upon block —
 // it just doesn't visit every block, since finding a settled common tip and
 // running the LocalStateQuery calls per node is far more expensive than a
-// chain-tip poll. Revisit this once #382 lands: Acquire(point) would let
-// this walk every block, not just periodic settled samples.
+// chain-tip poll. Revisit this once point-specific views exist: Acquire(point)
+// would let this walk every block, not just periodic settled samples.
 func TestLedgerStateConsensus(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")

@@ -31,14 +31,14 @@ import (
 // coverage.
 //
 // What the per-backend replays do buy is dialect divergence, and that is not
-// hypothetical: #3599 found two real bugs this way, neither of them a rule bug.
-// loadPoolAssociations held a pool_registration cursor open while issuing
-// nested per-row queries on one connection, which SQLite tolerates and MySQL
-// and PostgreSQL do not; and go-sql-driver/mysql reports rows changed rather
-// than rows matched, so a DRep voting twice in an epoch with an unchanged
-// expiry looked like a missing row. Both were found by driving the storage
-// layer through the corpus's variety of access patterns, which needs one pass
-// per dialect, not several.
+// hypothetical: replaying the corpus per backend found two real bugs, neither
+// of them a rule bug. loadPoolAssociations held a pool_registration cursor open
+// while issuing nested per-row queries on one connection, which SQLite
+// tolerates and MySQL and PostgreSQL do not; and go-sql-driver/mysql reports
+// rows changed rather than rows matched, so a DRep voting twice in an epoch
+// with an unchanged expiry looked like a missing row. Both were found by
+// driving the storage layer through the corpus's variety of access patterns,
+// which needs one pass per dialect, not several.
 //
 // So each backend replays the corpus exactly once per `go test` process, and
 // every consumer -- the pass/fail gate, the progress statistics, and the

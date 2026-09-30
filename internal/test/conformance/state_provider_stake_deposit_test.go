@@ -117,15 +117,15 @@ func stakeDepositVectorTx(
 }
 
 // TestConformanceProviderRefundsRecordedStakeDepositNotKeyDeposit is the
-// regression test for #3831. It runs gouroboros'
+// regression test for the recorded-deposit refund path. It runs gouroboros'
 // UtxoValidateValueNotConservedUtxo against the conformance state provider
 // with a recorded deposit of 5 ADA while the KeyDeposit in force during
 // validation is 2 ADA.
 //
 // Without DingoStateProvider.StakeCredentialDeposit the rule's optional type
 // assertion misses, the refund silently becomes the 2 ADA KeyDeposit, and the
-// 5 ADA transaction fails value conservation. That is the gap the issue
-// describes: the corpus could not distinguish a correct recorded refund from
+// 5 ADA transaction fails value conservation. That is the gap:
+// the corpus could not distinguish a correct recorded refund from
 // the fallback.
 func TestConformanceProviderRefundsRecordedStakeDepositNotKeyDeposit(
 	t *testing.T,

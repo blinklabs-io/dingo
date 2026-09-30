@@ -975,9 +975,10 @@ func TestLoadCaptureFailureTrackerCleanReturnsNil(t *testing.T) {
 
 // TestLoadCaptureFailureTrackerSurfacesFailures verifies that a recorded capture
 // failure surfaces as an error that preserves the first cause and names every
-// failed epoch. This is the load-mode safety net for #1959: the ledger
-// suppresses the authoritative capture error and load has no event-driven
-// fallback, so without this the missing mark/reward snapshot would be silent.
+// failed epoch. This is the load-mode safety net for the epoch-0 genesis
+// snapshot: the ledger suppresses the authoritative capture error and load has
+// no event-driven fallback, so without this the missing mark/reward snapshot
+// would be silent.
 func TestLoadCaptureFailureTrackerSurfacesFailures(t *testing.T) {
 	t.Parallel()
 	tracker := &loadCaptureFailureTracker{}
@@ -1064,7 +1065,7 @@ func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
 }
 
 // TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking verifies
-// finding B (#1959): replaying a genesis with Shelley-genesis staking (as
+// replaying a genesis with Shelley-genesis staking (as
 // devnets configure) through `dingo load` must seed the epoch-0 "mark"
 // RewardSnapshot the same way the normal node.Run startup path does via
 // CaptureGenesisSnapshot, or the first reward round applied at the epoch-3

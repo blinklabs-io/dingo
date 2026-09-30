@@ -317,7 +317,7 @@ func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 // account.drep column through the backend, not the govState pre-validation
 // mirror, so a backend that never persists or returns account.drep
 // correctly cannot hide behind a mirror that happens to agree. Following
-// the reviewer's own probe, this stores one delegation only in govState
+// a direct probe, this stores one delegation only in govState
 // (the mirror) and a different delegation only in the real backend, then
 // asserts DRepDelegation returns the backend's value.
 func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {

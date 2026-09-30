@@ -410,7 +410,7 @@ var flagSpecs = []flagSpec{
 		"history expiry scan frequency",
 	),
 
-	// Koios reward-parity observer (dingo #3098; one-off validation aid, not a
+	// Koios reward-parity observer (one-off validation aid, not a
 	// permanent subsystem)
 	boolFlag(
 		"KoiosParity.Enabled",
