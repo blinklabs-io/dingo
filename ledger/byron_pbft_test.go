@@ -101,6 +101,50 @@ func newSignedByronPBFTBlock(
 	delegationPayload []any,
 ) *byron.ByronMainBlock {
 	t.Helper()
+	return newSignedByronPBFTBlockWithBody(
+		t,
+		template,
+		protocolMagic,
+		epoch,
+		slot,
+		difficulty,
+		previousHash,
+		issuer,
+		delegate,
+		proxyCertificate,
+		delegationPayload,
+		nil,
+	)
+}
+
+// byronPBFTBodyOverride replaces parts of the template block's body. The
+// header's body proof is recomputed over the replacement before the header is
+// signed, so the block is internally consistent.
+type byronPBFTBodyOverride struct {
+	// emptyTransactions drops the template's transactions.
+	emptyTransactions bool
+	// updatePayload is the raw CBOR of the block's update payload.
+	updatePayload []byte
+	// blockVersion replaces the version the header declares, which is the
+	// protocol version its issuer endorses.
+	blockVersion *byron.ByronBlockVersion
+}
+
+func newSignedByronPBFTBlockWithBody(
+	t *testing.T,
+	template models.Block,
+	protocolMagic uint32,
+	epoch uint64,
+	slot uint64,
+	difficulty uint64,
+	previousHash lcommon.Blake2b256,
+	issuer byronPBFTTestKey,
+	delegate byronPBFTTestKey,
+	proxyCertificate []any,
+	delegationPayload []any,
+	override *byronPBFTBodyOverride,
+) *byron.ByronMainBlock {
+	t.Helper()
 	decoded, err := template.Decode()
 	require.NoError(t, err)
 	block, ok := decoded.(*byron.ByronMainBlock)
@@ -115,6 +159,9 @@ func newSignedByronPBFTBlock(
 		issuer.verificationKey...,
 	)
 	header.ConsensusData.Difficulty.Value = difficulty
+	if override != nil && override.blockVersion != nil {
+		header.ExtraData.BlockVersion = *override.blockVersion
+	}
 	header.ConsensusData.BlockSig = []any{
 		uint64(2),
 		[]any{proxyCertificate, make([]byte, ed25519.SignatureSize)},
@@ -122,13 +169,26 @@ func newSignedByronPBFTBlock(
 	if delegationPayload == nil {
 		delegationPayload = []any{}
 	}
-	delegationPayloadCbor, err := cbor.Encode(cbor.IndefLengthList(delegationPayload))
+	delegationPayloadCbor, err := cbor.Encode(
+		cbor.IndefLengthList(delegationPayload),
+	)
 	require.NoError(t, err)
 	bodyProof, ok := header.BodyProof.([]any)
 	require.True(t, ok)
 	require.Len(t, bodyProof, 4)
 	bodyProof = append([]any(nil), bodyProof...)
 	bodyProof[2] = lcommon.Blake2b256Hash(delegationPayloadCbor).Bytes()
+	emptyTransactionsCbor := []byte{0x9f, 0xff}
+	if override != nil && override.emptyTransactions {
+		bodyProof[0] = []any{
+			uint64(0),
+			byron.MerkleRoot(nil).Bytes(),
+			lcommon.Blake2b256Hash(emptyTransactionsCbor).Bytes(),
+		}
+	}
+	if override != nil && override.updatePayload != nil {
+		bodyProof[3] = lcommon.Blake2b256Hash(override.updatePayload).Bytes()
+	}
 	header.BodyProof = bodyProof
 
 	epochSlot := struct {
@@ -196,6 +256,12 @@ func newSignedByronPBFTBlock(
 	require.Len(t, bodyParts, 4)
 	blockParts[0] = cbor.RawMessage(headerCbor)
 	bodyParts[2] = cbor.RawMessage(delegationPayloadCbor)
+	if override != nil && override.emptyTransactions {
+		bodyParts[0] = cbor.RawMessage(emptyTransactionsCbor)
+	}
+	if override != nil && override.updatePayload != nil {
+		bodyParts[3] = cbor.RawMessage(override.updatePayload)
+	}
 	bodyCbor, err := cbor.Encode(bodyParts)
 	require.NoError(t, err)
 	blockParts[1] = cbor.RawMessage(bodyCbor)
@@ -206,6 +272,17 @@ func newSignedByronPBFTBlock(
 	require.Equal(t, previousHash, rebuilt.PrevHash())
 	require.Equal(t, delegationPayload, rebuilt.Body.DlgPayload)
 	return rebuilt
+}
+
+func encodeIndefiniteByronList(t *testing.T, values []any) []byte {
+	t.Helper()
+	encoded := []byte{0x9f}
+	for _, value := range values {
+		item, err := cbor.Encode(value)
+		require.NoError(t, err)
+		encoded = append(encoded, item...)
+	}
+	return append(encoded, 0xff)
 }
 
 func rawByronPBFTBlock(
@@ -253,7 +330,16 @@ func newGeneratedByronPBFTTestNodeConfig(
 	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
@@ -307,7 +393,16 @@ func newByronPBFTTestNodeConfig(
 	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
 		fmt.Sprintf(`{
 			"avvmDistr": {},
-			"blockVersionData": {"slotDuration": "20000"},
+			"blockVersionData": {
+				"heavyDelThd": "0", "maxBlockSize": "1",
+				"maxHeaderSize": "1", "maxProposalSize": "1",
+				"maxTxSize": "1", "mpcThd": "0", "scriptVersion": 0,
+				"slotDuration": "20000",
+				"softforkRule": {"initThd": "0", "minThd": "0", "thdDecrement": "0"},
+				"txFeePolicy": {"multiplier": "0", "summand": "0"},
+				"unlockStakeEpoch": "0", "updateImplicit": "0",
+				"updateProposalThd": "0", "updateVoteThd": "0"
+			},
 			"ftsSeed": null,
 			"protocolConsts": {"k": %d, "protocolMagic": %d},
 			"startTime": 1506203091,
@@ -353,7 +448,7 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	state, err = ls.advanceByronPBFTState(state, block, true)
@@ -363,6 +458,52 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 	_, err = ls.advanceByronPBFTState(state, block, true)
 	require.ErrorContains(t, err, "signature threshold")
 	require.Len(t, state.issuerState.SignatureHistory(), 2)
+}
+
+func TestByronPBFTStateUsesCardanoNodeThreshold(t *testing.T) {
+	stored := loadRealByronMainBlock(t)
+	block, err := stored.Decode()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name        string
+		threshold   float64
+		k           uint64
+		maxAllowed  uint64
+		shouldBlock bool
+	}{
+		{name: "default", k: 10, maxAllowed: 2, shouldBlock: true},
+		{name: "0.10", threshold: 0.10, k: 10, maxAllowed: 1, shouldBlock: true},
+		{name: "0.22", threshold: 0.22, k: 10, maxAllowed: 2, shouldBlock: true},
+		{name: "0.50", threshold: 0.50, k: 10, maxAllowed: 5, shouldBlock: true},
+		{name: "1.1", threshold: 1.1, k: 10, maxAllowed: 10},
+		// 0.57 * 100 is 56.99999999999999 in Double.
+		{name: "0.57", threshold: 0.57, k: 100, maxAllowed: 56, shouldBlock: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeConfig := newByronPBFTTestNodeConfig(t, block, tc.k)
+			if tc.threshold != 0 {
+				threshold := cardano.CardanoNodeDouble(tc.threshold)
+				nodeConfig.PBftSignatureThreshold = &threshold
+			}
+			ls := &LedgerState{config: LedgerStateConfig{
+				CardanoNodeConfig: nodeConfig,
+			}}
+
+			state, err := ls.byronPBFTStateAtTip(context.Background(), ocommon.Tip{})
+			require.NoError(t, err)
+			issuer := lcommon.Blake2b224Hash([]byte("configured issuer"))
+			for range tc.maxAllowed {
+				state.issuerState, err = state.issuerState.Transition(issuer)
+				require.NoError(t, err)
+			}
+			_, err = state.issuerState.Transition(issuer)
+			if tc.shouldBlock {
+				require.ErrorContains(t, err, "signature threshold")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
@@ -419,7 +560,7 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -619,7 +760,7 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	)
 	config, err := ls.byronPBFTConfig()
 	require.NoError(t, err)
-	state, err := newByronPBFTState(config)
+	state, err := newByronPBFTState(config, nil)
 	require.NoError(t, err)
 
 	var origin lcommon.Blake2b256
@@ -960,13 +1101,6 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 	)
 }
 
-func TestValidateByronPBFTSlotRejectsFuture(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, validateByronPBFTSlot(42, 42))
-	require.ErrorContains(t, validateByronPBFTSlot(43, 42), "current slot")
-}
-
 func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
 	t.Parallel()
 
@@ -1107,9 +1241,9 @@ func TestValidateByronPBFTHeaderRejectsGenesisHashMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "genesis hash")
 }
 
-// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin is a CodeRabbit
-// finding on PR #4445: an EBB's block number (Difficulty.Value) and slot
-// (derived from ConsensusData.Epoch) are independent fields.
+// TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin verifies that an
+// EBB's block number (Difficulty.Value) and slot (derived from
+// ConsensusData.Epoch) are independent fields.
 // chain.firstBlockNumberValid only constrains the former, and
 // validateByronPBFTCurrentSlot only rejects a future slot, not a past one.
 // Without the epoch-0 check, an EBB with Difficulty 0, PrevBlock equal to
@@ -1251,4 +1385,48 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 
 	err := ls.validateByronPBFTHeaderCrypto(ebb)
 	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
+// validator with typed-nil headers, the shape a Byron block type can carry
+// in process. It must return an error rather than read through the header.
+func TestValidateByronPBFTHeaderCryptoRejectsNilHeaders(t *testing.T) {
+	t.Parallel()
+
+	blocks := map[string]gledger.Block{
+		"header-only main": headerOnlyBlock{
+			header: (*byron.ByronMainBlockHeader)(nil),
+		},
+		"header-only EBB": headerOnlyBlock{
+			header: (*byron.ByronEpochBoundaryBlockHeader)(nil),
+		},
+		"main block":     &byron.ByronMainBlock{},
+		"boundary block": &byron.ByronEpochBoundaryBlock{},
+	}
+	for name, block := range blocks {
+		for _, atOrigin := range []bool{true, false} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				ls, primaryChain := newByronGenesisAnchorTestLedger(
+					t,
+					lcommon.Blake2b256Hash([]byte("genesis")).String(),
+				)
+				if !atOrigin {
+					require.NoError(t, primaryChain.AddBlock(
+						loadBoundaryBlock(
+							t,
+							"mainnet-byron-last-4492799.cbor",
+							gledger.BlockTypeByronMain,
+						),
+						nil,
+					))
+				}
+				var err error
+				require.NotPanics(t, func() {
+					err = ls.validateByronPBFTHeaderCrypto(block)
+				})
+				require.ErrorContains(t, err, "nil header")
+			})
+		}
+	}
 }

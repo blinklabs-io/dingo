@@ -116,7 +116,7 @@ at a time.`,
 	)
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.metricsAddr, "metrics-addr", defaultMetricsAddr,
-		"address to serve Prometheus /metrics on for 'watch' (empty disables it; unused by 'check')",
+		"address to serve Prometheus /metrics on for 'watch' and 'from-genesis' (empty disables it; unused by 'check')",
 	)
 	rootCmd.PersistentFlags().Uint64Var(
 		&globalFlags.atSlot, "at-slot", 0,

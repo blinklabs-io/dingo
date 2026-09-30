@@ -398,12 +398,52 @@ type s3StreamIterator struct {
 	valid     bool
 	err       error
 	cancel    context.CancelFunc
+
+	// pendingSeek holds the position reset was given, and started reports
+	// whether the listing for it has been issued yet. The listing is deferred
+	// to the first read because NewIterator rewinds the iterator before the
+	// caller gets to seek it: an eager reset(nil) there lists from the start
+	// of the prefix and the Seek that follows throws that page away. Callers
+	// that refill a batch by reopening the iterator -- database's block
+	// iterator does so every blobIteratorBatchSize keys -- pay one such
+	// discarded page per batch.
+	pendingSeek []byte
+	started     bool
+	closed      bool
 }
 
+// reset arms the iterator at seek without contacting S3. The listing itself is
+// issued by start, on the first read.
 func (it *s3StreamIterator) reset(seek []byte) {
+	it.closed = false
 	if it.cancel != nil {
 		it.cancel()
+		it.cancel = nil
 	}
+	it.paginator = nil
+	it.page = nil
+	it.pageIdx = 0
+	it.seek = string(seek)
+	it.key = ""
+	it.valid = false
+	it.err = nil
+	it.pendingSeek = seek
+	it.started = false
+}
+
+// ensureStarted issues the listing armed by reset, once. A closed iterator
+// stays closed rather than reopening a listing on a later Valid or Err.
+func (it *s3StreamIterator) ensureStarted() {
+	if it.started || it.closed {
+		return
+	}
+	it.start()
+}
+
+func (it *s3StreamIterator) start() {
+	it.started = true
+	seek := it.pendingSeek
+	it.pendingSeek = nil
 	ctx, cancel := it.store.opContext()
 	it.cancel = cancel
 	input := &s3.ListObjectsV2Input{
@@ -435,12 +475,6 @@ func (it *s3StreamIterator) reset(seek []byte) {
 		}
 	}
 	it.paginator = s3.NewListObjectsV2Paginator(it.store.client, input)
-	it.page = nil
-	it.pageIdx = 0
-	it.seek = string(seek)
-	it.key = ""
-	it.valid = false
-	it.err = nil
 	it.advance(ctx)
 }
 
@@ -499,6 +533,7 @@ func (it *s3StreamIterator) Rewind() { it.reset(nil) }
 func (it *s3StreamIterator) Seek(prefix []byte) { it.reset(prefix) }
 
 func (it *s3StreamIterator) Valid() bool {
+	it.ensureStarted()
 	return it.err == nil && it.valid
 }
 
@@ -506,7 +541,11 @@ func (it *s3StreamIterator) ValidForPrefix(prefix []byte) bool {
 	return it.Valid() && strings.HasPrefix(it.key, string(prefix))
 }
 
+// Next advances past the current key. On an iterator whose listing is still
+// deferred, start positions it on the first key and the advance below moves off
+// it, which is what Seek-then-Next did when the listing was eager.
 func (it *s3StreamIterator) Next() {
+	it.ensureStarted()
 	if it.cancel == nil {
 		return
 	}
@@ -528,10 +567,15 @@ func (it *s3StreamIterator) Close() {
 		it.cancel = nil
 	}
 	it.paginator = nil
+	it.pendingSeek = nil
+	it.closed = true
 	it.valid = false
 }
 
-func (it *s3StreamIterator) Err() error { return it.err }
+func (it *s3StreamIterator) Err() error {
+	it.ensureStarted()
+	return it.err
+}
 
 type s3ReverseIterator struct {
 	store *BlobStoreS3

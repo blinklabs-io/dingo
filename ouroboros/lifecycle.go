@@ -135,6 +135,13 @@ func (o *Ouroboros) subscribeTracked(
 // Close is idempotent, so Run()'s deferred shutdown and an explicit
 // live-restore teardown can both call it.
 func (o *Ouroboros) Close() error {
+	o.leiosValidationMu.Lock()
+	o.leiosValidationClosed = true
+	if o.leiosValidationCancel != nil {
+		o.leiosValidationCancel()
+	}
+	o.leiosValidationMu.Unlock()
+	o.leiosValidationWG.Wait()
 	// Cancel admission-recovery publication before waiting for EventBus
 	// handlers. A timer that fired concurrently with Close must not keep
 	// shutdown waiting on an ordered-lane enqueue.

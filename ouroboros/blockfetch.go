@@ -46,6 +46,10 @@ const blockfetchMetricsCdfUpdateInterval = 32
 // chainsync batches.
 const blockfetchMaxBlocksFloor = 10 * ledger.BlockfetchBatchSize
 
+// blockfetchMaxInFlightBytes is the per-connection bound on the total
+// expected size of outstanding pipelined block-fetch ranges.
+const blockfetchMaxInFlightBytes = 3 * ledger.BlockfetchMaxRangeBytes
+
 // maxBlockFetchBlocksForSecurityParam returns the maximum number of blocks
 // served for a single BlockFetch range request. The bound is on the actual
 // resource cost (blocks iterated and sent) rather than on slot distance: on
@@ -197,6 +201,11 @@ func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc
 			o.instrumentBlockfetchRangeDone(o.blockfetchClientRangeDone),
 		),
 		blockfetch.WithRequestPipelining(true),
+		// Ranges carry real size estimates, so the default budget (100 x
+		// 88 KiB) would admit one heavy range at a time and end pipelining.
+		// Sized for the active range, its prefetched successor, and one more
+		// range of slack for estimate error.
+		blockfetch.WithMaxInFlightBytes(blockfetchMaxInFlightBytes),
 		blockfetch.WithBatchStartTimeout(60 * time.Second),
 		blockfetch.WithBlockTimeout(60 * time.Second),
 	}
@@ -221,7 +230,10 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
-		return models.DecodeConwayBlock(raw)
+		return models.DecodeConwayPeerBlock(raw)
+	}
+	if blockType == gledger.BlockTypeDijkstra {
+		return models.DecodeDijkstraPeerBlock(raw)
 	}
 	return gledger.NewBlockFromCbor(blockType, raw)
 }
@@ -783,7 +795,13 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	// even though this caller's context is never canceled directly.
 	requestId, err := client.RequestRange(
 		context.Background(),
-		blockfetch.RangeRequest{Start: start, End: end},
+		blockfetch.RangeRequest{
+			Start: start,
+			End:   end,
+			// Zero (no estimate) makes the client charge one default block
+			// for the range; see LedgerState.BlockfetchRangeExpectedBytes.
+			ExpectedBytes: o.blockfetchRangeBytes(start, end),
+		},
 	)
 	if err != nil {
 		if o.peerGov != nil {
@@ -839,6 +857,11 @@ func (o *Ouroboros) blockfetchClientBlock(
 			}
 
 			o.blockfetchMetrics.blockDelay.Set(delaySeconds)
+			o.blockfetchMetrics.recentDelays.record(
+				block.BlockNumber(),
+				block.Hash(),
+				delaySeconds,
+			)
 			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
 			// blocks at or below its threshold.

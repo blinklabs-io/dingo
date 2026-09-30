@@ -44,26 +44,35 @@ type historicalWithdrawal struct {
 // historicalRewards evaluates future reward credits only for the selected
 // credentials.  Filters are split into bounded batches so the generated
 // predicate stays below SQLite/PostgreSQL/MySQL parameter limits.
-func historicalRewards(
+func (s *Store) historicalRewards(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
-	return historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
+	return s.historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
 }
 
 // historicalRewardsAtBoundary reconstructs the reward balance observed at an
 // epoch SNAP boundary. Boundary credits marked PostSnapshot are still future
 // credits relative to SNAP and must be removed, while unmarked credits at the
-// boundary are already visible to the snapshot.
-func historicalRewardsAtBoundary(
+// boundary are already visible to the snapshot. A pending round applied at or
+// before that point contributes its credits that are not written yet.
+func (s *Store) historicalRewardsAtBoundary(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
+	hasPending, err := pendingRewardCreditOutputsExist(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	visibleAt := slot
+	if boundarySlot > 0 {
+		visibleAt = boundarySlot
+	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
 		keys = append(keys, key)
@@ -90,6 +99,20 @@ func historicalRewardsAtBoundary(
 		)
 		if err != nil {
 			return nil, err
+		}
+		if hasPending {
+			pending, err := s.pendingCreditsForCredentials(
+				ctx, db, visibleAt, batchSelected,
+			)
+			if err != nil {
+				return nil, err
+			}
+			for ref, amount := range pending {
+				if ^uint64(0)-batch[ref] < amount {
+					return nil, errors.New("historical reward credit overflow")
+				}
+				batch[ref] += amount
+			}
 		}
 		maps.Copy(ret, batch)
 	}
@@ -484,7 +507,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
@@ -586,7 +609,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewards(ctx, db, slot, selected)
+		rewardsByCredential, err := s.historicalRewards(ctx, db, slot, selected)
 		if err != nil {
 			return nil, fmt.Errorf("calculate historical rewards: %w", err)
 		}
@@ -731,7 +754,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {

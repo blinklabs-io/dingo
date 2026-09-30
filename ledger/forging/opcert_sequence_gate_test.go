@@ -132,8 +132,9 @@ func TestCheckAndForgeProductionSkipsOnStaleOpCertCounter(t *testing.T) {
 
 // TestCheckAndForgeProductionAllowsUnobservedOpCertCounter covers the
 // baseline case: the ledger has never observed a counter for this pool
-// (fresh registration, or a Mithril-restored start), so there is nothing to
-// compare against and the candidate is accepted.
+// (fresh registration, or a pool absent from a Mithril-restored certified
+// counter map), so the counter is judged against zero and the fixture's
+// counter 0 is accepted.
 func TestCheckAndForgeProductionAllowsUnobservedOpCertCounter(t *testing.T) {
 	builder, broadcaster := newOpCertSequenceGateTestBuilder()
 	var logs bytes.Buffer
@@ -371,4 +372,80 @@ func TestCheckAndForgeProductionSkipsOpCertSequenceCheckWhenLedgerViewNil(
 
 	require.Equal(t, 1, builder.calls)
 	require.Equal(t, 1, broadcaster.calls)
+}
+
+// TestCheckAndForgeProductionUnobservedOpCertCounterUsesZeroBaseline covers a
+// pool with no counter observed on chain through the running forger. The
+// reference's baseline for such a pool is zero (Praos currentIssueNo), so a
+// Praos-era slot is forged for counters 0 and 1 and declined for 2, which
+// block application would reject as over-incremented. TPraos checks
+// monotonicity only and forges any counter.
+func TestCheckAndForgeProductionUnobservedOpCertCounterUsesZeroBaseline(
+	t *testing.T,
+) {
+	tests := []struct {
+		name       string
+		pparams    lcommon.ProtocolParameters
+		candidate  uint64
+		wantForged bool
+	}{
+		{
+			name:       "praos era counter zero",
+			pparams:    &babbage.BabbageProtocolParameters{},
+			candidate:  0,
+			wantForged: true,
+		},
+		{
+			name:       "praos era counter one",
+			pparams:    &babbage.BabbageProtocolParameters{},
+			candidate:  1,
+			wantForged: true,
+		},
+		{
+			name:       "praos era counter two declined",
+			pparams:    &babbage.BabbageProtocolParameters{},
+			candidate:  2,
+			wantForged: false,
+		},
+		{
+			name:       "tpraos era large counter",
+			pparams:    &shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
+			candidate:  490,
+			wantForged: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder, broadcaster := newOpCertSequenceGateTestBuilder()
+			var logs bytes.Buffer
+			view := &fakeLedgerView{seqFound: false}
+			eraParams := &mockPParamsProvider{pparams: tt.pparams}
+			forger := opCertSequenceGateForger(
+				t,
+				view,
+				eraParams,
+				&forgerCountingLeader{},
+				builder,
+				broadcaster,
+				&logs,
+			)
+			forger.creds.mu.Lock()
+			forger.creds.opCert.IssueNumber = tt.candidate
+			forger.creds.mu.Unlock()
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			if tt.wantForged {
+				require.Equal(t, 1, builder.calls)
+				require.Equal(t, 1, broadcaster.calls)
+				return
+			}
+			require.Zero(t, builder.calls)
+			require.Zero(t, broadcaster.calls)
+			require.Contains(t, logs.String(), "skips ahead of last seen 0")
+		})
+	}
 }

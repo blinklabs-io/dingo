@@ -76,13 +76,13 @@ func buildAbandonedForkChain(
 	forkB := []*MockBlock{
 		{
 			MockBlockNumber: 3,
-			MockSlot:        41,
+			MockSlot:        sharedAncestor.MockSlot + 1,
 			MockHash:        spliceForkHashPrefix + "0003",
 			MockPrevHash:    sharedAncestor.MockHash,
 		},
 		{
 			MockBlockNumber: 4,
-			MockSlot:        61,
+			MockSlot:        sharedAncestor.MockSlot + 2,
 			MockHash:        spliceForkHashPrefix + "0004",
 			MockPrevHash:    spliceForkHashPrefix + "0003",
 		},
@@ -179,6 +179,9 @@ func TestRollbackRejectsPointNotOnChain(t *testing.T) {
 	if !errors.Is(err, models.ErrBlockNotFound) {
 		t.Fatalf("expected ErrBlockNotFound, got: %s", err)
 	}
+	if !errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+		t.Fatalf("expected ErrRollbackPointNotOnChain, got: %s", err)
+	}
 	tip := c.Tip()
 	if tip.Point.Slot != forkBTip.Slot ||
 		!bytes.Equal(tip.Point.Hash, forkBTip.Hash) {
@@ -212,6 +215,9 @@ func TestValidateRollbackRejectsPointNotOnChain(t *testing.T) {
 	}
 	if !errors.Is(err, models.ErrBlockNotFound) {
 		t.Fatalf("expected ErrBlockNotFound, got: %s", err)
+	}
+	if !errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+		t.Fatalf("expected ErrRollbackPointNotOnChain, got: %s", err)
 	}
 }
 

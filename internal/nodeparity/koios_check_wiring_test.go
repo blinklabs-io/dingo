@@ -372,7 +372,7 @@ func TestCheckProtocolParams_AppliesWireResolvedEraOverAmbiguousGuess(t *testing
 	))
 	t.Cleanup(koiosSrv.Close)
 
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	mismatches, err := CheckProtocolParams(ctx, client, koios, nil, "preview", epoch)
@@ -433,21 +433,32 @@ func TestCheckStakeDistribution_DetectsRealPoolStakeDivergence(t *testing.T) {
 
 	koiosSrv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/pool_history" {
+			switch r.URL.Path {
+			case "/pool_history":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%d,"active_stake":"%s"}]`,
+					epoch, koiosStake,
+				)
+			case "/epoch_info":
+				// Matches what Dingo reports, so compareTotalActiveStake
+				// stays silent and the one mismatch asserted below is
+				// unambiguously the injected per-pool divergence.
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%d,"active_stake":"%d"}]`,
+					epoch, dingoStake,
+				)
+			default:
 				w.WriteHeader(http.StatusNotFound)
-				return
 			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(
-				w,
-				`[{"epoch_no":%d,"active_stake":"%s"}]`,
-				epoch, koiosStake,
-			)
 		},
 	))
 	t.Cleanup(koiosSrv.Close)
 
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	mismatches, err := CheckStakeDistribution(ctx, client, koios, nil, "preview", epoch)
@@ -530,7 +541,7 @@ func TestCheckProtocolParams_FailsWhenEraQueryFails(t *testing.T) {
 	))
 	t.Cleanup(koiosSrv.Close)
 
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	mismatches, err := CheckProtocolParams(ctx, client, koios, nil, "preview", epoch)
@@ -593,7 +604,7 @@ func TestCheckProtocolParams_PropagatesExplicitEraQueryError(t *testing.T) {
 	))
 	t.Cleanup(koiosSrv.Close)
 
-	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
 	require.NoError(t, err)
 
 	mismatches, err := CheckProtocolParams(

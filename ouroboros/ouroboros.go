@@ -102,6 +102,12 @@ type Ouroboros struct {
 	leiosAnnouncementLedger LeiosAnnouncementLedger
 	leiosVotes              LeiosVoteHandler
 	leiosPipeline           LeiosPipelineHandler
+	leiosValidationCtx      context.Context
+	leiosValidationCancel   context.CancelFunc
+	leiosValidationSlots    chan struct{}
+	leiosValidationWG       sync.WaitGroup
+	leiosValidationMu       sync.Mutex
+	leiosValidationClosed   bool
 	config                  OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
@@ -149,6 +155,10 @@ type Ouroboros struct {
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
 	localstatequeryAcquireMutex   sync.Mutex
 	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	// blockfetchRangeBytes returns the expected wire size of a block range
+	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
+	// ledger's queued-header estimate; tests override it.
+	blockfetchRangeBytes func(start, end ocommon.Point) uint64
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
@@ -453,6 +463,10 @@ type blockfetchMetrics struct {
 	blocksUnder1s      atomic.Int64
 	blocksUnder3s      atomic.Int64
 	blocksUnder5s      atomic.Int64
+	// Ring of the last N at-tip block delays, exported by block slot so a
+	// per-block chart sees every block; blockDelay above keeps only the most
+	// recent one, which a scrape interval longer than the block gap misses.
+	recentDelays *recentBlockDelays
 	// Wall-clock time spent decoding one fetched block's raw CBOR bytes
 	// into a gledger.Block, by stage ("decode"). Only observed on a
 	// decode-cache miss, since a hit reuses another connection's already
@@ -500,6 +514,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	futureHeaderResyncCtx, futureHeaderResyncCancel := context.WithCancel(
 		context.Background(),
 	)
+	leiosValidationCtx, leiosValidationCancel := context.WithCancel(
+		context.Background(),
+	)
 	o := &Ouroboros{
 		config:                  cfg,
 		registerer:              newTrackingRegisterer(cfg.PromRegistry),
@@ -507,6 +524,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		connManager:             cfg.ConnManager,
 		ledgerState:             cfg.LedgerState,
 		leiosAnnouncementLedger: cfg.LeiosAnnouncementLedger,
+		leiosValidationCtx:      leiosValidationCtx,
+		leiosValidationCancel:   leiosValidationCancel,
+		leiosValidationSlots:    make(chan struct{}, 2),
 		mempool:                 cfg.Mempool,
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
@@ -546,7 +566,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	o.blockfetchConnClient = o.blockfetchConnClientLive
+	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
+		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
@@ -588,6 +610,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "delay in seconds for the most recent block fetch",
 		},
 	)
+	o.blockfetchMetrics.recentDelays = newRecentBlockDelays()
+	o.registerer.MustRegister(o.blockfetchMetrics.recentDelays)
 	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_blockfetchclient_lateblocks",

@@ -324,7 +324,11 @@ func TestByronMinFee(t *testing.T) {
 		{155_381_000_000_000, 43_946_000_000, 200, 164_171},
 	}
 	for _, test := range tests {
-		got, err := byronMinFee(test.summand, test.multiplier, test.size)
+		params, err := byronGenesisTestParams(
+			test.summand, test.multiplier, 0,
+		)
+		require.NoError(t, err)
+		got, err := params.MinFee(test.size)
 		require.NoError(t, err)
 		assert.Zero(t, big.NewInt(test.want).Cmp(got),
 			"got %s for summand %d multiplier %d size %d", got,

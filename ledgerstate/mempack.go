@@ -48,7 +48,8 @@ package ledgerstate
 //   - DataHash (SafeHash): PackedBytes 32 = 32 raw bytes, big-endian
 //     Word64 packing inside PackedBytes.
 //
-//   - DataHash32: 4 * Word64 LE = 32 bytes (same physical layout).
+//   - DataHash32: 4 * Word64 LE = 32 bytes. Each word must be
+//     converted to big-endian bytes to reconstruct the hash digest.
 //
 //   - Datum (era): tag 0=NoDatum, tag 1=DatumHash(+32 bytes),
 //     tag 2=Datum(+BinaryData as ShortByteString)
@@ -565,6 +566,13 @@ func decodeTxOutAddrHash28(
 			return nil, fmt.Errorf(
 				"reading DataHash32: %w", err,
 			)
+		}
+		// MemPack serializes DataHash32 as Word64s, whereas the hash
+		// digest uses PackedBytes32's big-endian representation. The
+		// SafeHash fields in the other TxOut variants are already bytes.
+		for i := 0; i < len(datumHash); i += 8 {
+			word := binary.LittleEndian.Uint64(datumHash[i : i+8])
+			binary.BigEndian.PutUint64(datumHash[i:i+8], word)
 		}
 	}
 

@@ -54,10 +54,11 @@ type fakeLeiosAnnouncementLedger struct {
 	// e.g. so a test can make one slot's binding read as expired while
 	// another's does not. Every other caller leaves it nil and gets the
 	// single fixed slotTime as before.
-	slotTimeFunc func(uint64) time.Time
-	staleness    ledger.LeiosAnnouncementOCINStaleness
-	err          error
-	validated    int
+	slotTimeFunc    func(uint64) time.Time
+	staleness       ledger.LeiosAnnouncementOCINStaleness
+	err             error
+	txValidationErr error
+	validated       int
 }
 
 func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
@@ -78,6 +79,14 @@ func (f *fakeLeiosAnnouncementLedger) ValidateLeiosAnnouncementHeader(
 ) (ledger.LeiosAnnouncementOCINStaleness, error) {
 	f.validated++
 	return f.staleness, f.err
+}
+
+func (f *fakeLeiosAnnouncementLedger) ValidateLeiosEndorserBlockTransactions(
+	context.Context,
+	gledger.BlockHeader,
+	[][]byte,
+) error {
+	return f.txValidationErr
 }
 
 func mustCbor(t *testing.T, value any) cbor.RawMessage {
@@ -895,7 +904,7 @@ func testDijkstraCertRBBodyElems(t *testing.T) []cbor.RawMessage {
 		mustCbor(
 			t,
 			[]any{[]byte{0x01}, make([]byte, lcommon.LeiosBlsSignatureSize)},
-		), // leios_cert
+		), // leios_certificate
 		mustCbor(t, nil), // peras_certificate
 	}
 }
@@ -1269,7 +1278,21 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 		100,
 		make([]byte, lcommon.Blake2b256Size),
 	)
-	ebTxs := []cbor.RawMessage{testDijkstraTx(t, 1), testDijkstraTx(t, 2)}
+	// Endorser-block transaction bytes use the mempool transaction order,
+	// where is_valid precedes auxiliary_data. The served Dijkstra block uses
+	// the block transaction order, where auxiliary_data precedes is_valid.
+	ebTxs := make([]cbor.RawMessage, 0, 2)
+	wantBlockTxs := make([][]byte, 0, 2)
+	for seed := byte(1); seed <= 2; seed++ {
+		var blockTx []cbor.RawMessage
+		_, err := cbor.Decode(testDijkstraTx(t, seed), &blockTx)
+		require.NoError(t, err)
+		wantBlockTxs = append(wantBlockTxs, []byte(mustCbor(t, blockTx)))
+		mempoolTx := []cbor.RawMessage{
+			blockTx[0], blockTx[1], blockTx[3], blockTx[2],
+		}
+		ebTxs = append(ebTxs, mustCbor(t, mempoolTx))
+	}
 
 	merged, err := spliceEndorserTxsIntoDijkstraBlock(certRB, ebTxs)
 	require.NoError(t, err)
@@ -1309,8 +1332,8 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	_, err = cbor.Decode(mergedBody[0], &mergedTxs)
 	require.NoError(t, err)
 	require.Len(t, mergedTxs, 2)
-	require.Equal(t, []byte(ebTxs[0]), []byte(mergedTxs[0]))
-	require.Equal(t, []byte(ebTxs[1]), []byte(mergedTxs[1]))
+	require.Equal(t, wantBlockTxs[0], []byte(mergedTxs[0]))
+	require.Equal(t, wantBlockTxs[1], []byte(mergedTxs[1]))
 
 	// The merged block deliberately has a stale body hash: the preserved header
 	// still commits to the original empty body, so a full parse (which verifies
@@ -1333,6 +1356,51 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Len(t, decoded.Transactions(), 2)
 }
 
+func TestSpliceEndorserMempoolTxReordersValidityAndAuxiliaryData(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	body := mustCbor(t, []any{uint64(1)})
+	witnesses := mustCbor(t, map[uint]any{})
+	isValid := mustCbor(t, true)
+	auxiliaryData := mustCbor(t, map[uint]any{0: []byte{0x01}})
+	mempoolTx := mustCbor(t, []cbor.RawMessage{
+		body, witnesses, isValid, auxiliaryData,
+	})
+	certRB := testDijkstraCertRBRaw(
+		t,
+		100,
+		make([]byte, lcommon.Blake2b256Size),
+	)
+
+	merged, err := spliceEndorserTxsIntoDijkstraBlock(
+		certRB,
+		[]cbor.RawMessage{mempoolTx},
+	)
+	require.NoError(t, err)
+
+	var top []cbor.RawMessage
+	_, err = cbor.Decode(merged, &top)
+	require.NoError(t, err)
+	var blockBody []cbor.RawMessage
+	_, err = cbor.Decode(top[1], &blockBody)
+	require.NoError(t, err)
+	var transactions []cbor.RawMessage
+	_, err = cbor.Decode(blockBody[0], &transactions)
+	require.NoError(t, err)
+	require.Len(t, transactions, 1)
+
+	var blockTx []cbor.RawMessage
+	_, err = cbor.Decode(transactions[0], &blockTx)
+	require.NoError(t, err)
+	require.Len(t, blockTx, 4)
+	require.Equal(t, []byte(body), []byte(blockTx[0]))
+	require.Equal(t, []byte(witnesses), []byte(blockTx[1]))
+	require.Equal(t, []byte(auxiliaryData), []byte(blockTx[2]))
+	require.Equal(t, []byte(isValid), []byte(blockTx[3]))
+}
+
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
 	t.Parallel()
 
@@ -1346,6 +1414,55 @@ func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
 		block, []cbor.RawMessage{testDijkstraTx(t, 1)},
 	)
 	require.Error(t, err)
+}
+
+func TestDijkstraBlockTransactionCborConvertsStandaloneForm(t *testing.T) {
+	t.Parallel()
+
+	standalone := testDijkstraTx(t, 10)
+	var components []cbor.RawMessage
+	_, err := cbor.Decode(standalone, &components)
+	require.NoError(t, err)
+	valid, err := cbor.Encode(true)
+	require.NoError(t, err)
+	standaloneWithValidity, err := cbor.Encode([]cbor.RawMessage{
+		components[0], components[1], valid, components[2],
+	})
+	require.NoError(t, err)
+	standaloneWithoutValidity, err := cbor.Encode([]cbor.RawMessage{
+		components[0], components[1], components[2],
+	})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		raw  cbor.RawMessage
+	}{
+		{name: "block transaction validity after auxiliary data", raw: standalone},
+		{name: "without explicit validity", raw: standaloneWithoutValidity},
+		{name: "standalone validity before auxiliary data", raw: standaloneWithValidity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := dijkstraBlockTransactionCbor(tc.raw)
+			require.NoError(t, err)
+			var blockComponents []cbor.RawMessage
+			_, err = cbor.Decode(got, &blockComponents)
+			require.NoError(t, err)
+			require.Len(t, blockComponents, 4)
+			require.Equal(t, []byte(components[0]), []byte(blockComponents[0]))
+			require.Equal(t, []byte(components[1]), []byte(blockComponents[1]))
+			require.Equal(t, []byte(components[2]), []byte(blockComponents[2]))
+			require.Equal(t, []byte{0xf5}, []byte(blockComponents[3]))
+		})
+	}
+
+	invalid, err := cbor.Encode([]cbor.RawMessage{
+		components[0], components[1], {0xf4}, components[2],
+	})
+	require.NoError(t, err)
+	_, err = dijkstraBlockTransactionCbor(invalid)
+	require.ErrorContains(t, err, "marked invalid")
 }
 
 func TestSpliceEndorserTxsRejectsWrongShape(t *testing.T) {

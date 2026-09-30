@@ -24,10 +24,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -37,6 +39,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
@@ -80,6 +83,13 @@ var (
 	// a separate, authoritative rejection that never carries this sentinel.
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
+	)
+	// errPoolSnapshotPruned marks a leader-stake snapshot whose rows the
+	// default pool-snapshot retention window has already deleted. It always
+	// wraps errLeaderStakeSnapshotUnavailable. The header may be valid; the
+	// node simply no longer holds the state to check it.
+	errPoolSnapshotPruned = errors.New(
+		"pool stake snapshot pruned by retention",
 	)
 	errVrfKeyRegistrationHistoryUnavailable = errors.New(
 		"VRF key registration history unavailable",
@@ -218,11 +228,41 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	if header == nil {
 		return errors.New("nil block header")
 	}
-	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+	// A header the ledger has applied was fully verified then. Re-verifying
+	// it here can fail only because the state it needs (pool snapshots older
+	// than the retention window) has since been pruned. The point carries the
+	// header hash, so a match is the same header. Holding the point alone is
+	// not enough: a block can join the chain with its state checks deferred
+	// until the ledger reaches it, so the ledger tip must also cover the slot.
+	if ls.headerApplied(header) {
+		return nil
+	}
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		headerOnlyBlock{header: header},
 		false,
 		true,
 	)
+	if errors.Is(err, errPoolSnapshotPruned) {
+		return fmt.Errorf("%w: %w", errHeaderVerificationDeferred, err)
+	}
+	return err
+}
+
+// headerApplied reports whether the ledger has applied header: its point is on
+// the chain and the published ledger tip has reached its slot. An unpublished
+// tip counts as not applied, so the header is verified.
+func (ls *LedgerState) headerApplied(header ledger.BlockHeader) bool {
+	if ls.chain == nil {
+		return false
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil || tip.currentTip.Point.Slot < header.SlotNumber() {
+		return false
+	}
+	return ls.chain.HoldsPoint(ocommon.NewPoint(
+		header.SlotNumber(),
+		header.Hash().Bytes(),
+	))
 }
 
 // verifyBlockHeader performs cryptographic verification of a block header.
@@ -443,6 +483,35 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 	}
 
 	return epoch, epochCache, nil
+}
+
+// validateHeaderEraOrder rejects a non-nil header whose era precedes the era
+// of the header or block it extends (chain.ErrEraRegression). The parent is
+// resolved only when it is the primary chain's header tip or block tip, which
+// covers every header this node would admit; a header extending anything else
+// is checked against its concrete parent at chain admission and by the inbound
+// block envelope.
+func (ls *LedgerState) validateHeaderEraOrder(header ledger.BlockHeader) error {
+	parentEra, found, err := ls.chain.ParentEra(header.PrevHash().Bytes())
+	if err != nil {
+		// Failing to load a local block says nothing about the peer's header.
+		return fmt.Errorf(
+			"%w: resolve parent era: %w",
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
+	if !found {
+		return nil
+	}
+	if err := chain.CheckEraOrder(header.Era().Id, parentEra); err != nil {
+		return fmt.Errorf(
+			"block header at slot %d: %w",
+			header.SlotNumber(),
+			err,
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) headerVerificationEpoch(
@@ -1047,28 +1116,29 @@ func (ls *LedgerState) ProtocolParameterUpdateWindow(
 	if ls.config.CardanoNodeConfig == nil {
 		return 0, 0, errors.New("unable to get cardano node config")
 	}
-	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-	if genesis == nil || genesis.ActiveSlotsCoeff.Rat == nil ||
-		genesis.ActiveSlotsCoeff.Sign() <= 0 || genesis.SecurityParam <= 0 {
-		return 0, 0, errors.New("invalid Shelley genesis PPUP parameters")
+	// Every Shelley-family era takes its stability window from Shelley
+	// genesis, so the transaction's era does not change the boundary.
+	stabilityWindow, err := eras.StabilityWindowForEra(
+		ls.config.CardanoNodeConfig,
+		eras.ShelleyEraDesc.Id,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("classic PPUP stability window: %w", err)
 	}
 	epochLength := uint64(epoch.LengthInSlots)
 	if epoch.StartSlot > ^uint64(0)-epochLength {
 		return 0, 0, errors.New("epoch end slot overflows")
 	}
-	// Shelley stops accepting proposals for the current epoch 6k/f slots
-	// before its end, where k is the security parameter and f the active-slot
-	// coefficient. Use the same integer slot boundary as the reference rule.
-	votingWindow := new(big.Rat).SetFrac(
-		new(big.Int).Mul(big.NewInt(6), big.NewInt(int64(genesis.SecurityParam))),
-		big.NewInt(1),
-	)
-	votingWindow.Quo(votingWindow, genesis.ActiveSlotsCoeff.Rat)
-	windowSlots := new(big.Int).Quo(votingWindow.Num(), votingWindow.Denom())
-	if !windowSlots.IsUint64() || windowSlots.Uint64() >= epochLength {
+	// The reference point of no return is the next epoch's first slot less
+	// twice the stability window, where the window is ceiling(3k/f)
+	// (Cardano.Ledger.Slot.getTheSlotOfNoReturn). Doubling the rounded window
+	// is not floor(6k/f): the two differ whenever 3k/f is not an integer.
+	// When the voting window covers the whole epoch every slot targets the
+	// next epoch, which the epoch's first slot expresses.
+	if stabilityWindow > (^uint64(0))/2 || 2*stabilityWindow >= epochLength {
 		return epoch.EpochId, epoch.StartSlot, nil
 	}
-	return epoch.EpochId, epoch.StartSlot + epochLength - windowSlots.Uint64(), nil
+	return epoch.EpochId, epoch.StartSlot + epochLength - 2*stabilityWindow, nil
 }
 
 func classifyGenesisOverlaySlot(
@@ -1474,6 +1544,31 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	return nil
 }
 
+// poolSnapshotPruned reports whether the pool-stake rows for an epoch are
+// gone because they fell below the retention window (currentEpoch-3, see
+// snapshot.Manager.cleanupOldSnapshots). Pruning deletes whole epochs, and
+// epoch_summary rows survive it, so an epoch with no rows at all is the
+// signature; a populated snapshot that lacks the pool is not pruned. API
+// storage mode never prunes.
+func (ls *LedgerState) poolSnapshotPruned(
+	snapshotEpoch uint64,
+	snapshotType string,
+) bool {
+	if ls.db.StorageMode() == types.StorageModeAPI {
+		return false
+	}
+	current := ls.loadConsensusSnapshot().currentEpoch.EpochId
+	if current < 3 || snapshotEpoch >= current-3 {
+		return false
+	}
+	rows, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		snapshotEpoch,
+		snapshotType,
+		nil,
+	)
+	return err == nil && len(rows) == 0
+}
+
 func (ls *LedgerState) leaderEligibilityStakeWithCache(
 	block ledger.Block,
 	epochId uint64,
@@ -1575,6 +1670,17 @@ func (ls *LedgerState) leaderEligibilityStakeWithCache(
 			)
 	}
 	if snapshot == nil || snapshot.TotalStake == 0 {
+		if ls.poolSnapshotPruned(snapshotEpoch, snapshotType) {
+			return 0, 0, snapshotEpoch, snapshotType, false,
+				fmt.Errorf(
+					"%w: %w: block header verification rejected at slot %d: "+
+						"epoch %d mark snapshot is below the retention window",
+					errLeaderStakeSnapshotUnavailable,
+					errPoolSnapshotPruned,
+					block.SlotNumber(),
+					snapshotEpoch,
+				)
+		}
 		// Mirror cardano-ledger: a pool absent from the leader stake
 		// distribution is a hard rejection (the reference node's
 		// VRFKeyUnknown). The reference distribution (nesPd) is always

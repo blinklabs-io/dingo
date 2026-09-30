@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -135,6 +136,26 @@ func (m *Manager) saveSnapshotInTxn(
 	checkAuthoritativeMark bool,
 	txn *database.Txn,
 ) error {
+	return m.saveSnapshotInTxnDeferring(
+		epoch, snapshotType, distribution, evt, resolveAutoVote,
+		persistRewardInputs, checkAuthoritativeMark, false, txn,
+	)
+}
+
+// saveSnapshotInTxnDeferring is saveSnapshotInTxn that, with
+// deferStakeInputs, stages the reward_stake_input rows for
+// TakeDeferredRewardStakeInputs instead of writing them.
+func (m *Manager) saveSnapshotInTxnDeferring(
+	epoch uint64,
+	snapshotType string,
+	distribution *StakeDistribution,
+	evt event.EpochTransitionEvent,
+	resolveAutoVote bool,
+	persistRewardInputs bool,
+	checkAuthoritativeMark bool,
+	deferStakeInputs bool,
+	txn *database.Txn,
+) error {
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
 
@@ -212,6 +233,7 @@ func (m *Manager) saveSnapshotInTxn(
 		len(distribution.PoolStakes),
 	)
 	leiosKeys, err := m.snapshotLeiosKeys(
+		epoch,
 		distribution,
 		evt,
 		meta,
@@ -224,22 +246,23 @@ func (m *Manager) saveSnapshotInTxn(
 		delegators := distribution.DelegatorCount[poolKeyHash]
 		leiosKey := leiosKeys[string(poolKeyHash[:])]
 		var leiosKeyPublic, leiosKeyPossessionProof []byte
-		if leiosKey != nil {
-			leiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
+		if leiosKey.key != nil {
+			leiosKeyPublic = append([]byte(nil), leiosKey.key.PublicKey...)
 			leiosKeyPossessionProof = append(
-				[]byte(nil), leiosKey.PossessionProof...,
+				[]byte(nil), leiosKey.key.PossessionProof...,
 			)
 		}
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:                   epoch,
-			SnapshotType:            snapshotType,
-			PoolKeyHash:             poolKeyHash[:], // Convert [28]byte to []byte
-			TotalStake:              types.Uint64(stake),
-			DelegatorCount:          delegators,
-			CapturedSlot:            distribution.Slot,
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
-			CalculationVersion:      models.RewardStakeCalculationVersion,
+			Epoch:                     epoch,
+			SnapshotType:              snapshotType,
+			PoolKeyHash:               poolKeyHash[:], // Convert [28]byte to []byte
+			TotalStake:                types.Uint64(stake),
+			DelegatorCount:            delegators,
+			CapturedSlot:              distribution.Slot,
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: leiosKey.registrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
 
@@ -286,9 +309,19 @@ func (m *Manager) saveSnapshotInTxn(
 	// replace the per-pool and per-credential rows keyed off it.
 	if bundle != nil {
 		if err := m.saveRewardStateInputRows(
-			epoch, bundle, meta, metaTxn,
+			epoch, bundle, deferStakeInputs, meta, metaTxn,
 		); err != nil {
 			return fmt.Errorf("save reward state inputs: %w", err)
+		}
+		if deferStakeInputs {
+			m.mu.Lock()
+			m.deferredStakeInputs = &DeferredRewardStakeInputs{
+				txn:          txn,
+				Epoch:        epoch,
+				BoundarySlot: evt.BoundarySlot,
+				Inputs:       bundle.stakeInputs,
+			}
+			m.mu.Unlock()
 		}
 	}
 
@@ -315,16 +348,25 @@ func (m *Manager) saveSnapshotInTxn(
 // freeze a key one epoch too early. This is the same historical selection used
 // by buildRewardStateInputs for the rest of the snapshotted pool parameters.
 //
-// Missing legacy epoch metadata leaves the affected seats keyless. It must not
-// fall back to current pool state: doing so would make an old snapshot resolve
-// differently after a key rotation.
+// Missing legacy epoch metadata or an imported registration with only a
+// synthetic import slot leaves the key's age unknown. Preserve the key bytes
+// from the registration selected for the snapshot, but do not invent an
+// effective epoch; key lookup will keep it ineligible until its TTL can be
+// established. Never fall back to current pool state, which would make an old
+// snapshot resolve differently after a key rotation.
+type snapshottedLeiosKey struct {
+	key               *lcommon.LeiosKey
+	registrationEpoch *uint64
+}
+
 func (m *Manager) snapshotLeiosKeys(
+	snapshotEpoch uint64,
 	distribution *StakeDistribution,
 	evt event.EpochTransitionEvent,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
-) (map[string]*lcommon.LeiosKey, error) {
-	ret := make(map[string]*lcommon.LeiosKey)
+) (map[string]snapshottedLeiosKey, error) {
+	ret := make(map[string]snapshottedLeiosKey)
 	if distribution == nil || len(distribution.PoolStakes) == 0 {
 		return ret, nil
 	}
@@ -351,21 +393,58 @@ func (m *Manager) snapshotLeiosKeys(
 	if err != nil {
 		return nil, err
 	}
+	epochs, err := meta.GetEpochs(metaTxn)
+	if err != nil {
+		return nil, fmt.Errorf("load epochs for Leios key age: %w", err)
+	}
 	for _, registration := range registrations {
 		if len(registration.LeiosKeyPublic) == 0 ||
 			len(registration.LeiosKeyPossessionProof) == 0 {
 			continue
 		}
-		ret[string(registration.PoolKeyHash)] = &lcommon.LeiosKey{
-			PublicKey: append(
-				[]byte(nil), registration.LeiosKeyPublic...,
-			),
-			PossessionProof: append(
-				[]byte(nil), registration.LeiosKeyPossessionProof...,
-			),
+		registrationEpoch, ageKnown := uint64(0), false
+		if registration.LeiosKeyRegistrationEpoch != nil {
+			registrationEpoch = *registration.LeiosKeyRegistrationEpoch
+			ageKnown = true
+		} else if !registration.LeiosKeyRegistrationAgeUnknown {
+			registrationEpoch, ageKnown = epochForSlot(
+				epochs,
+				registration.AddedSlot,
+			)
+		}
+		var effectiveEpoch *uint64
+		if ageKnown && registrationEpoch != ^uint64(0) {
+			if registration.LeiosKeyRegistrationEpoch == nil {
+				registrationEpoch++ // on-chain pool parameters take effect after POOLREAP
+			}
+			if registrationEpoch > snapshotEpoch {
+				continue
+			}
+			effectiveEpoch = &registrationEpoch
+		}
+		ret[string(registration.PoolKeyHash)] = snapshottedLeiosKey{
+			key: &lcommon.LeiosKey{
+				PublicKey: append(
+					[]byte(nil), registration.LeiosKeyPublic...,
+				),
+				PossessionProof: append(
+					[]byte(nil), registration.LeiosKeyPossessionProof...,
+				),
+			},
+			registrationEpoch: effectiveEpoch,
 		}
 	}
 	return ret, nil
+}
+
+func epochForSlot(epochs []models.Epoch, slot uint64) (uint64, bool) {
+	index := sort.Search(len(epochs), func(i int) bool {
+		return epochs[i].StartSlot > slot
+	})
+	if index == 0 {
+		return 0, false
+	}
+	return epochs[index-1].EpochId, true
 }
 
 // rewardStateBundle is the fully computed reward-state capture for one epoch
@@ -545,6 +624,7 @@ func rewardStakeDistribution(
 func (m *Manager) saveRewardStateInputRows(
 	epoch uint64,
 	bundle *rewardStateBundle,
+	deferStakeInputs bool,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 ) error {
@@ -557,6 +637,9 @@ func (m *Manager) saveRewardStateInputRows(
 
 	if err := meta.SaveRewardPoolInputs(bundle.poolInputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward pool inputs: %w", err)
+	}
+	if deferStakeInputs {
+		return nil
 	}
 	if err := meta.SaveRewardStakeInputs(bundle.stakeInputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward stake inputs: %w", err)

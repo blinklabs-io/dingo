@@ -186,7 +186,7 @@ func TestCleanupConsumedUtxos_DoesNotWaitForChainsyncMutex(t *testing.T) {
 // rows could be pruned with no durable record that floor was ever used,
 // letting a later pinned query at or above that floor see no persisted
 // floor to reject against and silently answer "absent" for a ref that was
-// actually there (blinklabs-io/dingo#382 review, Cubic). Drops the
+// actually there. The test drops the
 // sync_state table (via a raw connection to the same file) so SetSyncState
 // fails while the utxo table -- and so UtxosDeleteConsumed -- stays fully
 // functional, isolating the failure to exactly the call this test cares

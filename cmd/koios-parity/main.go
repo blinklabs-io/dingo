@@ -206,10 +206,9 @@ func intConfigValue(cfg map[string]any, key string) int {
 }
 
 // dsnFromMetadataConfig builds a connection string from Dingo's resolved
-// plugins.storage.metadata.config map. A flat "dsn" key (the pattern used by
-// this repo's own k8s examples, e.g. examples/dingo-gov-lens/k8s/
-// dingo-values.yaml) is used verbatim; otherwise it's assembled from discrete
-// fields the same way database/plugin/metadata/{postgres,mysql}'s own
+// plugins.storage.metadata.config map. A flat "dsn" key is used verbatim;
+// otherwise it's assembled from discrete fields the same way
+// database/plugin/metadata/{postgres,mysql}'s own
 // RegisterProvider descriptor defaults + Start() methods do internally, so
 // this tool connects with the exact credentials the running Dingo node was
 // configured with.
@@ -449,6 +448,17 @@ func koiosAllowInsecureHTTP(cmd *cobra.Command) bool {
 	)
 }
 
+func koiosAllowPrivateAddresses(cmd *cobra.Command) bool {
+	if cmd.Flags().Changed("koios-allow-private-addresses") {
+		ok, _ := cmd.Flags().GetBool("koios-allow-private-addresses")
+		return ok
+	}
+	return strings.EqualFold(
+		strings.TrimSpace(os.Getenv("KOIOS_ALLOW_PRIVATE_ADDRESSES")),
+		"true",
+	)
+}
+
 // addKoiosURLFlag registers the self-hosted-instance override, shared by
 // fetch/run/watch. See koiosparity.NewKoiosClient for why a custom host is not
 // subject to the public tier's burst cap.
@@ -457,6 +467,10 @@ func addKoiosURLFlag(cmd *cobra.Command) {
 		"Koios v1 API root for a self-hosted instance, e.g. https://host/api/v1 (or KOIOS_URL); default is the public host for --network")
 	cmd.Flags().Bool("koios-allow-insecure-http", false,
 		"allow a plain-HTTP --koios-url (local dev/test only; the API key is sent as a Bearer token; or KOIOS_ALLOW_INSECURE_HTTP=true)")
+	cmd.Flags().Bool("koios-allow-private-addresses", false,
+		"allow a private, loopback, or special-use --koios-url "+
+			"(intentional private deployments only; or "+
+			"KOIOS_ALLOW_PRIVATE_ADDRESSES=true)")
 }
 
 // addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,
