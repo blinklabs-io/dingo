@@ -191,6 +191,10 @@ type PeerGovernor struct {
 	// is what lets reconcileLedgerKnownAddrs compare against a fresh on-chain
 	// candidate list without re-resolving every peer.
 	ledgerKnownAddrs map[string]string
+	// peerSnapshotRelays holds the relays of the last loaded peer snapshot.
+	// Below UseLedgerAfterSlot the ledger provider cannot answer, so urgent
+	// discovery refills from these instead. Guarded by mu.
+	peerSnapshotRelays []PoolRelay
 	// emergencyRefreshRounds counts consecutive emergency ledger-discovery
 	// rounds since the node last had enough upstreams. It drives the
 	// escalating emergency refresh interval and resets on recovery.
