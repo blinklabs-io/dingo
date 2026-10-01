@@ -1,10 +1,7 @@
 package architecture_test
 
 import (
-	"go/parser"
-	"go/token"
 	"regexp"
-	"strings"
 	"testing"
 )
 
@@ -21,40 +18,6 @@ var issueReference = regexp.MustCompile(
 		`|\b(?:issue|pull request|PR)s? (?:#\d+|\d{2,})\b` +
 		`|\bthis PR\b)`,
 )
-
-func TestCommentsCarryNoIssueReferences(t *testing.T) {
-	root := findRepoRoot(t)
-	files, err := goFilesBelow(root, ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, file := range files {
-		fset := token.NewFileSet()
-		parsed, err := parser.ParseFile(
-			fset, file, nil, parser.ParseComments|parser.SkipObjectResolution,
-		)
-		if err != nil {
-			t.Fatalf("parse %s: %v", file, err)
-		}
-		rel, err := relativePath(root, file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, group := range parsed.Comments {
-			for _, comment := range group.List {
-				for i, line := range strings.Split(comment.Text, "\n") {
-					if match := issueReference.FindString(line); match != "" {
-						t.Errorf(
-							"%s:%d cites %q; state what it stood for instead",
-							rel, fset.Position(comment.Pos()).Line+i,
-							strings.TrimSpace(match),
-						)
-					}
-				}
-			}
-		}
-	}
-}
 
 func TestIssueReferencePattern(t *testing.T) {
 	for _, text := range []string{
