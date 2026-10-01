@@ -15,7 +15,6 @@
 package eras
 
 import (
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"math/big"
 	"strings"
 	"testing"
@@ -24,6 +23,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -426,4 +426,107 @@ func TestEvaluateTxDijkstraRefusesPlutusV4ReferenceScript(t *testing.T) {
 
 	_, _, _, err := EvaluateTxDijkstra(tx, ls, params)
 	require.ErrorIs(t, err, ErrDijkstraEvaluationUnsupported)
+}
+
+// newDijkstraTopLevelMintFromSubTx builds a transaction whose top-level mint
+// redeemer runs a script that only a sub-transaction makes available.
+func newDijkstraTopLevelMintFromSubTx(
+	script lcommon.Script,
+	sub gdijkstra.DijkstraSubTransaction,
+) *gdijkstra.DijkstraTransaction {
+	mint := lcommon.NewMultiAsset[lcommon.MultiAssetTypeMint](
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeMint{
+			script.Hash(): {cbor.NewByteString([]byte("t")): big.NewInt(1)},
+		},
+	)
+	return &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxMint: &mint,
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{sub},
+				false,
+			),
+		},
+		WitnessSet: gdijkstra.DijkstraTransactionWitnessSet{
+			WsRedeemers: gdijkstra.DijkstraRedeemers{
+				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+					{Tag: lcommon.RedeemerTagMint, Index: 0}: {
+						ExUnits: v4TestBudget,
+					},
+				},
+			},
+		},
+		TxIsValid: true,
+	}
+}
+
+func TestEvaluateTxDijkstraRefusesPlutusV4ReferenceScriptInSubTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	params := dijkstraV4TestParams(
+		t, defaultMachineCostModel(t, lang.LanguageVersionV4),
+	)
+	params.MaxTxExUnits = v4TestBudget
+	v4 := lcommon.PlutusV4Script(plutusProgramBytes(t, v4PlainProgram))
+	refInput := shelley.NewShelleyTransactionInput(
+		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22", 0,
+	)
+	tx := newDijkstraTopLevelMintFromSubTx(v4, gdijkstra.DijkstraSubTransaction{
+		Body: gdijkstra.DijkstraSubTransactionBody{
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{refInput}, false,
+			),
+		},
+	})
+	ls := newMockLedgerState()
+	ls.addUtxo(refInput, testAddressScriptOutput{
+		testOutput: newTestOutput(2_000_000),
+		addr:       newTestKeyAddress(t),
+		scriptRef:  v4,
+	})
+
+	_, _, _, err := EvaluateTxDijkstra(tx, ls, params)
+	require.ErrorIs(t, err, ErrDijkstraEvaluationUnsupported)
+}
+
+func TestEvaluateTxDijkstraRefusesTopLevelScriptWitnessedInSubTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	params := dijkstraV4TestParams(
+		t, defaultMachineCostModel(t, lang.LanguageVersionV4),
+	)
+	params.MaxTxExUnits = v4TestBudget
+	v3 := lcommon.PlutusV3Script(plutusProgramBytes(t, v4PlainProgram))
+	tx := newDijkstraTopLevelMintFromSubTx(v3, gdijkstra.DijkstraSubTransaction{
+		WitnessSet: witnessSetWithScript(v3, nil),
+	})
+
+	_, _, _, err := EvaluateTxDijkstra(tx, newMockLedgerState(), params)
+	require.ErrorIs(t, err, ErrDijkstraEvaluationUnsupported)
+}
+
+func TestEvaluateTxDijkstraEvaluatesTopLevelScriptAlsoInSubTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	params := dijkstraV4TestParams(
+		t, defaultMachineCostModel(t, lang.LanguageVersionV4),
+	)
+	params.MaxTxExUnits = v4TestBudget
+	v3 := lcommon.PlutusV3Script(plutusProgramBytes(t, v4PlainProgram))
+	tx := newDijkstraTopLevelMintFromSubTx(v3, gdijkstra.DijkstraSubTransaction{
+		WitnessSet: witnessSetWithScript(v3, nil),
+	})
+	tx.WitnessSet.WsPlutusV3Scripts = cbor.NewSetType(
+		[]lcommon.PlutusV3Script{v3}, false,
+	)
+
+	_, total, redeemers, err := EvaluateTxDijkstra(
+		tx, newMockLedgerState(), params,
+	)
+	require.NoError(t, err)
+	require.Len(t, redeemers, 1)
+	require.NotZero(t, total.Steps)
 }

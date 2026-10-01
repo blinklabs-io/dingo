@@ -615,11 +615,14 @@ func EvaluateTxDijkstra(
 
 // checkDijkstraEvaluationSupported refuses transactions that EvaluateTxConway
 // would mis-evaluate. It sees only the top-level redeemers and the Plutus
-// V1-V3 scripts, so it would return an empty result for a sub-transaction
-// redeemer, and fail with an unrelated message for a guarding redeemer or a
-// Plutus V4 script. Evaluating them needs the per-level script context that
-// gouroboros builds but does not export, and the result map is keyed by
-// (tag, index), which cannot tell redeemers of different levels apart.
+// V1-V3 scripts witnessed or referenced at the top level, so it would return
+// an empty result for a sub-transaction redeemer, and fail with an unrelated
+// message for a guarding redeemer, a Plutus V4 script, or a top-level
+// redeemer whose script only a sub-transaction makes available (Dijkstra
+// shares witnessed and reference scripts across levels). Evaluating them
+// needs the per-level script context that gouroboros builds but does not
+// export, and the result map is keyed by (tag, index), which cannot tell
+// redeemers of different levels apart.
 func checkDijkstraEvaluationSupported(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
@@ -628,7 +631,8 @@ func checkDijkstraEvaluationSupported(
 	if !ok || dijkstraTx == nil {
 		return nil
 	}
-	for index, sub := range dijkstraTx.Body.TxSubTransactions.Items() {
+	subTxs := dijkstraTx.Body.TxSubTransactions.Items()
+	for index, sub := range subTxs {
 		if sub.WitnessSet.Redeemers() != nil {
 			for range sub.WitnessSet.Redeemers().Iter() {
 				return fmt.Errorf(
@@ -646,6 +650,7 @@ func checkDijkstraEvaluationSupported(
 			)
 		}
 	}
+	hasTopLevelRedeemers := false
 	if redeemers := dijkstraTx.WitnessSet.Redeemers(); redeemers != nil {
 		for key := range redeemers.Iter() {
 			if key.Tag == lcommon.RedeemerTagGuarding {
@@ -655,6 +660,7 @@ func checkDijkstraEvaluationSupported(
 					key.Index,
 				)
 			}
+			hasTopLevelRedeemers = true
 		}
 	}
 	if len(dijkstraTx.WitnessSet.PlutusV4Scripts()) > 0 {
@@ -663,27 +669,99 @@ func checkDijkstraEvaluationSupported(
 			ErrDijkstraEvaluationUnsupported,
 		)
 	}
-	if ls == nil {
-		return nil
+	topLevel := make(map[lcommon.ScriptHash]struct{})
+	addDijkstraPlutusWitnessHashes(topLevel, dijkstraTx.WitnessSet)
+	if ls != nil {
+		inputs, referenceInputs, err := resolveDijkstraScriptLevelInputs(
+			&dijkstraTx.Body,
+			ls,
+		)
+		if err != nil {
+			// Input resolution failures are reported by the evaluation itself.
+			return nil
+		}
+		for _, utxo := range script.ConcatResolvedInputs(inputs, referenceInputs) {
+			if err := checkDijkstraScriptRef(utxo, -1); err != nil {
+				return err
+			}
+			if utxo.Output != nil && utxo.Output.ScriptRef() != nil {
+				topLevel[utxo.Output.ScriptRef().Hash()] = struct{}{}
+			}
+		}
 	}
-	inputs, referenceInputs, err := resolveDijkstraScriptLevelInputs(
-		&dijkstraTx.Body,
-		ls,
-	)
-	if err != nil {
-		// Input resolution failures are reported by the evaluation itself.
-		return nil
-	}
-	for _, utxo := range script.ConcatResolvedInputs(inputs, referenceInputs) {
-		if utxo.Output == nil {
+	for index, sub := range subTxs {
+		subLevel := make(map[lcommon.ScriptHash]struct{})
+		addDijkstraPlutusWitnessHashes(subLevel, sub.WitnessSet)
+		if ls != nil {
+			for _, input := range append(
+				sub.Body.Inputs(),
+				sub.Body.ReferenceInputs()...,
+			) {
+				utxo, err := ls.UtxoById(input)
+				if err != nil {
+					// Unresolvable inputs fail phase 1 validation.
+					continue
+				}
+				if err := checkDijkstraScriptRef(utxo, index); err != nil {
+					return err
+				}
+				switch ref := utxo.Output.ScriptRef().(type) {
+				case lcommon.PlutusV1Script, lcommon.PlutusV2Script,
+					lcommon.PlutusV3Script:
+					subLevel[ref.Hash()] = struct{}{}
+				}
+			}
+		}
+		if !hasTopLevelRedeemers {
 			continue
 		}
-		if _, ok := utxo.Output.ScriptRef().(lcommon.PlutusV4Script); ok {
-			return fmt.Errorf(
-				"%w: Plutus V4 reference script",
-				ErrDijkstraEvaluationUnsupported,
-			)
+		for hash := range subLevel {
+			if _, ok := topLevel[hash]; !ok {
+				return fmt.Errorf(
+					"%w: Plutus script %s available only in sub-transaction %d",
+					ErrDijkstraEvaluationUnsupported,
+					hash.String(),
+					index,
+				)
+			}
 		}
 	}
 	return nil
+}
+
+// checkDijkstraScriptRef refuses a resolved output carrying a Plutus V4
+// reference script. A negative subTx index names the top-level transaction.
+func checkDijkstraScriptRef(utxo lcommon.Utxo, subTx int) error {
+	if utxo.Output == nil {
+		return nil
+	}
+	if _, ok := utxo.Output.ScriptRef().(lcommon.PlutusV4Script); !ok {
+		return nil
+	}
+	if subTx < 0 {
+		return fmt.Errorf(
+			"%w: Plutus V4 reference script",
+			ErrDijkstraEvaluationUnsupported,
+		)
+	}
+	return fmt.Errorf(
+		"%w: Plutus V4 reference script in sub-transaction %d",
+		ErrDijkstraEvaluationUnsupported,
+		subTx,
+	)
+}
+
+func addDijkstraPlutusWitnessHashes(
+	hashes map[lcommon.ScriptHash]struct{},
+	ws gdijkstra.DijkstraTransactionWitnessSet,
+) {
+	for _, s := range ws.PlutusV1Scripts() {
+		hashes[s.Hash()] = struct{}{}
+	}
+	for _, s := range ws.PlutusV2Scripts() {
+		hashes[s.Hash()] = struct{}{}
+	}
+	for _, s := range ws.PlutusV3Scripts() {
+		hashes[s.Hash()] = struct{}{}
+	}
 }
