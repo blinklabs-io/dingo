@@ -12,6 +12,10 @@ GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 
+# Soak monitor input/output file and extra flags for the soak-* targets
+SOAK_CSV ?= soak.csv
+SOAK_ARGS ?=
+
 # Extract Go module name from go.mod
 GOMODULE=$(shell grep ^module $(ROOT_DIR)/go.mod | awk '{ print $$2 }')
 TOOLS_BIN=$(ROOT_DIR)/.tools/bin
@@ -54,7 +58,7 @@ NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet soak-sample soak-analyse
 
 # Default target
 all: format build ## Format and build (default)
@@ -184,6 +188,12 @@ test-load-profile: build ## Run build, then load test data with CPU/memory profi
 	rm -rf .dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
+
+soak-sample: ## Sample a running node's metrics to $(SOAK_CSV) until interrupted (see docs/soak.md)
+	go run ./cmd/soak sample $(SOAK_ARGS) | tee $(SOAK_CSV)
+
+soak-analyse: ## Fail on sustained goroutine or RSS growth in $(SOAK_CSV) (see docs/soak.md)
+	go run ./cmd/soak analyse -csv $(SOAK_CSV) $(SOAK_ARGS)
 
 test-devnet: ## Run the default all-Dingo DevNet integration tests
 	./internal/test/devnet/run-tests.sh
