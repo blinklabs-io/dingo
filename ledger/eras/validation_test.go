@@ -840,6 +840,7 @@ type mockWitnessSet struct {
 	plutusV1Scripts []lcommon.PlutusV1Script
 	plutusV2Scripts []lcommon.PlutusV2Script
 	plutusV3Scripts []lcommon.PlutusV3Script
+	plutusData      []lcommon.Datum
 }
 
 func (m *mockWitnessSet) Vkey() []lcommon.VkeyWitness {
@@ -855,7 +856,7 @@ func (m *mockWitnessSet) Bootstrap() []lcommon.BootstrapWitness {
 }
 
 func (m *mockWitnessSet) PlutusData() []lcommon.Datum {
-	return nil
+	return m.plutusData
 }
 
 func (m *mockWitnessSet) PlutusV1Scripts() []lcommon.PlutusV1Script {
