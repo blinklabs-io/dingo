@@ -111,6 +111,7 @@ func (s *Store) applyTransactionAPIDetails(
 	slot uint64,
 	index uint32,
 	produced []models.Utxo,
+	accumulator *transactionBatchAccumulator,
 ) error {
 	if s.storageMode != types.StorageModeAPI {
 		return nil
@@ -152,6 +153,8 @@ func (s *Store) applyTransactionAPIDetails(
 		transactionID,
 		transaction,
 		slot,
+		s.dialect.ParameterLimit(),
+		accumulator,
 	); err != nil {
 		return err
 	}
@@ -368,6 +371,8 @@ func storeTransactionWitnesses(
 	transactionID int64,
 	transaction lcommon.Transaction,
 	slot uint64,
+	parameterLimit int,
+	accumulator *transactionBatchAccumulator,
 ) error {
 	for _, table := range transactionWitnessTables {
 		if _, err := db.ExecContext(
@@ -378,112 +383,98 @@ func storeTransactionWitnesses(
 			return fmt.Errorf("delete existing %s rows: %w", table, err)
 		}
 	}
+	// The cleanup above only reaches flushed rows; rows an earlier
+	// application of this transaction queued in the same window are replaced
+	// here so the batched path keeps the delete-then-insert semantics.
+	if accumulator != nil {
+		accumulator.witnesses.dropTransaction(transactionID)
+	}
 	witnesses := transaction.Witnesses()
 	if witnesses == nil {
 		return nil
 	}
+	var rows witnessBatch
 	for _, witness := range witnesses.Vkey() {
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO key_witness (
-    vkey, signature, transaction_id, type
-) VALUES (?, ?, ?, ?)`,
+		rows.add(
+			vkeyWitnessShape, transactionID,
 			witness.Vkey,
 			witness.Signature,
 			transactionID,
 			models.KeyWitnessTypeVkey,
-		); err != nil {
-			return fmt.Errorf("create vkey witness: %w", err)
-		}
+		)
 	}
 	for _, witness := range witnesses.Bootstrap() {
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO key_witness (
-    signature, public_key, chain_code, attributes, transaction_id, type
-) VALUES (?, ?, ?, ?, ?, ?)`,
+		rows.add(
+			bootstrapWitnessShape, transactionID,
 			witness.Signature,
 			witness.PublicKey,
 			witness.ChainCode,
 			witness.Attributes,
 			transactionID,
 			models.KeyWitnessTypeBootstrap,
-		); err != nil {
-			return fmt.Errorf("create bootstrap witness: %w", err)
-		}
+		)
 	}
 	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
+		ctx, db, &rows, transactionID,
 		uint8(lcommon.ScriptRefTypeNativeScript),
-		witnesses.NativeScripts(),
-		slot,
+		witnesses.NativeScripts(), slot,
 	); err != nil {
 		return err
 	}
 	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
+		ctx, db, &rows, transactionID,
 		uint8(lcommon.ScriptRefTypePlutusV1),
-		witnesses.PlutusV1Scripts(),
-		slot,
+		witnesses.PlutusV1Scripts(), slot,
 	); err != nil {
 		return err
 	}
 	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
+		ctx, db, &rows, transactionID,
 		uint8(lcommon.ScriptRefTypePlutusV2),
-		witnesses.PlutusV2Scripts(),
-		slot,
+		witnesses.PlutusV2Scripts(), slot,
 	); err != nil {
 		return err
 	}
 	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
+		ctx, db, &rows, transactionID,
 		uint8(lcommon.ScriptRefTypePlutusV3),
-		witnesses.PlutusV3Scripts(),
-		slot,
+		witnesses.PlutusV3Scripts(), slot,
 	); err != nil {
 		return err
 	}
 	if transaction.IsValid() {
 		for _, datum := range witnesses.PlutusData() {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO plutus_data (data, transaction_id) VALUES (?, ?)`,
+			rows.add(
+				plutusDataShape, transactionID,
 				datum.Cbor(),
 				transactionID,
-			); err != nil {
-				return fmt.Errorf("create Plutus data: %w", err)
-			}
+			)
 		}
 	}
 	if witnesses.Redeemers() != nil {
 		for key, value := range witnesses.Redeemers().Iter() {
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO redeemer (
-    data, transaction_id, ex_units_memory, ex_units_cpu, "index", tag
-) VALUES (?, ?, ?, ?, ?, ?)`,
+			rows.add(
+				redeemerShape, transactionID,
 				value.Data.Cbor(),
 				transactionID,
 				uint64(max(0, value.ExUnits.Memory)),
 				uint64(max(0, value.ExUnits.Steps)),
 				key.Index,
 				uint8(key.Tag),
-			); err != nil {
-				return fmt.Errorf("create redeemer: %w", err)
-			}
+			)
 		}
 	}
-	return nil
+	if accumulator != nil {
+		accumulator.witnesses.merge(&rows)
+		return nil
+	}
+	return rows.flush(ctx, db, parameterLimit)
 }
 
 func storeWitnessScripts[T lcommon.Script](
 	ctx context.Context,
 	db queryer,
+	rows *witnessBatch,
 	transactionID int64,
 	scriptType uint8,
 	scripts []T,
@@ -491,15 +482,12 @@ func storeWitnessScripts[T lcommon.Script](
 ) error {
 	for _, script := range scripts {
 		hash := script.Hash().Bytes()
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO witness_scripts (script_hash, transaction_id, type)
-VALUES (?, ?, ?)`,
+		rows.add(
+			witnessScriptShape, transactionID,
 			hash,
 			transactionID,
 			scriptType,
-		); err != nil {
-			return fmt.Errorf("create witness script: %w", err)
-		}
+		)
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO script (hash, content, created_slot, type)
 VALUES (?, ?, ?, ?)

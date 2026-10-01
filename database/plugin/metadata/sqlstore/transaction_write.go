@@ -55,6 +55,9 @@ type transactionBatchAccumulator struct {
 	// wrapped in countingQueryer and must count itself here to keep
 	// dingo_database_sql_operations_total covering this path too.
 	sqlOperations *prometheus.CounterVec
+	// witnesses holds witness rows queued by SetTransactionBatched until
+	// FlushBatch writes them as multi-row inserts.
+	witnesses witnessBatch
 }
 
 const transactionInsertSQL = `
@@ -118,6 +121,7 @@ func (a *transactionBatchAccumulator) Reset() {
 		_ = a.transactionInsert.Close()
 		a.transactionInsert = nil
 	}
+	a.witnesses.reset()
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
@@ -126,13 +130,26 @@ func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 
 func (s *Store) FlushBatch(
 	accumulator types.MetadataBatchAccumulator,
-	_ types.Txn,
+	txn types.Txn,
 ) error {
-	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
+	batched, ok := accumulator.(*transactionBatchAccumulator)
+	if !ok {
 		return fmt.Errorf(
 			"sqlstore FlushBatch: wrong accumulator type %T",
 			accumulator,
 		)
+	}
+	if !batched.witnesses.empty() {
+		if err := s.withWriteTransaction(
+			txn,
+			func(db queryer, ctx context.Context) error {
+				return batched.witnesses.flush(
+					ctx, db, s.dialect.ParameterLimit(),
+				)
+			},
+		); err != nil {
+			return err
+		}
 	}
 	accumulator.Reset()
 	return nil
@@ -305,6 +322,7 @@ func (s *Store) setTransactionWithAccumulator(
 			return fmt.Errorf("extract transaction metadata: %w", err)
 		}
 	}
+	batchedAccumulator, _ := accumulator.(*transactionBatchAccumulator)
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
@@ -456,6 +474,7 @@ func (s *Store) setTransactionWithAccumulator(
 				point.Slot,
 				index,
 				producedModels,
+				batchedAccumulator,
 			); err != nil {
 				return err
 			}
