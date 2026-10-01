@@ -317,6 +317,23 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
+	return c.calculateAdjustedLiveStakeDistributionInTxn(
+		ctx, txn, slot, boundarySlot, expiryEpoch, nil,
+	)
+}
+
+// calculateAdjustedLiveStakeDistributionInTxn is the live SNAP-point read
+// with adjust applied to the per-credential rows before they are summed.
+func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
+	ctx context.Context,
+	txn *database.Txn,
+	slot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	adjust func(
+		[]*models.RewardStakeInput,
+	) ([]*models.RewardStakeInput, error),
+) (*StakeDistribution, error) {
 	dist := &StakeDistribution{
 		Slot:           slot,
 		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
@@ -367,6 +384,12 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	rawInputs, err = mergePointerStakeInputs(rawInputs, pointerInputs)
 	if err != nil {
 		return nil, err
+	}
+	if adjust != nil {
+		rawInputs, err = adjust(rawInputs)
+		if err != nil {
+			return nil, err
+		}
 	}
 	inputs, err := rewardStakeInputsFromRows(rawInputs)
 	if err != nil {

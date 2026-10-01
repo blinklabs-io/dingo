@@ -7078,7 +7078,7 @@ func (ls *LedgerState) processEpochRollover(
 	// The order, asserted by TestProcessEpochRollover_OrderingInvariant,
 	// TestProcessEpochRollover_RewardOrdering and
 	// TestProcessEpochRollover_SnapStakeReadOrdering in
-	// chainsync_ordering_test.go and chainsync_snap_ordering_test.go, is:
+	// chainsync_test.go and chainsync_test.go, is:
 	//
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
@@ -7122,6 +7122,14 @@ func (ls *LedgerState) processEpochRollover(
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if err := ls.timeRolloverPhase(
+		currentEpoch.EpochId+1, "ratify_consume", func() error {
+			return ls.consumePendingRatification(txn)
+		},
+	); err != nil {
+		return nil, fmt.Errorf("apply pending ratification: %w", err)
+	}
+
+	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
 			return ls.applyStakeRewards(
 				txn, currentEpoch.EpochId+1, epochStartSlot,
@@ -7159,7 +7167,29 @@ func (ls *LedgerState) processEpochRollover(
 	// before any of them — while the snapshot row is written at the end of the
 	// rollover where the new epoch record and the post-enactment protocol
 	// version exist.
-	if err := ls.timeRolloverPhase(
+	// A Conway boundary with the deferred-snapshot hooks leaves mark[new
+	// epoch] to its background job, which repeats the live SNAP-point read on
+	// the committed boundary and corrects it for what followed SNAP; without
+	// the live read's hook the boundary keeps its own capture. HARDFORK and era transitions rewrite state the
+	// reconstruction reads, and CIP-0163 activation restamps expiries after
+	// SNAP, so those boundaries capture it here.
+	snapDeferred := ls.deferredBoundarySnapshotHook.Load() != nil &&
+		ls.epochBoundarySnapshotStakeHook() != nil &&
+		ls.epochBoundarySnapshotHook() != nil &&
+		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
+		currentEra.Id == eras.ConwayEraDesc.Id &&
+		!ls.config.DelegatorInactivityEnabled
+	if snapDeferred {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "snap_capture", func() error {
+				return ls.captureDeferredBoundarySnapshot(
+					txn, currentEpoch.EpochId, epochStartSlot,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("capture SNAP-point pool retirements: %w", err)
+		}
+	} else if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "snap", func() error {
 			return ls.captureEpochBoundarySnapshotStake(
 				txn, currentEpoch, epochStartSlot,
@@ -7182,16 +7212,20 @@ func (ls *LedgerState) processEpochRollover(
 	// governance silently fall back to reading the not-yet-written row and
 	// see zero SPO stake for every gated action at every boundary.
 	var currentBoundarySPOState *governance.SPOVotingState
-	if err := ls.timeRolloverPhase(
-		currentEpoch.EpochId+1, "spo_state_resolve", func() error {
-			var err error
-			currentBoundarySPOState, err = ls.currentBoundarySPOStakeState(
-				txn, currentEpoch, epochStartSlot,
+	if !snapDeferred {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "spo_state_resolve", func() error {
+				var err error
+				currentBoundarySPOState, err = ls.currentBoundarySPOStakeState(
+					txn, currentEpoch, epochStartSlot,
+				)
+				return err
+			},
+		); err != nil {
+			return nil, fmt.Errorf(
+				"resolve current-boundary SPO stake: %w", err,
 			)
-			return err
-		},
-	); err != nil {
-		return nil, fmt.Errorf("resolve current-boundary SPO stake: %w", err)
+		}
 	}
 
 	updateQuorum := 0
@@ -7280,18 +7314,20 @@ func (ls *LedgerState) processEpochRollover(
 		currentEpoch.EpochId+1, "governance", func() error {
 			var err error
 			govOut, err = governance.ProcessEpoch(&governance.EpochInput{
-				DB:                      ls.db,
-				Txn:                     txn,
-				Logger:                  ls.config.Logger,
-				PrevEpoch:               currentEpoch.EpochId,
-				NewEpoch:                currentEpoch.EpochId + 1,
-				BoundarySlot:            epochStartSlot,
-				PrevEpochStartSlot:      currentEpoch.StartSlot,
-				PParams:                 newPParams,
-				UpdateFn:                currentEra.PParamsUpdateFunc,
-				ConwayGenesis:           conwayGenesis,
-				DelegatorInactivityOn:   ls.config.DelegatorInactivityEnabled,
-				CurrentBoundarySPOState: currentBoundarySPOState,
+				DB:                       ls.db,
+				Txn:                      txn,
+				Logger:                   ls.config.Logger,
+				PrevEpoch:                currentEpoch.EpochId,
+				NewEpoch:                 currentEpoch.EpochId + 1,
+				BoundarySlot:             epochStartSlot,
+				PrevEpochStartSlot:       currentEpoch.StartSlot,
+				PParams:                  newPParams,
+				UpdateFn:                 currentEra.PParamsUpdateFunc,
+				ConwayGenesis:            conwayGenesis,
+				DelegatorInactivityOn:    ls.config.DelegatorInactivityEnabled,
+				CurrentBoundarySPOState:  currentBoundarySPOState,
+				DeferRatification:        true,
+				BoundarySPOStateDeferred: snapDeferred,
 			})
 			return err
 		},
@@ -7304,6 +7340,49 @@ func (ls *LedgerState) processEpochRollover(
 		// indirection loses that invariant for static analysis, so check it
 		// explicitly rather than dereference below.
 		return nil, errors.New("process governance epoch: nil output")
+	}
+	hardForkHere := majorVersionChanges(currentPParams, govOut.UpdatedPParams)
+	if hardForkHere && snapDeferred {
+		// The SNAP-point capture registered above would otherwise stop the
+		// epoch-transition fallback when this boundary's own capture does not
+		// persist.
+		ls.discardDeferredBoundarySnapshot(currentEpoch.EpochId + 1)
+		snapDeferred = false
+	}
+	var deferredPlan *governance.RatificationPlan
+	if plan := govOut.Ratification; plan != nil {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "ratify", func() error {
+				// A major-version change runs HARDFORK and an era
+				// transition rewrites state later in this transaction;
+				// RATIFY reads the state before either.
+				if ls.ratifyAtBoundary || deferBoundarySnapshot ||
+					hardForkHere {
+					if currentBoundarySPOState == nil {
+						state, err := ls.currentBoundarySPOStakeState(
+							txn, currentEpoch, epochStartSlot,
+						)
+						if err != nil {
+							return fmt.Errorf(
+								"resolve current-boundary SPO stake: %w",
+								err,
+							)
+						}
+						plan.SetBoundarySPOState(state)
+					}
+					decision, err := plan.Decide(txn)
+					if err != nil {
+						return err
+					}
+					_, err = plan.Apply(decision, txn)
+					return err
+				}
+				deferredPlan = plan
+				return nil
+			},
+		); err != nil {
+			return nil, fmt.Errorf("ratify governance: %w", err)
+		}
 	}
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
@@ -7524,14 +7603,35 @@ func (ls *LedgerState) processEpochRollover(
 	// CaptureGenesisSnapshot at startup. A multi-era boundary defers the capture
 	// to the caller, which takes it once the remaining era transitions have
 	// produced the era and protocol parameters the new epoch actually runs at.
-	if deferBoundarySnapshot {
+	var snapshotEvt *event.EpochTransitionEvent
+	switch {
+	case deferBoundarySnapshot:
 		result.BoundarySnapshotDeferred = true
-	} else if err := ls.timeRolloverPhase(
-		currentEpoch.EpochId+1, "snap_persist", func() error {
-			return ls.captureEpochBoundarySnapshot(txn, currentEpoch, result)
-		},
-	); err != nil {
-		return nil, err
+	case snapDeferred:
+		evt := ls.boundarySnapshotEvent(currentEpoch, result)
+		snapshotEvt = &evt
+	default:
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "snap_persist", func() error {
+				return ls.captureEpochBoundarySnapshot(
+					txn, currentEpoch, result,
+				)
+			},
+		); err != nil {
+			return nil, err
+		}
+	}
+	if deferredPlan != nil || snapshotEvt != nil {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "defer", func() error {
+				return ls.deferBoundaryJob(
+					txn, currentEpoch.EpochId+1, epochStartSlot,
+					deferredPlan, snapshotEvt,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf("defer boundary work: %w", err)
+		}
 	}
 
 	return result, nil
@@ -7543,6 +7643,12 @@ func (ls *LedgerState) processEpochRollover(
 // protocol parameters. This matters for fields removed by the successor era,
 // such as Alonzo's decentralization parameter, which remains present in the
 // legacy update CBOR but is not a valid Babbage update field.
+func majorVersionChanges(before, after lcommon.ProtocolParameters) bool {
+	oldVer, oldErr := GetProtocolVersion(before)
+	newVer, newErr := GetProtocolVersion(after)
+	return oldErr == nil && newErr == nil && oldVer.Major != newVer.Major
+}
+
 func splitEraTransitionsForRollover(
 	transitionPath []uint,
 ) (before, after []uint) {
@@ -7675,6 +7781,23 @@ func (ls *LedgerState) currentBoundarySPOStakeState(
 // rolls back only the snapshot's own writes and lets the rollover proceed,
 // deferring to the fallback rather than wedging the epoch boundary. The capture
 // writes only metadata, so a metadata savepoint fully covers it.
+func (ls *LedgerState) boundarySnapshotEvent(
+	prevEpoch models.Epoch,
+	result *EpochRolloverResult,
+) event.EpochTransitionEvent {
+	newEpoch := result.NewCurrentEpoch
+	return event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch.EpochId,
+		NewEpoch:      newEpoch.EpochId,
+		BoundarySlot:  newEpoch.StartSlot,
+		EpochNonce:    newEpoch.Nonce,
+		ProtocolVersion: ls.protocolMajorForEvent(
+			result.NewCurrentPParams, result.NewCurrentEra,
+		),
+		SnapshotSlot: epochBoundarySnapshotSlot(newEpoch.StartSlot),
+	}
+}
+
 func (ls *LedgerState) captureEpochBoundarySnapshot(
 	txn *database.Txn,
 	prevEpoch models.Epoch,
@@ -7685,17 +7808,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 		return nil
 	}
 	newEpoch := result.NewCurrentEpoch
-	snapshotSlot := epochBoundarySnapshotSlot(newEpoch.StartSlot)
-	evt := event.EpochTransitionEvent{
-		PreviousEpoch: prevEpoch.EpochId,
-		NewEpoch:      newEpoch.EpochId,
-		BoundarySlot:  newEpoch.StartSlot,
-		EpochNonce:    newEpoch.Nonce,
-		ProtocolVersion: ls.protocolMajorForEvent(
-			result.NewCurrentPParams, result.NewCurrentEra,
-		),
-		SnapshotSlot: snapshotSlot,
-	}
+	evt := ls.boundarySnapshotEvent(prevEpoch, result)
 	const savepoint = "epoch_boundary_snapshot"
 	if err := txn.SavePoint(savepoint); err != nil {
 		ls.config.Logger.Warn(

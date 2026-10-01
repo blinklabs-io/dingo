@@ -198,6 +198,13 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetGovernanceProposalSet returns the Conway proposals set: every
+	// proposal not yet enacted, dropped, or soft-deleted. An expired action
+	// stays a member until the boundary that drops it.
+	GetGovernanceProposalSet(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetRatifiedGovernanceProposals returns proposals that have been
 	// ratified but not yet enacted. Used at epoch start by enactment.
 	GetRatifiedGovernanceProposals(
@@ -2052,6 +2059,14 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetPostSnapshotRewardCredits returns each stake credential's total of
+	// the credits recorded at slot and marked AccountRewardDelta.PostSnapshot:
+	// what a boundary at slot credited after its SNAP point.
+	GetPostSnapshotRewardCredits(
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.AccountRewardDelta, error)
+
 	// GetDelegatedPoolKeyHashes returns every pool key hash the live reward
 	// stake aggregate attributes stake to, including pools that are no longer
 	// registered. cardano-ledger's ssTotalActiveStake sums registered
@@ -2546,6 +2561,10 @@ type MetadataStore interface {
 	// spendable, unguarded account outputs not yet folded into account balances.
 	HasPendingRewardCreditRounds(types.Txn) (bool, error)
 
+	// HasUnfoldedRewardCreditsThroughEpoch reports whether any applied round
+	// through snapshotEpoch has spendable, unguarded outputs not yet folded.
+	HasUnfoldedRewardCreditsThroughEpoch(uint64, types.Txn) (bool, error)
+
 	// AddAppliedRewardCreditRound registers an applied reward round in the
 	// caller's transaction.
 	AddAppliedRewardCreditRound(models.RewardCreditRound, types.Txn) error
@@ -2609,6 +2628,24 @@ type MetadataStore interface {
 	GetPendingRewardAccountOutputsForCredential(
 		uint8, // credentialTag
 		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// ClaimPendingRewardCreditsForCredential marks every unfolded credit of
+	// one stake credential in the credited rounds folded and returns them,
+	// for the caller to write to the account in the same transaction.
+	ClaimPendingRewardCreditsForCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// ClaimUnfoldedRewardCredits marks up to limit unfolded credits of one
+	// credited round folded and returns them, for the caller to write to
+	// their accounts in the same transaction.
+	ClaimUnfoldedRewardCredits(
+		uint64, // snapshotEpoch
+		int, // limit
 		types.Txn,
 	) ([]*models.RewardAccountOutput, error)
 

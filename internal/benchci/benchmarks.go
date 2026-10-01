@@ -19,7 +19,7 @@ package benchci
 // network throughput, and resource usage. Keep this in sync with the
 // Makefile bench-ci target's first `go test -bench` regex.
 var CuratedBenchmarks = []string{
-	// Block validation throughput (ledger/benchmark_test.go).
+	// Block validation throughput (ledger/state_test.go).
 	"BenchmarkBlockProcessingThroughput",
 	"BenchmarkBlockProcessingThroughputPredecoded",
 	"BenchmarkBlockBatchProcessingThroughput",
@@ -40,22 +40,22 @@ var CuratedBenchmarks = []string{
 	"BenchmarkBlockfetchNearTipQueuedHeaderPredecoded", // ledger/benchmark_test.go
 	"BenchmarkBlockfetchVerifiedHeaderDispatch",        // ledger/benchmark_test.go
 	"BenchmarkBlockfetchClientBlockMetrics",            // ouroboros/blockfetch_test.go
-	"BenchmarkUpdateConnectionMetrics",                 // connmanager/benchmark_test.go
-	"BenchmarkHasInboundPeerAddress",                   // connmanager/benchmark_test.go
-	"BenchmarkReconcile",                               // peergov/benchmark_test.go
-	"BenchmarkPublishSubscribers",                      // event/benchmark_test.go
+	"BenchmarkUpdateConnectionMetrics",                 // connmanager/tests_test.go
+	"BenchmarkHasInboundPeerAddress",                   // connmanager/tests_test.go
+	"BenchmarkReconcile",                               // peergov/tests_test.go
+	"BenchmarkPublishSubscribers",                      // event/backpressure_ext_test.go
 
 	// Resource usage.
 	"BenchmarkBlockMemoryUsage",             // ledger/benchmark_test.go
-	"BenchmarkHotCacheGet",                  // database/cbor_cache_bench_test.go
-	"BenchmarkHotCachePut",                  // database/cbor_cache_bench_test.go
-	"BenchmarkHotCacheGetMiss",              // database/cbor_cache_bench_test.go
-	"BenchmarkBlockLRUCacheGet",             // database/cbor_cache_bench_test.go
-	"BenchmarkBlockLRUCachePut",             // database/cbor_cache_bench_test.go
-	"BenchmarkTieredCacheHotHit",            // database/cbor_cache_bench_test.go
-	"BenchmarkCachedBlockExtract",           // database/cbor_cache_bench_test.go
-	"BenchmarkCborOffsetEncode",             // database/cbor_cache_bench_test.go
-	"BenchmarkCborOffsetDecode",             // database/cbor_cache_bench_test.go
+	"BenchmarkHotCacheGet",                  // database/cbor_cache_test.go
+	"BenchmarkHotCachePut",                  // database/cbor_cache_test.go
+	"BenchmarkHotCacheGetMiss",              // database/cbor_cache_test.go
+	"BenchmarkBlockLRUCacheGet",             // database/cbor_cache_test.go
+	"BenchmarkBlockLRUCachePut",             // database/cbor_cache_test.go
+	"BenchmarkTieredCacheHotHit",            // database/cbor_cache_test.go
+	"BenchmarkCachedBlockExtract",           // database/cbor_cache_test.go
+	"BenchmarkCborOffsetEncode",             // database/cbor_cache_test.go
+	"BenchmarkCborOffsetDecode",             // database/cbor_cache_test.go
 	"BenchmarkStorageModeIngest",            // ledger/benchmark_test.go
 	"BenchmarkStorageModeIngestSteadyState", // ledger/benchmark_test.go
 }
@@ -73,14 +73,14 @@ var CuratedBenchmarks = []string{
 // alongside them as a broader database-query-under-concurrency check, not a
 // substitute. Keep this list in sync with that invocation's -bench regex.
 var LockContentionBenchmarks = []string{
-	"BenchmarkBlockLRUParallelReadHeavy",     // database/block_lru_cache_parallel_bench_test.go
-	"BenchmarkBlockLRUParallelBalanced",      // database/block_lru_cache_parallel_bench_test.go
-	"BenchmarkBlockLRUParallelReadOnly",      // database/block_lru_cache_parallel_bench_test.go
-	"BenchmarkHotCacheParallelGet",           // database/cbor_cache_bench_test.go
-	"BenchmarkTryReserveInboundSlotParallel", // connmanager/benchmark_test.go
+	"BenchmarkBlockLRUParallelReadHeavy",     // database/block_lru_cache_test.go
+	"BenchmarkBlockLRUParallelBalanced",      // database/block_lru_cache_test.go
+	"BenchmarkBlockLRUParallelReadOnly",      // database/block_lru_cache_test.go
+	"BenchmarkHotCacheParallelGet",           // database/cbor_cache_test.go
+	"BenchmarkTryReserveInboundSlotParallel", // connmanager/tests_test.go
 	"BenchmarkConcurrentQueries",             // ledger/benchmark_test.go
-	"BenchmarkTipSnapshotReadOnly",           // ledger/snapshot_parallel_bench_test.go
-	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/snapshot_parallel_bench_test.go
+	"BenchmarkTipSnapshotReadOnly",           // ledger/benchmark_test.go
+	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/benchmark_test.go
 }
 
 // ledger/benchmark_test.go's RealData query benchmarks are deliberately

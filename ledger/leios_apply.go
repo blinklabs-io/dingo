@@ -594,7 +594,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// certified closure is mandatory whether or not the best-effort
 	// announcement window is configured, and returning "unavailable" without
 	// having tried to fetch it is what left the pipeline restarting on an
-	// endorser block nobody had asked any peer for.
+		// endorser block it had not fetched from any peer.
 	fetchMissingRequired := func(poll time.Duration) {
 		if !certDrivenHistorical || ls.leiosBackfill == nil {
 			return

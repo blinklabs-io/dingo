@@ -1,0 +1,279 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gconway "github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+)
+
+// leiosBoundaryTestBlock builds a decoded Dijkstra block with a Leios header
+// extension. announce is the endorser block the block announces (nil for
+// none); a certifying block carries a certificate and no transactions.
+func leiosBoundaryTestBlock(
+	t *testing.T,
+	blockNumber uint64,
+	slot uint64,
+	prevHash lcommon.Blake2b256,
+	certifies bool,
+	announce []byte,
+) *gdijkstra.DijkstraBlock {
+	t.Helper()
+	var certField any
+	if certifies {
+		certField = []any{[]byte{0x80}, make([]byte, 48)}
+	}
+	bodyCbor, err := cbor.Encode([]any{[]any{}, certField, nil})
+	require.NoError(t, err)
+	var body gdijkstra.DijkstraBlockBody
+	_, err = cbor.Decode(bodyCbor, &body)
+	require.NoError(t, err)
+
+	headerBodyCbor, err := cbor.Encode(&babbage.BabbageBlockHeaderBody{
+		BlockNumber:   blockNumber,
+		Slot:          slot,
+		PrevHash:      prevHash,
+		BlockBodySize: uint64(len(bodyCbor)),
+		BlockBodyHash: body.Hash(),
+		ProtoVersion: babbage.BabbageProtoVersion{
+			Major: gdijkstra.MinProtocolVersionDijkstra,
+		},
+	})
+	require.NoError(t, err)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerBodyCbor, &headerBody)
+	require.NoError(t, err)
+	var announcement any
+	if announce != nil {
+		announcement = []any{announce, uint64(4096)}
+	}
+	headerBody = append(
+		headerBody,
+		leiosTestRaw(t, certifies),
+		leiosTestRaw(t, announcement),
+	)
+	headerCbor, err := cbor.Encode([]any{headerBody, []byte{}})
+	require.NoError(t, err)
+	blockCbor, err := cbor.Encode([]cbor.RawMessage{
+		cbor.RawMessage(headerCbor),
+		cbor.RawMessage(bodyCbor),
+	})
+	require.NoError(t, err)
+	block, err := gdijkstra.NewDijkstraBlockFromCbor(blockCbor)
+	require.NoError(t, err)
+	return block
+}
+
+// TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary is
+//: one read batch reaches from epoch 0 into epoch 1, where one
+// block announces an endorser block and the next certifies it. Epoch 1 is not
+// in the epoch cache until the rollover at the boundary publishes it, so the
+// Leios pre-check must not resolve that certificate before the rollover. The
+// certificate must still be checked afterwards, against epoch 1, both by the
+// pre-check and at apply. The hard-fork case crosses from Conway into
+// Dijkstra, where the epoch cache is never forecast across the boundary.
+func TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	t.Run("same era", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, false)
+	})
+	t.Run("hard fork", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, true)
+	})
+}
+
+func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
+	t.Helper()
+	const epochLength = 1_000
+	ebHash := leiosTestHash(0xE4)
+	// In the same-era case the batch opens with the last block of epoch 0.
+	// A Conway ledger cannot apply a Dijkstra block, so in the hard-fork case
+	// the batch opens at the boundary instead.
+	var blocks []gledger.Block
+	var prevHash lcommon.Blake2b256
+	if !hardFork {
+		last := leiosBoundaryTestBlock(
+			t, 0, epochLength-10, lcommon.Blake2b256{}, false, nil,
+		)
+		blocks = append(blocks, last)
+		prevHash = last.Hash()
+	}
+	announcer := leiosBoundaryTestBlock(
+		t, uint64(len(blocks)), epochLength+10, prevHash, false, ebHash,
+	)
+	certifier := leiosBoundaryTestBlock(
+		t, uint64(len(blocks))+1, epochLength+20, announcer.Hash(), true, nil,
+	)
+	blocks = append(blocks, announcer, certifier)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
+	for _, blk := range blocks {
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        blk.SlotNumber(),
+			Hash:        blk.Hash().Bytes(),
+			BlockNumber: blk.BlockNumber(),
+			Type:        uint(gledger.BlockTypeDijkstra),
+			PrevHash:    blk.PrevHash().Bytes(),
+			Cbor:        blk.Cbor(),
+		})
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+
+	startEra := eras.DijkstraEraDesc
+	params := dijkstraTestProtocolParameters()
+	params.MaxBlockBodySize = 2_000_000
+	params.MaxBlockHeaderSize = 100_000
+	var startPParams lcommon.ProtocolParameters = params
+	if hardFork {
+		startEra = eras.ConwayEraDesc
+		// The Dijkstra hard fork encodes the Conway pparams it converts, so
+		// they need their rational fields set.
+		conwayParams := epochBoundaryBenchPParams()
+		conwayParams.ProtocolVersion.Major = gconway.MaxProtocolVersionConway
+		conwayParams.MaxBlockBodySize = params.MaxBlockBodySize
+		conwayParams.MaxBlockHeaderSize = params.MaxBlockHeaderSize
+		startPParams = conwayParams
+	}
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	epoch0 := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    1_000,
+		LengthInSlots: epochLength,
+		EraId:         startEra.Id,
+		Nonce:         nonce,
+		EvolvingNonce: nonce,
+	}
+	require.NoError(t, db.SetEpoch(
+		epoch0.StartSlot, epoch0.EpochId,
+		nonce, nonce, nil, nil,
+		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots,
+		nil,
+	))
+
+	var (
+		validatedMu     sync.Mutex
+		validatedEpochs []uint64
+	)
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:              db,
+		ChainManager:          cm,
+		CardanoNodeConfig:     nodeConfig,
+		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PromRegistry:          prometheus.NewRegistry(),
+		EnableDijkstra:        true,
+		ManualBlockProcessing: true,
+		EndorserBlockProvider: func(
+			hash []byte,
+			_ uint64,
+		) ([]cbor.RawMessage, bool) {
+			return []cbor.RawMessage{}, bytes.Equal(hash, ebHash)
+		},
+		ValidateLeiosCertificate: func(
+			epoch uint64,
+			_ []byte,
+			_ []byte,
+			_ []byte,
+		) error {
+			validatedMu.Lock()
+			defer validatedMu.Unlock()
+			validatedEpochs = append(validatedEpochs, epoch)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.currentEra = startEra
+	ls.currentPParams = startPParams
+	ls.currentEpoch = epoch0
+	ls.epochCache = []models.Epoch{epoch0}
+	ls.currentTip = ochainsync.Tip{}
+	ls.currentTipBlockNonce = nonce
+	ls.publishSnapshotsLocked()
+	require.NoError(t, cm.SetLedger(ls))
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: blocks}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+
+	require.Equal(t, uint64(1), ls.currentEpoch.EpochId)
+	require.Equal(t, eras.DijkstraEraDesc.Id, ls.currentEra.Id)
+	require.Equal(t, certifier.SlotNumber(), ls.currentTip.Point.Slot)
+	validatedMu.Lock()
+	defer validatedMu.Unlock()
+	require.Equal(
+		t,
+		[]uint64{1, 1},
+		validatedEpochs,
+		"the pre-check and the apply must each validate the certificate "+
+			"against the epoch of its endorser block",
+	)
+}
+
+// TestBlocksBeforeEpochEnd pins the prefix to the apply loop's own stop
+// condition: the first block at or past the epoch end, and every block while
+// the epoch is uninitialized.
+func TestBlocksBeforeEpochEnd(t *testing.T) {
+	t.Parallel()
+
+	epoch := models.Epoch{StartSlot: 100, SlotLength: 1_000, LengthInSlots: 100}
+	var prev lcommon.Blake2b256
+	var blocks []gledger.Block
+	for idx, slot := range []uint64{150, 199, 200, 210} {
+		blk := leiosBoundaryTestBlock(t, uint64(idx), slot, prev, false, nil)
+		blocks = append(blocks, blk)
+		prev = blk.Hash()
+	}
+
+	require.Equal(t, blocks[:2], blocksBeforeEpochEnd(blocks, epoch))
+	require.Equal(t, blocks[:2], blocksBeforeEpochEnd(blocks[:2], epoch))
+	require.Empty(t, blocksBeforeEpochEnd(blocks[2:], epoch))
+	uninitialized := epoch
+	uninitialized.SlotLength = 0
+	require.Empty(t, blocksBeforeEpochEnd(blocks, uninitialized))
+}

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -482,9 +483,7 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 			return err
 		}
 		level.resolved = script.ConcatResolvedInputs(inputs, referenceInputs)
-		for hash, candidate := range script.PlutusWitnessScripts(level.witnesses) {
-			available[hash] = candidate
-		}
+		maps.Copy(available, script.PlutusWitnessScripts(level.witnesses))
 		for _, utxo := range level.resolved {
 			if utxo.Output == nil {
 				continue

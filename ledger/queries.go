@@ -449,6 +449,14 @@ func (ls *LedgerState) query(
 	at QueryPoint,
 	protocolVersion uint16,
 ) (any, error) {
+	// The latest boundary's mark snapshot and RATIFY marks may still be
+	// written by its background job; answer ledger-state queries from the
+	// state it decided, and before any pinned read opens.
+	if _, ok := query.(*olocalstatequery.BlockQuery); ok {
+		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+			return nil, err
+		}
+	}
 	// txn is nil on the live (unpinned) path -- every handler below falls
 	// back to opening its own transaction in that case, unchanged from
 	// before this point-pinning existed. When pinned, this one transaction
@@ -2207,8 +2215,9 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 func (ls *LedgerState) queryShelleyGetProposals(
 	actionIds []lcommon.GovActionId,
 ) (any, error) {
-	epoch := ls.loadConsensusSnapshot().currentEpoch.EpochId
-	proposals, err := ls.db.GetActiveGovernanceProposals(epoch, nil)
+	// GetProposals returns the Conway proposals set, which keeps an action
+	// RATIFY classified expired until the boundary that drops it.
+	proposals, err := ls.db.GetGovernanceProposalSet(nil)
 	if err != nil {
 		return nil, err
 	}

@@ -156,77 +156,57 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 	deferStakeInputs bool,
 	txn *database.Txn,
 ) error {
+	prepared, err := m.prepareSnapshot(
+		epoch, snapshotType, distribution, evt, resolveAutoVote,
+		persistRewardInputs, txn,
+	)
+	if err != nil {
+		return err
+	}
+	return m.writePreparedSnapshot(
+		prepared, checkAuthoritativeMark, deferStakeInputs, txn,
+	)
+}
+
+// preparedSnapshot is a snapshot whose rows and reward inputs were built by
+// reads through one transaction, ready to be written through another.
+type preparedSnapshot struct {
+	epoch        uint64
+	snapshotType string
+	distribution *StakeDistribution
+	evt          event.EpochTransitionEvent
+	bundle       *rewardStateBundle
+	snapshots    []*models.PoolStakeSnapshot
+	summary      *models.EpochSummary
+}
+
+// prepareSnapshot does every read saving a snapshot needs, through txn.
+func (m *Manager) prepareSnapshot(
+	epoch uint64,
+	snapshotType string,
+	distribution *StakeDistribution,
+	evt event.EpochTransitionEvent,
+	resolveAutoVote bool,
+	persistRewardInputs bool,
+	txn *database.Txn,
+) (*preparedSnapshot, error) {
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
-
-	authoritative := !checkAuthoritativeMark
-
-	// Build the reward-state bundle before any write so the reward_snapshot
-	// marker can be the first row written. Writing the marker before the
-	// pool-stake snapshots gives the authoritative (epoch-rollover) and fallback
-	// (event-driven) capture paths the same lock-acquisition order
-	// (reward_snapshot, then pool_stake_snapshot, then the reward input rows),
-	// which keeps a concurrent authoritative-vs-fallback capture deadlock-free on
-	// MySQL/Postgres. bundle is nil when reward inputs are disabled for this
-	// call, or skipped because the ended-epoch metadata is not yet available. In
-	// either case there is no durable reward marker or reward-input row to write,
-	// so both the authoritative and fallback capture paths fall through and still
-	// persist the Mark pool-stake snapshot and epoch summary below — the
-	// leader-election data that must be captured on every epoch transition
-	// regardless of reward-input availability.
-	var bundle *rewardStateBundle
+	prepared := &preparedSnapshot{
+		epoch:        epoch,
+		snapshotType: snapshotType,
+		distribution: distribution,
+		evt:          evt,
+	}
 	if persistRewardInputs {
-		var err error
-		bundle, err = m.buildRewardStateInputs(
+		bundle, err := m.buildRewardStateInputs(
 			epoch, snapshotType, distribution, evt, meta, metaTxn,
 		)
 		if err != nil {
-			return fmt.Errorf("build reward state inputs: %w", err)
+			return nil, fmt.Errorf("build reward state inputs: %w", err)
 		}
+		prepared.bundle = bundle
 	}
-
-	var temporaryFallbackGuardID uint
-	if bundle != nil {
-		bundle.snapshot.Authoritative = authoritative
-		if authoritative {
-			// Authoritative capture: overwrite any provisional row.
-			if err := meta.SaveRewardSnapshot(bundle.snapshot, metaTxn); err != nil {
-				return fmt.Errorf("save reward snapshot: %w", err)
-			}
-		} else {
-			// Fallback capture: claim the marker atomically and bail out if an
-			// authoritative row already occupies it.
-			proceed, err := meta.ClaimFallbackRewardSnapshot(
-				bundle.snapshot, metaTxn,
-			)
-			if err != nil {
-				return fmt.Errorf("claim fallback reward snapshot: %w", err)
-			}
-			if !proceed {
-				return errFallbackSupersededByAuthoritative
-			}
-		}
-	} else if checkAuthoritativeMark {
-		// No reward bundle means there is no durable reward_snapshot marker to
-		// claim. Temporarily claim the same unique key so a fallback still
-		// serializes against authoritative rollover before replacing Mark rows.
-		// The helper leaves an existing provisional row untouched and returns a
-		// non-zero ID only when this transaction inserted the temporary row.
-		proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
-			epoch,
-			snapshotType,
-			metaTxn,
-		)
-		if err != nil {
-			return fmt.Errorf("claim fallback reward snapshot guard: %w", err)
-		}
-		if !proceed {
-			return errFallbackSupersededByAuthoritative
-		}
-		temporaryFallbackGuardID = guardID
-	}
-
-	// Save pool stake snapshots
 	snapshots := make(
 		[]*models.PoolStakeSnapshot,
 		0,
@@ -240,7 +220,7 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 		metaTxn,
 	)
 	if err != nil {
-		return fmt.Errorf("resolve snapshot Leios keys: %w", err)
+		return nil, fmt.Errorf("resolve snapshot Leios keys: %w", err)
 	}
 	for poolKeyHash, stake := range distribution.PoolStakes {
 		delegators := distribution.DelegatorCount[poolKeyHash]
@@ -265,32 +245,17 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
-
-	// Freeze the CIP-1694 SPO reward-account auto-vote per pool at
-	// the snapshot boundary so governance ratification at epoch N
-	// reads snapshot-era delegation rather than the live, possibly
-	// re-delegated state. Skipped (rows left Resolved=false) when
-	// the caller is seeding historical epochs where live state does
-	// not match the target boundary.
 	if resolveAutoVote {
 		if err := m.db.ResolvePoolRewardAccountAutoVotes(
 			snapshots, txn,
 		); err != nil {
-			return fmt.Errorf("resolve reward-account auto-votes: %w", err)
+			return nil, fmt.Errorf(
+				"resolve reward-account auto-votes: %w", err,
+			)
 		}
 	}
-
-	if err := meta.DeletePoolStakeSnapshotsForEpoch(
-		epoch, snapshotType, metaTxn,
-	); err != nil {
-		return fmt.Errorf("replace pool snapshots: delete prior set: %w", err)
-	}
-	if err := meta.SavePoolStakeSnapshots(snapshots, metaTxn); err != nil {
-		return fmt.Errorf("save pool snapshots: %w", err)
-	}
-
-	// Save epoch summary
-	summary := &models.EpochSummary{
+	prepared.snapshots = snapshots
+	prepared.summary = &models.EpochSummary{
 		Epoch:            epoch,
 		TotalActiveStake: types.Uint64(distribution.TotalStake),
 		TotalPoolCount:   distribution.TotalPools,
@@ -299,14 +264,67 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 		BoundarySlot:     evt.BoundarySlot,
 		SnapshotReady:    true,
 	}
+	return prepared, nil
+}
 
-	if err := meta.SaveEpochSummary(summary, metaTxn); err != nil {
+// writePreparedSnapshot writes a prepared snapshot through txn.
+func (m *Manager) writePreparedSnapshot(
+	prepared *preparedSnapshot,
+	checkAuthoritativeMark bool,
+	deferStakeInputs bool,
+	txn *database.Txn,
+) error {
+	meta := m.db.Metadata()
+	metaTxn := txn.Metadata()
+	epoch := prepared.epoch
+	snapshotType := prepared.snapshotType
+	bundle := prepared.bundle
+	authoritative := !checkAuthoritativeMark
+	var temporaryFallbackGuardID uint
+	if bundle != nil {
+		bundle.snapshot.Authoritative = authoritative
+		if authoritative {
+			if err := meta.SaveRewardSnapshot(bundle.snapshot, metaTxn); err != nil {
+				return fmt.Errorf("save reward snapshot: %w", err)
+			}
+		} else {
+			proceed, err := meta.ClaimFallbackRewardSnapshot(
+				bundle.snapshot, metaTxn,
+			)
+			if err != nil {
+				return fmt.Errorf("claim fallback reward snapshot: %w", err)
+			}
+			if !proceed {
+				return errFallbackSupersededByAuthoritative
+			}
+		}
+	} else if checkAuthoritativeMark {
+		proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
+			epoch,
+			snapshotType,
+			metaTxn,
+		)
+		if err != nil {
+			return fmt.Errorf("claim fallback reward snapshot guard: %w", err)
+		}
+		if !proceed {
+			return errFallbackSupersededByAuthoritative
+		}
+		temporaryFallbackGuardID = guardID
+	}
+
+	if err := meta.DeletePoolStakeSnapshotsForEpoch(
+		epoch, snapshotType, metaTxn,
+	); err != nil {
+		return fmt.Errorf("replace pool snapshots: delete prior set: %w", err)
+	}
+	if err := meta.SavePoolStakeSnapshots(prepared.snapshots, metaTxn); err != nil {
+		return fmt.Errorf("save pool snapshots: %w", err)
+	}
+	if err := meta.SaveEpochSummary(prepared.summary, metaTxn); err != nil {
 		return fmt.Errorf("save epoch summary: %w", err)
 	}
 
-	// Finalize the reward input rows. The reward_snapshot marker was already
-	// written above (SaveRewardSnapshot / ClaimFallbackRewardSnapshot); here we
-	// replace the per-pool and per-credential rows keyed off it.
 	if bundle != nil {
 		if err := m.saveRewardStateInputRows(
 			epoch, bundle, deferStakeInputs, meta, metaTxn,
@@ -318,17 +336,13 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 			m.deferredStakeInputs = &DeferredRewardStakeInputs{
 				txn:          txn,
 				Epoch:        epoch,
-				BoundarySlot: evt.BoundarySlot,
+				BoundarySlot: prepared.evt.BoundarySlot,
 				Inputs:       bundle.stakeInputs,
 			}
 			m.mu.Unlock()
 		}
 	}
 
-	// A no-bundle fallback uses a temporary reward_snapshot row only as a
-	// lockable serialization key. Delete exactly the row this transaction
-	// inserted; the database retains its row/unique-key locks until commit, so a
-	// waiting authoritative upsert cannot pass this capture before then.
 	if temporaryFallbackGuardID != 0 {
 		if err := meta.ReleaseFallbackRewardSnapshotGuard(
 			temporaryFallbackGuardID,

@@ -21,6 +21,7 @@ import (
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func TestGetCommitteeHotAuthorizationsSinceSQLite(t *testing.T) {

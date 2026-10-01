@@ -29,6 +29,90 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func FuzzNormalizeRunMode(f *testing.F) {
+	f.Add("")
+	f.Add("serve")
+	f.Add("LOAD")
+	f.Add("dev")
+	f.Add("leios")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeRunMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeRunMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case "",
+			string(RunModeServe),
+			string(RunModeLoad),
+			string(RunModeDev),
+			string(RunModeLeios):
+		default:
+			t.Fatalf("normalizeRunMode accepted unknown mode %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStartEra(f *testing.F) {
+	f.Add("")
+	f.Add("dijkstra")
+	f.Add("DIJKSTRA")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStartEra(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStartEra(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case string(StartEraDefault), string(StartEraDijkstra):
+		default:
+			t.Fatalf("normalizeStartEra accepted unknown era %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStorageMode(f *testing.F) {
+	f.Add("")
+	f.Add("core")
+	f.Add("API")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStorageMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStorageMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case storageModeCore, storageModeAPI:
+		default:
+			t.Fatalf(
+				"normalizeStorageMode accepted unknown mode %q",
+				normalized,
+			)
+		}
+	})
+}
+
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	resetGlobalConfig()
 

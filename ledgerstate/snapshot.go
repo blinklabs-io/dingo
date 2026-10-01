@@ -39,6 +39,12 @@ import (
 // be located within an extracted snapshot.
 var ErrLedgerDirNotFound = errors.New("ledger directory not found")
 
+// ErrByronSnapshotUnsupported is returned for a snapshot whose current era is
+// Byron.
+var ErrByronSnapshotUnsupported = errors.New(
+	"snapshot is in the Byron era: Byron ledger states are not supported",
+)
+
 // FindLedgerStateFile searches the extracted snapshot directory for
 // the ledger state file. It supports two formats:
 //   - Legacy: ledger/<slot>.lstate or ledger/<slot>
@@ -386,6 +392,13 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 			"navigating telescope: %w",
 			err,
 		)
+	}
+
+	// A Byron ledger state is not Shelley-shaped and carries the Byron
+	// update state a node would have to restore its adopted parameters from,
+	// which nothing here reads.
+	if eraIndex == EraByron {
+		return nil, ErrByronSnapshotUnsupported
 	}
 
 	// Parse the current era's state

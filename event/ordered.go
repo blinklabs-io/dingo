@@ -84,7 +84,7 @@ type orderedItem struct {
 // subscriber on that lane receives the barrier too, so give it a Data type
 // they skip rather than act on.
 //
-// See switchBarrier in ouroboros/consensus_conformance_test.go for the
+// See switchBarrier in ouroboros/tests_test.go for the
 // pattern, and for why a non-blocking drain is not a wait.
 func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
 	return e.PublishOrderedContext(context.Background(), eventType, evt)

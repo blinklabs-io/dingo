@@ -1537,6 +1537,57 @@ func TestHandleEpochTransitionKeepsBoundaryCapturedSnapshot(t *testing.T) {
 	require.Equal(t, uint64(50_000_000), uint64(inputs[0].Stake))
 }
 
+// A boundary that registers a deferred capture at SNAP and then keeps the
+// capture itself discards the entry: when that capture does not persist, the
+// epoch-transition fallback has to write the mark snapshot.
+func TestHandleEpochTransitionCapturesAfterBoundaryKeptDeferredCapture(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+	})
+	seedPoolAndDelegations(t, db, []byte("poolH_12345678901234567890AB"),
+		[]struct {
+			stakingKey  []byte
+			utxoAmounts []types.Uint64
+		}{
+			{
+				stakingKey:  bytes.Repeat([]byte{0xcd}, 28),
+				utxoAmounts: []types.Uint64{40_000_000},
+			},
+		}, 500)
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        1,
+		BoundarySlot:    432000,
+		EpochNonce:      []byte{0x01, 0x02, 0x03},
+		ProtocolVersion: 10,
+		SnapshotSlot:    431999,
+	}
+
+	// The boundary's own capture does not persist, as when it rolls back its
+	// savepoint.
+	txn := db.Transaction(true)
+	require.NoError(t, mgr.DeferEpochBoundaryCapture(txn, evt))
+	mgr.DiscardEpochBoundaryCapture(evt.NewEpoch)
+	require.NoError(t, txn.Rollback())
+
+	require.NoError(t, mgr.handleEpochTransition(context.Background(), evt))
+
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		1, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, snapshots, 1,
+		"the fallback must capture mark[1] when the boundary kept the capture")
+	require.Equal(t, uint64(40_000_000), uint64(snapshots[0].TotalStake))
+}
+
 func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 	t.Parallel()
 

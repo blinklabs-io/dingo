@@ -358,6 +358,29 @@ func (c *Chain) headerTip() ochainsync.Tip {
 	}
 }
 
+// IsFirstOnHeaderChain reports whether a header with the given hash is the
+// first header of a chain that has no applied block: the primary tip is at
+// origin and no queued header precedes it.
+//
+// Chainsync verifies and queues headers ahead of blockfetch applying any
+// block, so the primary tip alone cannot tell the first header from a later
+// one while the queue is filling. addBlockHeader anchors non-first headers to
+// the header tip for the same reason. Rolling back to origin drops the queue,
+// so the answer is true again afterwards.
+func (c *Chain) IsFirstOnHeaderChain(hash []byte) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	tip := c.currentTip
+	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 {
+		return false
+	}
+	return len(c.headers) == 0 ||
+		bytes.Equal(c.headers[0].point.Hash, hash)
+}
+
 // MaxQueuedHeaders returns the maximum number of headers that may be
 // queued. The limit is the larger of securityParam * 2 and
 // DefaultMaxQueuedHeaders. Using the default as a floor ensures the

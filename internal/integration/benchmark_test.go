@@ -20,13 +20,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/stretchr/testify/require"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/internal/blockverify"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
 )
 
 // loadImmutableBlocks loads numBlocks real blocks -- hash, type, slot, and
