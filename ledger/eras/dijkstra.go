@@ -659,176 +659,112 @@ func dijkstraReferenceInputOverlap(
 	return nil, false
 }
 
-// ErrDijkstraEvaluationUnsupported reports a Dijkstra transaction whose
-// scripts EvaluateTxDijkstra cannot evaluate yet.
-var ErrDijkstraEvaluationUnsupported = errors.New(
-	"dijkstra transaction evaluation unsupported",
-)
-
+// EvaluateTxDijkstra runs every Plutus redeemer of a Dijkstra transaction,
+// at the top level and in each sub-transaction, with the per-transaction
+// execution limit as each script's budget. The returned total and fee cover
+// every level. The per-redeemer map is keyed by tag and index, which name a
+// redeemer only within its own level, so it carries the top-level redeemers.
 func EvaluateTxDijkstra(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
-	if err := checkDijkstraEvaluationSupported(tx, ls); err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
-	}
-	return EvaluateTxConway(tx, ls, &tmpPparams.ConwayProtocolParameters)
-}
-
-// checkDijkstraEvaluationSupported refuses transactions that EvaluateTxConway
-// would mis-evaluate. It sees only the top-level redeemers and the Plutus
-// V1-V3 scripts witnessed or referenced at the top level, so it would return
-// an empty result for a sub-transaction redeemer, and fail with an unrelated
-// message for a guarding redeemer, a Plutus V4 script, or a top-level
-// redeemer whose script only a sub-transaction makes available (Dijkstra
-// shares witnessed and reference scripts across levels). Evaluating them
-// needs the per-level script context that gouroboros builds but does not
-// export, and the result map is keyed by (tag, index), which cannot tell
-// redeemers of different levels apart.
-func checkDijkstraEvaluationSupported(
-	tx lcommon.Transaction,
-	ls lcommon.LedgerState,
-) error {
 	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
 	if !ok || dijkstraTx == nil {
-		return nil
+		return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+			"dijkstra evaluation requires *dijkstra.DijkstraTransaction, got %T",
+			tx,
+		)
 	}
-	subTxs := dijkstraTx.Body.TxSubTransactions.Items()
-	for index, sub := range subTxs {
-		if sub.WitnessSet.Redeemers() != nil {
-			for range sub.WitnessSet.Redeemers().Iter() {
-				return fmt.Errorf(
-					"%w: redeemer in sub-transaction %d",
-					ErrDijkstraEvaluationUnsupported,
-					index,
-				)
-			}
+	if syntheticV2CostModelInEffect(ls) {
+		if err := dijkstraSyntheticV2CostModelGuard(
+			tx, 0, ls, tmpPparams,
+		); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
 		}
-		if len(sub.WitnessSet.PlutusV4Scripts()) > 0 {
-			return fmt.Errorf(
-				"%w: Plutus V4 script in sub-transaction %d",
-				ErrDijkstraEvaluationUnsupported,
-				index,
+	}
+	if err := gdijkstra.UtxoValidateCostModelsPresent(
+		tx, 0, ls, tmpPparams,
+	); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+	results, err := gdijkstra.EvaluatePlutusScripts(
+		dijkstraTx,
+		ls,
+		tmpPparams,
+		tmpPparams.MaxTxExUnits,
+	)
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+	var total lcommon.ExUnits
+	redeemers := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
+	for _, result := range results {
+		total, err = SafeAddExUnits(total, result.ExUnits)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"aggregate execution units: %w",
+				err,
 			)
 		}
-	}
-	hasTopLevelRedeemers := false
-	if redeemers := dijkstraTx.WitnessSet.Redeemers(); redeemers != nil {
-		for key := range redeemers.Iter() {
-			if key.Tag == lcommon.RedeemerTagGuarding {
-				return fmt.Errorf(
-					"%w: guarding redeemer %d",
-					ErrDijkstraEvaluationUnsupported,
-					key.Index,
-				)
-			}
-			hasTopLevelRedeemers = true
+		if result.SubTransactionIndex == nil {
+			redeemers[result.Key] = result.ExUnits
 		}
 	}
-	if len(dijkstraTx.WitnessSet.PlutusV4Scripts()) > 0 {
-		return fmt.Errorf(
-			"%w: Plutus V4 script",
-			ErrDijkstraEvaluationUnsupported,
-		)
+	fee, err := dijkstraEvaluationFee(tx, ls, tmpPparams, total)
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
 	}
-	topLevel := make(map[lcommon.ScriptHash]struct{})
-	addDijkstraPlutusWitnessHashes(topLevel, dijkstraTx.WitnessSet)
-	if ls != nil {
-		inputs, referenceInputs, err := resolveDijkstraScriptLevelInputs(
-			&dijkstraTx.Body,
-			ls,
-		)
-		if err != nil {
-			// Input resolution failures are reported by the evaluation itself.
-			return nil
-		}
-		for _, utxo := range script.ConcatResolvedInputs(inputs, referenceInputs) {
-			if err := checkDijkstraScriptRef(utxo, -1); err != nil {
-				return err
-			}
-			if utxo.Output != nil && utxo.Output.ScriptRef() != nil {
-				topLevel[utxo.Output.ScriptRef().Hash()] = struct{}{}
-			}
-		}
-	}
-	for index, sub := range subTxs {
-		subLevel := make(map[lcommon.ScriptHash]struct{})
-		addDijkstraPlutusWitnessHashes(subLevel, sub.WitnessSet)
-		if ls != nil {
-			for _, input := range append(
-				sub.Body.Inputs(),
-				sub.Body.ReferenceInputs()...,
-			) {
-				utxo, err := ls.UtxoById(input)
-				if err != nil {
-					// Unresolvable inputs fail phase 1 validation.
-					continue
-				}
-				if err := checkDijkstraScriptRef(utxo, index); err != nil {
-					return err
-				}
-				switch ref := utxo.Output.ScriptRef().(type) {
-				case lcommon.PlutusV1Script, lcommon.PlutusV2Script,
-					lcommon.PlutusV3Script:
-					subLevel[ref.Hash()] = struct{}{}
-				}
-			}
-		}
-		if !hasTopLevelRedeemers {
-			continue
-		}
-		for hash := range subLevel {
-			if _, ok := topLevel[hash]; !ok {
-				return fmt.Errorf(
-					"%w: Plutus script %s available only in sub-transaction %d",
-					ErrDijkstraEvaluationUnsupported,
-					hash.String(),
-					index,
-				)
-			}
-		}
-	}
-	return nil
+	return fee, total, redeemers, nil
 }
 
-// checkDijkstraScriptRef refuses a resolved output carrying a Plutus V4
-// reference script. A negative subTx index names the top-level transaction.
-func checkDijkstraScriptRef(utxo lcommon.Utxo, subTx int) error {
-	if utxo.Output == nil {
-		return nil
+// dijkstraEvaluationFee is the Dijkstra minimum fee for tx with exUnits as
+// its execution units. As in the Dijkstra minimum-fee rule, only top-level
+// reference scripts are charged, at the protocol's tiered stride and
+// multiplier.
+func dijkstraEvaluationFee(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+	pp *gdijkstra.DijkstraProtocolParameters,
+	exUnits lcommon.ExUnits,
+) (uint64, error) {
+	var pricesMem, pricesSteps *big.Rat
+	if pp.ExecutionCosts.MemPrice != nil {
+		pricesMem = pp.ExecutionCosts.MemPrice.ToBigRat()
 	}
-	if _, ok := utxo.Output.ScriptRef().(lcommon.PlutusV4Script); !ok {
-		return nil
+	if pp.ExecutionCosts.StepPrice != nil {
+		pricesSteps = pp.ExecutionCosts.StepPrice.ToBigRat()
 	}
-	if subTx < 0 {
-		return fmt.Errorf(
-			"%w: Plutus V4 reference script",
-			ErrDijkstraEvaluationUnsupported,
-		)
-	}
-	return fmt.Errorf(
-		"%w: Plutus V4 reference script in sub-transaction %d",
-		ErrDijkstraEvaluationUnsupported,
-		subTx,
+	fee := CalculateMinFee(
+		TxSizeForFee(tx),
+		exUnits,
+		pp.MinFeeA,
+		pp.MinFeeB,
+		pricesMem,
+		pricesSteps,
 	)
-}
-
-func addDijkstraPlutusWitnessHashes(
-	hashes map[lcommon.ScriptHash]struct{},
-	ws gdijkstra.DijkstraTransactionWitnessSet,
-) {
-	for _, s := range ws.PlutusV1Scripts() {
-		hashes[s.Hash()] = struct{}{}
+	refScriptSize, err := lcommon.ConsumedReferenceScriptSize(tx, ls)
+	if err != nil {
+		return 0, err
 	}
-	for _, s := range ws.PlutusV2Scripts() {
-		hashes[s.Hash()] = struct{}{}
+	var costPerByte, multiplier *big.Rat
+	if pp.MinFeeRefScriptCostPerByte != nil {
+		costPerByte = pp.MinFeeRefScriptCostPerByte.ToBigRat()
 	}
-	for _, s := range ws.PlutusV3Scripts() {
-		hashes[s.Hash()] = struct{}{}
+	if pp.RefScriptCostMultiplier != nil {
+		multiplier = pp.RefScriptCostMultiplier.ToBigRat()
 	}
+	return saturatedAddUint64(
+		fee,
+		calculateTieredRefScriptFee(
+			refScriptSize,
+			costPerByte,
+			uint64(pp.RefScriptCostStride),
+			multiplier,
+		),
+	), nil
 }
