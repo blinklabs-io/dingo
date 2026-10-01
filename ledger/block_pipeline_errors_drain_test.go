@@ -317,19 +317,28 @@ func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
 
 	rawBatch := buildNoNonceValidateBatch(t, numBlocks)
 
-	done := make(chan struct{})
+	type batchResult struct {
+		decoded []gledger.Block
+		err     error
+	}
+	done := make(chan batchResult, 1)
 	go func() {
-		defer close(done)
-		_, _ = ls.decodeReadChainBatch(t.Context(), rawBatch)
+		decoded, err := ls.decodeReadChainBatchWithError(t.Context(), rawBatch)
+		done <- batchResult{decoded: decoded, err: err}
 	}()
 
-	testutil.RequireReceive(
+	res := testutil.RequireReceive(
 		t,
 		done,
 		testutil.AsyncWait,
 		"decodeReadChainBatch blocked in Submit on a batch larger than "+
 			"MaxPendingBlocks while Results() was unread",
 	)
+	// Returning is not enough: a Submit failure after a prefix also returns.
+	// Every block's eta0 lookup fails as deferred, so the whole batch must
+	// come back decoded.
+	require.NoError(t, res.err)
+	require.Len(t, res.decoded, numBlocks)
 }
 
 // stopAndDrainBlockPipeline returns an idempotent function that stops ls's
