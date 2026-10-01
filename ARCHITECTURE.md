@@ -4737,7 +4737,9 @@ already reached the window end. A peer whose window is incomplete can still be
 disconnected, but only when the rival's delivered blocks exceed that upper
 bound. A peer that has delivered up to its advertised tip is treated the same
 way, not as complete: that tip can still advance, so an honest peer at its own
-tip on a short fork keeps the trailing slots in its upper bound. Fragments retain at most k+1 headers and the
+tip on a short fork keeps the trailing slots in its upper bound. The one
+exception is the idling rule for a rival held at the Limit on Eagerness,
+below. Fragments retain at most k+1 headers and the
 intersection must lie in both, so the dominating peer contributes at most k
 blocks; a sparse peer with k or more blocks in its window is not detected.
 Pairs with no shared point in the retained fragments, and pairs
@@ -5027,28 +5029,50 @@ the standoff rule below. A held header's wait happens inside the roll-forward
 callback after the peer was charged up to the header's arrival, so the Limit
 on Patience does not charge it.
 
-A held peer delivers no headers, so two forks that are both held cannot show
-the window-wide density the Genesis Density Disconnector compares, and the
-limit would not move. The disconnector therefore also resolves this standoff
+A held peer delivers no headers, so a fork held at the limit cannot show the
+window-wide density the Genesis Density Disconnector compares, and the limit
+would not move. The disconnector therefore also resolves two standoffs
 (`eagernessStandoffDisconnectsLocked`), in the same pass and through the same
-`OnGenesisDensityDisconnect` callback, with `EagernessStandoff` set. For each
-pair of held forks it counts the blocks each delivered in
-`(intersection, min(head slots)]`, which is exact for both because every
-header up to a head was delivered. The fork with fewer blocks is disconnected,
-which removes it from the candidate set and moves the limit. Equal counts fall
-to the selector's transport order (connection priority, incumbent, blockfetch
-latency, connection ID). A fork that is still streaming is not held and
-decides nothing, a held peer that is a prefix of another is not a fork, and a
-peer is reported once, so the last candidate is never removed. The decision
-does not depend on which peer the chainsync client treats as primary.
+`OnGenesisDensityDisconnect` callback, with `EagernessStandoff` set. A peer is
+reported once, so the last candidate is never removed, and a peer that is a
+prefix of another is not a fork and decides nothing.
+
+- Two held forks: the blocks each delivered in `(intersection, min(head
+  slots)]` are counted, which is exact for both because every header up to a
+  head was delivered. The fork with fewer blocks is disconnected. Equal counts
+  fall to the selector's transport order (connection priority, incumbent,
+  blockfetch latency, connection ID). Both forks stop at the same limit, so the
+  winner is in effect the fork that reached its last allowed block in fewer
+  slots. Unlike the provable comparison above this is a statistical heuristic,
+  not a proof: it exists because Dingo stops header download at `k` blocks
+  rather than at the forecast horizon, and a temporarily sparse honest fork can
+  lose it.
+- A held fork against an idle one: a peer that has delivered every header up
+  to the tip it advertises is idle. Keepalive traffic refreshes an idle peer's
+  liveness, so it is never aged out as stale, and its trailing slots keep the
+  provable comparison from excluding it; left alone it would hold the limit at
+  its fork point until the stall recycler removed it. This is upstream's
+  idling rule: an idling peer loses to a rival that offers more than `k`
+  blocks past the intersection and has at least as many blocks in the Genesis
+  window. A held peer was offered a header beyond the limit, so it offers more
+  than `k`; a held peer with fewer window blocks has already been removed by
+  the provable comparison. Only a peer's own advertised tip can mark it idle,
+  so a peer can make only itself look idle. A fork still streaming (advertised
+  tip ahead of its delivered one) is not idle and decides nothing.
+
+The decision does not depend on which peer the chainsync client treats as
+primary.
 
 The stall recycler is coherent with this: `ChainSelector.EagernessPaused`
-marks a stalled chainsync client the selector is holding, and the recycler
-neither schedules nor performs a recycle or removal for it. Without the
-standoff rule that exemption would stall the node; with it, a held peer leaves
-only by losing the density comparison, or by its competitor going away. A
-held peer is not exempt from the standoff comparison, only from the stall
-timer.
+marks a chainsync client the selector is holding, and every recycler path that
+closes, resyncs or removes a connection consults it. A stalled held client is
+not scheduled for recycle or removal, the local-tip plateau watchdog does not
+resync a held primary (it restarts the plateau window instead), and the
+post-plateau realignment skips held peers. Without the standoff rules those
+exemptions would stall the node; with them, a held peer leaves only by losing
+a density comparison, or by its competitor going away. A held peer is not
+exempt from those comparisons, only from the recycler. The Limit on Patience
+is separate: a held header's wait is not charged to it, as above.
 
 The limit is exported as the `dingo_chainselection_loe_block_number` and
 `dingo_chainselection_loe_intersection_slot` gauges (0 while inactive).

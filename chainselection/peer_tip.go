@@ -65,6 +65,15 @@ type PeerChainTip struct {
 	nowFn func() time.Time
 }
 
+// deliveredAdvertisedTip reports whether the latest delivered header is the
+// tip the peer advertises, so it has nothing further to send.
+func (p *PeerChainTip) deliveredAdvertisedTip() bool {
+	return !p.awaitingFirstHeader &&
+		p.Tip.BlockNumber == p.ObservedTip.BlockNumber &&
+		p.Tip.Point.Slot == p.ObservedTip.Point.Slot &&
+		bytes.Equal(p.Tip.Point.Hash, p.ObservedTip.Point.Hash)
+}
+
 // now returns nowFn(), or time.Now when nowFn is unset.
 func (p *PeerChainTip) now() time.Time {
 	if p.nowFn != nil {

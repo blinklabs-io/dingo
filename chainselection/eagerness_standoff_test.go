@@ -100,6 +100,22 @@ func sparseSlot(block uint64) uint64 { return standoffBaseSlot + block*100 }
 // denseSlot continues a fork after block 10 at one block per slot.
 func denseSlot(block uint64) uint64 { return sharedSlot(10) + block - 10 }
 
+// advanceStreaming delivers one block while the peer still advertises a tip
+// further ahead, as a peer mid-stream does.
+func advanceStreaming(
+	t *testing.T,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	prefix string,
+	block uint64,
+	slot func(block uint64) uint64,
+) {
+	t.Helper()
+	observed := standoffTip(prefix, block, slot(block))
+	advertised := standoffTip(prefix, block+2, slot(block+2))
+	require.True(t, cs.updatePeerTipObserved(connId, advertised, observed, nil))
+}
+
 // hold pauses connId at the limit for the rest of the test.
 func hold(t *testing.T, cs *ChainSelector, connId ouroboros.ConnectionId) {
 	t.Helper()
@@ -144,7 +160,8 @@ func TestLimitOnEagernessStandoffWaitsForEveryCandidateToPause(t *testing.T) {
 	feedStandoff(f.cs, sparse, "c", 1, 10, sharedSlot)
 	feedStandoff(f.cs, sparse, "s", 11, 16, sparseSlot)
 	feedStandoff(f.cs, dense, "c", 1, 10, sharedSlot)
-	feedStandoff(f.cs, dense, "d", 11, 14, denseSlot)
+	feedStandoff(f.cs, dense, "d", 11, 13, denseSlot)
+	advanceStreaming(t, f.cs, dense, "d", 14, denseSlot)
 	hold(t, f.cs, sparse)
 
 	assert.Empty(t, f.evaluate())
@@ -256,4 +273,77 @@ func BenchmarkEagernessLimit(b *testing.B) {
 		cs.computeEagernessLimitLocked(nil, cs.localTip)
 		cs.mutex.Unlock()
 	}
+}
+
+// A peer that delivered a short dead fork and went idle stays live on
+// keepalive traffic, so it never ages out. It must not hold the honest peer at
+// the limit until the stall recycler removes it: the honest peer is held with
+// more than k blocks offered, the idle one has fewer, and upstream's idling
+// rule removes the idle one.
+func TestLimitOnEagernessIdleDeadForkIsRemovedWhileKeepaliveTouches(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	f.cs.config.StaleTipThreshold = time.Minute
+	dead := newTestConnectionId(1)
+	honest := newTestConnectionId(2)
+	feedStandoff(f.cs, dead, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, dead, "x", 11, 12, sparseSlot)
+	feedStandoff(f.cs, honest, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, honest, "h", 11, 16, denseSlot)
+	hold(t, f.cs, honest)
+
+	// Keepalive pongs arrive every 50s, inside the 60s staleness threshold.
+	var got []GenesisDensityDisconnect
+	for range 20 {
+		f.mu.Lock()
+		f.now = f.now.Add(50 * time.Second)
+		f.mu.Unlock()
+		f.cs.TouchPeerActivity(dead)
+		got = append(got, f.evaluate()...)
+	}
+	require.Len(t, got, 1, "the idle dead fork must be removed exactly once")
+	assert.Equal(t, dead, got[0].ConnectionId)
+	assert.Equal(t, honest, got[0].DominatingConnectionId)
+	assert.True(t, got[0].EagernessStandoff)
+}
+
+// A peer whose advertised tip is ahead of what it has delivered is still
+// streaming, not idle, and decides nothing against it.
+func TestLimitOnEagernessStreamingForkIsNotRemovedByHeldPeer(t *testing.T) {
+	t.Parallel()
+	f := newStandoffFixture()
+	slow := newTestConnectionId(1)
+	held := newTestConnectionId(2)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "h", 11, 16, denseSlot)
+	feedStandoff(f.cs, slow, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, slow, "s", 11, 11, sparseSlot)
+	advanceStreaming(t, f.cs, slow, "s", 12, sparseSlot)
+	hold(t, f.cs, held)
+
+	assert.Empty(t, f.evaluate())
+}
+
+// An idle peer with more blocks in the Genesis window than the held one is not
+// removed: the held fork is provably sparser, and it is the one that goes.
+func TestLimitOnEagernessIdleDenserForkIsNotRemovedByHeldPeer(t *testing.T) {
+	t.Parallel()
+	f := newStandoffFixture()
+	idle := newTestConnectionId(1)
+	held := newTestConnectionId(2)
+	feedStandoff(f.cs, idle, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, idle, "d", 11, 14, denseSlot)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "s", 11, 16, func(b uint64) uint64 {
+		return sharedSlot(10) + (b-10)*300
+	})
+	hold(t, f.cs, held)
+
+	got := f.evaluate()
+	require.Len(t, got, 1)
+	assert.Equal(t, held, got[0].ConnectionId)
+	assert.Equal(t, idle, got[0].DominatingConnectionId)
+	assert.False(t, got[0].EagernessStandoff, "removed by the provable rule")
 }

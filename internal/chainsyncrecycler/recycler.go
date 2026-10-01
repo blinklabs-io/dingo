@@ -458,8 +458,7 @@ func (r *Recycler) tick(
 		// release by whether it happened to be primary; the selector resolves
 		// the standoff by density instead.
 		if conn.Status == chainsync.ClientStatusStalled &&
-			live.ChainSelector != nil &&
-			live.ChainSelector.EagernessPaused(conn.ConnId) {
+			isEagernessHeld(live.ChainSelector, conn.ConnId) {
 			delete(st.recycleAt, connKey)
 			continue
 		}
@@ -496,6 +495,14 @@ func (r *Recycler) tick(
 		eligibleCount,
 		effectiveCooldown,
 	)
+}
+
+// isEagernessHeld reports whether the selector is holding connId's header
+// stream at the Limit on Eagerness. Every path here that closes, resyncs or
+// removes a connection must consult it, so a held peer is never released by
+// the recycler's own timing.
+func isEagernessHeld(selector ChainSelector, connId ouroboros.ConnectionId) bool {
+	return selector != nil && selector.EagernessPaused(connId)
 }
 
 // checkLocalTipPlateau is the safety net for a local tip that has not moved for
@@ -675,6 +682,20 @@ func (r *Recycler) checkLocalTipPlateau(
 		delete(st.recycleAt, connKey)
 		return
 	}
+	// A primary the selector holds at the Limit on Eagerness is why the local
+	// tip stopped, not a fault in its stream, and a fresh connection would be
+	// held at the same point. The selector resolves the hold by density.
+	if isEagernessHeld(live.ChainSelector, *targetConn) {
+		r.logger.Info(
+			"local tip plateau is a hold at the Limit on Eagerness, not resyncing chainsync",
+			"connection_id", connKey,
+			"local_tip_slot", localTipSlot,
+			"plateau_duration", now.Sub(st.lastProgressAt),
+		)
+		st.lastProgressAt = now
+		delete(st.recycleAt, connKey)
+		return
+	}
 	// The local reconcile found nothing to repair (or failed), so the stall is
 	// in the upstream chainsync stream itself: the active peer's server-side
 	// cursor has stopped advancing (a flaky/stalled relay) while chain
@@ -714,6 +735,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	// a no-op.
 	if eligibleCount > 1 {
 		r.realignOtherPeersAfterPlateau(
+			live.ChainSelector,
 			*targetConn,
 			trackedClients,
 			localTipSlot,
@@ -898,6 +920,7 @@ func (r *Recycler) publishConnectionRecycle(
 // Realigning candidate peers' cursors to the current local tip lets whichever
 // peer is promoted next deliver headers from local-tip+1 onward.
 func (r *Recycler) realignOtherPeersAfterPlateau(
+	selector ChainSelector,
 	closedConnId ouroboros.ConnectionId,
 	trackedClients []chainsync.TrackedClient,
 	localTipSlot uint64,
@@ -910,7 +933,8 @@ func (r *Recycler) realignOtherPeersAfterPlateau(
 		if conn.ConnId.String() == closedKey {
 			continue
 		}
-		if conn.Cursor.Slot <= localTipSlot {
+		if conn.Cursor.Slot <= localTipSlot ||
+			isEagernessHeld(selector, conn.ConnId) {
 			continue
 		}
 		r.logger.Info(
