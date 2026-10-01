@@ -15,7 +15,16 @@ ID="$1"
 # Wallet auth isn't needed for read-only queries
 unset MOOG_WALLET_FILE
 
-function query_run() { moog facts test-runs --test-run-id "$ID"; }
+# The decrypted report URL carries a signed auth capability in its query
+# string. Every poll echoes the fact to the workflow log, so strip the query
+# string first: only scheme, host and path are ever printed.
+function redact_report_url() {
+  jq 'map(.value.url = ((.value.url // "") | sub("\\?.*$"; "")))'
+}
+
+function query_run() {
+  moog facts test-runs --test-run-id "$ID" | redact_report_url
+}
 
 # Phase 1: wait for acceptance (fast poll)
 echo "Waiting to be accepted..."

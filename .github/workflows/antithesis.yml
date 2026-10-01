@@ -240,7 +240,7 @@ jobs:
       MOOG_PLATFORM: github
       MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
       MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
-      DURATION: ${{ inputs.duration || '3' }}
+      DURATION: ${{ inputs.duration || '1' }}
     steps:
       - name: Validate duration
         id: duration
@@ -308,15 +308,34 @@ jobs:
           if [ "$NO_FAULTS" = "true" ]; then
             NO_FAULTS_FLAG="--no-faults"
           fi
-          # Try index must be unique per commit, so count existing runs for this
-          # commit and increment (matches io-ouroboros-leios antithesis-leios).
-          TRY=$(moog facts test-runs --whose "$MOOG_REQUESTER" \
-            | jq --arg sha "$GITHUB_SHA" 'map(select(.key.commitId == $sha)) | length')
+          TESTNET_DIR="internal/test/antithesis/testnets/dingo-praos"
+          # Try index must be unique per test-run key, so count this
+          # requester's runs with the same key and increment (matches the
+          # cardano-foundation/cardano-node-antithesis census). An unreadable
+          # census fails the step rather than guessing try=1.
+          if ! CENSUS=$(moog facts test-runs --whose "$MOOG_REQUESTER"); then
+            echo "::error::Moog test-run census unreadable"
+            exit 1
+          fi
+          TRY=$(echo "$CENSUS" | jq -e \
+            --arg commit "$GITHUB_SHA" \
+            --arg directory "$TESTNET_DIR" \
+            --arg platform "$MOOG_PLATFORM" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg requester "$MOOG_REQUESTER" \
+            'map(select(
+              .key.type == "test-run"
+              and .key.commitId == $commit
+              and .key.directory == $directory
+              and .key.platform == $platform
+              and ((.key.repository.organization + "/" + .key.repository.repo) == $repository)
+              and .key.requester == $requester
+            )) | length')
           TRY=$((TRY + 1))
           echo "Submitting Antithesis test for commit ${GITHUB_SHA} (try $TRY, duration ${DURATION_HOURS}h)..."
           # shellcheck disable=SC2086 # NO_FAULTS_FLAG intentionally word-splits
           RESULT=$(moog requester create-test \
-            -d "internal/test/antithesis/testnets/dingo-praos" \
+            -d "$TESTNET_DIR" \
             -c "${GITHUB_SHA}" \
             -r "${GITHUB_REPOSITORY}" \
             --try "$TRY" \
@@ -327,8 +346,10 @@ jobs:
           # exit 0; a submission only truly launched if it returned a testRunId.
           # jq -e fails the step (set -e) so a bad submit can't report false green.
           ID=$(echo "$RESULT" | jq -e .value.testRunId | jq -r .)
+          TXID=$(echo "$RESULT" | jq -e .txHash | jq -r .)
           echo "id=$ID" >> "$GITHUB_OUTPUT"
-          echo "Launched Antithesis test run: $ID"
+          echo "txHash=$TXID" >> "$GITHUB_OUTPUT"
+          echo "Launched Antithesis test run: $ID (tx $TXID)"
         env:
           # Moog uses this only for read-only GitHub API checks; the run token
           # avoids an expiring personal access token.
