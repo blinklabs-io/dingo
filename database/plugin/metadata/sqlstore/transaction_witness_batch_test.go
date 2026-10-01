@@ -205,7 +205,10 @@ func TestBatchAccumulatorResetDropsQueuedWitnessRows(t *testing.T) {
 
 // allShapesWitnessTx builds a transaction carrying a row for every witness
 // insert shape, so each shape's transaction_id column position is exercised.
-func allShapesWitnessTx(t *testing.T, seed byte) (lcommon.Transaction, ocommon.Point) {
+func allShapesWitnessTx(
+	t *testing.T,
+	seed byte,
+) (lcommon.Transaction, ocommon.Point) {
 	t.Helper()
 	txID := make([]byte, 32)
 	txID[0] = seed
