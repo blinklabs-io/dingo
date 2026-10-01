@@ -552,7 +552,7 @@ func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
 		},
 	}
 	noProgress := func(ImportProgress) {}
-	_, err = importCertState(
+	_, _, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
@@ -636,7 +636,7 @@ func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
 		},
 	}
 	noProgress := func(ImportProgress) {}
-	_, err = importCertState(
+	_, _, err = importCertState(
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
@@ -781,7 +781,7 @@ func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
 	// populates the pool registrations the seeding takes its parameters from.
 	// If this ever stops running before the snapshots, the seeding silently
 	// finds no parameters and writes nothing.
-	poolsImported, err := importCertState(ctx, cfg, slot, noProgress)
+	poolsImported, _, err := importCertState(ctx, cfg, slot, noProgress)
 	require.NoError(t, err)
 	require.Positive(t, poolsImported,
 		"the fixture must import pools, or the seeding below would be "+
@@ -1181,7 +1181,7 @@ func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
 	}
 	ctx := context.Background()
 	progress := func(ImportProgress) {}
-	_, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
+	_, _, err = importCertState(ctx, cfg, state.Tip.Slot, progress)
 	require.NoError(t, err)
 	require.NoError(t, importSnapShots(
 		ctx,

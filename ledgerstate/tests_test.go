@@ -113,7 +113,7 @@ func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 	}
 	noProgress := func(ImportProgress) {}
 	ctx := context.Background()
-	_, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
+	_, _, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
 	require.NoError(t, err)
 	require.NoError(t, importSnapShots(
 		ctx, cfg, state.Tip.Slot, noProgress, false,

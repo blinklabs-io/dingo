@@ -540,7 +540,7 @@ func ImportLedgerState(
 	) {
 		certStatePhaseRan = true
 		if cfg.State.CertStateData != nil {
-			poolsImported, err := importCertState(
+			poolsImported, importedAccounts, err := importCertState(
 				ctx, cfg, slot, progress,
 			)
 			if err != nil {
@@ -550,6 +550,56 @@ func ImportLedgerState(
 				)
 			}
 			certStatePoolsImported = poolsImported > 0
+
+			// A reward credit or withdrawal applied locally after this
+			// snapshot's anchor leaves a row in account_reward_delta/
+			// account_withdrawal_witness with added_slot > slot. The
+			// account import above just overwrote account.reward from the
+			// snapshot's own anchor-time value for every credential in
+			// importedAccounts (ImportAccount's upsert sets reward =
+			// excluded.reward, with no guard against a newer local value),
+			// so without deleting that journal, the stale rows survive
+			// untouched. Ordinary replay of the same credit or withdrawal
+			// then inserts into account_reward_delta/
+			// account_withdrawal_witness with an ON CONFLICT DO NOTHING
+			// against the surviving row, sees zero rows affected, and skips
+			// the UPDATE account SET reward entirely -- silently dropping
+			// the credit or withdrawal and leaving account.reward stuck at
+			// the snapshot's anchor-time value.
+			//
+			// This cannot reuse DeleteAccountRewardsAfterSlot -- the
+			// ordinary rollback primitive TruncateAfterSlot uses -- because
+			// that primitive reverses a credit by subtracting its amount
+			// from the account's *current* balance. The account import
+			// above has already overwritten that balance to the snapshot's
+			// value, which is correct, but is not the balance the credit
+			// was originally applied against: a database that already went
+			// through one pre-fix import (reward reset with the journal
+			// left in place, the symptom this cleanup repairs) has a current
+			// balance that never included the credit at all, so subtracting
+			// it a second time underflows. DeleteAccountRewardJournalForCredentialsAfterSlot
+			// instead only deletes the stale journal rows for the accounts
+			// importedAccounts names -- it does no arithmetic on
+			// account.reward, because the snapshot's value the import just
+			// wrote is already authoritative for every one of them. Run on
+			// every import, not only Reconcile: true, since the same gap
+			// affects a non-reconcile catch-up.
+			//
+			// A credential this import did not (re-)write -- registered
+			// strictly after the anchor, so absent from the snapshot's own
+			// account list -- is deliberately left out of importedAccounts:
+			// nothing overwrote its balance, so its current account.reward
+			// already reflects its post-anchor history correctly, and
+			// deleting its journal here would let replay double-apply a
+			// credit that balance already contains.
+			if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
+				slot, importedAccounts, nil,
+			); err != nil {
+				return fmt.Errorf(
+					"rolling back post-anchor account reward journal: %w",
+					err,
+				)
+			}
 		}
 		if err := setCheckpoint(
 			cfg, models.ImportPhaseCertState,
@@ -991,7 +1041,7 @@ func importCertState(
 	cfg ImportConfig,
 	slot uint64,
 	progress func(ImportProgress),
-) (int, error) {
+) (int, []models.StakeCredentialRef, error) {
 	cfg.Logger.Info(
 		"parsing cert state",
 		"component", "ledgerstate",
@@ -1000,7 +1050,7 @@ func importCertState(
 	certState, err := ParseCertState(cfg.State.CertStateData)
 	if err != nil {
 		if certState == nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state: %w", err,
 			)
 		}
@@ -1010,7 +1060,7 @@ func importCertState(
 		// reconcile forbids checkpoint resume, so a re-run fails here again —
 		// tell the operator how to get unstuck instead of looping.
 		if cfg.Reconcile {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state for reconcile: %w; catch-up cannot "+
 					"continue with a partial cert state and the database may "+
 					"contain a partial import — perform a full Mithril "+
@@ -1060,13 +1110,42 @@ func importCertState(
 	}
 
 	// Import accounts
+	var importedAccounts []models.StakeCredentialRef
 	if len(certState.Accounts) > 0 {
 		if err := importAccounts(
 			ctx, cfg, certState.Accounts, slot,
 		); err != nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"importing accounts: %w",
 				err,
+			)
+		}
+		// importAccounts has already validated every entry's credential type
+		// (it errors out above otherwise), so converting again here cannot
+		// fail in practice; still handled rather than ignored, since a
+		// dropped credential here would silently widen the "untouched"
+		// exemption DeleteAccountRewardJournalForCredentialsAfterSlot relies
+		// on for coverage it does not have.
+		importedAccounts = make(
+			[]models.StakeCredentialRef, 0, len(certState.Accounts),
+		)
+		for i := range certState.Accounts {
+			tag, tagErr := models.CredentialTagFromUint(
+				uint(certState.Accounts[i].StakingKey.Type),
+			)
+			if tagErr != nil {
+				return 0, nil, fmt.Errorf(
+					"resolving imported account %x credential type %d: %w",
+					certState.Accounts[i].StakingKey.Hash,
+					certState.Accounts[i].StakingKey.Type,
+					tagErr,
+				)
+			}
+			importedAccounts = append(
+				importedAccounts,
+				models.NewStakeCredentialRef(
+					tag, certState.Accounts[i].StakingKey.Hash,
+				),
 			)
 		}
 		progress(ImportProgress{
@@ -1088,7 +1167,7 @@ func importCertState(
 			ctx, cfg, certState.Pools, slot,
 			certState.PendingPoolRetirements,
 		); err != nil {
-			return 0, fmt.Errorf("importing pools: %w", err)
+			return 0, nil, fmt.Errorf("importing pools: %w", err)
 		}
 		importedPools = len(certState.Pools)
 		progress(ImportProgress{
@@ -1108,7 +1187,7 @@ func importCertState(
 		if err := importDReps(
 			ctx, cfg, certState.DReps, slot,
 		); err != nil {
-			return 0, fmt.Errorf("importing DReps: %w", err)
+			return 0, nil, fmt.Errorf("importing DReps: %w", err)
 		}
 		progress(ImportProgress{
 			Stage:   "dreps",
@@ -1127,10 +1206,10 @@ func importCertState(
 		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
 		nil,
 	); err != nil {
-		return 0, fmt.Errorf("importing committee authorizations: %w", err)
+		return 0, nil, fmt.Errorf("importing committee authorizations: %w", err)
 	}
 
-	return importedPools, nil
+	return importedPools, importedAccounts, nil
 }
 
 // importAccounts imports parsed accounts into the metadata store.

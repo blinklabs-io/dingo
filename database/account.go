@@ -381,3 +381,29 @@ func (d *Database) DeleteAccountRewardsAfterSlot(
 		return nil
 	})
 }
+
+// DeleteAccountRewardJournalForCredentialsAfterSlot deletes reward journal
+// entries recorded after the given slot for exactly the given credentials,
+// without reversing any balance. Used by ledger-state import; see
+// metadata.MetadataStore.DeleteAccountRewardJournalForCredentialsAfterSlot.
+func (d *Database) DeleteAccountRewardJournalForCredentialsAfterSlot(
+	slot uint64,
+	refs []models.StakeCredentialRef,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.DeleteAccountRewardJournalForCredentialsAfterSlot(
+			slot,
+			refs,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete account reward journal for %d credentials after slot %d: %w",
+				len(refs),
+				slot,
+				err,
+			)
+		}
+		return nil
+	})
+}

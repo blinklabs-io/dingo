@@ -2192,6 +2192,18 @@ type MetadataStore interface {
 	// after the given slot and deletes their journal entries.
 	DeleteAccountRewardsAfterSlot(uint64, types.Txn) error
 
+	// DeleteAccountRewardJournalForCredentialsAfterSlot deletes reward
+	// journal entries recorded after the given slot for exactly the given
+	// credentials, without reversing any balance. Used by ledger-state
+	// import for credentials an authoritative snapshot re-import has just
+	// overwritten; see the sqlstore implementation for why reversal is
+	// unsafe there.
+	DeleteAccountRewardJournalForCredentialsAfterSlot(
+		uint64, // slot
+		[]models.StakeCredentialRef, // refs
+		types.Txn,
+	) error
+
 	// GetBlockNonce retrieves a block nonce for a given point.
 	GetBlockNonce(
 		ocommon.Point,
