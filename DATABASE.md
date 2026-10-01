@@ -3356,6 +3356,16 @@ predicate over-counts them. Blockfrost's `AccountUTXOs` adapter
 and this count for a stake credential's UTxOs, since a credential-only
 pattern never needs exact-address filtering.
 
+`UtxoWithOrderingQuery.FilterByAsset` combined with `MatchAllAddresses` has no
+address to narrow the live set, so both queries start from the policy's `asset`
+rows (`idx_asset_policy_id`), deduplicate their `utxo_id`s, and look the live
+UTxOs up by primary key. Probing `asset` once per live UTxO instead costs the
+same however few UTxOs hold the policy. The cost of the asset-first form scales
+with every `asset` row ever written under the policy, spent or not, so a policy
+whose all-time rows far outnumber the live UTxOs reads more than a live scan
+would. With an address filter the asset filter remains a per-row `EXISTS` over
+the already narrowed set.
+
 `AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact
 total requires CBOR-decoding every coarse candidate either way. Instead
 `MatchingUtxoRefsByAddressWithOrdering` scans coarse candidates in keyset

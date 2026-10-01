@@ -88,6 +88,22 @@ func TestMySQLPParamUpdateOrdering(t *testing.T) {
 	)
 }
 
+func TestPostgresUtxoOrderingAssetFilter(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testUtxoOrderingAssetFilter(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLUtxoOrderingAssetFilter(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testUtxoOrderingAssetFilter(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestMySQLSQLStoreIntegration(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	testSQLStoreIntegration(t, "mysql", dsn, "mysql", database)

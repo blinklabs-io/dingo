@@ -2211,7 +2211,7 @@ func TestExactAddressOrderingUsesPaymentIndex(t *testing.T) {
 	require.NoError(t, err)
 	pattern, err := models.ExactUtxoAddressPattern(address)
 	require.NoError(t, err)
-	predicate, args, err := utxoOrderingPredicate(
+	_, predicate, args, err := utxoOrderingClauses(
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
