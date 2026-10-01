@@ -115,7 +115,6 @@ var utxoStoreMethods = []string{
 	"DeleteUtxosAfterSlot",
 	"SetUtxoDeletedAtSlot",
 	"SetUtxosNotDeletedAfterSlot",
-	"RestorePostAnchorCreatedUtxos",
 	"MarkUtxosDeletedAtSlot",
 	"AddUtxos",
 	"ImportUtxos",

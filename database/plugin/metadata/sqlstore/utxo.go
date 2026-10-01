@@ -323,78 +323,6 @@ WHERE deleted_slot > ?`,
 	)
 }
 
-// utxoStakeRefsCreatedAfterSlotDeletedQuery collects the stake credentials
-// RestorePostAnchorCreatedUtxos has to refresh: every row added after the
-// anchor slot that currently carries any deleted_slot value. See
-// RestorePostAnchorCreatedUtxos for why added_slot, not deleted_slot, is the
-// predicate's slot column.
-const utxoStakeRefsCreatedAfterSlotDeletedQuery = "SELECT credential_tag, " +
-	"staking_key FROM utxo WHERE added_slot > ? AND deleted_slot <> 0"
-
-// RestorePostAnchorCreatedUtxos clears deleted_slot/spent_at_tx_id on every
-// UTxO added strictly after anchorSlot that is currently marked deleted, no
-// matter what deleted_slot value it carries.
-//
-// This is the Mithril catch-up/reward-repair counterpart to
-// hydrateImportedUtxo's ON CONFLICT clear: a certified snapshot's live UTxO
-// set can only ever declare live an output that existed at its anchor, so an
-// output *created* after the anchor by local replay never appears in that
-// set at all and never reaches hydrateImportedUtxo's conflict path. If that
-// output was also spent locally after the anchor -- by a real block, or by a
-// reconcile pass that tombstoned it because it is absent from the snapshot's
-// live set -- the spend survives a snapshot re-import untouched, and the
-// next real replay of the block that spends it again finds it already
-// "not found" and halts (dingo#4770).
-//
-// The predicate is added_slot > anchorSlot, not deleted_slot > anchorSlot:
-// a certified snapshot is authoritative for every row that existed at its
-// anchor, including one genuinely spent locally after that anchor and
-// correctly declared dead by a *newer* snapshot's live set (or a reconcile
-// pass against one) -- unspending that row here would resurrect a UTxO the
-// snapshot has already judged. added_slot > anchorSlot scopes this to
-// exactly the rows the anchor could never have judged either way, which is
-// also why this checks deleted_slot <> 0 rather than > anchorSlot: a
-// reconcile pass tombstones a stale row at exactly the anchor slot (not
-// after it), and that row still has to be restored when it was only
-// created, not genuinely spent, after the anchor.
-//
-// Called once per ImportLedgerState catch-up/repair import, after any
-// reconcile pass and before the post-import reward-live-stake rebuild --
-// never from the per-block insert path, which stays a plain conflict-
-// tolerant INSERT (see insertUtxoModelChecked).
-func (s *Store) RestorePostAnchorCreatedUtxos(
-	anchorSlot uint64,
-	txn types.Txn,
-) error {
-	slotValue, err := checkedInt64(anchorSlot)
-	if err != nil {
-		return err
-	}
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			refs, err := queryStakeRefsDeduped(
-				ctx,
-				db,
-				utxoStakeRefsCreatedAfterSlotDeletedQuery,
-				slotValue,
-			)
-			if err != nil {
-				return err
-			}
-			if _, err := db.ExecContext(ctx, `
-UPDATE utxo
-SET deleted_slot = 0, spent_at_tx_id = NULL
-WHERE added_slot > ? AND deleted_slot <> 0`,
-				slotValue,
-			); err != nil {
-				return err
-			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, refs, anchorSlot)
-		},
-	)
-}
-
 func (s *Store) MarkUtxosDeletedAtSlot(
 	txn types.Txn,
 	refs []types.UtxoKey,
@@ -1561,10 +1489,7 @@ func (s *Store) utxoRefsByTxID(
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
 		batch := txIDs[start:end]
-		placeholders := strings.TrimSuffix(
-			strings.Repeat("?,", len(batch)),
-			",",
-		)
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
 		args := make([]any, len(batch))
 		for i, txID := range batch {
 			args[i] = txID

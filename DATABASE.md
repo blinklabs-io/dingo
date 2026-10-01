@@ -936,37 +936,13 @@ are also reached outside any ledger-state import, by `database/transaction.go`'s
 consumed-input producer recovery (`ensureTransactionConsumedUtxos`) and Mithril
 gap-closure (`ensureGapConsumedUtxos`) paths; neither can trigger this clause
 today; see the comment on `hydrateImportedUtxo`. The added `UPDATE` runs once
-per conflicting live row and is uncached, adding roughly one extra uncached
-statement's cost per row on the UTxO import phase only -- not on
-`insertUtxoModelChecked`, the per-block ingest hot path.
-
-A UTxO both *created and spent* entirely after the anchor is a separate,
-wider gap `hydrateImportedUtxo`'s conflict clear cannot reach: the snapshot's
-live set is built from state at its anchor, so an output that did not exist
-yet is absent from that set outright and never reaches the `ON CONFLICT`
-path at all -- there is no conflicting row to hydrate. When local replay
-later spends that output too, a catch-up/repair re-import of the same
-anchor leaves the row exactly as it found it: still spent, forever, the same
-"utxo not found" halt as the case above. `RestorePostAnchorCreatedUtxos`
-(`metadata.MetadataStore`, called once by `ledgerstate.ImportLedgerState`
-after any reconcile pass and before the post-import reward-live-stake
-rebuild) closes this by clearing `deleted_slot`/`spent_at_tx_id` on every row
-whose `added_slot` is strictly after the import's anchor and whose
-`deleted_slot` is nonzero. `added_slot`, not `deleted_slot`, is the slot
-column compared against the anchor: a certified snapshot is authoritative
-for every row that existed at its anchor, including one genuinely spent
-locally afterward and correctly declared dead by a newer snapshot's live set
-(or a reconcile pass against one) -- unspending that row would resurrect a
-UTxO the snapshot has already judged, so only a row the anchor could never
-have judged either way is eligible. The `deleted_slot <> 0` half (rather
-than `deleted_slot > anchorSlot`) matters because the reconcile pass above
-can tombstone exactly this kind of row too -- it is equally absent from the
-snapshot's live-key set -- and it always tombstones at exactly the anchor
-slot, not after it; `RestorePostAnchorCreatedUtxos` runs after reconcile so
-its own live-row scan is not handed a row to immediately re-tombstone, and
-its `deleted_slot <> 0` predicate still catches that anchor-slot tombstone
-on the next pass. Like the conflict-clear above, this runs once per
-catch-up/repair import, not on the per-block ingest path.
+per conflicting live row and is uncached: measured over 20,000 already-live
+conflicting rows against an in-memory SQLite store, three runs each, this adds
+roughly one extra uncached statement's cost per row (medians approximately
+17.5/22.0/24.3 µs/row before versus 24.5/32.2/41.7 µs/row after; the ranges
+overlap, so treat this as directional, not a precise multiplier), on the UTxO
+import phase only -- not on `insertUtxoModelChecked`, the per-block ingest hot
+path.
 
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
