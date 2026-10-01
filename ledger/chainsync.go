@@ -883,7 +883,10 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 	}
 	if txn == nil {
 		if err := ls.db.DeleteDeferredHeaderMarker(key); err != nil {
-			return fmt.Errorf("delete deferred header validation marker: %w", err)
+			return fmt.Errorf(
+				"delete deferred header validation marker: %w",
+				err,
+			)
 		}
 		return nil
 	}
