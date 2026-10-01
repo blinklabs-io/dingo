@@ -91,7 +91,7 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 		bytes.Repeat([]byte{0x22}, 28),
 	)
 	// inlineUTxOMap keys its single entry's tx hash as 0x40 repeated 32
-	// times (see inlineUTxOMap in import_deferred_reward_live_stake_test.go).
+	// times (see inlineUTxOMap in import_test.go).
 	utxoTxID := bytes.Repeat([]byte{0x40}, 32)
 
 	newImportConfig := func(tipSlot uint64) ImportConfig {
