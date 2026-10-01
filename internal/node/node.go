@@ -846,9 +846,6 @@ func buildDingoConfig(
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
 		),
-		dingo.WithForgePrimaryChainTipToleranceSlots(
-			cfg.ForgePrimaryChainTipToleranceSlots,
-		),
 		dingo.WithForgeUpstreamStalenessSlots(
 			cfg.ForgeUpstreamStalenessSlots,
 		),
