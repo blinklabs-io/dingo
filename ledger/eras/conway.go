@@ -1545,39 +1545,50 @@ func EvaluateTxConway(
 			Index: redeemer.Index,
 		}] = usedBudget
 	}
-	// Calculate fee based on TX size and calculated ExUnits
-	txSize := TxSizeForFee(tx)
-	var pricesMem, pricesSteps *big.Rat
-	if tmpPparams.ExecutionCosts.MemPrice != nil {
-		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
-	}
-	if tmpPparams.ExecutionCosts.StepPrice != nil {
-		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
-	}
-	fee := CalculateMinFee(
-		txSize,
-		retTotalExUnits,
-		tmpPparams.MinFeeA,
-		tmpPparams.MinFeeB,
-		pricesMem,
-		pricesSteps,
-	)
+	fee := evaluationMinFee(tx, tmpPparams, retTotalExUnits)
 	refScriptSize, err := ReferenceScriptSizeFromUtxos(
 		scriptInputs.resolvedAllInputs,
 	)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}
-	var refScriptCostPerByte *big.Rat
-	if tmpPparams.MinFeeRefScriptCostPerByte != nil {
-		refScriptCostPerByte = tmpPparams.MinFeeRefScriptCostPerByte.ToBigRat()
-	}
 	fee = saturatedAddUint64(
 		fee,
 		CalculateConwayRefScriptFee(
 			refScriptSize,
-			refScriptCostPerByte,
+			refScriptCostPerByteRat(tmpPparams),
 		),
 	)
 	return fee, retTotalExUnits, retRedeemerExUnits, nil
+}
+
+// evaluationMinFee is the size and execution part of the minimum fee for tx
+// with exUnits as its execution units.
+func evaluationMinFee(
+	tx lcommon.Transaction,
+	pp *conway.ConwayProtocolParameters,
+	exUnits lcommon.ExUnits,
+) uint64 {
+	var pricesMem, pricesSteps *big.Rat
+	if pp.ExecutionCosts.MemPrice != nil {
+		pricesMem = pp.ExecutionCosts.MemPrice.ToBigRat()
+	}
+	if pp.ExecutionCosts.StepPrice != nil {
+		pricesSteps = pp.ExecutionCosts.StepPrice.ToBigRat()
+	}
+	return CalculateMinFee(
+		TxSizeForFee(tx),
+		exUnits,
+		pp.MinFeeA,
+		pp.MinFeeB,
+		pricesMem,
+		pricesSteps,
+	)
+}
+
+func refScriptCostPerByteRat(pp *conway.ConwayProtocolParameters) *big.Rat {
+	if pp.MinFeeRefScriptCostPerByte == nil {
+		return nil
+	}
+	return pp.MinFeeRefScriptCostPerByte.ToBigRat()
 }

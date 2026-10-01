@@ -169,12 +169,7 @@ func keepConwayGovernanceParams(
 // reference-script fee calculation fail, and zero size limits reject every
 // transaction that consumes a reference script.
 func applyDijkstraRefScriptDefaults(p *gdijkstra.DijkstraProtocolParameters) {
-	if p.RefScriptCostStride == 0 {
-		p.RefScriptCostStride = uint32(conway.RefScriptCostStride)
-	}
-	if p.RefScriptCostMultiplier == nil {
-		p.RefScriptCostMultiplier = &cbor.Rat{Rat: big.NewRat(6, 5)}
-	}
+	gdijkstra.ApplyConwayRefScriptFeeDefaults(p)
 	if p.MaxRefScriptSizePerTx == 0 {
 		p.MaxRefScriptSizePerTx = uint32(conway.MaxRefScriptSizePerTx)
 	}
@@ -729,37 +724,19 @@ func dijkstraEvaluationFee(
 	pp *gdijkstra.DijkstraProtocolParameters,
 	exUnits lcommon.ExUnits,
 ) (uint64, error) {
-	var pricesMem, pricesSteps *big.Rat
-	if pp.ExecutionCosts.MemPrice != nil {
-		pricesMem = pp.ExecutionCosts.MemPrice.ToBigRat()
-	}
-	if pp.ExecutionCosts.StepPrice != nil {
-		pricesSteps = pp.ExecutionCosts.StepPrice.ToBigRat()
-	}
-	fee := CalculateMinFee(
-		TxSizeForFee(tx),
-		exUnits,
-		pp.MinFeeA,
-		pp.MinFeeB,
-		pricesMem,
-		pricesSteps,
-	)
 	refScriptSize, err := lcommon.ConsumedReferenceScriptSize(tx, ls)
 	if err != nil {
 		return 0, err
 	}
-	var costPerByte, multiplier *big.Rat
-	if pp.MinFeeRefScriptCostPerByte != nil {
-		costPerByte = pp.MinFeeRefScriptCostPerByte.ToBigRat()
-	}
+	var multiplier *big.Rat
 	if pp.RefScriptCostMultiplier != nil {
 		multiplier = pp.RefScriptCostMultiplier.ToBigRat()
 	}
 	return saturatedAddUint64(
-		fee,
+		evaluationMinFee(tx, &pp.ConwayProtocolParameters, exUnits),
 		calculateTieredRefScriptFee(
 			refScriptSize,
-			costPerByte,
+			refScriptCostPerByteRat(&pp.ConwayProtocolParameters),
 			uint64(pp.RefScriptCostStride),
 			multiplier,
 		),
