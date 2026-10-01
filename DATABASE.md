@@ -1038,6 +1038,23 @@ which query paths it also serves. `SetTransaction` clears `key_witness`,
 b-tree descent with a full scan of a table the same import is still growing,
 which makes historical backfill quadratic rather than merely slower.
 
+On the batched path (`SetTransactionBatched` and
+`SetTransactionBatchedHistorical`, used by API backfill), the clearing
+delete runs at once but the API-mode detail rows -- `key_witness`,
+`witness_scripts`, `redeemer`, `plutus_data`, `address_transaction`,
+`transaction_metadata_label`, and `datum` -- wait in the batch accumulator.
+`FlushBatch` writes them as multi-row INSERTs, each bounded by the dialect's
+bind-parameter limit, inside the caller's transaction. Until then a re-applied
+transaction's flushed rows are cleared but its replacement rows are not yet
+visible; nothing reads these tables inside a batch window, and the window
+commits only after the flush. A write that fails queues nothing, and
+re-applying a transaction inside a window replaces its queued rows. A caller
+that rolls back its transaction must `Reset` the accumulator. `SetTransaction`
+builds the same rows and writes them before it returns. UTxO spends and
+certificate rows stay per statement: a later transaction in the same window
+reads them for double-spend detection, live-stake deltas, and certificate
+state.
+
 Those seven indexes are named in `deferred.Retained`, and every drop and
 rebuild path creates any of them that is absent before touching the manifest.
 That includes the critical rebuild: it is the last step before `serve` clears

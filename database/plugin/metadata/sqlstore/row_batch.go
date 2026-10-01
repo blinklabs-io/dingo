@@ -20,106 +20,132 @@ import (
 	"strings"
 )
 
-// witnessInsertShape is one INSERT form for a witness table. key_witness has
-// two shapes (vkey and bootstrap) with different column lists, so rows are
-// grouped by shape rather than by table.
-type witnessInsertShape struct {
+// rowShape is one INSERT form. key_witness has two shapes (vkey and
+// bootstrap) with different column lists, so rows are grouped by shape rather
+// than by table. suffix is appended after the VALUES list, for an ON CONFLICT
+// clause.
+type rowShape struct {
 	table   string
 	columns []string
+	suffix  string
 }
 
 var (
-	vkeyWitnessShape = witnessInsertShape{
+	vkeyWitnessShape = rowShape{
 		table:   "key_witness",
 		columns: []string{"vkey", "signature", "transaction_id", "type"},
 	}
-	bootstrapWitnessShape = witnessInsertShape{
+	bootstrapWitnessShape = rowShape{
 		table: "key_witness",
 		columns: []string{
 			"signature", "public_key", "chain_code", "attributes",
 			"transaction_id", "type",
 		},
 	}
-	witnessScriptShape = witnessInsertShape{
+	witnessScriptShape = rowShape{
 		table:   "witness_scripts",
 		columns: []string{"script_hash", "transaction_id", "type"},
 	}
-	plutusDataShape = witnessInsertShape{
+	plutusDataShape = rowShape{
 		table:   "plutus_data",
 		columns: []string{"data", "transaction_id"},
 	}
-	redeemerShape = witnessInsertShape{
+	redeemerShape = rowShape{
 		table: "redeemer",
 		columns: []string{
 			"data", "transaction_id", "ex_units_memory", "ex_units_cpu",
 			`"index"`, "tag",
 		},
 	}
+	addressTransactionShape = rowShape{
+		table: "address_transaction",
+		columns: []string{
+			"payment_key", "staking_key", "credential_tag",
+			"transaction_id", "slot", "tx_index",
+		},
+	}
+	metadataLabelShape = rowShape{
+		table: "transaction_metadata_label",
+		columns: []string{
+			"transaction_id", "label", "slot", "cbor_value", "json_value",
+		},
+		suffix: `ON CONFLICT (transaction_id, label) DO UPDATE SET
+    slot = excluded.slot,
+    cbor_value = excluded.cbor_value,
+    json_value = excluded.json_value`,
+	}
+	// datum rows are content-addressed and shared between transactions, so
+	// they carry no transaction_id and are never replaced.
+	datumShape = rowShape{
+		table:   "datum",
+		columns: []string{"hash", "raw_datum", "added_slot"},
+		suffix:  "ON CONFLICT (hash) DO NOTHING",
+	}
 )
 
-// witnessRows holds rows queued for one insert shape. The transaction_id
-// column position is recorded so a transaction's queued rows can be dropped
-// when it is applied again within the same window.
-type witnessRows struct {
-	shape witnessInsertShape
-	// txIDCol indexes shape.columns' "transaction_id" entry.
+// shapeRows holds rows queued for one shape. txIDCol indexes the
+// "transaction_id" column, or is -1 when the shape has none.
+type shapeRows struct {
+	shape   rowShape
 	txIDCol int
 	rows    [][]any
 }
 
-// witnessBatch queues witness rows for multi-row insertion. Shapes are kept
-// in first-queued order so a flush is deterministic.
-type witnessBatch struct {
-	entries []witnessRows
-	// index maps a shape key to its position in entries.
-	index map[string]int
+// rowBatch queues rows for multi-row insertion. Shapes are kept in
+// first-queued order so a flush is deterministic.
+type rowBatch struct {
+	entries []shapeRows
 	// queued records which transactions have rows pending, so replacing a
 	// transaction's rows only scans when it actually has some.
 	queued map[int64]struct{}
 }
 
-func (b *witnessBatch) empty() bool {
+func (b *rowBatch) empty() bool {
 	return b == nil || len(b.entries) == 0
 }
 
-func (b *witnessBatch) add(
-	shape witnessInsertShape,
-	transactionID int64,
-	row ...any,
-) {
-	if b.index == nil {
-		b.index = make(map[string]int)
-		b.queued = make(map[int64]struct{})
-	}
-	key := shape.table + "(" + strings.Join(shape.columns, ",") + ")"
-	i, ok := b.index[key]
-	if !ok {
-		entry := witnessRows{shape: shape}
-		for col, column := range shape.columns {
-			if column == "transaction_id" {
-				entry.txIDCol = col
-			}
-		}
-		i = len(b.entries)
-		b.entries = append(b.entries, entry)
-		b.index[key] = i
-	}
+func (b *rowBatch) add(shape rowShape, row ...any) {
+	i := b.entryIndex(shape)
 	b.entries[i].rows = append(b.entries[i].rows, row)
-	b.queued[transactionID] = struct{}{}
+	if col := b.entries[i].txIDCol; col >= 0 {
+		if b.queued == nil {
+			b.queued = make(map[int64]struct{})
+		}
+		id, _ := row[col].(int64)
+		b.queued[id] = struct{}{}
+	}
+}
+
+func (b *rowBatch) entryIndex(shape rowShape) int {
+	for i := range b.entries {
+		if b.entries[i].shape.table == shape.table &&
+			strings.Join(b.entries[i].shape.columns, ",") ==
+				strings.Join(shape.columns, ",") {
+			return i
+		}
+	}
+	entry := shapeRows{shape: shape, txIDCol: -1}
+	for col, column := range shape.columns {
+		if column == "transaction_id" {
+			entry.txIDCol = col
+		}
+	}
+	b.entries = append(b.entries, entry)
+	return len(b.entries) - 1
 }
 
 // dropTransaction discards rows queued for transactionID.
-func (b *witnessBatch) dropTransaction(transactionID int64) {
-	if b == nil {
-		return
-	}
+func (b *rowBatch) dropTransaction(transactionID int64) {
 	if _, ok := b.queued[transactionID]; !ok {
 		return
 	}
 	delete(b.queued, transactionID)
 	for i := range b.entries {
 		entry := &b.entries[i]
-		kept := make([][]any, 0, len(entry.rows))
+		if entry.txIDCol < 0 {
+			continue
+		}
+		kept := entry.rows[:0]
 		for _, row := range entry.rows {
 			if id, _ := row[entry.txIDCol].(int64); id != transactionID {
 				kept = append(kept, row)
@@ -130,27 +156,22 @@ func (b *witnessBatch) dropTransaction(transactionID int64) {
 }
 
 // merge moves every queued row of other into b.
-func (b *witnessBatch) merge(other *witnessBatch) {
+func (b *rowBatch) merge(other *rowBatch) {
 	for _, entry := range other.entries {
 		for _, row := range entry.rows {
-			id, _ := row[entry.txIDCol].(int64)
-			b.add(entry.shape, id, row...)
+			b.add(entry.shape, row...)
 		}
 	}
 }
 
-func (b *witnessBatch) reset() {
-	if b == nil {
-		return
-	}
+func (b *rowBatch) reset() {
 	b.entries = nil
-	b.index = nil
 	b.queued = nil
 }
 
 // flush writes the queued rows with multi-row INSERTs bounded by
 // parameterLimit bind parameters per statement, then clears the queue.
-func (b *witnessBatch) flush(
+func (b *rowBatch) flush(
 	ctx context.Context,
 	db queryer,
 	parameterLimit int,
@@ -176,6 +197,9 @@ func (b *witnessBatch) flush(
 				strings.TrimSuffix(
 					strings.Repeat(placeholder+", ", end-start), ", ",
 				)
+			if entry.shape.suffix != "" {
+				query += "\n" + entry.shape.suffix
+			}
 			if _, err := db.ExecContext(ctx, query, args...); err != nil {
 				return fmt.Errorf(
 					"insert %s rows: %w", entry.shape.table, err,
