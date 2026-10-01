@@ -3867,7 +3867,7 @@ func protocolParamsQuery() *olocalstatequery.BlockQuery {
 
 // conwayPParamsWithCostModels builds a Conway pparams value with every
 // cbor.Rat-bearing field populated, not just CostModels --
-// PR review (wolf31o2): a fixture that only sets CostModels type-asserts fine
+// a fixture that only sets CostModels type-asserts fine
 // but is not actually encodable, since cbor.Rat.MarshalCBOR panics on the nil
 // *big.Rat a zero-value cbor.Rat (or a nil *cbor.Rat pointer field) carries,
 // and PoolVotingThresholds/DRepVotingThresholds's value-typed cbor.Rat fields

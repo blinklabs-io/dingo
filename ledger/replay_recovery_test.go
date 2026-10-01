@@ -3792,8 +3792,8 @@ func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
 	}
 }
 
-// TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers issue
-//: when every rewind target the at-tip recovery schedule produces lies
+// TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers a
+// terminal case: when every rewind target the at-tip recovery schedule produces lies
 // inside the Mithril protected window, the trust boundary guard refuses all of
 // them. Each refusal rewinds to the applied tip and asks ChainSync for a fresh
 // intersection, which cannot help for a canonical block -- every peer serves
@@ -4135,8 +4135,8 @@ func seedTestChain(
 	return raw
 }
 
-// TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins the second half of
-//: a recovery rewind the chain refuses as exceeding K is not a
+// TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins a
+// halting rule: a recovery rewind the chain refuses as exceeding K is not a
 // transient failure, so repeating it at an applied tip that never advances
 // must become terminal instead of restarting the pipeline forever.
 //

@@ -557,7 +557,7 @@ func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
 // TestChainBlockBeforeSlotBinarySearchBoundaries exercises the binary-search
 // boundary logic across a multi-block chain (testBlocks have slots 0, 20, 40,
 // 60, 80, 100): below all, at a block slot, between blocks, and above the tip.
-// It guards the change from the linear backward walk to a binary search.
+// It pins the binary search that replaced a linear backward walk.
 func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 	t.Parallel()
 

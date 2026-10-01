@@ -533,8 +533,7 @@ func TestFetchTxInfosCached_LiveFetchErrorIsNotSwallowed(t *testing.T) {
 // TestCheckStakeDistributionReportsATotalShortfall pins the call site, not
 // just the helper: compareTotalActiveStake is only useful if
 // CheckStakeDistribution actually calls it, and a helper-only test stays
-// green when the call is deleted -- the same unpinned-call-site gap raised
-// on.
+// green when the call is deleted.
 //
 // Dingo reports one pool; the cached Koios epoch total covers two. That is
 // failure mode: the per-pool loop finds nothing wrong, because
@@ -603,9 +602,8 @@ func TestCheckStakeDistributionReportsATotalShortfall(t *testing.T) {
 		"a shortfall is a real divergence, not a Koios-side fault")
 }
 
-// TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails is the
-// blocker raised in review on, and the reason the epoch_info failure
-// is a KoiosFault mismatch rather than an error return.
+// TestCheckStakeDistributionKeepsPoolFindingsWhenTheEpochTotalFails pins why
+// an epoch_info failure is a KoiosFault mismatch rather than an error return.
 //
 // An error return discards every per-pool mismatch CheckStakeDistribution
 // has already collected. from-genesis's recordEpoch then logs only "stake
@@ -1699,7 +1697,8 @@ func TestCheckStakeDistributionSkipsAnEpochKoiosHasNotPublished(t *testing.T) {
 
 // TestCheckStakeDistributionStillComparesASettledEpoch is the other side of
 // the guard: an epoch that closed long ago must be compared exactly as
-// before, or fix would silently disable the whole check.
+// before, or the unpublished-epoch guard would silently disable the whole
+// check.
 func TestCheckStakeDistributionStillComparesASettledEpoch(t *testing.T) {
 	const magic = 764824073
 	const epoch = uint64(600)

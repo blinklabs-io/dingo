@@ -6564,7 +6564,8 @@ func newActiveSlotCoeffLedgerState(
 // nearest binary64 value to 0.05 is strictly GREATER than 1/20, so a threshold
 // derived from it is strictly larger than the reference node's — a node using it
 // can only over-claim leader slots, never miss any. That is the one-sided
-// signature reported in, so the direction is pinned here even though
+// signature of the phantom leader slots seen in the field, so the direction
+// is pinned here even though
 // the magnitude (~5.6e-17 relative) is far too small to account for the three
 // phantom slots per epoch reported there.
 func TestActiveSlotCoeffRatIsExactGenesisRational(t *testing.T) {
@@ -7040,8 +7041,8 @@ func drainCleanupTimerFires(fires <-chan struct{}) {
 	}
 }
 
-// TestCleanupConsumedUtxos_TimerStopsOnClose covers the first half of issue
-//: the cleanup timer callback re-arms itself via
+// TestCleanupConsumedUtxos_TimerStopsOnClose covers a
+// shutdown leak: the cleanup timer callback re-arms itself via
 // scheduleCleanupConsumedUtxos, so a Close that does not stop it leaves a
 // self-perpetuating timer running against a database its owner closes
 // immediately after Close returns (LedgerState does not own the database --
@@ -7510,8 +7511,8 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 	)
 }
 
-// TestCleanupConsumedUtxos_APIModeRetains is the regression fix for
-//: in API storage mode the periodic cleanup must leave
+// TestCleanupConsumedUtxos_APIModeRetains covers API
+// storage mode: the periodic cleanup must leave
 // spent UTxO metadata rows in place so historical transaction queries
 // can resolve input / collateral / reference-input associations via
 // spent_at_tx_id, collateral_by_tx_id, and referenced_by_tx_id.
@@ -12206,7 +12207,7 @@ func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(
 }
 
 // TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel covers
-// PR review (wolf31o2): withoutSyntheticV2CostModel
+// reporting coverage: withoutSyntheticV2CostModel
 // originally had a single call site (queries.go's LocalStateQuery handler),
 // while every other interface reporting current parameters --
 // api/blockfrost, api/utxorpc, api/mesh -- read GetCurrentPParams()
@@ -12297,7 +12298,7 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 }
 
 // TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent covers
-// PR review (wolf31o2): a database that predates
+// pre-marker databases: a database that predates
 // this marker (or one that was reset by
 // database.RecomputeSyntheticV2CostModelMarkerAfterTruncate) must not
 // silently behave as "not synthetic" -- it must compare the current PlutusV2
@@ -12402,7 +12403,7 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 }
 
 // TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthetic
-// covers PR review (wolf31o2): on a database that
+// covers pre-marker databases: on a database that
 // predates these markers entirely, a real PlutusV2 cost model already in
 // force (differing from the known synthetic default) can still pick up a
 // clearedEpoch marker from the first update tracked AFTER these markers

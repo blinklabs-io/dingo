@@ -219,7 +219,8 @@ func seedSigmaDenominatorSnapshot(
 	))
 }
 
-// TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor is the
+// TestStakeDistributionAdapterResolvesDenominatorThroughVerifyAccessor pins
+// the forging adapter's stake denominator.
 //
 // The forging adapter used to return ledger.StakeDistribution.TotalStake,
 // which LedgerView.GetStakeDistribution accumulates by summing the mark rows

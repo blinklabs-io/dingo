@@ -295,7 +295,7 @@ func TestDeliverStallWarning(t *testing.T) {
 }
 
 // TestDeliverDoesNotWarnWhenCapacityIsAvailable guards against reintroducing
-// the per-event log spam .
+// per-event log spam.
 func TestDeliverDoesNotWarnWhenCapacityIsAvailable(t *testing.T) {
 	origInterval := deliveryStallWarnInterval
 	deliveryStallWarnInterval = 20 * time.Millisecond
@@ -1009,8 +1009,8 @@ func TestStopWaitsForInFlightPublish(t *testing.T) {
 
 // TestPublishBlocksOnFullChannelUntilDrained verifies that Publish applies
 // backpressure when a subscriber's channel buffer is full, and that the event
-// is delivered once capacity appears rather than dropped. Regression test for
-//. Close must still be able to run against an
+// is delivered once capacity appears rather than dropped.
+// Close must still be able to run against an
 // in-flight blocked send without deadlocking, which is why the blocked send
 // wakes on the subscriber's close signal.
 func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {

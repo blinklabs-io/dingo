@@ -1913,8 +1913,8 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 			Level: slog.LevelDebug,
 		}),
 	)
-	// Header crypto runs for every slot a Mithril certificate does not cover
-	//, and these synthetic blocks carry no VRF/KES material. An
+	// Header crypto runs for every slot a Mithril certificate does not cover,
+	// and these synthetic blocks carry no VRF/KES material. An
 	// epoch the cache covers but whose nonce is not published yet is the
 	// state a catching-up node is actually in when wedge appears:
 	// headerVerificationEpoch reports errEpochNonceUnavailable, which
@@ -2060,8 +2060,8 @@ func (f *blockfetchRollbackFixture) rollbackToAncestorAndQueueForkB(
 	require.Equal(t, 1, f.ls.chain.HeaderCount())
 }
 
-// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives is issue
-//. Fork resolution rolls the chain back to the common ancestor, queues
+// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives covers a
+// fork restart. Fork resolution rolls the chain back to the common ancestor, queues
 // the winning peer's header path from there, and only then restarts
 // blockfetch. That restart flushes whatever the abandoned batch had already
 // buffered, so the first body from the losing fork reached chain insertion
@@ -6702,8 +6702,7 @@ func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 
 // A crossable rollback that reaches the per-connection loop threshold must
 // still be APPLIED, not suppressed as a false loop: the loop detector only
-// breaks loops for rollbacks the node cannot cross (, requirement
-// 1). This exercises the appliability guard directly by pre-seeding history to
+// breaks loops for rollbacks the node cannot cross. This exercises the appliability guard directly by pre-seeding history to
 // the threshold, unlike the reset-on-success path which never reaches it.
 func TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold(
 	t *testing.T,
@@ -7381,10 +7380,10 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 // turned into a nil error -- ledgerProcessBlocksWithAttempt's err == nil
 // branch then exited its restart loop for good, permanently and silently
 // halting all ledger block processing with nothing to resume it short of a
-// full LedgerState restart. That the K-bounded rewind added to prevent the same rewind
+// full LedgerState restart. That the K-bounded rewind is
 // what made this branch reachable at all (RewindPrimaryChainToPoint had no
-// bound before) is what makes this a merge blocker for the change rather than
-// a candidate for the general, already-deferred pattern tracked in issue
+// bound before) is why it must be fixed here rather than
+// folded into the general, already-deferred pattern.
 //
 // This wires the real ledgerReadChain/ledgerProcessBlocksFromSource pair
 // through ledgerProcessBlocksWithAttempt exactly as production

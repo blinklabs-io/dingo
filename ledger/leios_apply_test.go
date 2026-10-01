@@ -2290,7 +2290,7 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 // blocking set is non-empty and the guard is what decides. On this path a
 // missing closure is already retried by the bounded fetch that follows, so
 // paying a second diffusion window here would add head-of-line blocking on the
-// pipeline for nothing -- exactly what the change removes.
+// pipeline for nothing.
 func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
 	t *testing.T,
 ) {

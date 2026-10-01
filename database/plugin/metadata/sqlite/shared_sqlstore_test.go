@@ -3719,7 +3719,8 @@ SELECT hash, id FROM "transaction" WHERE slot >= ? AND slot < ?`,
 	require.NoError(t, err)
 }
 
-// TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop covers issue
+// TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop covers
+// witness cleanup after a deferred index drop.
 //
 // Mithril drops the deferred-index manifest before API-mode historical
 // backfill, and backfill then calls SetTransaction for every transaction it
@@ -3935,6 +3936,7 @@ func seedPreChangeDeferredCycle(t *testing.T, db *sql.DB) {
 }
 
 // TestRetainedIndexesRepairPreChangeDeferredCycle covers the upgrade path for
+// databases created before the witness indexes left the manifest.
 //
 // Taking the three witness transaction_id indexes out of the manifest fixes
 // databases the fixed binary bootstraps itself, but not one already on disk.
@@ -4617,8 +4619,8 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	require.Equal(t, 1, deltas)
 }
 
-// TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount covers issue
-//: a canonical withdrawal replayed during API-mode Mithril historical
+// TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount covers a
+// replay case: a canonical withdrawal replayed during API-mode Mithril historical
 // backfill can find an inactive account after deregistration. That row is
 // still the historical account and its reward must be preserved. A credential
 // with no account row is an invariant failure and must abort the backfill.

@@ -125,7 +125,7 @@ func TestPublishBlockEventIgnoresOptionalSubscriberDetachment(t *testing.T) {
 // goroutine is already free to apply the post-rollback chain and publish
 // forward transaction events on the same lane, so anything the handler emits
 // races it and loses. Emitting undo events here reproducibly delivered the
-// forward event first. See.
+// forward event first.
 func TestChainUpdateHandlerPublishesNoTransactionEvents(t *testing.T) {
 	t.Parallel()
 
@@ -770,8 +770,8 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 }
 
 // TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating
-// covers the live primary-chain/ledger divergence reconciler
-//: rewinding the primary chain to their common ancestor must
+// covers the live primary-chain/ledger divergence reconciler:
+// rewinding the primary chain to their common ancestor must
 // follow the same validate-then-emit-then-truncate contract
 // rollbackChainAndState uses for a peer-driven rollback, so ledger.tx
 // subscribers still see an undo for blocks this reconciliation discards.
@@ -852,8 +852,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 // must still complete and roll the ledger back correctly -- refusing to
 // reconcile over a missing notification would, at this function's call
 // sites, mean refusing to start the node or halting the block-processing
-// reader goroutine, considerably worse than an incomplete notification
-//. The gap must be observable, not silent: an
+// reader goroutine, considerably worse than an incomplete notification.
+// The gap must be observable, not silent: an
 // error-level log and the reconciliationUndoUnresolved counter.
 func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 	t.Parallel()

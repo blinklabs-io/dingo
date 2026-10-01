@@ -2249,8 +2249,8 @@ func TestByronAdoptedParamsRollbackAcrossAdoptions(t *testing.T) {
 	requireByronParams(t, params, c.adoptedB, "replayed forward")
 }
 
-// TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption covers and
-//: when the chain switches to a fork that never endorsed update A, a
+// TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption covers
+// fork switching: when the chain switches to a fork that never endorsed update A, a
 // cached state from the abandoned fork's adoption is not reused, though the
 // new tip is later than the cached one.
 func TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption(t *testing.T) {

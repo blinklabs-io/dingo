@@ -212,8 +212,8 @@ func TestForgeStalenessBoundsAreOperatorTunable(t *testing.T) {
 	)
 }
 
-// TestConfigValidateRejectsByronNetworkMagicMismatch is a regression test for
-//: a loaded genesis network magic must be cross-checked against
+// TestConfigValidateRejectsByronNetworkMagicMismatch pins that
+// a loaded genesis network magic must be cross-checked against
 // the requested network. configValidate already cross-checks the Shelley
 // genesis's NetworkMagic against the configured/requested network magic;
 // this proves the same cross-check applies to the Byron genesis's own

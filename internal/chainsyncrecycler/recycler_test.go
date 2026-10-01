@@ -38,8 +38,8 @@ import (
 // awaiting-first-header best peer, never that chain selection ever hands the
 // watchdog one.
 //
-// It does, but only because of the rollback registration in chainselection
-//. The sequence a plateau resync produces is:
+// It does, but only because of the rollback registration in chainselection.
+// The sequence a plateau resync produces is:
 //
 //  1. the resync closes the connection (LocalTipPlateau is in
 //     chainsyncResyncRequiresFreshConnection, ouroboros/chainsync.go);

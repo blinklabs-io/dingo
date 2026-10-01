@@ -183,7 +183,7 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 // epoch, so RawLedgerState.Fees < SnapShots.Fee means the snapshot was not
 // decoded as a consistent ledger state. seedImportedRewardBasis must refuse
 // it: leaving ImportedEpochFees unset would make the next boundary sum only
-// the local post-anchor fees and credit that round short, the defect in
+// the local post-anchor fees and credit that round short.
 func TestImportRejectsSnapshotWhoseFeesDoNotReconcile(t *testing.T) {
 	t.Parallel()
 

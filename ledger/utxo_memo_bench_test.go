@@ -270,7 +270,7 @@ func BenchmarkLedgerStateValidateTxUtxoMemo(b *testing.B) {
 		// ls.db.UtxoByRef -> blob fetch + CBOR decode), one open read
 		// transaction and one LedgerView reused across iterations. After
 		// the first iteration, every further call hits the per-view memo
-// added by the memo instead of the database.
+		// instead of the database.
 		b.ReportAllocs()
 		txn := fx.db.Transaction(false)
 		defer txn.Release()

@@ -1123,7 +1123,7 @@ func extractRawCostModels(
 //
 // logger receives a warning when synthetic is true but pp's concrete type
 // matches none of the cases below: unlike every other branch, that combination
-// returns pp unfiltered, silently reintroducing the extra plutusV1 cost model
+// returns pp unfiltered, silently reintroducing the extra PlutusV2 cost model
 // in the reply for a future era type
 // this switch hasn't been taught yet. logger may be nil (e.g. in tests that
 // don't care about this diagnostic).

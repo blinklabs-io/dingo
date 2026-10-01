@@ -29,8 +29,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The fixture below is the ledger state of the node reported in
-//, read out of its own metadata.sqlite: 21600-slot
+// The fixture below is the ledger state of a node from a field
+// report, read out of its own metadata.sqlite: 21600-slot
 // epochs from slot 0, a pool registered four times on one VRF key and
 // re-registered on another at slot 639855 (inside epoch 29), the mark
 // snapshot that elects epoch 31 captured at 647999, and the block that

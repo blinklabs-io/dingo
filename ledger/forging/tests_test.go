@@ -1787,10 +1787,10 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
-	// asserted 991 here, the local tip's lag behind the wall clock,
+	// This once asserted 991, the local tip's lag behind the wall clock,
 	// because the sync-skip path was then the only writer that could make
-	// dingo_forge_tip_gap_slots non-zero on this branch. the change gives that
-	// gauge a single meaning -- the ledger-apply backlog, primary chain tip
+	// dingo_forge_tip_gap_slots non-zero on this branch. The gauge now has
+	// a single meaning -- the ledger-apply backlog, primary chain tip
 	// minus applied tip -- and sets it once per leader check instead, so the
 	// skip paths no longer overwrite it. The primary tip mirrors the applied tip
 	// on this fixture, so the backlog is 0 and the gauge says so.
@@ -2324,7 +2324,7 @@ func (c *forgerMovingTipSlotClock) reads() (int, int) {
 //
 // What must change is that the loss stops being silent. Reporting it as
 // "slot already has our own block" at Debug is both false and exactly
-// the invisible leader-slot loss the change exists to remove, so the
+// an invisible leader-slot loss, so the
 // declined leader slot is counted as a could-not-forge and logged at
 // Warn with both hashes.
 //

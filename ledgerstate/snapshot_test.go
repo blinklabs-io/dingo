@@ -236,8 +236,6 @@ func requireOwnersConsistent(
 	}
 }
 
-// The resolution of, stated as the property that was failing.
-//
 // A pool that held stake in one of the three snapshots and retired before the
 // snapshot's own epoch is absent from cert state and from the current pool
 // distribution, so no registration in an imported database describes it. Its

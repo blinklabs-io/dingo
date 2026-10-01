@@ -956,9 +956,9 @@ func applyProposalPurpose(
 // spent UTxO and another spent UTxO carries an inline datum, but no script
 // purpose needs the V1 script, so the transaction is valid.
 //
-// Before the rule gated on *available* scripts and rejected this shape,
-// which turned an ordinary transaction into a permanent validation failure.
-// asserted that rejection against the then-current pin; the
+// The rule used to gate on *available* scripts and reject this shape, which
+// turned an ordinary transaction into a permanent validation failure. This
+// test once asserted that rejection against the then-current pin; the
 // assertion is inverted here because the upstream rule now gates on needed
 // scripts.
 func TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript(
@@ -1327,7 +1327,7 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	t.Run(
 		"missing cost model fails closed instead of reaching evaluation",
 		func(t *testing.T) {
-			//: a protocol-parameters map that never populated
+			// A protocol-parameters map that never populated
 			// the PlutusV1 entry (e.g. a hard-fork/governance update, or a
 			// malformed genesis) must return a configuration error rather
 			// than silently evaluating the script under plutigo's built-in
@@ -2558,7 +2558,7 @@ var preprodSerialiseDataFundingTxIds = []string{
 // indefinite-length field list the Plutus encoder writes. Passing the
 // definite-length wire encoding through instead changes what serialiseData
 // returns, so the policy computed a different asset name than the network
-// minted, called error, and wedged a preprod replay at this block. See
+// minted, called error, and wedged a preprod replay at this block.
 func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 	t.Parallel()
 	tx, err := conway.NewConwayTransactionFromCbor(
@@ -2797,7 +2797,7 @@ type previewOracleBlockContext struct {
 // serialiseData of a payload containing integers with 101-byte magnitudes. A
 // serialiseData encoding that does not chunk a bignum magnitude makes that
 // validator return "error explicitly called", which rejects a canonical block
-// and freezes the tip. See.
+// and freezes the tip.
 func TestValidateTxPlutusConwayPreviewWithdrawalOracle(t *testing.T) {
 	raw, err := os.ReadFile(
 		filepath.Join("testdata", "preview-block-121707875.cbor"),
@@ -3371,8 +3371,8 @@ func newConwayDivergenceTxWithReference(
 // Position is not a stable property. gouroboros composes
 // conway.UtxoValidationRules from the ordered descriptor list, so any upstream
 // insertion renumbers every rule after it; the Id does not move. Tests that
-// pinned literal positions broke on the v0.202.5 and v0.202.9 bumps
-//, while production, which keys on the Id, did
+// pinned literal positions broke on the v0.202.5 and v0.202.9 bumps,
+// while production, which keys on the Id, did
 // not.
 func conwayUtxoValidationRuleIndex(
 	t *testing.T,
@@ -3548,7 +3548,7 @@ func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 
 	// The input resolved, so bad-inputs must NOT also fire. This is what
 	// separates a genuinely unbalanced transaction from the single-cause
-	// pairing in, where one unresolvable input produces both.
+	// pairing, where one unresolvable input produces both.
 	var badInputs shelley.BadInputsUtxoError
 	assert.NotErrorAs(t, err, &badInputs)
 }

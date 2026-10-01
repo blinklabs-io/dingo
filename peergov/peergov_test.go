@@ -3403,7 +3403,7 @@ func TestPeerGovernor_GossipChurn_SkipsLocalRoots(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.5,
 		},
-		// Warm replacement (, using the Ledger source so it
+		// Warm replacement (using the Ledger source so it
 		// does not collide with the PeerSourceP2PGossip assertion below)
 		// so the gossip demotion is not blocked by the "no promotable
 		// replacement" guard.
@@ -3461,7 +3461,7 @@ func TestPeerGovernor_GossipChurn_SkipsPublicRoots(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.5,
 		},
-		// Warm replacement (, using the Ledger source so it
+		// Warm replacement (using the Ledger source so it
 		// does not collide with the PeerSourceP2PGossip assertion below)
 		// so the gossip demotion is not blocked by the "no promotable
 		// replacement" guard.

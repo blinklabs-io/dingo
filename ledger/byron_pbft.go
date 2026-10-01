@@ -269,7 +269,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	// it has no notion of Byron block kinds at all. A PBFT-signed regular
 	// block claiming block number 0 would otherwise pass that check and reach
 	// the crypto verification below, which validates the signature but not
-// that this is the right kind of block to open the chain.
+	// that this is the right kind of block to open the chain.
 	if ls.isFirstByronHeader(block) {
 		return fmt.Errorf(
 			"byron block at slot %d: only an epoch-boundary block may be "+

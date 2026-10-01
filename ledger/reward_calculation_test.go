@@ -113,8 +113,8 @@ func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
 	}, nil))
 }
 
-// TestApplyStakeRewardsSkipsPrunedStakeInputs covers the retention interaction
-// tracked in: reward_ada_pots, reward_snapshot,
+// TestApplyStakeRewardsSkipsPrunedStakeInputs covers a retention interaction:
+// reward_ada_pots, reward_snapshot,
 // reward_pool_input and reward_pool_output are retained for the life of the
 // database while reward_stake_input is pruned to the rotation window, so an
 // aged-out epoch presents complete-looking pots and snapshot rows over an empty
@@ -9025,7 +9025,7 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 // The first RUPD reads an empty nesBprev, not epoch 0's nesBcur.
 // With d=0 this gives eta=0; the same 180 blocks enter the next update,
 // giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
-// too. These are the reference devnet inputs and pots .
+// too. These are the reference devnet inputs and pots.
 func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
 	t.Parallel()
 	ls, db := newRewardCalculationTestLedger(t)
@@ -9157,8 +9157,8 @@ INSERT INTO "transaction" (
 // anchor -- plus, once the historical backfill has run, slots at or
 // before it too. saveRewardAdaPotsForEpoch must sum the local fees strictly
 // after the anchor and add the imported amount, not sum the whole epoch:
-// summing the whole epoch either silently drops the pre-anchor fees (the
-// defect in ) or double-counts them once backfill has stored
+// summing the whole epoch either silently drops the pre-anchor fees or
+// double-counts them once backfill has stored
 // pre-anchor transactions locally.
 func TestSaveRewardAdaPotsForEpochUsesImportedPreAnchorFees(t *testing.T) {
 	t.Parallel()

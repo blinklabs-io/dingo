@@ -361,8 +361,8 @@ func TestPeerGovernor_RedialCandidates_EmergencyOnlyWhenNoEligibleUpstream(
 
 	// With a healthy upstream present but the hot set still far below
 	// MinHotPeers and no warm candidates to close that gap, cold
-	// gossip/ledger peers must still become redial candidates
-	//: a single eligible upstream is not "healthy" when the
+	// gossip/ledger peers must still become redial candidates:
+	// a single eligible upstream is not "healthy" when the
 	// configured hot-peer target is 10 and nothing else is in flight to
 	// reach it.
 	pg.mu.Lock()

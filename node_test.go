@@ -1411,8 +1411,8 @@ func newHandleConnManagerClosedOwnerConn(
 	return peer.conn
 }
 
-// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces
-//: NtC connections never received any close notification (the
+// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces a
+// leak: NtC connections never received any close notification (the
 // EventBus's ConnectionClosedEventType is intentionally NtN-only), so
 // chainsync.State.RemoveClient -- which cancels the live chain iterator and
 // deletes the per-connection client state -- was never invoked for a closed

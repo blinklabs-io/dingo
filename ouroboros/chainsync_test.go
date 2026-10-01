@@ -1999,8 +1999,8 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 }
 
 // The tests in this file drive Dingo's real ChainSync server callbacks over a
-// real protocol connection using the shared ouroboros-mock harness
-//, and assert the exact protocol messages the
+// real protocol connection using the shared ouroboros-mock harness,
+// and assert the exact protocol messages the
 // server emits back.
 //
 // This is the difference that matters versus calling the callbacks directly:

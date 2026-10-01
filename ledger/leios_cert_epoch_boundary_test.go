@@ -94,8 +94,8 @@ func leiosBoundaryTestBlock(
 	return block
 }
 
-// TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary is
-//: one read batch reaches from epoch 0 into epoch 1, where one
+// TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary
+// covers one read batch that reaches from epoch 0 into epoch 1, where one
 // block announces an endorser block and the next certifies it. Epoch 1 is not
 // in the epoch cache until the rollover at the boundary publishes it, so the
 // Leios pre-check must not resolve that certificate before the rollover. The

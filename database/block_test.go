@@ -70,7 +70,7 @@ func resetBlockByHashStats() {
 
 // TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound verifies that an
 // unknown hash increments the miss counter (so operators can track the
-// index miss rate from ) and returns ErrBlockNotFound directly on
+// index miss rate) and returns ErrBlockNotFound directly on
 // the index miss, without any fallback scan.
 func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 	t.Parallel()

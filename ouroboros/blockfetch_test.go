@@ -800,8 +800,8 @@ func TestBlockfetchServerRequestRange_InChainRangeStillServedInFull(
 	)
 }
 
-// TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire is issue
-//, end to end: a real MsgRequestRange whose endpoint slots differ by
+// TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire covers a
+// sparse network range end to end: a real MsgRequestRange whose endpoint slots differ by
 // more than 129600 (the old, now-removed MaxBlockFetchRange) must still be
 // served in full when every requested block is a real point on the chain --
 // this is what a sparse or low-active-slot-coefficient custom network

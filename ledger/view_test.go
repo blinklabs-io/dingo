@@ -3053,7 +3053,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 // specific lookups to fail with a caller-supplied error instead of
 // delegating to the wrapped store, reproducing a genuine non-not-found
 // storage fault (a timeout, a lost connection) without corrupting on-disk
-// rows. See.
+// rows.
 type errInjectingMetadataStore struct {
 	metadata.MetadataStore
 	getPoolErr                error
@@ -7698,7 +7698,7 @@ type unknownProtocolParameters struct {
 }
 
 // TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered covers
-// PR review (wolf31o2): a protocol-parameters type
+// a protocol-parameters type
 // the switch doesn't recognize falls to the default branch, which -- unlike
 // every other branch -- returns pp unfiltered even though synthetic is true.
 // That silently reintroduces for whatever type this is; the least this
@@ -7723,8 +7723,8 @@ func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
 	)
 }
 
-// TestExtractRawCostModels_CoversDijkstra covers PR
-// review (wolf31o2): extractRawCostModels' type switch lacked a Dijkstra
+// TestExtractRawCostModels_CoversDijkstra pins a gap
+// in extractRawCostModels: its type switch lacked a Dijkstra
 // case (falling to its own default: return nil), asymmetric with
 // withoutSyntheticV2CostModel, which does handle Dijkstra -- meaning
 // injectedSyntheticV2CostModel (built on extractRawCostModels) could never
