@@ -17,8 +17,6 @@ package ledger
 import (
 	"crypto/ed25519"
 	"crypto/sha3"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
@@ -28,7 +26,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -151,74 +148,6 @@ func processByronReferenceRuleBlock(
 	)
 	require.NoError(t, err)
 	return processByronBlockWithPParams(t, db, nodeConfig, tx, pparams)
-}
-
-// processByronBlockWithPParams applies one Byron block holding tx through
-// ledgerProcessBlock, validating it against pparams as block application
-// does with the parameters adopted for the block's epoch.
-func processByronBlockWithPParams(
-	t *testing.T,
-	db *database.Database,
-	nodeConfig *cardano.CardanoNodeConfig,
-	tx lcommon.Transaction,
-	pparams *eras.ByronProtocolParameters,
-) error {
-	t.Helper()
-	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ByronEraDesc,
-		config: LedgerStateConfig{
-			CardanoNodeConfig: nodeConfig,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-	block := &envelopeTestBlock{
-		header: &envelopeTestHeader{
-			cbor:   []byte{0x80},
-			slot:   1,
-			number: 1,
-			era:    byron.EraByron,
-		},
-		cbor: []byte{0x82, 0x80, 0x80},
-		txs:  []lcommon.Transaction{tx},
-	}
-	var txHash [32]byte
-	copy(txHash[:], tx.Hash().Bytes())
-	offsets := &database.BlockIngestionResult{
-		TxOffsets: map[[32]byte]database.CborOffset{
-			txHash: {
-				BlockSlot:  1,
-				ByteLength: uint32(len(tx.Cbor())), // #nosec G115
-			},
-		},
-		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
-	}
-	for _, utxo := range tx.Produced() {
-		offsets.UtxoOffsets[database.UtxoRef{
-			TxId:      txHash,
-			OutputIdx: utxo.Id.Index(),
-		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
-	}
-	return db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn,
-			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			offsets,
-			eras.ByronEraDesc,
-			pparams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
 }
 
 // TestLedgerProcessBlockByronReferenceRules drives real, correctly signed

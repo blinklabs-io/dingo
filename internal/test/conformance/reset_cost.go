@@ -19,7 +19,7 @@
 // SQLite reset path (state_manager_sqlite.go), which every build has, to exist
 // only in the tagged configuration. Letting the two configurations diverge
 // there is exactly what this package avoids elsewhere; see
-// process_cleanup_test.go.
+// state_provider_test.go.
 
 package conformance
 

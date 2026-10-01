@@ -87,7 +87,7 @@ type Gate struct {
 	// Label is the operator-facing name used in error messages. It defaults
 	// to Name when empty. storage_mode and network must label themselves
 	// "storage mode" and "network" to preserve the message wording that
-	// existing tests in database/storage_mode_test.go assert against.
+	// existing tests in database/tests_test.go assert against.
 	Label string
 	// Class selects the enforcement rule.
 	Class Class
@@ -153,7 +153,7 @@ func Gates() []Gate {
 		{
 			Name: "storage_mode",
 			// "storage mode", not "storage_mode": existing tests in
-			// database/storage_mode_test.go assert this wording.
+			// database/tests_test.go assert this wording.
 			Label:            "storage mode",
 			Class:            LatchEnum,
 			Ordered:          []string{"api", "core"},
