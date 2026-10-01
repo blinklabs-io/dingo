@@ -1007,3 +1007,49 @@ func TestValidateTxDijkstraRefScriptFeeWithEmptyGenesisUpgrade(t *testing.T) {
 		),
 	)
 }
+
+func TestRefScriptFeeUsesGenesisStrideAndMultiplier(t *testing.T) {
+	t.Parallel()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadDijkstraGenesisFromReader(strings.NewReader(
+		`{"refScriptCostStride": 100, "refScriptCostMultiplier": 2}`,
+	)))
+	prev := refFeeTestParams().ConwayProtocolParameters
+	prev.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra - 1
+	upgraded, err := HardForkDijkstra(cfg, &prev)
+	require.NoError(t, err)
+	params, ok := upgraded.(*gdijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+
+	// 250 bytes at the genesis stride and multiplier: 100 at 1, 100 at 2 and
+	// 50 at 4. The Conway stride would price them at one flat tier of 250.
+	const size = 250
+	const refFee = 100 + 200 + 200
+	require.Equal(t, uint64(refFee), tieredRefScriptFee(size))
+	minFee := uint64(refFeeTestBase + refFee)
+	state := newRefFeeTestState(t, size)
+
+	require.NoError(t, ValidateTxDijkstra(
+		newRefFeeTestTx(t, minFee, false), 0, state, upgraded,
+	))
+	requireFeeTooSmall(t, ValidateTxDijkstra(
+		newRefFeeTestTx(t, minFee-1, false), 0, state, upgraded,
+	))
+
+	fee, _, _, err := EvaluateTxDijkstra(
+		newRefFeeTestTx(t, minFee, false), state, params,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		CalculateMinFee(
+			TxSizeForFee(newRefFeeTestTx(t, minFee, false)),
+			lcommon.ExUnits{},
+			params.MinFeeA,
+			params.MinFeeB,
+			nil,
+			nil,
+		)+refFee,
+		fee,
+	)
+}
