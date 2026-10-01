@@ -54,7 +54,7 @@ NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-load-timing test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -184,9 +184,6 @@ test-load-profile: build ## Run build, then load test data with CPU/memory profi
 	rm -rf .dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
-
-test-load-timing: build ## Run build, then time `dingo load` on a fresh data dir (DINGO_LOAD_IMMUTABLE_DIR, DINGO_LOAD_PROFILE)
-	./internal/test/load/timed-load.sh
 
 test-devnet: ## Run the default all-Dingo DevNet integration tests
 	./internal/test/devnet/run-tests.sh
