@@ -908,6 +908,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 	if err := registerAppliedRewardCreditRound(meta, metaTxn, round); err != nil {
 		return fmt.Errorf("register pending reward credits: %w", err)
 	}
+	txn.AfterCommit(ls.queueRewardCreditCompaction)
 	ls.config.Logger.Info(
 		"applied stake rewards",
 		"component", "ledger",
