@@ -946,6 +946,65 @@ func TestHandleSlotTicksToleratesNilTipGapReporter(t *testing.T) {
 	}
 }
 
+// While the applied ledger is behind the wall clock the slot clock emits no
+// ticks, so handleBehindHorizon is the only thing keeping the gauges live.
+// Before it existed a from-genesis sync read as a fully synced node.
+func TestHandleBehindHorizonPublishesGaugesButNotReadiness(t *testing.T) {
+	t.Parallel()
+
+	reported := make(chan uint64, 1)
+	ls, _, metrics := newTipGapTestLedgerState(
+		t,
+		6_500_000,
+		func(gap uint64) { reported <- gap },
+	)
+	ls.currentEpoch.LengthInSlots = 432_000
+	ls.publishSnapshotsLocked()
+
+	ls.handleBehindHorizon(74_600_000)
+
+	assert.Equal(t, float64(68_100_000), gaugeValue(t, metrics.tipGapSlots))
+	assert.Equal(t, float64(432_000), gaugeValue(t, metrics.epochLengthSlots))
+	// The readiness probe must not learn a gap from a paused-tick report.
+	select {
+	case gap := <-reported:
+		t.Fatalf("ReportTipGapFunc called during catch-up with gap %d", gap)
+	default:
+	}
+}
+
+// An epoch length that is not yet known is left unset rather than
+// published as a fabricated value.
+func TestHandleBehindHorizonLeavesUnknownEpochLengthUnset(t *testing.T) {
+	t.Parallel()
+
+	ls, _, metrics := newTipGapTestLedgerState(t, 100, nil)
+
+	ls.handleBehindHorizon(1_000)
+
+	assert.Equal(t, float64(900), gaugeValue(t, metrics.tipGapSlots))
+	assert.Zero(t, gaugeValue(t, metrics.epochLengthSlots))
+}
+
+// initScheduler is where the slot clock is handed handleBehindHorizon. The
+// handleBehindHorizon tests call it directly and the slot clock tests build
+// their own config, so without this test deleting that wiring leaves every
+// other test green and a from-genesis sync reads as fully synced again.
+func TestInitSchedulerWiresBehindHorizonCallback(t *testing.T) {
+	t.Parallel()
+
+	ls, _, metrics := newTipGapTestLedgerState(t, 100, nil)
+	ls.currentEpoch.SlotLength = 1000
+	require.NoError(t, ls.initScheduler())
+	t.Cleanup(ls.Scheduler.Stop)
+
+	callback := ls.slotClock.config.OnBehindHorizon
+	require.NotNil(t, callback)
+	callback(1_000)
+
+	assert.Equal(t, float64(900), gaugeValue(t, metrics.tipGapSlots))
+}
+
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	t *testing.T,
 ) {

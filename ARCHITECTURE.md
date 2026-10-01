@@ -8337,7 +8337,10 @@ Readiness reads its tip gap from `(*dingo.Node).TipGapSlots`
 (`node_health.go`), which is fed by `ledger.LedgerStateConfig.ReportTipGapFunc`
 from the ledger's slot-tick loop — the same value published as the
 `dingo_tip_gap_slots` gauge, read directly so readiness does not depend on
-the Prometheus listener. The reading lives in a mutex-guarded `nodeHealth`
+the Prometheus listener. While the applied ledger is behind the era horizon the
+slot clock emits no ticks, so the gauge is instead kept live from the wall-clock
+slot (`handleBehindHorizon`) and readiness stays *unknown* until a real tick
+arrives. The reading lives in a mutex-guarded `nodeHealth`
 value on `Node` rather than behind `n.ledgerState`, which a live database
 Restore/Truncate replaces; `ledgerStateConfig` closes over the node, so a
 rebuilt ledger keeps reporting into the same state. That state carries a
