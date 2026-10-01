@@ -676,6 +676,23 @@ func ImportLedgerState(
 		}
 	}
 
+	// A UTxO created after this snapshot's anchor by local block replay never
+	// appears in the snapshot's live set -- the anchor predates it -- so it
+	// never reaches hydrateImportedUtxo's ON CONFLICT clear (dingo#4770's
+	// other case: an output both created and spent after the anchor). If a
+	// reconcile pass just ran, it can also have tombstoned such an output
+	// outright, because the output is equally absent from its live-key set.
+	// Run this after reconcile, not before: reconcile's own scan only sees
+	// rows live at scan time, so restoring first would hand it a row to
+	// immediately re-tombstone. Run before the reward-live-stake rebuild
+	// below, which sums live rows directly and must see the restored state.
+	if err := cfg.Database.RestorePostAnchorCreatedUtxos(slot, nil); err != nil {
+		return fmt.Errorf(
+			"restoring post-anchor created UTxOs: %w",
+			err,
+		)
+	}
+
 	// RebuildRewardLiveStake is a full-table rebuild in a single expensive
 	// transaction and takes no context, so it cannot observe cancellation once
 	// started. Bail out here if the import was cancelled during the preceding

@@ -817,6 +817,16 @@ type UtxoStore interface {
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
 
+	// RestorePostAnchorCreatedUtxos clears deleted_slot/spent_at_tx_id on
+	// every UTxO added strictly after anchorSlot that is currently marked
+	// deleted, regardless of its deleted_slot value. Used once per Mithril
+	// catch-up/reward-repair import, after any reconcile pass, to restore an
+	// output the import's snapshot could never have judged because it did
+	// not exist at the snapshot's anchor. See the sqlstore implementation's
+	// doc comment for why this predicate differs from
+	// SetUtxosNotDeletedAfterSlot's rollback semantics.
+	RestorePostAnchorCreatedUtxos(anchorSlot uint64, txn types.Txn) error
+
 	// IterateLiveUtxos invokes fn once for each live UTxO row
 	// (DeletedSlot == 0) in unspecified order. fn receives a
 	// pointer to a row that is reused between callbacks — copy

@@ -141,9 +141,12 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 			deleteErrors += skipped
 			d.logger.Warn(
 				"UTxO blob deletes left unstaged to keep the transaction committable",
-				"skipped", skipped,
-				"staged", staged,
-				"total", len(utxos),
+				"skipped",
+				skipped,
+				"staged",
+				staged,
+				"total",
+				len(utxos),
 			)
 		}
 	} else {
@@ -1392,6 +1395,41 @@ func (d *Database) UtxosUnspend(
 	}
 	if err := d.utxoStore().SetUtxosNotDeletedAfterSlot(
 		slot,
+		txn.Metadata(),
+	); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+		owned = false
+	}
+	return nil
+}
+
+// RestorePostAnchorCreatedUtxos clears deleted_slot/spent_at_tx_id on every
+// UTxO added strictly after anchorSlot that is currently marked deleted. See
+// the sqlstore implementation's doc comment for the full rationale. Called
+// once per Mithril catch-up/reward-repair import (ledgerstate.ImportLedgerState),
+// after any reconcile pass and before the post-import reward-live-stake
+// rebuild -- never from the per-block ingest path.
+func (d *Database) RestorePostAnchorCreatedUtxos(
+	anchorSlot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = NewMetadataOnlyTxn(d, true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.utxoStore().RestorePostAnchorCreatedUtxos(
+		anchorSlot,
 		txn.Metadata(),
 	); err != nil {
 		return err
