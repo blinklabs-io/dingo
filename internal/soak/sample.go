@@ -41,6 +41,7 @@ const (
 	metricHeapAlloc  = "go_memstats_heap_alloc_bytes"
 	metricHeapInuse  = "go_memstats_heap_inuse_bytes"
 	metricGC         = "go_gc_duration_seconds"
+	metricStart      = "process_start_time_seconds"
 )
 
 // Sample is one observation of the node's runtime metrics.
@@ -54,11 +55,14 @@ type Sample struct {
 	// time since process start.
 	GCCount   float64
 	GCSeconds float64
+	// ProcessStart is the process start time in Unix seconds, or 0 when the
+	// endpoint does not expose it. A change between samples is a restart.
+	ProcessStart float64
 }
 
 var csvHeader = []string{
 	"time", "goroutines", "rss_bytes", "heap_alloc_bytes",
-	"heap_inuse_bytes", "gc_count", "gc_seconds",
+	"heap_inuse_bytes", "gc_count", "gc_seconds", "process_start_seconds",
 }
 
 // ParseMetrics extracts a Sample from Prometheus text exposition. It returns
@@ -98,12 +102,19 @@ func ParseMetrics(r io.Reader, at time.Time) (Sample, error) {
 		}
 	}
 	gc, ok := families[metricGC]
-	if !ok || len(gc.GetMetric()) == 0 || gc.GetMetric()[0].GetSummary() == nil {
+	if !ok || len(gc.GetMetric()) == 0 ||
+		gc.GetMetric()[0].GetSummary() == nil {
 		return Sample{}, fmt.Errorf("metric %s not found", metricGC)
 	}
 	sum := gc.GetMetric()[0].GetSummary()
 	s.GCCount = float64(sum.GetSampleCount())
 	s.GCSeconds = sum.GetSampleSum()
+	// Optional: without it, Analyse still sees a restart whose GC count drops.
+	if _, ok := families[metricStart]; ok {
+		if err := gauge(metricStart, &s.ProcessStart); err != nil {
+			return Sample{}, err
+		}
+	}
 	return s, nil
 }
 
@@ -159,7 +170,7 @@ func WriteCSVRow(w io.Writer, s Sample) error {
 	if err := cw.Write([]string{
 		s.Time.UTC().Format(time.RFC3339Nano),
 		f(s.Goroutines), f(s.RSSBytes), f(s.HeapAlloc), f(s.HeapInuse),
-		f(s.GCCount), f(s.GCSeconds),
+		f(s.GCCount), f(s.GCSeconds), f(s.ProcessStart),
 	}); err != nil {
 		return err
 	}
@@ -174,7 +185,8 @@ func ReadCSV(r io.Reader) ([]Sample, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 || strings.Join(rows[0], ",") != strings.Join(csvHeader, ",") {
+	if len(rows) == 0 ||
+		strings.Join(rows[0], ",") != strings.Join(csvHeader, ",") {
 		return nil, errors.New("soak csv: missing or unexpected header")
 	}
 	out := make([]Sample, 0, len(rows)-1)
@@ -186,7 +198,7 @@ func ReadCSV(r io.Reader) ([]Sample, error) {
 		s := Sample{Time: ts}
 		for j, dst := range []*float64{
 			&s.Goroutines, &s.RSSBytes, &s.HeapAlloc, &s.HeapInuse,
-			&s.GCCount, &s.GCSeconds,
+			&s.GCCount, &s.GCSeconds, &s.ProcessStart,
 		} {
 			v, err := strconv.ParseFloat(row[j+1], 64)
 			if err != nil {

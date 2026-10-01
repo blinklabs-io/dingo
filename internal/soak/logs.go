@@ -33,8 +33,10 @@ type Repeated struct {
 var (
 	// Variable fragments are masked so one message logged with different
 	// hashes, slots, peers or durations collapses to a single key.
-	hexRe   = regexp.MustCompile(`\b[0-9a-fA-F]{16,}\b`)
-	numRe   = regexp.MustCompile(`\b\d+(?:\.\d+)?(?:ms|s|m|h|µs|ns|B|KiB|MiB|GiB)?\b`)
+	hexRe = regexp.MustCompile(`\b[0-9a-fA-F]{16,}\b`)
+	numRe = regexp.MustCompile(
+		`\b\d+(?:\.\d+)?(?:ms|s|m|h|µs|ns|B|KiB|MiB|GiB)?\b`,
+	)
 	addrRe  = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
 	textMsg = regexp.MustCompile(`\bmsg=(?:"((?:[^"\\]|\\.)*)"|(\S+))`)
 	textLvl = regexp.MustCompile(`\blevel=(\w+)`)
@@ -67,7 +69,10 @@ func SummariseLog(r io.Reader, minCount int) ([]Repeated, error) {
 	var out []Repeated
 	for k, c := range counts {
 		if c >= minCount {
-			out = append(out, Repeated{Level: k.level, Message: k.msg, Count: c})
+			out = append(
+				out,
+				Repeated{Level: k.level, Message: k.msg, Count: c},
+			)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

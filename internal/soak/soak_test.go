@@ -59,7 +59,10 @@ func TestAnalyseFlatPlateauWithWarmupPasses(t *testing.T) {
 		}
 		return 2060
 	}
-	rep, err := soak.Analyse(series(100, grow, grow), soak.Options{WarmupFraction: 0.5})
+	rep, err := soak.Analyse(
+		series(100, grow, grow),
+		soak.Options{WarmupFraction: 0.5},
+	)
 	require.NoError(t, err)
 	assert.False(t, rep.Failed(), "%+v", rep.Trends)
 }
@@ -124,7 +127,11 @@ func TestAnalyseTooFewSamples(t *testing.T) {
 
 func TestAnalyseRestartFails(t *testing.T) {
 	t.Parallel()
-	s := series(100, func(int) float64 { return 1 }, func(int) float64 { return 1 })
+	s := series(
+		100,
+		func(int) float64 { return 1 },
+		func(int) float64 { return 1 },
+	)
 	for i := 60; i < len(s); i++ {
 		s[i].GCCount = float64(i - 60)
 	}
@@ -243,10 +250,69 @@ func TestSnapshotWritesGoroutineAndHeapProfiles(t *testing.T) {
 		}))
 	defer srv.Close()
 	dir := t.TempDir()
-	require.NoError(t, soak.Snapshot(context.Background(), srv.Client(), srv.URL, dir, t0))
-	g, err := os.ReadFile(filepath.Join(dir, "goroutine-20260101T000000Z.pprof"))
+	require.NoError(
+		t,
+		soak.Snapshot(context.Background(), srv.Client(), srv.URL, dir, t0),
+	)
+	g, err := os.ReadFile(
+		filepath.Join(dir, "goroutine-20260101T000000Z.pprof"),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "profile for /debug/pprof/goroutine", string(g))
 	_, err = os.Stat(filepath.Join(dir, "heap-20260101T000000Z.pprof"))
 	require.NoError(t, err)
+}
+
+func TestAnalyseRestartWithoutGCCountDropFails(t *testing.T) {
+	t.Parallel()
+	// The restarted process collects garbage faster than the old one had in
+	// total, so only the changed process start time reveals the restart.
+	s := series(
+		100,
+		func(int) float64 { return 1 },
+		func(int) float64 { return 1 },
+	)
+	for i := range s {
+		s[i].ProcessStart = 1.7e9
+		if i >= 60 {
+			s[i].ProcessStart = 1.7e9 + 3600
+			s[i].GCCount = float64(i * 3)
+		}
+	}
+	rep, err := soak.Analyse(s, soak.Options{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, rep.Restarts)
+	assert.True(t, rep.Failed())
+}
+
+func TestParseMetricsReadsProcessStart(t *testing.T) {
+	t.Parallel()
+	s, err := soak.ParseMetrics(strings.NewReader(exposition+
+		"# TYPE process_start_time_seconds gauge\n"+
+		"process_start_time_seconds 1.7e+09\n"), t0)
+	require.NoError(t, err)
+	assert.Equal(t, 1.7e9, s.ProcessStart)
+}
+
+func TestSnapshotsWithinOneSecondDoNotCollide(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, "profile")
+		}))
+	defer srv.Close()
+	dir := t.TempDir()
+	at := t0.Add(100 * time.Millisecond)
+	require.NoError(
+		t,
+		soak.Snapshot(context.Background(), srv.Client(), srv.URL, dir, at),
+	)
+	require.NoError(
+		t,
+		soak.Snapshot(context.Background(), srv.Client(), srv.URL, dir,
+			at.Add(time.Millisecond)),
+	)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 4)
 }

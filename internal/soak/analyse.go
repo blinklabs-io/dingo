@@ -77,8 +77,8 @@ type Report struct {
 	// plateau; they are reported but do not gate the result.
 	GCCyclesPerHour    float64
 	GCMeanPauseSeconds float64
-	// Restarts counts decreases of the cumulative GC counter, which mean the
-	// process restarted and the run is not one continuous soak.
+	// Restarts counts samples where the process start time changed or the
+	// cumulative GC counter decreased: the run is not one continuous soak.
 	Restarts int
 }
 
@@ -113,19 +113,28 @@ func Analyse(samples []Sample, opts Options) (Report, error) {
 	}
 	var rep Report
 	for i := 1; i < len(samples); i++ {
-		if samples[i].GCCount < samples[i-1].GCCount {
+		prev, cur := samples[i-1], samples[i]
+		// The GC counter alone misses a restart whose new process has
+		// already run more cycles than the old one had in total.
+		if cur.GCCount < prev.GCCount ||
+			(prev.ProcessStart != 0 && cur.ProcessStart != prev.ProcessStart) {
 			rep.Restarts++
 		}
 	}
 	first, last := samples[0].Time, samples[len(samples)-1].Time
-	cut := first.Add(time.Duration(float64(last.Sub(first)) * opts.WarmupFraction))
+	cut := first.Add(
+		time.Duration(float64(last.Sub(first)) * opts.WarmupFraction),
+	)
 	start := sort.Search(len(samples), func(i int) bool {
 		return !samples[i].Time.Before(cut)
 	})
 	plateau := samples[start:]
 	if len(plateau) < opts.MinSamples {
 		return rep, fmt.Errorf(
-			"%w: have %d, need %d", ErrInsufficientData, len(plateau), opts.MinSamples,
+			"%w: have %d, need %d",
+			ErrInsufficientData,
+			len(plateau),
+			opts.MinSamples,
 		)
 	}
 	rep.PlateauSamples = len(plateau)

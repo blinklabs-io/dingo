@@ -190,7 +190,7 @@ test-load-profile: build ## Run build, then load test data with CPU/memory profi
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
 
 soak-sample: ## Sample a running node's metrics to $(SOAK_CSV) until interrupted (see docs/soak.md)
-	go run ./cmd/soak sample $(SOAK_ARGS) | tee $(SOAK_CSV)
+	go run ./cmd/soak sample $(SOAK_ARGS) > $(SOAK_CSV)
 
 soak-analyse: ## Fail on sustained goroutine or RSS growth in $(SOAK_CSV) (see docs/soak.md)
 	go run ./cmd/soak analyse -csv $(SOAK_CSV) $(SOAK_ARGS)

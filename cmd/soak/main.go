@@ -47,7 +47,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var err error
 	switch args[0] {
 	case "sample":
-		err = runSample(ctx, args[1:], stdout)
+		err = runSample(ctx, args[1:], stdout, stderr)
 	case "analyse":
 		err = runAnalyse(args[1:], stdout)
 	case "logs":
@@ -72,14 +72,34 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 var errSoakFailed = errors.New("soak: sustained growth or restart detected")
 
-func runSample(ctx context.Context, args []string, stdout io.Writer) error {
+func runSample(
+	ctx context.Context,
+	args []string,
+	stdout, stderr io.Writer,
+) error {
 	fs := flag.NewFlagSet("sample", flag.ContinueOnError)
-	metrics := fs.String("metrics-url", "http://127.0.0.1:12798/metrics", "node /metrics URL")
-	debug := fs.String("debug-url", "", "pprof listener base URL; enables profile snapshots")
-	snapDir := fs.String("snapshot-dir", "soak-pprof", "directory for pprof snapshots")
+	metrics := fs.String(
+		"metrics-url",
+		"http://127.0.0.1:12798/metrics",
+		"node /metrics URL",
+	)
+	debug := fs.String(
+		"debug-url",
+		"",
+		"pprof listener base URL; enables profile snapshots",
+	)
+	snapDir := fs.String(
+		"snapshot-dir",
+		"soak-pprof",
+		"directory for pprof snapshots",
+	)
 	snapEvery := fs.Int("snapshot-every", 60, "take a snapshot every N samples")
 	interval := fs.Duration("interval", time.Minute, "sampling interval")
-	duration := fs.Duration("duration", 0, "stop after this long (0 runs until interrupted)")
+	duration := fs.Duration(
+		"duration",
+		0,
+		"stop after this long (0 runs until interrupted)",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -106,13 +126,14 @@ func runSample(ctx context.Context, args []string, stdout io.Writer) error {
 			}
 			// A transient scrape failure must not end a multi-day run; the
 			// gap shows in the CSV timestamps.
-			fmt.Fprintln(os.Stderr, "soak: sample failed:", err)
+			fmt.Fprintln(stderr, "soak: sample failed:", err)
 		} else if err := soak.WriteCSVRow(stdout, s); err != nil {
 			return err
 		}
 		if *debug != "" && n%*snapEvery == 0 {
-			if err := soak.Snapshot(ctx, client, *debug, *snapDir, now); err != nil && ctx.Err() == nil {
-				fmt.Fprintln(os.Stderr, "soak: snapshot failed:", err)
+			if err := soak.Snapshot(ctx, client, *debug, *snapDir, now); err != nil &&
+				ctx.Err() == nil {
+				fmt.Fprintln(stderr, "soak: snapshot failed:", err)
 			}
 		}
 		select {
@@ -126,14 +147,39 @@ func runSample(ctx context.Context, args []string, stdout io.Writer) error {
 func runAnalyse(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("analyse", flag.ContinueOnError)
 	file := fs.String("csv", "", "CSV written by `soak sample`")
-	warmup := fs.Float64("warmup", 0.25, "fraction of the run excluded as warmup")
-	maxGrowth := fs.Float64("max-growth-percent-per-hour", 1, "tolerated fitted growth per hour")
-	minR2 := fs.Float64("min-r2", 0.5, "least R^2 for growth to count as sustained")
+	warmup := fs.Float64(
+		"warmup",
+		0.25,
+		"fraction of the run excluded as warmup",
+	)
+	maxGrowth := fs.Float64(
+		"max-growth-percent-per-hour",
+		1,
+		"tolerated fitted growth per hour",
+	)
+	minR2 := fs.Float64(
+		"min-r2",
+		0.5,
+		"least R^2 for growth to count as sustained",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *file == "" {
 		return errors.New("analyse: -csv is required")
+	}
+	// soak.Options reads a zero as "use the default", so a zero here would
+	// silently become 0.25 or 0.5 rather than disabling anything.
+	if *warmup <= 0 || *warmup >= 1 {
+		return errors.New("analyse: -warmup must be in (0, 1)")
+	}
+	if *maxGrowth <= 0 {
+		return errors.New(
+			"analyse: -max-growth-percent-per-hour must be positive",
+		)
+	}
+	if *minR2 <= 0 || *minR2 > 1 {
+		return errors.New("analyse: -min-r2 must be in (0, 1]")
 	}
 	f, err := os.Open(*file)
 	if err != nil {
@@ -152,7 +198,12 @@ func runAnalyse(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "plateau: %d samples over %.2fh\n", rep.PlateauSamples, rep.PlateauHours)
+	fmt.Fprintf(
+		stdout,
+		"plateau: %d samples over %.2fh\n",
+		rep.PlateauSamples,
+		rep.PlateauHours,
+	)
 	for _, t := range rep.Trends {
 		verdict := "ok"
 		if t.Sustained {

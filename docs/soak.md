@@ -25,8 +25,9 @@ Flags for `soak sample`:
 | `-snapshot-dir` | `soak-pprof` | Where goroutine and heap profiles are written |
 | `-snapshot-every` | `60` | Snapshot every N samples |
 
-A failed scrape is logged to stderr and skipped, so a single outage does not
-end the run. Gaps are visible in the CSV timestamps.
+Samples go to `$(SOAK_CSV)`; follow it with `tail -f`. A failed scrape is
+logged to stderr and skipped, so a single outage does not end the run. Gaps
+are visible in the CSV timestamps.
 
 ## Analyse
 
@@ -39,10 +40,12 @@ analyser fits a least-squares line to goroutines and RSS. A metric is reported
 as growing, and the command exits 1, when its fitted growth exceeds 1% of the
 plateau's starting value per hour and the fit has R^2 of at least 0.5. The R^2
 floor keeps a noisy or sawtooth series from being called a leak. Tune with
-`-warmup`, `-max-growth-percent-per-hour` and `-min-r2`.
+`-warmup` (between 0 and 1), `-max-growth-percent-per-hour` (positive) and
+`-min-r2` (above 0, at most 1); a value outside those ranges exits 2.
 
-A decrease in the cumulative GC count means the process restarted; the run is
-then not one continuous soak and the command exits 1. GC cycles per hour and
+A change in `process_start_time_seconds`, or a decrease in the cumulative GC
+count, means the process restarted; the run is then not one continuous soak
+and the command exits 1. GC cycles per hour and
 mean pause over the plateau are reported but do not gate the result. Fewer
 than 10 plateau samples is an error (exit 2).
 

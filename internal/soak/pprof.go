@@ -44,13 +44,18 @@ func Snapshot(
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	stamp := at.UTC().Format("20060102T150405Z")
+	// Sub-second digits keep snapshots taken within one second distinct;
+	// a whole-second time prints without them.
+	stamp := at.UTC().Format("20060102T150405.999999999Z")
 	for _, p := range profiles {
 		body, err := get(ctx, client, strings.TrimRight(debugURL, "/")+p.path)
 		if err != nil {
 			return err
 		}
-		err = writeProfile(filepath.Join(dir, fmt.Sprintf("%s-%s.pprof", p.name, stamp)), body)
+		err = writeProfile(
+			filepath.Join(dir, fmt.Sprintf("%s-%s.pprof", p.name, stamp)),
+			body,
+		)
 		body.Close()
 		if err != nil {
 			return err
