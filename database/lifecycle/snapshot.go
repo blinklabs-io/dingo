@@ -59,6 +59,9 @@ const (
 // point of running them concurrently in the first place. This is safe to
 // call against a database a live node is actively writing to.
 //
+// The hold is observed in the dingo_snapshot_commit_pause_seconds histogram
+// and can be bounded with WithMaxCommitPause.
+//
 // dingoVersion is recorded in the manifest for cross-version restore
 // detection; pass the running binary's version string. blobPluginName and
 // metadataPluginName are recorded in the manifest for Restore's later
@@ -76,6 +79,10 @@ func Snapshot(
 	opts ...ManifestOption,
 ) (m Manifest, err error) {
 	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, err
+	}
+	maxPause, err := commitPauseLimit(opts)
+	if err != nil {
 		return Manifest{}, err
 	}
 	// Pinned for the whole call: the Backup below runs long, and the store
@@ -201,6 +208,12 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
 	}
+	// The limit starts once the barrier is held; backupCtx is cancelled by
+	// the caller's ctx as well, so cancellation behaves as before.
+	backupCtx, cancelBackup := ctx, context.CancelFunc(func() {})
+	if maxPause > 0 {
+		backupCtx, cancelBackup = context.WithTimeout(ctx, maxPause)
+	}
 	tip, tipErr := db.GetTip(nil)
 	commitTimestamp, commitTimestampErr := db.Metadata().GetCommitTimestamp()
 	gates, gatesErr := db.Metadata().GetNodeSettingsGates()
@@ -210,21 +223,37 @@ func Snapshot(
 	backupWG.Add(2)
 	go func() {
 		defer backupWG.Done()
-		backupErr = blobBackuper.Backup(ctx, blobFile)
+		backupErr = blobBackuper.Backup(backupCtx, blobFile)
 	}()
 	go func() {
 		defer backupWG.Done()
-		metadataErr = metadataBackuper.BackupTo(ctx, metadataPath)
+		metadataErr = metadataBackuper.BackupTo(backupCtx, metadataPath)
 	}()
 	backupWG.Wait()
 
+	// Decided before resume(): a backup that merely finished near the limit
+	// is not a violation, only one the limit actually cancelled.
+	pauseExceeded := maxPause > 0 && ctx.Err() == nil &&
+		backupCtx.Err() != nil && (backupErr != nil || metadataErr != nil)
+	cancelBackup()
 	resume()
+	pauseDuration := time.Since(pauseStart)
+	metrics := snapshotMetricsFor(db.Config().PromRegistry)
+	pauseResult := snapshotResultOK
+	switch {
+	case pauseExceeded:
+		pauseResult = snapshotResultExceeded
+	case backupErr != nil || metadataErr != nil ||
+		tipErr != nil || commitTimestampErr != nil || gatesErr != nil:
+		pauseResult = snapshotResultFailed
+	}
+	metrics.pause.WithLabelValues(pauseResult).Observe(pauseDuration.Seconds())
 	if logger != nil {
 		logger.Debug(
 			"resumed commits after snapshot backup",
 			"component", "database",
 			"dir", dir,
-			"paused_for", time.Since(pauseStart),
+			"paused_for", pauseDuration,
 		)
 	}
 
@@ -241,6 +270,12 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf(
 			"get node settings gates: %w",
 			gatesErr,
+		)
+	}
+	if pauseExceeded {
+		return Manifest{}, fmt.Errorf(
+			"%w (%s): %w",
+			ErrCommitPauseExceeded, maxPause, errors.Join(backupErr, metadataErr),
 		)
 	}
 	if backupErr != nil {
@@ -297,6 +332,9 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
 	}
+
+	metrics.bytes.WithLabelValues("blob").Add(float64(blobInfo.Size()))
+	metrics.bytes.WithLabelValues("metadata").Add(float64(metadataInfo.Size()))
 
 	manifest := Manifest{
 		CreatedAt:       time.Now().UTC(),

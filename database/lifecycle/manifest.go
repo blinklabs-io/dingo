@@ -63,6 +63,7 @@ type ManifestOption func(*manifestConfig)
 
 type manifestConfig struct {
 	maxBytes int64
+	maxPause time.Duration
 }
 
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses
