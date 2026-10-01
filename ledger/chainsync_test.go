@@ -5872,12 +5872,7 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))
-	value, err := ls.db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		nil,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
+	assert.True(t, deferredMarkerPersisted(t, ls, point))
 }
 
 // TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails is a
@@ -17836,4 +17831,69 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 		e.Reason,
 	)
 	require.Equal(t, fixture.connId, e.ConnectionId)
+}
+
+// TestBlockfetchDeferredHeaderMarkerDoesNotWaitForWriteConnection holds the
+// metadata write connection, as a block-apply transaction does for the whole
+// of an epoch-rollover snapshot, and requires the blockfetch handler to admit
+// a block whose header verification is deferred anyway. The marker that
+// guards the block must still be durable once the connection is free.
+func TestBlockfetchDeferredHeaderMarkerDoesNotWaitForWriteConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := testRecycleConnId()
+	tb := createTestBlock(t, [32]byte{47}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.validationEnabled = true
+	ls.activeBlockfetchConnId = connId
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chain = &chain.Chain{}
+
+	holder := db.Transaction(true)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { _ = holder.Rollback() })
+	}
+	// Runs before the database is closed, so a failing run releases the
+	// connection instead of hanging the handler goroutine.
+	defer release()
+
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	done := make(chan error, 1)
+	go func() {
+		done <- handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
+			ConnectionId: connId,
+			Block:        tb.block,
+			Point:        point,
+		}, nil)
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal(
+			"blockfetch handler parked behind the held write connection",
+		)
+	}
+	require.Len(t, ls.pendingBlockfetchEvents, 1)
+	release()
+
+	assert.True(t, deferredMarkerPersisted(t, ls, point))
+}
+
+// deferredMarkerPersisted reports whether the durable deferred-header marker
+// for point exists.
+func deferredMarkerPersisted(
+	t *testing.T,
+	ls *LedgerState,
+	point ocommon.Point,
+) bool {
+	t.Helper()
+	persisted, err := ls.db.HasDeferredHeaderMarker(
+		headerValidationPointKey(point),
+	)
+	require.NoError(t, err)
+	return persisted
 }
