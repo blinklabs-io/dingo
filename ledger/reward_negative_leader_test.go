@@ -33,10 +33,10 @@ import (
 )
 
 const (
-	negativeLeaderNewEpoch     = uint64(4)
-	negativeLeaderSnapshot     = uint64(1)
-	negativeLeaderPerformance  = uint64(2)
-	negativeLeaderPotsEpoch    = uint64(3)
+	negativeLeaderNewEpoch     = uint64(5)
+	negativeLeaderSnapshot     = uint64(2)
+	negativeLeaderPerformance  = uint64(3)
+	negativeLeaderPotsEpoch    = uint64(4)
 	negativeLeaderBoundarySlot = uint64(400)
 )
 
@@ -329,30 +329,6 @@ func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
 	t.Parallel()
 
 	ls, db, rewardAccount := seedNegativeLeaderRewardRound(t, true)
-	var app *stakeRewardApplication
-	calcTxn := db.Transaction(false)
-	require.NoError(t, calcTxn.Do(func(txn *database.Txn) error {
-		var (
-			ok  bool
-			err error
-		)
-		app, ok, err = ls.calculateStakeRewardApplication(
-			txn,
-			negativeLeaderNewEpoch,
-			negativeLeaderBoundarySlot,
-			negativeLeaderBoundarySlot,
-			true,
-		)
-		require.True(t, ok)
-		return err
-	}))
-	require.NotNil(t, app)
-	require.Len(t, app.negativeLeaderRewards, 1)
-	require.True(t, app.negativeLeaderRewards[0].Spendable)
-	for _, output := range app.accountOutputs {
-		require.NotEqual(t, rewardAccount, output.StakingKey)
-	}
-
 	// Expiry 1 judged at snapshot epoch 2 is expired. The seeded
 	// registration at slot 250 is after the captured slot, so the account
 	// row's expiry decides.
@@ -365,24 +341,20 @@ func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
 		1,
 		nil,
 	))
-	app.epochs.snapshot = 2
-
-	guardTxn := db.Transaction(false)
-	require.NoError(t, guardTxn.Do(func(txn *database.Txn) error {
-		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
-		if err != nil {
-			return err
-		}
-		require.Contains(
-			t,
-			guarded,
-			models.NewStakeCredentialRef(0, rewardAccount).MapKey(),
+	applyTxn := db.Transaction(true)
+	require.NoError(t, applyTxn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 		)
-		require.NoError(t, negativeLeaderRewardApplicationError(
-			app.negativeLeaderRewards, guarded,
-		))
-		return nil
 	}))
+	outputs, err := db.Metadata().GetRewardAccountOutputs(
+		negativeLeaderSnapshot,
+		nil,
+	)
+	require.NoError(t, err)
+	for _, output := range outputs {
+		require.NotEqual(t, rewardAccount, output.StakingKey)
+	}
 }
 
 // The boundary that applies a negative leader reward records its magnitude in

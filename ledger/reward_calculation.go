@@ -24,7 +24,6 @@ import (
 	"slices"
 	"sort"
 	"strconv"
-	"strings"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -4914,74 +4913,16 @@ func applyPledgeLeveragePParams(
 }
 
 // loadPersistedRewardProtocolParameters loads a reward round's protocol
-// parameters. cardano-ledger types Dijkstra's maxPledgeLeverage as a
-// NonNegativeInterval, so an enacted value outside the governance-update range
-// [1, 10000] that the pinned gouroboros decoder enforces on stored rows is
-// still the value the reward calculation must use.
+// parameters through the era decoder so persisted values follow the ledger's
+// validation rules for that era.
 func (ls *LedgerState) loadPersistedRewardProtocolParameters(
 	epoch uint64,
 	era eras.EraDesc,
 	txn *database.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	decode := era.DecodePParamsFunc
-	if decode != nil && era.Id == eras.DijkstraEraDesc.Id {
-		decode = rewardDijkstraPParamsDecoder(decode)
-	}
-	return ls.loadPersistedProtocolParametersWith(epoch, era, decode, txn)
-}
-
-func rewardDijkstraPParamsDecoder(
-	decode func([]byte) (lcommon.ProtocolParameters, error),
-) func([]byte) (lcommon.ProtocolParameters, error) {
-	return func(data []byte) (lcommon.ProtocolParameters, error) {
-		params, decodeErr := decode(data)
-		if decodeErr == nil || !strings.Contains(
-			decodeErr.Error(), "maxPledgeLeverage must be in [1, 10000]",
-		) {
-			return params, decodeErr
-		}
-		var fields []cbor.RawMessage
-		if _, err := cbor.Decode(data, &fields); err != nil {
-			return nil, fmt.Errorf("decode Dijkstra reward parameters: %w", err)
-		}
-		const maxPledgeLeverageField = 35
-		if len(fields) != 46 {
-			return nil, decodeErr
-		}
-		var maxPledgeLeverage *cbor.Rat
-		if _, err := cbor.Decode(
-			fields[maxPledgeLeverageField], &maxPledgeLeverage,
-		); err != nil {
-			return nil, fmt.Errorf("decode Dijkstra maxPledgeLeverage: %w", err)
-		}
-		if maxPledgeLeverage == nil || maxPledgeLeverage.Rat == nil ||
-			maxPledgeLeverage.Sign() < 0 {
-			return nil, decodeErr
-		}
-		normalized, err := cbor.Encode(&cbor.Rat{Rat: big.NewRat(1, 1)})
-		if err != nil {
-			return nil, fmt.Errorf(
-				"normalize Dijkstra maxPledgeLeverage: %w", err,
-			)
-		}
-		fields[maxPledgeLeverageField] = normalized
-		validatedCbor, err := cbor.Encode(fields)
-		if err != nil {
-			return nil, fmt.Errorf("encode Dijkstra reward parameters: %w", err)
-		}
-		params, err = decode(validatedCbor)
-		if err != nil {
-			return nil, err
-		}
-		dijkstraParams, ok := params.(*dijkstra.DijkstraProtocolParameters)
-		if !ok || dijkstraParams == nil {
-			return nil, fmt.Errorf(
-				"decoded Dijkstra reward parameters as %T", params,
-			)
-		}
-		dijkstraParams.MaxPledgeLeverage = maxPledgeLeverage
-		return dijkstraParams, nil
-	}
+	return ls.loadPersistedProtocolParametersWith(
+		epoch, era, era.DecodePParamsFunc, txn,
+	)
 }
 
 func rewardParametersFromPParams(
