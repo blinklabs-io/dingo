@@ -228,7 +228,7 @@ func TestBlockfetchMetricsRegistersRecentBlockDelays(t *testing.T) {
 
 // A late delivery of a block that has already been overwritten by a newer
 // block in the same slot (the ring wrapped) is stale and must not replace the
-// newer sample. Review: blinklabs-io/dingo#4742.
+// newer sample.
 func TestRecentBlockDelaysWrappedSlotIgnoresStaleDelivery(t *testing.T) {
 	t.Parallel()
 	r, reg := newTestRecentDelays(t)

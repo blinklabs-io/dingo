@@ -743,7 +743,7 @@ func applyPoolRegistrationCertificate(
 	// validation at write time. PoP verification happens at read time in
 	// ledger/leios's on-chain key provider, which is allowed to depend on
 	// ledger/leios's BLS primitives; this package is not (see
-	// internal/architecture/import_boundary_test.go). An invalid-PoP key is
+	// internal/architecture/tests_test.go). An invalid-PoP key is
 	// therefore excluded there, not here -- both layers still end up
 	// treating it as absent, matching upstream.
 	var leiosKeyPublic, leiosKeyPoP []byte

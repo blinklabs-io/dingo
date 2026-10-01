@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -1420,8 +1420,7 @@ func (a *NodeAdapter) drepByCredentialTag(
 	currentEpoch := a.ledgerState.CurrentEpoch()
 	// Fold in any active governance proposal's deposit escrowed to a return
 	// account delegating to this DRep, matching the deposit-inclusive tally
-	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694;
-	// blinklabs-io/dingo#4355).
+	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694).
 	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
 		db, nil, currentEpoch, 0,
 	)
@@ -1698,7 +1697,7 @@ func (a *NodeAdapter) DReps(
 		// return account delegating to a listed DRep (or AlwaysNoConfidence),
 		// matching the deposit-inclusive tally
 		// ledger/governance.LoadDRepVotingState uses for ratification
-		// (CIP-1694; blinklabs-io/dingo#4355). AlwaysAbstain never gains
+		// (CIP-1694). AlwaysAbstain never gains
 		// deposit power, so typePowers' AlwaysAbstain entry is untouched.
 		depositRefPower, depositNoConfidencePower, depositErr := governance.
 			ActiveProposalDepositDRepPower(db, txn, currentEpoch, 0)

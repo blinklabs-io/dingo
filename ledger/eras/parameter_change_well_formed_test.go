@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package eras
 
@@ -152,9 +152,8 @@ func requireNotRejectedBy(t *testing.T, err error, unwanted ...string) {
 	}
 }
 
-// TestValidateTxParameterChangeZeroFields covers dingo#4438: six
-// unconditional zero-valued fields, and the PV-gated AdaPerUtxoByte (PV10+)
-// and NOpt (PV11+) boundaries.
+// TestValidateTxParameterChangeZeroFields pins: six unconditional zero-valued
+// fields, and the PV-gated AdaPerUtxoByte (PV10+) and NOpt (PV11+) boundaries.
 func TestValidateTxParameterChangeZeroFields(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -316,7 +315,7 @@ func TestValidateTxParameterChangeZeroFields(t *testing.T) {
 	}
 }
 
-// TestValidateTxParameterChangeIntegerWidths covers dingo#4478: the exact
+// TestValidateTxParameterChangeIntegerWidths pins: the exact
 // maximum of each .size 2 and .size 4 field is accepted, maximum+1 rejected.
 func TestValidateTxParameterChangeIntegerWidths(t *testing.T) {
 	t.Parallel()
@@ -359,7 +358,7 @@ func TestValidateTxParameterChangeIntegerWidths(t *testing.T) {
 	}
 }
 
-// TestValidateTxParameterChangeDijkstraDomains covers dingo#4596: the
+// TestValidateTxParameterChangeDijkstraDomains pins: the
 // Dijkstra-only tags and the inherited Conway tags Dijkstra must not bypass.
 func TestValidateTxParameterChangeDijkstraDomains(t *testing.T) {
 	t.Parallel()
@@ -530,7 +529,7 @@ func TestValidateTxParameterChangeDijkstraDomains(t *testing.T) {
 	}
 }
 
-// TestValidateTxParameterChangeCostModelLanguageIDWidth covers dingo#4607:
+// TestValidateTxParameterChangeCostModelLanguageIDWidth pins that
 // a cost-model language ID above Word8 is rejected, 255 stays an accepted
 // unknown future language.
 func TestValidateTxParameterChangeCostModelLanguageIDWidth(t *testing.T) {

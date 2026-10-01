@@ -30,7 +30,7 @@ import "github.com/blinklabs-io/dingo/database/plugin/metadata"
 //
 // What these cannot show is that a narrowed interface works against a live
 // database. That is storagetest.RunMetadataStoreConformance, which every
-// provider package runs from its own conformance_test.go.
+// provider package runs from its own package tests.
 var (
 	_ metadata.MetadataStore = (*Store)(nil)
 

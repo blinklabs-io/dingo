@@ -76,7 +76,7 @@ type GovernanceProposal struct {
 	// cardano-ledger does not refund the deposit in the same epoch it detects
 	// expiry -- that happens one full epoch later, the same one-epoch delay
 	// ratification has before enactment. ExpiredEpoch/ExpiredSlot alone would
-	// collapse that delay, so the drop is tracked separately (dingo#4411).
+	// collapse that delay, so the drop is tracked separately.
 	DroppedEpoch *uint64
 	DroppedSlot  *uint64
 	// TxIndex is the proposal's position in the proposal submission order

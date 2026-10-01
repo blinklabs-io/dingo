@@ -228,7 +228,7 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 // newDingoStateManagerAt creates a sqlite-backed DingoStateManager rooted at
 // an explicit, caller-owned data directory. Used directly by tests that
 // close one manager and open a second at the same path to prove state
-// survives a restart (see state_manager_backend_test.go); NewDingoStateManager
+// survives a restart (see state_manager_test.go); NewDingoStateManager
 // uses it with a manager-owned temp directory.
 func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 	m, err := newDingoStateManager(realBackendOptions{
@@ -254,7 +254,7 @@ func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 // mysqlProcessDatabase's in state_manager_mysql.go), so an individual
 // manager's Close must not drop a resource a sibling manager elsewhere in
 // the same process may still be using -- that cleanup belongs to TestMain
-// (conformance_main_test.go), once, after every test in the process has
+// (conformance_postgres_test.go), once, after every test in the process has
 // finished.
 func (m *DingoStateManager) Close() error {
 	err := closeRealDatabase(m.db, m.host)
@@ -1456,7 +1456,7 @@ func (m *DingoStateManager) recordVotesInGovState(tx common.Transaction) {
 // enact it -- reusing dingo's production side-effect code without
 // re-deriving its ratification math. governance.ProcessEpoch is exercised
 // directly, end-to-end, by TestProcessEpochAgainstRealBackend in
-// state_manager_backend_test.go.
+// state_manager_test.go.
 func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 	m.currentEpoch = newEpoch
 	m.govState.CurrentEpoch = newEpoch
@@ -1587,7 +1587,7 @@ func (m *DingoStateManager) ratifyProposals(
 			// tally: a vector can carry the same yes-voter shape (one DRep,
 			// one SPO) as another vector that must NOT ratify once active
 			// proposal deposits are counted as part of the depositor's
-			// active voting stake (CIP-1694). See issue #4007.
+			// active voting stake (CIP-1694).
 			//
 			// This must run before the zero-explicit-vote guard below: a
 			// DRep or silent pool delegated AlwaysNoConfidence casts an
@@ -1686,13 +1686,13 @@ func (m *DingoStateManager) inConwayBootstrap() bool {
 // committeeTermsWithinLimit under production's own tests instead of a second,
 // hand-maintained copy of each -- an earlier revision duplicated the
 // threshold selection and bootstrap gate here, and the duplication itself
-// went untested and drifted (see PR #4333 review history).
+// went untested and drifted.
 //
 // The one thing this cannot delegate to ShouldRatify is the tally itself:
 // production's DRep voting-power query does not yet add a proposal's own
 // deposit to its return account's DRep voting power (CIP-1694 counts an
 // active proposal's deposit as part of the depositor's active voting stake).
-// That gap is tracked separately as issue #4355 -- it affects every
+// That gap affects every
 // DRep-gated action type's real ratification, not just these two.
 func (m *DingoStateManager) committeeActionRatified(
 	txn *database.Txn,
@@ -1924,8 +1924,8 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 // SPOYesStake/SPOTotalStake. There is no Conway-bootstrap branch here:
 // ShouldRatify itself refuses both action types outright during bootstrap
 // before ever reading this tally, so a bootstrap-specific adjustment to the
-// tally would never run (an earlier revision carried one that PR #4333
-// review found was already dead code for exactly this reason).
+// tally would never run (an earlier revision carried one that
+// was found to be dead code for exactly this reason).
 //
 // Active-proposal deposits are deliberately excluded from this tally: a
 // deposit raises the return account's DRep voting power, not the delegated

@@ -27,10 +27,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// The cross-fork continuation audit answers the question issue #3005 could not
-// answer from the failure site: when a block reaches the ledger spending an
-// input whose producer is nowhere on the local chain, which peer delivered that
-// body and which fork was the node following at the time?
+// The cross-fork continuation audit answers a question the failure site alone
+// cannot: when a block reaches the ledger spending
+// an input whose producer is nowhere on the local chain, which peer delivered
+// that body and which fork was the node following at the time?
 //
 // Cost and gating. A full per-input producer probe on every fetched body would
 // add a database round trip per input to the steady-state blockfetch path, so
@@ -434,7 +434,7 @@ func (w *continuationAuditWindow) producersAtOrBelow(
 // auditContinuationBlock) lags behind blockfetch. A wholesale replace would
 // discard the prior window's producedTxs for any such in-flight block,
 // reporting it as a missing producer the moment something after it is
-// audited under the new window (issue #4102).
+// audited under the new window.
 //
 // carryForwardProducedTxs decides which of the prior window's producers
 // survive that, and a producer survives only when both of these hold.
@@ -453,7 +453,7 @@ func (w *continuationAuditWindow) producersAtOrBelow(
 // above the point so their producers are re-recorded under the new window.
 // Producers at or below the point are untouched by the truncation, stay on
 // the chain, and are never re-fetched -- so nothing else would ever put them
-// back, and dropping them is what produced the false report in issue #4102.
+// back, and dropping them is what produced a false report during early replay.
 //
 // A membership read that fails establishes neither, so the rearm disarms
 // instead of publishing. The prior window's producers may still be on the
@@ -622,7 +622,7 @@ func (ls *LedgerState) carryForwardWindow(
 // It is a diagnostic only: it never rejects a block, because the cross-fork
 // splice it detects is prevented upstream in chain.Chain.rollbackPointBlock and
 // any body that still slips through must reach the ledger's own validation and
-// the #2973 / #3008 guards unchanged.
+// the replay-recovery guards unchanged.
 //
 // It is also skipped while block validation is off, which is how historical
 // catch-up runs: the splice this diagnoses is a live tip-band failure, and

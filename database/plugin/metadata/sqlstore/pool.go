@@ -149,7 +149,7 @@ func poolPositionPredicate(
 //
 // A nil `charged` means the era's deposit function could not compute an
 // amount, and a nil return carries that through so the column stores NULL
-// rather than an authoritative zero (dingo #3829). A carried-forward amount
+// rather than an authoritative zero. A carried-forward amount
 // may also be unknown when both deposit columns on the earlier row are NULL;
 // preserve that absence rather than turning unknown into zero.
 func poolRegistrationDepositHeld(
@@ -1606,7 +1606,7 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 // built from a stake snapshot captured at an earlier boundary, and a block's
 // header carries the key registered at that capture. Validating a header
 // against the current registration rejects every block the pool makes for the
-// rest of the epoch it rotated in (issue #3842).
+// rest of the epoch it rotated in.
 //
 // The selection is the same latest-certificate-wins ordering
 // GetActivePoolKeyHashesAtSlot uses -- later added_slot, then later block
@@ -2613,7 +2613,7 @@ WHERE ret.epoch = ?
 // it matches every retirement effective up to and including epoch rather than
 // only the one landing on it, and returns bare key hashes because no deposit
 // refund is being applied. See MetadataStore's doc comment for why the parity
-// checker needs the wider comparison (dingo #3925).
+// checker needs the wider comparison.
 //
 // "Same resolution" includes the synthetic-retirement key every
 // latest-retirement query in the tree shares. A reconcile retirement
@@ -2714,6 +2714,19 @@ func (s *Store) RestorePoolStateAtSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			// Captured before the delete below removes exactly these rows:
+			// restorePoolLatestOpCertSequence needs the set of pool_key_hash
+			// values that lose a sequence row to this rollback, and that set
+			// is unrecoverable from pool_opcert_sequence once the DELETE has
+			// run.
+			affectedOpCertPoolKeyHashes, err := queryPoolKeyHashesWithOpCertAfterSlot(
+				ctx,
+				db,
+				slot,
+			)
+			if err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(
 				ctx,
 				"DELETE FROM pool_opcert_sequence WHERE slot > ?",
@@ -2732,65 +2745,189 @@ WHERE NOT EXISTS (
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(ctx, `
-WITH ranked AS (
-    SELECT registration.pool_id, registration.pledge, registration.cost,
-           registration.margin, registration.vrf_key_hash,
-           registration.reward_account,
-           registration.reward_account_credential_tag,
-           registration.leios_key_public,
-           registration.leios_key_possession_proof,
-           ROW_NUMBER() OVER (
-               PARTITION BY registration.pool_id
-               ORDER BY registration.added_slot DESC,
-                        COALESCE(tx.block_index, 0) DESC,
-                        COALESCE(certs.cert_index, 0) DESC,
-                        registration.id DESC
-           ) rn
-    FROM pool_registration registration
-    LEFT JOIN certs ON certs.id = registration.certificate_id
-    LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
-    WHERE registration.added_slot <= ?
-)
-UPDATE pool
-SET pledge = (SELECT pledge FROM ranked
-              WHERE ranked.pool_id = pool.id AND rn = 1),
-    cost = (SELECT cost FROM ranked
-            WHERE ranked.pool_id = pool.id AND rn = 1),
-    margin = (SELECT margin FROM ranked
-              WHERE ranked.pool_id = pool.id AND rn = 1),
-    vrf_key_hash = (SELECT vrf_key_hash FROM ranked
-                    WHERE ranked.pool_id = pool.id AND rn = 1),
-    reward_account = (SELECT reward_account FROM ranked
-                      WHERE ranked.pool_id = pool.id AND rn = 1),
-    reward_account_credential_tag = (
-        SELECT reward_account_credential_tag FROM ranked
-        WHERE ranked.pool_id = pool.id AND rn = 1
-    ),
-    leios_key_public = (
-        SELECT leios_key_public FROM ranked
-        WHERE ranked.pool_id = pool.id AND rn = 1
-    ),
-    leios_key_possession_proof = (
-        SELECT leios_key_possession_proof FROM ranked
-        WHERE ranked.pool_id = pool.id AND rn = 1
-    )
-WHERE EXISTS (
-    SELECT 1 FROM ranked WHERE ranked.pool_id = pool.id AND rn = 1
-)`,
-				slot,
-			); err != nil {
+			if _, err := s.restorePoolDenormalizedFields(ctx, db, slot); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(ctx, `
+			_, err = s.restorePoolLatestOpCertSequence(
+				ctx,
+				db,
+				affectedOpCertPoolKeyHashes,
+			)
+			return err
+		},
+	)
+}
+
+// queryPoolKeyHashesWithOpCertAfterSlot returns the distinct pool_key_hash
+// values with a pool_opcert_sequence row above slot -- exactly the rows
+// RestorePoolStateAtSlot's own DELETE FROM pool_opcert_sequence is about to
+// remove. Callers must read this before issuing that delete.
+func queryPoolKeyHashesWithOpCertAfterSlot(
+	ctx context.Context,
+	db queryer,
+	slot uint64,
+) ([][]byte, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		"SELECT DISTINCT pool_key_hash FROM pool_opcert_sequence WHERE slot > ?",
+		slot,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hashes [][]byte
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, hash)
+	}
+	return hashes, rows.Err()
+}
+
+// restorePoolDenormalizedFields reverts pledge/cost/margin/VRF/reward-account/
+// leios-key state on every pool with a discarded registration above slot,
+// restoring each from its surviving prior registration. It returns the
+// number of pool rows the UPDATE actually touched, both to let a caller
+// observe scope (the "affected" CTE below is what keeps this proportional to
+// the rollback rather than to the whole pool table) and to satisfy
+// database/sql's normal ExecContext contract.
+//
+// The affected CTE restricts ranked -- and therefore the UPDATE -- to pools
+// with at least one registration strictly above slot; a pool never
+// re-registered past the rollback target has nothing to revert and is left
+// untouched. Both restrictions matter together: narrowing ranked's row count
+// without also collapsing the eight independent correlated-subquery SET
+// clauses the original statement used still left SQLite building a fresh
+// scan of ranked per column per row, so the fix is this single-join UPDATE
+// FROM/JOIN form, not the scope restriction alone.
+//
+// Preserve the ROW_NUMBER() tie-break order verbatim
+// (added_slot DESC, block_index DESC, cert_index DESC, registration.id DESC):
+// multiple certificates can land in the same slot, and cert_index alone
+// cannot disambiguate across transactions in the same block (see this
+// package's cert-ordering invariant).
+func (s *Store) restorePoolDenormalizedFields(
+	ctx context.Context,
+	db queryer,
+	slot uint64,
+) (int64, error) {
+	result, err := db.ExecContext(
+		ctx,
+		restorePoolDenormalizedFieldsQuery(s.dialect),
+		slot,
+		slot,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// restorePoolDenormalizedFieldsQuery builds restorePoolDenormalizedFields'
+// statement for dialect, factored out from that method so tests can inspect
+// the assembled SQL (dialect-specific UPDATE shape, metrics classification)
+// without a live database connection.
+func restorePoolDenormalizedFieldsQuery(dialect Dialect) string {
+	return `
+-- name: RestorePoolStateAtSlot :execrows
+WITH affected AS (
+    SELECT DISTINCT pool_id
+    FROM pool_registration
+    WHERE added_slot > ?
+),
+latest AS (
+    SELECT pool_id, pledge, cost, margin, vrf_key_hash, reward_account,
+           reward_account_credential_tag, leios_key_public,
+           leios_key_possession_proof
+    FROM (
+        SELECT registration.pool_id, registration.pledge, registration.cost,
+               registration.margin, registration.vrf_key_hash,
+               registration.reward_account,
+               registration.reward_account_credential_tag,
+               registration.leios_key_public,
+               registration.leios_key_possession_proof,
+               ROW_NUMBER() OVER (
+                   PARTITION BY registration.pool_id
+                   ORDER BY registration.added_slot DESC,
+                            COALESCE(tx.block_index, 0) DESC,
+                            COALESCE(certs.cert_index, 0) DESC,
+                            registration.id DESC
+               ) rn
+        FROM pool_registration registration
+        JOIN affected ON affected.pool_id = registration.pool_id
+        LEFT JOIN certs ON certs.id = registration.certificate_id
+        LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
+        WHERE registration.added_slot <= ?
+    ) ranked
+    WHERE rn = 1
+)
+` + dialect.UpdateFromJoinSQL(
+		"pool",
+		"latest",
+		"latest.pool_id = pool.id",
+		[]JoinAssignment{
+			{Column: "pledge", Expr: "latest.pledge"},
+			{Column: "cost", Expr: "latest.cost"},
+			{Column: "margin", Expr: "latest.margin"},
+			{Column: "vrf_key_hash", Expr: "latest.vrf_key_hash"},
+			{Column: "reward_account", Expr: "latest.reward_account"},
+			{
+				Column: "reward_account_credential_tag",
+				Expr:   "latest.reward_account_credential_tag",
+			},
+			{Column: "leios_key_public", Expr: "latest.leios_key_public"},
+			{
+				Column: "leios_key_possession_proof",
+				Expr:   "latest.leios_key_possession_proof",
+			},
+		},
+	)
+}
+
+// restorePoolLatestOpCertSequence restores latest_op_cert_sequence only for
+// the pools named by poolKeyHashes -- the ones whose pool_opcert_sequence
+// rows RestorePoolStateAtSlot's DELETE actually removed -- rather than
+// recomputing it for every pool in the table. It returns the total number of
+// pool rows updated across all chunks.
+//
+// Chunked over dialect.ParameterLimit(): an unbounded disaster-recovery
+// truncate (database/lifecycle) can affect far more pools in one call than a
+// live, security-parameter-bounded rollback ever would.
+func (s *Store) restorePoolLatestOpCertSequence(
+	ctx context.Context,
+	db queryer,
+	poolKeyHashes [][]byte,
+) (int64, error) {
+	var total int64
+	for start := 0; start < len(poolKeyHashes); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(poolKeyHashes))
+		batch := poolKeyHashes[start:end]
+		args := make([]any, len(batch))
+		for i, hash := range batch {
+			args[i] = hash
+		}
+		result, err := db.ExecContext(ctx, `
 UPDATE pool
 SET latest_op_cert_sequence = COALESCE((
     SELECT MAX(sequence) FROM pool_opcert_sequence sequence
     WHERE sequence.pool_key_hash = pool.pool_key_hash
-), 0)`)
-			return err
-		},
-	)
+), 0)
+WHERE pool_key_hash IN (`+bindPlaceholders(len(batch))+`)`,
+			args...,
+		)
+		if err != nil {
+			return total, err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
 }
 
 func ledgerPoolRelay(

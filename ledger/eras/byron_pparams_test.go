@@ -111,9 +111,9 @@ func TestByronProtocolParametersApplyUpdate(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_AdoptedParameters covers #4379 and #4419: block
-// application validates against the parameters adopted for the block's
-// epoch, which it passes as pparams, not the genesis ones.
+// TestValidateTxByron_AdoptedParameters pins: block application validates
+// against the parameters adopted for the block's epoch, which it passes as
+// pparams, not the genesis ones.
 func TestValidateTxByron_AdoptedParameters(t *testing.T) {
 	t.Parallel()
 	genesis, err := NewByronProtocolParametersFromGenesis(mainnetByronGenesis())

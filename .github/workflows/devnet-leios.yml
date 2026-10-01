@@ -1,0 +1,42 @@
+name: devnet-leios
+
+# Runs the Dijkstra/Leios producer-to-peer DevNet scenario. It needs Docker and
+# several minutes of chain time, so it stays off the pull-request and merge
+# path and runs on a schedule or on demand.
+on:
+  schedule:
+    - cron: '35 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: devnet-leios
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  devnet-leios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEVNET_ARTIFACT_DIR: ${{ github.workspace }}/devnet-artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.x
+          cache: false
+      - name: Run Leios producer-to-peer scenario
+        run: ./internal/test/devnet/run-tests.sh --leios
+      # run-tests.sh keeps DEVNET_ARTIFACT_DIR only when the run fails.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 https://github.com/actions/upload-artifact/releases/tag/v7.0.1
+        with:
+          name: devnet-leios-artifacts
+          path: ${{ env.DEVNET_ARTIFACT_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14

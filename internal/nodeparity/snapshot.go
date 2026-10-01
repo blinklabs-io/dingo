@@ -78,7 +78,7 @@ type StakeDistributionEntry struct {
 // (Dingo or a real cardano-node) answers directly.
 //
 // point pins the session to a specific historical block instead of
-// whatever's live when each individual query runs (blinklabs-io/dingo#382)
+// whatever's live when each individual query runs
 // -- the whole-UTxO walk can take on the order of minutes against Dingo's
 // disk-backed store, long enough for a live testnet's tip to advance many
 // blocks before it finishes. A real cardano-node's Acquire(point) genuinely
@@ -147,7 +147,7 @@ func querySnapshot(
 // when the pinned point equals its live tip, never true for a per-block
 // walk that is behind tip by design (see
 // ledger/queries_stakedistribution.go's queryShelleyStakeDistribution;
-// blinklabs-io/dingo#1900 incremental-mode audit finding) -- can reuse just
+// incremental-mode audit finding) -- can reuse just
 // this half without also querying stake distribution.
 func queryProtocolParams(
 	client *localstatequery.Client,

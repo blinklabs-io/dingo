@@ -20,14 +20,19 @@ import (
 	"database/sql"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -553,4 +558,521 @@ func TestPoolDepositHeldSameBlockRetirementsOrderByBlockIndex(t *testing.T) {
 		uint64(500),
 		depositHeldRefund(t, store, pool, 5, 5_000),
 	)
+}
+
+// poolMetricValue returns the value reported for metric name under
+// pool="write"|"read", or -1 if no such series has been registered/gathered
+// yet. It reads whichever of GetGauge/GetCounter the family actually
+// carries, since dingo_database_sql_pool_* mixes GaugeFuncs
+// (OpenConnections/InUse/Idle/MaxOpenConnections) and CounterFuncs
+// (WaitCount/WaitDuration) under this one helper.
+func poolMetricValue(
+	t *testing.T,
+	reg *prometheus.Registry,
+	name, pool string,
+) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			var gotPool string
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "pool" {
+					gotPool = label.GetValue()
+				}
+			}
+			if gotPool != pool {
+				continue
+			}
+			if g := metric.GetGauge(); g != nil {
+				return g.GetValue()
+			}
+			if c := metric.GetCounter(); c != nil {
+				return c.GetValue()
+			}
+		}
+	}
+	return -1
+}
+
+// TestSQLPoolMetricsNilWhenNoRegistry proves the pool metrics are a true
+// no-op with no PromRegistry configured, the same guarantee
+// TestSQLOperationsCounterNilWhenNoRegistry establishes for the
+// operations counter/duration histogram: newSQLPoolMetrics must not panic
+// or otherwise misbehave when reg is nil, since every provider constructs
+// its Store this way whenever metrics are disabled.
+func TestSQLPoolMetricsNilWhenNoRegistry(t *testing.T) {
+	t.Parallel()
+	db, err := OpenDB(
+		"sqlite",
+		fmt.Sprintf(
+			"file:pool_metrics_nil_registry_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+		"sqlite",
+		false,
+	)
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	store, err := New(Config{
+		WriteDB:         db,
+		Dialect:         SQLiteDialect(),
+		Migrations:      registry,
+		MigrationLocker: migrations.NewProcessLocker(),
+		// PromRegistry deliberately left nil.
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	// Reaching here without a panic from newSQLPoolMetrics/
+	// safeRegisterGaugeFunc/safeRegisterCounterFunc is most of the
+	// assertion. WritePoolStats/ReadPoolStats must also still work
+	// directly, independent of whether anything is registered against them.
+	stats := store.WritePoolStats()
+	require.Equal(t, 1, stats.MaxOpenConnections)
+}
+
+// TestWritePoolWaitMetricsReflectContention is the regression test this
+// change exists for: it proves dingo_database_sql_pool_wait_count_total and
+// dingo_database_sql_pool_wait_duration_seconds_total (pool="write") report
+// real contention on the single write connection, not just a registered
+// metric sitting at its zero value.
+//
+// It holds writeDB's one and only connection open in an uncommitted
+// transaction (mirroring production's SetMaxOpenConns(1) constraint, which
+// newMigratedSQLiteStoreWithRegistry already applies), starts a second
+// write from another goroutine that can only proceed once that connection
+// is freed, confirms via WritePoolStats that database/sql actually recorded
+// a wait before releasing the first transaction, and confirms the second
+// write was actually blocked (not merely slow) by checking it had not yet
+// completed. It then asserts the *gathered Prometheus metrics* -- not just
+// the underlying sql.DBStats -- increased, since a bug that registered the
+// gauges/counters but wired the wrong statsFn, wrong pool, or wrong label
+// would still leave sql.DBStats itself correct.
+func TestWritePoolWaitMetricsReflectContention(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+	ctx := context.Background()
+
+	require.Equal(
+		t, 1, store.WritePoolStats().MaxOpenConnections,
+		"the write pool must be capped at one connection for this test to "+
+			"actually exercise contention rather than two connections "+
+			"running concurrently",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		poolMetricValue(t, reg, "dingo_database_sql_pool_max_open_connections", "write"),
+	)
+
+	baselineWaitCount := poolMetricValue(
+		t, reg, "dingo_database_sql_pool_wait_count_total", "write",
+	)
+	baselineWaitDuration := poolMetricValue(
+		t, reg, "dingo_database_sql_pool_wait_duration_seconds_total", "write",
+	)
+
+	// Hold the pool's only connection open in an uncommitted transaction.
+	holder, err := store.writeDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = holder.Rollback()
+	})
+
+	// A second write has no free connection to acquire until holder
+	// releases one, so it must block in database/sql's pool wait path.
+	done := make(chan error, 1)
+	go func() {
+		_, execErr := store.writeDB.ExecContext(
+			ctx,
+			"INSERT INTO sync_state (sync_key, value) VALUES (?, ?)",
+			"pool_metrics_test_key", "1",
+		)
+		done <- execErr
+	}()
+
+	// Confirm database/sql actually recorded the second call waiting,
+	// rather than racing it to completion.
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return poolMetricValue(
+				t, reg, "dingo_database_sql_pool_wait_count_total", "write",
+			) > baselineWaitCount
+		},
+		testutil.AsyncWait,
+		"expected dingo_database_sql_pool_wait_count_total{pool=\"write\"} "+
+			"to increase once the second write starts waiting for the held "+
+			"connection",
+	)
+
+	// The blocked write must still be pending: it cannot have completed
+	// while the only connection is held by holder.
+	select {
+	case execErr := <-done:
+		t.Fatalf(
+			"the second write completed (err=%v) before the holding "+
+				"transaction released the pool's only connection -- it "+
+				"was never actually blocked",
+			execErr,
+		)
+	default:
+	}
+
+	// Hold the connection a little longer once the wait is confirmed
+	// queued, so the blocked write accumulates a duration large enough to
+	// survive the host's clock resolution. Releasing immediately made
+	// dingo_database_sql_pool_wait_duration_seconds_total read back as
+	// exactly 0 on Windows CI: WaitCount had already incremented (proving
+	// database/sql queued the request), but the queued-to-released window
+	// was short enough that time.Since(waitStart) rounded to zero on that
+	// platform's timer.
+	time.Sleep(50 * time.Millisecond)
+
+	// Release the held connection so the waiting write can proceed.
+	require.NoError(t, holder.Rollback())
+
+	execErr := testutil.RequireReceive(
+		t, done, testutil.AsyncWait,
+		"expected the previously-blocked write to complete once the "+
+			"holding transaction released the connection",
+	)
+	require.NoError(t, execErr)
+
+	require.Greater(
+		t,
+		poolMetricValue(t, reg, "dingo_database_sql_pool_wait_count_total", "write"),
+		baselineWaitCount,
+		"dingo_database_sql_pool_wait_count_total{pool=\"write\"} must "+
+			"reflect the wait the blocked write just experienced",
+	)
+	require.Greater(
+		t,
+		poolMetricValue(t, reg, "dingo_database_sql_pool_wait_duration_seconds_total", "write"),
+		baselineWaitDuration,
+		"dingo_database_sql_pool_wait_duration_seconds_total{pool=\"write\"} "+
+			"must reflect non-zero time spent waiting",
+	)
+}
+
+// installPoolAuditTrigger attaches an AFTER UPDATE OF <columns> trigger to
+// the pool table that records every row id the update statement actually
+// names in its SET list -- SQLite fires an "UPDATE OF column-list" trigger
+// whenever the statement's SET clause mentions one of the named columns, even
+// when the assigned value is unchanged, which is exactly the "this row was
+// rewritten" behavior RestorePoolStateAtSlot's scoping is supposed to avoid
+// for an unaffected pool. It must be installed only after every fixture
+// write that itself updates pool (ImportPool's ON CONFLICT DO UPDATE path,
+// UpdatePoolOpCertSequence's second statement) has already run, or setup
+// itself pollutes the audit table. Returns a reader that drains the distinct
+// touched pool ids in ascending order.
+func installPoolAuditTrigger(
+	t *testing.T,
+	store *Store,
+	name string,
+	columns ...string,
+) func() []int64 {
+	t.Helper()
+	ctx := context.Background()
+	auditTable := "test_pool_audit_" + name
+	_, err := store.writeDB.ExecContext(
+		ctx,
+		"CREATE TABLE "+auditTable+" (pool_id INTEGER)",
+	)
+	require.NoError(t, err)
+	_, err = store.writeDB.ExecContext(ctx, fmt.Sprintf(
+		"CREATE TRIGGER trg_%s AFTER UPDATE OF %s ON pool "+
+			"BEGIN INSERT INTO %s (pool_id) VALUES (NEW.id); END",
+		name, strings.Join(columns, ", "), auditTable,
+	))
+	require.NoError(t, err)
+	return func() []int64 {
+		rows, err := store.writeDB.QueryContext(
+			ctx,
+			"SELECT DISTINCT pool_id FROM "+auditTable+" ORDER BY pool_id",
+		)
+		require.NoError(t, err)
+		defer rows.Close()
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
+	}
+}
+
+// poolIDForHash reads back the surrogate id ImportPool assigned to hash, so
+// a test can name the exact row an audit trigger is expected (or not
+// expected) to record.
+func poolIDForHash(t *testing.T, store *Store, hash []byte) int64 {
+	t.Helper()
+	var id int64
+	err := store.writeDB.QueryRowContext(
+		context.Background(),
+		"SELECT id FROM pool WHERE pool_key_hash = ?",
+		hash,
+	).Scan(&id)
+	require.NoError(t, err)
+	return id
+}
+
+// TestRestorePoolStateAtSlotScopesDenormalizedUpdateToAffectedPools is the
+// scope regression test for the O(pool_count) UPDATE RestorePoolStateAtSlot
+// used to issue on every rollback: it registers five pools that are never
+// re-registered past the truncate target (nothing to revert) alongside one
+// pool that is, and asserts the denormalized-field UPDATE's SET clause names
+// only that one pool's row -- not merely that the final values come out
+// right, which the pre-existing TestTruncateAfterSlotRestoresPoolDenormalizedFields
+// (database/truncate_test.go) already covers.
+//
+// It also checks every one of the eight denormalized columns
+// restorePoolDenormalizedFields reverts, with distinct before/after values
+// for each, not just pledge/cost/VRF/reward-account: a swapped assignment in
+// the rewritten single-join SET list (for example margin sourced from the
+// wrong CTE column) would go uncovered by checking only a subset.
+func TestRestorePoolStateAtSlotScopesDenormalizedUpdateToAffectedPools(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	const targetSlot = 1500
+
+	seedUnaffectedPool := func(marker byte) []byte {
+		hash := bytes.Repeat([]byte{marker}, 28)
+		pool := &models.Pool{
+			PoolKeyHash:   hash,
+			Pledge:        100,
+			Cost:          200,
+			Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+			VrfKeyHash:    bytes.Repeat([]byte{0xa0}, 32),
+			RewardAccount: bytes.Repeat([]byte{0xb0}, 28),
+		}
+		reg := &models.PoolRegistration{
+			PoolKeyHash:   hash,
+			AddedSlot:     1000,
+			Pledge:        pool.Pledge,
+			Cost:          pool.Cost,
+			Margin:        pool.Margin,
+			VrfKeyHash:    pool.VrfKeyHash,
+			RewardAccount: pool.RewardAccount,
+		}
+		require.NoError(t, store.ImportPool(pool, reg, nil))
+		return hash
+	}
+	for _, marker := range []byte{0x10, 0x11, 0x12, 0x13, 0x14} {
+		seedUnaffectedPool(marker)
+	}
+
+	// The one affected pool: an initial registration below the target,
+	// discarded by a later re-registration above it that changes every
+	// denormalized field.
+	affectedHash := bytes.Repeat([]byte{0x99}, 28)
+	before := &models.Pool{
+		PoolKeyHash:                affectedHash,
+		Pledge:                     100,
+		Cost:                       200,
+		Margin:                     &types.Rat{Rat: big.NewRat(1, 100)},
+		VrfKeyHash:                 bytes.Repeat([]byte{0xa1}, 32),
+		RewardAccount:              bytes.Repeat([]byte{0xb1}, 28),
+		RewardAccountCredentialTag: 0,
+		LeiosKeyPublic:             bytes.Repeat([]byte{0xc1}, 96),
+		LeiosKeyPossessionProof:    bytes.Repeat([]byte{0xd1}, 48),
+	}
+	beforeReg := &models.PoolRegistration{
+		PoolKeyHash:                affectedHash,
+		AddedSlot:                  1000,
+		Pledge:                     before.Pledge,
+		Cost:                       before.Cost,
+		Margin:                     before.Margin,
+		VrfKeyHash:                 before.VrfKeyHash,
+		RewardAccount:              before.RewardAccount,
+		RewardAccountCredentialTag: before.RewardAccountCredentialTag,
+		LeiosKeyPublic:             before.LeiosKeyPublic,
+		LeiosKeyPossessionProof:    before.LeiosKeyPossessionProof,
+	}
+	require.NoError(t, store.ImportPool(before, beforeReg, nil))
+	affectedID := poolIDForHash(t, store, affectedHash)
+
+	after := &models.Pool{
+		PoolKeyHash:                affectedHash,
+		Pledge:                     999,
+		Cost:                       888,
+		Margin:                     &types.Rat{Rat: big.NewRat(2, 100)},
+		VrfKeyHash:                 bytes.Repeat([]byte{0xa2}, 32),
+		RewardAccount:              bytes.Repeat([]byte{0xb2}, 28),
+		RewardAccountCredentialTag: 1,
+		LeiosKeyPublic:             bytes.Repeat([]byte{0xc2}, 96),
+		LeiosKeyPossessionProof:    bytes.Repeat([]byte{0xd2}, 48),
+	}
+	afterReg := &models.PoolRegistration{
+		PoolKeyHash:                affectedHash,
+		AddedSlot:                  2000,
+		Pledge:                     after.Pledge,
+		Cost:                       after.Cost,
+		Margin:                     after.Margin,
+		VrfKeyHash:                 after.VrfKeyHash,
+		RewardAccount:              after.RewardAccount,
+		RewardAccountCredentialTag: after.RewardAccountCredentialTag,
+		LeiosKeyPublic:             after.LeiosKeyPublic,
+		LeiosKeyPossessionProof:    after.LeiosKeyPossessionProof,
+	}
+	require.NoError(t, store.ImportPool(after, afterReg, nil))
+
+	// Installed only now: both ImportPool calls above included a real
+	// UPDATE (the ON CONFLICT DO UPDATE path), which would otherwise land
+	// in the audit table before RestorePoolStateAtSlot ever runs.
+	readAudit := installPoolAuditTrigger(
+		t, store, "denorm",
+		"pledge", "cost", "margin", "vrf_key_hash", "reward_account",
+		"reward_account_credential_tag", "leios_key_public",
+		"leios_key_possession_proof",
+	)
+
+	require.NoError(t, store.RestorePoolStateAtSlot(targetSlot, nil))
+
+	require.Equal(
+		t,
+		[]int64{affectedID},
+		readAudit(),
+		"only the pool with a discarded post-target registration may have "+
+			"its denormalized fields rewritten by RestorePoolStateAtSlot",
+	)
+
+	restored, err := store.GetPool(lcommon.PoolKeyHash(affectedHash), true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(100), uint64(restored.Pledge))
+	require.Equal(t, uint64(200), uint64(restored.Cost))
+	require.Equal(t, big.NewRat(1, 100).String(), restored.Margin.String())
+	require.Equal(t, before.VrfKeyHash, restored.VrfKeyHash)
+	require.Equal(t, before.RewardAccount, restored.RewardAccount)
+	require.Equal(
+		t,
+		before.RewardAccountCredentialTag,
+		restored.RewardAccountCredentialTag,
+	)
+	require.Equal(t, before.LeiosKeyPublic, restored.LeiosKeyPublic)
+	require.Equal(
+		t,
+		before.LeiosKeyPossessionProof,
+		restored.LeiosKeyPossessionProof,
+	)
+}
+
+// seedPoolWithSingleRegistration creates a minimally valid pool with one
+// registration at addedSlot, for tests that only care about
+// pool_opcert_sequence scoping and not about the pool's own denormalized
+// fields.
+func seedPoolWithSingleRegistration(
+	t *testing.T,
+	store *Store,
+	hash []byte,
+	addedSlot uint64,
+) {
+	t.Helper()
+	pool := &models.Pool{
+		PoolKeyHash:   hash,
+		Pledge:        1,
+		Cost:          1,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		VrfKeyHash:    bytes.Repeat([]byte{0xaa}, 32),
+		RewardAccount: bytes.Repeat([]byte{0xbb}, 28),
+	}
+	reg := &models.PoolRegistration{
+		PoolKeyHash:   hash,
+		AddedSlot:     addedSlot,
+		Pledge:        pool.Pledge,
+		Cost:          pool.Cost,
+		Margin:        pool.Margin,
+		VrfKeyHash:    pool.VrfKeyHash,
+		RewardAccount: pool.RewardAccount,
+	}
+	require.NoError(t, store.ImportPool(pool, reg, nil))
+}
+
+// TestRestorePoolStateAtSlotScopesOpCertSequenceToAffectedPools is the scope
+// regression test for latest_op_cert_sequence's matching bug: it covers a
+// pool whose pool_opcert_sequence rows are entirely below the truncate
+// target (never touched), one that reverts to a surviving earlier sequence,
+// and one whose only sequence row is discarded entirely (falls back to 0 via
+// COALESCE) -- asserting in each case which pool ids the UPDATE's SET clause
+// actually named, not just the pools' final values.
+func TestRestorePoolStateAtSlotScopesOpCertSequenceToAffectedPools(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	const targetSlot = 1500
+
+	untouchedHash := bytes.Repeat([]byte{0x21}, 28)
+	seedPoolWithSingleRegistration(t, store, untouchedHash, 1000)
+	require.NoError(t, store.UpdatePoolOpCertSequence(
+		lcommon.PoolKeyHash(untouchedHash), 3, 500, nil,
+	))
+
+	revertHash := bytes.Repeat([]byte{0x22}, 28)
+	seedPoolWithSingleRegistration(t, store, revertHash, 1000)
+	require.NoError(t, store.UpdatePoolOpCertSequence(
+		lcommon.PoolKeyHash(revertHash), 1, 500, nil,
+	))
+	require.NoError(t, store.UpdatePoolOpCertSequence(
+		lcommon.PoolKeyHash(revertHash), 5, 2000, nil,
+	))
+
+	zeroHash := bytes.Repeat([]byte{0x23}, 28)
+	seedPoolWithSingleRegistration(t, store, zeroHash, 1000)
+	require.NoError(t, store.UpdatePoolOpCertSequence(
+		lcommon.PoolKeyHash(zeroHash), 9, 2000, nil,
+	))
+
+	revertID := poolIDForHash(t, store, revertHash)
+	zeroID := poolIDForHash(t, store, zeroHash)
+
+	// Installed only now: UpdatePoolOpCertSequence's own second statement is
+	// a real UPDATE of latest_op_cert_sequence, which would otherwise be
+	// recorded by the trigger during setup above.
+	readAudit := installPoolAuditTrigger(
+		t, store, "opcert", "latest_op_cert_sequence",
+	)
+
+	require.NoError(t, store.RestorePoolStateAtSlot(targetSlot, nil))
+
+	require.ElementsMatch(
+		t,
+		[]int64{revertID, zeroID},
+		readAudit(),
+		"only pools whose pool_opcert_sequence rows were actually deleted "+
+			"by the truncate may have latest_op_cert_sequence rewritten",
+	)
+
+	revertPool, err := store.GetPool(lcommon.PoolKeyHash(revertHash), true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), revertPool.LatestOpCertSequence,
+		"must revert to the surviving pre-truncate sequence")
+
+	zeroPool, err := store.GetPool(lcommon.PoolKeyHash(zeroHash), true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), zeroPool.LatestOpCertSequence,
+		"must fall back to 0 via COALESCE when every sequence row is discarded")
+
+	untouchedPool, err := store.GetPool(
+		lcommon.PoolKeyHash(untouchedHash), true, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), untouchedPool.LatestOpCertSequence,
+		"a pool with no discarded op-cert rows must be left exactly as it was")
 }

@@ -16,6 +16,8 @@ package ledger
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"math/big"
 	"strings"
 	"testing"
@@ -24,10 +26,80 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
-// TestLedgerProcessBlockByronAdoptedFeePolicy covers #4419 through block
+// processByronBlockWithPParams applies one Byron block holding tx through
+// ledgerProcessBlock, validating it against pparams as block application
+// does with the parameters adopted for the block's epoch.
+func processByronBlockWithPParams(
+	t *testing.T,
+	db *database.Database,
+	nodeConfig *cardano.CardanoNodeConfig,
+	tx lcommon.Transaction,
+	pparams *eras.ByronProtocolParameters,
+) error {
+	t.Helper()
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ByronEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: nodeConfig,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			cbor:   []byte{0x80},
+			slot:   1,
+			number: 1,
+			era:    byron.EraByron,
+		},
+		cbor: []byte{0x82, 0x80, 0x80},
+		txs:  []lcommon.Transaction{tx},
+	}
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  1,
+				ByteLength: uint32(len(tx.Cbor())), // #nosec G115
+			},
+		},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	for _, utxo := range tx.Produced() {
+		offsets.UtxoOffsets[database.UtxoRef{
+			TxId:      txHash,
+			OutputIdx: utxo.Id.Index(),
+		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
+	}
+	return db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
+			block,
+			true,
+			false,
+			false,
+			nil,
+			envelopeParent{origin: true},
+			offsets,
+			eras.ByronEraDesc,
+			pparams,
+			nil,
+			0,
+			0,
+			false,
+		)
+		return err
+	})
+}
+
+// TestLedgerProcessBlockByronAdoptedFeePolicy covers through block
 // application: a real, signed Byron transaction paying a 200 lovelace fee is
 // judged by the fee policy adopted for the block, which ledgerProcessBlock
 // receives as pparams, and not by the genesis policy. Each case changes the

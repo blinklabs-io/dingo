@@ -63,8 +63,7 @@ func requireAscending(t *testing.T, got []int) {
 // events published to one event type from one goroutine reach a subscriber in
 // publish order. PublishAsync cannot promise this because AsyncWorkerPoolSize
 // workers drain the shared queue concurrently and race each other into
-// Publish; a single 200-event run reordered 3-8 of them. See
-// blinklabs-io/dingo#2287.
+// Publish; a single 200-event run reordered 3-8 of them.
 func TestPublishOrderedPreservesPublisherOrder(t *testing.T) {
 	t.Parallel()
 

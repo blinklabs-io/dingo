@@ -430,8 +430,8 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
 	require.Equal(t, uint64(1_000_000), result.Incentives)
 	// The pool has no BlocksProduced set, so it made zero blocks this epoch:
 	// it earns nothing at every decentralization value, matching
-	// mkPoolRewardInfo's Left (dingo#3978). The whole available pot falls
-	// through to reserves as undistributed.
+	// mkPoolRewardInfo's Left. The whole available pot falls through to
+	// reserves as undistributed.
 	require.Equal(t, uint64(0), result.EffectiveRewards)
 	require.Equal(t, uint64(1_000_000), result.Undistributed)
 	require.Equal(t, uint64(100_000_000), result.UpdatedPots.Reserves)
@@ -1343,7 +1343,7 @@ func TestApparentPerformanceHonorsDecentralizationThreshold(t *testing.T) {
 // construction entirely) whenever a pool made no blocks in the epoch -
 // Cardano.Ledger.Shelley.Rewards.hs, mkPoolRewardInfo. apparentPerformance
 // alone does not encode that rule: it returns 1 once d >= 4/5 regardless of
-// blocksProduced, matching mkApparentPerformance exactly (dingo#3978), so a
+// blocksProduced, matching mkApparentPerformance exactly, so a
 // pool with zero blocks earned the pool's optimalReward instead of nothing.
 func TestCalculatePoolRewardZeroBlocksEarnsNothing(t *testing.T) {
 	t.Parallel()
