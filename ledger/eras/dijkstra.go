@@ -592,6 +592,12 @@ func dijkstraReferenceInputOverlap(
 	return nil, false
 }
 
+// ErrDijkstraEvaluationUnsupported reports a Dijkstra transaction whose
+// scripts EvaluateTxDijkstra cannot evaluate yet.
+var ErrDijkstraEvaluationUnsupported = errors.New(
+	"dijkstra transaction evaluation unsupported",
+)
+
 func EvaluateTxDijkstra(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
@@ -601,5 +607,83 @@ func EvaluateTxDijkstra(
 	if !ok {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
+	if err := checkDijkstraEvaluationSupported(tx, ls); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	return EvaluateTxConway(tx, ls, &tmpPparams.ConwayProtocolParameters)
+}
+
+// checkDijkstraEvaluationSupported refuses transactions that EvaluateTxConway
+// would mis-evaluate. It sees only the top-level redeemers and the Plutus
+// V1-V3 scripts, so it would return an empty result for a sub-transaction
+// redeemer, and fail with an unrelated message for a guarding redeemer or a
+// Plutus V4 script. Evaluating them needs the per-level script context that
+// gouroboros builds but does not export, and the result map is keyed by
+// (tag, index), which cannot tell redeemers of different levels apart.
+func checkDijkstraEvaluationSupported(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+) error {
+	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
+	if !ok || dijkstraTx == nil {
+		return nil
+	}
+	for index, sub := range dijkstraTx.Body.TxSubTransactions.Items() {
+		if sub.WitnessSet.Redeemers() != nil {
+			for range sub.WitnessSet.Redeemers().Iter() {
+				return fmt.Errorf(
+					"%w: redeemer in sub-transaction %d",
+					ErrDijkstraEvaluationUnsupported,
+					index,
+				)
+			}
+		}
+		if len(sub.WitnessSet.PlutusV4Scripts()) > 0 {
+			return fmt.Errorf(
+				"%w: Plutus V4 script in sub-transaction %d",
+				ErrDijkstraEvaluationUnsupported,
+				index,
+			)
+		}
+	}
+	if redeemers := dijkstraTx.WitnessSet.Redeemers(); redeemers != nil {
+		for key := range redeemers.Iter() {
+			if key.Tag == lcommon.RedeemerTagGuarding {
+				return fmt.Errorf(
+					"%w: guarding redeemer %d",
+					ErrDijkstraEvaluationUnsupported,
+					key.Index,
+				)
+			}
+		}
+	}
+	if len(dijkstraTx.WitnessSet.PlutusV4Scripts()) > 0 {
+		return fmt.Errorf(
+			"%w: Plutus V4 script",
+			ErrDijkstraEvaluationUnsupported,
+		)
+	}
+	if ls == nil {
+		return nil
+	}
+	inputs, referenceInputs, err := resolveDijkstraScriptLevelInputs(
+		&dijkstraTx.Body,
+		ls,
+	)
+	if err != nil {
+		// Input resolution failures are reported by the evaluation itself.
+		return nil
+	}
+	for _, utxo := range script.ConcatResolvedInputs(inputs, referenceInputs) {
+		if utxo.Output == nil {
+			continue
+		}
+		if _, ok := utxo.Output.ScriptRef().(lcommon.PlutusV4Script); ok {
+			return fmt.Errorf(
+				"%w: Plutus V4 reference script",
+				ErrDijkstraEvaluationUnsupported,
+			)
+		}
+	}
+	return nil
 }
