@@ -387,42 +387,54 @@ func buildEndorserBlockBlob(
 		return uint32(off), uint32(len(b)), nil
 	}
 	for i, tx := range txs {
-		var txHash [32]byte
-		copy(txHash[:], tx.Hash().Bytes())
-		off, length, err := writeRange(bodyCbors[i])
-		if err != nil {
-			return nil, nil, err
-		}
-		result.TxOffsets[txHash] = database.CborOffset{
-			BlockSlot:  ebSlot,
-			BlockHash:  ebHash,
-			ByteOffset: off,
-			ByteLength: length,
-		}
-		for _, utxo := range tx.Produced() {
-			outCbor := utxo.Output.Cbor()
-			if len(outCbor) == 0 {
-				enc, err := cbor.Encode(utxo.Output)
-				if err != nil {
-					return nil, nil, fmt.Errorf(
-						"encode endorser output: %w",
-						err,
-					)
-				}
-				outCbor = enc
+		levels := TransactionLevelsForApply(tx)
+		for levelIdx, level := range levels {
+			// The last level is always the enclosing transaction, and its
+			// Cbor() is the whole [body, witnesses, isValid, aux] envelope
+			// whether or not it carries sub-transactions. Store its body
+			// element, as BlockIndexer.TxOffsets does under the same hash.
+			// Only sub-transaction levels expose their own body bytes.
+			bodyCbor := level.Cbor()
+			if levelIdx == len(levels)-1 {
+				bodyCbor = bodyCbors[i]
 			}
-			off, length, err := writeRange(outCbor)
+			off, length, err := writeRange(bodyCbor)
 			if err != nil {
 				return nil, nil, err
 			}
-			result.UtxoOffsets[database.UtxoRef{
-				TxId:      txHash,
-				OutputIdx: utxo.Id.Index(),
-			}] = database.CborOffset{
+			var levelHash [32]byte
+			copy(levelHash[:], level.Hash().Bytes())
+			result.TxOffsets[levelHash] = database.CborOffset{
 				BlockSlot:  ebSlot,
 				BlockHash:  ebHash,
 				ByteOffset: off,
 				ByteLength: length,
+			}
+			for _, utxo := range level.Produced() {
+				outCbor := utxo.Output.Cbor()
+				if len(outCbor) == 0 {
+					enc, err := cbor.Encode(utxo.Output)
+					if err != nil {
+						return nil, nil, fmt.Errorf(
+							"encode endorser output: %w",
+							err,
+						)
+					}
+					outCbor = enc
+				}
+				off, length, err := writeRange(outCbor)
+				if err != nil {
+					return nil, nil, err
+				}
+				result.UtxoOffsets[database.UtxoRef{
+					TxId:      levelHash,
+					OutputIdx: utxo.Id.Index(),
+				}] = database.CborOffset{
+					BlockSlot:  ebSlot,
+					BlockHash:  ebHash,
+					ByteOffset: off,
+					ByteLength: length,
+				}
 			}
 		}
 	}

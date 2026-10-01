@@ -17,17 +17,278 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
+
+func initialNodeSettingsGates() nodesettings.Values {
+	return nodesettings.Values{
+		nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
+	}
+}
+
+func TestNodeSettingsGatesRoundTrip(t *testing.T) {
+	store := newManagementTestStore(t)
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, initialNodeSettingsGates(), gates)
+
+	require.NoError(t, store.SetNodeSettingsGates(
+		nodesettings.Values{
+			"network_magic": "1",
+			"start_era":     "dijkstra",
+		},
+		42, 1000,
+	))
+
+	gates, err = store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "1", gates["network_magic"])
+	require.Equal(t, "dijkstra", gates["start_era"])
+}
+
+func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SetNodeSettingsGates(
+		nodesettings.Values{"storage_mode": "api"}, 1, 10,
+	))
+	require.NoError(t, store.SetNodeSettingsGates(
+		nodesettings.Values{"storage_mode": "core"}, 2, 20,
+	))
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "core", gates["storage_mode"])
+}
+
+func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SetNodeSettingsGates(nil, 0, 0))
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, initialNodeSettingsGates(), gates)
+}
+
+// TestInsertNodeSettingsGateIfAbsentFirstCallWins pins the ordinary case:
+// the first call for a name inserts and reports it, unlike
+// SetNodeSettingsGates's unconditional upsert.
+func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
+	store := newManagementTestStore(t)
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "1", 0, 0,
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "1", gates["network_magic"])
+}
+
+// TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite is
+// InsertNodeSettingsGateIfAbsent's whole point: a second call for a name
+// that already has a row must report that it did not insert and must never
+// touch the existing value -- the opposite of SetNodeSettingsGates's
+// upsert, which always overwrites regardless of what is already there.
+func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
+	store := newManagementTestStore(t)
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "1", 0, 0,
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	inserted, err = store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "2", 10, 100,
+	)
+	require.NoError(t, err)
+	require.False(t, inserted)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"1",
+		gates["network_magic"],
+		"a losing call must never overwrite the winner's value",
+	)
+}
+
+// TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins runs many
+// concurrent conditional inserts for the same name against a real
+// connection pool and asserts exactly one reports having inserted -- the
+// property commit_timestamp.go's evaluateAndPersistGates depends on to
+// detect a concurrent first-ever opener instead of racing an unconditional
+// upsert.
+func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
+	t *testing.T,
+) {
+	store := newManagementTestStore(t)
+	const attempts = 8
+	results := make([]bool, attempts)
+	errorsByAttempt := make([]error, attempts)
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for i := range attempts {
+		go func(i int) {
+			defer wg.Done()
+			inserted, err := store.InsertNodeSettingsGateIfAbsent(
+				"storage_mode", "core", 0, 0,
+			)
+			errorsByAttempt[i] = err
+			results[i] = inserted
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errorsByAttempt {
+		require.NoError(t, err, "attempt %d", i)
+	}
+
+	winners := 0
+	for _, inserted := range results {
+		if inserted {
+			winners++
+		}
+	}
+	require.Equal(t, 1, winners, "exactly one concurrent insert must win")
+}
+
+func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
+	store := newManagementTestStore(t)
+	sets := []nodesettings.Values{
+		{"network_magic": "1", "start_era": "byron"},
+		{"network_magic": "2", "start_era": "shelley"},
+	}
+	inserted := make([]bool, len(sets))
+	errorsByAttempt := make([]error, len(sets))
+	var wg sync.WaitGroup
+	wg.Add(len(sets))
+	for i := range sets {
+		go func(i int) {
+			defer wg.Done()
+			inserted[i], errorsByAttempt[i] =
+				store.InsertNodeSettingsGatesIfAbsent(sets[i], 0, 0)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errorsByAttempt {
+		require.NoError(t, err, "attempt %d", i)
+	}
+	winners := 0
+	for _, value := range inserted {
+		if value {
+			winners++
+		}
+	}
+	require.Equal(t, 1, winners)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	winningSet := sets[0]
+	if !inserted[0] {
+		winningSet = sets[1]
+	}
+	require.Equal(t, initialNodeSettingsGates()[nodesettings.AlonzoPParamsUnitGateName],
+		gates[nodesettings.AlonzoPParamsUnitGateName])
+	delete(gates, nodesettings.AlonzoPParamsUnitGateName)
+	require.Equal(t, winningSet, gates)
+}
+
+func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
+	rollbackErr := errors.New("rollback failed")
+	err := errors.Join(errNodeSettingsGateInitializationLost, rollbackErr)
+	require.False(t, isOnlyNodeSettingsGateInitializationRace(err))
+}
+
+// TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot proves every write path
+// that stamps recordedEpoch/recordedSlot onto a gate row rejects a uint64
+// value outside SQLite's signed INTEGER domain instead of silently wrapping
+// it into a negative column value, matching the checkedInt64 guard already
+// used elsewhere in this package for the same write boundary.
+func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
+	const outOfDomain = uint64(math.MaxInt64) + 1
+
+	// requireOnlyInitialGates proves rejection actually left no new row behind:
+	// a regression that writes the row and still returns an error would
+	// otherwise slip past a test that only checks the error return.
+	requireOnlyInitialGates := func(t *testing.T, store *Store) {
+		t.Helper()
+		gates, err := store.GetNodeSettingsGates()
+		require.NoError(t, err)
+		require.Equal(t, initialNodeSettingsGates(), gates)
+	}
+
+	t.Run("SetNodeSettingsGates bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		err := store.SetNodeSettingsGates(
+			nodesettings.Values{"start_era": "byron"},
+			outOfDomain,
+			0,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("SetNodeSettingsGates bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		err := store.SetNodeSettingsGates(
+			nodesettings.Values{"start_era": "byron"},
+			0,
+			outOfDomain,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGateIfAbsent bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGateIfAbsent(
+			"start_era", "byron", outOfDomain, 0,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGateIfAbsent bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGateIfAbsent(
+			"start_era", "byron", 0, outOfDomain,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGatesIfAbsent bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGatesIfAbsent(
+			nodesettings.Values{"start_era": "byron"}, outOfDomain, 0,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGatesIfAbsent bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGatesIfAbsent(
+			nodesettings.Values{"start_era": "byron"}, 0, outOfDomain,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+}
 
 func newManagementTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -84,8 +345,8 @@ func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
 
 }
 
-// TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner is the
-// regression test for a CodeRabbit finding on this PR: a retired pool's own
+// TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner verifies that a
+// retired pool's own
 // historical registration of a key must not shadow a different, currently
 // active pool that legitimately re-registered the same, by-then-free key.
 // Both pools have a pool_registration row naming the key, so both are
@@ -761,4 +1022,66 @@ func TestNodeSettingsAreImmutableWithNetworkBackfill(t *testing.T) {
 		StorageMode: types.StorageModeCore,
 		Network:     "preview",
 	}, settings)
+}
+
+// TestTransactionContextCancellationRollsBackWrites guards "preserve
+// transaction rollback on cancellation": a write issued through a
+// Transaction(ctx) must not survive once ctx is canceled mid-transaction,
+// and the connection it held must be released back to the pool rather than
+// leaked.
+//
+// This intentionally does not pin writeDB to a single connection: doing so
+// with SQLite's mode=memory&cache=shared DSN interacts badly with
+// database/sql discarding (rather than idling) a connection whose in-flight
+// statement failed from ctx cancellation -- a brief window with zero live
+// connections destroys the shared in-memory database out from under the
+// test, which is a SQLite test-fixture artifact, not the behavior under
+// test. Connection release is instead asserted directly against pool
+// stats.
+func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	// database/sql discards (rather than idles) a pooled connection whose
+	// in-flight statement failed from ctx cancellation, and reopens a fresh
+	// one lazily on next use. For SQLite's mode=memory&cache=shared DSN, a
+	// window with zero live connections destroys the shared in-memory
+	// database along with it. Hold one extra, otherwise-unused connection
+	// open for the test's duration so the schema survives that window.
+	keepAlive, err := store.writeDB.Conn(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = keepAlive.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	txn := store.Transaction(ctx)
+	require.NoError(t, store.SetCommitTimestamp(42, txn))
+
+	cancel()
+
+	// database/sql rolls back a Tx once the ctx supplied to BeginTx is
+	// canceled, per BeginTx's documented contract -- but that happens on an
+	// internal watcher goroutine, not synchronously with cancel(), so poll
+	// rather than assert immediately. (In practice this also fails on the
+	// first attempt regardless of that goroutine's timing: dbFromTxn hands
+	// this statement the transaction's own now-canceled ctx directly.)
+	require.Eventually(t, func() bool {
+		return store.SetCommitTimestamp(43, txn) != nil
+	}, 2*time.Second, 5*time.Millisecond,
+		"transaction must stop accepting writes once its ctx is canceled")
+
+	require.Error(t, txn.Commit())
+
+	// The connection the aborted transaction held must come back to the
+	// pool rather than being leaked: only the keepAlive connection above
+	// should remain checked out.
+	require.Eventually(t, func() bool {
+		return store.writeDB.Stats().InUse <= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"canceled transaction's connection must be released back to the pool")
+
+	// Neither the successful first write nor anything else from the
+	// canceled transaction may be durably visible.
+	persisted, err := store.GetCommitTimestamp()
+	require.NoError(t, err)
+	require.Zero(t, persisted)
 }

@@ -26,6 +26,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestStabilityWindowForEra_RejectsActiveSlotsCoeffAbove1 verifies that
+// StabilityWindowForEra treats ActiveSlotsCoeff > 1 as malformed.
+//
+// ActiveSlotsCoeff is the "active slot coefficient" f in the Praos
+// stability-window formula ceil(3*k/f). The protocol requires f in (0, 1].
+// An f > 1 silently shrinks the safe zone below the protocol floor — a bad
+// genesis file should be rejected, not accepted with a subtle security
+// regression.
+func TestStabilityWindowForEra_RejectsActiveSlotsCoeffAbove1(t *testing.T) {
+	shelley := `{
+		"activeSlotsCoeff": 2.0,
+		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+	)
+	_, err := eras.StabilityWindowForEra(cfg, eras.ShelleyEraDesc.Id)
+	assert.Error(
+		t,
+		err,
+		"StabilityWindowForEra must reject ActiveSlotsCoeff > 1 (would silently shrink safe zone)",
+	)
+}
+
 // Full mainnet-ish config with both genesis files present.
 func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()

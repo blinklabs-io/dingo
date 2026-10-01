@@ -353,9 +353,11 @@ func (d *Database) SetTransactionWithOpts(
 	for _, utxo := range produced {
 		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
+		var utxoTxHashArray [32]byte
+		copy(utxoTxHashArray[:], txId)
 
 		ref := UtxoRef{
-			TxId:      txHashArray,
+			TxId:      utxoTxHashArray,
 			OutputIdx: outputIdx,
 		}
 		offset, ok := offsets.UtxoOffsets[ref]
@@ -409,7 +411,7 @@ func (d *Database) SetTransactionWithOpts(
 		)
 	}
 
-	if updateEpoch > 0 && tx.IsValid() {
+	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
 			if err := d.SetPParamUpdate(genesisHash.Bytes(), update.Cbor(), point.Slot, updateEpoch, txn); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
@@ -539,8 +541,10 @@ func (d *Database) SetGapBlockTransaction(
 	for _, utxo := range tx.Produced() {
 		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
+		var utxoTxHashArray [32]byte
+		copy(utxoTxHashArray[:], txId)
 		ref := UtxoRef{
-			TxId:      txHashArray,
+			TxId:      utxoTxHashArray,
 			OutputIdx: outputIdx,
 		}
 		offset, ok := offsets.UtxoOffsets[ref]
