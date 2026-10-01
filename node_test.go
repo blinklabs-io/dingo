@@ -3371,7 +3371,7 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 				t.Context(), 660070, []byte("eb-hash"),
 			)
 		})
-		assert.Error(t, err)
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
 	})
 
 	t.Run("blockfetch range request returns an error", func(t *testing.T) {
@@ -3385,7 +3385,7 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 				ocommon.NewPoint(2, []byte("end")),
 			)
 		})
-		assert.Error(t, err)
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
 	})
 
 	t.Run("block decode cache reject is a no-op", func(t *testing.T) {
