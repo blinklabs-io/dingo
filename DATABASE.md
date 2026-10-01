@@ -927,22 +927,54 @@ appear in the snapshot's live set to conflict with in the first place. Before
 this, a local chain that spent such an output after bootstrapping from an
 earlier anchor kept the row marked spent forever across a later catch-up or
 repair re-import of that same output as live, and the first later block that
-actually spent it failed with "utxo not found," halting the ledger pipeline
-(dingo#4770). This is independent of, and narrower than, the reconcile pass
-above: reconcile only tombstones rows *absent* from a newer snapshot's live
+actually spent it failed with "utxo not found," halting the ledger pipeline.
+This is independent of, and narrower than, the reconcile pass above:
+reconcile only tombstones rows *absent* from a newer snapshot's live
 set and never touches a conflicting row's `deleted_slot`, so it does not
 correct this case on its own. `ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`
 are also reached outside any ledger-state import, by `database/transaction.go`'s
 consumed-input producer recovery (`ensureTransactionConsumedUtxos`) and Mithril
 gap-closure (`ensureGapConsumedUtxos`) paths; neither can trigger this clause
 today; see the comment on `hydrateImportedUtxo`. The added `UPDATE` runs once
-per conflicting live row and is uncached: measured over 20,000 already-live
-conflicting rows against an in-memory SQLite store, three runs each, this adds
-roughly one extra uncached statement's cost per row (medians approximately
-17.5/22.0/24.3 µs/row before versus 24.5/32.2/41.7 µs/row after; the ranges
-overlap, so treat this as directional, not a precise multiplier), on the UTxO
-import phase only -- not on `insertUtxoModelChecked`, the per-block ingest hot
-path.
+per conflicting live row and is uncached, adding roughly one extra uncached
+statement's cost per row on the UTxO import phase only -- not on
+`insertUtxoModelChecked`, the per-block ingest hot path.
+
+A UTxO both *created and spent* entirely after the anchor is a wider gap
+neither `hydrateImportedUtxo`'s conflict clear nor the reconcile pass above
+can reach: the snapshot's live set is built from state at its anchor, so an
+output that did not exist yet is absent from that set outright -- there is no
+conflicting row for `hydrateImportedUtxo` to hydrate, and reconcile's absence
+test cannot tell "created after the anchor" from "spent before it," so it
+either leaves an already-spent one untouched or wrongly tombstones a
+still-live one. Either shape leaves the row permanently wrong once a later
+catch-up/repair re-import of the same anchor runs, with the same "utxo not
+found" halt as above.
+`ImportLedgerState` closes this with `Database.UtxosDeleteRolledback`
+(the same primitive a rejected Mithril gap-block range uses to discard
+itself) called once, after the UTxO import phase and before both the
+reconcile pass and the post-import reward-live-stake rebuild: every UTxO
+whose `added_slot` is strictly after the import's anchor is deleted outright,
+cascading to its `asset` and `utxo_pointer` rows, so the ordinary block
+replay that follows the import re-creates it fresh at its real slot --
+`insertUtxoModelChecked` sees no existing row, inserts with `inserted=true`,
+and its live-stake delta lands at the slot replay actually reaches it.
+Patching the row's `deleted_slot` in place at import time (rather than
+deleting it for replay to re-create) was tried and rejected: a mark-snapshot
+read for an epoch boundary between the anchor and the row's real creation
+slot (`ComputeEpochBoundarySnapshot` -> `GetLiveStakeInputsForPools`) has no
+tip gate and takes no slot argument, so a row made live at import time would
+count toward every such boundary crossed before replay actually re-creates
+it, corrupting reward and leader-stake inputs instead of only failing the
+halt this exists to fix. Scoped by `added_slot`, not `deleted_slot`: a row
+the anchor could have judged (created at or before it) is left exactly as
+the snapshot and reconcile leave it, whether live or already correctly
+spent, even if its `deleted_slot` is well after the anchor. This runs on
+every import, not only `Reconcile: true`, since the legacy reward-repair
+shape hits the identical gap; it also now rolls back an unspent post-anchor
+row the same way, where it was previously left alone under `Reconcile:
+false` (and silently miscounted by any mark snapshot taken before the
+repair ran) -- a deliberate widening, not merely coverage of the spent case.
 
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,

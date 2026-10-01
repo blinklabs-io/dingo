@@ -1,0 +1,593 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledgerstate
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"log/slog"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/stretchr/testify/require"
+)
+
+// TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo covers
+// dingo#4770's uncovered majority class: a UTxO both *created* and spent
+// after the snapshot's anchor. Unlike TestImportLedgerStateCatchUpRestores-
+// PostAnchorSpentUtxo's output (live at the anchor, spent afterward), this
+// output never appears in the snapshot's live set at all -- the anchor
+// predates its creation -- so it never reaches hydrateImportedUtxo's ON
+// CONFLICT clear. It is created and spent purely by local block replay, so a
+// catch-up/reward-repair re-import of the same anchor leaves it exactly as
+// it found it unless the import path itself repairs it.
+//
+// The repair rolls the row back entirely (deletes it) rather than clearing
+// its deleted_slot in place: see UtxosDeleteRolledback's call site in
+// ImportLedgerState for why patching the row live at import time would
+// corrupt an epoch-boundary mark-snapshot crossed before replay actually
+// re-creates it. The discriminating assertion is therefore that the row is
+// *entirely absent* immediately after re-import, not merely unspent.
+func TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	addr := buildShelleyAddr(
+		0, 1,
+		bytes.Repeat([]byte{0x55}, 28),
+		bytes.Repeat([]byte{0x66}, 28),
+	)
+	// inlineUTxOMap keys its single entry's tx hash as 0x40 repeated 32
+	// times (see inlineUTxOMap in import_test.go).
+	xTxID := bytes.Repeat([]byte{0x40}, 32)
+
+	newImportConfig := func(tipSlot uint64) ImportConfig {
+		nonce := make([]byte, 32)
+		eraBounds := make([]EraBound, EraConway+1)
+		return ImportConfig{
+			Database: db,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			State: &RawLedgerState{
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{5_000_000},
+				),
+				Epoch:               100,
+				EraIndex:            EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      tipSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		}
+	}
+
+	// 1. Original bootstrap import: X is live at anchor slot 1000. Nothing
+	// else exists yet -- the anchor predates the output under test.
+	const anchorSlot = 1_000
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot),
+	))
+
+	// 2. A real post-anchor block spends X and creates a brand-new output O,
+	// through the ordinary block-apply path -- exactly what a node synced
+	// past its bootstrap anchor does. O did not exist at the anchor, so no
+	// snapshot could ever have declared it live.
+	const txSeedA = 0x71
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	oTxID := bytes.Repeat([]byte{txSeedA}, 32)
+	liveO, err := db.Metadata().GetUtxo(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, liveO, "precondition: O live after being created")
+
+	// 3. A further real post-anchor block spends O.
+	const txSeedB = 0x72
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedB, oTxID, 0, 1_500,
+	))
+	spentO, err := db.Metadata().GetUtxo(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, spentO, "precondition: O spent for real after creation")
+
+	// 4. Catch-up / reward-repair re-import of the same anchor. The
+	// snapshot's live UTxO set only knows about slot-1000 state (X); it says
+	// nothing about O at all, since O was created thereafter. This is the
+	// dingo#4770 gap hydrateImportedUtxo's ON CONFLICT clear cannot reach.
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot),
+	))
+
+	// This is the discriminating assertion: O's row must be gone entirely,
+	// not merely unspent -- see UtxosDeleteRolledback's call site for why
+	// clearing deleted_slot in place at import time (rather than deleting
+	// the row for replay to re-create) would corrupt a mark-snapshot read
+	// between the anchor and O's real creation slot.
+	oAfterCatchUp, err := db.Metadata().GetUtxoIncludingSpent(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t, oAfterCatchUp,
+		"O was created and spent entirely after the anchor; the re-import "+
+			"must roll it back so replay re-creates it fresh",
+	)
+
+	// 5. Real replay of the block that created O re-creates the row from
+	// scratch (insertUtxoModelChecked's conflict-tolerant insert now finds
+	// no existing row, so inserted=true and the live-stake delta lands at
+	// this slot).
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	liveOAfterReplayA, err := db.Metadata().GetUtxo(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t, liveOAfterReplayA,
+		"O must be live again after replaying the block that created it",
+	)
+
+	// 6. Real replay of the block that spent O, reusing the same
+	// transaction hash a real chain replay would. This must apply cleanly:
+	// a live-stake underflow, or a spend rejected against a missing row,
+	// would error here.
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedB, oTxID, 0, 1_500,
+	), "replaying the real block that spent O must apply after the repair")
+	spentOAfterReplayB, err := db.Metadata().GetUtxo(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, spentOAfterReplayB, "O must be spent again")
+}
+
+// TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorCreatedAndSpentUtxo
+// is the sibling test's second import run with Reconcile: true. O is already
+// spent (not live) by the time reconcile's own tombstoning scan runs, so
+// that scan does not additionally touch it; the roll-back below still
+// removes it regardless of reconcile, proving the fix holds under the
+// literal catch-up flag too, alongside the legacy reward-repair shape
+// (Reconcile: false) the first test covers.
+func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	addr := buildShelleyAddr(
+		0, 1,
+		bytes.Repeat([]byte{0x57}, 28),
+		bytes.Repeat([]byte{0x68}, 28),
+	)
+	xTxID := bytes.Repeat([]byte{0x40}, 32)
+	govStateTxHash := bytes.Repeat([]byte{0x93}, 32)
+
+	newImportConfig := func(tipSlot uint64, reconcile bool) ImportConfig {
+		nonce := make([]byte, 32)
+		eraBounds := make([]EraBound, EraConway+1)
+		return ImportConfig{
+			Database:  db,
+			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Reconcile: reconcile,
+			State: &RawLedgerState{
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{5_000_000},
+				),
+				CertStateData:       minimalCertStateData(t),
+				GovStateData:        testGovStateData(t, govStateTxHash, 100),
+				Epoch:               100,
+				EraIndex:            EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      tipSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		}
+	}
+
+	// 1. Bootstrap (Reconcile: false).
+	const anchorSlot = 1_000
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot, false),
+	))
+
+	// 2. A real post-anchor block spends X and creates O.
+	const txSeedA = 0x73
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	oTxID := bytes.Repeat([]byte{txSeedA}, 32)
+
+	// 3. A further real post-anchor block spends O.
+	const txSeedB = 0x74
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedB, oTxID, 0, 1_500,
+	))
+	spentO, err := db.Metadata().GetUtxo(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, spentO, "precondition: O spent for real after creation")
+
+	// 4. A literal catch-up import: Reconcile: true, same anchor.
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot, true),
+	))
+
+	// Discriminating assertion -- see the non-reconcile test's comment.
+	oAfterCatchUp, err := db.Metadata().GetUtxoIncludingSpent(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t, oAfterCatchUp,
+		"O was created and spent entirely after the anchor; the reconcile "+
+			"catch-up must roll it back",
+	)
+
+	// 5. Real replay of the block that created O.
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	liveOAfterReplayA, err := db.Metadata().GetUtxo(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, liveOAfterReplayA, "O must be live again")
+
+	// 6. Real replay of the block that spent O, same transaction hash.
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedB, oTxID, 0, 1_500,
+	), "replaying the real block that spent O must apply after the "+
+		"reconcile catch-up")
+	spentOAfterReplayB, err := db.Metadata().GetUtxo(oTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, spentOAfterReplayB, "O must be spent again")
+}
+
+// TestImportLedgerStateCatchUpRollsBackPostAnchorLiveUnspentUtxo covers a
+// UTxO created after the anchor and never spent (an ordinary unspent change
+// output), under Reconcile: false. This is a deliberate widening versus the
+// behavior before this fix: previously such a row was simply left alone (it
+// is live, so nothing patched its deleted_slot, and Reconcile: false never
+// runs reconcileStaleLedgerState's tombstoning pass at all), which also means
+// it would have been silently over-counted in any mark-snapshot crossed
+// before the repair ran. UtxosDeleteRolledback does not distinguish "created
+// after the anchor" from "created and spent after the anchor" -- it rolls
+// back every post-anchor row -- so this one is now removed and re-created by
+// replay exactly like the create-and-spend case.
+func TestImportLedgerStateCatchUpRollsBackPostAnchorLiveUnspentUtxo(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	addr := buildShelleyAddr(
+		0, 1,
+		bytes.Repeat([]byte{0x59}, 28),
+		bytes.Repeat([]byte{0x6a}, 28),
+	)
+	xTxID := bytes.Repeat([]byte{0x40}, 32)
+
+	newImportConfig := func(tipSlot uint64) ImportConfig {
+		nonce := make([]byte, 32)
+		eraBounds := make([]EraBound, EraConway+1)
+		return ImportConfig{
+			Database: db,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			State: &RawLedgerState{
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{5_000_000},
+				),
+				Epoch:               100,
+				EraIndex:            EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      tipSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		}
+	}
+
+	// 1. Bootstrap: X live at anchor slot 1000.
+	const anchorSlot = 1_000
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot),
+	))
+
+	// 2. A real post-anchor block spends X and creates P. Unlike O above, P
+	// is never spent locally -- it stays live, exactly like a real unspent
+	// change output would.
+	const txSeedA = 0x75
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	pTxID := bytes.Repeat([]byte{txSeedA}, 32)
+	liveP, err := db.Metadata().GetUtxo(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, liveP, "precondition: P live after being created")
+
+	// 3. A reward-repair re-import at the same anchor, Reconcile: false. The
+	// snapshot's live set only ever declares X; P is absent from it, having
+	// been created after the anchor.
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot),
+	))
+
+	// Discriminating assertion: P's row must be gone entirely immediately
+	// after re-import -- the deliberate widening this test documents.
+	pAfterCatchUp, err := db.Metadata().GetUtxoIncludingSpent(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t, pAfterCatchUp,
+		"P was created after the anchor and never spent; the re-import "+
+			"must still roll it back for replay to re-create",
+	)
+
+	// 4. Real replay of the block that created P re-creates it fresh.
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	liveAfterReplayA, err := db.Metadata().GetUtxo(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, liveAfterReplayA, "P must be live again")
+
+	// 5. A genuine real spend of P must still apply cleanly (a live-stake
+	// underflow against the credential P's address carries would error
+	// here).
+	const txSeedC = 0x76
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedC, pTxID, 0, 2_000,
+	), "spending the restored output must apply after the repair")
+	spentAfterRealSpend, err := db.Metadata().GetUtxo(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, spentAfterRealSpend, "P must be spent")
+}
+
+// TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorLiveUnspentUtxo is
+// the sibling live-unspent test under the literal Reconcile: true catch-up
+// flag. Before this fix, reconcile's own tombstoning pass would have marked
+// P inactive at the anchor slot (it is absent from the reconcile key set,
+// indistinguishable there from a row genuinely spent before the anchor);
+// UtxosDeleteRolledback runs before reconcile, so P is removed outright
+// before reconcile's live-row scan ever considers it, and reconcile never
+// has to reason about it at all.
+func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorLiveUnspentUtxo(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	addr := buildShelleyAddr(
+		0, 1,
+		bytes.Repeat([]byte{0x5b}, 28),
+		bytes.Repeat([]byte{0x6c}, 28),
+	)
+	xTxID := bytes.Repeat([]byte{0x40}, 32)
+	govStateTxHash := bytes.Repeat([]byte{0x95}, 32)
+
+	newImportConfig := func(tipSlot uint64, reconcile bool) ImportConfig {
+		nonce := make([]byte, 32)
+		eraBounds := make([]EraBound, EraConway+1)
+		return ImportConfig{
+			Database:  db,
+			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Reconcile: reconcile,
+			State: &RawLedgerState{
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{5_000_000},
+				),
+				CertStateData:       minimalCertStateData(t),
+				GovStateData:        testGovStateData(t, govStateTxHash, 100),
+				Epoch:               100,
+				EraIndex:            EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      tipSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		}
+	}
+
+	// 1. Bootstrap (Reconcile: false).
+	const anchorSlot = 1_000
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot, false),
+	))
+
+	// 2. A real post-anchor block spends X and creates P, never spent.
+	const txSeedA = 0x77
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	pTxID := bytes.Repeat([]byte{txSeedA}, 32)
+
+	// 3. A literal catch-up import at the same anchor, Reconcile: true.
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot, true),
+	))
+
+	pAfterCatchUp, err := db.Metadata().GetUtxoIncludingSpent(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t, pAfterCatchUp,
+		"P was created after the anchor and never spent; the reconcile "+
+			"catch-up must roll it back, not tombstone it",
+	)
+
+	// 4. Real replay of the block that created P.
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	liveAfterReplayA, err := db.Metadata().GetUtxo(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, liveAfterReplayA, "P must be live again")
+
+	// 5. A genuine real spend of P.
+	const txSeedC = 0x78
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedC, pTxID, 0, 2_000,
+	), "spending the restored output must apply after the reconcile catch-up")
+	spentAfterRealSpend, err := db.Metadata().GetUtxo(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, spentAfterRealSpend, "P must be spent")
+}
+
+// TestImportLedgerStateCatchUpDoesNotRollBackPreAnchorSnapshotDeadUtxo
+// guards UtxosDeleteRolledback's scoping: it must remove only a UTxO created
+// after the anchor, never one the snapshot could have judged. Y is live at
+// the (only) bootstrap anchor, so its added_slot is at or before that
+// anchor; it is then spent for real, and re-imported with a snapshot that
+// (synthetically, for this test only -- a real snapshot at the same anchor
+// would still include Y) omits it. A predicate keyed on deleted_slot alone
+// would incorrectly delete or revive Y; UtxosDeleteRolledback's
+// added_slot > anchorSlot predicate correctly leaves it alone -- still
+// present, still spent.
+func TestImportLedgerStateCatchUpDoesNotRollBackPreAnchorSnapshotDeadUtxo(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	addr := buildShelleyAddr(
+		0, 1,
+		bytes.Repeat([]byte{0x5d}, 28),
+		bytes.Repeat([]byte{0x6e}, 28),
+	)
+	// inlineUTxOMap keys entry i's tx hash as (0x40+i) repeated 32 times.
+	xTxID := bytes.Repeat([]byte{0x40}, 32)
+	yTxID := bytes.Repeat([]byte{0x41}, 32)
+
+	newImportConfig := func(tipSlot uint64, amounts []uint64) ImportConfig {
+		nonce := make([]byte, 32)
+		eraBounds := make([]EraBound, EraConway+1)
+		return ImportConfig{
+			Database: db,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			State: &RawLedgerState{
+				UTxOData:            inlineUTxOMap(t, addr, amounts),
+				Epoch:               100,
+				EraIndex:            EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      tipSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		}
+	}
+
+	// 1. Bootstrap: both X and Y live at anchor slot 1000.
+	const anchorSlot = 1_000
+	require.NoError(t, ImportLedgerState(
+		context.Background(),
+		newImportConfig(anchorSlot, []uint64{5_000_000, 3_000_000}),
+	))
+	liveY, err := db.Metadata().GetUtxo(yTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, liveY, "precondition: Y live after bootstrap")
+
+	// 2. A real post-anchor block spends Y. Y's added_slot is anchorSlot
+	// (from the bootstrap import), strictly at-or-before the anchor.
+	require.NoError(t, applySpendingTransaction(
+		t, db, 0x81, yTxID, 0, 1_500,
+	))
+	spentY, err := db.Metadata().GetUtxo(yTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, spentY, "precondition: Y spent for real")
+
+	// 3. Re-import the same anchor, this time with a snapshot that only
+	// carries X. This is a synthetic input solely to isolate the
+	// added_slot boundary in UtxosDeleteRolledback's predicate.
+	require.NoError(t, ImportLedgerState(
+		context.Background(),
+		newImportConfig(anchorSlot, []uint64{5_000_000}),
+	))
+
+	yAfterCatchUp, err := db.Metadata().GetUtxoIncludingSpent(yTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t, yAfterCatchUp,
+		"Y's added_slot does not postdate the anchor, so the re-import "+
+			"must not roll it back even though the snapshot omits it",
+	)
+	require.NotZero(
+		t, yAfterCatchUp.DeletedSlot,
+		"Y must remain spent, not resurrected",
+	)
+	stillSpentY, err := db.Metadata().GetUtxo(yTxID, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, stillSpentY, "Y must remain spent via the live-only getter")
+
+	liveXAfterCatchUp, err := db.Metadata().GetUtxo(xTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, liveXAfterCatchUp, "X remains live after the re-import")
+}
