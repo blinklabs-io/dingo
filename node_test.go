@@ -67,6 +67,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -3330,6 +3331,88 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 			"pipeline's parallel VRF/KES validate stage never activates "+
 			"otherwise",
 	)
+}
+
+// The ledger is started, and replays any stored blocks it has not applied,
+// before the node creates Ouroboros networking. ledgerStateConfig therefore
+// hands the ledger callbacks that run while n.ouroboros() is still nil, and
+// each of them must report "unavailable" instead of dereferencing it
+// (dingo#4805: a Musashi restart panicked in EndorserBlockTxsByHash).
+func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
+	t.Parallel()
+
+	newConfig := func(t *testing.T) ledger.LedgerStateConfig {
+		t.Helper()
+		n := &Node{config: Config{cfg: &internalconfig.Config{}}}
+		require.Nil(t, n.ouroboros())
+		return n.ledgerStateConfig()
+	}
+
+	t.Run("endorser block provider reports unavailable", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var (
+			txs []cbor.RawMessage
+			ok  bool
+		)
+		require.NotPanics(t, func() {
+			txs, ok = cfg.EndorserBlockProvider([]byte("eb-hash"), 660070)
+		})
+		assert.False(t, ok, "an endorser block must not be reported present")
+		assert.Empty(t, txs)
+	})
+
+	t.Run("endorser block fetcher returns an error", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var err error
+		require.NotPanics(t, func() {
+			err = cfg.EndorserBlockFetcher(
+				t.Context(), 660070, []byte("eb-hash"),
+			)
+		})
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
+	})
+
+	t.Run("blockfetch range request returns an error", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var err error
+		require.NotPanics(t, func() {
+			_, err = cfg.BlockfetchRequestRangeFunc(
+				newNodeTestConnId(3001),
+				ocommon.NewPoint(1, []byte("start")),
+				ocommon.NewPoint(2, []byte("end")),
+			)
+		})
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
+	})
+
+	t.Run("block decode cache reject is a no-op", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		require.NotPanics(t, func() {
+			cfg.RejectBlockDecodeCacheFunc(7, []byte("raw-block"))
+		})
+	})
+}
+
+// The "not started" answers above apply only while n.ouroboros() is nil. Once
+// networking exists the callbacks must reach it, or the ledger would treat
+// every endorser block as permanently unavailable.
+func TestLedgerStateConfigCallbacksDelegateOnceOuroborosExists(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: Config{cfg: &internalconfig.Config{}}}
+	n.ouroborosRef.Store(&ouroborosPkg.Ouroboros{})
+	cfg := n.ledgerStateConfig()
+
+	var err error
+	require.NotPanics(t, func() {
+		err = cfg.EndorserBlockFetcher(t.Context(), 660070, []byte("eb-hash"))
+	})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errOuroborosNotStarted)
 }
 
 func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
