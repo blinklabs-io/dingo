@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -678,6 +679,16 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 
 func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	t.Parallel()
+	testSyncRewardRepairBelowCertifiedTip(t, true)
+}
+
+func TestSyncRewardRepairWithoutLocalTailUnspendsAtCertifiedFloor(t *testing.T) {
+	t.Parallel()
+	testSyncRewardRepairBelowCertifiedTip(t, false)
+}
+
+func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
+	t.Helper()
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	files, certifiedHash := validImmutableFiles(t, 1000)
@@ -719,8 +730,20 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 		Number:   2,
 		Type:     uint(shelley.BlockTypeShelley),
 	}, nil))
-	for _, block := range []models.Block{block1050, staleFork, block1100} {
-		require.NoError(t, db.BlockCreate(block, nil))
+	if !withLocalTail {
+		require.NoError(t, db.SetTip(ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1000, Hash: certifiedHash},
+			BlockNumber: 2,
+		}, nil))
+		localTip, err := db.GetTip(nil)
+		require.NoError(t, err)
+		require.EqualValues(t, 1000, localTip.Point.Slot,
+			"fixture must exercise a local tip equal to the certified tip")
+	}
+	if withLocalTail {
+		for _, block := range []models.Block{block1050, staleFork, block1100} {
+			require.NoError(t, db.BlockCreate(block, nil))
+		}
 	}
 	utxoTxn := db.Transaction(true)
 	t.Cleanup(utxoTxn.Release)
@@ -752,6 +775,12 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 		1050, 99, []byte{1}, []byte{2}, []byte{3}, nil,
 		uint(shelley.EraShelley.Id), 1, 432000, nil,
 	))
+	if !withLocalTail {
+		require.NoError(t, db.SetEpoch(
+			950, 98, []byte{1}, []byte{2}, []byte{3}, nil,
+			uint(shelley.EraShelley.Id), 1, 432000, nil,
+		))
+	}
 	require.NoError(t, db.Metadata().SaveRewardAdaPots(
 		&models.RewardAdaPots{
 			Epoch: 99, Treasury: 10, Reserves: 20,
@@ -783,12 +812,14 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
-	_, err = database.BlockByHash(db, staleFork.Hash)
-	require.ErrorIs(t, err, models.ErrBlockNotFound)
-	retained, err := database.BlockByHash(db, block1100.Hash)
-	require.NoError(t, err)
-	require.EqualValues(t, 1100, retained.Slot,
-		"canonical blocks after the selected state must remain for replay")
+	if withLocalTail {
+		_, err = database.BlockByHash(db, staleFork.Hash)
+		require.ErrorIs(t, err, models.ErrBlockNotFound)
+		retained, err := database.BlockByHash(db, block1100.Hash)
+		require.NoError(t, err)
+		require.EqualValues(t, 1100, retained.Slot,
+			"canonical blocks after the selected state must remain for replay")
+	}
 	pots, err := db.Metadata().GetRewardAdaPots(99, nil)
 	require.NoError(t, err)
 	require.Nil(t, pots,
