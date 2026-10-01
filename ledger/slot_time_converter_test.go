@@ -17,9 +17,11 @@ package ledger
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -690,4 +692,71 @@ func TestSlotTimeConverter_SnapshotMismatchFailsClosed(t *testing.T) {
 				test.message)
 		})
 	}
+}
+
+// futureSystemStartCfg returns a CardanoNodeConfig whose Shelley
+// SystemStart is in the future, simulating a node that booted before the
+// configured genesis time (clock skew, misconfig, or early bring-up).
+func futureSystemStartCfg(
+	t *testing.T,
+	future time.Time,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	var sb strings.Builder
+	sb.WriteString(`{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
+		"systemStart": "`)
+	sb.WriteString(future.UTC().Format(time.RFC3339))
+	sb.WriteString(`"
+	}`)
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(sb.String())),
+	)
+	return cfg
+}
+
+// TestNearNowSlot_FutureSystemStartReturnsZero pins that nearNowSlot does
+// not silently wrap a negative `time.Since` to a huge uint64. Under clock
+// skew or node-before-genesis boot, `time.Since(SystemStart)` is negative,
+// and `uint64(negative)` produces a near-MaxUint value — bogus and
+// indistinguishable from a valid slot.
+func TestNearNowSlot_FutureSystemStartReturnsZero(t *testing.T) {
+	t.Parallel()
+
+	cfg := futureSystemStartCfg(t, time.Now().Add(time.Hour))
+	got := nearNowSlot(cfg.ShelleyGenesis(), time.Now())
+	assert.Equal(
+		t,
+		uint64(0),
+		got,
+		"nearNowSlot with SystemStart in the future must return 0, not a huge wrapped uint64",
+	)
+}
+
+// The window scales with slot length but stays a bounded operational window.
+func TestWithinOperationalWindowScalesWithSlotLength(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// With no slot length it is the plain near-now window.
+	assert.True(t, isNearNow(now, now.Add(4*time.Second)))
+	assert.False(t, isNearNow(now, now.Add(6*time.Second)))
+
+	// A 20s era admits its own next boundary...
+	assert.True(t, withinOperationalWindow(
+		now, now.Add(20*time.Second), 20*time.Second))
+	// ...and still rejects times many slot lengths out.
+	assert.False(t, withinOperationalWindow(
+		now, now.Add(5*time.Minute), 20*time.Second))
+	// Symmetric in the past direction.
+	assert.True(t, withinOperationalWindow(
+		now, now.Add(-20*time.Second), 20*time.Second))
+	assert.False(t, withinOperationalWindow(
+		now, now.Add(-5*time.Minute), 20*time.Second))
 }

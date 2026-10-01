@@ -36,7 +36,13 @@ PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
-COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
+# Slice exactly the first 7 chars of the full commit SHA. `git rev-parse
+# --short=7` only sets a 7-char minimum and lengthens the abbreviation on an
+# ambiguous prefix -- more likely under the release job's fetch-depth: 0 full
+# history -- which would diverge from the Homebrew formula bump. The formula
+# slices the first 7 of github.sha the same way, so both paths stamp an
+# identical, deterministic version.CommitHash.
+COMMIT_HASH ?= $(shell git rev-parse HEAD | cut -c1-7)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 BUILD_TAGS ?= dingo_extra_plugins
 CGO_ENABLED ?= 0

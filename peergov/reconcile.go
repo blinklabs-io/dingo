@@ -155,6 +155,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				if p.isTopologyPeer(peer.Source) {
 					continue
 				}
+				// With no eligible upstream this peer is one of the node's
+				// last leads back onto the network. A removed peer is not
+				// restored when its deny entry expires, so keep it for the
+				// emergency redial path.
+				if p.countEligibleUpstreamsLocked() == 0 {
+					continue
+				}
 				p.denyList[peer.NormalizedAddress] = now.
 					Add(p.config.DenyDuration)
 				knownRemoved++

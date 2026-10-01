@@ -153,7 +153,7 @@ func TestHandleCheckResult_Diverged(t *testing.T) {
 		t,
 		float64(1),
 		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("protocol_params"),
+			metrics.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode),
 		),
 	)
 }
@@ -553,7 +553,7 @@ func TestHandleIncrementalBlockCheck_Diverged(t *testing.T) {
 	assert.Equal(
 		t,
 		float64(1),
-		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
+		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode)),
 		"an incremental mismatch must also count toward the shared divergenceTotal series",
 	)
 }

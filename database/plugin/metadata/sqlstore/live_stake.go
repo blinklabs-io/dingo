@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -668,6 +669,43 @@ LEFT JOIN latest_delegation
  AND latest_delegation.pool_key_hash = account.pool` + runningTotalJoin, args
 }
 
+// sqliteRewardLiveStakeAccountFirstQuery keeps SQLite's loop order on the
+// bounded account-key range. The active/pool index orders pool before the
+// credential columns, so its non-NULL pool range hides the batch key bound.
+func sqliteRewardLiveStakeAccountFirstQuery(query string) (string, error) {
+	fromAccount := "FROM account a\n"
+	if count := strings.Count(query, fromAccount); count != 4 {
+		return "", fmt.Errorf(
+			"reward live stake query has %d account assignment sources, want 4",
+			count,
+		)
+	}
+	query = strings.ReplaceAll(
+		query,
+		fromAccount,
+		"FROM account a INDEXED BY idx_account_credential\n",
+	)
+	for _, assignment := range []struct {
+		table string
+		alias string
+	}{
+		{table: "stake_delegation", alias: "sd"},
+		{table: "stake_registration_delegation", alias: "srd"},
+		{table: "stake_vote_delegation", alias: "svd"},
+		{table: "stake_vote_registration_delegation", alias: "svrd"},
+	} {
+		join := "JOIN " + assignment.table + " " + assignment.alias + "\n"
+		if !strings.Contains(query, join) {
+			return "", fmt.Errorf(
+				"reward live stake query has no %s assignment source",
+				assignment.table,
+			)
+		}
+		query = strings.Replace(query, join, "CROSS "+join, 1)
+	}
+	return query, nil
+}
+
 func (s *Store) rebuildRewardLiveStake(
 	slot uint64,
 	txn types.Txn,
@@ -808,14 +846,20 @@ func (s *Store) rebuildRewardLiveStakeRange(
 	slotValue int64,
 ) (int, error) {
 	var utxoStakes map[string]uint64
+	var err error
 	if !fromRunningTotals {
-		var err error
 		utxoStakes, err = sumRewardLiveStakeUtxos(ctx, db, keys)
 		if err != nil {
 			return 0, err
 		}
 	}
 	query, args := rewardLiveStakeCredentialQuery(fromRunningTotals, keys)
+	if s.dialect.Name() == "sqlite" {
+		query, err = sqliteRewardLiveStakeAccountFirstQuery(query)
+		if err != nil {
+			return 0, err
+		}
+	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("load reward live stake credentials: %w", err)
@@ -1327,6 +1371,73 @@ ORDER BY epoch`,
 		return nil, err
 	}
 	return epochs, nil
+}
+
+func (s *Store) GetPostSnapshotRewardCredits(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.AccountRewardDelta, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPostSnapshotRewardCredits: resolve db: %w", err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT credential_tag, staking_key, amount
+FROM account_reward_delta
+WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
+ORDER BY credential_tag, staking_key, id`, slotValue)
+	if err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+	}
+	defer rows.Close()
+	var (
+		ret  []*models.AccountRewardDelta
+		last *models.AccountRewardDelta
+	)
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &raw); err != nil {
+			return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("post-snapshot reward credit", raw.String)
+		if err != nil {
+			return nil, err
+		}
+		if last != nil && last.CredentialTag == tag &&
+			bytes.Equal(last.StakingKey, key) {
+			total := uint64(last.Amount)
+			if ^uint64(0)-total < amount {
+				return nil, errors.New(
+					"GetPostSnapshotRewardCredits: credit total overflows",
+				)
+			}
+			last.Amount = types.Uint64(total + amount)
+			continue
+		}
+		last = &models.AccountRewardDelta{
+			CredentialTag: tag,
+			StakingKey:    key,
+			Amount:        types.Uint64(amount),
+			AddedSlot:     slot,
+			PostSnapshot:  true,
+		}
+		ret = append(ret, last)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+	}
+	return ret, nil
 }
 
 func (s *Store) GetLiveStakeInputsForPools(
