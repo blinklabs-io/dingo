@@ -15,7 +15,11 @@
 package load
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,4 +78,48 @@ func TestTimedLoadMakeTargetRunsScript(t *testing.T) {
 			name,
 		)
 	}
+}
+
+// TestTimedLoadReportsMissingBlocksMarker checks that a load log without the
+// blocks marker fails with the script's own diagnostic rather than exiting
+// silently from the failed grep under set -e and pipefail.
+func TestTimedLoadReportsMissingBlocksMarker(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("timed-load.sh needs a POSIX shell")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	work := t.TempDir()
+	immutable := filepath.Join(work, "immutable")
+	require.NoError(t, os.Mkdir(immutable, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(immutable, "00000.chunk"), nil, 0o600,
+	))
+	fakeDingo := filepath.Join(work, "dingo")
+	require.NoError(t, os.WriteFile(
+		fakeDingo,
+		[]byte("#!/bin/sh\necho 'no block summary here'\n"),
+		0o755,
+	))
+	cmd := exec.Command(
+		bash,
+		filepath.Join(root, "internal", "test", "load", "timed-load.sh"),
+	)
+	cmd.Env = append(
+		os.Environ(),
+		"DINGO_BIN="+fakeDingo,
+		"DINGO_LOAD_IMMUTABLE_DIR="+immutable,
+		"TMPDIR="+work,
+	)
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err, "script output:\n%s", out)
+	require.Contains(
+		t,
+		string(out),
+		"could not find 'finished processing blocks from immutable DB'",
+	)
 }

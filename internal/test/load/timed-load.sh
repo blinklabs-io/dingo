@@ -19,8 +19,9 @@
 #
 #   DINGO_LOAD_IMMUTABLE_DIR  immutable directory to load
 #                             (default: database/immutable/testdata)
-#   DINGO_LOAD_PROFILE        non-empty: also write cpu.prof and mem.prof
-#                             into the run directory
+#   DINGO_LOAD_PROFILE        non-empty: also write cpu.prof and mem.prof,
+#                             copied to the repository root unless
+#                             DINGO_LOAD_KEEP is set
 #   DINGO_LOAD_KEEP           non-empty: keep the run directory
 #   DINGO_LOAD_MAX_SECONDS    when set, exit non-zero if the load takes longer
 
@@ -97,11 +98,11 @@ END="$(date +%s)"
 ELAPSED=$((END - START))
 
 # Kept in step with the Info call in internal/node/load.go by
-# TestTimedLoadMarkerMatchesLoader; a reworded log line would otherwise
-# report zero blocks.
+# TestTimedLoadMarkerMatchesLoader. grep exits 1 when the marker is absent;
+# without || true, set -e and pipefail would exit before the diagnostic below.
 BLOCKS_MARKER="finished processing blocks from immutable DB"
 BLOCKS="$(grep -F -- "${BLOCKS_MARKER}" "${LOAD_LOG}" |
-	sed -n 's/.*blocks_copied=\([0-9][0-9]*\).*/\1/p' | tail -n 1)"
+	sed -n 's/.*blocks_copied=\([0-9][0-9]*\).*/\1/p' | tail -n 1 || true)"
 if [[ -z "${BLOCKS}" ]]; then
 	echo "timed-load: could not find '${BLOCKS_MARKER}' in the load log" >&2
 	exit 1
