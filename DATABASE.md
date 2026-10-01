@@ -195,7 +195,10 @@ setting. It defaults to `0`, which disables full `VACUUM`: SQLite's full
 database rebuild holds a database-wide writer lock and can stop ledger writes
 for the duration. Setting a positive interval explicitly opts into that pause.
 VACUUM runs on its own ticker and does not change the separate daily committee
-authorization cleanup schedule.
+authorization cleanup schedule. It runs on a dedicated short-lived connection
+(30 second busy timeout), not on the single-connection write pool, so waiting
+for or running a VACUUM never occupies the pool's only connection; ledger
+writes still wait on SQLite's database-wide lock while the file is rewritten.
 
 Dingo stores chain state in two sibling stores:
 

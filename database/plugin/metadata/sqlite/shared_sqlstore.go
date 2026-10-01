@@ -41,8 +41,42 @@ const maxVacuumIntervalSeconds uint64 = uint64(
 	(1<<63 - 1) / int64(time.Second),
 )
 
+// vacuumBusyTimeout bounds how long VACUUM waits for the write lock another
+// connection holds, matching the budget the pools' own busy_timeout gives
+// ordinary writers.
+const vacuumBusyTimeout = 30 * time.Second
+
+// openMaintenanceDB opens a single-connection pool that is neither writeDB nor
+// readDB, for work that must not occupy writeDB's sole connection. SQLite
+// tracks locks per database file rather than per database/sql connection, so
+// it still contends with the pools at the SQLite level.
+func openMaintenanceDB(
+	databaseURI string,
+	busyTimeout time.Duration,
+) (*sql.DB, error) {
+	db, err := sqlstore.OpenDB(
+		"sqlite",
+		fmt.Sprintf(
+			"%s?_pragma=busy_timeout(%d)",
+			databaseURI,
+			busyTimeout.Milliseconds(),
+		),
+		"sqlite",
+		false, // short-lived per-run connection; not worth tracing
+	)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// sqliteVacuum returns the optional periodic VACUUM callback. VACUUM rewrites
+// the whole database through the WAL, so it runs on its own short-lived
+// connection: issued on writeDB it would hold that pool's only connection for
+// the whole rewrite and queue every ledger write behind it.
 func sqliteVacuum(
-	writeDB *sql.DB,
+	databaseURI string,
 	intervalSeconds uint64,
 ) (func(context.Context) error, time.Duration, error) {
 	if intervalSeconds == 0 {
@@ -55,7 +89,14 @@ func sqliteVacuum(
 		)
 	}
 	return func(ctx context.Context) error {
-		_, err := writeDB.ExecContext(ctx, "VACUUM")
+		db, err := openMaintenanceDB(databaseURI, vacuumBusyTimeout)
+		if err != nil {
+			return fmt.Errorf("open VACUUM connection: %w", err)
+		}
+		defer func() {
+			_ = db.Close()
+		}()
+		_, err = db.ExecContext(ctx, "VACUUM")
 		return err
 	}, time.Duration(intervalSeconds) * time.Second, nil // #nosec G115 -- bounded above by maxVacuumIntervalSeconds
 }
@@ -193,23 +234,13 @@ func checkpointWAL(
 	logger *slog.Logger,
 ) func(context.Context) error {
 	return func(ctx context.Context) error {
-		db, err := sqlstore.OpenDB(
-			"sqlite",
-			fmt.Sprintf(
-				"%s?_pragma=busy_timeout(%d)",
-				databaseURI,
-				checkpointBusyTimeout.Milliseconds(),
-			),
-			"sqlite",
-			false, // short-lived per-tick connection; not worth tracing
-		)
+		db, err := openMaintenanceDB(databaseURI, checkpointBusyTimeout)
 		if err != nil {
 			return fmt.Errorf("open WAL checkpoint connection: %w", err)
 		}
 		defer func() {
 			_ = db.Close()
 		}()
-		db.SetMaxOpenConns(1)
 
 		return checkpointWALWith(
 			ctx,
@@ -474,7 +505,7 @@ func openSQLStore(
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
 		diskSizeFunc = sqliteDiskSize(databaseURI, databasePath)
 		vacuum, vacuumInterval, err = sqliteVacuum(
-			writeDB,
+			databaseURI,
 			config.VacuumIntervalSeconds,
 		)
 		if err != nil {
