@@ -13616,6 +13616,14 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    single-credential reads, `GetDRepVotingPower`'s) plain figure the same way
    `LoadDRepVotingState` does; without that, a DRep's reported voting power
    would silently disagree with the value ratification actually used for it.
+   `tallySPOVotes` applies the same active-deposit set to its in-memory
+   `SPOVotingState`: each deposit follows its return account's pool delegation
+   and is added only when that pool already appears in the mark distribution.
+   The overlay raises both that pool's voting stake and the voting total but
+   does not modify the persisted mark snapshot, which remains the leader-election
+   distribution. This matches Conway's `DRepPulser.computeDRepDistr`, which adds
+   proposal deposits to DRep and SPO voting distributions while leaving the
+   ordinary stake snapshot unchanged.
    Those call sites pass `expiryEpoch = 0` (matching `GetDRepVotingPower`'s
    existing point-in-time, ungated convention noted above), not
    `LoadDRepVotingState`'s epoch-boundary CIP-0163 value, so a return
@@ -13631,6 +13639,12 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    treats every silent pool as implicit No for HardForkInitiation; during
    Conway bootstrap, silent pools on other actions are Abstain. Only
    post-bootstrap non-voters reach the reward-account default-vote rules.
+
+   UpdateCommittee threshold selection uses elected-committee presence in the
+   post-ENACT enact state. `CommitteeNormal` applies when that state contains a
+   committee object, even if every member is expired; `CommitteeNoConfidence`
+   applies only when no committee is present. This follows Conway's
+   `votingCommitteeThreshold` rule, which tests whether `ensCommittee` is set.
 8. Treasury donations (`applyEpochDonations`), added after withdrawals.
 9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
