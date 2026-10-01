@@ -426,6 +426,26 @@ func blockApplyCandidatePoint(
 	)
 }
 
+// blocksBeforeEpochEnd returns the leading blocks that the block-apply
+// callback applies before it stops for an epoch rollover. It uses the same
+// stop condition as blockApplyCandidatePoint and the callback: a block at or
+// past the end of epoch, or any block while epoch is uninitialized.
+func blocksBeforeEpochEnd(
+	blocks []ledger.Block,
+	epoch models.Epoch,
+) []ledger.Block {
+	if epoch.SlotLength == 0 {
+		return nil
+	}
+	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	for idx, blk := range blocks {
+		if blk.SlotNumber() >= epochEnd {
+			return blocks[:idx]
+		}
+	}
+	return blocks
+}
+
 // submitBlockApplyDBTxn serializes a block-apply commit and its after-commit
 // transaction events against every primary-chain rollback that emits undo
 // events. The expected ledger tip and last block the batch will examine are
@@ -989,6 +1009,15 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	// plutusEvalCtxCache holds one *cek.EvalContext per distinct (language
+	// version, protocol major version, cost-model parameter list,
+	// synthetic-V2 flag) combination observed by script evaluation, bounded
+	// with least-recently-used eviction. It is never reset:
+	// cek.NewEvalContext is a pure function of that key, so an entry stays
+	// correct across every epoch/era boundary that does not itself change
+	// the key (see PlutusEvalContextCache's doc comment). Set once in NewLedgerState
+	// and never reassigned; safe for concurrent readers without a lock.
+	plutusEvalCtxCache *eras.PlutusEvalContextCache
 	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
 	// a PlutusV2 cost model (real mainnet/preview/preprod never had one in
 	// genesis -- PlutusV2 postdates the Alonzo genesis format entirely, so
@@ -1686,6 +1715,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		chain:              cfg.ChainManager.PrimaryChain(),
 		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		validationEnabled:  cfg.ValidateHistorical,
+		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
@@ -7632,21 +7662,42 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				len(nextBatch),
 				i+batchSize,
 			)
+			// Starts the dingo_ledger_block_apply_batch_latency_seconds
+			// window for this chunk: everything from here through
+			// updateTipMetrics reflecting its new tip below, including the
+			// Leios endorser-block wait this chunk may take next. See
+			// blockApplyBatchLatency's doc comment for why this is a
+			// per-batch, not per-block, measurement.
+			batchApplyStart := time.Now()
 
 			// Leios: gate delivery of this chunk on the availability of the
 			// endorser blocks its Dijkstra ranking blocks reference, so the
 			// endorser transactions are applied ahead of the ranking blocks
 			// that endorse them. Runs outside the DB transaction opened below
 			// and is a no-op for blocks without Leios references.
-			if err := ls.ensureReferencedEndorserBlocks(
-				ctx,
+			//
+			// Only the blocks the transaction below applies are checked. It
+			// stops at the first block past the current epoch, and that block
+			// is re-checked on the pass after the rollover publishes its epoch:
+			// checking it now would resolve a certificate against an epoch
+			// that is not in the epoch cache yet (#4766).
+			ls.RLock()
+			precheckEpoch := ls.currentEpoch
+			ls.RUnlock()
+			if precheck := blocksBeforeEpochEnd(
 				nextBatch[i:end],
-			); err != nil {
-				completeReadResult()
-				return fmt.Errorf(
-					"ensure referenced Leios endorser blocks: %w",
-					err,
-				)
+				precheckEpoch,
+			); len(precheck) > 0 {
+				if err := ls.ensureReferencedEndorserBlocks(
+					ctx,
+					precheck,
+				); err != nil {
+					completeReadResult()
+					return fmt.Errorf(
+						"ensure referenced Leios endorser blocks: %w",
+						err,
+					)
+				}
 			}
 
 			// Capture snapshots of state needed during transaction.
@@ -8154,6 +8205,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.reachedTip.Store(true)
 				}
 				ls.updateTipMetrics(tipDensity)
+				// This chunk's new tip is now reflected in
+				// cardano_node_metrics_blockNum_int, closing the window
+				// batchApplyStart opened above.
+				ls.metrics.observeBlockApplyBatch(
+					blocksProcessed,
+					time.Since(batchApplyStart),
+				)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then check whether the stability window reaches or exceeds
@@ -11679,6 +11737,15 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
 // GetCurrentPParams returns the currentPParams value
 func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
+}
+
+// PlutusEvalContextCache returns the shared PlutusEvalContextCache script
+// evaluation reuses across every redeemer, transaction, and block this
+// LedgerState validates or evaluates. Returns nil for a bare-constructed
+// LedgerState that skipped NewLedgerState (test-only); callers must treat a
+// nil cache as "no cache available" rather than dereferencing it.
+func (ls *LedgerState) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
+	return ls.plutusEvalCtxCache
 }
 
 // GetCurrentPParamsForReporting returns the current protocol parameters with
