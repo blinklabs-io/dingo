@@ -15,6 +15,8 @@
 package chainselection
 
 import (
+	"bytes"
+
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -84,7 +86,11 @@ func (cs *ChainSelector) computeEagernessLimitLocked() EagernessLimit {
 		return limit
 	}
 	// Every point shared by all fragments lies on the first fragment, and the
-	// lowest of its intersections with the others is the one all of them hold.
+	// lowest of its intersections with the others is the candidate. The
+	// fragments are bounded windows, so two of the others can each hold their
+	// fork point with the first and still share nothing with each other; only
+	// a candidate every fragment retains is accepted. Without that check the
+	// result would depend on which fragment map iteration put first.
 	common := fragments[0].entries[len(fragments[0].entries)-1]
 	for _, other := range fragments[1:] {
 		tip, ok := fragments[0].intersectTip(other)
@@ -95,10 +101,26 @@ func (cs *ChainSelector) computeEagernessLimitLocked() EagernessLimit {
 			common = tip
 		}
 	}
+	for _, fragment := range fragments[1:] {
+		if !fragment.containsPoint(common.Point) {
+			return limit
+		}
+	}
 	limit.Intersected = true
 	limit.Point = clonePoint(common.Point)
 	limit.BlockNumber = safeAddUint64(common.BlockNumber, cs.securityParam)
 	return limit
+}
+
+// containsPoint reports whether the fragment retains point.
+func (f CandidateFragment) containsPoint(point ocommon.Point) bool {
+	for _, entry := range f.entries {
+		if entry.Point.Slot == point.Slot &&
+			bytes.Equal(entry.Point.Hash, point.Hash) {
+			return true
+		}
+	}
+	return false
 }
 
 // SelectedTip returns the tip of the currently selected peer's chain truncated

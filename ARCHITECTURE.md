@@ -4997,9 +4997,10 @@ Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 While Genesis mode is active a candidate fragment retains `2k+1` delivered
 points instead of `k+1`, so that a fork point more than `k` behind a candidate's
 head is still found. Peers whose block numbers both reach the limit are
-indistinguishable to `comparePeerTips`; the incumbent is kept, then connection
-priority, blockfetch latency, and connection ID break the tie, before density
-and Praos comparison run. `ChainSelector.SelectedTip` returns the selected
+indistinguishable to the length comparison: Genesis density is still compared
+first, and when it is equal the incumbent is kept, then connection priority,
+blockfetch latency, and connection ID break the tie in place of the Praos
+comparison. `ChainSelector.SelectedTip` returns the selected
 peer's tip truncated at the limit.
 
 The limit constrains which candidate chain selection prefers. It is not an

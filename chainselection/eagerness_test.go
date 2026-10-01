@@ -16,9 +16,9 @@ package chainselection
 
 import (
 	"fmt"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 	"testing"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -163,4 +163,65 @@ func TestLimitOnEagernessCandidatesBeyondLimitKeepIncumbent(t *testing.T) {
 	require.Equal(t, uint64(10+loeTestK), limit.BlockNumber)
 	require.Equal(t, a, *cs.GetBestPeer(),
 		"candidates equal under the limit must not displace the incumbent")
+}
+
+// Two candidates both past the limit still differ in Genesis density, and
+// density, not the incumbent, decides between them.
+func TestLimitOnEagernessKeepsGenesisDensityPrecedence(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, a, "a", 11, 16)
+	cs.SetLocalTip(loeTip("c", 5))
+	cs.EvaluateAndSwitch()
+	require.Equal(t, a, *cs.GetBestPeer())
+
+	// B forks at block 10 like A but fills consecutive slots, so it is the
+	// denser chain in the 3k-slot window; A has one block per 100 slots.
+	feedLoEChain(cs, b, "c", 1, 10)
+	for block := uint64(11); block <= 19; block++ {
+		tip := loeTip("b", block)
+		tip.Point.Slot = 1000 + block - 10
+		cs.UpdatePeerTip(b, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+
+	limit := cs.EagernessLimit()
+	require.True(t, limit.Intersected)
+	require.Equal(t, uint64(10+loeTestK), limit.BlockNumber)
+	require.Equal(t, b, *cs.GetBestPeer(),
+		"the denser candidate must win even when both reach the limit")
+}
+
+// The limit is a function of the candidate set, not of map iteration order.
+// A forks at block 10, C at block 20, and B runs to 20 on the shared chain:
+// with 2k+1 retention B holds both fork points, C holds neither of A's.
+func TestLimitOnEagernessIndependentOfCandidateOrder(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	c := newTestConnectionId(3)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, a, "a", 11, 20)
+	feedLoEChain(cs, b, "c", 1, 20)
+	feedLoEChain(cs, c, "c", 1, 20)
+	feedLoEChain(cs, c, "x", 21, 30)
+	cs.SetLocalTip(loeTip("c", 5))
+
+	first := cs.EagernessLimit()
+	for range 100 {
+		require.Equal(t, first, cs.EagernessLimit())
+	}
+	assert.False(t, first.Intersected,
+		"C retains no point A holds, so no point is common to every fragment")
+	assert.Equal(t, uint64(5+loeTestK), first.BlockNumber)
 }

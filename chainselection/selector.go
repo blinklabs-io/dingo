@@ -1640,12 +1640,6 @@ func (cs *ChainSelector) comparePeerTips(
 	if peerTipA == nil || peerTipB == nil {
 		return ChainComparisonUnknown
 	}
-	if cs.indistinguishableUnderEagernessLocked(
-		peerTipA.SelectionTip(),
-		peerTipB.SelectionTip(),
-	) {
-		return cs.compareTransportLocked(connIdA, connIdB, true)
-	}
 	if cs.mode == SelectionModeGenesis {
 		genesisWindow := cs.genesisWindowSlotsLocked()
 		densityA := peerTipA.observedDensity(genesisWindow)
@@ -1656,6 +1650,14 @@ func (cs *ChainSelector) comparePeerTips(
 		if densityB > densityA {
 			return ChainBBetter
 		}
+	}
+	// The limit replaces only the length comparison: density is what tells
+	// apart two forks that both run past it, so it must be decided first.
+	if cs.indistinguishableUnderEagernessLocked(
+		peerTipA.SelectionTip(),
+		peerTipB.SelectionTip(),
+	) {
+		return cs.compareTransportLocked(connIdA, connIdB, true)
 	}
 	return cs.comparePeerTipsPraos(
 		connIdA,
