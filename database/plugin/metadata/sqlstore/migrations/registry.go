@@ -67,6 +67,7 @@ const (
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
+	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -189,6 +190,11 @@ var schemaVersions = []struct {
 		Version: 31,
 		Name:    rewardCreditRoundTableSchemaRelease,
 		Dir:     "v31",
+	},
+	{
+		Version: 32,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Dir:     "v32",
 	},
 }
 
