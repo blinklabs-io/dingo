@@ -202,10 +202,6 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 			{name: "missing datum/isValid=false", valid: false},
 			{name: "datum present/isValid=true", witnessDatum: true, valid: true},
 		} {
-			// A Dijkstra transaction carries no isValid flag.
-			if !tc.valid && era.Id == gdijkstra.EraIdDijkstra {
-				continue
-			}
 			t.Run(era.Name+"/"+tc.name, func(t *testing.T) {
 				t.Parallel()
 				f := newRequiredDatumFixture(t, alwaysSucceedsV1(t), true)
@@ -244,7 +240,11 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 					require.NoError(t, err)
 					tx, err := gdijkstra.NewDijkstraTransactionFromCbor(txCbor)
 					require.NoError(t, err)
+					// The standalone transaction encoding has no is_valid
+					// field; a block carries it per transaction.
+					tx.TxIsValid = tc.valid
 					block = newDijkstraCollateralReturnBlock(t, tx)
+					require.Equal(t, tc.valid, block.Transactions()[0].IsValid())
 					dijkstraPP := dijkstraTestProtocolParameters()
 					conwayPP.ProtocolVersion = dijkstraPP.ProtocolVersion
 					dijkstraPP.ConwayProtocolParameters = conwayPP
