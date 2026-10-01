@@ -88,8 +88,9 @@ type followTipTimestampLedger struct {
 
 	tip ochainsync.Tip
 
-	block    models.Block
-	blockErr error
+	block      models.Block
+	blockErr   error
+	blockCalls int
 
 	// slotToTimeErrOnSlot fails SlotToTime for exactly this slot; every
 	// other slot succeeds with a fixed time built from the slot number.
@@ -104,6 +105,7 @@ func (l *followTipTimestampLedger) Tip() ochainsync.Tip {
 func (l *followTipTimestampLedger) GetBlock(
 	ocommon.Point,
 ) (models.Block, error) {
+	l.blockCalls++
 	return l.block, l.blockErr
 }
 
@@ -194,6 +196,7 @@ func TestFollowTipResponse_RollbackToOrigin(t *testing.T) {
 	})
 
 	require.NoError(t, err)
+	require.Zero(t, stub.blockCalls, "rollback to origin must not fetch a block")
 	require.NotNil(t, resp)
 	reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
 	require.True(t, ok)
