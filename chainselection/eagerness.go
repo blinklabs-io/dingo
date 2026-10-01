@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"bytes"
+	"slices"
 
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -142,9 +143,9 @@ func (cs *ChainSelector) SelectedTip() (ochainsync.Tip, bool) {
 	if !limit.Active || tip.BlockNumber <= limit.BlockNumber {
 		return cloneObservedTip(tip), true
 	}
-	for i := len(peerTip.observedTipHistory) - 1; i >= 0; i-- {
-		if peerTip.observedTipHistory[i].BlockNumber <= limit.BlockNumber {
-			return cloneObservedTip(peerTip.observedTipHistory[i]), true
+	for _, historyTip := range slices.Backward(peerTip.observedTipHistory) {
+		if historyTip.BlockNumber <= limit.BlockNumber {
+			return cloneObservedTip(historyTip), true
 		}
 	}
 	return cloneObservedTip(cs.localTip), true
