@@ -345,10 +345,7 @@ func (a *replayAdapter) RollBackward(
 	peerID uint64, point format.Point, tip format.Tip,
 ) error {
 	connId := a.connFor(peerID)
-	rollbackPoint := ocommon.Point{
-		Slot: point.Slot,
-		Hash: append([]byte(nil), point.Hash...),
-	}
+	rollbackPoint := toGouroborosPoint(point)
 	rollbackTip := toGouroborosTip(tip)
 	if err := a.o.chainsyncClientRollBackward(
 		ochainsync.CallbackContext{ConnectionId: connId},
@@ -385,7 +382,84 @@ func (a *replayAdapter) Stabilize() {
 	})
 	a.cs.EvaluateAndSwitch()
 	a.collectSwitchesThroughBarrier()
-	a.downstream = a.selectedPeerTrace()
+	a.downstream = a.observeDownstream(a.selectedPeerTrace())
+}
+
+// observeDownstream serves the selected peer's chain from Dingo's ChainSync
+// server to a node-to-node client that intersects at origin, and returns what
+// the server sent before its first AwaitReply.
+//
+// The replay has headers and no ledger, so the harness stands in for block
+// fetch: each header the selected peer rolled forward is added to the server's
+// chain as a block whose CBOR is a one-element array holding that header. A
+// node-to-node RollForward carries only a block's first element, so this is
+// everything a downstream peer could observe. The ledger tip is set to the
+// tip the selector adopted, which is the tip the harness's final_tip assertion
+// reads: a peer can advertise a tip beyond the last header it served.
+func (a *replayAdapter) observeDownstream(
+	selected []format.ServedMessage,
+) []format.ServedMessage {
+	a.t.Helper()
+	if len(selected) == 0 {
+		return nil
+	}
+	f := newChainsyncServerFixture(a.t, csmock.ModeNtN)
+	ls := f.o.ledgerState
+	for _, m := range selected {
+		switch m.MsgType {
+		case format.ChainSyncMsgRollForward:
+			hdr, err := gledger.NewBlockHeaderFromCbor(*m.Era, m.HeaderCbor)
+			require.NoError(a.t, err)
+			blockCbor, err := cbor.Encode([]cbor.RawMessage{
+				cbor.RawMessage(m.HeaderCbor),
+			})
+			require.NoError(a.t, err)
+			require.NoError(a.t, ls.Chain().AddBlock(&testBlock{
+				BlockHeader: hdr,
+				blockType:   int(gledger.BlockHeaderToBlockTypeMap[*m.Era]),
+				cbor:        blockCbor,
+			}, nil))
+		case format.ChainSyncMsgRollBackward:
+			require.NoError(a.t, ls.Chain().Rollback(toGouroborosPoint(*m.Point)))
+		}
+	}
+	bestTip, ok := a.BestTip()
+	require.True(a.t, ok, "selector has no best tip")
+	ls.SetTipForTesting(toGouroborosTip(bestTip))
+
+	require.NoError(a.t, f.h.FindIntersect(
+		[]ocommon.Point{ocommon.NewPointOrigin()},
+	))
+	require.True(a.t, f.observe(a.t).IsIntersectFound(), "expected IntersectFound")
+	var served []format.ServedMessage
+	for {
+		require.NoError(a.t, f.h.RequestNext())
+		msg := f.observe(a.t)
+		if msg.IsAwaitReply() {
+			return served
+		}
+		tip, ok := msg.Tip()
+		require.True(a.t, ok, "server message %d carries no tip", msg.Type())
+		formatTip := fromGouroborosTip(tip)
+		out := format.ServedMessage{
+			Protocol: format.ProtocolChainSync,
+			Tip:      &formatTip,
+		}
+		if header, _, ok := msg.RollForwardNtN(); ok {
+			era := header.Era
+			out.MsgType = format.ChainSyncMsgRollForward
+			out.Era = &era
+			out.HeaderCbor = header.HeaderCbor()
+		} else {
+			point, ok := msg.Point()
+			require.True(a.t, msg.IsRollBackward() && ok,
+				"unexpected server message type %d", msg.Type())
+			formatPoint := fromGouroborosPoint(point)
+			out.MsgType = format.ChainSyncMsgRollBackward
+			out.Point = &formatPoint
+		}
+		served = append(served, out)
+	}
 }
 
 // collectSwitchesThroughBarrier records every chain switch the selector has
@@ -415,10 +489,8 @@ func (a *replayAdapter) collectSwitchesThroughBarrier() {
 				NewTip:      fromGouroborosTip(e.NewTip),
 			}
 			if e.RollbackPoint != nil {
-				sw.RollbackPoint = &format.Point{
-					Slot: e.RollbackPoint.Slot,
-					Hash: append(format.HexBytes(nil), e.RollbackPoint.Hash...),
-				}
+				point := fromGouroborosPoint(*e.RollbackPoint)
+				sw.RollbackPoint = &point
 			}
 			a.switches = append(a.switches, sw)
 		default:
@@ -510,12 +582,17 @@ func drainEvents(ch <-chan event.Event, f func(event.Event)) {
 	}
 }
 
+func toGouroborosPoint(p format.Point) ocommon.Point {
+	return ocommon.Point{Slot: p.Slot, Hash: append([]byte(nil), p.Hash...)}
+}
+
+func fromGouroborosPoint(p ocommon.Point) format.Point {
+	return format.Point{Slot: p.Slot, Hash: append(format.HexBytes(nil), p.Hash...)}
+}
+
 func toGouroborosTip(t format.Tip) ochainsync.Tip {
 	return ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: t.Slot,
-			Hash: append([]byte(nil), t.Hash...),
-		},
+		Point:       toGouroborosPoint(format.Point{Slot: t.Slot, Hash: t.Hash}),
 		BlockNumber: t.BlockNumber,
 	}
 }
