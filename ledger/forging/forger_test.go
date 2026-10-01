@@ -1289,7 +1289,7 @@ func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
 //
 // upstreamStalenessSlots and ebStalenessSlots are explicit and every caller
 // that exercises those bounds must pass a non-zero value. The wall-clock bound
-// falls back to the forge-sync tolerance when no upstream target is available.
+// applies only when a live upstream has published a positive target.
 func newStalenessTestForger(
 	t *testing.T,
 	currentSlot, chainTipSlot, primaryTipSlot, upstreamSlot uint64,
