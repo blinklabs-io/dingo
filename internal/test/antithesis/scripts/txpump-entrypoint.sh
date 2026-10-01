@@ -18,7 +18,7 @@ case ",${TXPUMP_TYPES:-},"  in
       exit 1
     fi
     TXPUMP_DELEGATION_STAKE_KEY_HASH="$(cardano-cli latest stake-address key-hash --stake-verification-key-file "${stake_key}")"
-    TXPUMP_DELEGATION_POOL_KEY_HASH="$(cardano-cli stake-pool id --cold-verification-key-file "${pool_key}" --output-format hex)"
+    TXPUMP_DELEGATION_POOL_KEY_HASH="$(cardano-cli latest stake-pool id --cold-verification-key-file "${pool_key}" --output-hex)"
     export TXPUMP_DELEGATION_STAKE_KEY_HASH TXPUMP_DELEGATION_POOL_KEY_HASH
     ;;
 esac
