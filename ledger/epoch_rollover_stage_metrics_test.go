@@ -28,7 +28,7 @@ import (
 
 // TestEpochRolloverStageRecordsBoundaryTransaction drives a real epoch
 // boundary through ledgerProcessBlocksFromSource and requires the
-// epoch_rollover stage to record it. The #4364 stall is the boundary
+// epoch_rollover stage to record it. The epoch-boundary stall is the boundary
 // transaction itself (reward application and the governance tally run inside
 // processEpochRollover), which none of the per-block stages time.
 func TestEpochRolloverStageRecordsBoundaryTransaction(t *testing.T) {

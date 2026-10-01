@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"slices"
 	"strings"
 
@@ -2587,6 +2588,13 @@ func parseCommittee(data []byte) (
 	if quorum.Rat == nil {
 		return nil, nil, errors.New("committee quorum is nil")
 	}
+	// The quorum is a UnitInterval; a value outside [0,1] would otherwise
+	// reach ratification thresholds.
+	if quorum.Sign() < 0 || quorum.Cmp(big.NewRat(1, 1)) > 0 {
+		return nil, nil, fmt.Errorf(
+			"committee quorum %s is outside [0,1]", quorum.Rat,
+		)
+	}
 
 	// Decode the committee map using decodeMapEntries to
 	// handle credential array keys. Preserve the already-decoded
@@ -3115,7 +3123,7 @@ func parseGovActionState(
 	// parent. Without this, validateParentChain rejects every
 	// chained child of a pre-snapshot enactment as if the parent
 	// were missing, and chained proposals silently expire instead of
-	// ratifying. See issue #2195.
+	// ratifying.
 	switch prop.ActionType {
 	case 0, 1, 3, 4, 5:
 		if len(govAction) < 2 {

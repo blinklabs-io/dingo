@@ -126,8 +126,8 @@ func TestCheckedUint(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestGetEpochRejectsNegativeStoredEraID reproduces the review finding on
-// this PR: GetEpoch filters only by epoch_id, so era_id, slot_length, and
+// TestGetEpochRejectsNegativeStoredEraID reproduces that
+// GetEpoch filters only by epoch_id, so era_id, slot_length, and
 // length_in_slots are returned regardless of their stored value. A
 // negative era_id previously reinterpreted its bit pattern as unsigned in
 // epochFromValues (uint(int64(-1)) silently becomes MaxUint) instead of

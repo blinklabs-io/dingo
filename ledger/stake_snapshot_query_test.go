@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package ledger
 
@@ -30,10 +30,10 @@ import (
 )
 
 // Fixtures captured off the wire from cardano-cli 11.0.0.0
-// `query stake-snapshot` against cardano-node 11.0.1 (devnet). See dingo
-// issue #2917. The query payloads are LSQ MsgQuery (mini-protocol 7); the
-// result fixtures are the CBOR carried inside the tag-24 Serialised wrapper
-// of the MsgResult that cardano-node returns.
+// `query stake-snapshot` against cardano-node 11.0.1 (devnet). The query
+// payloads are LSQ MsgQuery (mini-protocol 7); the result fixtures are the CBOR
+// carried inside the tag-24 Serialised wrapper of the MsgResult that
+// cardano-node returns.
 const (
 	ssQueryOnePoolHex = "82038200820082068209821481" +
 		"d9010281581c728ea45cc4888f97d1c3233956fd6abf9362854d880efd6e577807f2"
@@ -132,7 +132,7 @@ func serialisedInner(t *testing.T, ls *LedgerState, payloadHex string) []byte {
 
 // TestQueryStakeSnapshotSpecificPool reproduces the exact single-pool
 // scenario captured from cardano-node and asserts dingo emits byte-identical
-// serialised CBOR. Reproduces and guards the fix for issue #2917.
+// serialised CBOR. Reproduces and guards the fix for the cardano-cli failure.
 func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
 	t.Parallel()
 
@@ -346,7 +346,7 @@ func TestQueryStakeSnapshotNonexistentPoolPV10(t *testing.T) {
 
 // TestQueryStakeSnapshotNonexistentPoolPV11 verifies that at PV11 an
 // explicitly requested pool whose mark/set/go are all zero is omitted
-// (cardano-ledger issue 5581).
+// (cardano-ledger behavior).
 func TestQueryStakeSnapshotNonexistentPoolPV11(t *testing.T) {
 	t.Parallel()
 

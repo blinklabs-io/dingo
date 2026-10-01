@@ -24,7 +24,6 @@ current branch.
 | How do I run benchmarks or collect profiles? | [Benchmarks and profiling](benchmarks.md) |
 | How do I run conformance tests? | [Conformance tests](../internal/test/conformance/README.md) |
 | How do I exercise archive and history-expiry behavior? | [Archive node demo](../internal/test/archive-demo/README.md) |
-| Where are runnable API examples? | [Examples](../examples/README.md) |
 | How do I install the Grafana dashboards? | [Dashboards](dashboards/README.md) |
 
 Contributor rules live in [`AGENTS.md`](../AGENTS.md) and

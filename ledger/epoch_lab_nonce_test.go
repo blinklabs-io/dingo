@@ -33,7 +33,7 @@ import (
 )
 
 // TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab verifies the
-// epoch-nonce assembly (#2734). The epoch nonce mixes the frozen candidate with
+// epoch-nonce assembly. The epoch nonce mixes the frozen candidate with
 // the CARRIED lastEpochBlockNonce (prevEpoch.LastEpochBlockNonce, == cardano-
 // ledger praosStateLastEpochBlockNonce; ouroboros-consensus Praos.hs
 // tickChainDepState uses candidateNonce ⭒ praosStateLastEpochBlockNonce). The
@@ -188,8 +188,8 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 		hex.EncodeToString(carriedLab),
 		hex.EncodeToString(rLab),
 	)
-	// The epoch nonce for THIS boundary uses the CARRIED lastEpochBlockNonce
-	// (#2734), not the closing epoch's own last block.
+	// The epoch nonce for THIS boundary uses the CARRIED lastEpochBlockNonce,
+	// not the closing epoch's own last block.
 	require.Equal(
 		t,
 		hex.EncodeToString(wantEta.Bytes()),
@@ -208,7 +208,7 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 // TestEpochLabNonceEmptyEpochCarriesPrevNonceForward verifies that when the
 // closing epoch has NO blocks of its own, epochLabNonce carries the previous
 // boundary nonce forward UNCHANGED. Under the corrected Praos prevHash semantic
-// (#2734) the carried value is already a prevHash-shape nonce, so it must be
+// the carried value is already a prevHash-shape nonce, so it must be
 // returned as-is — NOT converted to the boundary block's own hash (the old
 // "normalize PrevHash -> Hash" behavior was the eta_1349 off-by-one regression).
 func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
@@ -275,7 +275,7 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 	require.NoError(t, err)
 	require.Len(t, canonicalBlocks, 2)
 	// canonicalBlocks[1] is the boundary (last) block; its PrevHash is
-	// canonicalBlocks[0].Hash. Under the corrected prevHash semantic (#2734)
+	// canonicalBlocks[0].Hash. Under the corrected prevHash semantic
 	// epochLabNonce returns the boundary block's PrevHash, so the fork blob is
 	// given a DISTINCT PrevHash to keep the canonical-vs-fork distinction sharp.
 	canonicalPrevHash := canonicalBlocks[0].Hash().Bytes()
@@ -313,7 +313,7 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 	require.NotEqual(t, canonicalBoundaryHash, lab)
 }
 
-// TestEpochLabNonceReturnsPrevHashNotHash pins the #2734 eta_1349 root cause:
+// TestEpochLabNonceReturnsPrevHashNotHash pins the eta_1349 root cause:
 // for a closing epoch with blocks, epochLabNonce returns the PARENT hash (the
 // last block's PrevHash), NOT the last block's own hash. cardano-ledger's
 // praosStateLastEpochBlockNonce = prevHashToNonce(lastBlock.prevHash), a

@@ -281,7 +281,7 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 // an unexpectedly empty dingoPool.FixedCost/Margin means a corrupted/partial
 // row, not a legitimate skip condition, and must be reported as a
 // value_mismatch like any other divergence rather than silently passed over.
-// Both fields are read at the stake epoch (dingo #3484), so StakePresent, not
+// Both fields are read at the stake epoch, so StakePresent, not
 // ParamsPresent, is the flag that governs them.
 func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
 	t.Parallel()
@@ -358,7 +358,7 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 		FixedCost:   "340000000",
 		Margin:      "0.1",
 	}
-	// FixedCost/Margin are stake-epoch fields (dingo #3484), so they are
+	// FixedCost/Margin are stake-epoch fields, so they are
 	// present here and match Koios: the only thing missing is the
 	// param-epoch row, and blocks_produced is the only field it still owns.
 	dingo := &DingoPoolEpochData{
@@ -717,7 +717,7 @@ func TestCompareAccountEpochAggregatesSharedRewardAccounts(t *testing.T) {
 // been applied yet must report that key once as reference_lag rather than as
 // an acct_only_koios divergence. Aggregating the contributions and then
 // judging the total strictly would turn every unapplied epoch of a replay
-// into a false account-parity failure (dingo #3857).
+// into a false account-parity failure.
 func TestCompareAccountEpochSharedAccountPendingRewardsAreALag(t *testing.T) {
 	t.Parallel()
 
@@ -1214,7 +1214,7 @@ func TestLovelaceEqual(t *testing.T) {
 // therefore never exists, so that one field cannot be compared. Both sides
 // agree the pool departed — Koios has no pool_history row at K+1's reporting
 // epoch either — so this is a documented gap in coverage, not a divergence,
-// and it must not escalate to ERROR and halt a strict-mode node (dingo #3485).
+// and it must not escalate to ERROR and halt a strict-mode node.
 func TestComparePoolEpochDepartedPoolIsInformational(t *testing.T) {
 	t.Parallel()
 
@@ -1341,7 +1341,7 @@ func TestComparePoolEpochDepartedRequiresStakeEpochRow(t *testing.T) {
 // classification to the pool having been in epoch K's stake basis, the same
 // way TestComparePoolEpochDepartedRequiresStakeEpochRow anchors departure: an
 // epoch-level completeness proof must not downgrade a pool absent from both
-// reward-input reads (dingo #4691).
+// reward-input reads.
 func TestComparePoolEpochZeroStakeRequiresStakeEpochRow(t *testing.T) {
 	t.Parallel()
 
@@ -1377,7 +1377,7 @@ func TestComparePoolEpochZeroStakeRequiresStakeEpochRow(t *testing.T) {
 // received; reward_pool_output.member_reward_total sums every member reward the
 // calculation produced, spendable or not. A pool with an unspendable member
 // reward — one computed for a credential the ledger correctly never credits —
-// used to fail against a node that was right (dingo #3797).
+// used to fail against a node that was right.
 func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
 	t.Parallel()
 
@@ -1483,8 +1483,8 @@ func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
 // TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel pins the reason the
 // per-(stake_address, reward_type) total is not the only thing compared.
 //
-// A reward account shared by several pools carries one contribution per pool
-// (dingo #3841). Summing those contributions before comparing makes the
+// A reward account shared by several pools carries one contribution per pool.
+// Summing those contributions before comparing makes the
 // comparison blind to any disagreement that preserves the sum: two per-pool
 // errors of equal magnitude and opposite sign, or an account whose whole
 // total Dingo attributed to one of the two pools Koios reports it from. Both
@@ -1605,7 +1605,7 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 
 	// Pending rewards downgrade the per-pool finding exactly as they downgrade
 	// the total comparison beside it: before the applying boundary a per-pool
-	// amount can still change (dingo #3857, #4130).
+	// amount can still change.
 	longClosed := now.Add(-1388 * 24 * time.Hour)
 	pending := CompareAccountEpoch(
 		"preview", 100, koios, swapped, now, 24, longClosed, true,

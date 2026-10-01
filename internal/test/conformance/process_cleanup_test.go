@@ -22,17 +22,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This package builds in two configurations, and process-level teardown differs
-// between them: the dingo_extra_plugins build additionally owns a Postgres
-// schema, a MySQL database, and their paired blob directories. That previously
-// meant two TestMain functions selected by build tag, each with its own cleanup
-// chain and its own copy of processCleanupExitCode.
-//
-// That split is what this replaces. Two entry points had to be kept in step by
-// hand, a change to one silently did not apply to the other, and only the
-// tagged copy of the exit-code helper had a test -- so the untagged build could
-// have regressed without any run noticing. There is now one TestMain, compiled
-// in both configurations, and the tag-specific teardown registers itself.
+// cleanupCorpusTestdata removes the shared extraction. Safe to call when the
+// corpus was never extracted, which is the case for a run whose tests all
+// skipped.
+func cleanupCorpusTestdata() error {
+	if testdataDir == "" {
+		return nil
+	}
+	return os.RemoveAll(testdataDir)
+}
 
 // processCleanups holds teardown that must run once after every test in the
 // process, in registration order. A build configuration contributes to it from
@@ -98,7 +96,7 @@ func processCleanupExitCode(testExitCode int, cleanupFailed bool) int {
 
 // TestProcessCleanupExitCodeFailsOnCleanupFailure proves a process-cleanup
 // failure makes TestMain report a nonzero exit code even when every test in the
-// process passed -- a reviewer's forced RemoveAll permission failure otherwise
+// process passed -- a forced RemoveAll permission failure otherwise
 // logged "permission denied" but left `go test` exiting 0, silently leaking the
 // per-run schema, database, or directory this cleanup exists to remove.
 //

@@ -410,7 +410,7 @@ var flagSpecs = []flagSpec{
 		"history expiry scan frequency",
 	),
 
-	// Koios reward-parity observer (dingo #3098; one-off validation aid, not a
+	// Koios reward-parity observer (one-off validation aid, not a
 	// permanent subsystem)
 	boolFlag(
 		"KoiosParity.Enabled",
@@ -563,6 +563,7 @@ var flagSpecs = []flagSpec{
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
 	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag("MaxTrustedLocalNtCConns", "max-trusted-local-ntc-conns", "max trusted local node-to-client connections"),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",

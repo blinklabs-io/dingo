@@ -16,11 +16,15 @@ package dingo
 
 import (
 	"context"
+	"net/http"
 	"reflect"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -30,6 +34,335 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestForgePrimaryChainTipToleranceSlotsIsOperatorTunable covers the config
+// plumbing for the header-frontier forge gate. The bound decides whether a
+// block producer forges or skips, so an operator whose ledger pipeline is
+// legitimately slow on their deployment must be able to reach it without
+// rebuilding; the gate's own default lives in ledger/forging and is only a
+// fallback for a zero value.
+//
+// Each hop is asserted separately, because a break in any one of them leaves
+// the knob silently inert: the loaded config carries the value, the node
+// Config snapshot copies it out of the loaded config, and the accessor
+// reports it.
+//
+// IMPORTANT: this covers the NewConfigFromInternal path only. The binary does
+// NOT take it -- internal/node.buildDingoConfig composes dingo.Config via
+// dingo.NewConfig from an explicit With... list, and a field missing from that
+// list is dropped no matter how green this test is. That is exactly how
+// ForgePrimaryChainTipToleranceSlots shipped inert while every layer here
+// asserted green. The runtime composition path is covered by
+// TestBuildDingoConfigWiresForgeTolerances in internal/node; presence of a
+// field at each layer is not wiring.
+func TestForgePrimaryChainTipToleranceSlotsIsOperatorTunable(t *testing.T) {
+	t.Run("explicit value survives every hop", func(t *testing.T) {
+		loaded := &internalconfig.Config{
+			ForgePrimaryChainTipToleranceSlots: 42,
+		}
+		c := &Config{cfg: loaded}
+		// syncCompatFields is what the loaded-config constructor runs to
+		// project the parsed config onto the fields the node reads.
+		c.syncCompatFields()
+		require.Equal(
+			t,
+			uint64(42),
+			c.ForgePrimaryChainTipToleranceSlots(),
+			"loaded config value must reach the accessor",
+		)
+		require.Equal(
+			t,
+			uint64(42),
+			c.forgePrimaryChainTipToleranceSlots,
+			"the node Config snapshot the forger reads must carry it",
+		)
+	})
+
+	t.Run("option func sets it", func(t *testing.T) {
+		c := NewConfig(WithForgePrimaryChainTipToleranceSlots(17))
+		require.Equal(t, uint64(17), c.ForgePrimaryChainTipToleranceSlots())
+		c.syncCompatFields()
+		require.Equal(t, uint64(17), c.forgePrimaryChainTipToleranceSlots)
+	})
+
+	t.Run("defaults fill an unset value", func(t *testing.T) {
+		loaded := internalconfig.Config{}
+		loaded.ApplyDefaults()
+		require.Equal(
+			t,
+			uint64(internalconfig.DefaultForgePrimaryChainTipToleranceSlots),
+			loaded.ForgePrimaryChainTipToleranceSlots,
+		)
+		require.Equal(
+			t,
+			uint64(5),
+			loaded.ForgePrimaryChainTipToleranceSlots,
+			"the documented default must not drift silently",
+		)
+	})
+
+	t.Run(
+		"an explicit value is not overwritten by defaults",
+		func(t *testing.T) {
+			loaded := internalconfig.Config{
+				ForgePrimaryChainTipToleranceSlots: 9,
+			}
+			loaded.ApplyDefaults()
+			require.Equal(
+				t,
+				uint64(9),
+				loaded.ForgePrimaryChainTipToleranceSlots,
+			)
+		},
+	)
+}
+
+// TestForgeStalenessBoundsAreOperatorTunable covers the config plumbing for
+// the three opt-in forge staleness bounds.
+//
+// Each hop is asserted separately, because a break in any one of them leaves
+// the knob silently inert: the loaded config carries the value, the node
+// Config snapshot copies it out of the loaded config, and the accessor
+// reports it.
+//
+// IMPORTANT: this covers the NewConfigFromInternal path only. The binary does
+// NOT take it -- internal/node.buildDingoConfig composes dingo.Config via
+// dingo.NewConfig from an explicit With... list, and a field missing from that
+// list is dropped no matter how green this test is. The runtime composition
+// path is covered by TestBuildDingoConfigWiresForgeTolerances in
+// internal/node; presence of a field at each layer is not wiring.
+func TestForgeStalenessBoundsAreOperatorTunable(t *testing.T) {
+	t.Run("explicit values survive every hop", func(t *testing.T) {
+		loaded := &internalconfig.Config{
+			ForgeUpstreamStalenessSlots:      41,
+			ForgeAppliedTipStalenessSlots:    42,
+			ForgeEndorserBlockStalenessSlots: 43,
+		}
+		c := &Config{cfg: loaded}
+		// syncCompatFields is what the loaded-config constructor runs to
+		// project the parsed config onto the fields the node reads.
+		c.syncCompatFields()
+
+		require.Equal(t, uint64(41), c.ForgeUpstreamStalenessSlots())
+		require.Equal(t, uint64(41), c.forgeUpstreamStalenessSlots)
+		require.Equal(t, uint64(42), c.ForgeAppliedTipStalenessSlots())
+		require.Equal(t, uint64(42), c.forgeAppliedTipStalenessSlots)
+		require.Equal(t, uint64(43), c.ForgeEndorserBlockStalenessSlots())
+		require.Equal(
+			t,
+			uint64(43),
+			c.forgeEndorserBlockStalenessSlots,
+			"the node Config snapshot the forger reads must carry it",
+		)
+	})
+
+	t.Run("option funcs set them", func(t *testing.T) {
+		c := NewConfig(
+			WithForgeUpstreamStalenessSlots(11),
+			WithForgeAppliedTipStalenessSlots(12),
+			WithForgeEndorserBlockStalenessSlots(13),
+		)
+		require.Equal(t, uint64(11), c.ForgeUpstreamStalenessSlots())
+		require.Equal(t, uint64(12), c.ForgeAppliedTipStalenessSlots())
+		require.Equal(t, uint64(13), c.ForgeEndorserBlockStalenessSlots())
+
+		c.syncCompatFields()
+		require.Equal(t, uint64(11), c.forgeUpstreamStalenessSlots)
+		require.Equal(t, uint64(12), c.forgeAppliedTipStalenessSlots)
+		require.Equal(t, uint64(13), c.forgeEndorserBlockStalenessSlots)
+	})
+
+	// All three are opt-in. ApplyDefaults must leave them at 0, because 0
+	// means "disabled" for them rather than "unset": a default-on bound on any
+	// of the three refuses leader slots during ordinary operation.
+	t.Run("defaults leave every bound disabled", func(t *testing.T) {
+		loaded := internalconfig.Config{}
+		loaded.ApplyDefaults()
+
+		require.Zero(t, loaded.ForgeUpstreamStalenessSlots)
+		require.Zero(t, loaded.ForgeAppliedTipStalenessSlots)
+		require.Zero(
+			t,
+			loaded.ForgeEndorserBlockStalenessSlots,
+			"the endorser-block bound gates a network-stage watermark "+
+				"against the local applied tip; defaulting it on would "+
+				"withhold leader slots with every local indicator healthy",
+		)
+		require.Zero(
+			t,
+			uint64(internalconfig.DefaultForgeEndorserBlockStalenessSlots),
+			"the documented default must not drift silently",
+		)
+	})
+
+	t.Run(
+		"explicit values are not overwritten by defaults",
+		func(t *testing.T) {
+			loaded := internalconfig.Config{
+				ForgeUpstreamStalenessSlots:      7,
+				ForgeAppliedTipStalenessSlots:    8,
+				ForgeEndorserBlockStalenessSlots: 9,
+			}
+			loaded.ApplyDefaults()
+
+			require.Equal(t, uint64(7), loaded.ForgeUpstreamStalenessSlots)
+			require.Equal(t, uint64(8), loaded.ForgeAppliedTipStalenessSlots)
+			require.Equal(t, uint64(9), loaded.ForgeEndorserBlockStalenessSlots)
+		},
+	)
+}
+
+// TestConfigValidateRejectsByronNetworkMagicMismatch pins that
+// a loaded genesis network magic must be cross-checked against
+// the requested network. configValidate already cross-checks the Shelley
+// genesis's NetworkMagic against the configured/requested network magic;
+// this proves the same cross-check applies to the Byron genesis's own
+// ProtocolConsts.ProtocolMagic field, which previously loaded and was used
+// for Byron-era validation without ever being compared against the
+// configured network.
+func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
+	const shelleyMagic = 42
+
+	shelleyGenesisJSON := `{
+		"networkMagic": ` + strconv.Itoa(shelleyMagic) + `,
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+
+	tests := []struct {
+		name               string
+		byronProtocolMagic int
+		wantErr            string
+	}{
+		{
+			name:               "mismatched Byron protocol magic is rejected",
+			byronProtocolMagic: shelleyMagic + 1,
+			wantErr:            "doesn't match value from Byron genesis",
+		},
+		{
+			name:               "matching Byron protocol magic is accepted",
+			byronProtocolMagic: shelleyMagic,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			byronGenesisJSON := `{
+				"avvmDistr": {},
+				"blockVersionData": {
+					"heavyDelThd":"300000000000","maxBlockSize":"2000000",
+					"maxHeaderSize":"2000000","maxProposalSize":"700",
+					"maxTxSize":"4096","mpcThd":"20000000000000",
+					"scriptVersion":0,"slotDuration":"20000",
+					"softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},
+					"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},
+					"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000",
+					"updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"
+				},
+				"startTime": 1666656000,
+				"bootStakeholders": {}, "heavyDelegation": {}, "nonAvvmBalances": {},
+				"protocolConsts": {"k": 108, "protocolMagic": ` + strconv.Itoa(
+				tt.byronProtocolMagic,
+			) + `}
+			}`
+
+			nodeCfg := &cardano.CardanoNodeConfig{}
+			require.NoError(
+				t,
+				nodeCfg.LoadShelleyGenesisFromReader(
+					strings.NewReader(shelleyGenesisJSON),
+				),
+			)
+			require.NoError(
+				t,
+				nodeCfg.LoadByronGenesisFromReader(
+					strings.NewReader(byronGenesisJSON),
+				),
+			)
+
+			cfg := NewConfig(
+				WithPrometheusRegistry(prometheus.NewRegistry()),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+				WithNetworkMagic(shelleyMagic),
+				WithCardanoNodeConfig(nodeCfg),
+			)
+			n, err := New(cfg)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = n.Stop() })
+		})
+	}
+}
+
+// TestConfigPopulateNetworkMagicSyncsCompatField is a regression test for the
+// devnet handshake blocker: a config built by network NAME (magic left 0, the
+// production path from internal/node) must resolve the compat networkMagic
+// field that the ouroboros handshake reads. configPopulateNetworkMagic resolves
+// the canonical cfg.NetworkMagic, but the handshake reads Config.networkMagic
+// (set only by syncCompatFields at construction time, before the name was
+// resolved). If the compat field stays 0, gouroboros refuses every connection
+// with "invalid network magic value provided: 0". This affects any network
+// started by name (devnet, preview, ...), not just devnet.
+func TestConfigPopulateNetworkMagicSyncsCompatField(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		network string
+		want    uint32
+	}{
+		{"devnet", 42},
+		{"preview", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.network, func(t *testing.T) {
+			cfg := NewConfig(WithNetwork(tc.network))
+			n := &Node{config: cfg}
+			if err := n.configPopulateNetworkMagic(); err != nil {
+				t.Fatalf("configPopulateNetworkMagic: %v", err)
+			}
+			if got := n.config.cfg.NetworkMagic; got != tc.want {
+				t.Fatalf("cfg.NetworkMagic = %d, want %d", got, tc.want)
+			}
+			// The compat field the ouroboros handshake actually reads.
+			if got := n.config.networkMagic; got != tc.want {
+				t.Fatalf(
+					"config.networkMagic = %d, want %d (handshake would get 0)",
+					got, tc.want,
+				)
+			}
+		})
+	}
+}
+
+// This checks configuration acceptance, not socket binding. The removed
+// startup gate rejected these configurations; Node.Run binding has separate
+// provider-dependency coverage in TestNodeRunPublicAPIsUseSharedBindAddress.
+func TestProgrammaticPublicAPIConfigAcceptsRemoteAddresses(t *testing.T) {
+	t.Parallel()
+	for _, bind := range []string{"0.0.0.0", "::", "192.0.2.10"} {
+		t.Run(bind, func(t *testing.T) {
+			cfg := NewConfig(
+				WithStorageMode(StorageModeAPI),
+				WithBindAddr(bind),
+				WithNetworkMagic(42),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+			)
+			node := &Node{config: cfg}
+			require.NoError(t, node.configValidate())
+		})
+	}
+}
 
 func TestStorageModeValid(t *testing.T) {
 	t.Parallel()
@@ -667,6 +1000,7 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	WithMaxInboundConns(0)(cfg)
 	WithMaxNtCConns(-3)(cfg)
 	WithMaxNtCConnectionsPerIP(0)(cfg)
+	WithMaxTrustedLocalNtCConns(-1)(cfg)
 
 	assert.Zero(t, cfg.cfg.MinHotPeers)
 	assert.Zero(t, cfg.cfg.ReconcileInterval)
@@ -675,6 +1009,7 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	assert.Zero(t, cfg.cfg.MaxInboundConns)
 	assert.Zero(t, cfg.cfg.MaxNtCConns)
 	assert.Zero(t, cfg.cfg.MaxNtCConnectionsPerIP)
+	assert.Zero(t, cfg.cfg.MaxTrustedLocalNtCConns)
 }
 
 func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
@@ -689,6 +1024,7 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	WithMaxInboundConns(25)(cfg)
 	WithMaxNtCConns(30)(cfg)
 	WithMaxNtCConnectionsPerIP(6)(cfg)
+	WithMaxTrustedLocalNtCConns(8)(cfg)
 
 	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
 	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
@@ -697,10 +1033,21 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
 	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
 	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
+	assert.Equal(t, 8, cfg.cfg.MaxTrustedLocalNtCConns)
 
 	cfg.syncCompatFields()
 	assert.Equal(t, 30, cfg.maxNtCConns)
 	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
+	assert.Equal(t, 8, cfg.maxTrustedLocalNtCConns)
+}
+
+func TestWithSkipRewardLiveStakeBackfillCheck(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{cfg: &internalconfig.Config{}}
+	WithSkipRewardLiveStakeBackfillCheck(true)(cfg)
+	assert.True(t, cfg.cfg.SkipRewardLiveStakeBackfillCheck)
+	cfg.syncCompatFields()
+	assert.True(t, cfg.skipRewardLiveStakeBackfillCheck)
 }
 
 // TestWithGenesisCorroborationPeers covers the public programmatic API path for
@@ -814,7 +1161,7 @@ func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
 // pointer must default to enabled (true), matching
 // internalconfig.DefaultKoiosParityConfig's own Accounts: true default. A
 // plain bool field here would make "caller never set this" indistinguishable
-// from an explicit opt-out, silently disabling #3097's per-account checking.
+// from an explicit opt-out, silently disabling per-account checking.
 func TestWithKoiosParityAccountsNilDefaultsToEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -837,7 +1184,7 @@ func TestWithKoiosParityAccountsNilDefaultsToEnabled(t *testing.T) {
 }
 
 // TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd proves an explicit
-// pointer-to-false actually disables #3097's per-account checking end to
+// pointer-to-false actually disables per-account checking end to
 // end: through WithKoiosParity's resolution into the internal config
 // (internalconfig.KoiosParityConfig.Accounts, a plain bool), and through
 // syncCompatFields's mirror back into the exported root
@@ -856,4 +1203,92 @@ func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
 	assert.False(t, cfg.cfg.KoiosParity.Accounts)
 	require.NotNil(t, cfg.koiosParity.Accounts)
 	assert.False(t, *cfg.koiosParity.Accounts)
+}
+
+// TestTokenRegistryConfigReachesRuntimeFromYAML covers the path YAML, env, and
+// CLI all land on: internal config only. The syncer reads the runtime mirror,
+// so without syncCompatFields carrying it across, an operator's tokenRegistry
+// block would parse and then be silently ignored.
+func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := NewConfigFromInternal(
+		&internalconfig.Config{
+			TokenRegistry: internalconfig.TokenRegistryConfig{
+				Enabled:               true,
+				SourceURL:             "https://mirror.example.test/reg.tar.gz",
+				Interval:              2 * time.Hour,
+				RequestTimeout:        9 * time.Minute,
+				UserAgent:             "custom-agent/9",
+				MaxBytes:              123,
+				MaxDecompressedBytes:  456,
+				MaxEntryBytes:         45,
+				MaxArchiveEntries:     67,
+				MaxAcceptedEntries:    34,
+				MaxBatchBytes:         89,
+				StoreLogos:            true,
+				AllowPrivateAddresses: true,
+			},
+		},
+		nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+
+	require.True(t, cfg.tokenRegistry.Enabled)
+	require.Equal(
+		t,
+		"https://mirror.example.test/reg.tar.gz",
+		cfg.tokenRegistry.SourceURL,
+	)
+	require.Equal(t, 2*time.Hour, cfg.tokenRegistry.Interval)
+	require.Equal(t, 9*time.Minute, cfg.tokenRegistry.RequestTimeout)
+	require.Equal(t, "custom-agent/9", cfg.tokenRegistry.UserAgent)
+	require.Equal(t, int64(123), cfg.tokenRegistry.MaxBytes)
+	require.Equal(t, int64(456), cfg.tokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, int64(45), cfg.tokenRegistry.MaxEntryBytes)
+	require.Equal(t, 67, cfg.tokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 34, cfg.tokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(89), cfg.tokenRegistry.MaxBatchBytes)
+	require.True(t, cfg.tokenRegistry.StoreLogos)
+	require.True(t, cfg.tokenRegistry.AllowPrivateAddresses)
+}
+
+// TestTokenRegistryConfigDisabledByDefault pins the deliberate default: the
+// mainnet registry is a roughly 240MB download, so an upgrade must not start
+// one on its own.
+func TestTokenRegistryConfigDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewConfig()
+
+	require.False(t, cfg.tokenRegistry.Enabled)
+	require.False(t, cfg.TokenRegistry().Enabled)
+}
+
+// TestWithTokenRegistryConfigPreservesHTTPClient guards the one field that
+// cannot round-trip through internal config: the programmatic HTTP client is
+// runtime-only, and syncCompatFields runs after options are applied.
+func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{}
+
+	cfg := NewConfig(WithTokenRegistryConfig(TokenRegistryConfig{
+		Enabled:              true,
+		HTTPClient:           client,
+		UserAgent:            "programmatic/1",
+		MaxDecompressedBytes: 456,
+		MaxArchiveEntries:    67,
+		MaxAcceptedEntries:   34,
+		MaxBatchBytes:        89,
+	}))
+
+	require.Same(t, client, cfg.tokenRegistry.HTTPClient)
+	require.True(t, cfg.tokenRegistry.Enabled)
+	require.Equal(t, "programmatic/1", cfg.tokenRegistry.UserAgent)
+	require.Equal(t, "programmatic/1", cfg.TokenRegistry().UserAgent)
+	require.Equal(t, int64(456), cfg.TokenRegistry().MaxDecompressedBytes)
+	require.Equal(t, 67, cfg.TokenRegistry().MaxArchiveEntries)
+	require.Equal(t, 34, cfg.TokenRegistry().MaxAcceptedEntries)
+	require.Equal(t, int64(89), cfg.TokenRegistry().MaxBatchBytes)
 }
